@@ -171,13 +171,23 @@ impl TransferSidecarClient {
                 &request_id,
             )
             .await?;
-        let snapshots = response
+        let mut snapshots = response
             .get("snapshots")
             .and_then(Value::as_array)
             .cloned()
             .ok_or_else(|| {
                 "transfer sidecar list_peer_task_snapshots response missing snapshots".to_string()
             })?;
+        if let Some(issues) = response.get("issues").and_then(Value::as_array) {
+            snapshots.extend(issues.iter().cloned().map(|mut issue| {
+                if let Some(object) = issue.as_object_mut() {
+                    if let Some(message) = object.remove("message") {
+                        object.insert("error".to_string(), message);
+                    }
+                }
+                issue
+            }));
+        }
         Ok(snapshots)
     }
 
@@ -185,6 +195,7 @@ impl TransferSidecarClient {
         &self,
         peer_id: String,
         session_id: String,
+        observer_lease_id: String,
     ) -> Result<Value, String> {
         let request_id = self.next_request_id("observe-session");
         self.send_request(
@@ -193,6 +204,7 @@ impl TransferSidecarClient {
                 "request_id": request_id,
                 "target_peer_id": peer_id,
                 "session_id": session_id,
+                "observer_lease_id": observer_lease_id,
             }),
             &request_id,
         )
@@ -203,6 +215,7 @@ impl TransferSidecarClient {
         &self,
         peer_id: String,
         session_id: String,
+        observer_lease_id: String,
     ) -> Result<Value, String> {
         let request_id = self.next_request_id("unobserve-session");
         self.send_request(
@@ -211,6 +224,7 @@ impl TransferSidecarClient {
                 "request_id": request_id,
                 "target_peer_id": peer_id,
                 "session_id": session_id,
+                "observer_lease_id": observer_lease_id,
             }),
             &request_id,
         )
@@ -423,7 +437,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn request_task_pull(
-        &mut self,
+        &self,
         peer_id: String,
         source_task_id: String,
         transport: String,

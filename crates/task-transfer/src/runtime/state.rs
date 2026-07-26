@@ -87,7 +87,8 @@ pub(super) struct TransferArtifactRecord {
 }
 
 pub(super) struct TerminalObserverSlot {
-    pub(super) generation: u64,
+    pub(super) lease_id: String,
+    pub(super) closed: bool,
     pub(super) handle: Option<JoinHandle<()>>,
 }
 

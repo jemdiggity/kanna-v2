@@ -34,16 +34,14 @@ pub(super) async fn stream_peer_session(
     )
     .await?;
 
+    let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
-    {
-        let mut reader = BufReader::new(&mut stream);
-        let read = reader.read_line(&mut response_line).await?;
-        if read == 0 {
-            return Err(RuntimeError::Protocol(format!(
-                "peer {} closed observe-session before response",
-                peer.peer_id
-            )));
-        }
+    let read = reader.read_line(&mut response_line).await?;
+    if read == 0 {
+        return Err(RuntimeError::Protocol(format!(
+            "peer {} closed observe-session before response",
+            peer.peer_id
+        )));
     }
 
     match parse_peer_response_line(&peer.peer_id, "observe-session", &response_line)? {
@@ -55,7 +53,6 @@ pub(super) async fn stream_peer_session(
         other => return Err(unexpected_peer_response("observe-session", &other)),
     }
 
-    let mut reader = BufReader::new(stream);
     loop {
         let mut event_line = String::new();
         let read = reader.read_line(&mut event_line).await?;

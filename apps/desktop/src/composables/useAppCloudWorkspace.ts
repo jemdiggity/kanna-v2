@@ -107,6 +107,8 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   const activeMarkReadClients = new Set<ActiveMarkReadClient>();
   const remoteStageAdvancesPending = new Map<string, RemoteStageAdvancePending>();
   const associatedCloudUsers = new Set<string>();
+  const shownLanPeerIssues = new Set<string>();
+  let e2eLanRefreshFrozen = false;
   let lastCloudBackendErrorToastAt: number | null = null;
   let currentDesktopId: string | null = null;
   const transferMachineRevision = ref(0);
@@ -501,14 +503,21 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   }
 
   function refreshLanTasks(): Promise<void> {
+    if (import.meta.env.DEV && e2eLanRefreshFrozen) return Promise.resolve();
     if (lanRefreshInFlight) return lanRefreshInFlight;
     const refresh = (async () => {
       await publishDesktopLanTaskSnapshot(db);
       const snapshot = await listDesktopLanTasks({
         localRepos: localReposForCloudMatching.value,
         localClosedItems: closedLocalTaskIdentities.value,
+        onPeerIssue: (issue) => {
+          const key = `${issue.peerId}:${issue.message}`;
+          if (shownLanPeerIssues.has(key)) return;
+          shownLanPeerIssues.add(key);
+          toast.warning(issue.message);
+        },
       });
-      if (desktopCloudWorkspaceDisposed) return;
+      if (desktopCloudWorkspaceDisposed || (import.meta.env.DEV && e2eLanRefreshFrozen)) return;
       lanAuthoritativeGeneration.value += 1;
       lanSnapshot.value = {
         repos: snapshot.repos,
@@ -619,6 +628,30 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         console.warn("[lan] failed to refresh LAN tasks:", error),
       );
     }, 1000);
+  }
+
+  function __e2eInjectRemoteSnapshot(
+    source: "cloud" | "lan",
+    snapshot: DesktopCloudSnapshot,
+    options: { freezeLanRefresh?: boolean } = {},
+  ): void {
+    if (!import.meta.env.DEV) {
+      throw new Error("remote snapshot injection is available only in development builds");
+    }
+    if (source === "cloud") {
+      cloudAuthoritativeGeneration.value += 1;
+      cloudSnapshot.value = snapshot;
+      return;
+    }
+    e2eLanRefreshFrozen = options.freezeLanRefresh === true;
+    if (e2eLanRefreshFrozen) {
+      if (lanRefreshTimer) {
+        clearInterval(lanRefreshTimer);
+        lanRefreshTimer = null;
+      }
+    }
+    lanAuthoritativeGeneration.value += 1;
+    lanSnapshot.value = snapshot;
   }
 
   async function closeSelectedWorkspaceTask(): Promise<boolean> {
@@ -935,6 +968,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     cloudRepoRemoteUrl,
     markWorkspaceTaskLocallyClosed,
     refreshLanTasks,
+    __e2eInjectRemoteSnapshot,
     initializeDesktopCloudAuth,
     initializeDesktopLanTaskSync,
     markTransferSidecarReady,

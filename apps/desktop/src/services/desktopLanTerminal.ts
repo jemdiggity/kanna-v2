@@ -12,7 +12,11 @@ export async function createConfiguredDesktopLanTerminalClient(): Promise<Deskto
 }
 
 export function createDesktopLanTerminalClient(): DesktopRelayTerminalClient {
-  const observers = new Map<string, ObserveDesktopRelayTerminalOptions>();
+  interface ObserverRecord {
+    leaseId: string;
+    options: ObserveDesktopRelayTerminalOptions;
+  }
+  const observers = new Map<string, ObserverRecord>();
   let unlistenPromise: Promise<() => void> | null = null;
 
   const ensureListener = () => {
@@ -30,15 +34,16 @@ export function createDesktopLanTerminalClient(): DesktopRelayTerminalClient {
     const observer = observers.get(observerKey(peerId, sessionId));
     if (!observer) return;
     const normalized = normalizeTerminalEvent(sessionId, event);
-    if (normalized) observer.listener(normalized);
+    if (normalized) observer.options.listener(normalized);
   };
 
   return {
     close() {
       for (const observer of observers.values()) {
         void invoke("unobserve_transfer_peer_session", {
-          peerId: observer.desktopId,
-          sessionId: observer.taskId,
+          peerId: observer.options.desktopId,
+          sessionId: observer.options.taskId,
+          observerLeaseId: observer.leaseId,
         }).catch(() => undefined);
       }
       observers.clear();
@@ -47,18 +52,26 @@ export function createDesktopLanTerminalClient(): DesktopRelayTerminalClient {
     },
     observeTerminal(options) {
       const key = observerKey(options.desktopId, options.taskId);
-      observers.set(key, options);
+      const observer: ObserverRecord = {
+        leaseId: globalThis.crypto.randomUUID(),
+        options,
+      };
+      observers.set(key, observer);
       void ensureListener()
-        .then(() =>
-          invoke("observe_transfer_peer_session", {
+        .then(() => {
+          if (observers.get(key) !== observer) return false;
+          return invoke("observe_transfer_peer_session", {
             peerId: options.desktopId,
             sessionId: options.taskId,
-          }),
-        )
-        .then(() => {
+            observerLeaseId: observer.leaseId,
+          }).then(() => true);
+        })
+        .then((observing) => {
+          if (!observing || observers.get(key) !== observer) return;
           options.listener({ type: "ready", taskId: options.taskId });
         })
         .catch((error: unknown) => {
+          if (observers.get(key) !== observer) return;
           options.listener({
             type: "error",
             taskId: options.taskId,
@@ -68,10 +81,13 @@ export function createDesktopLanTerminalClient(): DesktopRelayTerminalClient {
 
       return {
         close() {
-          observers.delete(key);
+          if (observers.get(key) === observer) {
+            observers.delete(key);
+          }
           void invoke("unobserve_transfer_peer_session", {
             peerId: options.desktopId,
             sessionId: options.taskId,
+            observerLeaseId: observer.leaseId,
           }).catch(() => undefined);
         },
       } satisfies DesktopRelayTerminalSubscription;

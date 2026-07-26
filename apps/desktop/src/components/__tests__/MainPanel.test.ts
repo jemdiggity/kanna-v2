@@ -3,6 +3,10 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createI18n } from "vue-i18n";
+import en from "../../i18n/locales/en.json";
+import ja from "../../i18n/locales/ja.json";
+import ko from "../../i18n/locales/ko.json";
 import type { PipelineItem } from "../../types/kanna";
 import type { TaskUiSlot } from "../../types/taskUi";
 
@@ -415,5 +419,53 @@ describe("MainPanel", () => {
     expect(wrapper.find(".blocked-placeholder").exists()).toBe(true);
     expect(wrapper.text()).toContain("Build dependency");
     expect(wrapper.find('[data-testid="cloud-terminal"]').exists()).toBe(false);
+  });
+
+  it.each([
+    ["en", "Task 3c45beea", "Untitled"],
+    ["ja", "タスク 3c45beea", "無題"],
+    ["ko", "작업 3c45beea", "제목 없음"],
+  ])("localizes unresolved and untitled blocker labels in %s", async (locale, unresolved, untitled) => {
+    const { default: MainPanel } = await import("../MainPanel.vue");
+    const i18n = createI18n({
+      legacy: false,
+      locale,
+      fallbackLocale: "en",
+      messages: { en, ja, ko },
+    });
+    const wrapper = mount(MainPanel, {
+      props: {
+        uiSlot: readySlot(),
+        hasRepos: true,
+        blockers: [
+          {
+            ...durableTask({
+              id: "3c45beea",
+              display_name: null,
+              issue_title: null,
+              prompt: null,
+            }),
+            fallback_task_id: "3c45beea",
+          },
+          durableTask({
+            id: "empty-resolved",
+            display_name: null,
+            issue_title: null,
+            prompt: null,
+          }),
+        ],
+        blocked: true,
+      },
+      global: {
+        plugins: [i18n],
+        stubs: {
+          TaskHeader: { template: '<div data-testid="task-header" />' },
+          TerminalTabs: { template: '<div data-testid="terminal-tabs" />' },
+        },
+      },
+    });
+
+    expect(wrapper.findAll(".blocker-name").map((item) => item.text()))
+      .toEqual([unresolved, untitled]);
   });
 });

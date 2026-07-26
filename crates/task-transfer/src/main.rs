@@ -168,9 +168,10 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
         },
         ControlRequest::ListPeerTaskSnapshots { request_id } => {
             match runtime.list_peer_task_snapshots().await {
-                Ok(snapshots) => ControlResponse::ListPeerTaskSnapshots {
+                Ok(listing) => ControlResponse::ListPeerTaskSnapshots {
                     request_id,
-                    snapshots,
+                    snapshots: listing.snapshots,
+                    issues: listing.issues,
                 },
                 Err(error) => control_error(request_id, error),
             }
@@ -179,8 +180,9 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             request_id,
             target_peer_id,
             session_id,
+            observer_lease_id,
         } => match runtime
-            .observe_peer_session(&target_peer_id, &session_id)
+            .observe_peer_session(&target_peer_id, &session_id, &observer_lease_id)
             .await
         {
             Ok(()) => ControlResponse::ObservePeerSession { request_id },
@@ -267,8 +269,9 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             request_id,
             target_peer_id,
             session_id,
+            observer_lease_id,
         } => match runtime
-            .unobserve_peer_session(&target_peer_id, &session_id)
+            .unobserve_peer_session(&target_peer_id, &session_id, &observer_lease_id)
             .await
         {
             Ok(()) => ControlResponse::UnobservePeerSession { request_id },

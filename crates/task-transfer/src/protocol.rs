@@ -31,6 +31,7 @@ pub enum ControlRequest {
         request_id: String,
         target_peer_id: String,
         session_id: String,
+        observer_lease_id: String,
     },
     SendPeerSessionInput {
         request_id: String,
@@ -73,6 +74,7 @@ pub enum ControlRequest {
         request_id: String,
         target_peer_id: String,
         session_id: String,
+        observer_lease_id: String,
     },
     StartPairing {
         request_id: String,
@@ -178,6 +180,8 @@ pub enum ControlResponse {
     ListPeerTaskSnapshots {
         request_id: String,
         snapshots: Vec<PeerTaskSnapshot>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        issues: Vec<PeerTaskSnapshotIssue>,
     },
     ObservePeerSession {
         request_id: String,
@@ -497,6 +501,19 @@ pub struct PeerTaskSnapshot {
     pub peer_id: String,
     pub display_name: String,
     pub snapshot: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerTaskSnapshotIssue {
+    pub peer_id: String,
+    pub display_name: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerTaskSnapshotListing {
+    pub snapshots: Vec<PeerTaskSnapshot>,
+    pub issues: Vec<PeerTaskSnapshotIssue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

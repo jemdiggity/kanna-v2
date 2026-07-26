@@ -73,7 +73,9 @@ export type BlockerTaskStates = Record<string, BlockerTaskState>;
 export type BlockerDisplayItem = Pick<
   PipelineItem,
   "id" | "display_name" | "issue_title" | "prompt" | "closed_at" | "stage" | "pr_url"
->;
+> & {
+  fallback_task_id?: string;
+};
 
 export interface TaskPort {
   port: number;

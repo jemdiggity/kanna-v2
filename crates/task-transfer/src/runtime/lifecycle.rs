@@ -12,13 +12,16 @@ use super::utils::{
 };
 use crate::crypto::{parse_public_key, public_key_to_string, seal_json};
 use crate::discovery::encode_txt_record;
-use crate::protocol::{DiscoveredPeer, LocalTransferIdentity, PeerTaskSnapshot};
+use crate::protocol::{
+    DiscoveredPeer, LocalTransferIdentity, PeerTaskSnapshot, PeerTaskSnapshotIssue,
+    PeerTaskSnapshotListing,
+};
 use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalEvent};
 use crate::registry::PeerRegistry;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
@@ -217,9 +220,10 @@ impl TransferRuntime {
         Ok(())
     }
 
-    pub async fn list_peer_task_snapshots(&self) -> Result<Vec<PeerTaskSnapshot>, RuntimeError> {
+    pub async fn list_peer_task_snapshots(&self) -> Result<PeerTaskSnapshotListing, RuntimeError> {
         let peers = self.list_peers().await?;
         let mut snapshots = Vec::new();
+        let mut issues = Vec::new();
         for peer in peers.into_iter().filter(|peer| {
             self.trusted_peer_record(&peer.peer_id)
                 .ok()
@@ -227,97 +231,115 @@ impl TransferRuntime {
                 .map(|record| record.public_key == peer.public_key)
                 .unwrap_or(false)
         }) {
-            let request_id = self.next_request_id("task-snapshot");
-            self.require_authenticated_task_requests(
-                &peer.peer_id,
-                &peer.public_key,
-                peer.protocol_version,
-            )?;
-            let target_public_key = parse_public_key(&peer.public_key)?;
-            let sealed_payload = seal_json(
-                &self.identity,
-                &target_public_key,
-                &serde_json::json!({
-                    "action": "get_task_snapshot",
-                    "request_id": request_id,
-                }),
-            )?;
-            let response = match self
-                .send_peer_request(
-                    &PeerRegistryEntry {
-                        peer_id: peer.peer_id.clone(),
-                        display_name: peer.display_name.clone(),
-                        endpoint: peer.endpoint.clone(),
-                        pid: peer.pid,
-                        public_key: peer.public_key.clone(),
-                        protocol_version: peer.protocol_version,
-                        accepting_transfers: peer.accepting_transfers,
-                    },
-                    PeerRequest::GetTaskSnapshot {
-                        request_id: request_id.clone(),
-                        requester_peer_id: self.config.peer_id.clone(),
-                        sealed_payload: Some(sealed_payload),
-                    },
-                )
-                .await
-            {
-                Ok(response) => response,
+            match self.fetch_peer_task_snapshot(&peer).await {
+                Ok(snapshot) => snapshots.push(snapshot),
                 Err(error) => {
+                    let message = error.to_string();
                     eprintln!(
                         "[task-transfer] failed to fetch task snapshot from {}: {}",
-                        peer.peer_id, error
-                    );
-                    continue;
-                }
-            };
-
-            match response {
-                PeerResponse::TaskSnapshot {
-                    request_id: response_request_id,
-                    peer_id: response_peer_id,
-                    display_name,
-                    snapshot,
-                } => {
-                    if response_request_id == request_id {
-                        if response_peer_id != peer.peer_id {
-                            eprintln!(
-                                "[task-transfer] peer {} returned task snapshot for mismatched peer {}",
-                                peer.peer_id, response_peer_id
-                            );
-                            continue;
-                        }
-                        snapshots.push(PeerTaskSnapshot {
-                            peer_id: peer.peer_id.clone(),
-                            display_name,
-                            snapshot,
-                        });
-                    }
-                }
-                PeerResponse::Error { message, .. } => {
-                    eprintln!(
-                        "[task-transfer] peer {} rejected task snapshot request: {}",
                         peer.peer_id, message
                     );
-                }
-                other => {
-                    return Err(unexpected_peer_response("task snapshot", &other));
+                    issues.push(PeerTaskSnapshotIssue {
+                        peer_id: peer.peer_id,
+                        display_name: peer.display_name,
+                        message,
+                    });
                 }
             }
         }
-        Ok(snapshots)
+        Ok(PeerTaskSnapshotListing { snapshots, issues })
+    }
+
+    async fn fetch_peer_task_snapshot(
+        &self,
+        peer: &DiscoveredPeer,
+    ) -> Result<PeerTaskSnapshot, RuntimeError> {
+        self.require_authenticated_task_requests(
+            &peer.peer_id,
+            &peer.public_key,
+            peer.protocol_version,
+        )?;
+        let request_id = self.next_request_id("task-snapshot");
+        let target_public_key = parse_public_key(&peer.public_key)?;
+        let sealed_payload = seal_json(
+            &self.identity,
+            &target_public_key,
+            &serde_json::json!({
+                "action": "get_task_snapshot",
+                "request_id": request_id,
+            }),
+        )?;
+        let response = self
+            .send_peer_request(
+                &PeerRegistryEntry {
+                    peer_id: peer.peer_id.clone(),
+                    display_name: peer.display_name.clone(),
+                    endpoint: peer.endpoint.clone(),
+                    pid: peer.pid,
+                    public_key: peer.public_key.clone(),
+                    protocol_version: peer.protocol_version,
+                    accepting_transfers: peer.accepting_transfers,
+                },
+                PeerRequest::GetTaskSnapshot {
+                    request_id: request_id.clone(),
+                    requester_peer_id: self.config.peer_id.clone(),
+                    sealed_payload: Some(sealed_payload),
+                },
+            )
+            .await?;
+        match response {
+            PeerResponse::TaskSnapshot {
+                request_id: response_request_id,
+                peer_id: response_peer_id,
+                display_name,
+                snapshot,
+            } => {
+                if response_request_id != request_id {
+                    return Err(RuntimeError::Protocol(format!(
+                        "peer {} returned task snapshot request id {} for {}",
+                        peer.peer_id, response_request_id, request_id
+                    )));
+                }
+                if response_peer_id != peer.peer_id {
+                    return Err(RuntimeError::Protocol(format!(
+                        "peer {} returned task snapshot for mismatched peer {}",
+                        peer.peer_id, response_peer_id
+                    )));
+                }
+                Ok(PeerTaskSnapshot {
+                    peer_id: peer.peer_id.clone(),
+                    display_name,
+                    snapshot,
+                })
+            }
+            PeerResponse::Error { message, .. } => Err(RuntimeError::Protocol(format!(
+                "peer {} rejected task snapshot request: {}",
+                peer.peer_id, message
+            ))),
+            other => Err(unexpected_peer_response("task snapshot", &other)),
+        }
     }
 
     pub async fn observe_peer_session(
         &self,
         target_peer_id: &str,
         session_id: &str,
+        observer_lease_id: &str,
     ) -> Result<(), RuntimeError> {
         let observer_key = terminal_observer_key(target_peer_id, session_id);
-        let generation = self.request_counter.fetch_add(1, Ordering::Relaxed);
-        if let Some(displaced) = self.terminal_observers.lock().await.insert(
+        let lease_id = observer_lease_id.to_owned();
+        let mut observers = self.terminal_observers.lock().await;
+        if observers
+            .get(&observer_key)
+            .is_some_and(|slot| slot.lease_id == lease_id && slot.closed)
+        {
+            return Ok(());
+        }
+        if let Some(displaced) = observers.insert(
             observer_key.clone(),
             TerminalObserverSlot {
-                generation,
+                lease_id: lease_id.clone(),
+                closed: false,
                 handle: None,
             },
         ) {
@@ -325,11 +347,12 @@ impl TransferRuntime {
                 handle.abort();
             }
         }
+        drop(observers);
 
         let target_peer = match self.find_peer(target_peer_id).await {
             Ok(target_peer) => target_peer,
             Err(error) => {
-                self.clear_terminal_observer_generation(&observer_key, generation)
+                self.clear_terminal_observer_lease(&observer_key, &lease_id)
                     .await;
                 return Err(error);
             }
@@ -337,7 +360,7 @@ impl TransferRuntime {
         if let Err(error) =
             self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)
         {
-            self.clear_terminal_observer_generation(&observer_key, generation)
+            self.clear_terminal_observer_lease(&observer_key, &lease_id)
                 .await;
             return Err(error);
         }
@@ -352,7 +375,7 @@ impl TransferRuntime {
         let mut observers = self.terminal_observers.lock().await;
         let Some(slot) = observers
             .get_mut(&observer_key)
-            .filter(|slot| slot.generation == generation)
+            .filter(|slot| slot.lease_id == lease_id && !slot.closed)
         else {
             return Ok(());
         };
@@ -386,21 +409,37 @@ impl TransferRuntime {
         &self,
         target_peer_id: &str,
         session_id: &str,
+        observer_lease_id: &str,
     ) -> Result<(), RuntimeError> {
         let observer_key = terminal_observer_key(target_peer_id, session_id);
-        if let Some(slot) = self.terminal_observers.lock().await.remove(&observer_key) {
-            if let Some(handle) = slot.handle {
-                handle.abort();
+        let mut observers = self.terminal_observers.lock().await;
+        match observers.get_mut(&observer_key) {
+            Some(slot) if slot.lease_id == observer_lease_id => {
+                slot.closed = true;
+                if let Some(handle) = slot.handle.take() {
+                    handle.abort();
+                }
+            }
+            Some(_) => {}
+            None => {
+                observers.insert(
+                    observer_key,
+                    TerminalObserverSlot {
+                        lease_id: observer_lease_id.to_owned(),
+                        closed: true,
+                        handle: None,
+                    },
+                );
             }
         }
         Ok(())
     }
 
-    async fn clear_terminal_observer_generation(&self, observer_key: &str, generation: u64) {
+    async fn clear_terminal_observer_lease(&self, observer_key: &str, lease_id: &str) {
         let mut observers = self.terminal_observers.lock().await;
         if observers
             .get(observer_key)
-            .is_some_and(|slot| slot.generation == generation)
+            .is_some_and(|slot| slot.lease_id == lease_id && !slot.closed)
         {
             if let Some(slot) = observers.remove(observer_key) {
                 if let Some(handle) = slot.handle {

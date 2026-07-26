@@ -848,7 +848,9 @@ async fn copied_cloud_peer_identity_does_not_authorize_plaintext_lan_snapshot_ac
         true
     });
 
-    assert!(runtime.list_peer_task_snapshots().await.unwrap().is_empty());
+    let listing = runtime.list_peer_task_snapshots().await.unwrap();
+    assert!(listing.snapshots.is_empty());
+    assert!(listing.issues.is_empty());
     assert!(
         !spoof_contact.await.unwrap(),
         "plaintext task snapshot was sent using external cloud trust"
@@ -1157,6 +1159,8 @@ async fn list_peer_task_snapshots_rejects_spoofed_response_peer_id() {
     let target_public_key = public_key_to_string(&target_identity.public_key);
     let honest_identity = TransferIdentity::generate();
     let honest_public_key = public_key_to_string(&honest_identity.public_key);
+    let legacy_identity = TransferIdentity::generate();
+    let legacy_public_key = public_key_to_string(&legacy_identity.public_key);
 
     let registry = PeerRegistry::new(temp.path().to_path_buf());
     registry
@@ -1167,6 +1171,17 @@ async fn list_peer_task_snapshots_rejects_spoofed_response_peer_id() {
             pid: std::process::id(),
             public_key: target_public_key.clone(),
             protocol_version: 2,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    registry
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-a-legacy".into(),
+            display_name: "Legacy".into(),
+            endpoint: "127.0.0.1:1".into(),
+            pid: std::process::id(),
+            public_key: legacy_public_key.clone(),
+            protocol_version: 1,
             accepting_transfers: true,
         })
         .unwrap();
@@ -1191,6 +1206,17 @@ async fn list_peer_task_snapshots_rejects_spoofed_response_peer_id() {
             capabilities_json:
                 "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
                     .into(),
+            paired_at: "2026-04-17T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+    peer_store
+        .upsert(PeerRecord {
+            peer_id: "peer-a-legacy".into(),
+            display_name: "Legacy".into(),
+            public_key: legacy_public_key,
+            capabilities_json: "{\"protocolVersion\":1}".into(),
             paired_at: "2026-04-17T00:00:00Z".into(),
             last_seen_at: None,
             revoked_at: None,
@@ -1271,12 +1297,17 @@ async fn list_peer_task_snapshots_rejects_spoofed_response_peer_id() {
     .await
     .unwrap();
 
-    let snapshots = primary.list_peer_task_snapshots().await.unwrap();
+    let listing = primary.list_peer_task_snapshots().await.unwrap();
+    let snapshots = listing.snapshots;
     assert_eq!(
         snapshots.len(),
         1,
         "expected only the honest peer snapshot: {snapshots:?}"
     );
+    assert_eq!(listing.issues.len(), 2);
+    assert!(listing.issues.iter().any(|issue| {
+        issue.peer_id == "peer-a-legacy" && issue.message.contains("upgrade and re-pair")
+    }));
     assert_eq!(snapshots[0].peer_id, "peer-z-honest");
     assert_eq!(
         snapshots[0].snapshot,
@@ -1342,7 +1373,7 @@ async fn observe_peer_session_reports_empty_peer_response_with_peer_context() {
     .unwrap();
 
     primary
-        .observe_peer_session("peer-target", "task-1")
+        .observe_peer_session("peer-target", "task-1", "lease-task-1")
         .await
         .unwrap();
     let message = match primary.next_event().await.unwrap() {
@@ -1401,12 +1432,12 @@ async fn delayed_observe_cannot_install_after_unobserve() {
     let observe_runtime = std::sync::Arc::clone(&primary);
     let observe = tokio::spawn(async move {
         observe_runtime
-            .observe_peer_session("peer-target", "task-delayed")
+            .observe_peer_session("peer-target", "task-delayed", "lease-delayed")
             .await
     });
     tokio::time::sleep(Duration::from_millis(25)).await;
     primary
-        .unobserve_peer_session("peer-target", "task-delayed")
+        .unobserve_peer_session("peer-target", "task-delayed", "lease-delayed")
         .await
         .unwrap();
     observe.await.unwrap().unwrap();
@@ -1460,14 +1491,14 @@ async fn concurrent_observe_replacement_aborts_displaced_generation() {
     let first_runtime = std::sync::Arc::clone(&primary);
     let first = tokio::spawn(async move {
         first_runtime
-            .observe_peer_session("peer-target", "task-replaced")
+            .observe_peer_session("peer-target", "task-replaced", "lease-old")
             .await
     });
     tokio::time::sleep(Duration::from_millis(25)).await;
     let second_runtime = std::sync::Arc::clone(&primary);
     let second = tokio::spawn(async move {
         second_runtime
-            .observe_peer_session("peer-target", "task-replaced")
+            .observe_peer_session("peer-target", "task-replaced", "lease-new")
             .await
     });
 
@@ -1488,6 +1519,107 @@ async fn concurrent_observe_replacement_aborts_displaced_generation() {
             .is_err(),
         "stale delayed observe displaced the newer observer",
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn old_unobserve_cannot_remove_replacement_observer_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let target_identity = TransferIdentity::generate();
+    let target_public_key = public_key_to_string(&target_identity.public_key);
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            endpoint: format!("127.0.0.1:{port}"),
+            pid: std::process::id(),
+            public_key: target_public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    PeerStore::new(trusted_peer_store_path(temp.path(), "peer-primary"))
+        .upsert(PeerRecord {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            public_key: target_public_key,
+            capabilities_json: "{\"protocolVersion\":1}".into(),
+            paired_at: "2026-07-26T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    runtime
+        .observe_peer_session("peer-target", "task-replaced", "lease-old")
+        .await
+        .unwrap();
+    let (old_stream, _) = listener.accept().await.unwrap();
+    runtime
+        .observe_peer_session("peer-target", "task-replaced", "lease-new")
+        .await
+        .unwrap();
+    let (new_stream, _) = listener.accept().await.unwrap();
+    runtime
+        .unobserve_peer_session("peer-target", "task-replaced", "lease-old")
+        .await
+        .unwrap();
+    drop(old_stream);
+
+    let mut new_reader = BufReader::new(new_stream);
+    let mut request = String::new();
+    tokio::time::timeout(Duration::from_secs(1), new_reader.read_line(&mut request))
+        .await
+        .expect("replacement observer was removed by the old lease")
+        .unwrap();
+    assert!(request.contains("\"observe_session\""));
+    let request: PeerRequest = serde_json::from_str(request.trim()).unwrap();
+    let PeerRequest::ObserveSession { request_id, .. } = request else {
+        panic!("expected observe request");
+    };
+    let response = PeerResponse::ObserveSession {
+        request_id,
+        session_id: "task-replaced".into(),
+    };
+    new_reader
+        .get_mut()
+        .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    let event = kanna_task_transfer::protocol::PeerTerminalEvent::Output {
+        session_id: "task-replaced".into(),
+        data: b"replacement-live".to_vec(),
+    };
+    new_reader
+        .get_mut()
+        .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())
+        .await
+        .expect("replacement observer connection was closed by the old lease");
+    match tokio::time::timeout(Duration::from_secs(1), runtime.next_event())
+        .await
+        .expect("replacement observer event was not forwarded")
+        .unwrap()
+    {
+        RuntimeEvent::TerminalEvent {
+            peer_id,
+            session_id,
+            event: kanna_task_transfer::protocol::PeerTerminalEvent::Output { data, .. },
+        } => {
+            assert_eq!(peer_id, "peer-target");
+            assert_eq!(session_id, "task-replaced");
+            assert_eq!(data, b"replacement-live");
+        }
+        other => panic!("unexpected replacement observer event: {other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2012,7 +2144,7 @@ async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snaps
             runtime.list_peer_task_snapshots(),
         );
         input.unwrap();
-        assert_eq!(snapshots.unwrap().len(), 1);
+        assert_eq!(snapshots.unwrap().snapshots.len(), 1);
     })
     .await;
     assert!(

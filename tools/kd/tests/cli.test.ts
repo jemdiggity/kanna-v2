@@ -363,9 +363,19 @@ describe("kd CLI", () => {
           runtime
         )
       ).toBe(true);
-      expect(
-        readdirSync(cacheRoot).filter((name) => name.startsWith("."))
-      ).toEqual([]);
+      const cacheMetadata = readdirSync(cacheRoot).filter((name) =>
+        name.startsWith(".")
+      );
+      expect(cacheMetadata).toHaveLength(3);
+      expect(cacheMetadata.filter((name) => name.includes(".lease-")))
+        .toHaveLength(2);
+      expect(cacheMetadata.filter((name) => name.endsWith(".used")))
+        .toHaveLength(1);
+      expect(cacheMetadata.some((name) =>
+        name.endsWith(".lock") ||
+        name.includes(".candidate-") ||
+        name === ".reclamation.guard"
+      )).toBe(false);
 
       const mcp = await runMcpExchange(fixtureRepoRoots[1], env);
       expect(mcp.stderr).toBe("");

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { type DbHandle } from "./types/kanna";
+import { type BlockerDisplayItem, type DbHandle } from "./types/kanna";
 import type { TaskUiSlot } from "./types/taskUi";
 import Sidebar from "./components/Sidebar.vue";
 import MainPanel from "./components/MainPanel.vue";
@@ -60,6 +60,7 @@ const {
   isCloudOnlyRepoId,
   cloudRepoRemoteUrl,
   refreshLanTasks,
+  __e2eInjectRemoteSnapshot,
   initializeDesktopCloudAuth,
   initializeDesktopLanTaskSync,
   markTransferSidecarReady,
@@ -76,6 +77,7 @@ if (import.meta.env.DEV) {
   void desktopAuthSession;
   void cloudSnapshot;
   void lanSnapshot;
+  void __e2eInjectRemoteSnapshot;
 }
 
 const mainPanelUiSlot = computed<TaskUiSlot | null>(() => {
@@ -278,9 +280,24 @@ const {
   handleSelectRepo,
   selectSidebarItemById,
 } = appTaskNavigation;
+function workspaceBlockerName(blocker: BlockerDisplayItem): string {
+  return blocker.display_name
+    || blocker.issue_title
+    || (blocker.prompt ? blocker.prompt.slice(0, 30) : null)
+    || (blocker.fallback_task_id
+      ? t("tasks.taskId", { id: blocker.fallback_task_id })
+      : t("tasks.untitled"));
+}
+const workspaceSidebarBlockerNames = computed(() => Object.fromEntries(
+  Object.entries(workspaceBlockers.value.blockersByPresentationTaskId)
+    .map(([taskId, blockers]) => [
+      taskId,
+      blockers.map(workspaceBlockerName).join(", "),
+    ]),
+));
 const sidebarBlockerNames = computed(() => ({
   ...localSidebarBlockerNames.value,
-  ...workspaceBlockers.value.blockerNames,
+  ...workspaceSidebarBlockerNames.value,
 }));
 const appTaskCreation = useAppTaskCreation({
   store,

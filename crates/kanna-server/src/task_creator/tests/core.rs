@@ -3475,6 +3475,7 @@ fn dormant_start_preparation_rechecks_open_blockers() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,

@@ -12,6 +12,7 @@
     "loadingOptions": "タスクオプションを読み込んでいます…",
     "blockedBy": "ブロック元",
     "blockedByNone": "なし",
+    "taskId": "タスク {id}",
     "untitled": "無題",
     "renameTask": "タスク名を変更"
   },

@@ -6,7 +6,9 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   unlinkSync,
+  utimesSync,
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,9 +16,11 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   computeKdIdentity,
+  createKdInstallationLease,
   ensureKdInstallation,
   formatKdCacheEvent,
   kdDependencyProjection,
+  pruneKdInstallations,
   resolveKdCacheRoot,
   validateKdInstallation,
   writeKdManifest
@@ -93,6 +97,19 @@ async function successfulFakeBuild({ outputDir, identity }) {
   writeFileSync(join(outputDir, "bin/kd.js"), "#!/usr/bin/env node\n");
   writeFileSync(join(outputDir, "bin/kd-mcp.js"), "#!/usr/bin/env node\n");
   writeKdManifest(outputDir, identity, runtime);
+}
+
+function createCachedInstallation(cacheRoot, identity, bytes, usedAtMs) {
+  const entryRoot = join(cacheRoot, identity);
+  mkdirSync(join(entryRoot, "bin"), { recursive: true });
+  writeFileSync(join(entryRoot, "bin/kd.js"), "x".repeat(bytes));
+  writeFileSync(join(entryRoot, "bin/kd-mcp.js"), "#!/usr/bin/env node\n");
+  writeKdManifest(entryRoot, identity, runtime);
+  const usedPath = join(cacheRoot, `.${identity}.used`);
+  writeFileSync(usedPath, `${usedAtMs}\n`);
+  const usedAt = new Date(usedAtMs);
+  utimesSync(usedPath, usedAt, usedAt);
+  return entryRoot;
 }
 
 describe("kd installation identity", () => {
@@ -464,6 +481,107 @@ describe("kd installation publication", () => {
     expect(events.at(-1)).toBe(
       `kd installation failed: identity=${identity} cache=${entryRoot} phase=build: synthetic command failure`
     );
+  });
+});
+
+describe("kd installation reclamation", () => {
+  it("prunes expired entries and then enforces oldest-first count and byte limits", () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    mkdirSync(cacheRoot, { recursive: true });
+    const now = Date.parse("2026-07-26T12:00:00.000Z");
+    createCachedInstallation(cacheRoot, "expired", 16, now - 31 * 24 * 60 * 60 * 1000);
+    createCachedInstallation(cacheRoot, "oldest", 32, now - 3_000);
+    createCachedInstallation(cacheRoot, "middle", 32, now - 2_000);
+    createCachedInstallation(cacheRoot, "current", 32, now - 1_000);
+
+    const result = pruneKdInstallations({
+      cacheRoot,
+      currentIdentity: "current",
+      now,
+      maxAgeMs: 30 * 24 * 60 * 60 * 1000,
+      maxEntries: 2,
+      maxBytes: 10_000,
+      isProcessAlive: () => false,
+    });
+
+    expect(result.removedIdentities).toEqual(["expired", "oldest"]);
+    expect(readdirSync(cacheRoot).filter((name) => !name.startsWith(".")))
+      .toEqual(["current", "middle"]);
+
+    const middleBytes = statSync(join(cacheRoot, "middle/bin/kd.js")).size;
+    const currentBytes = statSync(join(cacheRoot, "current/bin/kd.js")).size;
+    pruneKdInstallations({
+      cacheRoot,
+      currentIdentity: "current",
+      now,
+      maxAgeMs: Number.POSITIVE_INFINITY,
+      maxEntries: 10,
+      maxBytes: middleBytes + currentBytes,
+      isProcessAlive: () => false,
+    });
+    expect(existsSync(join(cacheRoot, "middle"))).toBe(false);
+    expect(existsSync(join(cacheRoot, "current"))).toBe(true);
+  });
+
+  it("fences live leases, installation locks, and the current identity", () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    mkdirSync(cacheRoot, { recursive: true });
+    const now = Date.parse("2026-07-26T12:00:00.000Z");
+    for (const identity of ["leased", "installing", "current", "deletable"]) {
+      createCachedInstallation(cacheRoot, identity, 16, now - 60_000);
+    }
+    createKdInstallationLease({
+      cacheRoot,
+      identity: "leased",
+      pid: 101,
+      now,
+    });
+    writeFileSync(
+      join(cacheRoot, ".installing.lock"),
+      `${JSON.stringify({ pid: 202, token: "installing", startedAt: now })}\n`,
+    );
+
+    const result = pruneKdInstallations({
+      cacheRoot,
+      currentIdentity: "current",
+      now,
+      maxAgeMs: 1,
+      maxEntries: 0,
+      maxBytes: 0,
+      isProcessAlive: (pid) => pid === 101 || pid === 202,
+    });
+
+    expect(result.removedIdentities).toEqual(["deletable"]);
+    expect(existsSync(join(cacheRoot, "leased"))).toBe(true);
+    expect(existsSync(join(cacheRoot, "installing"))).toBe(true);
+    expect(existsSync(join(cacheRoot, "current"))).toBe(true);
+  });
+
+  it("cleans stale leases and allows their installation to be reclaimed", () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    mkdirSync(cacheRoot, { recursive: true });
+    const now = Date.parse("2026-07-26T12:00:00.000Z");
+    createCachedInstallation(cacheRoot, "stale", 16, now - 60_000);
+    const leasePath = createKdInstallationLease({
+      cacheRoot,
+      identity: "stale",
+      pid: 303,
+      now,
+    });
+
+    const result = pruneKdInstallations({
+      cacheRoot,
+      currentIdentity: "other",
+      now,
+      maxAgeMs: 1,
+      maxEntries: 0,
+      maxBytes: 0,
+      isProcessAlive: () => false,
+    });
+
+    expect(result.removedIdentities).toEqual(["stale"]);
+    expect(existsSync(leasePath)).toBe(false);
+    expect(existsSync(join(cacheRoot, "stale"))).toBe(false);
   });
 });
 

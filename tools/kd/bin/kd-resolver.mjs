@@ -6,8 +6,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   computeKdIdentity,
+  createKdInstallationLease,
   ensureKdInstallation,
   formatKdCacheEvent,
+  pruneKdInstallations,
   resolveKdCacheRoot,
   writeKdManifest
 } from "./kd-cache.mjs";
@@ -90,7 +92,12 @@ async function resolveEntrypoint(entrypoint) {
     env: process.env
   });
 
-  return ensureKdInstallation({
+  createKdInstallationLease({
+    cacheRoot,
+    identity,
+    pid: process.ppid
+  });
+  const resolvedEntrypoint = await ensureKdInstallation({
     cacheRoot,
     identity,
     entrypoint,
@@ -116,6 +123,11 @@ async function resolveEntrypoint(entrypoint) {
       }
     }
   });
+  pruneKdInstallations({
+    cacheRoot,
+    currentIdentity: identity
+  });
+  return resolvedEntrypoint;
 }
 
 try {

@@ -475,10 +475,11 @@ pub(crate) struct EnqueueReport {
 pub(crate) struct SessionFanout {
     pub(crate) state: Mutex<FanoutState>,
     pub(crate) recovery_notify: Arc<tokio::sync::Notify>,
+    pub(crate) recovery_retry_scheduled: AtomicBool,
 }
 
 impl SessionFanout {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let recovery_notify = Arc::new(tokio::sync::Notify::new());
         Self {
             state: Mutex::new(FanoutState {
@@ -486,6 +487,7 @@ impl SessionFanout {
                 ..FanoutState::default()
             }),
             recovery_notify,
+            recovery_retry_scheduled: AtomicBool::new(false),
         }
     }
 }

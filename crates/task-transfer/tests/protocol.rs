@@ -65,6 +65,22 @@ fn control_messages_roundtrip_with_request_ids() {
 }
 
 #[test]
+fn terminal_observer_control_messages_carry_subscription_leases() {
+    assert_roundtrip(ControlRequest::ObservePeerSession {
+        request_id: "observe-1".into(),
+        target_peer_id: "peer-owner".into(),
+        session_id: "task-1".into(),
+        observer_lease_id: "lease-new".into(),
+    });
+    assert_roundtrip(ControlRequest::UnobservePeerSession {
+        request_id: "unobserve-1".into(),
+        target_peer_id: "peer-owner".into(),
+        session_id: "task-1".into(),
+        observer_lease_id: "lease-new".into(),
+    });
+}
+
+#[test]
 fn task_pull_control_peer_and_event_messages_roundtrip() {
     let control_request = ControlRequest::RequestTaskPull {
         request_id: "control-pull-1".into(),

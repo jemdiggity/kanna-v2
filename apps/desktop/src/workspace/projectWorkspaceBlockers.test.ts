@@ -141,7 +141,6 @@ describe("projectWorkspaceBlockers", () => {
       blocked_item_id: blockedTask.item.id,
       blocker_item_id: blockerTask.item.id,
     }]);
-    expect(result.blockerNames[blockedTask.item.id]).toBe("Build dependency");
     expect(result.blockersByLogicalTaskKey[blockedTask.logicalTaskKey]).toEqual([
       expect.objectContaining({
         id: blockerTask.item.id,
@@ -150,7 +149,7 @@ describe("projectWorkspaceBlockers", () => {
     ]);
   });
 
-  it("keeps an unresolved owner blocker visible with a stable fallback label", () => {
+  it("keeps an unresolved owner blocker visible as raw fallback metadata", () => {
     const blockedTask = workspaceTask("blocked-owner", "Blocked task", ["3c45beea"]);
 
     const result = project([blockedTask]);
@@ -159,11 +158,11 @@ describe("projectWorkspaceBlockers", () => {
       blocked_item_id: blockedTask.item.id,
       blocker_item_id: "3c45beea",
     }]);
-    expect(result.blockerNames[blockedTask.item.id]).toBe("Task 3c45beea");
     expect(result.blockersByLogicalTaskKey[blockedTask.logicalTaskKey]).toEqual([
       expect.objectContaining({
         id: "3c45beea",
-        display_name: "Task 3c45beea",
+        display_name: null,
+        fallback_task_id: "3c45beea",
       }),
     ]);
   });
@@ -179,7 +178,6 @@ describe("projectWorkspaceBlockers", () => {
     const result = project([localTask]);
 
     expect(result.taskBlockers).toEqual([]);
-    expect(result.blockerNames).toEqual({});
     expect(result.blockersByLogicalTaskKey).toEqual({});
   });
 });

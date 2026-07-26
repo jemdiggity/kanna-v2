@@ -83,19 +83,7 @@ pub async fn get_transfer_identity(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::TransferServiceState>,
 ) -> Result<Value, String> {
-    let mut guard = state.lock().await;
-    ensure_client(&app, &mut guard).await?;
-    let (result, dead) = {
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| "transfer sidecar client unavailable".to_string())?;
-        let result = client.get_local_identity().await;
-        (result, client.is_dead())
-    };
-    if dead {
-        *guard = None;
-    }
-    result
+    with_transfer_client!(app, state, client, client.get_local_identity())
 }
 
 #[tauri::command]
@@ -120,19 +108,7 @@ pub async fn upsert_external_transfer_peer(
     state: tauri::State<'_, crate::TransferServiceState>,
     peer: Value,
 ) -> Result<Value, String> {
-    let mut guard = state.lock().await;
-    ensure_client(&app, &mut guard).await?;
-    let (result, dead) = {
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| "transfer sidecar client unavailable".to_string())?;
-        let result = client.upsert_external_peer(peer).await;
-        (result, client.is_dead())
-    };
-    if dead {
-        *guard = None;
-    }
-    result
+    with_transfer_client!(app, state, client, client.upsert_external_peer(peer))
 }
 
 #[tauri::command]
@@ -141,19 +117,7 @@ pub async fn remove_external_transfer_peer(
     state: tauri::State<'_, crate::TransferServiceState>,
     peer_id: String,
 ) -> Result<Value, String> {
-    let mut guard = state.lock().await;
-    ensure_client(&app, &mut guard).await?;
-    let (result, dead) = {
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| "transfer sidecar client unavailable".to_string())?;
-        let result = client.remove_external_peer(peer_id).await;
-        (result, client.is_dead())
-    };
-    if dead {
-        *guard = None;
-    }
-    result
+    with_transfer_client!(app, state, client, client.remove_external_peer(peer_id))
 }
 
 #[tauri::command]
@@ -161,19 +125,7 @@ pub async fn clear_external_transfer_peers(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::TransferServiceState>,
 ) -> Result<Value, String> {
-    let mut guard = state.lock().await;
-    ensure_client(&app, &mut guard).await?;
-    let (result, dead) = {
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| "transfer sidecar client unavailable".to_string())?;
-        let result = client.clear_external_peers().await;
-        (result, client.is_dead())
-    };
-    if dead {
-        *guard = None;
-    }
-    result
+    with_transfer_client!(app, state, client, client.clear_external_peers())
 }
 
 #[tauri::command]
@@ -199,12 +151,13 @@ pub async fn observe_transfer_peer_session(
     state: tauri::State<'_, crate::TransferServiceState>,
     peer_id: String,
     session_id: String,
+    observer_lease_id: String,
 ) -> Result<Value, String> {
     with_transfer_client!(
         app,
         state,
         client,
-        client.observe_peer_session(peer_id, session_id)
+        client.observe_peer_session(peer_id, session_id, observer_lease_id)
     )
 }
 
@@ -214,12 +167,13 @@ pub async fn unobserve_transfer_peer_session(
     state: tauri::State<'_, crate::TransferServiceState>,
     peer_id: String,
     session_id: String,
+    observer_lease_id: String,
 ) -> Result<Value, String> {
     with_transfer_client!(
         app,
         state,
         client,
-        client.unobserve_peer_session(peer_id, session_id)
+        client.unobserve_peer_session(peer_id, session_id, observer_lease_id)
     )
 }
 
@@ -387,25 +341,13 @@ pub async fn request_task_pull(
     source_task_id: String,
     transport: Option<String>,
 ) -> Result<Value, String> {
-    let mut guard = state.lock().await;
-    ensure_client(&app, &mut guard).await?;
-    let (result, dead) = {
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| "transfer sidecar client unavailable".to_string())?;
-        let result = client
-            .request_task_pull(
-                target_peer_id,
-                source_task_id,
-                transport.unwrap_or_else(|| "auto".into()),
-            )
-            .await;
-        (result, client.is_dead())
-    };
-    if dead {
-        *guard = None;
-    }
-    result
+    let transport = transport.unwrap_or_else(|| "auto".into());
+    with_transfer_client!(
+        app,
+        state,
+        client,
+        client.request_task_pull(target_peer_id, source_task_id, transport)
+    )
 }
 
 #[tauri::command]
@@ -465,21 +407,12 @@ pub async fn mark_incoming_transfer_event_recorded(
     state: tauri::State<'_, crate::TransferServiceState>,
     transfer_id: String,
 ) -> Result<Value, String> {
-    let mut guard = state.lock().await;
-    ensure_client(&app, &mut guard).await?;
-    let (result, dead) = {
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| "transfer sidecar client unavailable".to_string())?;
-        let result = client
-            .mark_incoming_transfer_event_recorded(transfer_id)
-            .await;
-        (result, client.is_dead())
-    };
-    if dead {
-        *guard = None;
-    }
-    result
+    with_transfer_client!(
+        app,
+        state,
+        client,
+        client.mark_incoming_transfer_event_recorded(transfer_id)
+    )
 }
 
 #[tauri::command]
@@ -488,21 +421,12 @@ pub async fn mark_incoming_transfer_ack_completed(
     state: tauri::State<'_, crate::TransferServiceState>,
     transfer_id: String,
 ) -> Result<Value, String> {
-    let mut guard = state.lock().await;
-    ensure_client(&app, &mut guard).await?;
-    let (result, dead) = {
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| "transfer sidecar client unavailable".to_string())?;
-        let result = client
-            .mark_incoming_transfer_ack_completed(transfer_id)
-            .await;
-        (result, client.is_dead())
-    };
-    if dead {
-        *guard = None;
-    }
-    result
+    with_transfer_client!(
+        app,
+        state,
+        client,
+        client.mark_incoming_transfer_ack_completed(transfer_id)
+    )
 }
 
 #[tauri::command]
@@ -511,21 +435,12 @@ pub async fn mark_outgoing_transfer_commit_applied(
     state: tauri::State<'_, crate::TransferServiceState>,
     transfer_id: String,
 ) -> Result<Value, String> {
-    let mut guard = state.lock().await;
-    ensure_client(&app, &mut guard).await?;
-    let (result, dead) = {
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| "transfer sidecar client unavailable".to_string())?;
-        let result = client
-            .mark_outgoing_transfer_commit_applied(transfer_id)
-            .await;
-        (result, client.is_dead())
-    };
-    if dead {
-        *guard = None;
-    }
-    result
+    with_transfer_client!(
+        app,
+        state,
+        client,
+        client.mark_outgoing_transfer_commit_applied(transfer_id)
+    )
 }
 
 #[tauri::command]

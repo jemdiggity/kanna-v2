@@ -87,7 +87,6 @@ enum ErrorCode {
     SessionAlreadyExists,
     HandoffLost,
     HandoffVersionMismatch,
-    HandoffInProgress,
     PtySpawnFailed,
     PtyCloneFailed,
     HeadlessTerminalInitFailed,
@@ -221,6 +220,36 @@ impl DaemonHandle {
             .unwrap_or(0);
         assert_eq!(actual_pid, expected_pid, "PID file should match our daemon");
 
+        DaemonHandle { child, socket_path }
+    }
+
+    fn start_in_with_path_env(dir: &PathBuf, extra_env: &[(&str, &Path)]) -> Self {
+        std::fs::create_dir_all(dir).unwrap();
+        let socket_path = compute_socket_path(dir);
+        let pid_path = dir.join("daemon.pid");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_kanna-daemon"));
+        command.env("KANNA_DAEMON_DIR", dir.to_str().unwrap());
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let child = command.spawn().expect("failed to start daemon");
+        let expected_pid = child.id();
+        for _ in 0..100 {
+            if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+                if pid_str.trim().parse::<u32>().ok() == Some(expected_pid)
+                    && UnixStream::connect(&socket_path).is_ok()
+                {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let actual_pid = std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+        assert_eq!(actual_pid, expected_pid, "PID file should match our daemon");
         DaemonHandle { child, socket_path }
     }
 
@@ -1034,6 +1063,7 @@ fn test_interrupted_handoff_leaves_old_daemon_session_usable() {
         "expected HandoffReady, got {line:?}"
     );
     drop(handoff);
+    drop(reader);
 
     send_input_and_wait_for_echo(
         &mut conn_a,
@@ -1178,7 +1208,7 @@ fn test_handoff_commit_refuses_mutation_for_retry_on_adopting_daemon() {
     handoff.flush().unwrap();
     match spawner.recv_with_timeout(Duration::from_secs(2)) {
         Ok(Evt::Error {
-            code: Some(ErrorCode::HandoffInProgress),
+            code: None,
             message,
         }) => assert!(message.contains("retry against the adopting daemon")),
         other => panic!("committed handoff mutation was not retryably refused: {other:?}"),
@@ -1324,6 +1354,77 @@ fn test_handoff_transfers_session() {
         b"after-handoff\n",
         "after-handoff",
     );
+
+    drop(daemon_b);
+    cleanup(&dir);
+}
+
+#[test]
+fn test_handoff_preserves_output_emitted_after_final_snapshot_before_ack() {
+    let dir = test_dir("snapshot-to-ack-output");
+    let marker_path = dir.join("handoff-snapshot-complete");
+    let release_path = dir.join("handoff-snapshot-release");
+    let daemon_a = DaemonHandle::start_in_with_path_env(
+        &dir,
+        &[
+            (
+                "KANNA_DAEMON_TEST_HANDOFF_SNAPSHOT_MARKER",
+                marker_path.as_path(),
+            ),
+            (
+                "KANNA_DAEMON_TEST_HANDOFF_SNAPSHOT_RELEASE",
+                release_path.as_path(),
+            ),
+        ],
+    );
+    let mut conn_a = daemon_a.connect();
+    let mut env = HashMap::new();
+    env.insert(
+        "KANNA_HANDOFF_MARKER".to_string(),
+        marker_path.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "KANNA_HANDOFF_RELEASE".to_string(),
+        release_path.to_string_lossy().into_owned(),
+    );
+    conn_a.send(&Cmd::Spawn {
+        session_id: "sess-snapshot-window".to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "while [ ! -f \"$KANNA_HANDOFF_MARKER\" ]; do sleep 0.01; done; printf 'snapshot-to-ack-output\\r\\n'; touch \"$KANNA_HANDOFF_RELEASE\"; sleep 30".to_string(),
+        ],
+        cwd: "/tmp".to_string(),
+        env,
+        cols: 80,
+        rows: 24,
+        agent_provider: None,
+    });
+    match conn_a.recv() {
+        Evt::SessionCreated { .. } => {}
+        other => panic!("expected SessionCreated, got: {other:?}"),
+    }
+    drop(conn_a);
+
+    let daemon_b = DaemonHandle::start_in(&dir);
+    let mut conn_b = daemon_b.connect();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        conn_b.send(&Cmd::Snapshot {
+            session_id: "sess-snapshot-window".to_string(),
+        });
+        match conn_b.recv() {
+            Evt::Snapshot { snapshot, .. } if snapshot.vt.contains("snapshot-to-ack-output") => {
+                break;
+            }
+            Evt::Snapshot { .. } | Evt::StatusChanged { .. } if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            other => {
+                panic!("output emitted in the final-snapshot-to-ACK window was lost: {other:?}")
+            }
+        }
+    }
 
     drop(daemon_b);
     cleanup(&dir);

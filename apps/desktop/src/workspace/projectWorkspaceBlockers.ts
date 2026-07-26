@@ -9,8 +9,8 @@ import type { WorkspaceTask } from "./types";
 export interface WorkspaceBlockerProjection {
   taskBlockers: TaskBlocker[];
   blockerTaskStates: BlockerTaskStates;
-  blockerNames: Record<string, string>;
   blockersByLogicalTaskKey: Record<string, BlockerDisplayItem[]>;
+  blockersByPresentationTaskId: Record<string, BlockerDisplayItem[]>;
 }
 
 interface ProjectWorkspaceBlockersInput {
@@ -26,8 +26,8 @@ export function projectWorkspaceBlockers(
   const tasksByOwnerIdentity = buildOwnerTaskIndex(input.workspaceTasks);
   const taskBlockers: TaskBlocker[] = [];
   const blockerTaskStates: BlockerTaskStates = {};
-  const blockerNames: Record<string, string> = {};
   const blockersByLogicalTaskKey: Record<string, BlockerDisplayItem[]> = {};
+  const blockersByPresentationTaskId: Record<string, BlockerDisplayItem[]> = {};
 
   for (const blockedTask of input.workspaceTasks) {
     if (blockedTask.owner.kind === "local" || blockedTask.blockedByTaskIds.length === 0) {
@@ -38,7 +38,6 @@ export function projectWorkspaceBlockers(
     if (!blockedPresentationId) continue;
 
     const displays: BlockerDisplayItem[] = [];
-    const names: string[] = [];
     const seenBlockerIds = new Set<string>();
     for (const ownerBlockerId of blockedTask.blockedByTaskIds) {
       const resolved = resolveBlockerTask(tasksByOwnerIdentity, blockedTask, ownerBlockerId);
@@ -62,20 +61,19 @@ export function projectWorkspaceBlockers(
         pr_url: display.pr_url,
       };
       displays.push(display);
-      names.push(blockerDisplayName(display));
     }
 
     if (displays.length > 0) {
       blockersByLogicalTaskKey[blockedTask.logicalTaskKey] = displays;
-      blockerNames[blockedPresentationId] = names.join(", ");
+      blockersByPresentationTaskId[blockedPresentationId] = displays;
     }
   }
 
   return {
     taskBlockers,
     blockerTaskStates,
-    blockerNames,
     blockersByLogicalTaskKey,
+    blockersByPresentationTaskId,
   };
 }
 
@@ -200,18 +198,12 @@ function blockerDisplayItem(
   }
   return {
     id: presentationId,
-    display_name: `Task ${ownerBlockerId.slice(0, 8)}`,
+    display_name: null,
     issue_title: null,
     prompt: null,
     closed_at: null,
     stage: "in progress",
     pr_url: null,
+    fallback_task_id: ownerBlockerId.slice(0, 8),
   };
-}
-
-function blockerDisplayName(blocker: BlockerDisplayItem): string {
-  return blocker.display_name
-    || blocker.issue_title
-    || blocker.prompt?.slice(0, 30)
-    || "Untitled";
 }

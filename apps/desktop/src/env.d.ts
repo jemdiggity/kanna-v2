@@ -95,6 +95,7 @@ interface KannaE2EHook {
   invokes?: {
     clear(): void;
     getAll(): Array<{ cmd: string; args?: unknown }>;
+    failNext(cmd: string, message: string): void;
   };
   events?: {
     clear(): void;

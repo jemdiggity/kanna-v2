@@ -201,8 +201,12 @@ fn write_control(stdin: &mut ChildStdin, request: &ControlRequest) {
 
 fn control_response_id(response: &ControlResponse) -> &str {
     match response {
-        ControlResponse::Error { request_id, .. }
+        ControlResponse::GetLocalIdentity { request_id, .. }
+        | ControlResponse::Error { request_id, .. }
         | ControlResponse::ListPeers { request_id, .. }
+        | ControlResponse::UpsertExternalPeer { request_id }
+        | ControlResponse::RemoveExternalPeer { request_id }
+        | ControlResponse::ClearExternalPeers { request_id }
         | ControlResponse::SetTaskSnapshot { request_id }
         | ControlResponse::ListPeerTaskSnapshots { request_id, .. }
         | ControlResponse::ObservePeerSession { request_id }
@@ -219,9 +223,13 @@ fn control_response_id(response: &ControlResponse) -> &str {
         | ControlResponse::StageTransferArtifact { request_id, .. }
         | ControlResponse::FetchTransferArtifact { request_id, .. }
         | ControlResponse::PrepareTransferPreflight { request_id, .. }
+        | ControlResponse::RequestTaskPull { request_id, .. }
         | ControlResponse::PrepareTransferCommit { request_id, .. }
         | ControlResponse::FinalizeOutgoingTransfer { request_id, .. }
         | ControlResponse::CompleteOutgoingTransferFinalization { request_id, .. }
-        | ControlResponse::AcknowledgeImportCommitted { request_id, .. } => request_id,
+        | ControlResponse::AcknowledgeImportCommitted { request_id, .. }
+        | ControlResponse::MarkIncomingEventRecorded { request_id, .. }
+        | ControlResponse::MarkImportCommitApplied { request_id, .. }
+        | ControlResponse::MarkImportAckCompleted { request_id, .. } => request_id,
     }
 }

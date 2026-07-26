@@ -17,7 +17,10 @@ pub const STATUS_DETECTION_THROTTLE_MS: u64 = 500;
 pub struct StreamControl {
     stop_requested: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
+    quiesce_requested: Arc<AtomicBool>,
+    quiesced: Arc<AtomicBool>,
     stopped_notify: Arc<Notify>,
+    state_notify: Arc<Notify>,
 }
 
 impl Default for StreamControl {
@@ -31,12 +34,16 @@ impl StreamControl {
         Self {
             stop_requested: Arc::new(AtomicBool::new(false)),
             stopped: Arc::new(AtomicBool::new(false)),
+            quiesce_requested: Arc::new(AtomicBool::new(false)),
+            quiesced: Arc::new(AtomicBool::new(false)),
             stopped_notify: Arc::new(Notify::new()),
+            state_notify: Arc::new(Notify::new()),
         }
     }
 
     pub fn request_stop(&self) {
         self.stop_requested.store(true, Ordering::SeqCst);
+        self.state_notify.notify_one();
     }
 
     pub fn stop_requested(&self) -> bool {
@@ -45,7 +52,9 @@ impl StreamControl {
 
     pub fn mark_stopped(&self) {
         self.stopped.store(true, Ordering::SeqCst);
+        self.quiesced.store(false, Ordering::SeqCst);
         self.stopped_notify.notify_waiters();
+        self.state_notify.notify_waiters();
     }
 
     pub fn is_stopped(&self) -> bool {
@@ -55,6 +64,38 @@ impl StreamControl {
     pub fn is_same_instance(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.stop_requested, &other.stop_requested)
             && Arc::ptr_eq(&self.stopped, &other.stopped)
+    }
+
+    pub fn request_quiesce(&self) {
+        self.quiesce_requested.store(true, Ordering::SeqCst);
+        self.state_notify.notify_one();
+    }
+
+    pub fn resume(&self) {
+        self.quiesce_requested.store(false, Ordering::SeqCst);
+        self.state_notify.notify_one();
+    }
+
+    pub fn quiesce_requested(&self) -> bool {
+        self.quiesce_requested.load(Ordering::SeqCst)
+    }
+
+    pub fn mark_quiesced(&self) {
+        self.quiesced.store(true, Ordering::SeqCst);
+        self.state_notify.notify_waiters();
+    }
+
+    pub fn mark_resumed(&self) {
+        self.quiesced.store(false, Ordering::SeqCst);
+        self.state_notify.notify_waiters();
+    }
+
+    pub fn is_quiesced(&self) -> bool {
+        self.quiesced.load(Ordering::SeqCst)
+    }
+
+    pub async fn wait_for_state_change(&self) {
+        self.state_notify.notified().await;
     }
 
     pub async fn wait_until_stopped(&self) {

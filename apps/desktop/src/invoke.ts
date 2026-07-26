@@ -19,6 +19,8 @@ export async function invoke<T = unknown>(
         window.__KANNA_E2E__.failNextInvoke = undefined;
         throw new Error(`simulated one-shot E2E invoke failure: ${cmd}`);
       }
+      const failure = e2eInvokeHistory.consumeFailure(cmd);
+      if (failure) throw new Error(failure);
     }
     return await tauriInvoke<T>(cmd, args);
   } catch (error) {

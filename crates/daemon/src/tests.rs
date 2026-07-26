@@ -1013,6 +1013,7 @@ async fn agent_input_rejects_resume_while_reservation_is_held() {
     let (_server_read, server_write) = server.into_split();
     let writer: kanna_daemon::agent::AgentClientWriter = Arc::new(Mutex::new(server_write));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
+    let daemon_lifecycle = crate::daemon_lifecycle::new_daemon_lifecycle();
 
     crate::agent_runtime::handle_agent_input(
         "sess".to_string(),
@@ -1020,7 +1021,7 @@ async fn agent_input_rejects_resume_while_reservation_is_held() {
         writer,
         broadcast_tx,
         agents.clone(),
-        crate::daemon_lifecycle::new_daemon_lifecycle(),
+        daemon_lifecycle,
     )
     .await;
 
@@ -1098,6 +1099,7 @@ async fn concurrent_spawn_agent_creates_exactly_one_session() {
     let dir = temp_daemon_dir("agent-create-race");
     let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(64);
+    let daemon_lifecycle = crate::daemon_lifecycle::new_daemon_lifecycle();
 
     let (writer_a, mut reader_a) = agent_client_writer();
     let (writer_b, mut reader_b) = agent_client_writer();
@@ -1109,7 +1111,7 @@ async fn concurrent_spawn_agent_creates_exactly_one_session() {
             broadcast_tx.clone(),
             agents.clone(),
             dir.clone(),
-            crate::daemon_lifecycle::new_daemon_lifecycle(),
+            daemon_lifecycle.clone(),
         )
     };
     tokio::join!(spawn(writer_a), spawn(writer_b));
@@ -1900,6 +1902,7 @@ async fn rejected_duplicate_spawn_does_not_contaminate_the_winners_journal() {
     let _serial = crate::agent_runtime::seal_test_serializer().lock().await;
     let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(64);
+    let daemon_lifecycle = crate::daemon_lifecycle::new_daemon_lifecycle();
 
     let (writer_a, mut reader_a) = agent_client_writer();
     let (writer_b, mut reader_b) = agent_client_writer();
@@ -1913,7 +1916,7 @@ async fn rejected_duplicate_spawn_does_not_contaminate_the_winners_journal() {
             broadcast_tx.clone(),
             agents.clone(),
             dir.clone(),
-            crate::daemon_lifecycle::new_daemon_lifecycle(),
+            daemon_lifecycle.clone(),
         )
     };
     tokio::join!(spawn(writer_a, "prompt-a"), spawn(writer_b, "prompt-b"));
@@ -2260,6 +2263,7 @@ async fn a_pty_exit_during_a_sealed_handoff_defers_to_the_transfer_outcome() {
     let terminal_emulator_clients: TerminalEmulatorClients = Arc::new(Mutex::new(HashMap::new()));
     let session_sizes: SessionSizes = Arc::new(Mutex::new(HashMap::new()));
     let recovery_manager = kanna_daemon::recovery::RecoveryManager::start().await;
+    let daemon_lifecycle = crate::daemon_lifecycle::new_daemon_lifecycle();
 
     // The snapshot has been taken and the fd sent; the transfer is in flight.
     let _epoch = sessions.lock().await.seal_for_handoff();
@@ -2275,7 +2279,7 @@ async fn a_pty_exit_during_a_sealed_handoff_defers_to_the_transfer_outcome() {
         sessions.clone(),
         session_sizes.clone(),
         recovery_manager.clone(),
-        crate::daemon_lifecycle::new_daemon_lifecycle(),
+        daemon_lifecycle,
         handle.clone(),
     ));
 

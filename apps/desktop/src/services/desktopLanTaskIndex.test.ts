@@ -360,4 +360,41 @@ describe("desktop LAN task index reader", () => {
       });
     }
   });
+
+  it("keeps compatible peer snapshots when another peer requires upgrade and re-pair", async () => {
+    const onPeerIssue = vi.fn();
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_transfer_task_snapshots") {
+        return [
+          {
+            peer_id: "peer-v1",
+            display_name: "Old Mac",
+            error: "peer peer-v1 uses protocol v1 without authenticated task requests; upgrade and re-pair the peer",
+          },
+          {
+            peer_id: "peer-v2",
+            display_name: "Current Mac",
+            snapshot: {
+              schemaVersion: 1,
+              tasks: [remoteLanTaskSnapshot()],
+            },
+          },
+        ];
+      }
+      return null;
+    });
+
+    const snapshot = await listDesktopLanTasks({
+      currentDesktopId: "peer-local",
+      onPeerIssue,
+    });
+
+    expect(snapshot.items).toHaveLength(1);
+    expect(snapshot.terminalRefs[snapshot.items[0].id]?.ownerDesktopId).toBe("peer-v2");
+    expect(onPeerIssue).toHaveBeenCalledWith({
+      peerId: "peer-v1",
+      displayName: "Old Mac",
+      message: expect.stringContaining("upgrade and re-pair"),
+    });
+  });
 });

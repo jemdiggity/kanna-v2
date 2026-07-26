@@ -27,6 +27,22 @@ const STAGE_MIRROR_OUTPUT: &str = "mirror_output";
 const STAGE_DETECT_STATUS: &str = "detect_status";
 const STAGE_RECOVERY_WRITE: &str = "recovery_write";
 
+fn schedule_lag_recovery_retry(fanout: Arc<SessionFanout>) {
+    if fanout
+        .recovery_retry_scheduled
+        .swap(true, std::sync::atomic::Ordering::AcqRel)
+    {
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(STATUS_IDLE_FLUSH_MS)).await;
+        fanout
+            .recovery_retry_scheduled
+            .store(false, std::sync::atomic::Ordering::Release);
+        fanout.recovery_notify.notify_one();
+    });
+}
+
 // `attached_writer` and `observer_write` are emitted by the per-subscriber
 // writer tasks in `fanout.rs`; they no longer run inside the ingestion loop.
 #[cfg(test)]
@@ -140,11 +156,24 @@ pub(crate) async fn stream_output(
             stream_control.mark_stopped();
             return;
         }
+        if stream_control.quiesce_requested() && pending_input.is_empty() {
+            stream_control.mark_quiesced();
+            while stream_control.quiesce_requested() {
+                if stream_control.stop_requested() || session.is_retired() {
+                    log::info!("[stream] stopped quiesced reader session={}", session_id);
+                    stream_control.mark_stopped();
+                    return;
+                }
+                stream_control.wait_for_state_change().await;
+            }
+            stream_control.mark_resumed();
+            continue;
+        }
 
         tokio::select! {
             biased;
 
-            maybe_input = input_rx.recv() => {
+            maybe_input = input_rx.recv(), if !stream_control.quiesce_requested() => {
                 if let Some(input) = maybe_input {
                     if input.data.is_empty() {
                         input.acknowledge_written();
@@ -304,6 +333,8 @@ pub(crate) async fn stream_output(
                 }
                 resync_drained_subscribers(&session_id, &session, &session_fanout).await;
             }
+
+            _ = stream_control.wait_for_state_change() => {}
 
             _ = status_interval.tick() => {
                 if stream_control.stop_requested() || session.is_retired() {
@@ -642,7 +673,7 @@ async fn resync_drained_subscribers(
                 session_id,
                 error
             );
-            fanout.recovery_notify.notify_one();
+            schedule_lag_recovery_retry(Arc::clone(fanout));
             return;
         }
     };
@@ -790,6 +821,33 @@ async fn log_status_observation(session: &Arc<SessionHandle>, session_id: &str, 
                 source,
                 error
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{schedule_lag_recovery_retry, STATUS_IDLE_FLUSH_MS};
+    use crate::fanout::SessionFanout;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn persistent_snapshot_failure_cannot_immediately_renotify_recovery() {
+        let fanout = Arc::new(SessionFanout::new());
+
+        for _ in 0..3 {
+            schedule_lag_recovery_retry(Arc::clone(&fanout));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(1), fanout.recovery_notify.notified())
+                    .await
+                    .is_err(),
+                "a failed snapshot must not immediately make the biased recovery branch ready",
+            );
+            tokio::time::advance(Duration::from_millis(STATUS_IDLE_FLUSH_MS)).await;
+            tokio::time::timeout(Duration::from_millis(1), fanout.recovery_notify.notified())
+                .await
+                .expect("failed lag recovery should retry after the bounded interval");
         }
     }
 }

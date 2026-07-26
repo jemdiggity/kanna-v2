@@ -17,6 +17,9 @@ import { join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 export const KD_CACHE_SCHEMA = 1;
+export const KD_CACHE_MAX_ENTRIES = 20;
+export const KD_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
+export const KD_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export const KD_ENTRYPOINTS = Object.freeze({
   kd: "bin/kd.js",
   "kd-mcp": "bin/kd-mcp.js"
@@ -283,6 +286,201 @@ export function validateKdInstallation(entryDir, identity, runtime) {
   }
 }
 
+function kdUseMarkerPath(cacheRoot, identity) {
+  return join(cacheRoot, `.${identity}.used`);
+}
+
+export function createKdInstallationLease({
+  cacheRoot,
+  identity,
+  pid,
+  now = Date.now()
+}) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new Error(`kd installation lease requires a positive pid, got ${pid}`);
+  }
+  mkdirSync(cacheRoot, { recursive: true });
+  const releaseGuard = acquireCacheReclamationGuard({
+    cacheRoot,
+    isProcessAlive: defaultIsProcessAlive
+  });
+  try {
+    const token = randomUUID();
+    const leasePath = join(cacheRoot, `.${identity}.lease-${pid}-${token}`);
+    writeFileSync(
+      leasePath,
+      `${JSON.stringify({ identity, pid, token, startedAt: now })}\n`,
+      { flag: "wx", mode: 0o600 }
+    );
+    writeFileSync(kdUseMarkerPath(cacheRoot, identity), `${now}\n`, {
+      mode: 0o600
+    });
+    return leasePath;
+  } finally {
+    releaseGuard();
+  }
+}
+
+function directoryBytes(path) {
+  let bytes = 0;
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    const child = join(path, entry.name);
+    if (entry.isDirectory()) {
+      bytes += directoryBytes(child);
+    } else if (entry.isFile()) {
+      bytes += statSync(child).size;
+    }
+  }
+  return bytes;
+}
+
+function readLease(path) {
+  try {
+    const lease = JSON.parse(readFileSync(path, "utf8"));
+    if (
+      typeof lease.identity !== "string" ||
+      lease.identity.length === 0 ||
+      !Number.isSafeInteger(lease.pid) ||
+      lease.pid <= 0
+    ) {
+      return null;
+    }
+    return lease;
+  } catch {
+    return null;
+  }
+}
+
+function installationLastUsedAt(cacheRoot, identity, entryRoot) {
+  try {
+    return statSync(kdUseMarkerPath(cacheRoot, identity)).mtimeMs;
+  } catch {
+    return statSync(entryRoot).mtimeMs;
+  }
+}
+
+function removeKdInstallation(cacheRoot, entry) {
+  rmSync(entry.path, { recursive: true, force: true });
+  rmSync(kdUseMarkerPath(cacheRoot, entry.identity), { force: true });
+}
+
+export function pruneKdInstallations({
+  cacheRoot,
+  currentIdentity,
+  now = Date.now(),
+  maxEntries = KD_CACHE_MAX_ENTRIES,
+  maxBytes = KD_CACHE_MAX_BYTES,
+  maxAgeMs = KD_CACHE_MAX_AGE_MS,
+  isProcessAlive = defaultIsProcessAlive
+}) {
+  if (!existsSync(cacheRoot)) {
+    return { removedIdentities: [], retainedEntries: 0, retainedBytes: 0 };
+  }
+  const releaseGuard = acquireCacheReclamationGuard({
+    cacheRoot,
+    isProcessAlive
+  });
+  try {
+    return pruneKdInstallationsLocked({
+      cacheRoot,
+      currentIdentity,
+      now,
+      maxEntries,
+      maxBytes,
+      maxAgeMs,
+      isProcessAlive
+    });
+  } finally {
+    releaseGuard();
+  }
+}
+
+function pruneKdInstallationsLocked({
+  cacheRoot,
+  currentIdentity,
+  now,
+  maxEntries,
+  maxBytes,
+  maxAgeMs,
+  isProcessAlive
+}) {
+  const names = readdirSync(cacheRoot).sort();
+  const fencedIdentities = new Set([currentIdentity]);
+  for (const name of names) {
+    if (!name.startsWith(".") || !name.includes(".lease-")) {
+      continue;
+    }
+    const leasePath = join(cacheRoot, name);
+    const lease = readLease(leasePath);
+    if (lease && isProcessAlive(lease.pid)) {
+      fencedIdentities.add(lease.identity);
+    } else {
+      rmSync(leasePath, { force: true });
+    }
+  }
+  for (const name of names) {
+    if (!name.startsWith(".") || !name.endsWith(".lock")) {
+      continue;
+    }
+    const identity = name.slice(1, -".lock".length);
+    const owner = readLockOwner(join(cacheRoot, name));
+    if (!owner || isProcessAlive(owner.pid)) {
+      fencedIdentities.add(identity);
+    }
+  }
+
+  let entries = readdirSync(cacheRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+    .map((entry) => {
+      const path = join(cacheRoot, entry.name);
+      return {
+        identity: entry.name,
+        path,
+        bytes: directoryBytes(path),
+        lastUsedAt: installationLastUsedAt(cacheRoot, entry.name, path),
+      };
+    })
+    .sort((left, right) =>
+      left.lastUsedAt - right.lastUsedAt ||
+      left.identity.localeCompare(right.identity)
+    );
+  const removedIdentities = [];
+  const removeEntry = (entry) => {
+    removeKdInstallation(cacheRoot, entry);
+    removedIdentities.push(entry.identity);
+  };
+
+  const expired = entries.filter((entry) =>
+    !fencedIdentities.has(entry.identity) &&
+    Number.isFinite(maxAgeMs) &&
+    now - entry.lastUsedAt > maxAgeMs
+  );
+  for (const entry of expired) {
+    removeEntry(entry);
+  }
+  const expiredIds = new Set(expired.map((entry) => entry.identity));
+  entries = entries.filter((entry) => !expiredIds.has(entry.identity));
+
+  let retainedBytes = entries.reduce((total, entry) => total + entry.bytes, 0);
+  for (const entry of [...entries]) {
+    if (entries.length <= maxEntries && retainedBytes <= maxBytes) {
+      break;
+    }
+    if (fencedIdentities.has(entry.identity)) {
+      continue;
+    }
+    removeEntry(entry);
+    entries = entries.filter((candidate) => candidate.identity !== entry.identity);
+    retainedBytes -= entry.bytes;
+  }
+
+  return {
+    removedIdentities,
+    retainedEntries: entries.length,
+    retainedBytes,
+  };
+}
+
 function defaultIsProcessAlive(pid) {
   try {
     process.kill(pid, 0);
@@ -322,6 +520,46 @@ function readLockOwner(lockRoot) {
     return owner;
   } catch {
     return null;
+  }
+}
+
+function acquireCacheReclamationGuard({
+  cacheRoot,
+  isProcessAlive,
+  pid = process.pid,
+  waitTimeoutMs = 30_000
+}) {
+  const guardRoot = join(cacheRoot, ".reclamation.guard");
+  const startedAt = Date.now();
+  const token = randomUUID();
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  while (true) {
+    const candidateRoot = `${guardRoot}.candidate-${token}`;
+    try {
+      writeFileSync(
+        candidateRoot,
+        `${JSON.stringify({ pid, token, startedAt: Date.now() })}\n`,
+        { flag: "wx", mode: 0o600 }
+      );
+      linkSync(candidateRoot, guardRoot);
+      return () => removeOwnedLock(guardRoot, token);
+    } catch (error) {
+      if (error?.code !== "EEXIST") {
+        throw error;
+      }
+    } finally {
+      rmSync(candidateRoot, { force: true });
+    }
+
+    const owner = readLockOwner(guardRoot);
+    if (owner && !isProcessAlive(owner.pid)) {
+      quarantineLock(guardRoot);
+      continue;
+    }
+    if (Date.now() - startedAt >= waitTimeoutMs) {
+      throw new Error("Timed out waiting for kd cache reclamation guard");
+    }
+    Atomics.wait(sleeper, 0, 0, 10);
   }
 }
 

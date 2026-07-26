@@ -12,6 +12,13 @@ interface PeerTaskSnapshotEnvelope {
   display_name?: string;
   displayName?: string;
   snapshot?: unknown;
+  error?: unknown;
+}
+
+export interface DesktopLanPeerIssue {
+  peerId: string;
+  displayName: string;
+  message: string;
 }
 
 interface LanTaskSnapshotPayload {
@@ -79,6 +86,7 @@ export async function listDesktopLanTasks(options: {
   localRepos?: Array<{ repo: Repo; remoteUrlHash: string | null }>;
   localClosedItems?: Array<{ id: string; repo_id: string }>;
   currentDesktopId?: string | null;
+  onPeerIssue?: (issue: DesktopLanPeerIssue) => void;
 } = {}): Promise<DesktopCloudSnapshot> {
   const [raw, currentDesktopId] = await Promise.all([
     invoke<unknown>("list_transfer_task_snapshots").catch(() => []),
@@ -92,6 +100,17 @@ export async function listDesktopLanTasks(options: {
   for (const entry of snapshots) {
     const envelope = entry as PeerTaskSnapshotEnvelope;
     const peerId = envelope.peer_id ?? envelope.peerId;
+    const displayName = envelope.display_name ?? envelope.displayName ?? peerId;
+    if (peerId && typeof envelope.error === "string" && envelope.error.trim()) {
+      const issue = {
+        peerId,
+        displayName: displayName ?? peerId,
+        message: envelope.error.trim(),
+      };
+      console.warn(`[lan] ${issue.displayName}: ${issue.message}`);
+      options.onPeerIssue?.(issue);
+      continue;
+    }
     const payload = envelope.snapshot as LanTaskSnapshotPayload | undefined;
     if (!peerId || !Array.isArray(payload?.tasks)) continue;
     for (const task of payload.tasks) {
