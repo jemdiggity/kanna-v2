@@ -114,12 +114,17 @@ answer:
 Say which path you used in your aggregate summary, so a human can tell a
 narrow round from a full one.
 
-Read `$PREV_RESULT` too: the previous stage run's recorded result, which on a
-later round is the implementing agent's own summary of the work that produced
-this round's change — including anything it declined to do. A finding the
-previous round asked for and the implementer declined is **not** resolved: it
-is a blocking finding for this round, whether or not a specialty re-runs. A
-narrower panel must not carry it past you.
+Read `$PREV_MAIN_RESULT` too: the result of the previous stage agent's own
+run, which on a later round is the implementing agent's summary of the work
+that produced this round's change — including anything it declined to do. A
+finding the previous round asked for and the implementer declined is **not**
+resolved: it is a blocking finding for this round, whether or not a specialty
+re-runs. A narrower panel must not carry it past you.
+
+(`$PREV_RESULT` is a different binding — the latest run of any kind, which
+after this stage's predecessor runs its commit post is the *commit* agent's
+result. It reports what was committed, not what the implementer decided, so
+it cannot answer the declined-findings question.)
 
 If this round's change is empty, dispatch nothing: the previous round's
 findings cannot have been addressed. Request a revision saying exactly that

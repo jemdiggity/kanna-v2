@@ -1245,3 +1245,317 @@ async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
     drop(db);
     cleanup_revision_budget_fixture(&fixture);
 }
+
+/// `$PREV_RESULT` binds the latest finished run of any kind, so for a review
+/// stage whose predecessor declares a commit post it is the *commit* agent's
+/// result — the implementer's own report, including work it declined, is not
+/// reachable through it. `$PREV_MAIN_RESULT` binds the previous main run.
+/// This drives the real chain (implementation main run -> commit post ->
+/// stage transition -> review prompt) through the router, because the bug
+/// lives in how stage-run persistence, post completion, and prompt
+/// substitution meet.
+#[tokio::test]
+async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_the_post_result() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use std::sync::Mutex;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    const DECLINED_MARKER: &str = "DECLINED: the migration finding is out of scope for this task.";
+    const COMMIT_SUMMARY: &str = "committed 2 files for review";
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-prev-main-{unique}"));
+    init_test_git_repo(&repo_root);
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/prevmain.json"),
+        serde_json::json!({
+            "name": "prevmain",
+            "stages": [
+                {
+                    "name": "in progress",
+                    "policy": { "transition": "auto" },
+                    "agent": "implement",
+                    "prompt": "$TASK_PROMPT",
+                    "post": { "name": "commit", "prompt": "Commit for $TASK_PROMPT" }
+                },
+                {
+                    "name": "review",
+                    "policy": { "transition": "manual" },
+                    "agent": "reviewer",
+                    "prompt": "IMPLEMENTER_RESULT[$PREV_MAIN_RESULT]\nLATEST_RESULT[$PREV_RESULT]"
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    for agent in ["implement", "reviewer"] {
+        std::fs::write(
+            repo_root.join(format!(".kanna/agents/{agent}/AGENT.md")),
+            format!("---\nname: {agent}\ndescription: Test {agent} agent\nagent_provider: claude\n---\nRun {agent}."),
+        )
+        .unwrap();
+    }
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add prev-main pipeline"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    super::publish_test_origin_main(&repo_root);
+    assert!(Command::new("git")
+        .args(["branch", "task-prevmain"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-prev-main-d-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+
+    // Records every prompt the daemon is asked to spawn, so the review
+    // stage's rendered prompt can be inspected after the transition.
+    let spawned_prompts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&spawned_prompts);
+    let daemon_server = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = daemon_listener.accept().await else {
+                return;
+            };
+            let recorder = Arc::clone(&recorder);
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => {}
+                    }
+                    let Ok(command) = serde_json::from_str::<DaemonCommand>(line.trim()) else {
+                        return;
+                    };
+                    let response = match command {
+                        DaemonCommand::Kill { .. } => DaemonEvent::Error {
+                            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                            message: "session not found".to_string(),
+                        },
+                        DaemonCommand::SpawnAgent { session_id, params } => {
+                            recorder.lock().unwrap().push(params.prompt.clone());
+                            DaemonEvent::SessionCreated { session_id }
+                        }
+                        DaemonCommand::Spawn {
+                            session_id, args, ..
+                        } => {
+                            recorder.lock().unwrap().push(args.join(" "));
+                            DaemonEvent::SessionCreated { session_id }
+                        }
+                        DaemonCommand::Input { .. } => DaemonEvent::Ok,
+                        _ => DaemonEvent::Ok,
+                    };
+                    if write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-prev-main-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        pairing_store_path: format!("/tmp/kanna-pairings-prev-main-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "prevmain-1",
+        "repo-1",
+        "Original implementation prompt.",
+        Some("Prev main result"),
+        "in progress",
+        "2026-07-27 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "prevmain-1",
+        "task-prevmain",
+        "prevmain",
+        None,
+        "claude",
+    )
+    .unwrap();
+    db.insert_stage_run_with_completion_transition(
+        crate::db::NewStageRun {
+            id: "prevmain-impl-run",
+            task_id: "prevmain-1",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("implement"),
+            agent_provider: Some("claude"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("prevmain-1"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        },
+        Some("auto"),
+    )
+    .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+
+    // 1. The implementation main run reports what it did — and what it
+    //    declined. Auto completion dispatches the commit post.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/prevmain-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "status": "success",
+                        "summary": format!("Implemented the fix. {DECLINED_MARKER}")
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let db = Db::open(&config.db_path).unwrap();
+    let mut post_run = None;
+    for _ in 0..200 {
+        if let Some(run) = db
+            .list_stage_runs_for_task("prevmain-1")
+            .unwrap()
+            .into_iter()
+            .find(|run| run.kind == "post" && run.stage == "commit")
+        {
+            post_run = Some(run);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(post_run.is_some(), "the commit post was not dispatched");
+
+    // 2. The commit post reports its own, different result and finishes,
+    //    which performs the transition into the review stage.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/prevmain-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "status": "success", "summary": COMMIT_SUMMARY })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut review_prompt = None;
+    for _ in 0..200 {
+        if let Some(prompt) = spawned_prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|prompt| prompt.contains("IMPLEMENTER_RESULT["))
+            .cloned()
+        {
+            review_prompt = Some(prompt);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let review_prompt = review_prompt.expect("the review stage never spawned with its prompt");
+
+    let implementer_field = review_prompt
+        .split("IMPLEMENTER_RESULT[")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .expect("IMPLEMENTER_RESULT field")
+        .to_string();
+    let latest_field = review_prompt
+        .split("LATEST_RESULT[")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .expect("LATEST_RESULT field")
+        .to_string();
+
+    // $PREV_MAIN_RESULT carries the implementer's report, declined finding
+    // and all — this is what the QA dispatcher reads to know an earlier
+    // finding was never addressed.
+    assert!(
+        implementer_field.contains(DECLINED_MARKER),
+        "the review stage must receive the implementer's declined finding: {implementer_field}"
+    );
+    assert!(
+        !implementer_field.contains(COMMIT_SUMMARY),
+        "the implementer binding must not be the commit post's result: {implementer_field}"
+    );
+    // $PREV_RESULT keeps its documented meaning for the pipelines that want
+    // the post's result.
+    assert!(
+        latest_field.contains(COMMIT_SUMMARY),
+        "$PREV_RESULT must still carry the latest run's result: {latest_field}"
+    );
+
+    let item = db.get_pipeline_item("prevmain-1").unwrap().unwrap();
+    assert_eq!(item.stage.as_deref(), Some("review"));
+
+    daemon_server.abort();
+    drop(db);
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}

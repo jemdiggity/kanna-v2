@@ -372,6 +372,7 @@ fn prepare_stage_run_for_target_returning_prompt(
     let source_branch =
         resolve_current_source_worktree_branch(&context.repo.path, source_task.branch.as_deref());
     let prev_result = previous_stage_result(db, context.source_task_id, source_task)?;
+    let prev_main_result = previous_main_stage_result(db, context.source_task_id)?;
     let task_prompt = prompt_override
         .or(source_task.prompt.as_deref())
         .unwrap_or("");
@@ -397,6 +398,7 @@ fn prepare_stage_run_for_target_returning_prompt(
         target_stage,
         task_prompt,
         prev_result.as_deref(),
+        prev_main_result.as_deref(),
         prompt_branch.as_deref(),
         source_task.base_ref.as_deref(),
         source_task.branch.as_deref(),
@@ -408,6 +410,7 @@ fn prepare_stage_run_for_target_returning_prompt(
             target_stage,
             task_prompt,
             prev_result.as_deref(),
+            prev_main_result.as_deref(),
             prompt_branch.as_deref(),
             source_task.base_ref.as_deref(),
             source_task.branch.as_deref(),
@@ -469,6 +472,19 @@ pub(crate) fn previous_stage_result(
     _source_task: &TaskStageSource,
 ) -> Result<Option<String>, String> {
     db.latest_finished_stage_run_result(source_task_id)
+        .map_err(|e| format!("db error: {}", e))
+}
+
+/// Result of the previous stage agent's own run, skipping posts. A stage
+/// whose predecessor declares a post (e.g. `in progress` → `commit` →
+/// `review`) sees the post's result in `$PREV_RESULT`; this is what binds
+/// `$PREV_MAIN_RESULT` so such a stage can still read what the stage agent
+/// itself reported.
+pub(crate) fn previous_main_stage_result(
+    db: &Db,
+    source_task_id: &str,
+) -> Result<Option<String>, String> {
+    db.latest_finished_main_stage_run_result(source_task_id)
         .map_err(|e| format!("db error: {}", e))
 }
 

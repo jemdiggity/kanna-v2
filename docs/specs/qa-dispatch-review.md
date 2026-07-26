@@ -242,10 +242,24 @@ Three fallbacks keep the narrowing honest:
   round; reviewing the wrong range misses defects.
 - **Empty round** — dispatch nothing and request a revision: if the revision
   committed nothing, the previous round's findings cannot have been addressed.
-- **Declined findings** — the review stage prompt now carries `$PREV_RESULT`
-  (the implementing agent's own summary of what it changed and what it
-  declined). A finding the previous round demanded and the implementer declined
-  is still blocking, whether or not any specialty re-runs this round.
+- **Declined findings** — the review stage prompt carries `$PREV_MAIN_RESULT`,
+  the implementing agent's own summary of what it changed and what it declined.
+  A finding the previous round demanded and the implementer declined is still
+  blocking, whether or not any specialty re-runs this round.
+
+  This needs its own binding. `$PREV_RESULT` is the latest finished run of any
+  kind, and the `in progress` stage declares a `commit` post, so at review time
+  it holds the *commit* agent's result — what was committed, not what the
+  implementer decided. Routing the declined-findings check through it would
+  have dropped exactly the report the check exists to read.
+  `$PREV_MAIN_RESULT` (`latest_finished_main_stage_run_result`, posts excluded)
+  resolves the previous stage agent's own run, leaving `$PREV_RESULT` untouched
+  for the pipelines that want the post result — the `approve` post still reads
+  it. The chain is covered end to end in
+  `http_api::tests::revision_status`: an implementation main run reporting a
+  declined finding, its commit post reporting a different summary, and the
+  review stage prompt that follows, asserting each binding carries its own
+  result.
 
 Deliberately *not* a limit: how many specialties one dispatch may fan out.
 The built-in specialties have disjoint scopes, and migration, security, and

@@ -140,6 +140,7 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
         stage,
         "Pinned task",
         None,
+        None,
         Some(branch),
         Some("origin/main"),
         Some(branch),

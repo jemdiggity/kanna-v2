@@ -253,9 +253,33 @@ impl Db {
         Ok(())
     }
 
+    /// The task's most recently finished run result, whatever its kind. This
+    /// is what `$PREV_RESULT` binds to, so for a stage whose predecessor
+    /// declares a post it is the *post's* result (e.g. the commit agent's),
+    /// not the stage agent's.
     pub fn latest_finished_stage_run_result(
         &self,
         task_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.latest_finished_stage_run_result_of_kind(task_id, None)
+    }
+
+    /// The task's most recently finished **main** run result, skipping posts.
+    /// A stage that needs what the previous stage's own agent reported — the
+    /// implementer's summary, including work it declined — must use this:
+    /// `latest_finished_stage_run_result` would hand it the commit post's
+    /// result instead, silently losing that report.
+    pub fn latest_finished_main_stage_run_result(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.latest_finished_stage_run_result_of_kind(task_id, Some("main"))
+    }
+
+    fn latest_finished_stage_run_result_of_kind(
+        &self,
+        task_id: &str,
+        kind: Option<&str>,
     ) -> Result<Option<String>, rusqlite::Error> {
         let result = self
             .conn
@@ -265,9 +289,10 @@ impl Db {
                  WHERE task_id = ?
                    AND status IN ('succeeded', 'failed')
                    AND result IS NOT NULL
+                   AND (?2 IS NULL OR kind = ?2)
                  ORDER BY datetime(finished_at) DESC, datetime(started_at) DESC, id DESC
                  LIMIT 1",
-                [task_id],
+                rusqlite::params![task_id, kind],
                 |row| row.get(0),
             )
             .optional();

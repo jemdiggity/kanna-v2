@@ -20,7 +20,7 @@
       "name": "review",
       "description": "QA dispatcher selects the specialty reviews this branch needs, fans them out as child tasks, and aggregates their verdicts",
       "agent": "qa-dispatcher",
-      "prompt": "Dispatch the specialty reviews needed for branch $BRANCH against base $BASE_REF, then aggregate their verdicts into one review decision. On a later round, review what changed since the previous review round rather than the whole branch again. Original task: $TASK_PROMPT. Previous result: $PREV_RESULT",
+      "prompt": "Dispatch the specialty reviews needed for branch $BRANCH against base $BASE_REF, then aggregate their verdicts into one review decision. On a later round, review what changed since the previous review round rather than the whole branch again. Original task: $TASK_PROMPT. Previous implementation result: $PREV_MAIN_RESULT",
       "policy": { "transition": "auto" }
     },
     {

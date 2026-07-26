@@ -2,12 +2,14 @@ use std::collections::HashMap;
 
 use super::definitions::{PipelineStage, PipelineStageTransition, RepoDefinitions};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_target_stage_prompt(
     definitions: &RepoDefinitions,
     repo_path: &str,
     stage: &PipelineStage,
     task_prompt: &str,
     prev_result: Option<&str>,
+    prev_main_result: Option<&str>,
     branch: Option<&str>,
     base_ref: Option<&str>,
     source_worktree_branch: Option<&str>,
@@ -18,6 +20,7 @@ pub(super) fn build_target_stage_prompt(
         stage,
         task_prompt,
         prev_result,
+        prev_main_result,
         branch,
         base_ref,
         source_worktree_branch,
@@ -32,6 +35,7 @@ pub(super) fn build_target_stage_prompt_with_instructions(
     stage: &PipelineStage,
     task_prompt: &str,
     prev_result: Option<&str>,
+    prev_main_result: Option<&str>,
     branch: Option<&str>,
     base_ref: Option<&str>,
     source_worktree_branch: Option<&str>,
@@ -42,6 +46,7 @@ pub(super) fn build_target_stage_prompt_with_instructions(
     let context = PromptContext {
         task_prompt: Some(task_prompt),
         prev_result,
+        prev_main_result,
         branch,
         base_ref,
         source_worktree: source_worktree.as_deref(),
@@ -84,6 +89,11 @@ pub(super) fn build_target_stage_prompt_with_instructions(
 pub(super) struct PromptContext<'a> {
     pub(super) task_prompt: Option<&'a str>,
     pub(super) prev_result: Option<&'a str>,
+    /// Result of the previous **main** run, skipping posts. `$PREV_RESULT`
+    /// binds the latest run of any kind, which for a stage following one that
+    /// declares a post is the post's result; a stage that needs the previous
+    /// stage agent's own report reads this instead.
+    pub(super) prev_main_result: Option<&'a str>,
     pub(super) branch: Option<&'a str>,
     pub(super) base_ref: Option<&'a str>,
     pub(super) source_worktree: Option<&'a str>,
@@ -98,6 +108,7 @@ const RESERVED_PROMPT_VARS: &[&str] = &[
     "BASE_REF",
     "BRANCH",
     "KANNA_TASK_ID",
+    "PREV_MAIN_RESULT",
     "PREV_RESULT",
     "SOURCE_WORKTREE",
     "TASK_PROMPT",
@@ -110,6 +121,7 @@ fn prompt_var_value<'a>(name: &str, context: &'a PromptContext<'_>) -> Option<&'
     match name {
         "TASK_PROMPT" => Some(context.task_prompt.unwrap_or("")),
         "PREV_RESULT" => Some(context.prev_result.unwrap_or("")),
+        "PREV_MAIN_RESULT" => Some(context.prev_main_result.unwrap_or("")),
         "BRANCH" => Some(context.branch.unwrap_or("")),
         "BASE_REF" => Some(context.base_ref.unwrap_or("")),
         "SOURCE_WORKTREE" => Some(context.source_worktree.unwrap_or("")),
