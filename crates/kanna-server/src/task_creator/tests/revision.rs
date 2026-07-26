@@ -622,6 +622,194 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
 }
 
 #[tokio::test]
+async fn resumed_revision_waits_for_target_teardown_before_setup_and_provider_spawn() {
+    let config = test_config("revision-resume-teardown-order");
+    let (repo_root, db) = init_resume_revision_fixture_for_provider(
+        "revision-resume-teardown-order",
+        &config,
+        "codex",
+    );
+    let impl_worktree = repo_root.join(".kanna-worktrees/task-review-task");
+    let setup_marker = impl_worktree.join("resume-setup.marker");
+    db.update_test_pipeline_item_agent_type("review-task", "agent")
+        .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/qa.json"),
+        r#"{
+  "environments": {
+    "implementation": {
+      "setup": ["touch resume-setup.marker"],
+      "teardown": ["rm -f resume-setup.marker"]
+    },
+    "reviewing": {
+      "teardown": ["touch review-teardown.marker"]
+    }
+  },
+  "stages": [
+    {
+      "name": "in progress",
+      "policy": { "transition": "manual", "revision_transition": "auto" },
+      "agent": "implement",
+      "environment": "implementation",
+      "prompt": "$TASK_PROMPT"
+    },
+    {
+      "name": "review",
+      "environment": "reviewing",
+      "transition": "manual"
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish revision teardown ordering");
+
+    let prepared = prepare_revision_task_for_api(
+        &db,
+        &config,
+        "review-task",
+        "in progress",
+        "Resume only after teardown finishes.",
+    )
+    .unwrap();
+    assert!(prepared.resumed_workspace().is_some());
+    assert!(
+        prepared.workspace_teardown.is_some(),
+        "resumed transition must prepare teardown for the departed review workspace"
+    );
+
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let (observed_tx, mut observed_rx) =
+        tokio::sync::mpsc::unbounded_channel::<kanna_daemon::protocol::Command>();
+    let (release_teardown_tx, release_teardown_rx) = tokio::sync::oneshot::channel::<()>();
+    let marker_for_daemon = setup_marker.clone();
+    let fake_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut release_teardown_rx = Some(release_teardown_rx);
+        let mut spawns = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            let observed_command = serde_json::from_str(line.trim()).unwrap();
+            observed_tx.send(observed_command).unwrap();
+            let response = match &command {
+                kanna_daemon::protocol::Command::List => {
+                    kanna_daemon::protocol::Event::SessionList {
+                        sessions: Vec::new(),
+                        capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
+                    }
+                }
+                kanna_daemon::protocol::Command::Kill { session_id, .. }
+                    if session_id == "td-task-review-task" =>
+                {
+                    let _ = std::fs::remove_file(&marker_for_daemon);
+                    release_teardown_rx
+                        .take()
+                        .expect("one target teardown wait")
+                        .await
+                        .expect("release target teardown");
+                    kanna_daemon::protocol::Event::Ok
+                }
+                kanna_daemon::protocol::Command::Kill { .. } => kanna_daemon::protocol::Event::Ok,
+                kanna_daemon::protocol::Command::SpawnAgent { session_id, params } => {
+                    assert!(
+                        marker_for_daemon.is_file(),
+                        "resumed setup must be restored after target teardown and before provider spawn"
+                    );
+                    spawns += 1;
+                    kanna_daemon::protocol::Event::SessionCreated {
+                        session_id: session_id.clone(),
+                        run_id: params.env.get("KANNA_STAGE_RUN_ID").cloned(),
+                    }
+                }
+                kanna_daemon::protocol::Command::Spawn { session_id, .. } => {
+                    spawns += 1;
+                    kanna_daemon::protocol::Event::SessionCreated {
+                        session_id: session_id.clone(),
+                        run_id: None,
+                    }
+                }
+                other => panic!("unexpected daemon command: {other:?}"),
+            };
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            if spawns == 2 {
+                break;
+            }
+        }
+    });
+
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let replacements = crate::session_replacements::SessionReplacements::default();
+    let transition =
+        spawn_prepared_stage_run_for_api(&config.db_path, &mut daemon, &replacements, prepared);
+    tokio::pin!(transition);
+
+    let mut commands = Vec::new();
+    for _ in 0..4 {
+        commands.push(tokio::select! {
+            command = observed_rx.recv() => command.expect("daemon command"),
+            result = &mut transition => panic!("transition finished before teardown ordering was observed: {result:?}"),
+        });
+    }
+    assert!(matches!(commands[0], kanna_daemon::protocol::Command::List));
+    assert!(matches!(
+        &commands[1],
+        kanna_daemon::protocol::Command::Kill { session_id, .. }
+            if session_id == "review-task"
+    ));
+    assert!(matches!(
+        &commands[2],
+        kanna_daemon::protocol::Command::Kill { session_id, .. }
+            if session_id == "shell-wt-review-task"
+    ));
+    assert!(matches!(
+        &commands[3],
+        kanna_daemon::protocol::Command::Kill { session_id, .. }
+            if session_id == "td-task-review-task"
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), observed_rx.recv())
+            .await
+            .is_err(),
+        "provider spawn must remain blocked until target teardown exits"
+    );
+
+    release_teardown_tx.send(()).unwrap();
+    let provider_spawn = tokio::select! {
+        command = observed_rx.recv() => command.expect("provider spawn"),
+        result = &mut transition => panic!("transition finished before provider spawn: {result:?}"),
+    };
+    assert!(matches!(
+        provider_spawn,
+        kanna_daemon::protocol::Command::SpawnAgent { ref session_id, .. }
+            if session_id == "review-task"
+    ));
+    transition.await.unwrap();
+    let departed_teardown =
+        tokio::time::timeout(std::time::Duration::from_secs(1), observed_rx.recv())
+            .await
+            .expect("departed teardown must start after landing")
+            .expect("departed teardown spawn");
+    assert!(matches!(
+        departed_teardown,
+        kanna_daemon::protocol::Command::Spawn { ref session_id, .. }
+            if session_id == "td-task-review-task-2"
+    ));
+
+    fake_daemon.await.unwrap();
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
 async fn failed_owned_kill_restores_source_run_so_revision_can_retry() {
     let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
     let config = test_config("revision-owned-kill-retry");

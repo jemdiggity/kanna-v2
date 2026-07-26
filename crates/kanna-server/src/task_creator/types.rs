@@ -232,9 +232,12 @@ pub(crate) struct PreparedStageRunSpawn {
     /// `stage_run.kind`: "main" or "post".
     pub(super) run_kind: &'static str,
     pub(super) workspace: PreparedRunWorkspace,
-    /// Teardown for the workspace this run leaves behind (forked swaps only);
-    /// spawned after the transition succeeds, never on rollback.
+    /// Teardown for the workspace this run leaves behind; spawned after a
+    /// forked or resumed transition succeeds, never on rollback.
     pub(super) workspace_teardown: Option<PreparedWorkspaceTeardown>,
+    /// A detached teardown already running in a resumed target workspace must
+    /// stop before that workspace is set up again or its provider is spawned.
+    pub(super) blocking_teardown_session_id: Option<String>,
     pub(super) stage_agent: Option<String>,
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
@@ -248,6 +251,10 @@ pub(crate) struct PreparedStageRunSpawn {
     pub(super) resumed_from_run_id: Option<String>,
     pub(super) cwd: String,
     pub(super) env: HashMap<String, String>,
+    /// Headless resumed runs defer setup until the target workspace's previous
+    /// teardown has stopped. PTY runs carry the same setup in their bootstrap
+    /// shell so it remains ordered before the provider command.
+    pub(super) deferred_setup: Vec<String>,
     /// Ordered bytes seeded into a replacement PTY's terminal history before
     /// the new stage's process output. Absent for non-transition spawns.
     pub(super) terminal_prelude: Option<Vec<u8>>,

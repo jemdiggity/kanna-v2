@@ -355,10 +355,17 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
 ) -> Result<crate::mobile_api::TaskActionResponse, String> {
     let task_id = prepared.task_id.clone();
     let session_id = prepared.session_id.clone();
-    let teardown_session_id = prepared
-        .workspace_teardown
-        .as_ref()
-        .map(|teardown| teardown.session_id.clone());
+    let blocking_teardown_session_id =
+        prepared.blocking_teardown_session_id.clone().or_else(|| {
+            matches!(prepared.workspace, PreparedRunWorkspace::Forked(_))
+                .then(|| {
+                    prepared
+                        .workspace_teardown
+                        .as_ref()
+                        .map(|teardown| teardown.session_id.clone())
+                })
+                .flatten()
+        });
 
     if prepared.resumed_from_run_id.is_some() {
         let capabilities = daemon
@@ -392,14 +399,13 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             provider_session_id.clone(),
         );
     }
-    let worktree_id = format!("wt-{task_id}");
     let (target_branch, target_worktree) = match &prepared.workspace {
         PreparedRunWorkspace::Forked(workspace) | PreparedRunWorkspace::Resumed(workspace) => (
-            Some(workspace.branch.as_str()),
+            Some(workspace.branch.clone()),
             Some((
-                worktree_id.as_str(),
-                workspace.worktree_path.as_str(),
-                workspace.branch.as_str(),
+                format!("wt-{task_id}"),
+                workspace.worktree_path.clone(),
+                workspace.branch.clone(),
             )),
         ),
         PreparedRunWorkspace::Current => (None, None),
@@ -431,8 +437,10 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             PendingStageActionTarget {
                 session_id: &session_id,
                 stage: &prepared.next_stage,
-                branch: target_branch,
-                worktree: target_worktree,
+                branch: target_branch.as_deref(),
+                worktree: target_worktree
+                    .as_ref()
+                    .map(|(id, path, branch)| (id.as_str(), path.as_str(), branch.as_str())),
                 remove_worktree_on_rollback: matches!(
                     &prepared.workspace,
                     PreparedRunWorkspace::Forked(_)
@@ -479,7 +487,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                 db_path, &run_id, &prepared, error,
             ));
         }
-        if let Some(teardown_session_id) = teardown_session_id.as_deref() {
+        if let Some(teardown_session_id) = blocking_teardown_session_id.as_deref() {
             if let Err(error) =
                 kill_session_replacing(daemon, replacements, teardown_session_id).await
             {
@@ -488,6 +496,11 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                 );
             }
         }
+    }
+    if let Err(error) = prepare_deferred_stage_setup(&mut prepared) {
+        return Err(fail_prepared_stage_spawn(
+            db_path, &run_id, &prepared, error,
+        ));
     }
 
     let command = spawn_session_command(
@@ -566,8 +579,10 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         &task_id,
         &run_id,
         &prepared.next_stage,
-        target_branch,
-        target_worktree,
+        target_branch.as_deref(),
+        target_worktree
+            .as_ref()
+            .map(|(id, path, branch)| (id.as_str(), path.as_str(), branch.as_str())),
         Some(&prepared.expected_source),
     ) {
         if let Err(kill_error) =
@@ -605,6 +620,28 @@ fn fail_prepared_stage_spawn(
         Err(db_error) => format!("{error}; failed to record stage spawn failure: {db_error}"),
     };
     rollback_prepared_stage_fork(prepared, recorded_error)
+}
+
+fn prepare_deferred_stage_setup(prepared: &mut PreparedStageRunSpawn) -> Result<(), String> {
+    if prepared.deferred_setup.is_empty() {
+        return Ok(());
+    }
+    run_workspace_setup_commands(&prepared.deferred_setup, &prepared.cwd, &prepared.env)?;
+    let PreparedSessionSpawn::Agent {
+        agent_provider,
+        executable,
+        ..
+    } = &mut prepared.session
+    else {
+        return Err("deferred resumed setup requires a headless agent session".to_string());
+    };
+    *executable = resolve_headless_agent_executable(
+        *agent_provider,
+        prepared.env.get("PATH").map(String::as_str),
+        &prepared.cwd,
+    )?;
+    prepared.deferred_setup.clear();
+    Ok(())
 }
 
 fn rollback_prepared_stage_reservation(

@@ -76,8 +76,8 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "032_task_transfer_sidecar_cleanup",
     "033_create_task_intent",
     "034_pipeline_item_revision_rounds",
-    "029_stage_run_ownership_version",
-    "030_pending_stage_action",
+    "035_stage_run_ownership_version",
+    "036_pending_stage_action",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1346,7 +1346,7 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         Ok(())
     })?;
 
-    run_migration(conn, "029_stage_run_ownership_version", |conn| {
+    run_migration(conn, "035_stage_run_ownership_version", |conn| {
         // Existing rows intentionally retain version zero: their already
         // running CLI/MCP processes cannot supply KANNA_STAGE_RUN_ID.
         add_column(
@@ -1358,7 +1358,7 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         Ok(())
     })?;
 
-    run_migration(conn, "030_pending_stage_action", |conn| {
+    run_migration(conn, "036_pending_stage_action", |conn| {
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS pending_stage_action (

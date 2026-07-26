@@ -650,7 +650,7 @@ fn prepare_revision_resume(
     // resolve to that run's provider — never the agent def's priority list.
     let explicit_provider = run.agent_provider.clone();
     let resumed_from_run_id = run.id.clone();
-    let prepared = prepare_stage_run_spawn(
+    let mut prepared = prepare_stage_run_spawn(
         db,
         config,
         context.repo,
@@ -684,6 +684,20 @@ fn prepare_revision_resume(
     {
         return fall_back("stage no longer resolves to the recorded resumable session");
     }
+    let departed_stage = source_task
+        .stage
+        .as_deref()
+        .ok_or_else(|| format!("task has no stage: {task_id}"))?;
+    prepared.workspace_teardown = super::prepare_workspace_teardown(
+        db,
+        config,
+        context.repo,
+        context.definitions,
+        task_id,
+        context.pipeline,
+        departed_stage,
+        current_branch_name,
+    );
     log::info!(
         "revision resumes task {task_id} stage '{}' from run {} in {}",
         target_stage.name,

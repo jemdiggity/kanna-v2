@@ -801,10 +801,15 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             &kanna_server_base_url(config),
             &mut spawn_env,
         )?;
-        // A forked workspace is fresh disk: run the repo's worktree setup
-        // (the same commands task creation runs) before any stage-specific
-        // setup. Current and resumed workspaces are already set up.
-        let mut setup = if matches!(workspace, PreparedRunWorkspace::Forked(_)) {
+        // A forked workspace is fresh disk. A resumed workspace may have had
+        // that setup invalidated by the detached teardown started when the
+        // task left it, so it must restore both repo and stage setup after the
+        // teardown is stopped.
+        let resumed_workspace = matches!(workspace, PreparedRunWorkspace::Resumed(_));
+        let mut setup = if matches!(
+            workspace,
+            PreparedRunWorkspace::Forked(_) | PreparedRunWorkspace::Resumed(_)
+        ) {
             repo_config.setup.clone().unwrap_or_default()
         } else {
             Vec::new()
@@ -823,29 +828,46 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
                     .unwrap_or_default(),
             );
         }
-        run_workspace_setup_commands(&setup, &worktree_path, &spawn_env)?;
-        let provider = provider_candidates
-            .iter()
-            .copied()
-            .find(|provider| {
-                resolve_provider_executable(
-                    *provider,
-                    spawn_env.get("PATH").map(String::as_str),
-                    &worktree_path,
-                )
-                .is_ok()
-            })
-            .ok_or_else(|| {
-                format!(
-                    "None of the configured agent providers are available: {}.",
-                    provider_candidates
-                        .iter()
-                        .map(|provider| provider.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })?;
+        if !resumed_workspace {
+            run_workspace_setup_commands(&setup, &worktree_path, &spawn_env)?;
+        }
+        let provider = if resumed_workspace {
+            // Resume has already pinned and validated the recorded provider.
+            // Its executable may temporarily be absent while an old teardown
+            // is still invalidating workspace setup, so defer availability
+            // resolution until setup is restored.
+            provider_candidates[0]
+        } else {
+            provider_candidates
+                .iter()
+                .copied()
+                .find(|provider| {
+                    resolve_provider_executable(
+                        *provider,
+                        spawn_env.get("PATH").map(String::as_str),
+                        &worktree_path,
+                    )
+                    .is_ok()
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "None of the configured agent providers are available: {}.",
+                        provider_candidates
+                            .iter()
+                            .map(|provider| provider.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?
+        };
         let agent_type = resolve_agent_type(source_agent_type, provider)?;
+        let defer_resumed_headless_setup =
+            resumed_workspace && agent_type == AgentSessionType::Agent && !setup.is_empty();
+        let pty_resume_setup = if resumed_workspace && agent_type == AgentSessionType::Pty {
+            setup.as_slice()
+        } else {
+            &[]
+        };
         let model = agent.as_ref().and_then(|agent| agent.model.clone());
         let permission_mode = agent
             .as_ref()
@@ -872,8 +894,8 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             mcp_config_path,
             &spawn_env,
             &worktree_path,
-            &[],
-            false,
+            pty_resume_setup,
+            defer_resumed_headless_setup,
             resume_session_id.as_deref(),
         )?;
         let session_id = db
@@ -887,25 +909,41 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             session_id,
             provider,
             stage_run_model,
+            if defer_resumed_headless_setup {
+                setup
+            } else {
+                Vec::new()
+            },
         ))
     })();
-    let (spawn_env, session, provider_session_id, session_id, provider, stage_run_model) =
-        match prepared_session {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                if let PreparedRunWorkspace::Forked(fork) = &workspace {
-                    if let Err(rollback_error) =
-                        remove_prepared_worktree(&fork.worktree_path, &fork.branch)
-                    {
-                        return Err(format!(
-                            "{error}; fork preparation rollback failed: {rollback_error}"
-                        ));
-                    }
+    let (
+        spawn_env,
+        session,
+        provider_session_id,
+        session_id,
+        provider,
+        stage_run_model,
+        deferred_setup,
+    ) = match prepared_session {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            if let PreparedRunWorkspace::Forked(fork) = &workspace {
+                if let Err(rollback_error) =
+                    remove_prepared_worktree(&fork.worktree_path, &fork.branch)
+                {
+                    return Err(format!(
+                        "{error}; fork preparation rollback failed: {rollback_error}"
+                    ));
                 }
-                return Err(error);
             }
-        };
+            return Err(error);
+        }
+    };
 
+    let blocking_teardown_session_id = match &workspace {
+        PreparedRunWorkspace::Resumed(workspace) => Some(format!("td-{}", workspace.branch)),
+        _ => None,
+    };
     Ok(PreparedStageRunSpawn {
         task_id: task_id.to_string(),
         session_id,
@@ -914,6 +952,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         run_kind,
         workspace,
         workspace_teardown: None,
+        blocking_teardown_session_id,
         stage_agent: target_stage.agent.clone(),
         agent_provider: provider.as_str().to_string(),
         model: stage_run_model,
@@ -923,6 +962,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         resumed_from_run_id,
         cwd: worktree_path,
         env: spawn_env,
+        deferred_setup,
         terminal_prelude: None,
         session,
         expected_source,

@@ -164,7 +164,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "030_pending_stage_action");
+    assert_eq!(latest_migration, "036_pending_stage_action");
 
     let stage_run_sql: String = db
         .conn
@@ -797,6 +797,116 @@ fn migration_backfills_cloud_task_identity_from_local_task_id() {
 }
 
 #[test]
+fn activity_revision_migration_precedes_new_stage_run_migrations() {
+    let activity_revision = CURRENT_SCHEMA_MIGRATIONS
+        .iter()
+        .position(|migration| *migration == "029_pipeline_item_activity_revision")
+        .expect("shipped activity revision migration");
+    let ownership = CURRENT_SCHEMA_MIGRATIONS
+        .iter()
+        .position(|migration| *migration == "030_stage_run_ownership_version")
+        .expect("stage run ownership migration");
+    let pending_action = CURRENT_SCHEMA_MIGRATIONS
+        .iter()
+        .position(|migration| *migration == "036_pending_stage_action")
+        .expect("pending stage action migration");
+
+    assert!(activity_revision < ownership);
+    assert!(ownership < pending_action);
+}
+
+#[test]
+fn open_migrates_origin_main_028_activity_revision() {
+    let path = temp_db_path();
+    let conn = Connection::open(&path).expect("open origin/main fixture db");
+    conn.execute_batch(include_str!("fixtures/origin_main_028.sql"))
+        .expect("load origin/main schema fixture");
+    let migration_029_index = CURRENT_SCHEMA_MIGRATIONS
+        .iter()
+        .position(|id| *id == "029_pipeline_item_activity_revision")
+        .expect("029 activity revision migration exists");
+    for migration_id in &CURRENT_SCHEMA_MIGRATIONS[..migration_029_index] {
+        conn.execute(
+            "INSERT INTO schema_migrations (id) VALUES (?1)",
+            [migration_id],
+        )
+        .expect("record migration through 028");
+    }
+    drop(conn);
+
+    let db =
+        Db::open_migrated(path.to_str().expect("utf8 path")).expect("migrate origin/main fixture");
+
+    let activity_revision_metadata: (String, i64, Option<String>) = db
+        .conn
+        .query_row(
+            "SELECT type, \"notnull\", dflt_value
+             FROM pragma_table_info('pipeline_item')
+             WHERE name = 'activity_revision'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("activity revision metadata");
+    assert_eq!(
+        activity_revision_metadata,
+        ("INTEGER".to_string(), 1, Some("0".to_string()))
+    );
+
+    let stored_revision: i64 = db
+        .conn
+        .query_row(
+            "SELECT activity_revision FROM pipeline_item WHERE id = 'origin-main-task'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("backfilled activity revision");
+    assert_eq!(stored_revision, 0);
+
+    let item = db
+        .get_pipeline_item("origin-main-task")
+        .expect("load migrated pipeline item")
+        .expect("migrated pipeline item exists");
+    assert_eq!(item.activity_revision, 0);
+
+    let snapshot = db.ui_snapshot().expect("load migrated ui snapshot");
+    assert_eq!(snapshot.entries.len(), 1);
+    assert_eq!(snapshot.entries[0].items.len(), 1);
+    assert_eq!(snapshot.entries[0].items[0].id, "origin-main-task");
+    assert_eq!(snapshot.entries[0].items[0].activity_revision, 0);
+    drop(db);
+
+    let db = Db::open_migrated(path.to_str().expect("utf8 path"))
+        .expect("reopen migrated origin/main fixture");
+    for migration_id in [
+        "029_pipeline_item_activity_revision",
+        "030_stage_run_ownership_version",
+        "036_pending_stage_action",
+    ] {
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE id = ?1",
+                [migration_id],
+                |row| row.get(0),
+            )
+            .expect("count migration records");
+        assert_eq!(count, 1, "{migration_id} must be applied exactly once");
+    }
+
+    db.update_pipeline_item_activity("origin-main-task", "working")
+        .expect("transition migrated activity");
+    let item = db
+        .get_pipeline_item("origin-main-task")
+        .expect("reload transitioned pipeline item")
+        .expect("transitioned pipeline item exists");
+    assert_eq!(item.activity.as_deref(), Some("working"));
+    assert_eq!(item.activity_revision, 1);
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn open_migrates_legacy_frontend_schema_with_backfills() {
     let path = temp_db_path();
     let conn = Connection::open(&path).expect("open legacy db");
@@ -925,7 +1035,7 @@ fn ownership_migration_rolls_back_non_duplicate_alter_errors_and_repairs_on_reop
     conn.execute_batch(
         r#"
         DELETE FROM schema_migrations
-        WHERE id IN ('029_stage_run_ownership_version', '030_pending_stage_action');
+        WHERE id IN ('035_stage_run_ownership_version', '036_pending_stage_action');
         DROP TABLE pending_stage_action;
         ALTER TABLE stage_run DROP COLUMN run_ownership_version;
         "#,
@@ -936,12 +1046,12 @@ fn ownership_migration_rolls_back_non_duplicate_alter_errors_and_repairs_on_reop
     super::inject_add_column_failure_once("stage_run", "run_ownership_version");
     assert!(
         Db::open_migrated(&path_string).is_err(),
-        "ALTER TABLE failures other than an existing column must abort migration 029"
+        "ALTER TABLE failures other than an existing column must abort migration 030"
     );
     let repair = Connection::open(&path).expect("reopen failed migration db");
     let migration_recorded: i64 = repair
         .query_row(
-            "SELECT COUNT(*) FROM schema_migrations WHERE id = '029_stage_run_ownership_version'",
+            "SELECT COUNT(*) FROM schema_migrations WHERE id = '030_stage_run_ownership_version'",
             [],
             |row| row.get(0),
         )
@@ -952,7 +1062,7 @@ fn ownership_migration_rolls_back_non_duplicate_alter_errors_and_repairs_on_reop
     );
     drop(repair);
 
-    let db = Db::open_migrated(&path_string).expect("reopen should retry and finish migration 029");
+    let db = Db::open_migrated(&path_string).expect("reopen should retry and finish migration 030");
     let repaired_column: i64 = db
         .conn
         .query_row(
@@ -2573,6 +2683,90 @@ fn every_server_activity_write_advances_the_activity_revision() {
     let item = db.get_pipeline_item("task-1").unwrap().unwrap();
     assert_eq!(item.activity.as_deref(), Some("idle"));
     assert_eq!(item.activity_revision, 3);
+}
+
+#[test]
+fn every_server_activity_write_advances_the_activity_revision() {
+    let path = Db::test_db_path("activity-revision-writes");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "task prompt",
+        Some("Task"),
+        "in progress",
+        "2026-07-25 01:00:00",
+    )
+    .unwrap();
+
+    db.update_pipeline_item_activity("task-1", "working")
+        .unwrap();
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .activity_revision,
+        1
+    );
+
+    db.update_pipeline_item_base_ref_and_activity("task-1", Some("origin/main"), "unread")
+        .unwrap();
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .activity_revision,
+        2
+    );
+
+    db.delete_dormant_task_start_artifacts("task-1", Some("origin/main"))
+        .unwrap();
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(item.activity.as_deref(), Some("idle"));
+    assert_eq!(item.activity_revision, 3);
+}
+
+#[test]
+fn stale_mark_read_cannot_overwrite_newer_unread_activity() {
+    let path = Db::test_db_path("activity-revision-mark-read");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "task prompt",
+        Some("Task"),
+        "in progress",
+        "2026-07-25 01:00:00",
+    )
+    .unwrap();
+
+    db.update_pipeline_item_activity("task-1", "unread")
+        .unwrap();
+    let observed_revision = db
+        .get_pipeline_item("task-1")
+        .unwrap()
+        .unwrap()
+        .activity_revision;
+    db.update_pipeline_item_activity("task-1", "working")
+        .unwrap();
+    db.update_pipeline_item_activity("task-1", "unread")
+        .unwrap();
+
+    assert!(!db
+        .mark_pipeline_item_read_if_unchanged("task-1", Some(observed_revision))
+        .unwrap());
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(item.activity.as_deref(), Some("unread"));
+    assert_eq!(item.activity_revision, observed_revision + 2);
+
+    assert!(db
+        .mark_pipeline_item_read_if_unchanged("task-1", Some(item.activity_revision))
+        .unwrap());
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(item.activity.as_deref(), Some("idle"));
+    assert_eq!(item.activity_revision, observed_revision + 3);
 }
 
 #[test]
