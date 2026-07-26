@@ -7,6 +7,7 @@ import {
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   setDoc: vi.fn(async () => undefined),
+  reconnectDesktopCloudRelay: vi.fn(async () => undefined),
   doc: vi.fn((...segments: unknown[]) => ({ segments })),
   serverTimestamp: vi.fn(() => "SERVER_TIMESTAMP"),
 }));
@@ -17,6 +18,9 @@ vi.mock("firebase/firestore", () => ({
   setDoc: (...args: unknown[]) => mocks.setDoc(...args),
 }));
 vi.mock("../invoke", () => ({ invoke: (...args: unknown[]) => mocks.invoke(...args) }));
+vi.mock("./desktopServerClient", () => ({
+  reconnectDesktopCloudRelay: () => mocks.reconnectDesktopCloudRelay(),
+}));
 vi.mock("./desktopAuthSdk", () => ({
   getConfiguredDesktopAuthSession: vi.fn(async () => ({
     getState: () => ({
@@ -40,6 +44,7 @@ describe("desktop cloud credential association", () => {
       if (command === "mobile_server_status") return { desktopName: "Studio Mac" };
       return "";
     });
+    mocks.reconnectDesktopCloudRelay.mockClear();
   });
 
   it("associates only the user profile and deterministic desktop credential document", async () => {
@@ -91,6 +96,11 @@ describe("desktop cloud credential association", () => {
         updatedAt: "SERVER_TIMESTAMP",
       },
       { merge: true },
+    );
+    expect(mocks.setDoc).toHaveBeenCalledTimes(1);
+    expect(mocks.reconnectDesktopCloudRelay).toHaveBeenCalledOnce();
+    expect(mocks.setDoc.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.reconnectDesktopCloudRelay.mock.invocationCallOrder[0]!,
     );
   });
 });

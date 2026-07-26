@@ -322,12 +322,21 @@ relay:
    provenance, cloud owner update, source completion, and source closure.
 3. Select the resulting remote-owned task from the other instance, pull it
    back, and verify the same ownership invariants in reverse.
-4. Verify a shared repo, remote clone, and bundle-backed repo acquisition path.
-5. Interrupt destination import and verify the source task remains open.
-6. Interrupt acknowledgment after import and verify retry does not duplicate
+4. Push a task whose clone-remote repository is absent on the destination and
+   verify relay artifact transport, repository acquisition/import, ownership
+   update, acknowledgment, and source closure.
+5. Repeat the absent-repository transfer for a bundle-backed repository and
+   verify the same acquisition and ownership invariants.
+6. Expose both routes for one desktop, make its direct LAN endpoint unusable,
+   and verify preflight retries through the relay before creating durable
+   transfer state, then completes exactly once.
+7. Interrupt destination import and verify the source task remains open.
+8. Interrupt acknowledgment after import and verify retry does not duplicate
    the destination task.
-7. Log out and verify cloud machines disappear from transfer actions while
-   manually paired LAN peers remain governed by their existing trust.
+9. Sign out through the product UI and verify same-account cloud machines and
+   executable push/pull eligibility disappear through the relay and Firestore
+   subscriptions. Then manually pair the LAN peers, repeat sign-in/sign-out,
+   and verify durable LAN trust and LAN transfer eligibility remain.
 
 The existing LAN transfer E2E suite remains green to prove the transport
 extension did not regress direct transfers.
@@ -358,9 +367,12 @@ by the next tunnel. Until then, the lifecycle boundary is covered by:
   the registered loopback endpoint and authenticates the next relay connection
   with the refreshed token while an existing tunnel remains open.
 
-The two-instance `cloud-task-transfer.test.ts` suite still covers the complete
-Firebase-emulator, desktop, Tauri proxy, relay, sidecar, and import/acknowledgment
-path for real Push and Pull operations.
+The two-instance `cloud-task-transfer.test.ts` suite covers the complete
+Firebase-emulator, desktop UI, Tauri proxy, relay, sidecar, filesystem/git
+acquisition, persistence, import/acknowledgment, and source-close path. Its
+seven executable cases cover shared-repo push/pull, clone and bundle acquisition,
+LAN-preferred cloud fallback, interrupted acknowledgment, pre-ack import
+failure, and sign-out revocation with paired-LAN trust preservation.
 
 ## Success Criteria
 

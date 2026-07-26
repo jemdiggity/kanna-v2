@@ -22,6 +22,7 @@ pub struct AppState {
     pub(super) terminal_attachments: crate::terminal_attachments::TerminalAttachments,
     pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
     requested_task_operations: Arc<RequestedTaskOperations>,
+    relay_reconnect: Arc<Notify>,
     state_changes: broadcast::Sender<ServerFrame>,
     #[cfg(test)]
     pub(super) task_creator: Option<TestTaskCreator>,
@@ -173,6 +174,7 @@ impl AppState {
             terminal_attachments: crate::terminal_attachments::TerminalAttachments::default(),
             repo_definitions: Arc::new(crate::task_creator::RepoDefinitionsCache::default()),
             requested_task_operations: Arc::new(RequestedTaskOperations::default()),
+            relay_reconnect: Arc::new(Notify::new()),
             state_changes: broadcast::channel(256).0,
             #[cfg(test)]
             task_creator: None,
@@ -205,6 +207,14 @@ impl AppState {
 
     pub fn publish_state_changed(&self, scope: StateChangeScope) {
         let _ = self.state_changes.send(ServerFrame::StateChanged { scope });
+    }
+
+    pub fn request_cloud_relay_reconnect(&self) {
+        self.relay_reconnect.notify_one();
+    }
+
+    pub async fn wait_for_cloud_relay_reconnect(&self) {
+        self.relay_reconnect.notified().await;
     }
 
     pub(super) fn begin_requested_task_creation(

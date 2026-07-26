@@ -520,7 +520,10 @@ async function main(): Promise<void> {
     return {
       ...realE2eRuntimeEnv,
       ...(/real\/cloud-task-transfer\.test\.ts$/.test(testTarget)
-        ? { KANNA_TRANSFER_REGISTRY_DIR: primaryCloudTransferRegistryDir }
+        ? {
+            KANNA_TRANSFER_REGISTRY_DIR: primaryCloudTransferRegistryDir,
+            KANNA_E2E_TARGET_TRANSFER_REGISTRY_DIR: secondaryCloudTransferRegistryDir,
+          }
         : {}),
       ...(targetNeedsAuthIndexedDbOpenFailure(testTarget)
         ? { KANNA_E2E_FIREBASE_AUTH_INDEXEDDB_OPEN_FAILURE: "1" }

@@ -1,13 +1,20 @@
+import { homedir } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
+import {
+  exposeRealLanRoutesBetweenInstances,
+  exposeUnusablePrimaryLanRouteToSecondary,
+} from "../helpers/transferRegistry";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import {
   listPairMachineRows,
   listTransferPickerRows,
+  pairWithPeerThroughUi,
   pullSelectedTaskToThisMachineThroughUi,
   pushSelectedTaskToPeerThroughUi,
+  waitForTransferPeerTrusted,
 } from "../helpers/transferFlow";
 import { callVueMethod, queryDb, tauriInvoke } from "../helpers/vue";
 
@@ -21,11 +28,30 @@ interface TransferRow {
   id: string;
   status: string;
   local_task_id: string | null;
+  payload_json: string | null;
+}
+
+interface RepoRow {
+  id: string;
+  name: string;
+  path: string;
+}
+
+interface TransferMachineRow {
+  peerId: string;
+  name: string;
+  trustSource: "paired-lan" | "same-account-cloud";
+  preferredTransport: "lan" | "cloud";
+  cloudFallback: boolean;
+  relayDesktopId: string | null;
 }
 
 const { primary, secondary } = createPrimaryAndSecondaryClients();
 let testRepoPath = "";
 let primaryRepoId = "";
+let secondaryRepoId = "";
+const fixtureRepoPaths = new Set<string>();
+const acquiredRepoPaths = new Set<string>();
 
 async function setSetupState(client: typeof primary, key: string, value: unknown): Promise<void> {
   await client.executeSync(`
@@ -37,6 +63,12 @@ async function setSetupState(client: typeof primary, key: string, value: unknown
 }
 
 async function signIn(client: typeof primary): Promise<void> {
+  const alreadySignedIn = await client.executeSync<boolean>(`
+    const value = window.__KANNA_E2E__.setupState.desktopAuthSession;
+    const session = value?.__v_isRef ? value.value : value;
+    return session?.getState?.().status === "signedIn";
+  `);
+  if (alreadySignedIn) return;
   await setSetupState(client, "showPreferencesPanel", true);
   await client.click(await client.waitForElement('[data-testid="preferences-account-tab"]'));
   await client.sendKeys(await client.waitForElement('[data-testid="account-email"]'), "upvote.sieve.7t@icloud.com");
@@ -48,27 +80,56 @@ async function signIn(client: typeof primary): Promise<void> {
   await setSetupState(client, "sidebarHidden", false);
 }
 
-async function createSourceTask(prompt: string): Promise<TaskRow> {
+async function signOut(client: typeof primary): Promise<void> {
+  const alreadySignedOut = await client.executeSync<boolean>(`
+    const value = window.__KANNA_E2E__.setupState.desktopAuthSession;
+    const session = value?.__v_isRef ? value.value : value;
+    return session?.getState?.().status !== "signedIn";
+  `);
+  if (alreadySignedOut) return;
+  await setSetupState(client, "showPreferencesPanel", true);
+  await client.click(await client.waitForElement('[data-testid="preferences-account-tab"]'));
+  await client.click(await client.waitForText(".account-signed-in button", "Sign out", 10_000));
+  await client.waitForElement('[data-testid="account-sign-in"]', 15_000);
+  await setSetupState(client, "showPreferencesPanel", false);
+}
+
+async function createTask(
+  client: typeof primary,
+  repoId: string,
+  repoPath: string,
+  prompt: string,
+  baseRef = "origin/main",
+): Promise<TaskRow> {
   const result = await callVueMethod(
-    primary,
+    client,
     "store.createItem",
-    primaryRepoId,
-    testRepoPath,
+    repoId,
+    repoPath,
     prompt,
     "sdk",
-    { agentProvider: "codex", baseRef: "origin/main" },
+    { agentProvider: "codex", baseRef },
   );
   if (typeof result !== "string") {
     throw new Error(`failed to create ${prompt}: ${JSON.stringify(result)}`);
   }
-  await callVueMethod(primary, "selectSidebarItemById", result);
+  await callVueMethod(client, "selectSidebarItemById", result);
   const rows = await queryDb(
-    primary,
+    client,
     "SELECT id, cloud_task_id, closed_at FROM pipeline_item WHERE id = ?",
     [result],
   ) as TaskRow[];
   if (!rows[0]) throw new Error(`created task ${result} was not persisted`);
   return rows[0];
+}
+
+async function createSourceTask(
+  prompt: string,
+  repoId = primaryRepoId,
+  repoPath = testRepoPath,
+  baseRef = "origin/main",
+): Promise<TaskRow> {
+  return createTask(primary, repoId, repoPath, prompt, baseRef);
 }
 
 async function waitForTaskByCloudIdentity(
@@ -122,7 +183,7 @@ async function waitForIncoming(
   while (Date.now() < deadline) {
     last = await queryDb(
       client,
-      `SELECT id, status, local_task_id
+      `SELECT id, status, local_task_id, payload_json
          FROM task_transfer
         WHERE direction = 'incoming' AND source_task_id = ?
         ORDER BY started_at DESC LIMIT 1`,
@@ -132,6 +193,29 @@ async function waitForIncoming(
     await sleep(250);
   }
   throw new Error(`timed out waiting for incoming ${sourceTaskId}=${status}: ${JSON.stringify(last)}`);
+}
+
+async function waitForOutgoing(
+  client: typeof primary,
+  sourceTaskId: string,
+  status: string,
+  timeoutMs = 45_000,
+): Promise<TransferRow> {
+  const deadline = Date.now() + timeoutMs;
+  let last: TransferRow[] = [];
+  while (Date.now() < deadline) {
+    last = await queryDb(
+      client,
+      `SELECT id, status, local_task_id, payload_json
+         FROM task_transfer
+        WHERE direction = 'outgoing' AND source_task_id = ?
+        ORDER BY started_at DESC LIMIT 1`,
+      [sourceTaskId],
+    ) as TransferRow[];
+    if (last[0]?.status === status) return last[0];
+    await sleep(250);
+  }
+  throw new Error(`timed out waiting for outgoing ${sourceTaskId}=${status}: ${JSON.stringify(last)}`);
 }
 
 async function selectRemoteTask(client: typeof primary, prompt: string): Promise<void> {
@@ -194,9 +278,9 @@ async function waitForTransferMachine(
   client: typeof primary,
   machineName: string,
   timeoutMs = 30_000,
-): Promise<{ peerId: string }> {
+): Promise<TransferMachineRow> {
   const deadline = Date.now() + timeoutMs;
-  let last: Array<{ peerId: string; name: string }> = [];
+  let last: TransferMachineRow[] = [];
   while (Date.now() < deadline) {
     last = await client.executeSync(`
       const value = window.__KANNA_E2E__.setupState.transferMachines;
@@ -207,6 +291,75 @@ async function waitForTransferMachine(
     await sleep(250);
   }
   throw new Error(`timed out waiting for transfer machine ${machineName}: ${JSON.stringify(last)}`);
+}
+
+async function waitForTransferMachineMatching(
+  client: typeof primary,
+  machineName: string,
+  predicate: (machine: TransferMachineRow | null) => boolean,
+  timeoutMs = 30_000,
+): Promise<TransferMachineRow | null> {
+  const deadline = Date.now() + timeoutMs;
+  let last: TransferMachineRow | null = null;
+  while (Date.now() < deadline) {
+    last = await client.executeSync(`
+      const value = window.__KANNA_E2E__.setupState.transferMachines;
+      const machines = value?.__v_isRef ? value.value : value;
+      return machines?.find((candidate) => candidate.name === ${JSON.stringify(machineName)}) || null;
+    `);
+    if (predicate(last)) return last;
+    await sleep(250);
+  }
+  throw new Error(`timed out waiting for transfer machine state ${machineName}: ${JSON.stringify(last)}`);
+}
+
+async function waitForRemotePullEligibility(
+  client: typeof primary,
+  prompt: string,
+  expected: boolean | null,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last: { found: boolean; canPull: boolean } = { found: false, canPull: false };
+  while (Date.now() < deadline) {
+    last = await client.executeSync(`
+      const ctx = window.__KANNA_E2E__.setupState;
+      const read = (value) => value?.__v_isRef ? value.value : value;
+      const tasks = Array.from(read(ctx.workspaceTasksByItemId)?.values?.() || []);
+      const task = tasks.find((candidate) => candidate.item?.prompt === ${JSON.stringify(prompt)});
+      return {
+        found: Boolean(task),
+        canPull: task?.capabilities?.canPullFromMachine === true,
+      };
+    `);
+    if (expected === null ? !last.found : last.found && last.canPull === expected) return;
+    await sleep(250);
+  }
+  throw new Error(
+    `timed out waiting for remote pull eligibility ${prompt}=${String(expected)}: ${JSON.stringify(last)}`,
+  );
+}
+
+async function waitForRepoForTask(
+  client: typeof primary,
+  taskId: string,
+  timeoutMs = 30_000,
+): Promise<RepoRow> {
+  const deadline = Date.now() + timeoutMs;
+  let last: RepoRow[] = [];
+  while (Date.now() < deadline) {
+    last = await queryDb(
+      client,
+      `SELECT repo.id, repo.name, repo.path
+         FROM repo
+         JOIN pipeline_item ON pipeline_item.repo_id = repo.id
+        WHERE pipeline_item.id = ?`,
+      [taskId],
+    ) as RepoRow[];
+    if (last[0]) return last[0];
+    await sleep(250);
+  }
+  throw new Error(`timed out waiting for repo imported for task ${taskId}: ${JSON.stringify(last)}`);
 }
 
 async function waitForInvoke(
@@ -259,6 +412,42 @@ async function waitForCloudOwner(
   );
 }
 
+async function pushAndAssertCloudOwnershipTransfer(
+  source: TaskRow,
+  prompt: string,
+): Promise<{
+  destinationTask: TaskRow;
+  incoming: TransferRow;
+  outgoing: TransferRow;
+}> {
+  const cloudTaskId = source.cloud_task_id ?? source.id;
+  await pushSelectedTaskToPeerThroughUi(primary, "Secondary", { waitForDismissal: false });
+  const incoming = await waitForIncoming(secondary, source.id, "completed");
+  const destinationTask = await waitForTaskByCloudIdentity(secondary, cloudTaskId, true);
+  expect(incoming.local_task_id).toBe(destinationTask.id);
+  const outgoing = await waitForOutgoing(primary, source.id, "completed");
+  await waitForLocalTaskClosed(primary, source.id);
+
+  const secondaryStatus = await tauriInvoke(secondary, "mobile_server_status") as { desktopId?: string };
+  await waitForCloudOwner(primary, prompt, secondaryStatus.desktopId!);
+
+  const [primaryOpen, secondaryOpen] = await Promise.all([
+    queryDb(
+      primary,
+      "SELECT id FROM pipeline_item WHERE cloud_task_id = ? AND closed_at IS NULL",
+      [cloudTaskId],
+    ),
+    queryDb(
+      secondary,
+      "SELECT id FROM pipeline_item WHERE cloud_task_id = ? AND closed_at IS NULL",
+      [cloudTaskId],
+    ),
+  ]);
+  expect(primaryOpen).toHaveLength(0);
+  expect(secondaryOpen).toEqual([{ id: destinationTask.id }]);
+  return { destinationTask, incoming, outgoing };
+}
+
 describe("cloud task ownership transfer", () => {
   beforeAll(async () => {
     await primary.createSession();
@@ -266,17 +455,26 @@ describe("cloud task ownership transfer", () => {
     await resetDatabase(primary);
     await resetDatabase(secondary);
     testRepoPath = await createFixtureRepo("cloud-task-transfer");
+    fixtureRepoPaths.add(testRepoPath);
     primaryRepoId = await importTestRepo(primary, testRepoPath, "cloud-transfer-primary");
-    await importTestRepo(secondary, testRepoPath, "cloud-transfer-secondary");
+    secondaryRepoId = await importTestRepo(secondary, testRepoPath, "cloud-transfer-secondary");
     await signIn(primary);
     await signIn(secondary);
     await waitForBidirectionalCloudReadiness();
   }, 240_000);
 
   afterAll(async () => {
+    const acquiredRows = await queryDb(
+      secondary,
+      "SELECT path FROM repo WHERE path LIKE ?",
+      [`${homedir()}/.kanna/repos/cloud-task-transfer-%`],
+    ).catch(() => []) as Array<{ path: string }>;
+    for (const row of acquiredRows) acquiredRepoPaths.add(row.path);
+    await resetDatabase(primary).catch(() => undefined);
+    await resetDatabase(secondary).catch(() => undefined);
     await cleanupWorktrees(primary, testRepoPath).catch(() => undefined);
     await cleanupWorktrees(secondary, testRepoPath).catch(() => undefined);
-    await cleanupFixtureRepos(testRepoPath ? [testRepoPath] : []).catch(() => undefined);
+    await cleanupFixtureRepos([...fixtureRepoPaths, ...acquiredRepoPaths]).catch(() => undefined);
     await primary.deleteSession().catch(() => undefined);
     await secondary.deleteSession().catch(() => undefined);
   });
@@ -372,6 +570,112 @@ describe("cloud task ownership transfer", () => {
     expect(secondaryOpen).toHaveLength(0);
   }, 180_000);
 
+  it("acquires a missing clone-remote repo over the cloud relay before taking ownership", async () => {
+    await waitForBidirectionalCloudReadiness();
+    const repoName = `cloud-task-transfer-clone-${process.pid}`;
+    const repoPath = await createFixtureRepo(repoName);
+    fixtureRepoPaths.add(repoPath);
+    const repoId = await importTestRepo(primary, repoPath, repoName);
+    const prompt = "Cloud clone repo acquisition";
+    const source = await createSourceTask(prompt, repoId, repoPath);
+
+    const { destinationTask, outgoing } = await pushAndAssertCloudOwnershipTransfer(source, prompt);
+    const importedRepo = await waitForRepoForTask(secondary, destinationTask.id);
+    acquiredRepoPaths.add(importedRepo.path);
+    expect(importedRepo.path).not.toBe(repoPath);
+    expect(importedRepo.path).toContain(`${homedir()}/.kanna/repos/${repoName}`);
+
+    const payload = JSON.parse(outgoing.payload_json ?? "{}") as {
+      repo?: { mode?: string; remote_url?: string | null };
+    };
+    expect(payload.repo).toMatchObject({
+      mode: "clone-remote",
+    });
+    expect(typeof payload.repo?.remote_url).toBe("string");
+  }, 180_000);
+
+  it("acquires a missing bundle-backed repo and artifact over the cloud relay before taking ownership", async () => {
+    await waitForBidirectionalCloudReadiness();
+    const repoName = `cloud-task-transfer-bundle-${process.pid}`;
+    const repoPath = await createFixtureRepo(repoName);
+    fixtureRepoPaths.add(repoPath);
+    await tauriInvoke(primary, "run_script", {
+      script: "git remote remove origin",
+      cwd: repoPath,
+      env: {},
+    });
+    const repoId = await importTestRepo(primary, repoPath, repoName);
+    const prompt = "Cloud bundle repo acquisition";
+    const source = await createSourceTask(prompt, repoId, repoPath, "main");
+
+    const { destinationTask, outgoing } = await pushAndAssertCloudOwnershipTransfer(source, prompt);
+    const importedRepo = await waitForRepoForTask(secondary, destinationTask.id);
+    acquiredRepoPaths.add(importedRepo.path);
+    expect(importedRepo.path).not.toBe(repoPath);
+    expect(importedRepo.path).toContain(`${homedir()}/.kanna/repos/${repoName}`);
+
+    const payload = JSON.parse(outgoing.payload_json ?? "{}") as {
+      repo?: {
+        mode?: string;
+        bundle?: { artifact_id?: string; filename?: string } | null;
+      };
+    };
+    expect(payload.repo).toMatchObject({
+      mode: "bundle-repo",
+    });
+    expect(payload.repo?.bundle?.artifact_id).toBeTruthy();
+    expect(payload.repo?.bundle?.filename).toContain(".bundle");
+  }, 180_000);
+
+  it("falls back from an unusable preferred LAN route to cloud before creating one durable transfer", async () => {
+    await waitForBidirectionalCloudReadiness();
+    const source = await createSourceTask("Cloud fallback from unusable LAN");
+    const removeLanRoute = await exposeUnusablePrimaryLanRouteToSecondary();
+    try {
+      await callVueMethod(primary, "updateLanTransferPeers", await tauriInvoke(primary, "list_transfer_peers"));
+      const route = await waitForTransferMachineMatching(
+        primary,
+        "Secondary",
+        (machine) =>
+          machine?.preferredTransport === "lan"
+          && machine.cloudFallback === true
+          && machine.relayDesktopId !== null,
+      );
+      expect(route).toMatchObject({
+        trustSource: "same-account-cloud",
+        preferredTransport: "lan",
+        cloudFallback: true,
+      });
+      expect(await queryDb(
+        primary,
+        "SELECT id FROM task_transfer WHERE direction = 'outgoing' AND source_task_id = ?",
+        [source.id],
+      )).toHaveLength(0);
+      await primary.executeSync(`window.__KANNA_E2E__.invokes?.clear();`);
+
+      await pushAndAssertCloudOwnershipTransfer(source, "Cloud fallback from unusable LAN");
+
+      const invokes = await primary.executeSync<Array<{
+        cmd: string;
+        args?: { payload?: { phase?: string; transport?: string } };
+      }>>(`return window.__KANNA_E2E__.invokes?.getAll() || [];`);
+      const preflights = invokes.filter(
+        (call) =>
+          call.cmd === "prepare_outgoing_transfer"
+          && call.args?.payload?.phase === "preflight",
+      );
+      expect(preflights).toHaveLength(2);
+      expect(preflights.map((call) => call.args?.payload?.transport)).toEqual(["lan", "cloud"]);
+      expect(await queryDb(
+        primary,
+        "SELECT id, status FROM task_transfer WHERE direction = 'outgoing' AND source_task_id = ?",
+        [source.id],
+      )).toEqual([expect.objectContaining({ status: "completed" })]);
+    } finally {
+      await removeLanRoute();
+    }
+  }, 180_000);
+
   it("retries an interrupted acknowledgment without duplicating the imported destination", async () => {
     await waitForBidirectionalCloudReadiness();
     const source = await createSourceTask("Cloud ack retry");
@@ -380,6 +684,7 @@ describe("cloud task ownership transfer", () => {
     await interruptNextDestinationAck();
     await pushSelectedTaskToPeerThroughUi(primary, "Secondary", { waitForDismissal: false });
     const awaiting = await waitForIncoming(secondary, source.id, "awaiting_acknowledgment");
+    await waitForInvoke(secondary, "acknowledge_incoming_transfer_commit");
     const interruption = await secondary.executeSync<{
       faultPending: boolean;
       invokes: Array<{ cmd: string }>;
@@ -428,4 +733,80 @@ describe("cloud task ownership transfer", () => {
     ) as Array<{ closed_at: string | null }>;
     expect(rows[0]?.closed_at).toBeNull();
   }, 90_000);
+
+  it("revokes cloud push and pull eligibility on UI sign-out without clearing paired LAN trust", async () => {
+    await waitForBidirectionalCloudReadiness();
+    const remoteSource = await createSourceTask("Cloud sign-out pull eligibility");
+    const localSecondary = await createTask(
+      secondary,
+      secondaryRepoId,
+      testRepoPath,
+      "Cloud sign-out push eligibility",
+    );
+    await waitForRemotePullEligibility(secondary, "Cloud sign-out pull eligibility", true);
+
+    await signOut(secondary);
+    await Promise.all([
+      waitForTransferMachineMatching(primary, "Secondary", (machine) => machine === null),
+      waitForTransferMachineMatching(secondary, "Primary", (machine) => machine === null),
+      waitForRemotePullEligibility(secondary, "Cloud sign-out pull eligibility", null),
+    ]);
+    await callVueMethod(secondary, "selectSidebarItemById", localSecondary.id);
+    expect(await listTransferPickerRows(secondary)).not.toContain("Primary");
+
+    await signOut(primary);
+
+    const removeRealLanRoutes = await exposeRealLanRoutesBetweenInstances();
+    try {
+      expect(await listPairMachineRows(primary)).toContain("Secondary");
+      await pairWithPeerThroughUi(primary, "Secondary", "peer-secondary", {
+        promptClient: secondary,
+        promptPeerId: "peer-primary",
+      });
+      await Promise.all([
+        waitForTransferPeerTrusted(primary, "peer-secondary"),
+        waitForTransferPeerTrusted(secondary, "peer-primary"),
+      ]);
+
+      await Promise.all([signIn(primary), signIn(secondary)]);
+      await waitForBidirectionalCloudReadiness();
+      await waitForTransferMachineMatching(
+        primary,
+        "Secondary",
+        (machine) =>
+          machine?.trustSource === "same-account-cloud"
+          && machine.preferredTransport === "lan"
+          && machine.cloudFallback === true,
+      );
+
+      await signOut(secondary);
+      await Promise.all([
+        waitForTransferMachineMatching(
+          primary,
+          "Secondary",
+          (machine) =>
+            machine?.trustSource === "paired-lan"
+            && machine.preferredTransport === "lan"
+            && machine.relayDesktopId === null,
+        ),
+        waitForTransferMachineMatching(
+          secondary,
+          "Primary",
+          (machine) =>
+            machine?.trustSource === "paired-lan"
+            && machine.preferredTransport === "lan"
+            && machine.relayDesktopId === null,
+        ),
+        waitForTransferPeerTrusted(primary, "peer-secondary"),
+        waitForTransferPeerTrusted(secondary, "peer-primary"),
+      ]);
+      await callVueMethod(primary, "selectSidebarItemById", remoteSource.id);
+      expect(await listTransferPickerRows(primary)).toContain("Secondary");
+      expect(await listPairMachineRows(primary)).not.toContain("Secondary");
+    } finally {
+      await signIn(primary).catch(() => undefined);
+      await signIn(secondary).catch(() => undefined);
+      await removeRealLanRoutes();
+    }
+  }, 240_000);
 });

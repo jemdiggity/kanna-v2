@@ -1160,6 +1160,7 @@ git commit -m "feat(desktop): push and pull task ownership across machines"
 **Files:**
 - Create: `apps/desktop/tests/e2e/real/cloud-task-transfer.test.ts`
 - Modify: `apps/desktop/tests/e2e/helpers/transferFlow.ts`
+- Create: `apps/desktop/tests/e2e/helpers/transferRegistry.ts`
 - Modify: `apps/desktop/tests/e2e/run.ts`
 - Modify: `apps/desktop/tests/e2e/helpers/twoInstance.ts`
 - Modify: `services/relay/test/integration.test.ts`
@@ -1189,6 +1190,18 @@ open.
 Add cases that fail destination import before acknowledgment and interrupt
 acknowledgment after import. The former keeps source open; the latter retries
 without creating another destination task.
+
+Also execute the remaining cross-boundary design scenarios:
+
+- transfer clone-remote and bundle-backed repositories that are absent on the
+  destination, verifying acquisition/import and the normal ownership,
+  acknowledgment, and source-close invariants;
+- expose a dual-route machine with an unusable LAN endpoint and verify preflight
+  falls back to cloud before durable transfer creation, then completes once;
+- sign out one discovered desktop through the product UI and verify cloud
+  machine plus executable push/pull eligibility disappear; then manually pair
+  the LAN peers and verify later cloud sign-out preserves their durable LAN
+  trust and LAN transfer eligibility.
 
 - [x] **Step 2: Run E2E and verify RED**
 
@@ -1223,7 +1236,10 @@ pnpm --dir apps/desktop test:e2e -- real/local-transfer-accept-import.test.ts
 pnpm --dir apps/desktop test:e2e -- real/local-transfer-repo-acquisition.test.ts
 ```
 
-Expected: cloud push/pull and existing LAN transfer tests all PASS.
+Expected: all seven cloud cases (shared-repo push/pull, clone acquisition,
+bundle acquisition, LAN-to-cloud fallback, interrupted acknowledgment,
+pre-ack import failure, and sign-out/LAN-trust preservation) and the existing
+LAN transfer tests all PASS.
 
 - [x] **Step 5: Commit**
 

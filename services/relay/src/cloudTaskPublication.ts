@@ -45,6 +45,11 @@ export interface CloudTaskPublicationSessionStore extends CloudTaskPublicationSt
     userId: string;
     desktopId: string;
   }): Promise<number>;
+  endSession(input: {
+    userId: string;
+    desktopId: string;
+    generation: number;
+  }): Promise<boolean>;
 }
 
 export interface CloudTaskPublicationFaultInjection {
@@ -302,6 +307,20 @@ export async function beginCloudTaskPublicationSession(input: {
   });
 }
 
+export async function endCloudTaskPublicationSession(input: {
+  userId: string;
+  desktopId: string;
+  generation: number;
+  store?: CloudTaskPublicationSessionStore;
+}): Promise<boolean> {
+  const store = input.store ?? createFirestoreCloudTaskPublicationStore();
+  return await store.endSession({
+    userId: input.userId,
+    desktopId: input.desktopId,
+    generation: input.generation,
+  });
+}
+
 export function createFirestoreCloudTaskPublicationStore(
   db: Firestore = getFirebaseServices().db,
   faultInjection?: CloudTaskPublicationFaultInjection,
@@ -327,6 +346,24 @@ export function createFirestoreCloudTaskPublicationStore(
           updatedAt: FieldValue.serverTimestamp(),
         }, { merge: true });
         return nextGeneration;
+      });
+    },
+
+    async endSession({ userId, desktopId, generation }) {
+      const desktopDocId = cloudDesktopDocumentId(desktopId);
+      const desktopRef = db.doc(`users/${userId}/desktops/${desktopDocId}`);
+      return await db.runTransaction(async (transaction) => {
+        const current = await transaction.get(desktopRef);
+        if (storedGenerationPart(
+          current.data()?.publicationSessionGeneration,
+        ) !== generation) {
+          return false;
+        }
+        transaction.set(desktopRef, {
+          transfer: FieldValue.delete(),
+          updatedAt: FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return true;
       });
     },
 

@@ -163,6 +163,21 @@ mod tests {
 
             assert_eq!(connections.load(Ordering::SeqCst), 1);
             assert_eq!(publications.load(Ordering::SeqCst), 1);
+
+            let reconnect = client
+                .post(format!("{status_url}/../cloud/relay/actions/reconnect"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(reconnect.status(), reqwest::StatusCode::NO_CONTENT);
+            tokio::time::timeout(Duration::from_secs(7), async {
+                while connections.load(Ordering::SeqCst) < 2 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("relay did not reconnect after the local session revocation signal");
+            assert_eq!(connections.load(Ordering::SeqCst), 2);
         };
         tokio::select! {
             _ = &mut runtime => panic!("server runtime exited before singleton assertions"),

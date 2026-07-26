@@ -1,5 +1,6 @@
 use super::analytics::get_repo_analytics;
 use super::backup::create_backup;
+use super::cloud_relay::reconnect_cloud_relay;
 use super::desktop::list_desktops;
 #[cfg(debug_assertions)]
 use super::e2e_mobile_controls::{gate_direct_lan_http, update_e2e_mobile_machine_controls};
@@ -61,6 +62,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/backup", post(create_backup))
+        .route(
+            "/v1/cloud/relay/actions/reconnect",
+            post(reconnect_cloud_relay),
+        )
         .route(
             "/v1/settings/cloud-transfer-identity",
             axum::routing::put(put_cloud_transfer_identity),

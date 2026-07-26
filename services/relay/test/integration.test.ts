@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deleteApp, initializeApp, type App } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import WebSocket from "ws";
 import {
   beginCloudTaskPublicationSession,
@@ -561,14 +561,43 @@ describe("Relay integration", () => {
     expect(after).toBe(before);
   });
 
-  it("authenticates a desktop with desktop_id and desktop_secret", async () => {
+  it("authenticates a desktop and clears its transfer capability when the session disconnects", async () => {
+    const desktopRef = testFirestore.doc(
+      `users/${TEST_USER_ID}/desktops/${SECRET_DESKTOP_ID}`,
+    );
     const { ws, userId } = await connectAndAuth({
       desktop_id: SECRET_DESKTOP_ID,
       desktop_secret: SECRET_DESKTOP_SECRET,
     });
 
     expect(userId).toBe(TEST_USER_ID);
+    const publicationAck = waitForMessage(ws, (message) =>
+      message.type === "task_snapshot_ack" && message.id === "publish-transfer");
+    const snapshot = publishedSnapshot("idle");
+    snapshot.desktop = {
+      displayName: "Studio Mac",
+      transfer: {
+        peerId: "peer-secret-auth",
+        publicKey: "public-key",
+        protocolVersion: 1,
+        acceptingTransfers: true,
+      },
+    };
+    ws.send(JSON.stringify({
+      type: "task_snapshot_publish",
+      id: "publish-transfer",
+      snapshot,
+    }));
+    await expect(publicationAck).resolves.toMatchObject({ ok: true });
+    expect((await desktopRef.get()).data()?.transfer).toMatchObject({
+      peerId: "peer-secret-auth",
+      acceptingTransfers: true,
+    });
+
     await closeAndWait(ws);
+    await vi.waitFor(async () => {
+      expect((await desktopRef.get()).data()?.transfer).toBeUndefined();
+    });
   });
 
   it("reconciles only the authenticated desktop task subtree and carries activity-only changes", async () => {

@@ -362,6 +362,12 @@ export async function putDesktopCloudTransferIdentity(
   });
 }
 
+export async function reconnectDesktopCloudRelay(): Promise<void> {
+  await requestJson<void>("/v1/cloud/relay/actions/reconnect", {
+    method: "POST",
+  });
+}
+
 export interface DesktopWorkspaceWindowState {
   windowId: string;
   selectedRepoId: string | null;

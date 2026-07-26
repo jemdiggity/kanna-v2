@@ -99,6 +99,10 @@ pub(crate) async fn run_relay_loop(
         // Message processing loop
         loop {
             let msg = tokio::select! {
+                _ = http_state.wait_for_cloud_relay_reconnect() => {
+                    log::info!("Cloud relay reconnect requested by the local desktop");
+                    break;
+                }
                 _ = publication_interval.tick(), if publication_enabled => {
                     match db.ui_snapshot() {
                         Ok(snapshot) => publisher.observe(map_ui_snapshot(
