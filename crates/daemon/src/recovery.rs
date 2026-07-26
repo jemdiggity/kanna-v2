@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,6 +41,7 @@ pub struct SeededRecoverySnapshot {
 pub struct RecoveryManager {
     launcher: Option<RecoveryLauncher>,
     snapshot_dir: PathBuf,
+    seeded_for_next_start: Arc<StdMutex<HashSet<String>>>,
     sequences: Arc<StdMutex<HashMap<String, u64>>>,
     state: Arc<Mutex<RecoveryState>>,
 }
@@ -232,6 +233,26 @@ impl RecoveryManager {
             )
         })?;
         Ok(())
+    }
+
+    pub fn seed_snapshot_for_next_start(
+        &self,
+        session_id: &str,
+        snapshot: &SeededRecoverySnapshot,
+    ) -> Result<(), String> {
+        self.seed_snapshot(session_id, snapshot)?;
+        lock_seeded_for_next_start(&self.seeded_for_next_start).insert(session_id.to_string());
+        Ok(())
+    }
+
+    pub fn take_seeded_snapshot_for_start(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<RecoverySnapshot>, String> {
+        if !lock_seeded_for_next_start(&self.seeded_for_next_start).remove(session_id) {
+            return Ok(None);
+        }
+        self.read_persisted_snapshot(session_id)
     }
 
     pub fn next_sequence(&self, session_id: &str) -> u64 {
@@ -440,6 +461,7 @@ impl RecoveryManager {
         Self {
             launcher,
             snapshot_dir,
+            seeded_for_next_start: Arc::new(StdMutex::new(HashSet::new())),
             sequences: Arc::new(StdMutex::new(HashMap::new())),
             state: Arc::new(Mutex::new(RecoveryState {
                 sender: None,
@@ -598,6 +620,18 @@ fn lock_sequences(
         Ok(guard) => guard,
         Err(poisoned) => {
             log::warn!("recovery sequence map was poisoned; continuing");
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn lock_seeded_for_next_start(
+    seeded: &Arc<StdMutex<HashSet<String>>>,
+) -> std::sync::MutexGuard<'_, HashSet<String>> {
+    match seeded.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("seeded recovery session set was poisoned; continuing");
             poisoned.into_inner()
         }
     }
