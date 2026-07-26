@@ -829,6 +829,138 @@ async fn resumed_revision_waits_for_target_teardown_before_setup_and_provider_sp
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
+async fn assert_blocking_teardown_kill_failure_aborts(label: &str, disconnect: bool) {
+    let config = test_config(label);
+    let (repo_root, db) = init_resume_revision_fixture_for_provider(label, &config, "codex");
+    let impl_worktree = repo_root.join(".kanna-worktrees/task-review-task");
+    let setup_marker = impl_worktree.join("failed-kill-setup.marker");
+    db.update_test_pipeline_item_agent_type("review-task", "agent")
+        .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/qa.json"),
+        r#"{
+  "environments": {
+    "implementation": {
+      "setup": ["touch failed-kill-setup.marker"]
+    }
+  },
+  "stages": [
+    {
+      "name": "in progress",
+      "policy": { "transition": "manual", "revision_transition": "auto" },
+      "agent": "implement",
+      "environment": "implementation",
+      "prompt": "$TASK_PROMPT"
+    },
+    {
+      "name": "review",
+      "transition": "manual"
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish blocking teardown failure fixture");
+
+    let prepared = prepare_revision_task_for_api(
+        &db,
+        &config,
+        "review-task",
+        "in progress",
+        "Do not run setup until teardown is confirmed stopped.",
+    )
+    .unwrap();
+    assert!(prepared.resumed_workspace().is_some());
+    assert!(!setup_marker.exists());
+
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let fake_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut commands = Vec::new();
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.unwrap() == 0 {
+                break;
+            }
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            let is_blocking_kill = matches!(
+                &command,
+                kanna_daemon::protocol::Command::Kill { session_id, .. }
+                    if session_id == "td-task-review-task"
+            );
+            commands.push(command);
+            if is_blocking_kill && disconnect {
+                break;
+            }
+            let response = if is_blocking_kill {
+                kanna_daemon::protocol::Event::Error {
+                    code: Some(kanna_daemon::protocol::ErrorCode::WriteFailed),
+                    message: "injected teardown kill failure".to_string(),
+                }
+            } else if matches!(commands.last(), Some(kanna_daemon::protocol::Command::List)) {
+                kanna_daemon::protocol::Event::SessionList {
+                    sessions: Vec::new(),
+                    capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
+                }
+            } else {
+                kanna_daemon::protocol::Event::Ok
+            };
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            if is_blocking_kill {
+                break;
+            }
+        }
+        commands
+    });
+
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let result = spawn_prepared_stage_run_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        prepared,
+    )
+    .await;
+    assert!(result.is_err(), "blocking teardown kill must abort");
+    let commands = fake_daemon.await.unwrap();
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        kanna_daemon::protocol::Command::Kill { session_id, .. }
+            if session_id == "td-task-review-task"
+    )));
+    assert!(commands.iter().all(|command| !matches!(
+        command,
+        kanna_daemon::protocol::Command::SpawnAgent { .. }
+            | kanna_daemon::protocol::Command::Spawn { .. }
+    )));
+    assert!(
+        !setup_marker.exists(),
+        "resumed workspace setup ran after an unconfirmed teardown kill"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn resumed_revision_aborts_when_blocking_teardown_kill_fails() {
+    assert_blocking_teardown_kill_failure_aborts("revision-blocking-teardown-kill-failure", false)
+        .await;
+}
+
+#[tokio::test]
+async fn resumed_revision_aborts_when_blocking_teardown_kill_response_is_lost() {
+    assert_blocking_teardown_kill_failure_aborts("revision-blocking-teardown-kill-lost", true)
+        .await;
+}
+
 #[tokio::test]
 async fn failed_owned_kill_restores_source_run_so_revision_can_retry() {
     let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();

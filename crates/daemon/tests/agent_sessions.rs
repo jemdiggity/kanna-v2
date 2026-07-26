@@ -531,6 +531,82 @@ fn idle_per_turn_kill_emits_before_reused_session_successor_exit() {
 }
 
 #[test]
+fn exited_persistent_kill_acknowledges_before_reused_session_successor_exit() {
+    let dir = temp_dir("exited-persistent-kill");
+    let script = write_script(&dir, "one-shot.sh", ONE_SHOT_AGENT);
+    let daemon = DaemonHandle::start_in(&dir);
+
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Command::Subscribe);
+    assert!(matches!(subscriber.recv(), Event::Ok));
+
+    let mut control = daemon.connect();
+    let mut source_params = spawn_params(&dir, &script, "source prompt");
+    source_params.env.insert(
+        "KANNA_STAGE_RUN_ID".to_string(),
+        "run-persistent-source".to_string(),
+    );
+    control.send(&Command::SpawnAgent {
+        session_id: "agent-persistent-reused".to_string(),
+        params: source_params,
+    });
+    control.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+    subscriber.recv_until(|event| {
+        matches!(
+            event,
+            Event::Exit {
+                session_id,
+                run_id: Some(run_id),
+                killed: false,
+                ..
+            } if session_id == "agent-persistent-reused"
+                && run_id == "run-persistent-source"
+        )
+    });
+
+    control.send(&Command::Kill {
+        session_id: "agent-persistent-reused".to_string(),
+        expected_run_id: Some("run-persistent-source".to_string()),
+    });
+    assert!(matches!(control.recv(), Event::Ok));
+    subscriber.recv_until(|event| {
+        matches!(
+            event,
+            Event::Exit {
+                session_id,
+                run_id: Some(run_id),
+                killed: true,
+                ..
+            } if session_id == "agent-persistent-reused"
+                && run_id == "run-persistent-source"
+        )
+    });
+
+    let mut successor_params = spawn_params(&dir, &script, "successor prompt");
+    successor_params.env.insert(
+        "KANNA_STAGE_RUN_ID".to_string(),
+        "run-persistent-successor".to_string(),
+    );
+    control.send(&Command::SpawnAgent {
+        session_id: "agent-persistent-reused".to_string(),
+        params: successor_params,
+    });
+    control.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+    subscriber.recv_until(|event| {
+        matches!(
+            event,
+            Event::Exit {
+                session_id,
+                run_id: Some(run_id),
+                killed: false,
+                ..
+            } if session_id == "agent-persistent-reused"
+                && run_id == "run-persistent-successor"
+        )
+    });
+}
+
+#[test]
 fn idle_status_broadcast_carries_latest_assistant_text() {
     let dir = temp_dir("waiting-prompt-status");
     let script = write_script(&dir, "fake-agent.sh", STEERABLE_AGENT);

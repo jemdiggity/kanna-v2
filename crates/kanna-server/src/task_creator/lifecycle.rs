@@ -516,9 +516,14 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             if let Err(error) =
                 kill_session_replacing(daemon, replacements, teardown_session_id).await
             {
-                log::warn!(
-                    "failed to replace workspace teardown session {teardown_session_id}: {error}"
-                );
+                return Err(fail_prepared_stage_spawn(
+                    db_path,
+                    &run_id,
+                    &prepared,
+                    format!(
+                        "failed to stop workspace teardown session {teardown_session_id}: {error}"
+                    ),
+                ));
             }
         }
     }
@@ -1104,14 +1109,14 @@ pub(crate) async fn kill_session_replacing_if_owned(
     session_id: &str,
     expected_run_id: Option<&str>,
 ) -> Result<(), String> {
-    replacements.begin_for_run(session_id, expected_run_id);
+    let replacement_marker = replacements.begin_for_run(session_id, expected_run_id);
     let mut kill = daemon
         .send_command(&DaemonCommand::Kill {
             session_id: session_id.to_string(),
         })
         .await
         .map_err(|e| {
-            replacements.cancel(session_id);
+            replacements.cancel(session_id, replacement_marker);
             format!("daemon error: {}", e)
         })?;
     if matches!(
@@ -1126,7 +1131,7 @@ pub(crate) async fn kill_session_replacing_if_owned(
             .send_command(&DaemonCommand::List)
             .await
             .map_err(|error| {
-                replacements.cancel(session_id);
+                replacements.cancel(session_id, replacement_marker);
                 format!("daemon capability negotiation failed after ownership mismatch: {error}")
             })?;
         if matches!(
@@ -1147,7 +1152,7 @@ pub(crate) async fn kill_session_replacing_if_owned(
                 })
                 .await
                 .map_err(|error| {
-                    replacements.cancel(session_id);
+                    replacements.cancel(session_id, replacement_marker);
                     format!("daemon error after legacy ownership negotiation: {error}")
                 })?;
         }
@@ -1158,21 +1163,21 @@ pub(crate) async fn kill_session_replacing_if_owned(
             code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
             ..
         } => {
-            replacements.cancel(session_id);
+            replacements.cancel(session_id, replacement_marker);
             Ok(())
         }
         DaemonEvent::Error { message, .. }
             if message.to_ascii_lowercase().contains("session not found") =>
         {
-            replacements.cancel(session_id);
+            replacements.cancel(session_id, replacement_marker);
             Ok(())
         }
         DaemonEvent::Error { message, .. } => {
-            replacements.cancel(session_id);
+            replacements.cancel(session_id, replacement_marker);
             Err(format!("daemon error: {}", message))
         }
         other => {
-            replacements.cancel(session_id);
+            replacements.cancel(session_id, replacement_marker);
             Err(format!("unexpected daemon response: {:?}", other))
         }
     }
