@@ -75,6 +75,24 @@ impl OldDaemon {
             None => unsafe { libc::kill(self.pid, 0) == 0 },
         }
     }
+
+    pub(crate) fn identity_intact(&self) -> bool {
+        self.start
+            .is_some_and(|start| crate::proc_info::identity_alive(self.pid, start))
+    }
+
+    /// Signal only the authenticated process identity pinned before the
+    /// handoff connection was opened. The verified stop/signal window keeps a
+    /// recycled pid from becoming a target between validation and SIGKILL.
+    pub(crate) fn kill_verified(&self) -> bool {
+        self.authenticated
+            && self.start.is_some_and(|start| {
+                crate::proc_info::kill_process_verified(crate::proc_info::SessionTarget {
+                    pid: self.pid,
+                    start,
+                })
+            })
+    }
 }
 
 pub(crate) struct HandoffResult {
@@ -171,7 +189,7 @@ pub(crate) fn blank_snapshot(rows: u16, cols: u16) -> protocol::TerminalSnapshot
 type HandoffTransfer = (
     Vec<protocol::HandoffSession>,
     Vec<std::os::fd::RawFd>,
-    Option<libc::pid_t>,
+    OldDaemon,
 );
 
 async fn request_handoff(
@@ -228,6 +246,11 @@ async fn request_handoff(
         }
     };
     peer_identity_ok("connect")?;
+    let old_daemon = OldDaemon {
+        pid: expected_pid,
+        start: expected_start,
+        authenticated: true,
+    };
     log::info!(
         "[handoff] connected to old daemon (peer_pid={:?})",
         peer_pid
@@ -279,9 +302,17 @@ async fn request_handoff(
 
     let expected_fds = expected_handoff_fd_count(&session_infos);
     if expected_fds == 0 {
+        peer_identity_ok("metadata ack")?;
         maybe_delay_handoff_ack().await;
         send_handoff_ack(&mut writer, mode.version()).await?;
-        return Ok((session_infos, vec![], peer_pid));
+        wait_for_handoff_release_with(
+            &mut reader,
+            &old_daemon,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(2),
+        )
+        .await?;
+        return Ok((session_infos, vec![], old_daemon));
     }
 
     log::info!(
@@ -306,7 +337,78 @@ async fn request_handoff(
     }
     maybe_delay_handoff_ack().await;
     send_handoff_ack(&mut writer, mode.version()).await?;
-    Ok((session_infos, fds, peer_pid))
+    if let Err(error) = wait_for_handoff_release_with(
+        &mut reader,
+        &old_daemon,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(2),
+    )
+    .await
+    {
+        for fd in &fds {
+            unsafe { libc::close(*fd) };
+        }
+        return Err(error);
+    }
+    Ok((session_infos, fds, old_daemon))
+}
+
+pub(crate) async fn wait_for_handoff_release_with(
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    old_daemon: &OldDaemon,
+    release_deadline: std::time::Duration,
+    post_kill_deadline: std::time::Duration,
+) -> Result<(), HandoffRequestError> {
+    use tokio::io::AsyncBufReadExt;
+
+    async fn wait_for_eof(reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>) {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {
+                    log::debug!(
+                        "[handoff] ignoring message while waiting for old daemon release: {}",
+                        line.trim()
+                    );
+                }
+            }
+        }
+    }
+
+    // HandoffAdopted commits descriptor ownership. The incumbent then stops
+    // its readers and closes this dedicated connection. EOF is the actual
+    // release barrier: process probes alone cannot prove those reader tasks
+    // have relinquished the transferred descriptors.
+    if tokio::time::timeout(release_deadline, wait_for_eof(reader))
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    log::warn!(
+        "[handoff] old daemon (pid={}) did not close the handoff connection after {:?}",
+        old_daemon.pid,
+        release_deadline
+    );
+    if !old_daemon.kill_verified() {
+        return Err(HandoffRequestError::Other(format!(
+            "old daemon pid {} did not release transferred descriptors and its authenticated \
+             identity could not be pinned for termination",
+            old_daemon.pid
+        )));
+    }
+
+    tokio::time::timeout(post_kill_deadline, wait_for_eof(reader))
+        .await
+        .map_err(|_| {
+            HandoffRequestError::Other(format!(
+                "old daemon pid {} did not close the handoff connection after verified termination",
+                old_daemon.pid
+            ))
+        })
 }
 
 /// Fault-injection hook for the cross-version lifecycle regression. Holding
@@ -459,25 +561,16 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
         socket_path
     );
 
-    // Bind the old-daemon identity to the pid file, marked authenticated
-    // only once the socket peer confirmed it (request_handoff fails closed
-    // on a peer/pid-file disagreement, so a successful transfer implies
-    // agreement). Unauthenticated old daemons can be awaited but never
-    // killed.
-    let resolve_old_daemon = |peer_pid: Option<libc::pid_t>| -> OldDaemon {
-        OldDaemon {
-            pid: pid_file_pid,
-            // The pre-connect sample, never a fresh one: re-sampling after
-            // the ACK would silently re-pin a recycled pid.
-            start: pinned_start,
-            // Authenticated only when the socket peer is continuous with the
-            // pinned identity: same pid AND still the same process.
-            authenticated: peer_pid == Some(pid_file_pid)
-                && pinned_start
-                    .is_some_and(|start| crate::proc_info::identity_matches(pid_file_pid, start)),
-        }
+    // Ambiguous failures retain the pre-connect identity only for liveness
+    // reporting. request_handoff returns the authenticated, continuously
+    // verified identity on success; this fallback must never be killable.
+    let unauthenticated_old_daemon = OldDaemon {
+        pid: pid_file_pid,
+        // The pre-connect sample, never a fresh one: re-sampling after the
+        // ACK would silently re-pin a recycled pid.
+        start: pinned_start,
+        authenticated: false,
     };
-    let unauthenticated_old_daemon = resolve_old_daemon(None);
     let old_pid = pid_file_pid;
 
     let initial_mode = HandoffMode::TransactionalV3;
@@ -489,12 +582,7 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
     )
     .await
     {
-        Ok((session_infos, fds, peer_pid)) => (
-            session_infos,
-            fds,
-            initial_mode,
-            resolve_old_daemon(peer_pid),
-        ),
+        Ok((session_infos, fds, old_daemon)) => (session_infos, fds, initial_mode, old_daemon),
         Err(error) => {
             log::info!(
                 "[handoff] mode {} (version {}) failed: {}",
@@ -522,18 +610,13 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
                  but concurrent Spawn/Kill is outside a provable snapshot boundary"
             );
             match request_handoff(socket_path, legacy_mode, pid_file_pid, pinned_start).await {
-                Ok((session_infos, fds, peer_pid)) => {
+                Ok((session_infos, fds, old_daemon)) => {
                     log::info!(
                         "[handoff] legacy fallback accepted (mode={}, version={})",
                         legacy_mode.label(),
                         legacy_mode.version()
                     );
-                    (
-                        session_infos,
-                        fds,
-                        legacy_mode,
-                        resolve_old_daemon(peer_pid),
-                    )
+                    (session_infos, fds, legacy_mode, old_daemon)
                 }
                 Err(legacy_error) => {
                     log::info!(

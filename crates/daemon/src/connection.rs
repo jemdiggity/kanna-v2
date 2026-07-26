@@ -238,6 +238,8 @@ pub(crate) async fn handle_command(
             agent_provider,
             terminal_prelude,
         } => {
+            let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+            let _lifecycle_guard = lifecycle.lock().await;
             log::info!(
                 "[spawn] session={} executable={} cwd={} cols={} rows={}",
                 session_id,
@@ -730,6 +732,8 @@ pub(crate) async fn handle_command(
         }
 
         Command::Kill { session_id } => {
+            let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+            let _lifecycle_guard = lifecycle.lock().await;
             log::info!("[kill] session={}", session_id);
             // Fence Kill with the handoff transaction: the snapshot has
             // already been taken and sent, so removing the session here would
@@ -815,9 +819,36 @@ pub(crate) async fn handle_command(
                 }
                 Ok(session) => session,
             };
+            let stream_control = match &session {
+                Some(session) => {
+                    let control = session.stream_control().await;
+                    if let Some(control) = control.as_ref() {
+                        control.request_stop();
+                    }
+                    control
+                }
+                None => None,
+            };
+            let result = match &session {
+                Some(session) => session.kill().await,
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("session not found: {}", session_id),
+                )),
+            };
+            if result.is_ok() {
+                if let Some(control) = stream_control.as_ref() {
+                    control.wait_until_stopped().await;
+                }
+            }
+
             let killed_fanout = fanouts.lock().await.remove(&session_id);
-            let success = session.is_some();
-            if success {
+            if result.is_ok() {
+                // The lifecycle guard keeps a same-id Spawn on another
+                // connection behind the old reader's stop acknowledgement,
+                // killed Exit, and recovery teardown. The manager claim above
+                // independently ensures the handoff snapshot and this Kill
+                // agree on the exact outgoing incarnation.
                 let exit_evt = Event::Exit {
                     session_id: session_id.clone(),
                     code: 128 + libc::SIGKILL,
@@ -845,18 +876,8 @@ pub(crate) async fn handle_command(
             drop(killed_fanout);
             terminal_emulator_clients.lock().await.remove(&session_id);
             session_sizes.lock().await.remove(&session_id);
-            // Only now tear the claimed incarnation down. The Exit is already
-            // published and the id is already free, so a same-id respawn can
-            // proceed without ever observing this session again.
-            let result = match &session {
-                Some(session) => session.kill().await,
-                None => Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("session not found: {}", session_id),
-                )),
-            };
             // Every id-keyed registry is now clear and the Exit is published:
-            // a replacement may install.
+            // a replacement may install after this lifecycle guard releases.
             sessions.lock().await.end_teardown(&session_id);
             let evt = match result {
                 Ok(_) => Event::Ok,

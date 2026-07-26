@@ -10,7 +10,7 @@ kanna-daemon manages persistent PTY sessions for Claude CLI agents. It runs as a
 2. **Always handoff.** When a new daemon starts and an old one is running, the new daemon takes over all live sessions via fd transfer. The old daemon exits.
 3. **Always spawn on first startup. Reconnect (don't spawn) on daemon restart. Spawn again only if reconnect backoff is exhausted (daemon crash recovery).**
 4. **Sessions survive upgrades.** Child processes (Claude CLI) are unaware of daemon restarts. Their PTY connections are preserved through fd transfer.
-5. **One reader per session.** Each PTY session has exactly one `stream_output` task. Newly spawned sessions start it immediately so detached output is captured by the headless terminal. Adopted handoff sessions start it on first `AttachSnapshot`.
+5. **One reader per session.** Each PTY session has exactly one `stream_output` task. Newly spawned sessions start it immediately so detached output is captured by the headless terminal. Adopted handoff sessions start it immediately after the old-daemon release barrier.
 6. **Headless terminal is authoritative while detached.** PTY bytes are always consumed by `stream_output` and applied to the per-session headless terminal. There is no raw pre-attach byte replay buffer.
 7. **AttachSnapshot is the only frontend attach path.** It atomically sends the current headless terminal snapshot, adds the connection to the live writer list, and then streams future output.
 8. **Multiple clients per session.** Attached clients receive output via broadcast. Smallest terminal dimensions are used for the PTY.
@@ -30,7 +30,7 @@ Every daemon startup follows this sequence:
    d. Receive HandoffReady{sessions} + session fds (SCM_RIGHTS)
    e. Authenticate the peer and validate the descriptor transfer
    f. Send HandoffAdopted{version} to commit the transfer
-   g. Wait for the old daemon to release its readers and exit
+   g. Wait for EOF on the dedicated handoff connection, proving that the old daemon released its readers
    h. Adopt sessions from the transferred fds
 3. Write our PID file
 4. Bind socket (removes stale socket file first)
@@ -129,7 +129,7 @@ New daemon                              Old daemon
     │      "version":3}                      ├── stop old readers
     │                                        ├── broadcast ShuttingDown
     │                                        ├── close fd copies + exit
-    ├── wait for authenticated old daemon ───┤
+    ├── wait for handoff connection EOF ─────┤
     ├── authenticate per-session provenance  ✗
     ├── adopt PTYs + live/resumable agents
     ├── bind socket
@@ -139,6 +139,10 @@ New daemon                              Old daemon
 Before the acknowledgement, the adopter pins the daemon process identity,
 checks Unix-socket peer credentials, validates every metadata-declared FD
 count, rejects truncated or extra ancillary data, and rechecks the pinned peer.
+After the acknowledgement, it waits for EOF on the dedicated handoff
+connection before starting adopted readers. If the release deadline expires,
+only that exact authenticated process identity may be terminated; failure to
+prove release remains fail-closed.
 During adoption, the transferred descriptor is the authority:
 
 - A PTY leader gets signal authority only when the claimed live process is on
@@ -180,7 +184,8 @@ Adopted sessions differ from spawned sessions:
 - The master fd was received via SCM_RIGHTS, wrapped in `OwnedFd`
 - Signal authority comes from descriptor provenance, never sender-provided pid
   metadata alone
-- No `stream_output` task is running — it starts on first `AttachSnapshot`
+- `stream_output` starts immediately after the old-daemon release barrier, so
+  detached status and recovery state remain authoritative before first attach
 
 ## Protocol Reference
 

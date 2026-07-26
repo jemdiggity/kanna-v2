@@ -503,7 +503,7 @@ User makes PR → GitHub API → DB update → stage transition
 - Handoff v3 is the transactional guarantee epoch. A new daemon requests v3 first and retries legacy v2 exactly once only after an explicit version mismatch; ambiguous failures are fail-closed.
 - Legacy v2 preserves stable PTYs and resumable/live agent state during the one-time protocol upgrade, but concurrent Spawn/Kill against a deployed v2 sender has unspecified ordering. Receiver peer, FD-shape, ancillary-data, and descriptor-provenance checks still apply.
 - App waits for new daemon's PID file before connecting (prevents stale connections)
-- One reader per session. New spawned sessions start the reader at Spawn; adopted handoff sessions start it on first AttachSnapshot.
+- One reader per session. Newly spawned sessions start the reader at Spawn; adopted handoff sessions start it immediately after the old-daemon release barrier.
 - **Headless terminal authority** — detached PTY output is interpreted into the per-session headless terminal. There is no pre-attach raw byte buffer.
 - **Broadcast output** — all attached clients receive output simultaneously; AttachSnapshot adds a live writer without creating new readers
 - **Terminal size coordination** — effective PTY dimensions are `min(cols)` × `min(rows)` across all attached clients
@@ -519,7 +519,7 @@ User makes PR → GitHub API → DB update → stage transition
 3. **Always spawn.** App always starts a fresh daemon. Never reuses existing.
 4. **Always wait.** App waits for the new daemon's PID before connecting.
 5. **Sessions survive upgrades.** Child processes are unaware of daemon restarts.
-6. **One reader per session.** Single `stream_output` task; spawned sessions start it immediately, adopted sessions start it on first AttachSnapshot.
+6. **One reader per session.** Single `stream_output` task; spawned sessions start it immediately, and adopted sessions start it immediately after the old-daemon release barrier.
 7. **Headless terminal is authoritative while detached.** AttachSnapshot atomically snapshots that state and joins the live output stream.
 8. **Transactional guarantees require v3.** A v3 sender seals lifecycle mutation around its exact snapshot and retains owned descriptors until `HandoffAdopted`; legacy v2 is explicitly degraded and never mislabeled transactional.
 9. **Ambiguity is fail-closed.** Only an explicit pre-transfer v3 version mismatch permits the one legacy-v2 retry. A newcomer never publishes alongside a live incumbent after a timeout, disconnect, malformed response, partial FD transfer, or failed ACK.
@@ -527,7 +527,7 @@ User makes PR → GitHub API → DB update → stage transition
 ### App startup sequence
 
 1. App spawns new daemon binary (detached via `setsid`)
-2. New daemon detects old daemon, performs handoff (fd transfer), old daemon exits
+2. New daemon detects the old daemon, performs handoff (fd transfer), and waits for EOF on the dedicated handoff connection, which proves the old daemon released its readers
 3. New daemon writes PID file and binds socket
 4. App polls PID file until it matches the spawned child
 5. App clears stale command connection (`DaemonState`)

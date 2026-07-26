@@ -717,6 +717,7 @@ fn run_successful_lifecycle_churn(conn: &mut ClientConn, script: &Path) -> usize
                     env: HashMap::new(),
                     cols: 80,
                     rows: 24,
+                    agent_provider: None,
                 },
                 |event| matches!(event, Evt::SessionCreated { session_id } if session_id == &pty_id),
             )

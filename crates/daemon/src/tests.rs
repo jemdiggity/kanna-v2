@@ -15,7 +15,7 @@ use crate::client::{
 use crate::fanout::{session_fanout, EventLine, SessionFanouts, SubscriberKind};
 use crate::handoff::{
     blank_snapshot, handoff_mode_for_version, legacy_fallback_after_error, parse_handoff_response,
-    HandoffMode, HandoffRequestError,
+    wait_for_handoff_release_with, HandoffMode, HandoffRequestError, OldDaemon,
 };
 use crate::output::{
     classify_output_gap, fanout_status_changed, format_status_observation_log,
@@ -629,6 +629,42 @@ async fn old_daemon_release_only_kills_authenticated_identity_intact_overstayers
         victim.kill().unwrap();
         victim.wait().unwrap();
     }
+}
+
+#[tokio::test]
+async fn handoff_release_waits_for_the_dedicated_connection_to_close() {
+    let (adopter, incumbent) = UnixStream::pair().expect("handoff stream pair");
+    let (adopter_read, _adopter_write) = adopter.into_split();
+    let mut reader = BufReader::new(adopter_read);
+    let pid = std::process::id() as libc::pid_t;
+    let start = crate::proc_info::process_info(pid).map(|info| info.start);
+
+    let mut release = tokio::spawn(async move {
+        wait_for_handoff_release_with(
+            &mut reader,
+            &OldDaemon {
+                pid,
+                start,
+                authenticated: true,
+            },
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .await
+    });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut release)
+            .await
+            .is_err(),
+        "the release barrier must not infer ownership release while the dedicated connection is open"
+    );
+    drop(incumbent);
+    tokio::time::timeout(Duration::from_secs(1), release)
+        .await
+        .expect("release barrier should observe connection EOF")
+        .expect("release task should join")
+        .expect("connection EOF should complete the release barrier");
 }
 
 // ---- Agent resume-spawn lifecycle ----
