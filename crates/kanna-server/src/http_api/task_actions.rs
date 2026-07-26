@@ -62,6 +62,7 @@ pub(super) async fn run_merge_agent(
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id: created_task.task_id,
         follow_task: None,
+        revision_budget: None,
     }))
 }
 
@@ -150,6 +151,7 @@ pub(super) async fn set_task_parent(
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,
+        revision_budget: None,
     }))
 }
 
@@ -186,6 +188,7 @@ pub(super) async fn pin_task(
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,
+        revision_budget: None,
     }))
 }
 
@@ -206,6 +209,7 @@ pub(super) async fn unpin_task(
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,
+        revision_budget: None,
     }))
 }
 
@@ -546,6 +550,7 @@ pub(super) async fn reopen_task(
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,
+        revision_budget: None,
     }))
 }
 
@@ -629,6 +634,7 @@ async fn close_task_after_final_stage(
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: Some(false),
+        revision_budget: None,
     }))
 }
 
@@ -661,6 +667,7 @@ pub(super) async fn advance_stage(
     let response = crate::mobile_api::TaskActionResponse {
         task_id: task_id.clone(),
         follow_task: None,
+        revision_budget: None,
     };
     execute_stage_transition_detached(Arc::clone(&state), task_id, transition);
     state.publish_state_changed(StateChangeScope::Tasks);
@@ -851,6 +858,7 @@ pub(super) async fn rerun_stage(
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,
+        revision_budget: None,
     }))
 }
 
@@ -983,6 +991,7 @@ pub(super) async fn complete_stage(
         return Ok(Json(crate::mobile_api::TaskActionResponse {
             task_id,
             follow_task: None,
+            revision_budget: None,
         }));
     }
 
@@ -1020,12 +1029,14 @@ pub(super) async fn complete_stage(
         return Ok(Json(crate::mobile_api::TaskActionResponse {
             task_id,
             follow_task: None,
+            revision_budget: None,
         }));
     };
 
     let response = crate::mobile_api::TaskActionResponse {
         task_id: task_id.clone(),
         follow_task: None,
+        revision_budget: None,
     };
     execute_stage_transition_detached(Arc::clone(&state), task_id, transition);
     state.publish_state_changed(StateChangeScope::Tasks);
@@ -1128,18 +1139,8 @@ pub(super) async fn request_revision(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
     }
 
-    let stage_result = serde_json::to_string(&serde_json::json!({
-        "status": "failure",
-        "summary": payload.summary,
-        "metadata": payload.metadata,
-    }))
-    .map_err(|e| {
-        (
-            axum::http::StatusCode::BAD_REQUEST,
-            format!("invalid revision result: {}", e),
-        )
-    })?;
-    let (source_task_id, prepared) = {
+    let origin = payload.origin.unwrap_or_default();
+    let outcome = {
         let state = Arc::clone(&state);
         super::blocking::run_handler_blocking("revision prepare", move || {
             let db = Db::open(&state.config.db_path).map_err(|e| {
@@ -1162,6 +1163,64 @@ pub(super) async fn request_revision(
                         format!("task not found: {}", task_id),
                     )
                 })?;
+            // A revision request always records the review verdict on the run
+            // it closes, even when the request itself cannot proceed — so a
+            // failure to resolve the budget still closes the run before it
+            // surfaces the error.
+            let budget = match crate::task_creator::resolve_revision_budget(&db, &source_task_id) {
+                Ok(budget) => budget,
+                Err(error) => {
+                    let stage_result = revision_stage_result(&payload.summary, &payload.metadata)?;
+                    let _ = db.finish_latest_running_stage_run(
+                        &source_task_id,
+                        "failed",
+                        Some(&stage_result),
+                        Some(&payload.summary),
+                    );
+                    return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error));
+                }
+            };
+
+            // Budget spent: record the review verdict, park the task where it
+            // is, and start nothing. This is the backstop against a review
+            // agent driving a scoped task through endless revise/review
+            // rounds — only the human can hand out more rounds.
+            if origin.is_agent() && budget.exhausted() {
+                let parked_summary = format!(
+                    "Parked for human review: this task's automatic revision budget \
+                     ({limit} round(s)) is spent, so Kanna did not start another revision. \
+                     Review verdict: {summary}",
+                    limit = budget.limit,
+                    summary = payload.summary,
+                );
+                let parked_result = revision_stage_result(&parked_summary, &payload.metadata)?;
+                let _ = db
+                    .finish_latest_running_stage_run(
+                        &source_task_id,
+                        "failed",
+                        Some(&parked_result),
+                        Some(&payload.prompt),
+                    )
+                    .map_err(|e| {
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("db error: {}", e),
+                        )
+                    })?;
+                db.update_pipeline_item_activity(&source_task_id, "unread")
+                    .map_err(|e| {
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("db error: {}", e),
+                        )
+                    })?;
+                return Ok(RevisionOutcome::Parked {
+                    source_task_id,
+                    budget,
+                });
+            }
+
+            let stage_result = revision_stage_result(&payload.summary, &payload.metadata)?;
             let _ = db
                 .finish_latest_running_stage_run(
                     &source_task_id,
@@ -1175,28 +1234,148 @@ pub(super) async fn request_revision(
                         format!("db error: {}", e),
                     )
                 })?;
-            crate::task_creator::prepare_revision_task_for_api(
+            // Only a capped agent round is announced to the revising agent as
+            // a round; a human-requested revision is the human's own call.
+            let round = (origin.is_agent() && budget.limit > 0).then_some(
+                crate::task_creator::RevisionRound {
+                    number: budget.rounds + 1,
+                    limit: budget.limit,
+                },
+            );
+            let prepared = crate::task_creator::prepare_revision_task_for_api(
                 &db,
                 &state.config,
                 &source_task_id,
                 &payload.target_stage,
                 &payload.prompt,
+                round,
             )
-            .map(|prepared| (source_task_id, prepared))
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            // Count the round only once the revision is real: a failed
+            // preparation never ran an agent, so it must not cost the task a
+            // round. A human request hands the budget back instead.
+            let rounds = if origin.is_agent() {
+                db.bump_task_revision_rounds(&source_task_id).map_err(|e| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("db error: {}", e),
+                    )
+                })?
+            } else {
+                db.reset_task_revision_rounds(&source_task_id)
+                    .map_err(|e| {
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("db error: {}", e),
+                        )
+                    })?;
+                0
+            };
+            Ok(RevisionOutcome::Started {
+                source_task_id,
+                prepared: Box::new(prepared),
+                budget: crate::task_creator::RevisionBudget {
+                    rounds,
+                    limit: budget.limit,
+                },
+            })
         })
         .await?
     };
 
-    execute_stage_transition_detached(
-        Arc::clone(&state),
-        source_task_id.clone(),
-        crate::task_creator::PreparedStageTransition::Run(Box::new(prepared)),
-    );
-    state.publish_state_changed(StateChangeScope::Tasks);
+    match outcome {
+        RevisionOutcome::Parked {
+            source_task_id,
+            budget,
+        } => {
+            state.publish_state_changed(StateChangeScope::Tasks);
+            Ok(Json(crate::mobile_api::TaskActionResponse {
+                task_id: source_task_id,
+                follow_task: None,
+                revision_budget: Some(crate::mobile_api::RevisionBudgetStatus {
+                    rounds: budget.rounds,
+                    limit: budget.limit,
+                    exhausted: true,
+                    message: format!(
+                        "No revision was started: this task has already used its \
+                         {limit} automatic revision round(s). The task is parked at its current \
+                         stage for its human, who decides whether to revise again. Do not retry \
+                         this request — report your findings and stop.",
+                        limit = budget.limit,
+                    ),
+                }),
+            }))
+        }
+        RevisionOutcome::Started {
+            source_task_id,
+            prepared,
+            budget,
+        } => {
+            execute_stage_transition_detached(
+                Arc::clone(&state),
+                source_task_id.clone(),
+                crate::task_creator::PreparedStageTransition::Run(prepared),
+            );
+            state.publish_state_changed(StateChangeScope::Tasks);
 
-    Ok(Json(crate::mobile_api::TaskActionResponse {
-        task_id: source_task_id,
-        follow_task: None,
+            let message = if budget.limit > 0 && origin.is_agent() {
+                format!(
+                    "Revision round {rounds} of {limit} started.",
+                    rounds = budget.rounds,
+                    limit = budget.limit,
+                )
+            } else if budget.limit > 0 {
+                format!(
+                    "Revision started; the automatic revision budget was reset to 0 of {limit} \
+                     round(s).",
+                    limit = budget.limit,
+                )
+            } else {
+                "Revision started; this pipeline sets no revision-round limit.".to_string()
+            };
+            Ok(Json(crate::mobile_api::TaskActionResponse {
+                task_id: source_task_id,
+                follow_task: None,
+                revision_budget: Some(crate::mobile_api::RevisionBudgetStatus {
+                    rounds: budget.rounds,
+                    limit: budget.limit,
+                    exhausted: false,
+                    message,
+                }),
+            }))
+        }
+    }
+}
+
+/// Either a revision run to dispatch, or a parked task whose revision budget
+/// is spent.
+enum RevisionOutcome {
+    Parked {
+        source_task_id: String,
+        budget: crate::task_creator::RevisionBudget,
+    },
+    Started {
+        source_task_id: String,
+        prepared: Box<crate::task_creator::PreparedStageRunSpawn>,
+        budget: crate::task_creator::RevisionBudget,
+    },
+}
+
+/// The `{status, summary, metadata}` verdict JSON a revision request records
+/// on the run it closes.
+fn revision_stage_result(
+    summary: &str,
+    metadata: &Option<serde_json::Value>,
+) -> Result<String, (axum::http::StatusCode, String)> {
+    serde_json::to_string(&serde_json::json!({
+        "status": "failure",
+        "summary": summary,
+        "metadata": metadata,
     }))
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("invalid revision result: {}", e),
+        )
+    })
 }

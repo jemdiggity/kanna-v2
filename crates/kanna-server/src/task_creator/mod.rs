@@ -51,6 +51,7 @@ use worktree::{
     remove_prepared_worktree, MergeBranchesError,
 };
 
+pub(crate) use definitions::DEFAULT_REVISION_LIMIT;
 pub(crate) use environment::warm_login_shell_path;
 pub(crate) use lifecycle::{
     dispatch_prepared_post_for_api, kill_session_replacing, prepared_task_id,
@@ -60,9 +61,10 @@ pub(crate) use lifecycle::{
 };
 pub(crate) use merge::prepare_merge_agent_for_api;
 pub use merge::run_merge_agent;
+pub(crate) use prompt::RevisionRound;
 pub(crate) use stages::{
     prepare_advance_stage_for_api, prepare_revision_task_for_api, prepare_stage_completion_for_api,
-    resolve_stage_transition,
+    resolve_revision_budget, resolve_revision_limit, resolve_stage_transition, RevisionBudget,
 };
 pub(crate) use worktree::resolve_current_source_worktree_branch;
 
@@ -1414,6 +1416,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
             post: None,
         }],
         environments: None,
+        revision_limit: None,
     };
     let pipeline_def =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
@@ -1517,6 +1520,7 @@ completion with status success so Kanna can run the commit post and close this i
             }),
         }],
         environments: None,
+        revision_limit: None,
     };
     let pipeline_def =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;

@@ -436,6 +436,7 @@ pub(super) async fn block_task(
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,
+        revision_budget: None,
     }))
 }
 
@@ -468,5 +469,6 @@ pub(super) async fn unblock_task(
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,
+        revision_budget: None,
     }))
 }

@@ -72,6 +72,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "031_task_transfer_cloud_desktop_ids",
     "032_task_transfer_sidecar_cleanup",
     "033_create_task_intent",
+    "034_pipeline_item_revision_rounds",
 ];
 
 #[derive(Debug, Serialize)]
@@ -104,6 +105,9 @@ pub struct PipelineItem {
     pub notified_at: Option<String>,
     pub parent_task_id: Option<String>,
     pub pipeline_def: Option<String>,
+    /// Agent-requested revision rounds since the last human-requested one.
+    /// Bounds autonomous review/revise loops; a human revision resets it.
+    pub revision_rounds: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1267,6 +1271,16 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             );
             "#,
         )
+    })?;
+
+    run_migration(conn, "034_pipeline_item_revision_rounds", |conn| {
+        add_column(
+            conn,
+            "pipeline_item",
+            "revision_rounds",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        Ok(())
     })?;
 
     Ok(())

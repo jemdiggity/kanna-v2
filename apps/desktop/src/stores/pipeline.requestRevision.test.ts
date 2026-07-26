@@ -88,6 +88,9 @@ describe("requestRevision", () => {
         targetStage: "in progress",
         summary: "needs changes",
         prompt: "Please revise.",
+        // A user-driven revision is exempt from the agent revision-round
+        // budget and resets it.
+        origin: "human",
       }),
     });
     expect(reloadSnapshot).not.toHaveBeenCalled();

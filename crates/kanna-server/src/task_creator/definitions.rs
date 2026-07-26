@@ -58,6 +58,26 @@ pub(super) struct PipelineDefinition {
     pub(super) stages: Vec<PipelineStage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) environments: Option<HashMap<String, PipelineEnvironment>>,
+    /// Cap on agent-requested revision rounds per task before the task parks
+    /// for its human instead of looping. Omitted means
+    /// `DEFAULT_REVISION_LIMIT`; `0` means unlimited. Pinned `pipeline_def`
+    /// snapshots written before this field existed omit it and therefore
+    /// inherit the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) revision_limit: Option<i64>,
+}
+
+/// Rounds of agent-requested revision a task gets before the engine stops
+/// forking new work and parks the task for its human. A review agent that
+/// keeps finding new work each round is the mechanism by which a scoped task
+/// turns into an open-ended project, so the loop is bounded by default.
+pub(crate) const DEFAULT_REVISION_LIMIT: i64 = 3;
+
+impl PipelineDefinition {
+    /// Effective revision-round cap: `0` means unlimited.
+    pub(super) fn revision_limit(&self) -> i64 {
+        self.revision_limit.unwrap_or(DEFAULT_REVISION_LIMIT).max(0)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -190,6 +210,7 @@ struct RawPipelineDefinition {
     description: Option<String>,
     stages: Vec<RawPipelineStage>,
     environments: Option<HashMap<String, PipelineEnvironment>>,
+    revision_limit: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -1004,6 +1025,7 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
         description: raw.description,
         stages,
         environments: raw.environments,
+        revision_limit: raw.revision_limit,
     })
 }
 

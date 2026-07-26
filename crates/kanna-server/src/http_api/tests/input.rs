@@ -389,6 +389,7 @@ async fn run_merge_agent_route_uses_merge_agent_runner() {
             Ok(TaskActionResponse {
                 task_id: format!("merge-{task_id}"),
                 follow_task: None,
+                revision_budget: None,
             })
         }),
     );

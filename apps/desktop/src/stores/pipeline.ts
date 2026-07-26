@@ -348,6 +348,9 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
         summary: options.summary,
         prompt: options.prompt,
         metadata: options.metadata,
+        // A revision the user asked for is never refused by the agent
+        // revision-round budget, and it hands the budget back.
+        origin: "human",
       });
       if (!response.ok) {
         throw new Error(await response.text());

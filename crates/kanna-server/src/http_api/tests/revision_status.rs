@@ -14,6 +14,7 @@ async fn request_revision_route_uses_revision_requester() {
             Ok(TaskActionResponse {
                 task_id: "revision-task".to_string(),
                 follow_task: None,
+                revision_budget: None,
             })
         }),
     );
@@ -181,6 +182,10 @@ async fn request_revision_route_resolves_branch_style_task_id() {
                     let command_line = args.join(" ");
                     assert!(command_line.contains("Implement revision:"));
                     assert!(command_line.contains("Add e2e coverage for task creation."));
+                    // The pipeline declares no revision_limit, so the default
+                    // cap applies and the revising agent is told which round
+                    // it is and that the loop is bounded.
+                    assert!(command_line.contains("Revision round 1 of 3"));
                     session_id
                 }
                 other => panic!("expected revision spawn command, got {:?}", other),
@@ -287,6 +292,8 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         revision_run.feedback.as_deref(),
         Some("Add e2e coverage for task creation.")
     );
+    // An agent-requested revision spends one round of the task's budget.
+    assert_eq!(db.task_revision_rounds("710917fb").unwrap(), 1);
 
     daemon_server.await.unwrap();
     let _ = std::fs::remove_file(&socket_path);
@@ -915,4 +922,326 @@ async fn status_route_does_not_expose_pairing_secret() {
     assert_eq!(status_json["environment"], "development");
     assert_eq!(status_json["serverVersion"], "test-version");
     assert!(status.pairing_code.is_none());
+}
+
+/// Repo + config + seeded task for the revision-budget tests: a pipeline that
+/// caps revision rounds, a task parked at `review` with a running review run,
+/// and the round budget already spent.
+struct RevisionBudgetFixture {
+    config: Config,
+    repo_root: PathBuf,
+    daemon_dir: PathBuf,
+    socket_path: PathBuf,
+}
+
+fn setup_revision_budget_fixture(label: &str, revision_limit: i64) -> RevisionBudgetFixture {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let unique = format!(
+        "{label}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-budget-{unique}"));
+    init_test_git_repo(&repo_root);
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/budget.json"),
+        serde_json::json!({
+            "name": "budget",
+            "revision_limit": revision_limit,
+            "stages": [
+                {
+                    "name": "in progress",
+                    "prompt": "$TASK_PROMPT",
+                    "policy": { "transition": "manual" }
+                },
+                { "name": "review", "policy": { "transition": "auto" } },
+                { "name": "pr", "policy": { "transition": "manual" } }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add budgeted pipeline"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    publish_test_origin_main(&repo_root);
+    assert!(Command::new("git")
+        .args(["branch", "task-budget-1"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-revision-budget-d-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-revision-budget-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        pairing_store_path: format!("/tmp/kanna-pairings-revision-budget-{unique}.json"),
+    };
+
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "budget-1",
+        "repo-1",
+        "Add a focused fix",
+        Some("Add a focused fix"),
+        "review",
+        "2026-07-26 10:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "budget-1",
+        "task-budget-1",
+        "budget",
+        None,
+        "claude",
+    )
+    .unwrap();
+    // Spend the whole budget, as a task that has already been round-tripped
+    // through review this many times would have.
+    for _ in 0..revision_limit {
+        db.bump_task_revision_rounds("budget-1").unwrap();
+    }
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "budget-review-run",
+        task_id: "budget-1",
+        stage: "review",
+        kind: "main",
+        agent: Some("qa-dispatcher"),
+        agent_provider: Some("claude"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("budget-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    drop(db);
+
+    RevisionBudgetFixture {
+        config,
+        repo_root,
+        daemon_dir,
+        socket_path,
+    }
+}
+
+fn cleanup_revision_budget_fixture(fixture: &RevisionBudgetFixture) {
+    let _ = std::fs::remove_file(&fixture.socket_path);
+    let _ = std::fs::remove_dir_all(&fixture.daemon_dir);
+    let _ = std::fs::remove_dir_all(&fixture.repo_root);
+}
+
+#[tokio::test]
+async fn agent_revision_request_parks_the_task_once_the_round_budget_is_spent() {
+    let fixture = setup_revision_budget_fixture("agent", 2);
+
+    // No daemon is listening: an exhausted budget must start nothing, so the
+    // request cannot need one.
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/budget-1/actions/request-revision")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "targetStage": "in progress",
+                        "summary": "QA failed: review-ui",
+                        "prompt": "Rebuild the sidebar with a different layout."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let action: TaskActionResponse = from_slice(&body).unwrap();
+    assert_eq!(action.task_id, "budget-1");
+    let budget = action.revision_budget.expect("revision budget reported");
+    assert!(budget.exhausted);
+    assert_eq!(budget.rounds, 2);
+    assert_eq!(budget.limit, 2);
+    assert!(
+        budget.message.contains("parked"),
+        "the agent must be told why nothing started: {}",
+        budget.message
+    );
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    let task = db.get_task_stage_source("budget-1").unwrap().unwrap();
+    // Parked: the task stays where it was, and no round was spent on a
+    // revision that never happened.
+    assert_eq!(task.stage.as_deref(), Some("review"));
+    assert_eq!(task.branch.as_deref(), Some("task-budget-1"));
+    assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 2);
+    assert_eq!(
+        db.get_pipeline_item("budget-1")
+            .unwrap()
+            .unwrap()
+            .activity
+            .as_deref(),
+        Some("unread"),
+        "a parked task must surface to its human"
+    );
+
+    // The review verdict is still recorded, with the requested changes kept as
+    // the run's feedback so nothing the reviewer found is lost.
+    let runs = db.list_stage_runs_for_task("budget-1").unwrap();
+    assert_eq!(runs.len(), 1, "no revision run may be created");
+    let review_run = &runs[0];
+    assert_eq!(review_run.status, "failed");
+    assert_eq!(
+        review_run.feedback.as_deref(),
+        Some("Rebuild the sidebar with a different layout.")
+    );
+    let result: serde_json::Value =
+        serde_json::from_str(review_run.result.as_deref().unwrap()).unwrap();
+    let summary = result["summary"].as_str().unwrap();
+    assert!(summary.contains("Parked for human review"), "{summary}");
+    assert!(summary.contains("QA failed: review-ui"), "{summary}");
+
+    drop(db);
+    cleanup_revision_budget_fixture(&fixture);
+}
+
+#[tokio::test]
+async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let fixture = setup_revision_budget_fixture("human", 1);
+
+    // Fake daemon: the human-requested revision must reach a real spawn even
+    // though the agent budget is spent.
+    let daemon_listener = UnixListener::bind(&fixture.socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let session_id = match command {
+                DaemonCommand::Kill { .. } => {
+                    let response = DaemonEvent::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    };
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                DaemonCommand::SpawnAgent { session_id, .. } => session_id,
+                DaemonCommand::Spawn { session_id, .. } => session_id,
+                other => panic!("expected revision spawn command, got {:?}", other),
+            };
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            break;
+        }
+    });
+
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/budget-1/actions/request-revision")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "targetStage": "in progress",
+                        "summary": "needs one more pass",
+                        "prompt": "Fix the failing typecheck.",
+                        "origin": "human"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    if response.status() != StatusCode::OK {
+        daemon_server.abort();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        cleanup_revision_budget_fixture(&fixture);
+        panic!(
+            "human revision must not be refused by the agent budget, got {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let action: TaskActionResponse = from_slice(&body).unwrap();
+    let budget = action.revision_budget.expect("revision budget reported");
+    assert!(!budget.exhausted);
+    assert_eq!(budget.rounds, 0, "the budget is handed back to the agents");
+    assert_eq!(budget.limit, 1);
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    let task = super::actions::wait_for_task_stage(&db, "budget-1", "in progress").await;
+    assert_eq!(task.stage.as_deref(), Some("in progress"));
+    assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 0);
+
+    daemon_server.await.unwrap();
+    drop(db);
+    cleanup_revision_budget_fixture(&fixture);
 }

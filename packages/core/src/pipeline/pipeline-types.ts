@@ -39,6 +39,13 @@ export interface PipelineDefinition {
   description?: string;
   environments?: Record<string, PipelineEnvironment>;
   stages: PipelineStage[];
+  /**
+   * Agent-requested revision rounds a task may spend before Kanna stops
+   * forking revisions and parks the task for its human. Omitted means the
+   * engine default (3); 0 disables the cap. Enforced server-side by
+   * `request_revision`.
+   */
+  revision_limit?: number;
 }
 
 export interface AgentDefinition {

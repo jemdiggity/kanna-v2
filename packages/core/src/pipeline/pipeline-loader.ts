@@ -218,6 +218,16 @@ export function parsePipelineJson(raw: string): PipelineDefinition {
     def.description = obj["description"];
   }
 
+  if (obj["revision_limit"] !== undefined && obj["revision_limit"] !== null) {
+    const limit = obj["revision_limit"];
+    if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 0) {
+      throw validationError(
+        `Pipeline "${def.name}" has an invalid revision_limit ${formatRawValue(limit)}; must be a non-negative integer`
+      );
+    }
+    def.revision_limit = limit;
+  }
+
   if (obj["environments"] !== undefined && obj["environments"] !== null) {
     if (typeof obj["environments"] === "object" && !Array.isArray(obj["environments"])) {
       def.environments = obj["environments"] as Record<string, { setup?: string[]; teardown?: string[] }>;

@@ -164,7 +164,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "033_create_task_intent");
+    assert_eq!(latest_migration, "034_pipeline_item_revision_rounds");
 
     let stage_run_sql: String = db
         .conn
@@ -650,6 +650,9 @@ fn open_migrates_origin_main_028_activity_revision() {
         .expect("load migrated pipeline item")
         .expect("migrated pipeline item exists");
     assert_eq!(item.activity_revision, 0);
+    // Rows written before the revision budget existed start with their full
+    // budget rather than an exhausted one.
+    assert_eq!(item.revision_rounds, 0);
 
     let snapshot = db.ui_snapshot().expect("load migrated ui snapshot");
     assert_eq!(snapshot.entries.len(), 1);
@@ -1692,4 +1695,51 @@ fn find_open_agent_task_ignores_closed_singleton() {
         .is_none());
 
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn revision_rounds_count_agent_rounds_until_reset() {
+    let path = Db::test_db_path("revision-rounds");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Fix one thing",
+        Some("Fix one thing"),
+        "in progress",
+        "2026-07-26 00:00:00",
+    )
+    .unwrap();
+
+    // A task starts with its whole budget: existing rows (and rows written by
+    // older versions, via the column default) count as zero rounds spent.
+    assert_eq!(db.task_revision_rounds("task-1").unwrap(), 0);
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .revision_rounds,
+        0
+    );
+
+    assert_eq!(db.bump_task_revision_rounds("task-1").unwrap(), 1);
+    assert_eq!(db.bump_task_revision_rounds("task-1").unwrap(), 2);
+    assert_eq!(db.task_revision_rounds("task-1").unwrap(), 2);
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .revision_rounds,
+        2
+    );
+
+    // A human-requested revision hands the budget back.
+    db.reset_task_revision_rounds("task-1").unwrap();
+    assert_eq!(db.task_revision_rounds("task-1").unwrap(), 0);
+
+    // An unknown task is an error, never a silent zero that would hand out an
+    // unbounded budget.
+    assert!(db.bump_task_revision_rounds("missing-task").is_err());
+    assert!(db.reset_task_revision_rounds("missing-task").is_err());
 }
