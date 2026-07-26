@@ -41,14 +41,21 @@ function canonicalize(value) {
   return value;
 }
 
-function dependencyKey(name, version) {
+function dependencyKey(name, version, snapshots) {
   if (typeof version !== "string" || version.length === 0) {
     throw new Error(`kd lockfile dependency ${name} has no resolved version`);
   }
   if (version.startsWith("link:") || version.startsWith("workspace:")) {
     throw new Error(`kd lockfile dependency ${name} is not an installable package`);
   }
-  return `${name}@${version}`;
+  if (version.startsWith("npm:")) {
+    return version.slice("npm:".length);
+  }
+  const conventional = `${name}@${version}`;
+  if (snapshots?.[conventional] || !snapshots) {
+    return conventional;
+  }
+  return snapshots[version] ? version : conventional;
 }
 
 function packageMetadata(packages, snapshotKey) {
@@ -70,20 +77,20 @@ export function kdDependencyProjection(lockfile) {
     throw new Error("pnpm lockfile is missing the tools/kd importer");
   }
 
+  const snapshots = lockfile.snapshots ?? {};
+  const packages = lockfile.packages ?? {};
   const roots = [
     ...Object.entries(importer.dependencies ?? {}).map(([name, value]) =>
-      dependencyKey(name, value.version)
+      dependencyKey(name, value.version, snapshots)
     )
   ];
   const tsup = importer.devDependencies?.tsup;
   if (!tsup) {
     throw new Error("pnpm lockfile tools/kd importer is missing tsup");
   }
-  roots.push(dependencyKey("tsup", tsup.version));
+  roots.push(dependencyKey("tsup", tsup.version, snapshots));
   roots.sort();
 
-  const snapshots = lockfile.snapshots ?? {};
-  const packages = lockfile.packages ?? {};
   const selectedSnapshots = {};
   const selectedPackages = {};
   const pending = [...roots];
@@ -111,7 +118,7 @@ export function kdDependencyProjection(lockfile) {
       snapshot.optionalDependencies ?? {}
     ]) {
       for (const [name, version] of Object.entries(dependencies)) {
-        pending.push(dependencyKey(name, version));
+        pending.push(dependencyKey(name, version, snapshots));
       }
     }
   }

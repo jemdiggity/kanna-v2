@@ -9,5 +9,6 @@ export default defineConfig({
   target: "node22",
   clean: true,
   sourcemap: true,
-  dts: false
+  dts: false,
+  noExternal: ["@modelcontextprotocol/sdk", "smol-toml", "zod"]
 });

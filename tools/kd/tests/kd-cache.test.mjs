@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -7,7 +8,7 @@ import {
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   computeKdIdentity,
@@ -61,16 +62,19 @@ function createLockfile() {
     packages: {
       "zod@4.4.3": { resolution: { integrity: "zod-integrity" } },
       "tsup@8.5.1": { resolution: { integrity: "tsup-integrity" } },
-      "esbuild@0.27.4": { resolution: { integrity: "esbuild-integrity" } }
+      "esbuild@0.27.4": { resolution: { integrity: "esbuild-integrity" } },
+      "wrap-ansi@7.0.0": { resolution: { integrity: "wrap-ansi-integrity" } }
     },
     snapshots: {
       "zod@4.4.3": {},
       "tsup@8.5.1(esbuild@0.27.4)": {
         dependencies: {
-          esbuild: "0.27.4"
+          esbuild: "0.27.4",
+          "wrap-ansi-cjs": "npm:wrap-ansi@7.0.0"
         }
       },
-      "esbuild@0.27.4": {}
+      "esbuild@0.27.4": {},
+      "wrap-ansi@7.0.0": {}
     }
   };
 }
@@ -99,6 +103,7 @@ describe("kd installation identity", () => {
     expect(Object.keys(projection.snapshots)).toEqual([
       "esbuild@0.27.4",
       "tsup@8.5.1(esbuild@0.27.4)",
+      "wrap-ansi@7.0.0",
       "zod@4.4.3"
     ]);
     expect(JSON.stringify(projection)).not.toContain("vitest");
@@ -279,4 +284,52 @@ describe("kd installation publication", () => {
 
     expect(existsSync(lockRoot)).toBe(true);
   });
+});
+
+describe("kd installation resolver", () => {
+  it("builds one standalone bundle and returns silent cache hits", () => {
+    const repoRoot = resolve(import.meta.dirname, "../../..");
+    const cacheRoot = mkdtempSync(join(tmpdir(), "kd-resolver-cache-"));
+    fixtureRoots.push(cacheRoot);
+    const resolver = join(repoRoot, "tools/kd/bin/kd-resolver.mjs");
+    const env = {
+      ...process.env,
+      KANNA_KD_CACHE_ROOT: cacheRoot
+    };
+
+    const first = spawnSync(process.execPath, [resolver, "kd"], {
+      cwd: repoRoot,
+      env,
+      encoding: "utf8",
+      timeout: 180_000
+    });
+
+    expect(first.status).toBe(0);
+    expect(first.stderr).toContain("Installing kd ");
+    const entrypoint = first.stdout.trim();
+    expect(entrypoint.startsWith(`${cacheRoot}/`)).toBe(true);
+    expect(entrypoint.endsWith("/bin/kd.js")).toBe(true);
+
+    const standalone = spawnSync(process.execPath, [entrypoint, "--help"], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        NODE_PATH: ""
+      },
+      encoding: "utf8",
+      timeout: 30_000
+    });
+    expect(standalone.status).toBe(0);
+    expect(standalone.stdout).toContain("Usage: kd <command>");
+
+    const second = spawnSync(process.execPath, [resolver, "kd"], {
+      cwd: repoRoot,
+      env,
+      encoding: "utf8",
+      timeout: 30_000
+    });
+    expect(second.status).toBe(0);
+    expect(second.stdout.trim()).toBe(entrypoint);
+    expect(second.stderr).toBe("");
+  }, 240_000);
 });
