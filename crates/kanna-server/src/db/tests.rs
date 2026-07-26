@@ -426,6 +426,11 @@ fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
         .list_pending_incoming_transfers()
         .expect("list after complete")
         .is_empty());
+    assert_eq!(
+        db.list_completed_incoming_transfer_ids()
+            .expect("list completed incoming cleanup candidates"),
+        vec!["transfer-1"]
+    );
 
     let _ = std::fs::remove_file(path);
 }

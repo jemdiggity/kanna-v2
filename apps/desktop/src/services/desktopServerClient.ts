@@ -69,6 +69,7 @@ export interface DesktopServerClientHandlersForTests {
   ) => MaybePromise<RunDesktopRepoCommandResponse>;
   findRepoByPath?: (path: string) => MaybePromise<DesktopRepoResponse | null>;
   reorderRepos?: (orderedIds: string[]) => MaybePromise<void>;
+  fetchIncomingTransferCleanupCandidates?: () => MaybePromise<string[]>;
   fetchPendingIncomingTransfers?: () => MaybePromise<PendingIncomingTransfer[]>;
   claimPendingIncomingTransfer?: (transferId: string) => MaybePromise<boolean>;
   failPendingIncomingTransfer?: (transferId: string, reason: string) => MaybePromise<boolean>;
@@ -810,6 +811,16 @@ export async function fetchPendingIncomingTransfers(): Promise<PendingIncomingTr
   }
   const response = await requestJson<{ transfers: PendingIncomingTransferResponse[] }>("/v1/transfers/incoming/pending");
   return response.transfers.map(normalizePendingIncomingTransfer);
+}
+
+export async function fetchIncomingTransferCleanupCandidates(): Promise<string[]> {
+  if (clientHandlersForTests?.fetchIncomingTransferCleanupCandidates) {
+    return await clientHandlersForTests.fetchIncomingTransferCleanupCandidates();
+  }
+  const response = await requestJson<{ transferIds: string[] }>(
+    "/v1/transfers/incoming/cleanup-candidates",
+  );
+  return response.transferIds;
 }
 
 export async function claimPendingIncomingTransfer(transferId: string): Promise<boolean> {

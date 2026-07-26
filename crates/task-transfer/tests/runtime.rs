@@ -1672,10 +1672,11 @@ async fn live_ttl_pruning_removes_outgoing_and_incoming_reservation_files() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn aged_committed_incoming_reservations_are_pruned_live_and_on_restart() {
+async fn committed_incoming_reservations_survive_pending_ttl_and_restart() {
     let temp = tempfile::tempdir().unwrap();
     let secondary_config = RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0)
-        .with_committed_incoming_ttl(Duration::from_millis(25));
+        .with_pending_transfer_ttl(Duration::from_secs(1))
+        .with_max_incoming_reservations(2);
     let secondary = TransferRuntime::spawn(secondary_config.clone())
         .await
         .unwrap();
@@ -1707,73 +1708,29 @@ async fn aged_committed_incoming_reservations_are_pruned_live_and_on_restart() {
         "incoming-reservations",
         &first.transfer_id,
     );
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
     let _ = primary
         .prepare_transfer_preflight("peer-secondary", "task-trigger-live-prune")
         .await
         .unwrap();
-    assert!(!first_path.exists());
+    assert!(first_path.exists());
 
-    drop(primary);
+    age_incoming_reservation(&first_path);
     drop(secondary);
-
-    let restart_temp = tempfile::tempdir().unwrap();
-    let restart_secondary_config = RuntimeConfig::for_tests(
-        "peer-restart-secondary",
-        "Restart Secondary",
-        restart_temp.path(),
-        0,
-    )
-    .with_committed_incoming_ttl(Duration::from_secs(24 * 60 * 60));
-    let restart_secondary = TransferRuntime::spawn(restart_secondary_config.clone())
+    let secondary = TransferRuntime::spawn(secondary_config).await.unwrap();
+    assert!(first_path.exists());
+    secondary
+        .acknowledge_import_committed(&first.transfer_id, "task-committed-1", "task-dest-1")
         .await
         .unwrap();
-    let restart_primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
-        "peer-restart-primary",
-        "Restart Primary",
-        restart_temp.path(),
-        0,
-    ))
-    .await
-    .unwrap();
-    pair_peers(
-        &restart_primary,
-        &restart_secondary,
-        "peer-restart-secondary",
-    )
-    .await;
-    let second = restart_primary
-        .prepare_transfer_preflight("peer-restart-secondary", "task-committed-2")
-        .await
-        .unwrap();
-    restart_primary
-        .prepare_transfer_commit(
-            &second.transfer_id,
-            json!({"task": {"source_task_id": "task-committed-2"}}),
-        )
-        .await
-        .unwrap();
-    let _ = next_incoming_transfer_request(&restart_secondary).await;
-    let second_path = replay_record_path(
-        restart_temp.path(),
-        "peer-restart-secondary",
-        "incoming-reservations",
-        &second.transfer_id,
-    );
-    age_incoming_reservation(&second_path);
-    drop(restart_secondary);
-    let _secondary = TransferRuntime::spawn(restart_secondary_config)
-        .await
-        .unwrap();
-    assert!(!second_path.exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn incoming_reservation_capacity_bounds_active_admission_and_committed_history() {
+async fn incoming_reservation_capacity_rejects_without_displacing_committed_work() {
     let temp = tempfile::tempdir().unwrap();
     let secondary = TransferRuntime::spawn(
         RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0)
-            .with_incoming_replay_limits(1, 2),
+            .with_max_incoming_reservations(2),
     )
     .await
     .unwrap();
@@ -1787,27 +1744,9 @@ async fn incoming_reservation_capacity_bounds_active_admission_and_committed_his
     .unwrap();
     pair_peers(&primary, &secondary, "peer-secondary").await;
 
-    let active = primary
-        .prepare_transfer_preflight("peer-secondary", "task-active")
-        .await
-        .unwrap();
-    let active_cap = primary
-        .prepare_transfer_preflight("peer-secondary", "task-over-active-cap")
-        .await
-        .unwrap_err();
-    assert!(active_cap.to_string().contains("too many active incoming"));
-
-    primary
-        .prepare_transfer_commit(
-            &active.transfer_id,
-            json!({"task": {"source_task_id": "task-active"}}),
-        )
-        .await
-        .unwrap();
-    let _ = next_incoming_transfer_request(&secondary).await;
-    let mut committed_ids = vec![active.transfer_id];
+    let mut committed_ids = Vec::new();
     for index in 0..2 {
-        let source_task = format!("task-committed-cap-{index}");
+        let source_task = format!("task-committed-{index}");
         let transfer = primary
             .prepare_transfer_preflight("peer-secondary", &source_task)
             .await
@@ -1821,25 +1760,112 @@ async fn incoming_reservation_capacity_bounds_active_admission_and_committed_his
             .unwrap();
         let _ = next_incoming_transfer_request(&secondary).await;
         committed_ids.push(transfer.transfer_id);
-        tokio::time::sleep(Duration::from_millis(2)).await;
     }
+    let capacity_error = primary
+        .prepare_transfer_preflight("peer-secondary", "task-over-capacity")
+        .await
+        .unwrap_err();
+    assert!(capacity_error
+        .to_string()
+        .contains("too many active incoming"));
     assert_eq!(
         replay_json_count(temp.path(), "peer-secondary", "incoming-reservations"),
         2
     );
-    let oldest_error = secondary
-        .acknowledge_import_committed(&committed_ids[0], "task-active", "task-dest-oldest")
+    secondary
+        .acknowledge_import_committed(&committed_ids[0], "task-committed-0", "task-dest-oldest")
         .await
-        .unwrap_err();
-    assert!(oldest_error.to_string().contains("missing source peer"));
+        .unwrap();
+    secondary
+        .mark_import_ack_completed(&committed_ids[0])
+        .await
+        .unwrap();
+    let admitted_after_cleanup = primary
+        .prepare_transfer_preflight("peer-secondary", "task-after-cleanup")
+        .await
+        .unwrap();
+    assert!(!admitted_after_cleanup.transfer_id.is_empty());
     secondary
         .acknowledge_import_committed(
             committed_ids.last().unwrap(),
-            "task-committed-cap-1",
+            "task-committed-1",
             "task-dest-newest",
         )
         .await
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_capacity_restart_preserves_existing_committed_work_and_closes_admission() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0)
+            .with_max_incoming_reservations(2),
+    )
+    .await
+    .unwrap();
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    let mut committed = Vec::new();
+    for index in 0..2 {
+        let source_task_id = format!("task-legacy-{index}");
+        let transfer = primary
+            .prepare_transfer_preflight("peer-secondary", &source_task_id)
+            .await
+            .unwrap();
+        primary
+            .prepare_transfer_commit(
+                &transfer.transfer_id,
+                json!({"task": {"source_task_id": source_task_id}}),
+            )
+            .await
+            .unwrap();
+        let _ = next_incoming_transfer_request(&secondary).await;
+        committed.push(transfer.transfer_id);
+    }
+
+    drop(secondary);
+    let secondary = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0)
+            .with_max_incoming_reservations(1),
+    )
+    .await
+    .unwrap();
+    let admission_error = primary
+        .prepare_transfer_preflight("peer-secondary", "task-over-legacy-cap")
+        .await
+        .unwrap_err();
+    assert!(admission_error
+        .to_string()
+        .contains("too many active incoming"));
+
+    for (index, transfer_id) in committed.iter().enumerate() {
+        secondary
+            .acknowledge_import_committed(
+                transfer_id,
+                &format!("task-legacy-{index}"),
+                &format!("task-dest-{index}"),
+            )
+            .await
+            .unwrap();
+        secondary
+            .mark_import_ack_completed(transfer_id)
+            .await
+            .unwrap();
+    }
+    let admitted = primary
+        .prepare_transfer_preflight("peer-secondary", "task-after-legacy-cleanup")
+        .await
+        .unwrap();
+    assert!(!admitted.transfer_id.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2722,7 +2748,7 @@ fn age_incoming_reservation(path: &Path) {
     let mut reservation: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path).expect("read incoming reservation"))
             .expect("parse incoming reservation");
-    reservation["committed_at_unix_ms"] = json!(1);
+    reservation["created_at_unix_ms"] = json!(1);
     std::fs::write(
         path,
         serde_json::to_vec_pretty(&reservation).expect("serialize aged reservation"),

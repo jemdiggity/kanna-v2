@@ -40,9 +40,9 @@ use super::tasks::{
 use super::transfers::{
     claim_pending_incoming_transfer, complete_task_transfer, fail_pending_incoming_transfer,
     get_task_transfer, insert_task_transfer, insert_task_transfer_provenance,
-    list_pending_incoming_transfers, mark_incoming_transfer_awaiting_acknowledgment,
-    mark_incoming_transfer_importing, reject_task_transfer, set_task_cloud_identity,
-    update_task_transfer_payload,
+    list_incoming_transfer_cleanup_candidates, list_pending_incoming_transfers,
+    mark_incoming_transfer_awaiting_acknowledgment, mark_incoming_transfer_importing,
+    reject_task_transfer, set_task_cloud_identity, update_task_transfer_payload,
 };
 use super::window_workspace::mutate_window_workspace;
 use axum::body::Body;
@@ -187,6 +187,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/transfers/incoming/pending",
             get(list_pending_incoming_transfers),
+        )
+        .route(
+            "/v1/transfers/incoming/cleanup-candidates",
+            get(list_incoming_transfer_cleanup_candidates),
         )
         .route("/v1/transfers", post(insert_task_transfer))
         .route(

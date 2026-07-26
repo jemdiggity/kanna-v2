@@ -10,6 +10,7 @@ import {
   fetchDesktopRepoCommands,
   runDesktopRepoCommand,
   fetchDesktopSnapshot,
+  fetchIncomingTransferCleanupCandidates,
   fetchPendingIncomingTransfers,
   getDesktopSetting,
   mutateDesktopWindowWorkspace,
@@ -534,6 +535,26 @@ describe("desktopServerClient", () => {
     ]);
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:48121/v1/transfers/incoming/pending",
+      {
+        method: "GET",
+        headers: undefined,
+        body: undefined,
+      },
+    );
+  });
+
+  it("lists completed incoming transfer cleanup candidates", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ transferIds: ["transfer-completed"] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchIncomingTransferCleanupCandidates()).resolves.toEqual(["transfer-completed"]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/transfers/incoming/cleanup-candidates",
       {
         method: "GET",
         headers: undefined,

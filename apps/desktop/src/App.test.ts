@@ -1005,6 +1005,7 @@ describe("App", () => {
         ],
       }),
       runRepoCommand: async () => ({ taskId: "repo-command-task", reused: false }),
+      fetchIncomingTransferCleanupCandidates: async () => [],
       fetchPendingIncomingTransfers: async () => await dbSelectMock(),
       claimPendingIncomingTransfer: async (transferId) => {
         const result = await dbMock.execute(
@@ -1046,6 +1047,7 @@ describe("App", () => {
       if (command === "git_list_base_branches") return ["feature/x", "main", "origin/main"];
       if (command === "read_env_var") return "/Users/test";
       if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
+      if (command === "mark_incoming_transfer_ack_completed") return null;
       throw new Error(`unexpected invoke: ${command}`);
     });
   });
@@ -4769,6 +4771,20 @@ describe("App", () => {
       ["transfer-db-1"],
     );
     expect(wrapper.text()).not.toContain("peer-source");
+  });
+
+  it("cleans up completed incoming sidecar reservations on restart", async () => {
+    updateDesktopServerClientHandlersForTests({
+      fetchIncomingTransferCleanupCandidates: async () => ["transfer-completed"],
+    });
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+
+    expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
+      transferId: "transfer-completed",
+    });
+    wrapper.unmount();
   });
 
   it("does not auto-import the same pending transfer twice across restored windows", async () => {

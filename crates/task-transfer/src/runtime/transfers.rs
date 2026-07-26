@@ -206,7 +206,7 @@ impl TransferRuntime {
         let source_peer_id = {
             let mut reservations = self.incoming_reservations.lock().await;
             self.replay_store
-                .prune_incoming_reservations(&mut reservations, None);
+                .prune_incoming_reservations(&mut reservations);
             reservations
                 .get(transfer_id)
                 .map(|reservation| reservation.source_peer_id.clone())
@@ -356,7 +356,7 @@ impl TransferRuntime {
         let source_peer_id = {
             let mut reservations = self.incoming_reservations.lock().await;
             self.replay_store
-                .prune_incoming_reservations(&mut reservations, None);
+                .prune_incoming_reservations(&mut reservations);
             reservations
                 .get(transfer_id)
                 .map(|reservation| reservation.source_peer_id.clone())
@@ -474,7 +474,7 @@ impl TransferRuntime {
         let source_peer_id = {
             let mut reservations = self.incoming_reservations.lock().await;
             self.replay_store
-                .prune_incoming_reservations(&mut reservations, None);
+                .prune_incoming_reservations(&mut reservations);
             reservations.get(transfer_id).map(|reservation| {
                 (
                     reservation.source_peer_id.clone(),

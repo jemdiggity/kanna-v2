@@ -1259,6 +1259,7 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
         .unwrap();
     assert_eq!(complete_response.status(), StatusCode::OK);
     let completed_list = app
+        .clone()
         .oneshot(
             Request::get("/v1/transfers/incoming/pending")
                 .body(Body::empty())
@@ -1271,6 +1272,24 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
         .unwrap();
     let completed_json: serde_json::Value = from_slice(&completed_body).unwrap();
     assert!(completed_json["transfers"].as_array().unwrap().is_empty());
+
+    let cleanup_list = app
+        .oneshot(
+            Request::get("/v1/transfers/incoming/cleanup-candidates")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleanup_list.status(), StatusCode::OK);
+    let cleanup_body = axum::body::to_bytes(cleanup_list.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cleanup_json: serde_json::Value = from_slice(&cleanup_body).unwrap();
+    assert_eq!(
+        cleanup_json["transferIds"],
+        serde_json::json!(["transfer-1"])
+    );
 }
 
 #[tokio::test]

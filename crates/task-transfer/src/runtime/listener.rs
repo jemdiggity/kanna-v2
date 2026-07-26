@@ -187,16 +187,11 @@ async fn handle_connection(
             let mut reservations = context.incoming_reservations.lock().await;
             context
                 .replay_store
-                .prune_incoming_reservations(&mut reservations, None);
-            if reservations
-                .values()
-                .filter(|reservation| !reservation.committed)
-                .count()
-                >= context.replay_store.max_active_incoming_reservations()
-            {
+                .prune_incoming_reservations(&mut reservations);
+            if reservations.len() >= context.replay_store.max_incoming_reservations() {
                 return Err(RuntimeError::Protocol(format!(
                     "too many active incoming transfer reservations (maximum {})",
-                    context.replay_store.max_active_incoming_reservations()
+                    context.replay_store.max_incoming_reservations()
                 )));
             }
             let transfer_id = loop {
@@ -210,7 +205,6 @@ async fn handle_connection(
                 source_task_id,
                 created_at_unix_ms: unix_ms(),
                 committed: false,
-                committed_at_unix_ms: None,
             };
             context
                 .replay_store
@@ -255,13 +249,9 @@ async fn handle_connection(
                             RuntimeError::Protocol(format!("unknown transfer id {}", transfer_id))
                         })?;
                         reservation.committed = true;
-                        reservation.committed_at_unix_ms = Some(unix_ms());
                         context
                             .replay_store
                             .save_incoming_reservation(&transfer_id, reservation)?;
-                        context
-                            .replay_store
-                            .prune_incoming_reservations(&mut reservations, Some(&transfer_id));
                     }
                     context
                         .incoming_sender
@@ -873,7 +863,7 @@ async fn build_incoming_event(
 ) -> Result<IncomingTransferEvent, RuntimeError> {
     let reservation = {
         let mut reservations = incoming_reservations.lock().await;
-        replay_store.prune_incoming_reservations(&mut reservations, None);
+        replay_store.prune_incoming_reservations(&mut reservations);
         reservations
             .get(transfer_id)
             .cloned()

@@ -39,8 +39,6 @@ struct StoredIncomingTransferReservation {
     source_task_id: String,
     created_at_unix_ms: u64,
     committed: bool,
-    #[serde(default)]
-    committed_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,9 +48,7 @@ pub(super) struct TransferReplayStore {
     applied_receipt_ttl: Duration,
     max_unapplied_receipts: usize,
     max_applied_receipts: usize,
-    committed_incoming_ttl: Duration,
-    max_active_incoming_reservations: usize,
-    max_committed_incoming_reservations: usize,
+    max_incoming_reservations: usize,
 }
 
 impl TransferReplayStore {
@@ -63,9 +59,7 @@ impl TransferReplayStore {
         applied_receipt_ttl: Duration,
         max_unapplied_receipts: usize,
         max_applied_receipts: usize,
-        committed_incoming_ttl: Duration,
-        max_active_incoming_reservations: usize,
-        max_committed_incoming_reservations: usize,
+        max_incoming_reservations: usize,
     ) -> Self {
         Self {
             root: registry_root
@@ -75,9 +69,7 @@ impl TransferReplayStore {
             applied_receipt_ttl,
             max_unapplied_receipts,
             max_applied_receipts,
-            committed_incoming_ttl,
-            max_active_incoming_reservations,
-            max_committed_incoming_reservations,
+            max_incoming_reservations,
         }
     }
 
@@ -114,8 +106,6 @@ impl TransferReplayStore {
     ) -> Result<HashMap<String, IncomingTransferReservation>, RuntimeError> {
         let now_ms = unix_ms();
         let mut loaded = HashMap::new();
-        let mut committed = Vec::new();
-        let mut active_count = 0usize;
         for (path, stored) in self.load_records::<StoredIncomingTransferReservation>(
             &self.root.join("incoming-reservations"),
         )? {
@@ -123,22 +113,10 @@ impl TransferReplayStore {
                 self.remove_record(&path);
                 continue;
             }
-            let committed_at = stored
-                .committed_at_unix_ms
-                .unwrap_or(stored.created_at_unix_ms);
-            if (!stored.committed && self.is_expired(stored.created_at_unix_ms, now_ms))
-                || (stored.committed
-                    && now_ms.saturating_sub(committed_at)
-                        >= self.committed_incoming_ttl.as_millis() as u64)
-            {
+            if !stored.committed && self.is_expired(stored.created_at_unix_ms, now_ms) {
                 self.remove_record(&path);
                 continue;
             }
-            if stored.committed {
-                committed.push((path, stored, committed_at));
-                continue;
-            }
-            active_count += 1;
             loaded.insert(
                 stored.transfer_id,
                 IncomingTransferReservation {
@@ -146,30 +124,6 @@ impl TransferReplayStore {
                     source_task_id: stored.source_task_id,
                     created_at_unix_ms: stored.created_at_unix_ms,
                     committed: stored.committed,
-                    committed_at_unix_ms: stored.committed_at_unix_ms,
-                },
-            );
-        }
-        if active_count > self.max_active_incoming_reservations {
-            return Err(RuntimeError::InvalidConfig(format!(
-                "replay store contains {active_count} active incoming reservations, exceeding configured maximum {}",
-                self.max_active_incoming_reservations
-            )));
-        }
-        committed.sort_by_key(|(_, _, committed_at)| std::cmp::Reverse(*committed_at));
-        for (index, (path, stored, _)) in committed.into_iter().enumerate() {
-            if index >= self.max_committed_incoming_reservations {
-                self.remove_record(&path);
-                continue;
-            }
-            loaded.insert(
-                stored.transfer_id,
-                IncomingTransferReservation {
-                    source_peer_id: stored.source_peer_id,
-                    source_task_id: stored.source_task_id,
-                    created_at_unix_ms: stored.created_at_unix_ms,
-                    committed: true,
-                    committed_at_unix_ms: stored.committed_at_unix_ms,
                 },
             );
         }
@@ -251,7 +205,6 @@ impl TransferReplayStore {
                 source_task_id: reservation.source_task_id.clone(),
                 created_at_unix_ms: reservation.created_at_unix_ms,
                 committed: reservation.committed,
-                committed_at_unix_ms: reservation.committed_at_unix_ms,
             },
         )
     }
@@ -260,58 +213,24 @@ impl TransferReplayStore {
         self.remove_record(&self.incoming_reservation_path(transfer_id));
     }
 
-    pub(super) fn max_active_incoming_reservations(&self) -> usize {
-        self.max_active_incoming_reservations
+    pub(super) fn max_incoming_reservations(&self) -> usize {
+        self.max_incoming_reservations
     }
 
     pub(super) fn prune_incoming_reservations(
         &self,
         reservations: &mut HashMap<String, IncomingTransferReservation>,
-        protected_transfer_id: Option<&str>,
     ) {
         let now_ms = unix_ms();
-        let mut remove = reservations
+        let remove = reservations
             .iter()
             .filter(|(_, reservation)| {
-                if reservation.committed {
-                    now_ms.saturating_sub(
-                        reservation
-                            .committed_at_unix_ms
-                            .unwrap_or(reservation.created_at_unix_ms),
-                    ) >= self.committed_incoming_ttl.as_millis() as u64
-                } else {
-                    now_ms.saturating_sub(reservation.created_at_unix_ms)
+                !reservation.committed
+                    && now_ms.saturating_sub(reservation.created_at_unix_ms)
                         >= self.ttl.as_millis() as u64
-                }
             })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
-        let mut committed = reservations
-            .iter()
-            .filter(|(id, reservation)| {
-                reservation.committed
-                    && protected_transfer_id.is_none_or(|protected| protected != id.as_str())
-                    && !remove.contains(id)
-            })
-            .map(|(id, reservation)| {
-                (
-                    id.clone(),
-                    reservation
-                        .committed_at_unix_ms
-                        .unwrap_or(reservation.created_at_unix_ms),
-                )
-            })
-            .collect::<Vec<_>>();
-        committed.sort_by_key(|(_, at)| std::cmp::Reverse(*at));
-        let protected_count = usize::from(
-            protected_transfer_id
-                .and_then(|id| reservations.get(id))
-                .is_some_and(|reservation| reservation.committed),
-        );
-        let allowed = self
-            .max_committed_incoming_reservations
-            .saturating_sub(protected_count);
-        remove.extend(committed.into_iter().skip(allowed).map(|(id, _)| id));
         for transfer_id in remove {
             reservations.remove(&transfer_id);
             self.remove_incoming_reservation(&transfer_id);

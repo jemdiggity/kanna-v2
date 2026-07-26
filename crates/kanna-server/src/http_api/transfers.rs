@@ -19,6 +19,12 @@ pub(super) struct PendingIncomingTransfersResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct IncomingTransferCleanupCandidatesResponse {
+    transfer_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct TransferUpdateResponse {
     updated: bool,
 }
@@ -71,6 +77,18 @@ pub(super) async fn list_pending_incoming_transfers(
     let db = open_db(&state)?;
     let transfers = db.list_pending_incoming_transfers().map_err(db_error)?;
     Ok(Json(PendingIncomingTransfersResponse { transfers }))
+}
+
+pub(super) async fn list_incoming_transfer_cleanup_candidates(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<IncomingTransferCleanupCandidatesResponse>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    let transfer_ids = db
+        .list_completed_incoming_transfer_ids()
+        .map_err(db_error)?;
+    Ok(Json(IncomingTransferCleanupCandidatesResponse {
+        transfer_ids,
+    }))
 }
 
 pub(super) async fn insert_task_transfer(

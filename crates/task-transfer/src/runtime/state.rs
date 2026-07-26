@@ -19,7 +19,6 @@ pub(super) struct IncomingTransferReservation {
     pub(super) source_task_id: String,
     pub(super) created_at_unix_ms: u64,
     pub(super) committed: bool,
-    pub(super) committed_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]

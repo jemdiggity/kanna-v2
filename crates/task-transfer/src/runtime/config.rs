@@ -12,12 +12,9 @@ const DEFAULT_RECEIPT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const DEFAULT_APPLIED_RECEIPT_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const DEFAULT_MAX_UNAPPLIED_RECEIPTS: usize = 256;
 const DEFAULT_MAX_APPLIED_RECEIPTS: usize = 4096;
-// Destination acknowledgments can be ambiguous across desktop/sidecar crashes,
-// so retain committed reservations for a week but bound both active admission
-// and historical committed rows.
-const DEFAULT_COMMITTED_INCOMING_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-const DEFAULT_MAX_ACTIVE_INCOMING_RESERVATIONS: usize = 256;
-const DEFAULT_MAX_COMMITTED_INCOMING_RESERVATIONS: usize = 4096;
+// Incoming reservations are active work until destination acknowledgment
+// completes. Bound admission rather than evicting committed user-pending work.
+const DEFAULT_MAX_INCOMING_RESERVATIONS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoveryMode {
@@ -41,9 +38,7 @@ pub struct RuntimeConfig {
     pub(super) applied_receipt_ttl: Duration,
     pub(super) max_unapplied_receipts: usize,
     pub(super) max_applied_receipts: usize,
-    pub(super) committed_incoming_ttl: Duration,
-    pub(super) max_active_incoming_reservations: usize,
-    pub(super) max_committed_incoming_reservations: usize,
+    pub(super) max_incoming_reservations: usize,
 }
 
 impl RuntimeConfig {
@@ -68,9 +63,7 @@ impl RuntimeConfig {
             applied_receipt_ttl: DEFAULT_APPLIED_RECEIPT_TTL,
             max_unapplied_receipts: DEFAULT_MAX_UNAPPLIED_RECEIPTS,
             max_applied_receipts: DEFAULT_MAX_APPLIED_RECEIPTS,
-            committed_incoming_ttl: DEFAULT_COMMITTED_INCOMING_TTL,
-            max_active_incoming_reservations: DEFAULT_MAX_ACTIVE_INCOMING_RESERVATIONS,
-            max_committed_incoming_reservations: DEFAULT_MAX_COMMITTED_INCOMING_RESERVATIONS,
+            max_incoming_reservations: DEFAULT_MAX_INCOMING_RESERVATIONS,
         }
     }
 
@@ -109,14 +102,8 @@ impl RuntimeConfig {
         self
     }
 
-    pub fn with_committed_incoming_ttl(mut self, ttl: Duration) -> Self {
-        self.committed_incoming_ttl = ttl;
-        self
-    }
-
-    pub fn with_incoming_replay_limits(mut self, max_active: usize, max_committed: usize) -> Self {
-        self.max_active_incoming_reservations = max_active;
-        self.max_committed_incoming_reservations = max_committed;
+    pub fn with_max_incoming_reservations(mut self, maximum: usize) -> Self {
+        self.max_incoming_reservations = maximum;
         self
     }
 
@@ -211,9 +198,7 @@ impl RuntimeConfig {
             applied_receipt_ttl: DEFAULT_APPLIED_RECEIPT_TTL,
             max_unapplied_receipts: DEFAULT_MAX_UNAPPLIED_RECEIPTS,
             max_applied_receipts: DEFAULT_MAX_APPLIED_RECEIPTS,
-            committed_incoming_ttl: DEFAULT_COMMITTED_INCOMING_TTL,
-            max_active_incoming_reservations: DEFAULT_MAX_ACTIVE_INCOMING_RESERVATIONS,
-            max_committed_incoming_reservations: DEFAULT_MAX_COMMITTED_INCOMING_RESERVATIONS,
+            max_incoming_reservations: DEFAULT_MAX_INCOMING_RESERVATIONS,
         })
     }
 

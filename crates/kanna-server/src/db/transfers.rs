@@ -232,6 +232,17 @@ impl Db {
         rows.collect()
     }
 
+    pub fn list_completed_incoming_transfer_ids(&self) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id
+             FROM task_transfer
+             WHERE direction = 'incoming' AND status = 'completed'
+             ORDER BY completed_at ASC, started_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+
     pub fn claim_pending_incoming_transfer(
         &self,
         transfer_id: &str,

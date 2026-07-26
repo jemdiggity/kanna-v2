@@ -70,9 +70,7 @@ impl TransferRuntime {
             config.applied_receipt_ttl,
             config.max_unapplied_receipts,
             config.max_applied_receipts,
-            config.committed_incoming_ttl,
-            config.max_active_incoming_reservations,
-            config.max_committed_incoming_reservations,
+            config.max_incoming_reservations,
         ));
         let mut loaded_outgoing_transfers = replay_store.load_outgoing_reservations()?;
         let loaded_receipts = replay_store.load_receipts()?;

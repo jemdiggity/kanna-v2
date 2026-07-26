@@ -13,6 +13,7 @@ import type { useToast } from "./useToast";
 import {
   claimPendingIncomingTransfer,
   failPendingIncomingTransfer,
+  fetchIncomingTransferCleanupCandidates,
   fetchPendingIncomingTransfers,
   type PendingIncomingTransfer,
 } from "../services/desktopServerClient";
@@ -173,6 +174,25 @@ export function useAppTaskTransfer({
 
   async function importPendingIncomingTransfers() {
     void db;
+    try {
+      const cleanupCandidates = await fetchIncomingTransferCleanupCandidates();
+      for (const transferId of cleanupCandidates) {
+        try {
+          await invoke("mark_incoming_transfer_ack_completed", { transferId });
+        } catch (error: unknown) {
+          console.warn("[App] failed to clean up completed incoming transfer reservation:", {
+            transferId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    } catch (error: unknown) {
+      console.warn(
+        "[App] failed to list incoming transfer cleanup candidates:",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+
     let rows: PendingIncomingTransfer[];
     try {
       rows = await fetchPendingIncomingTransfers();
