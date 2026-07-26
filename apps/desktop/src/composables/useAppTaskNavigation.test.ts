@@ -58,6 +58,101 @@ function sidebarTask(slotId: string, repoId: string): SidebarTaskItem {
 }
 
 describe("useAppTaskNavigation", () => {
+  it("derives push and pull palette actions from the selected workspace task capabilities", () => {
+    const localItem = sidebarTask("slot-local", "repo-local");
+    const remoteItem = {
+      ...sidebarTask("slot-remote", "cloud:repo-remote"),
+      task_id: "cloud:task-remote",
+    };
+    const localTask = {
+      item: { id: "task-local" },
+      localTaskId: "task-local",
+      owner: { kind: "local", id: "local" },
+      capabilities: { canPushToMachine: true, canPullFromMachine: false },
+    } as WorkspaceTask;
+    const remoteTask = reactive({
+      item: { id: "cloud:task-remote" },
+      localTaskId: null,
+      owner: { kind: "remote", id: "desktop-owner" },
+      capabilities: { canPushToMachine: false, canPullFromMachine: true },
+    }) as WorkspaceTask;
+    const selectedCloudItemId = ref<string | null>(null);
+    const store = reactive({
+      recordSelectionIntent: vi.fn(),
+      selectedRepoId: "repo-local",
+      selectedItemId: "slot-local" as string | null,
+      lastSelectedItemByRepo: {},
+      items: [{ ...localItem, id: "task-local" }],
+      sortedItemsForCurrentRepo: [],
+      sortedItemsAllRepos: [],
+      taskBlockers: [],
+      currentItem: { ...localItem, id: "task-local" },
+      getStageOrder: () => 0,
+      listBlockedByItem: vi.fn(async () => []),
+      listBlockersForItem: vi.fn(async () => []),
+      blockTask: vi.fn(async () => {}),
+      editBlockedTask: vi.fn(async () => {}),
+      loadAgent: vi.fn(),
+      createItem: vi.fn(),
+      selectRepo: vi.fn(async () => {}),
+      selectItem: vi.fn(async () => {}),
+    });
+    const openPeerPicker = vi.fn();
+    const pullSelectedWorkspaceTask = vi.fn();
+    const scope = effectScope();
+    const navigation = scope.run(() => useAppTaskNavigation({
+      store: store as never,
+      toast: { error: vi.fn() } as never,
+      t: (key) => key,
+      windowWorkspace: { persistSelection: vi.fn(async () => {}) } as never,
+      sidebarRef: ref(null),
+      sidebarRepos: computed(() => []),
+      sidebarItems: computed(() => [localItem, remoteItem]),
+      workspaceTasksByItemId: computed(() => new Map([
+        ["slot-local", localTask],
+        ["task-local", localTask],
+        ["slot-remote", remoteTask],
+        ["cloud:task-remote", remoteTask],
+      ])),
+      selectedCloudRepoId: ref(null),
+      selectedCloudItemId,
+      showBlockerSelect: ref(false),
+      blockerSelectMode: ref("block"),
+      repoCommandCatalog: ref(null),
+      openPeerPicker,
+      openPairPeerPicker: vi.fn(),
+      pullSelectedWorkspaceTask,
+    }));
+    if (!navigation) throw new Error("navigation composable did not initialize");
+
+    try {
+      const localPush = navigation.paletteDynamicCommands.value.find((command) =>
+        command.id === "push-to-machine");
+      expect(localPush?.label).toBe("taskTransfer.pushToMachine");
+      localPush?.execute();
+      expect(openPeerPicker).toHaveBeenCalledWith("task-local");
+
+      selectedCloudItemId.value = "slot-remote";
+      store.selectedItemId = "slot-remote";
+      store.currentItem = null as never;
+      const remotePull = navigation.paletteDynamicCommands.value.find((command) =>
+        command.id === "pull-to-machine");
+      expect(remotePull?.label).toBe("taskTransfer.pullToThisMachine");
+      remotePull?.execute();
+      expect(pullSelectedWorkspaceTask).toHaveBeenCalledWith(remoteTask);
+
+      remoteTask.capabilities.canPullFromMachine = false;
+      expect(navigation.paletteDynamicCommands.value.some((command) =>
+        command.id === "pull-to-machine")).toBe(false);
+      expect(navigation.paletteDynamicCommands.value.some((command) =>
+        command.id === "push-to-machine")).toBe(false);
+      expect(navigation.paletteDynamicCommands.value.some((command) =>
+        command.id === "pair-machine")).toBe(true);
+    } finally {
+      scope.stop();
+    }
+  });
+
   it("does not let an older cross-repo navigation overwrite a newer intent", async () => {
     const firstRepoSelection = deferred();
     const items = [sidebarTask("task-one", "repo-1"), sidebarTask("task-two", "repo-2")];

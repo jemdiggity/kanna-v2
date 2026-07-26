@@ -12,6 +12,7 @@ pub const STAGING_FIREBASE_PROJECT_ID: &str = "kanna-staging";
 pub const LOCAL_FIREBASE_PROJECT_ID: &str = "kanna-local";
 pub const PRODUCTION_MOBILE_SERVER_PORT: u16 = 48_120;
 pub const STAGING_MOBILE_SERVER_PORT: u16 = 48_121;
+pub const DEFAULT_TRANSFER_PORT: u16 = 4_455;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesktopCloudEnvironment {

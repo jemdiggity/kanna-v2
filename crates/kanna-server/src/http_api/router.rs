@@ -1,5 +1,6 @@
 use super::analytics::get_repo_analytics;
 use super::backup::create_backup;
+use super::cloud_relay::reconnect_cloud_relay;
 use super::desktop::list_desktops;
 #[cfg(debug_assertions)]
 use super::e2e_mobile_controls::{gate_direct_lan_http, update_e2e_mobile_machine_controls};
@@ -15,7 +16,7 @@ use super::repos::{
     get_repo_kanna_definitions, get_repo_pipeline_definition, list_available_agent_providers,
     list_repo_tasks, list_repos, patch_repo, reorder_repos,
 };
-use super::settings::{delete_setting, get_setting, put_setting};
+use super::settings::{delete_setting, get_setting, put_cloud_transfer_identity, put_setting};
 use super::signal_agent::signal_agent;
 use super::snapshot::get_snapshot;
 use super::state::{AppState, HttpInvokeResponse, TunneledHttpInvoke};
@@ -40,7 +41,10 @@ use super::tasks::{
 use super::transfers::{
     claim_pending_incoming_transfer, complete_task_transfer, fail_pending_incoming_transfer,
     get_task_transfer, insert_task_transfer, insert_task_transfer_provenance,
-    list_pending_incoming_transfers, reject_task_transfer, update_task_transfer_payload,
+    list_incoming_transfer_cleanup_candidates, list_pending_incoming_transfers,
+    mark_incoming_transfer_awaiting_acknowledgment, mark_incoming_transfer_importing,
+    mark_incoming_transfer_sidecar_cleanup_completed, reject_task_transfer,
+    set_task_cloud_identity, update_task_transfer_payload,
 };
 use super::window_workspace::mutate_window_workspace;
 use axum::body::Body;
@@ -58,6 +62,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/status", get(status))
         .route("/v1/snapshot", get(get_snapshot))
         .route("/v1/backup", post(create_backup))
+        .route(
+            "/v1/cloud/relay/actions/reconnect",
+            post(reconnect_cloud_relay),
+        )
+        .route(
+            "/v1/settings/cloud-transfer-identity",
+            axum::routing::put(put_cloud_transfer_identity),
+        )
         .route(
             "/v1/settings/{key}",
             get(get_setting).put(put_setting).delete(delete_setting),
@@ -179,8 +191,16 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(run_merge_agent),
         )
         .route(
+            "/v1/tasks/{task_id}/actions/cloud-task-identity",
+            axum::routing::put(set_task_cloud_identity),
+        )
+        .route(
             "/v1/transfers/incoming/pending",
             get(list_pending_incoming_transfers),
+        )
+        .route(
+            "/v1/transfers/incoming/cleanup-candidates",
+            get(list_incoming_transfer_cleanup_candidates),
         )
         .route("/v1/transfers", post(insert_task_transfer))
         .route(
@@ -197,6 +217,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(complete_task_transfer),
         )
         .route(
+            "/v1/transfers/{transfer_id}/actions/importing",
+            post(mark_incoming_transfer_importing),
+        )
+        .route(
+            "/v1/transfers/{transfer_id}/actions/awaiting-acknowledgment",
+            post(mark_incoming_transfer_awaiting_acknowledgment),
+        )
+        .route(
             "/v1/transfers/{transfer_id}/actions/reject",
             post(reject_task_transfer),
         )
@@ -207,6 +235,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/transfers/{transfer_id}/actions/fail",
             post(fail_pending_incoming_transfer),
+        )
+        .route(
+            "/v1/transfers/{transfer_id}/actions/sidecar-cleanup-complete",
+            post(mark_incoming_transfer_sidecar_cleanup_completed),
         )
         .route("/v1/pairing/sessions", post(create_pairing_session))
         .route("/v1/pairing/sessions/claim", post(claim_pairing_session));

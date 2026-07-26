@@ -122,6 +122,7 @@ pub struct TaskLatestRun {
 pub struct AddRepoRequest {
     pub path: String,
     pub name: Option<String>,
+    pub default_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -129,6 +130,44 @@ pub struct AddRepoRequest {
 pub struct TaskTemplateLaunch {
     pub id: String,
     pub teardown: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTaskRecoverySnapshot {
+    pub serialized: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub cursor_row: u16,
+    pub cursor_col: u16,
+    pub cursor_visible: bool,
+    pub saved_at: u64,
+    pub sequence: u64,
+}
+
+impl CreateTaskRecoverySnapshot {
+    pub fn validate(&self) -> Result<(), String> {
+        const MAX_COLS: u16 = 320;
+        const MAX_ROWS: u16 = 256;
+        const MAX_SERIALIZED_BYTES: usize = 64 * 1024 * 1024;
+
+        if self.serialized.len() > MAX_SERIALIZED_BYTES {
+            return Err(format!(
+                "recoverySnapshot.serialized exceeds {MAX_SERIALIZED_BYTES} bytes"
+            ));
+        }
+        if self.cols == 0 || self.cols > MAX_COLS || self.rows == 0 || self.rows > MAX_ROWS {
+            return Err(format!(
+                "recoverySnapshot dimensions must be within 1..={MAX_COLS} columns and 1..={MAX_ROWS} rows"
+            ));
+        }
+        if self.cursor_row >= self.rows || self.cursor_col >= self.cols {
+            return Err(
+                "recoverySnapshot cursor must be inside its terminal dimensions".to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -156,6 +195,7 @@ pub struct CreateTaskRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_template: Option<TaskTemplateLaunch>,
     pub resume_session_id: Option<String>,
+    pub recovery_snapshot: Option<CreateTaskRecoverySnapshot>,
     pub blocker_task_ids: Option<Vec<String>>,
     pub notify_task_id: Option<String>,
     pub parent_task_id: Option<String>,
@@ -253,14 +293,24 @@ impl MobileApi {
             .ok_or_else(|| {
                 AddRepoError::InvalidPath("repo name could not be derived".to_string())
             })?;
-        let default_branch = git_default_branch(&canonical_path).ok();
+        let default_branch = request
+            .default_branch
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                git_default_branch(&canonical_path)
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or_else(|| "main".to_string());
         let id = generate_repo_id()?;
         self._db
             .insert_repo(NewRepo {
                 id: &id,
                 path: &path_string,
                 name: &name,
-                default_branch: default_branch.as_deref(),
+                default_branch: Some(&default_branch),
             })
             .map_err(|e| AddRepoError::Internal(format!("db error: {}", e)))?;
         let repo = self
@@ -787,7 +837,8 @@ mod tests {
                 "resumeSessionId": null,
                 "blockerTaskIds": null,
                 "notifyTaskId": null,
-                "parentTaskId": null
+                "parentTaskId": null,
+                "recoverySnapshot": null
             })
         );
     }
@@ -835,6 +886,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -866,6 +918,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -913,6 +966,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -975,6 +1029,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -1027,6 +1082,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -1076,6 +1132,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -1132,6 +1189,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -1195,6 +1253,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1247,6 +1306,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1336,6 +1396,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -1396,6 +1457,7 @@ mod tests {
             environment: "production".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };
 
@@ -1430,6 +1492,7 @@ mod tests {
             environment: "staging".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48121,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-staging-pairings.json".to_string(),
         };
 

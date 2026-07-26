@@ -72,9 +72,40 @@ impl Db {
                         AND stage_run.kind = 'post'
                         AND stage_run.status = 'running'
                     ) AS has_running_post,
-                    pipeline_item.activity_revision
+                    pipeline_item.activity_revision,
+                    COALESCE(pipeline_item.cloud_task_id, pipeline_item.id) AS cloud_task_id,
+                    task_transfer.id,
+                    task_transfer.direction,
+                    task_transfer.status,
+                    task_transfer.source_peer_id,
+                    task_transfer.target_peer_id,
+                    task_transfer.source_desktop_id,
+                    task_transfer.target_desktop_id
              FROM pipeline_item
-             WHERE repo_id = ? AND closed_at IS NULL
+             LEFT JOIN task_transfer ON task_transfer.id = (
+               SELECT candidate.id
+               FROM task_transfer candidate
+               WHERE candidate.local_task_id = pipeline_item.id
+                 AND (
+                   (
+                     candidate.direction = 'outgoing'
+                     AND candidate.status IN ('pending', 'streaming')
+                   )
+                   OR (
+                     candidate.direction = 'incoming'
+                     AND candidate.status IN (
+                       'pending',
+                       'streaming',
+                       'importing',
+                       'awaiting_acknowledgment'
+                     )
+                   )
+                 )
+               ORDER BY datetime(COALESCE(candidate.completed_at, candidate.started_at)) DESC,
+                        candidate.rowid DESC
+               LIMIT 1
+             )
+             WHERE pipeline_item.repo_id = ? AND pipeline_item.closed_at IS NULL
              ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([repo_id], |row| {
@@ -113,6 +144,14 @@ impl Db {
                 updated_at: row.get(31)?,
                 has_running_post: row.get(32)?,
                 activity_revision: row.get(33)?,
+                cloud_task_id: row.get(34)?,
+                transfer_id: row.get(35)?,
+                transfer_direction: row.get(36)?,
+                transfer_status: row.get(37)?,
+                transfer_source_peer_id: row.get(38)?,
+                transfer_target_peer_id: row.get(39)?,
+                transfer_source_desktop_id: row.get(40)?,
+                transfer_target_desktop_id: row.get(41)?,
             })
         })?;
         rows.collect()

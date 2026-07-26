@@ -2,10 +2,10 @@ use crate::{
     cloud_task_publisher::{map_ui_snapshot, PublisherState, PublisherStep},
     commands,
     config::Config,
-    daemon_client, db, http_api, relay_client,
+    daemon_client, db, http_api, relay_client, task_transfer_tunnel,
 };
 use futures_util::{SinkExt, StreamExt};
-use relay_client::{RelayId, RelayInvoke, RelayMessage};
+use relay_client::{RelayId, RelayInvoke, RelayMessage, TunnelService};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -99,6 +99,10 @@ pub(crate) async fn run_relay_loop(
         // Message processing loop
         loop {
             let msg = tokio::select! {
+                _ = http_state.wait_for_cloud_relay_reconnect() => {
+                    log::info!("Cloud relay reconnect requested by the local desktop");
+                    break;
+                }
                 _ = publication_interval.tick(), if publication_enabled => {
                     match db.ui_snapshot() {
                         Ok(snapshot) => publisher.observe(map_ui_snapshot(
@@ -404,6 +408,7 @@ pub(crate) async fn run_relay_loop(
                         RelayMessage::TunnelEstablish {
                             desktop_id,
                             tunnel_id,
+                            service,
                         } => {
                             if desktop_id != config.desktop_id {
                                 log::warn!(
@@ -416,22 +421,43 @@ pub(crate) async fn run_relay_loop(
                             let tunnel_config = config.clone();
                             let tunnel_state = Arc::clone(&http_state);
                             tokio::spawn(async move {
-                                log::info!("Dialing relay tunnel {}", tunnel_id);
+                                log::info!(
+                                    "Dialing relay tunnel {} for service {:?}",
+                                    tunnel_id,
+                                    service
+                                );
                                 match relay_client::connect_tunnel_to_relay(
                                     &tunnel_config,
                                     tunnel_id.clone(),
                                 )
                                 .await
                                 {
-                                    Ok(socket) => {
-                                        crate::ksp::handle_tungstenite_stream(
-                                            socket,
-                                            tunnel_state,
-                                            relay_tunnel_ksp_auth_mode(),
-                                        )
-                                        .await;
-                                        log::info!("Relay tunnel {} closed", tunnel_id);
-                                    }
+                                    Ok(socket) => match service {
+                                        TunnelService::Ksp => {
+                                            crate::ksp::handle_tungstenite_stream(
+                                                socket,
+                                                tunnel_state,
+                                                relay_tunnel_ksp_auth_mode(),
+                                            )
+                                            .await;
+                                        }
+                                        TunnelService::TaskTransfer => {
+                                            let result =
+                                                task_transfer_tunnel::bridge_task_transfer_tunnel(
+                                                    socket,
+                                                    tunnel_config.transfer_port,
+                                                    tunnel_id.clone(),
+                                                )
+                                                .await;
+                                            if let Err(error) = result {
+                                                log::error!(
+                                                    "Task-transfer relay tunnel {} failed: {}",
+                                                    tunnel_id,
+                                                    error
+                                                );
+                                            }
+                                        }
+                                    },
                                     Err(error) => {
                                         log::error!(
                                             "Failed to establish relay tunnel {}: {}",
@@ -440,6 +466,7 @@ pub(crate) async fn run_relay_loop(
                                         );
                                     }
                                 }
+                                log::info!("Relay tunnel {} closed", tunnel_id);
                             });
                         }
                         RelayMessage::Error { message } => {
@@ -1012,6 +1039,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48_120,
+            transfer_port: 4455,
             pairing_store_path: std::env::temp_dir()
                 .join(format!("{unique}-pairings.json"))
                 .to_string_lossy()
@@ -1056,6 +1084,174 @@ mod tests {
             relay_tunnel_ksp_auth_mode(),
             crate::ksp::AuthMode::AllowEmpty
         );
+    }
+
+    #[tokio::test]
+    async fn relay_dispatches_task_transfer_tunnel_to_configured_sidecar_port() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::time::timeout;
+        use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+        let relay_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind relay stand-in");
+        let relay_address = relay_listener.local_addr().expect("relay address");
+        let transfer_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind transfer sidecar stand-in");
+        let transfer_port = transfer_listener
+            .local_addr()
+            .expect("transfer address")
+            .port();
+
+        let relay_server = tokio::spawn(async move {
+            let (primary_stream, _) = relay_listener
+                .accept()
+                .await
+                .expect("accept primary relay connection");
+            let mut primary = tokio_tungstenite::accept_async(primary_stream)
+                .await
+                .expect("accept primary websocket");
+            let auth = primary
+                .next()
+                .await
+                .expect("primary auth frame")
+                .expect("valid primary auth");
+            assert!(matches!(auth, TungsteniteMessage::Text(_)));
+
+            primary
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "tunnel_establish",
+                        "desktopId": "desktop-destination",
+                        "tunnelId": "transfer-tunnel-1",
+                        "service": "task-transfer",
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("request task-transfer tunnel");
+
+            let (tunnel_stream, _) = timeout(Duration::from_secs(2), relay_listener.accept())
+                .await
+                .expect("desktop did not dial task-transfer tunnel")
+                .expect("accept tunnel relay connection");
+            let mut tunnel = tokio_tungstenite::accept_async(tunnel_stream)
+                .await
+                .expect("accept tunnel websocket");
+            let tunnel_auth = tunnel
+                .next()
+                .await
+                .expect("tunnel auth frame")
+                .expect("valid tunnel auth");
+            let TungsteniteMessage::Text(tunnel_auth) = tunnel_auth else {
+                panic!("expected text tunnel auth");
+            };
+            let tunnel_auth: serde_json::Value =
+                serde_json::from_str(&tunnel_auth).expect("parse tunnel auth");
+            assert_eq!(tunnel_auth["tunnel_id"], "transfer-tunnel-1");
+
+            tunnel
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "tunnel_ready",
+                        "desktopId": "desktop-destination",
+                        "tunnelId": "transfer-tunnel-1",
+                        "service": "task-transfer",
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send tunnel_ready");
+            tunnel
+                .send(TungsteniteMessage::Binary(
+                    b"source-through-relay".to_vec().into(),
+                ))
+                .await
+                .expect("send source bytes");
+
+            let destination = timeout(Duration::from_secs(2), tunnel.next())
+                .await
+                .expect("desktop did not return destination bytes")
+                .expect("tunnel closed")
+                .expect("valid destination frame");
+            tunnel.close(None).await.expect("close tunnel");
+            destination
+        });
+
+        let unique = format!(
+            "relay-task-transfer-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        );
+        let db_path = db::Db::test_db_path(&unique);
+        let config = Config {
+            relay_url: format!("ws://{relay_address}"),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: std::env::temp_dir()
+                .join(&unique)
+                .to_string_lossy()
+                .to_string(),
+            db_path: db_path.clone(),
+            kanna_cli_path: None,
+            desktop_id: "desktop-destination".to_string(),
+            desktop_secret: None,
+            desktop_name: "Destination Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48_120,
+            transfer_port,
+            pairing_store_path: std::env::temp_dir()
+                .join(format!("{unique}-pairings.json"))
+                .to_string_lossy()
+                .to_string(),
+        };
+        let database = db::Db::open_for_tests(&db_path).expect("open test database");
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+        let relay_loop = run_relay_loop(config, database, state);
+        tokio::pin!(relay_loop);
+
+        let destination = timeout(Duration::from_secs(3), async {
+            tokio::select! {
+                destination = async {
+                    let (mut sidecar, _) = transfer_listener
+                        .accept()
+                        .await
+                        .expect("accept sidecar bridge");
+                    let mut source = [0_u8; 20];
+                    sidecar
+                        .read_exact(&mut source)
+                        .await
+                        .expect("read source relay bytes");
+                    assert_eq!(&source, b"source-through-relay");
+                    sidecar
+                        .write_all(b"destination-through-sidecar")
+                        .await
+                        .expect("send destination sidecar bytes");
+                    relay_server.await.expect("relay stand-in task")
+                } => destination,
+                result = &mut relay_loop => {
+                    panic!("relay loop exited before bridging task transfer: {result:?}")
+                }
+            }
+        })
+        .await
+        .expect("relay did not bridge task-transfer tunnel");
+        assert_eq!(
+            destination,
+            TungsteniteMessage::Binary(b"destination-through-sidecar".to_vec().into())
+        );
+
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[test]

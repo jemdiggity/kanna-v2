@@ -1,4 +1,5 @@
 use crate::db::{SnapshotPipelineItem, UiSnapshot};
+use crate::http_api::settings::{CloudTransferIdentity, CLOUD_TRANSFER_IDENTITY_SETTING};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::time::{Duration, Instant};
@@ -24,11 +25,23 @@ impl CloudTaskSnapshotEnvelope {
 #[serde(rename_all = "camelCase")]
 struct CloudDesktopSnapshot {
     display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transfer: Option<CloudDesktopTransferSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudDesktopTransferSnapshot {
+    peer_id: String,
+    public_key: String,
+    protocol_version: u16,
+    accepting_transfers: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CloudTaskSnapshot {
+    cloud_task_id: String,
     local_repo_id: String,
     owner_desktop_id: String,
     owner_local_task_id: String,
@@ -86,6 +99,17 @@ pub(crate) fn map_ui_snapshot(
     desktop_name: &str,
     snapshot: UiSnapshot,
 ) -> CloudTaskSnapshotEnvelope {
+    let desktop_transfer = snapshot
+        .settings
+        .get(CLOUD_TRANSFER_IDENTITY_SETTING)
+        .and_then(|encoded| serde_json::from_str::<CloudTransferIdentity>(encoded).ok())
+        .filter(valid_cloud_transfer_identity)
+        .map(|identity| CloudDesktopTransferSnapshot {
+            peer_id: identity.peer_id,
+            public_key: identity.public_key,
+            protocol_version: identity.protocol_version,
+            accepting_transfers: identity.accepting_transfers,
+        });
     let blockers = snapshot.task_blockers.into_iter().fold(
         HashMap::<String, Vec<String>>::new(),
         |mut by_task, blocker| {
@@ -121,9 +145,18 @@ pub(crate) fn map_ui_snapshot(
         schema_version: 1,
         desktop: CloudDesktopSnapshot {
             display_name: truncate(desktop_name, 256),
+            transfer: desktop_transfer,
         },
         tasks,
     }
+}
+
+fn valid_cloud_transfer_identity(identity: &CloudTransferIdentity) -> bool {
+    !identity.peer_id.trim().is_empty()
+        && identity.peer_id.chars().count() <= 256
+        && !identity.public_key.trim().is_empty()
+        && identity.public_key.chars().count() <= 4096
+        && identity.protocol_version > 0
 }
 
 fn map_task(
@@ -132,6 +165,7 @@ fn map_task(
     item: SnapshotPipelineItem,
     blocked_by_task_ids: Vec<String>,
 ) -> CloudTaskSnapshot {
+    let transfer = map_transfer(&item);
     let prompt = item.prompt.unwrap_or_default();
     let title = item
         .display_name
@@ -167,6 +201,7 @@ fn map_task(
         .unwrap_or_else(|| updated_at.clone());
 
     CloudTaskSnapshot {
+        cloud_task_id: item.cloud_task_id,
         local_repo_id: repo.id.clone(),
         owner_desktop_id: desktop_id.to_string(),
         owner_local_task_id: item.id,
@@ -194,18 +229,53 @@ fn map_task(
             provider: truncate(&item.agent_provider, 64),
             execution_type: truncate(&item.agent_type.unwrap_or_else(|| "pty".into()), 32),
         },
-        transfer: CloudTransferSnapshot {
-            state: "none".into(),
-            transfer_id: None,
-            source_desktop_id: None,
-            destination_desktop_id: None,
-        },
+        transfer,
         blocked_by_task_ids: blocked_by_task_ids.into_iter().take(100).collect(),
         parent_task_id: truncate_option(item.parent_task_id, 128),
         created_at,
         updated_at,
         closed_at: item.closed_at,
     }
+}
+
+fn map_transfer(item: &SnapshotPipelineItem) -> CloudTransferSnapshot {
+    let none = || CloudTransferSnapshot {
+        state: "none".into(),
+        transfer_id: None,
+        source_desktop_id: None,
+        destination_desktop_id: None,
+    };
+    let Some(transfer_id) = nonblank(item.transfer_id.as_deref()) else {
+        return none();
+    };
+    let Some(source_desktop_id) = nonblank(item.transfer_source_desktop_id.as_deref()) else {
+        return none();
+    };
+    let Some(destination_desktop_id) = nonblank(item.transfer_target_desktop_id.as_deref()) else {
+        return none();
+    };
+    let state = match (
+        item.transfer_direction.as_deref(),
+        item.transfer_status.as_deref(),
+    ) {
+        (Some("outgoing"), Some("pending" | "streaming")) => "outgoing",
+        (Some("incoming"), Some("pending" | "streaming" | "importing")) => "incoming",
+        (Some("incoming"), Some("awaiting_acknowledgment")) if item.closed_at.is_none() => {
+            "finalization_pending"
+        }
+        _ => return none(),
+    };
+
+    CloudTransferSnapshot {
+        state: state.into(),
+        transfer_id: Some(transfer_id.into()),
+        source_desktop_id: Some(source_desktop_id.into()),
+        destination_desktop_id: Some(destination_desktop_id.into()),
+    }
+}
+
+fn nonblank(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
@@ -388,6 +458,14 @@ mod tests {
                 },
                 items: vec![SnapshotPipelineItem {
                     id: "task-1".into(),
+                    cloud_task_id: "cloud-stable".into(),
+                    transfer_id: None,
+                    transfer_direction: None,
+                    transfer_status: None,
+                    transfer_source_peer_id: None,
+                    transfer_target_peer_id: None,
+                    transfer_source_desktop_id: None,
+                    transfer_target_desktop_id: None,
                     repo_id: "repo-1".into(),
                     issue_number: None,
                     issue_title: None,
@@ -442,6 +520,7 @@ mod tests {
         assert_eq!(json["desktop"]["displayName"], "Studio Mac");
         assert_eq!(json["tasks"][0]["ownerDesktopId"], "desktop-1");
         assert_eq!(json["tasks"][0]["ownerLocalTaskId"], "task-1");
+        assert_eq!(json["tasks"][0]["cloudTaskId"], "cloud-stable");
         assert_eq!(json["tasks"][0]["localRepoId"], "repo-1");
         assert_eq!(json["tasks"][0]["title"], "Cloud publication");
         assert_eq!(
@@ -470,6 +549,107 @@ mod tests {
             serde_json::json!({"provider":"codex","type":"pty"})
         );
         assert_eq!(json["tasks"][0]["parentTaskId"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn snapshot_mapping_publishes_cloud_transfer_identity_setting() {
+        let mut source = ui_snapshot("idle");
+        source.settings.insert(
+            "cloud_transfer_identity_v1".into(),
+            serde_json::json!({
+                "peerId": "peer-a",
+                "displayName": "Studio Mac",
+                "publicKey": "base64-key",
+                "protocolVersion": 1,
+                "acceptingTransfers": true,
+            })
+            .to_string(),
+        );
+
+        let mapped = map_ui_snapshot("desktop-1", "Studio Mac", source);
+        let json = serde_json::to_value(mapped).unwrap();
+
+        assert_eq!(
+            json["desktop"]["transfer"],
+            serde_json::json!({
+                "peerId": "peer-a",
+                "publicKey": "base64-key",
+                "protocolVersion": 1,
+                "acceptingTransfers": true,
+            }),
+        );
+    }
+
+    #[test]
+    fn snapshot_mapping_publishes_authenticated_transfer_states() {
+        for (direction, status, expected_state) in [
+            ("outgoing", "pending", "outgoing"),
+            ("outgoing", "streaming", "outgoing"),
+            ("incoming", "pending", "incoming"),
+            ("incoming", "streaming", "incoming"),
+            ("incoming", "importing", "incoming"),
+            (
+                "incoming",
+                "awaiting_acknowledgment",
+                "finalization_pending",
+            ),
+        ] {
+            let mut source = ui_snapshot("idle");
+            let item = &mut source.entries[0].items[0];
+            item.transfer_id = Some("transfer-1".into());
+            item.transfer_direction = Some(direction.into());
+            item.transfer_status = Some(status.into());
+            item.transfer_source_peer_id = Some("peer-a".into());
+            item.transfer_target_peer_id = Some("peer-b".into());
+            item.transfer_source_desktop_id = Some("desktop-a".into());
+            item.transfer_target_desktop_id = Some("desktop-b".into());
+
+            let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", source);
+            let json = serde_json::to_value(snapshot).unwrap();
+
+            assert_eq!(json["tasks"][0]["transfer"]["state"], expected_state);
+            assert_eq!(json["tasks"][0]["transfer"]["transferId"], "transfer-1");
+            assert_eq!(json["tasks"][0]["transfer"]["sourceDesktopId"], "desktop-a");
+            assert_eq!(
+                json["tasks"][0]["transfer"]["destinationDesktopId"],
+                "desktop-b"
+            );
+        }
+
+        let mut completed = ui_snapshot("idle");
+        let item = &mut completed.entries[0].items[0];
+        item.transfer_id = Some("transfer-1".into());
+        item.transfer_direction = Some("incoming".into());
+        item.transfer_status = Some("completed".into());
+        item.transfer_source_desktop_id = Some("desktop-a".into());
+        item.transfer_target_desktop_id = Some("desktop-b".into());
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", completed);
+        let json = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(json["tasks"][0]["transfer"]["state"], "none");
+    }
+
+    #[test]
+    fn snapshot_mapping_suppresses_lan_only_transfer_state() {
+        let mut source = ui_snapshot("idle");
+        let item = &mut source.entries[0].items[0];
+        item.transfer_id = Some("transfer-lan".into());
+        item.transfer_direction = Some("outgoing".into());
+        item.transfer_status = Some("pending".into());
+        item.transfer_source_peer_id = Some("peer-a".into());
+        item.transfer_target_peer_id = Some("peer-b".into());
+
+        let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", source);
+        let json = serde_json::to_value(snapshot).unwrap();
+
+        assert_eq!(
+            json["tasks"][0]["transfer"],
+            serde_json::json!({
+                "state": "none",
+                "transferId": null,
+                "sourceDesktopId": null,
+                "destinationDesktopId": null,
+            })
+        );
     }
 
     #[test]

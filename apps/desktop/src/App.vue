@@ -41,6 +41,7 @@ const {
   desktopAuthSession,
   cloudSnapshot,
   lanSnapshot,
+  transferMachines,
   selectedCloudRepoId,
   selectedCloudItemId,
   remoteSnapshot,
@@ -61,6 +62,9 @@ const {
   refreshLanTasks,
   initializeDesktopCloudAuth,
   initializeDesktopLanTaskSync,
+  markTransferSidecarReady,
+  refreshCloudTransferRoute,
+  updateLanTransferPeers,
   closeSelectedWorkspaceTask,
   advanceSelectedRemoteWorkspaceTask,
   pinSidebarTask,
@@ -201,7 +205,15 @@ const {
   openImageUrlPreview,
   getCurrentPreviewRecall,
 } = appModals;
-const appTaskTransfer = useAppTaskTransfer({ db, store, toast, showPeerPicker });
+const appTaskTransfer = useAppTaskTransfer({
+  db,
+  store,
+  toast,
+  showPeerPicker,
+  transferMachines,
+  refreshCloudTransferRoute,
+  onLanTransferPeersChanged: updateLanTransferPeers,
+});
 const {
   warmTransferSidecar,
   openPeerPicker,
@@ -209,6 +221,10 @@ const {
   closePeerPicker,
   importPendingIncomingTransfers,
 } = appTaskTransfer;
+async function warmCloudTransferSidecar(): Promise<void> {
+  await warmTransferSidecar();
+  await markTransferSidecarReady();
+}
 const appPreferences = useAppPreferences({
   db,
   store,
@@ -247,6 +263,7 @@ const appTaskNavigation = useAppTaskNavigation({
   repoCommandCatalog,
   openPeerPicker,
   openPairPeerPicker,
+  pullSelectedWorkspaceTask: appTaskTransfer.pullSelectedWorkspaceTask,
 });
 const {
   navigateItems,
@@ -318,6 +335,7 @@ const {
   openFilePreview,
   openImageUrlPreview,
   preferences,
+  refreshCloudTransferRoute,
   remoteTaskDiagnostics,
   restoreSidebarWidth,
   shortcutsStartFull,
@@ -327,7 +345,8 @@ const {
   stopSystemThemeListener,
   store,
   toast,
-  warmTransferSidecar,
+  transferMachines,
+  warmTransferSidecar: warmCloudTransferSidecar,
   windowWorkspace,
 });
 const appKeyboardActions = useAppKeyboardActions({

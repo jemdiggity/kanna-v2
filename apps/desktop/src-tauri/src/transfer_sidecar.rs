@@ -66,6 +66,34 @@ impl TransferSidecarClient {
         self.dead.load(Ordering::Relaxed)
     }
 
+    pub async fn get_local_identity(&mut self) -> Result<Value, String> {
+        let request_id = self.next_request_id("identity");
+        let response = self
+            .send_request(
+                json!({
+                    "type": "get_local_identity",
+                    "request_id": request_id,
+                }),
+                &request_id,
+            )
+            .await?;
+        Ok(json!({
+            "peerId": required_string(&response, &["peer_id", "peerId"])?,
+            "displayName": required_string(&response, &["display_name", "displayName"])?,
+            "publicKey": required_string(&response, &["public_key", "publicKey"])?,
+            "protocolVersion": response
+                .get("protocol_version")
+                .or_else(|| response.get("protocolVersion"))
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "transfer sidecar identity response missing protocol version".to_string())?,
+            "acceptingTransfers": response
+                .get("accepting_transfers")
+                .or_else(|| response.get("acceptingTransfers"))
+                .and_then(Value::as_bool)
+                .ok_or_else(|| "transfer sidecar identity response missing accepting state".to_string())?,
+        }))
+    }
+
     pub async fn list_transfer_peers(&mut self) -> Result<Vec<Value>, String> {
         let request_id = self.next_request_id("list");
         let response = self
@@ -83,6 +111,40 @@ impl TransferSidecarClient {
             .cloned()
             .ok_or_else(|| "transfer sidecar list_peers response missing peers".to_string())?;
         Ok(peers)
+    }
+
+    pub async fn upsert_external_peer(&mut self, peer: Value) -> Result<Value, String> {
+        let request_id = self.next_request_id("external-upsert");
+        let request = build_upsert_external_peer_request(&request_id, &peer)?;
+        self.send_request(request, &request_id).await
+    }
+
+    pub async fn remove_external_peer(&mut self, peer_id: String) -> Result<Value, String> {
+        if peer_id.trim().is_empty() {
+            return Err("external peer id must not be blank".into());
+        }
+        let request_id = self.next_request_id("external-remove");
+        self.send_request(
+            json!({
+                "type": "remove_external_peer",
+                "request_id": request_id,
+                "peer_id": peer_id,
+            }),
+            &request_id,
+        )
+        .await
+    }
+
+    pub async fn clear_external_peers(&mut self) -> Result<Value, String> {
+        let request_id = self.next_request_id("external-clear");
+        self.send_request(
+            json!({
+                "type": "clear_external_peers",
+                "request_id": request_id,
+            }),
+            &request_id,
+        )
+        .await
     }
 
     pub async fn set_task_snapshot(&mut self, snapshot: Value) -> Result<Value, String> {
@@ -366,6 +428,37 @@ impl TransferSidecarClient {
         }
     }
 
+    pub async fn request_task_pull(
+        &mut self,
+        peer_id: String,
+        source_task_id: String,
+        transport: String,
+    ) -> Result<Value, String> {
+        if !matches!(transport.as_str(), "auto" | "lan" | "cloud") {
+            return Err(format!("unsupported transfer transport {transport}"));
+        }
+        let request_id = self.next_request_id("task-pull");
+        let response = self
+            .send_request(
+                json!({
+                    "type": "request_task_pull",
+                    "request_id": request_id,
+                    "target_peer_id": peer_id,
+                    "source_task_id": source_task_id,
+                    "transport": transport,
+                }),
+                &request_id,
+            )
+            .await?;
+
+        Ok(json!({
+            "requestId": required_string(
+                &response,
+                &["pull_request_id", "pullRequestId"],
+            )?,
+        }))
+    }
+
     pub async fn stage_transfer_artifact(
         &mut self,
         transfer_id: String,
@@ -442,6 +535,69 @@ impl TransferSidecarClient {
         }))
     }
 
+    pub async fn mark_outgoing_transfer_commit_applied(
+        &mut self,
+        transfer_id: String,
+    ) -> Result<Value, String> {
+        let request_id = self.next_request_id("commit-applied");
+        let response = self
+            .send_request(
+                json!({
+                    "type": "mark_import_commit_applied",
+                    "request_id": request_id,
+                    "transfer_id": transfer_id,
+                }),
+                &request_id,
+            )
+            .await?;
+
+        Ok(json!({
+            "transferId": required_string(&response, &["transfer_id", "transferId"])?,
+        }))
+    }
+
+    pub async fn mark_incoming_transfer_event_recorded(
+        &mut self,
+        transfer_id: String,
+    ) -> Result<Value, String> {
+        let request_id = self.next_request_id("event-recorded");
+        let response = self
+            .send_request(
+                json!({
+                    "type": "mark_incoming_event_recorded",
+                    "request_id": request_id,
+                    "transfer_id": transfer_id,
+                }),
+                &request_id,
+            )
+            .await?;
+
+        Ok(json!({
+            "transferId": required_string(&response, &["transfer_id", "transferId"])?,
+        }))
+    }
+
+    pub async fn mark_incoming_transfer_ack_completed(
+        &mut self,
+        transfer_id: String,
+    ) -> Result<Value, String> {
+        let request_id = self.next_request_id("ack-completed");
+        let response = self
+            .send_request(
+                json!({
+                    "type": "mark_import_ack_completed",
+                    "request_id": request_id,
+                    "transfer_id": transfer_id,
+                }),
+                &request_id,
+            )
+            .await?;
+
+        Ok(json!({
+            "transferId": required_string(&response, &["transfer_id", "transferId"])?,
+        }))
+    }
+
     pub async fn finalize_outgoing_transfer(
         &mut self,
         transfer_id: String,
@@ -491,6 +647,7 @@ impl TransferSidecarClient {
     async fn prepare_transfer_preflight(&mut self, payload: Value) -> Result<Value, String> {
         let source_task_id = required_string(&payload, &["sourceTaskId", "source_task_id"])?;
         let target_peer_id = required_string(&payload, &["targetPeerId", "target_peer_id"])?;
+        let transport = transfer_transport(&payload)?;
         let request_id = self.next_request_id("preflight");
         let response = self
             .send_request(
@@ -499,6 +656,7 @@ impl TransferSidecarClient {
                     "request_id": request_id,
                     "source_task_id": source_task_id,
                     "target_peer_id": target_peer_id,
+                    "transport": transport,
                 }),
                 &request_id,
             )
@@ -601,6 +759,42 @@ impl TransferSidecarClient {
     }
 }
 
+fn build_upsert_external_peer_request(request_id: &str, peer: &Value) -> Result<Value, String> {
+    let protocol_version = peer
+        .get("protocolVersion")
+        .or_else(|| peer.get("protocol_version"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "external peer missing protocol version".to_string())?;
+    let accepting_transfers = peer
+        .get("acceptingTransfers")
+        .or_else(|| peer.get("accepting_transfers"))
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "external peer missing accepting transfers state".to_string())?;
+    Ok(json!({
+        "type": "upsert_external_peer",
+        "request_id": request_id,
+        "peer": {
+            "peer_id": required_string(peer, &["peerId", "peer_id"])?,
+            "display_name": required_string(peer, &["displayName", "display_name"])?,
+            "endpoint": required_string(peer, &["endpoint"])?,
+            "public_key": required_string(peer, &["publicKey", "public_key"])?,
+            "protocol_version": protocol_version,
+            "accepting_transfers": accepting_transfers,
+        },
+    }))
+}
+
+fn transfer_transport(payload: &Value) -> Result<&str, String> {
+    let transport = payload
+        .get("transport")
+        .and_then(Value::as_str)
+        .unwrap_or("auto");
+    match transport {
+        "auto" | "lan" | "cloud" => Ok(transport),
+        other => Err(format!("unsupported transfer transport {other}")),
+    }
+}
+
 fn spawn_reader(
     app: AppHandle,
     stdout: ChildStdout,
@@ -687,6 +881,7 @@ fn forwarded_event_name(value: &Value) -> Option<&'static str> {
         Some("pairing_started") => Some("pairing-started"),
         Some("pairing_requested") => Some("pairing-requested"),
         Some("incoming_transfer_request") => Some("transfer-request"),
+        Some("task_pull_requested") => Some("task-pull-requested"),
         Some("pairing_completed") => Some("pairing-completed"),
         Some("outgoing_transfer_committed") => Some("outgoing-transfer-committed"),
         Some("outgoing_transfer_finalization_requested") => {
@@ -769,7 +964,8 @@ fn build_transfer_sidecar_env_from_resolved(
     let mut env = HashMap::new();
     env.insert(
         "KANNA_TRANSFER_PORT".to_string(),
-        std::env::var("KANNA_TRANSFER_PORT").unwrap_or_else(|_| "4455".to_string()),
+        std::env::var("KANNA_TRANSFER_PORT")
+            .unwrap_or_else(|_| kanna_runtime_defaults::DEFAULT_TRANSFER_PORT.to_string()),
     );
     env.insert(
         "KANNA_TRANSFER_ROOT".to_string(),
@@ -933,6 +1129,54 @@ mod tests {
     }
 
     #[test]
+    fn external_peer_control_requests_normalize_frontend_fields() {
+        let request = build_upsert_external_peer_request(
+            "external-1",
+            &json!({
+                "peerId": "peer-cloud",
+                "displayName": "Cloud Mac",
+                "endpoint": "127.0.0.1:4456",
+                "publicKey": "public-key",
+                "protocolVersion": 1,
+                "acceptingTransfers": true,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            json!({
+                "type": "upsert_external_peer",
+                "request_id": "external-1",
+                "peer": {
+                    "peer_id": "peer-cloud",
+                    "display_name": "Cloud Mac",
+                    "endpoint": "127.0.0.1:4456",
+                    "public_key": "public-key",
+                    "protocol_version": 1,
+                    "accepting_transfers": true,
+                },
+            })
+        );
+        assert!(
+            build_upsert_external_peer_request("external-2", &json!({"peerId": "peer-cloud"}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn transfer_preflight_transport_defaults_and_rejects_unknown_values() {
+        assert_eq!(
+            transfer_transport(&json!({"phase": "preflight"})).unwrap(),
+            "auto"
+        );
+        assert_eq!(
+            transfer_transport(&json!({"transport": "cloud"})).unwrap(),
+            "cloud"
+        );
+        assert!(transfer_transport(&json!({"transport": "bluetooth"})).is_err());
+    }
+
+    #[test]
     fn transfer_sidecar_env_includes_stable_peer_id_and_display_name() {
         let _lock = env_lock();
         let _transfer_root = EnvVarGuard::unset("KANNA_TRANSFER_ROOT");
@@ -1063,5 +1307,17 @@ mod tests {
             forwarded_event_name(&value),
             Some("outgoing-transfer-finalization-requested")
         );
+    }
+
+    #[test]
+    fn task_pull_request_events_emit_expected_tauri_topic() {
+        let value = json!({
+            "type": "task_pull_requested",
+            "request_id": "pull-1",
+            "requester_peer_id": "peer-destination",
+            "source_task_id": "task-source",
+        });
+
+        assert_eq!(forwarded_event_name(&value), Some("task-pull-requested"));
     }
 }

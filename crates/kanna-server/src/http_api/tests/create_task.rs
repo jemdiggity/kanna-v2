@@ -104,6 +104,73 @@ async fn create_task_route_rejects_invalid_requested_task_ids_before_creation() 
 }
 
 #[tokio::test]
+async fn create_task_route_rejects_invalid_recovery_snapshot_geometry() {
+    let create_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let create_calls_for_creator = Arc::clone(&create_calls);
+    let app = super::test_router_with_task_creator(
+        "desktop-invalid-recovery",
+        "Studio Mac",
+        Arc::new(move |_| {
+            create_calls_for_creator.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("invalid recovery snapshot reached task creation")
+        }),
+    );
+
+    for recovery_snapshot in [
+        serde_json::json!({
+            "serialized": "snapshot",
+            "cols": 0,
+            "rows": 24,
+            "cursorRow": 0,
+            "cursorCol": 0,
+            "cursorVisible": true,
+            "savedAt": 1,
+            "sequence": 1
+        }),
+        serde_json::json!({
+            "serialized": "snapshot",
+            "cols": 80,
+            "rows": 24,
+            "cursorRow": 24,
+            "cursorCol": 0,
+            "cursorVisible": true,
+            "savedAt": 1,
+            "sequence": 1
+        }),
+        serde_json::json!({
+            "serialized": "snapshot",
+            "cols": 80,
+            "rows": 24,
+            "cursorRow": 0,
+            "cursorCol": 80,
+            "cursorVisible": true,
+            "savedAt": 1,
+            "sequence": 1
+        }),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "repoId": "repo-1",
+                            "prompt": "invalid recovery",
+                            "recoverySnapshot": recovery_snapshot
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(create_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn concurrent_requested_task_creation_is_rejected_until_owner_failure_releases_flight() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
@@ -267,6 +334,30 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
         let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        match command {
+            DaemonCommand::SeedSnapshot {
+                session_id,
+                snapshot,
+            } => {
+                assert_eq!(session_id, task_id);
+                assert_eq!(snapshot.version, 1);
+                assert_eq!(snapshot.vt, "RECOVERY\u{1b}[31m");
+                assert_eq!((snapshot.cols, snapshot.rows), (101, 37));
+                assert_eq!((snapshot.cursor_row, snapshot.cursor_col), (9, 17));
+                assert!(!snapshot.cursor_visible);
+                assert_eq!(snapshot.saved_at, 1_785_000_000_000);
+                assert_eq!(snapshot.sequence, 44);
+            }
+            other => panic!("expected seed snapshot command, got {other:?}"),
+        }
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes())
+            .await
+            .unwrap();
+
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
         let session_id = match command {
             DaemonCommand::Spawn {
                 session_id, cwd, ..
@@ -305,6 +396,7 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-create-replay-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -318,7 +410,17 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
         "prompt": "Ship idempotently",
         "displayName": "Idempotent task",
         "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
-        "agentProvider": "claude"
+        "agentProvider": "claude",
+        "recoverySnapshot": {
+            "serialized": "RECOVERY\u{001b}[31m",
+            "cols": 101,
+            "rows": 37,
+            "cursorRow": 9,
+            "cursorCol": 17,
+            "cursorVisible": false,
+            "savedAt": 1785000000000_u64,
+            "sequence": 44
+        }
     })
     .to_string();
     let first_response = app
@@ -365,7 +467,321 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
         1
     );
     assert_eq!(db.list_stage_runs_for_task(task_id).unwrap().len(), 1);
+    assert!(
+        db.get_create_task_intent(task_id).unwrap().is_none(),
+        "successful initial spawn should clear the create intent"
+    );
 
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, ErrorCode, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let task_id = "d1e2f3a4b5c60718";
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-repair-{unique}"));
+    init_test_git_repo(&repo_root);
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-create-repair-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-create-repair-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        pairing_store_path: format!("/tmp/kanna-pairings-create-repair-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let resume_session_id = "364643cc-5e6d-48fc-86ca-ca7764380900";
+    let request_body = serde_json::json!({
+        "repoId": "repo-1",
+        "prompt": "Repair the interrupted spawn",
+        "displayName": "Prepared intent repair",
+        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+        "agentProvider": "claude",
+        "agentType": "pty",
+        "terminalCols": 132,
+        "terminalRows": 43,
+        "model": "claude-repair-model",
+        "permissionMode": "acceptEdits",
+        "allowedTools": ["Read", "Bash"],
+        "disallowedTools": ["WebFetch"],
+        "maxTurns": 17,
+        "maxBudgetUsd": 4.25,
+        "setupCmds": ["printf 'prepared-intent-setup\\n'"],
+        "resumeSessionId": resume_session_id,
+        "recoverySnapshot": {
+            "serialized": "REPAIRED-RECOVERY\u{001b}[2J",
+            "cols": 132,
+            "rows": 43,
+            "cursorRow": 21,
+            "cursorCol": 42,
+            "cursorVisible": true,
+            "savedAt": 1785000000123_u64,
+            "sequence": 87
+        }
+    })
+    .to_string();
+    let first = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/v1/tasks/{task_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(request_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let db = Db::open(&config.db_path).unwrap();
+    assert_eq!(db.count_test_pipeline_items_for_repo("repo-1").unwrap(), 1);
+    assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 1);
+    assert_eq!(
+        db.count_test_terminal_sessions_for_repo("repo-1").unwrap(),
+        1
+    );
+    assert!(db.list_stage_runs_for_task(task_id).unwrap().is_empty());
+    let stored_intent: serde_json::Value = serde_json::from_str(
+        &db.get_create_task_intent(task_id)
+            .unwrap()
+            .expect("prepared task should retain its create intent"),
+    )
+    .unwrap();
+    assert_eq!(
+        stored_intent["resumeSessionId"],
+        serde_json::json!(resume_session_id)
+    );
+    assert_eq!(
+        stored_intent["setupCmds"],
+        serde_json::json!(["printf 'prepared-intent-setup\\n'"])
+    );
+    assert_eq!(
+        stored_intent["allowedTools"],
+        serde_json::json!(["Read", "Bash"])
+    );
+    assert_eq!(
+        stored_intent["_kannaResolved"]["model"],
+        serde_json::json!("claude-repair-model")
+    );
+    assert_eq!(
+        stored_intent["_kannaResolved"]["initialTerminalGeometry"],
+        serde_json::json!([132, 43])
+    );
+    assert_eq!(
+        stored_intent["_kannaResolved"]["recoverySnapshot"]["serialized"],
+        serde_json::json!("REPAIRED-RECOVERY\u{1b}[2J")
+    );
+    let interrupted_worktree = db
+        .get_task_worktree_path(task_id)
+        .unwrap()
+        .expect("prepared worktree path");
+    let remove = std::process::Command::new("git")
+        .args(["worktree", "remove", "--force", &interrupted_worktree])
+        .current_dir(&repo_root)
+        .output()
+        .expect("remove prepared worktree");
+    assert!(
+        remove.status.success(),
+        "remove prepared worktree failed: {}",
+        String::from_utf8_lossy(&remove.stderr)
+    );
+    let branch = format!("task-{task_id}");
+    let delete_branch = std::process::Command::new("git")
+        .args(["branch", "-D", &branch])
+        .current_dir(&repo_root)
+        .output()
+        .expect("delete prepared branch");
+    assert!(
+        delete_branch.status.success(),
+        "delete prepared branch failed: {}",
+        String::from_utf8_lossy(&delete_branch.stderr)
+    );
+    db.delete_worktree_rows_for_task(task_id)
+        .expect("remove interrupted worktree row");
+    assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 0);
+    std::fs::write(
+        repo_root
+            .join(".kanna/pipelines")
+            .join(format!("{TEST_PROVIDER_NEUTRAL_PIPELINE}.json")),
+        serde_json::json!({
+            "name": TEST_PROVIDER_NEUTRAL_PIPELINE,
+            "stages": [{
+                "name": "in progress",
+                "prompt": "MUTATED-DEFINITION-$TASK_PROMPT",
+                "setup": ["printf 'mutated-definition-setup\\n'"],
+                "policy": { "transition": "auto" }
+            }]
+        })
+        .to_string(),
+    )
+    .expect("mutate definitions after interrupted preparation");
+    drop(db);
+
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut command_count = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            command_count += 1;
+            match command {
+                DaemonCommand::Kill { .. } => {
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&DaemonEvent::Error {
+                                    code: Some(ErrorCode::SessionNotFound),
+                                    message: "session not found".to_string(),
+                                })
+                                .unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                DaemonCommand::SeedSnapshot {
+                    session_id,
+                    snapshot,
+                } => {
+                    assert_eq!(session_id, task_id);
+                    assert_eq!(snapshot.version, 1);
+                    assert_eq!(snapshot.vt, "REPAIRED-RECOVERY\u{1b}[2J");
+                    assert_eq!((snapshot.cols, snapshot.rows), (132, 43));
+                    assert_eq!((snapshot.cursor_row, snapshot.cursor_col), (21, 42));
+                    assert!(snapshot.cursor_visible);
+                    assert_eq!(snapshot.saved_at, 1_785_000_000_123);
+                    assert_eq!(snapshot.sequence, 87);
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                DaemonCommand::Spawn {
+                    session_id,
+                    args,
+                    cols,
+                    rows,
+                    ..
+                } => {
+                    assert_eq!(session_id, task_id);
+                    assert_eq!((cols, rows), (132, 43));
+                    let command = args.join(" ");
+                    for expected in [
+                        "prepared-intent-setup",
+                        "--resume '364643cc-5e6d-48fc-86ca-ca7764380900'",
+                        "--model claude-repair-model",
+                        "--allowedTools Read,Bash",
+                        "--disallowedTools WebFetch",
+                        "--max-turns 17",
+                        "--max-budget-usd 4.25",
+                        "Repair the interrupted spawn",
+                    ] {
+                        assert!(
+                            command.contains(expected),
+                            "repaired spawn did not preserve `{expected}`: {command}"
+                        );
+                    }
+                    assert!(
+                        !command.contains("MUTATED-DEFINITION")
+                            && !command.contains("mutated-definition-setup"),
+                        "repaired spawn re-read mutated repo definitions: {command}"
+                    );
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
+                                    .unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    break;
+                }
+                DaemonCommand::SpawnAgent { .. } => {
+                    panic!("prepared intent requested a PTY spawn")
+                }
+                other => panic!("unexpected repair command: {other:?}"),
+            }
+        }
+        command_count
+    });
+
+    let retry = app
+        .oneshot(
+            Request::put(format!("/v1/tasks/{task_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(request_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), StatusCode::OK);
+    let command_count = daemon_server.await.unwrap();
+    assert_eq!(command_count, 3);
+
+    let db = Db::open(&config.db_path).unwrap();
+    assert_eq!(db.count_test_pipeline_items_for_repo("repo-1").unwrap(), 1);
+    assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 1);
+    assert_eq!(
+        db.count_test_terminal_sessions_for_repo("repo-1").unwrap(),
+        1
+    );
+    let runs = db.list_stage_runs_for_task(task_id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "running");
+    assert_eq!(runs[0].session_id.as_deref(), Some(task_id));
+    assert_eq!(
+        runs[0].provider_session_id.as_deref(),
+        Some(resume_session_id)
+    );
+    assert!(
+        db.get_create_task_intent(task_id).unwrap().is_none(),
+        "running stage run should clear the prepared create intent"
+    );
+
+    let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir_all(&daemon_dir);
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -542,6 +958,7 @@ async fn create_task_route_uses_saved_default_agent_provider_when_payload_omits_
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-default-provider-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -659,6 +1076,7 @@ async fn create_task_route_persists_display_name_alias_and_returns_it_as_title()
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-create-title-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -845,6 +1263,7 @@ async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-stage-override-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1000,6 +1419,7 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-create-env-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1092,6 +1512,7 @@ async fn create_task_route_rejects_invalid_blocker_before_creating_task_or_spawn
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-invalid-blocker-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1178,6 +1599,7 @@ async fn create_task_route_preserves_failed_prepare_diagnostics() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-create-bad-base-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1282,6 +1704,7 @@ async fn create_task_route_with_blocker_creates_dormant_task_without_spawning() 
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-create-dormant-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1444,6 +1867,7 @@ async fn create_task_route_with_only_closed_blockers_spawns_immediately() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-create-closed-blocker-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1510,8 +1934,8 @@ async fn create_task_route_with_only_closed_blockers_spawns_immediately() {
 }
 
 #[tokio::test]
-async fn create_task_route_preserves_failed_spawn_diagnostics() {
-    use kanna_daemon::protocol::{Command as DaemonCommand, ErrorCode, Event as DaemonEvent};
+async fn create_task_route_preserves_failed_recovery_seed_diagnostics_without_spawning() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
@@ -1539,21 +1963,23 @@ async fn create_task_route_preserves_failed_spawn_diagnostics() {
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
         let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
-        let (session_id, cwd) = match command {
-            DaemonCommand::SpawnAgent { session_id, params } => (session_id, params.cwd),
-            DaemonCommand::Spawn {
-                session_id, cwd, ..
-            } => (session_id, cwd),
-            other => panic!("expected spawn command, got {:?}", other),
+        let session_id = match command {
+            DaemonCommand::SeedSnapshot {
+                session_id,
+                snapshot,
+            } => {
+                assert_eq!(snapshot.vt, "SEED-MUST-ACK");
+                session_id
+            }
+            other => panic!("expected recovery seed command, got {other:?}"),
         };
         write_half
             .write_all(
                 format!(
                     "{}\n",
                     serde_json::to_string(&DaemonEvent::Error {
-                        code: Some(ErrorCode::AgentSpawnFailed),
-                        message: "failed to spawn agent: No such file or directory (os error 2)"
-                            .to_string(),
+                        code: None,
+                        message: "recovery store unavailable".to_string(),
                     })
                     .unwrap()
                 )
@@ -1561,7 +1987,13 @@ async fn create_task_route_preserves_failed_spawn_diagnostics() {
             )
             .await
             .unwrap();
-        (session_id, cwd)
+        let mut unexpected = String::new();
+        let bytes = reader.read_line(&mut unexpected).await.unwrap();
+        assert_eq!(
+            bytes, 0,
+            "Spawn followed a failed recovery seed: {unexpected}"
+        );
+        session_id
     });
 
     let config = Config {
@@ -1580,6 +2012,7 @@ async fn create_task_route_preserves_failed_spawn_diagnostics() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-create-spawn-fail-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1597,7 +2030,17 @@ async fn create_task_route_preserves_failed_spawn_diagnostics() {
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Rollback this failed create",
-                        "agentProvider": "codex"
+                        "agentProvider": "codex",
+                        "recoverySnapshot": {
+                            "serialized": "SEED-MUST-ACK",
+                            "cols": 80,
+                            "rows": 24,
+                            "cursorRow": 0,
+                            "cursorCol": 0,
+                            "cursorVisible": true,
+                            "savedAt": 1785000000999_u64,
+                            "sequence": 9
+                        }
                     })
                     .to_string(),
                 ))
@@ -1612,9 +2055,13 @@ async fn create_task_route_preserves_failed_spawn_diagnostics() {
         .unwrap();
     let body = String::from_utf8_lossy(&body);
     assert!(body.contains("task "));
-    assert!(body.contains("failed to spawn"));
-    let (task_id, worktree_path) = daemon_server.await.unwrap();
+    assert!(body.contains("recovery seed"));
+    let task_id = daemon_server.await.unwrap();
     let db = Db::open(&config.db_path).unwrap();
+    let worktree_path = db
+        .get_task_worktree_path(&task_id)
+        .unwrap()
+        .expect("failed seed preserves prepared worktree row");
     assert_eq!(db.count_test_pipeline_items_for_repo("repo-1").unwrap(), 1);
     assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 1);
     assert_eq!(
@@ -1651,7 +2098,7 @@ async fn create_task_route_preserves_failed_spawn_diagnostics() {
         .unwrap();
     let logs = String::from_utf8_lossy(&logs);
     assert!(logs.contains("failed to spawn task"));
-    assert!(logs.contains("No such file or directory"));
+    assert!(logs.contains("recovery store unavailable"));
 
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::process::Command::new("git")
@@ -1703,6 +2150,7 @@ async fn create_task_route_persists_blocker_without_daemon_spawn() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-create-blocker-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();

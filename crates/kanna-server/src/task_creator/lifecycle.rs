@@ -8,7 +8,9 @@ use crate::daemon_client::DaemonClient;
 use crate::db::{Db, NewStageRun};
 use crate::http_api::{try_submit_task_input, TaskInputError};
 use crate::session_replacements::SessionReplacements;
-use kanna_daemon::protocol::{AgentSpawnParams, Command as DaemonCommand, Event as DaemonEvent};
+use kanna_daemon::protocol::{
+    AgentSpawnParams, Command as DaemonCommand, Event as DaemonEvent, TerminalSnapshot,
+};
 
 pub(crate) fn prepared_task_id(prepared: &PreparedTaskSpawn) -> &str {
     &prepared.created_task.task_id
@@ -36,6 +38,9 @@ pub(super) async fn spawn_prepared_task(
     daemon: &mut DaemonClient,
     prepared: PreparedTaskSpawn,
 ) -> Result<CreatedTask, String> {
+    if let Some(snapshot) = prepared.recovery_snapshot.as_ref() {
+        seed_recovery_snapshot(daemon, &prepared.session_id, snapshot).await?;
+    }
     let command = spawn_session_command(
         prepared.session_id,
         prepared.cwd,
@@ -53,6 +58,37 @@ pub(super) async fn spawn_prepared_task(
         DaemonEvent::SessionCreated { .. } => Ok(prepared.created_task),
         DaemonEvent::Error { message, .. } => Err(format!("daemon error: {}", message)),
         other => Err(format!("unexpected daemon response: {:?}", other)),
+    }
+}
+
+async fn seed_recovery_snapshot(
+    daemon: &mut DaemonClient,
+    session_id: &str,
+    snapshot: &crate::mobile_api::CreateTaskRecoverySnapshot,
+) -> Result<(), String> {
+    let event = daemon
+        .send_command(&DaemonCommand::SeedSnapshot {
+            session_id: session_id.to_string(),
+            snapshot: TerminalSnapshot {
+                version: 1,
+                rows: snapshot.rows,
+                cols: snapshot.cols,
+                cursor_row: snapshot.cursor_row,
+                cursor_col: snapshot.cursor_col,
+                cursor_visible: snapshot.cursor_visible,
+                saved_at: snapshot.saved_at,
+                sequence: snapshot.sequence,
+                vt: snapshot.serialized.clone(),
+            },
+        })
+        .await
+        .map_err(|error| format!("daemon recovery seed error: {error}"))?;
+    match event {
+        DaemonEvent::Ok => Ok(()),
+        DaemonEvent::Error { message, .. } => Err(format!("daemon recovery seed error: {message}")),
+        other => Err(format!(
+            "unexpected daemon recovery seed response: {other:?}"
+        )),
     }
 }
 
@@ -456,6 +492,11 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     if let Err(error) = prepare_deferred_rerun_setup(&mut prepared) {
         return Err(record_failure(error));
     }
+    if let Some(snapshot) = prepared.recovery_snapshot.as_ref() {
+        if let Err(error) = seed_recovery_snapshot(daemon, &session_id, snapshot).await {
+            return Err(record_failure(error));
+        }
+    }
 
     let command = spawn_session_command(
         session_id.clone(),
@@ -625,31 +666,33 @@ fn spawn_session_command(
 
 fn record_spawned_stage_run(db_path: &str, prepared: &PreparedTaskSpawn) -> Result<(), String> {
     let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
-    db.update_pipeline_item_agent_session_id(
-        &prepared.created_task.task_id,
-        prepared.provider_session_id.as_deref(),
-    )
-    .map_err(|e| format!("db error: {}", e))?;
     let run_id = generate_stage_run_id(&prepared.created_task.task_id);
-    db.insert_stage_run_with_completion_transition(
-        NewStageRun {
-            id: &run_id,
-            task_id: &prepared.created_task.task_id,
-            stage: &prepared.created_task.stage,
-            kind: "main",
-            agent: prepared.stage_agent.as_deref(),
-            agent_provider: Some(prepared.agent_provider.as_str()),
-            model: prepared.model.as_deref(),
-            status: "running",
-            result: None,
-            feedback: None,
-            session_id: Some(&prepared.session_id),
-            provider_session_id: prepared.provider_session_id.as_deref(),
-            cwd: Some(&prepared.cwd),
-            resumed_from_run_id: None,
-        },
-        Some(prepared.completion_transition.as_str()),
-    )
+    db.with_immediate_transaction(|db| {
+        db.update_pipeline_item_agent_session_id(
+            &prepared.created_task.task_id,
+            prepared.provider_session_id.as_deref(),
+        )?;
+        db.insert_stage_run_with_completion_transition(
+            NewStageRun {
+                id: &run_id,
+                task_id: &prepared.created_task.task_id,
+                stage: &prepared.created_task.stage,
+                kind: "main",
+                agent: prepared.stage_agent.as_deref(),
+                agent_provider: Some(prepared.agent_provider.as_str()),
+                model: prepared.model.as_deref(),
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some(&prepared.session_id),
+                provider_session_id: prepared.provider_session_id.as_deref(),
+                cwd: Some(&prepared.cwd),
+                resumed_from_run_id: None,
+            },
+            Some(prepared.completion_transition.as_str()),
+        )?;
+        db.delete_create_task_intent(&prepared.created_task.task_id)
+    })
     .map_err(|e| format!("db error: {}", e))
 }
 
@@ -701,32 +744,32 @@ fn record_rerun_stage_run(
     cwd: &str,
 ) -> Result<(), String> {
     let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
-    db.cancel_running_stage_runs(task_id)
-        .map_err(|e| format!("db error: {}", e))?;
-    db.update_pipeline_item_activity(task_id, "working")
-        .map_err(|e| format!("db error: {}", e))?;
-    db.update_pipeline_item_agent_session_id(task_id, provider_session_id)
-        .map_err(|e| format!("db error: {}", e))?;
     let run_id = generate_stage_run_id(task_id);
-    db.insert_stage_run_with_completion_transition(
-        NewStageRun {
-            id: &run_id,
-            task_id,
-            stage,
-            kind: run_kind,
-            agent: stage_agent,
-            agent_provider: Some(agent_provider),
-            model,
-            status: "running",
-            result: None,
-            feedback: None,
-            session_id: Some(session_id),
-            provider_session_id,
-            cwd: Some(cwd),
-            resumed_from_run_id: None,
-        },
-        Some(completion_transition),
-    )
+    db.with_immediate_transaction(|db| {
+        db.cancel_running_stage_runs(task_id)?;
+        db.update_pipeline_item_activity(task_id, "working")?;
+        db.update_pipeline_item_agent_session_id(task_id, provider_session_id)?;
+        db.insert_stage_run_with_completion_transition(
+            NewStageRun {
+                id: &run_id,
+                task_id,
+                stage,
+                kind: run_kind,
+                agent: stage_agent,
+                agent_provider: Some(agent_provider),
+                model,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some(session_id),
+                provider_session_id,
+                cwd: Some(cwd),
+                resumed_from_run_id: None,
+            },
+            Some(completion_transition),
+        )?;
+        db.delete_create_task_intent(task_id)
+    })
     .map_err(|e| format!("db error: {}", e))
 }
 

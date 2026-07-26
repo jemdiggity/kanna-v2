@@ -29,6 +29,7 @@ pub(crate) fn test_router(desktop_id: &str, desktop_name: &str) -> Router {
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -60,6 +61,7 @@ pub(super) fn test_router_with_seed(
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -92,6 +94,7 @@ pub(super) fn test_state_with_seed(
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-invoke-{desktop_id}-{test_db_id}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -124,6 +127,7 @@ pub(super) fn test_state_with_task_input_sender(
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!(
             "/tmp/kanna-pairings-invoke-input-{desktop_id}-{test_db_id}.json"
         ),
@@ -157,6 +161,7 @@ pub(super) fn test_router_with_task_creator(
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -189,6 +194,7 @@ pub(super) fn test_router_with_seed_and_task_creator(
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -221,6 +227,7 @@ pub(super) fn test_router_with_merge_agent_runner(
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -255,6 +262,7 @@ pub(super) fn test_router_with_task_input_sender(
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -289,6 +297,7 @@ pub(super) fn test_router_with_task_closer(
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -320,6 +329,7 @@ pub(super) fn test_router_with_stage_advancer(
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -354,6 +364,7 @@ pub(super) fn test_router_with_stage_rerunner(
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-rerun-{desktop_id}-{test_db_id}.json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -388,6 +399,7 @@ pub(super) fn test_router_with_stage_completer(
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -422,6 +434,7 @@ pub(super) fn test_router_with_revision_requester(
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");

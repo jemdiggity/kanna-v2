@@ -3,7 +3,21 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlRequest {
+    GetLocalIdentity {
+        request_id: String,
+    },
     ListPeers {
+        request_id: String,
+    },
+    UpsertExternalPeer {
+        request_id: String,
+        peer: crate::runtime::ExternalPeer,
+    },
+    RemoveExternalPeer {
+        request_id: String,
+        peer_id: String,
+    },
+    ClearExternalPeers {
         request_id: String,
     },
     SetTaskSnapshot {
@@ -86,6 +100,15 @@ pub enum ControlRequest {
         request_id: String,
         source_task_id: String,
         target_peer_id: String,
+        #[serde(default)]
+        transport: crate::runtime::TransferTransport,
+    },
+    RequestTaskPull {
+        request_id: String,
+        target_peer_id: String,
+        source_task_id: String,
+        #[serde(default)]
+        transport: crate::runtime::TransferTransport,
     },
     PrepareTransferCommit {
         request_id: String,
@@ -109,14 +132,43 @@ pub enum ControlRequest {
         source_task_id: String,
         destination_local_task_id: String,
     },
+    MarkIncomingEventRecorded {
+        request_id: String,
+        transfer_id: String,
+    },
+    MarkImportCommitApplied {
+        request_id: String,
+        transfer_id: String,
+    },
+    MarkImportAckCompleted {
+        request_id: String,
+        transfer_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlResponse {
+    GetLocalIdentity {
+        request_id: String,
+        peer_id: String,
+        display_name: String,
+        public_key: String,
+        protocol_version: u16,
+        accepting_transfers: bool,
+    },
     ListPeers {
         request_id: String,
         peers: Vec<DiscoveredPeer>,
+    },
+    UpsertExternalPeer {
+        request_id: String,
+    },
+    RemoveExternalPeer {
+        request_id: String,
+    },
+    ClearExternalPeers {
+        request_id: String,
     },
     SetTaskSnapshot {
         request_id: String,
@@ -181,6 +233,10 @@ pub enum ControlResponse {
         source_peer_id: String,
         target_has_repo: bool,
     },
+    RequestTaskPull {
+        request_id: String,
+        pull_request_id: String,
+    },
     PrepareTransferCommit {
         request_id: String,
         transfer_id: String,
@@ -199,10 +255,31 @@ pub enum ControlResponse {
         request_id: String,
         transfer_id: String,
     },
+    MarkIncomingEventRecorded {
+        request_id: String,
+        transfer_id: String,
+    },
+    MarkImportCommitApplied {
+        request_id: String,
+        transfer_id: String,
+    },
+    MarkImportAckCompleted {
+        request_id: String,
+        transfer_id: String,
+    },
     Error {
         request_id: String,
         message: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalTransferIdentity {
+    pub peer_id: String,
+    pub display_name: String,
+    pub public_key: String,
+    pub protocol_version: u16,
+    pub accepting_transfers: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,6 +295,11 @@ pub enum PeerRequest {
     PrepareTransfer {
         request_id: String,
         source_peer_id: String,
+        sealed_payload: String,
+    },
+    RequestTaskPull {
+        request_id: String,
+        requester_peer_id: String,
         sealed_payload: String,
     },
     SubmitTransferPayload {
@@ -300,6 +382,9 @@ pub enum PeerResponse {
         transfer_id: String,
         source_peer_id: String,
         target_has_repo: bool,
+    },
+    RequestTaskPull {
+        request_id: String,
     },
     SubmitTransferPayload {
         request_id: String,
@@ -439,6 +524,11 @@ pub enum SidecarEvent {
         source_task_id: String,
         source_name: Option<String>,
         payload: serde_json::Value,
+    },
+    TaskPullRequested {
+        request_id: String,
+        requester_peer_id: String,
+        source_task_id: String,
     },
     OutgoingTransferCommitted {
         transfer_id: String,

@@ -8,6 +8,7 @@ import {
 
 function task(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
+    cloudTaskId: "cloud-stable",
     localRepoId: "repo-1",
     ownerDesktopId: "desktop-1",
     ownerLocalTaskId: "task-1",
@@ -45,10 +46,21 @@ function task(overrides: Record<string, unknown> = {}): Record<string, unknown> 
   };
 }
 
-function publication(tasks: unknown[] = [task()]): Record<string, unknown> {
+function publication(
+  tasks: unknown[] = [task()],
+  desktop: Record<string, unknown> = {
+    displayName: "Studio Mac",
+    transfer: {
+      peerId: "peer-a",
+      publicKey: "base64-key",
+      protocolVersion: 1,
+      acceptingTransfers: true,
+    },
+  },
+): Record<string, unknown> {
   return {
     schemaVersion: 1,
-    desktop: { displayName: "Studio Mac" },
+    desktop,
     tasks,
   };
 }
@@ -56,15 +68,154 @@ function publication(tasks: unknown[] = [task()]): Record<string, unknown> {
 describe("cloud task publication validation", () => {
   it("accepts and normalizes the existing mobile cloud snapshot schema", () => {
     const parsed = validateCloudTaskPublication(publication(), "desktop-1");
+    expect(parsed.transfer).toEqual({
+      peerId: "peer-a",
+      publicKey: "base64-key",
+      protocolVersion: 1,
+      acceptingTransfers: true,
+    });
     expect(parsed.tasks[0]).toMatchObject({
       ownerDesktopId: "desktop-1",
       ownerLocalTaskId: "task-1",
+      cloudTaskId: "cloud-stable",
       activity: "idle",
       activityRevision: 4,
       waitingPromptSnippet: "Ready for review",
       agent: { provider: "codex", type: "pty" },
       repo: { remoteUrlHash: "remote-hash" },
     });
+  });
+
+  it("accepts older publishers without desktop transfer metadata", () => {
+    const parsed = validateCloudTaskPublication(
+      publication([], { displayName: "Studio Mac" }),
+      "desktop-1",
+    );
+
+    expect(parsed.transfer).toBeNull();
+  });
+
+  it.each([
+    ["peerId", ""],
+    ["publicKey", "   "],
+    ["protocolVersion", 0],
+    ["protocolVersion", 1.5],
+    ["acceptingTransfers", "yes"],
+  ])("rejects invalid desktop transfer %s", (field, value) => {
+    expect(() => validateCloudTaskPublication(
+      publication([], {
+        displayName: "Studio Mac",
+        transfer: {
+          peerId: "peer-a",
+          publicKey: "base64-key",
+          protocolVersion: 1,
+          acceptingTransfers: true,
+          [field]: value,
+        },
+      }),
+      "desktop-1",
+    )).toThrow(new RegExp(`desktop\\.transfer\\.${field}`));
+  });
+
+  it("accepts exactly the four transfer states with authenticated desktop ids", () => {
+    const states = ["none", "outgoing", "incoming", "finalization_pending"] as const;
+
+    for (const state of states) {
+      const transfer = state === "none"
+        ? {
+            state,
+            transferId: null,
+            sourceDesktopId: null,
+            destinationDesktopId: null,
+          }
+        : {
+            state,
+            transferId: "transfer-1",
+            sourceDesktopId: state === "outgoing" ? "desktop-1" : "desktop-a",
+            destinationDesktopId: state === "outgoing" ? "desktop-b" : "desktop-1",
+          };
+      const parsed = validateCloudTaskPublication(
+        publication([task({ transfer })]),
+        "desktop-1",
+      );
+
+      expect(parsed.tasks[0]?.transfer).toEqual(transfer);
+    }
+
+    expect(() => validateCloudTaskPublication(
+      publication([task({
+        transfer: {
+          state: "finished",
+          transferId: "transfer-1",
+          sourceDesktopId: "desktop-a",
+          destinationDesktopId: "desktop-b",
+        },
+      })]),
+      "desktop-1",
+    )).toThrow(/transfer.state/);
+  });
+
+  it.each([
+    ["outgoing", "desktop-other", "desktop-target"],
+    ["incoming", "desktop-source", "desktop-other"],
+    ["finalization_pending", "desktop-source", "desktop-other"],
+  ])("rejects %s publication by a desktop that does not own its role", (
+    state,
+    sourceDesktopId,
+    destinationDesktopId,
+  ) => {
+    expect(() => validateCloudTaskPublication(
+      publication([task({
+        transfer: {
+          state,
+          transferId: "transfer-1",
+          sourceDesktopId,
+          destinationDesktopId,
+        },
+      })]),
+      "desktop-1",
+    )).toThrow(/authenticated desktop/);
+  });
+
+  it.each([
+    ["transferId", null],
+    ["sourceDesktopId", null],
+    ["destinationDesktopId", null],
+  ])("rejects outgoing transfer missing %s", (field, missingValue) => {
+    expect(() => validateCloudTaskPublication(
+      publication([task({
+        transfer: {
+          state: "outgoing",
+          transferId: "transfer-1",
+          sourceDesktopId: "desktop-1",
+          destinationDesktopId: "desktop-b",
+          [field]: missingValue,
+        },
+      })]),
+      "desktop-1",
+    )).toThrow(new RegExp(`transfer\\.${field}`));
+  });
+
+  it.each([
+    ["transferId", "empty", ""],
+    ["transferId", "whitespace-only", " \t "],
+    ["sourceDesktopId", "empty", ""],
+    ["sourceDesktopId", "whitespace-only", "\n  "],
+    ["destinationDesktopId", "empty", ""],
+    ["destinationDesktopId", "whitespace-only", "   "],
+  ])("rejects outgoing transfer with %s %s", (field, _kind, invalidValue) => {
+    expect(() => validateCloudTaskPublication(
+      publication([task({
+        transfer: {
+          state: "outgoing",
+          transferId: "transfer-1",
+          sourceDesktopId: "desktop-1",
+          destinationDesktopId: "desktop-b",
+          [field]: invalidValue,
+        },
+      })]),
+      "desktop-1",
+    )).toThrow(new RegExp(`transfer\\.${field}`));
   });
 
   it("accepts legacy missing revisions but rejects malformed activity revisions", () => {
@@ -188,6 +339,12 @@ describe("cloud task publication reconciliation", () => {
       desktopId: "desktop-1",
       generation: { session: 4, sequence: 2 },
       displayName: "Studio Mac",
+      transfer: {
+        peerId: "peer-a",
+        publicKey: "base64-key",
+        protocolVersion: 1,
+        acceptingTransfers: true,
+      },
       tasks: expect.arrayContaining([
         expect.objectContaining({ ownerDesktopId: "desktop-1", ownerLocalTaskId: "task-1" }),
       ]),

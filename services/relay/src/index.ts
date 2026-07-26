@@ -20,6 +20,7 @@ import {
 import { handleOtaRequest } from "./ota.js";
 import {
   beginCloudTaskPublicationSession,
+  endCloudTaskPublicationSession,
   handleCloudTaskPublication,
   MAX_TASK_SNAPSHOT_BYTES,
 } from "./cloudTaskPublication.js";
@@ -123,6 +124,26 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   let serverAuthProof: ServerAuthProof | null = null;
   let publicationSessionGeneration: number | null = null;
   let nextPublicationSequence = 1;
+
+  ws.on("close", () => {
+    if (
+      role !== "server"
+      || !userId
+      || !desktopId
+      || publicationSessionGeneration === null
+    ) {
+      return;
+    }
+    void endCloudTaskPublicationSession({
+      userId,
+      desktopId,
+      generation: publicationSessionGeneration,
+    }).catch((error) => {
+      console.warn(
+        `[cloud] Failed to end task publication session for ${userId}/${desktopId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+  });
 
   // 10-second auth timeout
   const authTimer = setTimeout(() => {

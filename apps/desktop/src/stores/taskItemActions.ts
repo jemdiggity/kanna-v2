@@ -112,6 +112,7 @@ export function createTaskItemActions(
       }
 
       const created = await createDesktopTask({
+        requestedTaskId: opts?.requestedTaskId,
         repoId,
         prompt: effectivePrompt,
         displayName,

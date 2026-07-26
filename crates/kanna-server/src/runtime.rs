@@ -129,6 +129,7 @@ mod tests {
             environment: "development".into(),
             lan_host: "127.0.0.1".into(),
             lan_port,
+            transfer_port: 4455,
             pairing_store_path: pairing_store_path.clone(),
         };
         let database = db::Db::open_for_tests(&db_path).unwrap();
@@ -162,6 +163,21 @@ mod tests {
 
             assert_eq!(connections.load(Ordering::SeqCst), 1);
             assert_eq!(publications.load(Ordering::SeqCst), 1);
+
+            let reconnect = client
+                .post(format!("{status_url}/../cloud/relay/actions/reconnect"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(reconnect.status(), reqwest::StatusCode::NO_CONTENT);
+            tokio::time::timeout(Duration::from_secs(7), async {
+                while connections.load(Ordering::SeqCst) < 2 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("relay did not reconnect after the local session revocation signal");
+            assert_eq!(connections.load(Ordering::SeqCst), 2);
         };
         tokio::select! {
             _ = &mut runtime => panic!("server runtime exited before singleton assertions"),

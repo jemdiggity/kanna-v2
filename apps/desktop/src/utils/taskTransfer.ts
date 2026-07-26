@@ -16,8 +16,11 @@ export interface TransferArtifactPayload {
 
 export interface OutgoingTransferPayload {
   target_peer_id: string;
+  target_desktop_id: string | null;
   task: {
+    cloud_task_id: string;
     source_peer_id: string;
+    source_desktop_id: string | null;
     source_task_id: string;
     local_task_id?: string;
     resume_session_id?: string | null;
@@ -48,11 +51,13 @@ export interface OutgoingTransferPayload {
 
 export interface BuildOutgoingTransferPayloadInput {
   sourcePeerId: string;
+  sourceDesktopId?: string | null;
   sourceTaskId: string;
   targetPeerId: string;
+  targetDesktopId?: string | null;
   item: Pick<
     PipelineItem,
-    "id" | "prompt" | "stage" | "branch" | "pipeline" | "display_name" | "base_ref" | "agent_type" | "agent_provider" | "agent_session_id"
+    "id" | "cloud_task_id" | "prompt" | "stage" | "branch" | "pipeline" | "display_name" | "base_ref" | "agent_type" | "agent_provider" | "agent_session_id"
   >;
   repoPath?: string | null;
   repoName?: string | null;
@@ -122,6 +127,12 @@ export interface PairingRequestedEvent {
   peerId: string;
   displayName: string;
   verificationCode: string;
+}
+
+export interface TaskPullRequestedEvent {
+  requestId: string;
+  requesterPeerId: string;
+  sourceTaskId: string;
 }
 
 function normalizeRemoteUrl(remoteUrl: string | null): string | null {
@@ -203,6 +214,39 @@ function readRequiredBoolean(
   throw new Error(label);
 }
 
+function normalizeOutgoingTransferPayload(
+  payloadRecord: Record<string, unknown>,
+  invalidMessage: string,
+): OutgoingTransferPayload {
+  const taskRecord = asRecord(payloadRecord.task);
+  const repoRecord = asRecord(payloadRecord.repo);
+  if (!taskRecord || !repoRecord) {
+    throw new Error(invalidMessage);
+  }
+  const sourceTaskId = readRequiredString(
+    taskRecord,
+    ["source_task_id", "sourceTaskId"],
+    `${invalidMessage}: task missing source_task_id`,
+  );
+
+  return {
+    ...payloadRecord,
+    target_desktop_id: readOptionalString(payloadRecord, [
+      "target_desktop_id",
+      "targetDesktopId",
+    ]),
+    task: {
+      ...taskRecord,
+      cloud_task_id: readOptionalString(taskRecord, ["cloud_task_id", "cloudTaskId"])
+        ?? sourceTaskId,
+      source_desktop_id: readOptionalString(taskRecord, [
+        "source_desktop_id",
+        "sourceDesktopId",
+      ]),
+    },
+  } as unknown as OutgoingTransferPayload;
+}
+
 export function chooseRepoAcquisitionMode(input: {
   remoteUrl: string | null;
   targetHasRepo: boolean;
@@ -231,8 +275,11 @@ export function buildOutgoingTransferPayload(
 
   return {
     target_peer_id: input.targetPeerId,
+    target_desktop_id: input.targetDesktopId ?? null,
     task: {
+      cloud_task_id: input.item.cloud_task_id ?? input.item.id,
       source_peer_id: input.sourcePeerId,
+      source_desktop_id: input.sourceDesktopId ?? null,
       source_task_id: input.sourceTaskId,
       resume_session_id: input.item.agent_session_id,
       prompt: input.item.prompt,
@@ -369,6 +416,31 @@ export function parsePairingRequestedEvent(value: unknown): PairingRequestedEven
   };
 }
 
+export function parseTaskPullRequestedEvent(value: unknown): TaskPullRequestedEvent {
+  const record = asRecord(value);
+  if (!record) {
+    throw new Error("task-pull-requested event payload is invalid");
+  }
+
+  return {
+    requestId: readRequiredString(
+      record,
+      ["requestId", "request_id"],
+      "task-pull-requested event missing request id",
+    ),
+    requesterPeerId: readRequiredString(
+      record,
+      ["requesterPeerId", "requester_peer_id"],
+      "task-pull-requested event missing requester peer id",
+    ),
+    sourceTaskId: readRequiredString(
+      record,
+      ["sourceTaskId", "source_task_id"],
+      "task-pull-requested event missing source task id",
+    ),
+  };
+}
+
 export function parseIncomingTransferRequest(value: unknown): IncomingTransferRequest {
   const record = asRecord(value);
   if (!record) {
@@ -406,7 +478,10 @@ export function parseIncomingTransferRequest(value: unknown): IncomingTransferRe
       "displayName",
       "display_name",
     ]),
-    payload: payloadRecord as unknown as OutgoingTransferPayload,
+    payload: normalizeOutgoingTransferPayload(
+      payloadRecord,
+      "transfer-request payload is missing task or repo",
+    ),
   };
 }
 
@@ -472,7 +547,10 @@ export function parseFinalizedOutgoingTransferResult(
       ["transferId", "transfer_id"],
       "finalize_outgoing_transfer response missing transferId",
     ),
-    payload: payloadRecord as unknown as OutgoingTransferPayload,
+    payload: normalizeOutgoingTransferPayload(
+      payloadRecord,
+      "finalize_outgoing_transfer response payload is missing task or repo",
+    ),
     finalizedCleanly: readRequiredBoolean(
       record,
       ["finalizedCleanly", "finalized_cleanly"],
@@ -500,11 +578,8 @@ export function parsePersistedOutgoingTransferPayload(raw: string | null): Outgo
     throw new Error("task transfer payload_json did not decode to an object");
   }
 
-  const task = asRecord(record.task);
-  const repo = asRecord(record.repo);
-  if (!task || !repo) {
-    throw new Error("task transfer payload_json is missing task or repo");
-  }
-
-  return record as unknown as OutgoingTransferPayload;
+  return normalizeOutgoingTransferPayload(
+    record,
+    "task transfer payload_json is missing task or repo",
+  );
 }

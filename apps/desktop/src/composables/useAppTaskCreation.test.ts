@@ -39,6 +39,7 @@ function createTaskCreationHarness() {
     items: [],
     terminalRefs: {},
     blockedByTaskIds: {},
+    transferMachines: [],
   });
   const cloudOnlyRepoIds = new Set<string>();
   const toast = { warning: vi.fn(), error: vi.fn() };

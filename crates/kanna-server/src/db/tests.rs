@@ -1,6 +1,7 @@
 use super::NewStageRun;
 use super::{
-    add_column, database_open_flags, run_migration, Db, NewPipelineItem, CURRENT_SCHEMA_MIGRATIONS,
+    add_column, database_open_flags, run_migration, Db, NewPipelineItem, NewTaskTransfer,
+    NewTaskTransferProvenance, CURRENT_SCHEMA_MIGRATIONS,
 };
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
@@ -163,7 +164,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "029_pipeline_item_activity_revision");
+    assert_eq!(latest_migration, "033_create_task_intent");
 
     let stage_run_sql: String = db
         .conn
@@ -176,6 +177,346 @@ fn open_creates_and_migrates_fresh_profile_database() {
     assert!(stage_run_sql.contains("provider_session_id"));
     assert!(stage_run_sql.contains("resumed_from_run_id"));
     assert!(stage_run_sql.contains("completion_transition"));
+    let mut transfer_columns_stmt = db
+        .conn
+        .prepare("PRAGMA table_info(task_transfer)")
+        .expect("prepare transfer columns");
+    let transfer_columns = transfer_columns_stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("read transfer columns")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect transfer columns");
+    assert!(transfer_columns.contains(&"source_desktop_id".to_string()));
+    assert!(transfer_columns.contains(&"target_desktop_id".to_string()));
+    assert!(transfer_columns.contains(&"sidecar_cleanup_completed_at".to_string()));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn task_transfer_round_trip_preserves_nullable_authenticated_desktop_ids() {
+    let path = Db::test_db_path("task-transfer-cloud-desktop-ids");
+    let db = Db::open_for_tests(&path).expect("open test db");
+
+    db.insert_task_transfer(&NewTaskTransfer {
+        id: "transfer-cloud".into(),
+        direction: "outgoing".into(),
+        status: "pending".into(),
+        source_peer_id: Some("peer-a".into()),
+        target_peer_id: Some("peer-b".into()),
+        source_desktop_id: Some("desktop-a".into()),
+        target_desktop_id: Some("desktop-b".into()),
+        source_task_id: Some("task-a".into()),
+        local_task_id: None,
+        error: None,
+        payload_json: None,
+    })
+    .expect("insert cloud transfer");
+    db.insert_task_transfer(&NewTaskTransfer {
+        id: "transfer-lan".into(),
+        direction: "incoming".into(),
+        status: "pending".into(),
+        source_peer_id: Some("peer-a".into()),
+        target_peer_id: Some("peer-b".into()),
+        source_desktop_id: None,
+        target_desktop_id: None,
+        source_task_id: Some("task-a".into()),
+        local_task_id: None,
+        error: None,
+        payload_json: None,
+    })
+    .expect("insert LAN transfer");
+
+    let cloud = db
+        .get_task_transfer("transfer-cloud")
+        .expect("load cloud transfer")
+        .expect("cloud transfer exists");
+    assert_eq!(cloud.source_desktop_id.as_deref(), Some("desktop-a"));
+    assert_eq!(cloud.target_desktop_id.as_deref(), Some("desktop-b"));
+
+    let lan = db
+        .get_task_transfer("transfer-lan")
+        .expect("load LAN transfer")
+        .expect("LAN transfer exists");
+    assert_eq!(lan.source_desktop_id, None);
+    assert_eq!(lan.target_desktop_id, None);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn incoming_transfer_insert_is_idempotent_for_event_replay() {
+    let path = Db::test_db_path("incoming-transfer-insert-idempotent");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    let transfer = NewTaskTransfer {
+        id: "transfer-replayed".into(),
+        direction: "incoming".into(),
+        status: "pending".into(),
+        source_peer_id: Some("peer-a".into()),
+        target_peer_id: None,
+        source_desktop_id: Some("desktop-a".into()),
+        target_desktop_id: None,
+        source_task_id: Some("task-a".into()),
+        local_task_id: None,
+        error: None,
+        payload_json: Some(r#"{"task":{"source_task_id":"task-a"}}"#.into()),
+    };
+
+    db.insert_task_transfer(&transfer)
+        .expect("insert incoming transfer");
+    db.insert_task_transfer(&transfer)
+        .expect("replay incoming transfer insert");
+    let count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_transfer WHERE id = ?",
+            ["transfer-replayed"],
+            |row| row.get(0),
+        )
+        .expect("count replayed transfer rows");
+    assert_eq!(count, 1);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn snapshot_selects_latest_relevant_transfer_for_open_task() {
+    let path = Db::test_db_path("snapshot-latest-task-transfer");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Kanna").expect("insert repo");
+    db.insert_test_pipeline_item(
+        "task-destination",
+        "repo-1",
+        "Transferred task",
+        None,
+        "in progress",
+        "2026-07-26 00:00:00",
+    )
+    .expect("insert task");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-older-outgoing",
+        "outgoing",
+        "pending",
+        Some("task-destination"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert older relevant outgoing transfer");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-awaiting-incoming",
+        "incoming",
+        "awaiting_acknowledgment",
+        Some("task-destination"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert awaiting incoming transfer");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-newer-completed-incoming",
+        "incoming",
+        "completed",
+        Some("task-destination"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert newer terminal incoming transfer");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-newest-invalid-importing-outgoing",
+        "outgoing",
+        "importing",
+        Some("task-destination"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert newest invalid importing outgoing transfer");
+    for (id, started_at, completed_at) in [
+        ("transfer-older-outgoing", "2026-07-26 00:01:00", None),
+        (
+            "transfer-awaiting-incoming",
+            "2026-07-26 00:02:00",
+            Some("2026-07-26 00:03:00"),
+        ),
+        (
+            "transfer-newer-completed-incoming",
+            "2026-07-26 00:04:00",
+            Some("2026-07-26 00:05:00"),
+        ),
+        (
+            "transfer-newest-invalid-importing-outgoing",
+            "2026-07-26 00:06:00",
+            Some("2026-07-26 00:07:00"),
+        ),
+    ] {
+        db.conn
+            .execute(
+                "UPDATE task_transfer
+                 SET started_at = ?, completed_at = ?
+                 WHERE id = ?",
+                (started_at, completed_at, id),
+            )
+            .expect("set deterministic transfer timestamps");
+    }
+
+    let snapshot = db.ui_snapshot().expect("load snapshot");
+    let item = &snapshot.entries[0].items[0];
+    assert_eq!(item.cloud_task_id, "task-destination");
+    assert_eq!(
+        item.transfer_id.as_deref(),
+        Some("transfer-awaiting-incoming")
+    );
+    assert_eq!(item.transfer_direction.as_deref(), Some("incoming"));
+    assert_eq!(
+        item.transfer_status.as_deref(),
+        Some("awaiting_acknowledgment")
+    );
+    assert_eq!(item.transfer_source_peer_id.as_deref(), Some("peer-1"));
+    assert_eq!(item.transfer_target_peer_id.as_deref(), Some("peer-2"));
+    assert_eq!(
+        item.transfer_source_desktop_id.as_deref(),
+        Some("desktop-a")
+    );
+    assert_eq!(
+        item.transfer_target_desktop_id.as_deref(),
+        Some("desktop-b")
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
+    let path = Db::test_db_path("incoming-transfer-state-machine");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.conn
+        .execute_batch(
+            "CREATE TABLE task_transfer_provenance (
+               pipeline_item_id TEXT PRIMARY KEY,
+               source_peer_id TEXT NOT NULL,
+               source_task_id TEXT NOT NULL,
+               source_machine_task_label TEXT,
+               imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );",
+        )
+        .expect("create provenance table");
+    db.insert_test_task_transfer("transfer-1", "incoming", "streaming", Some("{}"))
+        .expect("insert transfer");
+    drop(db);
+
+    let db = Db::open(&path).expect("reopen test db after restart");
+    let streaming = db
+        .list_pending_incoming_transfers()
+        .expect("list streaming transfer after restart");
+    assert_eq!(streaming.len(), 1);
+    assert_eq!(streaming[0].status, "streaming");
+    assert!(db
+        .claim_pending_incoming_transfer("transfer-1")
+        .expect("reclaim streaming transfer after restart"));
+
+    assert!(db
+        .mark_incoming_transfer_importing("transfer-1", "task-local")
+        .expect("mark importing"));
+    let importing = db
+        .get_task_transfer("transfer-1")
+        .expect("read importing")
+        .expect("transfer exists");
+    assert_eq!(importing.status, "importing");
+    assert_eq!(importing.local_task_id.as_deref(), Some("task-local"));
+
+    let provenance = NewTaskTransferProvenance {
+        pipeline_item_id: "task-local".into(),
+        source_peer_id: "peer-source".into(),
+        source_task_id: "task-source".into(),
+        source_machine_task_label: Some("source-branch".into()),
+    };
+    db.insert_task_transfer_provenance(&provenance)
+        .expect("insert provenance");
+    db.insert_task_transfer_provenance(&provenance)
+        .expect("repeat provenance");
+    let provenance_count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_transfer_provenance WHERE pipeline_item_id = ?",
+            ["task-local"],
+            |row| row.get(0),
+        )
+        .expect("count provenance");
+    assert_eq!(provenance_count, 1);
+
+    assert!(db
+        .mark_incoming_transfer_awaiting_acknowledgment("transfer-1", "task-local")
+        .expect("mark awaiting"));
+    let resumable = db
+        .list_pending_incoming_transfers()
+        .expect("list resumable transfers");
+    assert_eq!(resumable.len(), 1);
+    assert_eq!(resumable[0].status, "awaiting_acknowledgment");
+    assert_eq!(resumable[0].local_task_id.as_deref(), Some("task-local"));
+    assert!(db
+        .claim_pending_incoming_transfer("transfer-1")
+        .expect("claim resumable awaiting transfer"));
+
+    assert!(db
+        .mark_task_transfer_completed("transfer-1", "task-local")
+        .expect("mark complete"));
+    assert!(db
+        .list_pending_incoming_transfers()
+        .expect("list after complete")
+        .is_empty());
+    db.insert_test_task_transfer("transfer-rejected", "incoming", "rejected", Some("{}"))
+        .expect("insert rejected incoming transfer");
+    db.insert_test_task_transfer("transfer-failed", "incoming", "failed", Some("{}"))
+        .expect("insert failed incoming transfer");
+    db.insert_test_task_transfer("transfer-outgoing", "outgoing", "completed", Some("{}"))
+        .expect("insert completed outgoing transfer");
+    let mut cleanup_candidates = db
+        .list_terminal_incoming_transfer_ids()
+        .expect("list terminal incoming cleanup candidates");
+    cleanup_candidates.sort();
+    assert_eq!(
+        cleanup_candidates,
+        vec!["transfer-1", "transfer-failed", "transfer-rejected"]
+    );
+    assert!(db
+        .mark_incoming_transfer_sidecar_cleanup_completed("transfer-1")
+        .expect("mark incoming sidecar cleanup completed"));
+    assert!(db
+        .mark_incoming_transfer_sidecar_cleanup_completed("transfer-1")
+        .expect("repeat incoming sidecar cleanup completion"));
+    let mut remaining_cleanup_candidates = db
+        .list_terminal_incoming_transfer_ids()
+        .expect("list remaining cleanup candidates");
+    remaining_cleanup_candidates.sort();
+    assert_eq!(
+        remaining_cleanup_candidates,
+        vec!["transfer-failed", "transfer-rejected"]
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn outgoing_transfer_completion_replays_only_for_the_same_source_task() {
+    let path = Db::test_db_path("outgoing-transfer-completion-replay");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_task_transfer("transfer-1", "outgoing", "streaming", Some("{}"))
+        .expect("insert transfer");
+
+    assert!(db
+        .mark_task_transfer_completed("transfer-1", "task-source")
+        .expect("complete transfer"));
+    assert!(db
+        .mark_task_transfer_completed("transfer-1", "task-source")
+        .expect("replay matching completion"));
+    assert!(!db
+        .mark_task_transfer_completed("transfer-1", "different-source")
+        .expect("reject mismatched completion"));
+
+    let transfer = db
+        .get_task_transfer("transfer-1")
+        .expect("read transfer")
+        .expect("transfer exists");
+    assert_eq!(transfer.status, "completed");
+    assert_eq!(transfer.local_task_id.as_deref(), Some("task-source"));
 
     let _ = std::fs::remove_file(path);
 }
@@ -338,6 +679,104 @@ fn open_migrates_origin_main_028_activity_revision() {
         .expect("transitioned pipeline item exists");
     assert_eq!(item.activity.as_deref(), Some("working"));
     assert_eq!(item.activity_revision, 1);
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn migration_backfills_cloud_task_identity_from_local_task_id() {
+    let path = temp_db_path();
+    let conn = Connection::open(&path).expect("open pre-cloud-identity fixture db");
+    conn.execute_batch(include_str!("fixtures/origin_main_028.sql"))
+        .expect("load pre-cloud-identity schema fixture");
+    conn.execute(
+        "INSERT INTO pipeline_item (
+             id, repo_id, prompt, pipeline, stage, branch, agent_type, agent_provider,
+             activity, pinned, display_name, created_at, updated_at
+         ) VALUES (
+             'task-local-uuid', 'origin-main-repo', 'Transferred task', 'default',
+             'in progress', 'task-local-uuid', 'claude', 'claude', 'idle', 0,
+             'Transferred Task', '2026-07-25 10:00:00', '2026-07-25 10:00:00'
+         )",
+        [],
+    )
+    .expect("insert task before cloud identity migration");
+    for migration_id in CURRENT_SCHEMA_MIGRATIONS
+        .iter()
+        .take_while(|id| **id != "029_pipeline_item_activity_revision")
+    {
+        conn.execute(
+            "INSERT INTO schema_migrations (id) VALUES (?1)",
+            [migration_id],
+        )
+        .expect("record migration before cloud identity");
+    }
+    drop(conn);
+
+    let db = Db::open_migrated(path.to_str().expect("utf8 path"))
+        .expect("apply cloud identity migration");
+
+    let stored_identity: String = db
+        .conn
+        .query_row(
+            "SELECT cloud_task_id FROM pipeline_item WHERE id = 'task-local-uuid'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read backfilled cloud identity");
+    assert_eq!(stored_identity, "task-local-uuid");
+
+    let item = db
+        .get_pipeline_item("task-local-uuid")
+        .expect("load migrated task")
+        .expect("migrated task exists");
+    assert_eq!(item.cloud_task_id.as_deref(), Some("task-local-uuid"));
+
+    let snapshot = db.ui_snapshot().expect("load migrated snapshot");
+    assert_eq!(
+        snapshot.entries[0].items[0].cloud_task_id,
+        "task-local-uuid"
+    );
+
+    db.conn
+        .execute(
+            "UPDATE pipeline_item
+             SET closed_at = datetime('now')
+             WHERE id = 'task-local-uuid'",
+            [],
+        )
+        .expect("close historical task");
+    db.conn
+        .execute(
+            "INSERT INTO pipeline_item (
+                 id, cloud_task_id, repo_id, prompt, pipeline, stage, branch,
+                 agent_type, agent_provider, activity, pinned, created_at, updated_at
+             ) VALUES (
+                 'task-imported-copy', 'task-local-uuid', 'origin-main-repo',
+                 'Imported copy', 'default', 'in progress', 'task-imported-copy',
+                 'claude', 'claude', 'idle', 0,
+                 '2026-07-26 10:00:00', '2026-07-26 10:00:00'
+             )",
+            [],
+        )
+        .expect("reuse identity retained by a closed historical row");
+    let duplicate_open_identity = db.conn.execute(
+        "INSERT INTO pipeline_item (
+             id, cloud_task_id, repo_id, prompt, pipeline, stage, branch,
+             agent_type, agent_provider, activity, pinned, created_at, updated_at
+         ) VALUES (
+             'task-open-collision', 'task-local-uuid', 'origin-main-repo',
+             'Conflicting copy', 'default', 'in progress', 'task-open-collision',
+             'claude', 'claude', 'idle', 0,
+             '2026-07-26 11:00:00', '2026-07-26 11:00:00'
+         )",
+        [],
+    );
+    assert!(
+        duplicate_open_identity.is_err(),
+        "two open tasks must not share one cloud identity"
+    );
 
     drop(db);
     let _ = std::fs::remove_file(path);

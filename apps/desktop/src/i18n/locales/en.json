@@ -381,8 +381,9 @@
   },
   "taskTransfer": {
     "pushToMachine": "Push to Machine",
+    "pullToThisMachine": "Pull to This Machine",
     "pairPeer": "Pair Machine",
-    "noPeersFound": "No machines found on your network yet.",
+    "noPeersFound": "No available machines found.",
     "incomingTitle": "Incoming Task Transfer",
     "approve": "Approve",
     "reject": "Reject"

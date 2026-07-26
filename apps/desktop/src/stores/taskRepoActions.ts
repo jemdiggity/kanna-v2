@@ -23,7 +23,6 @@ export function createTaskRepoActions(
   const repoHidden = (repo: Pick<DesktopRepoResponse, "hidden">) => Boolean(repo.hidden);
 
   async function importRepo(path: string, name: string, defaultBranch: string): Promise<string> {
-    void defaultBranch;
     const existing = await findDesktopRepoByPath(path);
     if (existing) {
       if (repoHidden(existing)) {
@@ -34,7 +33,7 @@ export function createTaskRepoActions(
       }
       return existing.id;
     }
-    const created = await addDesktopRepo({ path, name });
+    const created = await addDesktopRepo({ path, name, defaultBranch });
     const id = repoId(created);
     await refreshRepoRemoteMetadata({ id, path });
     await reloadSnapshot();

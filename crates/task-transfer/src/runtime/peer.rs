@@ -1,4 +1,8 @@
 use super::events::RuntimeError;
+use super::external_peers::{
+    ensure_peer_is_trusted_for_transport, external_key_is_trusted, external_peer, external_peers,
+    find_peer, resolve_peer, validate_external_peer, ExternalPeer, PeerRoutes, TransferTransport,
+};
 use super::state::{TransferArtifactRecord, TransferRuntime};
 use super::utils::{
     ensure_peer_is_trusted_for, parse_peer_response_line, peer_store, prune_transfer_artifacts,
@@ -16,15 +20,91 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 
 impl TransferRuntime {
-    pub(super) async fn find_peer(
+    pub async fn find_peer(&self, target_peer_id: &str) -> Result<PeerRegistryEntry, RuntimeError> {
+        self.find_peer_with_transport(target_peer_id, TransferTransport::Auto)
+            .await
+    }
+
+    pub(super) async fn find_peer_with_transport(
         &self,
         target_peer_id: &str,
+        transport: TransferTransport,
     ) -> Result<PeerRegistryEntry, RuntimeError> {
-        let peers = self.discovery.list_peers(&self.config.peer_id).await?;
-        peers
+        find_peer(
+            &self.discovery,
+            &self.external_peers,
+            &self.config.peer_id,
+            target_peer_id,
+            transport,
+        )
+        .await
+    }
+
+    pub(super) async fn resolve_peer_with_transport(
+        &self,
+        target_peer_id: &str,
+        transport: TransferTransport,
+    ) -> Result<(PeerRegistryEntry, TransferTransport), RuntimeError> {
+        resolve_peer(
+            &self.discovery,
+            &self.external_peers,
+            &self.config.peer_id,
+            target_peer_id,
+            transport,
+        )
+        .await
+    }
+
+    pub async fn peer_routes(&self, peer_id: &str) -> Result<PeerRoutes, RuntimeError> {
+        let lan_endpoint = self
+            .discovery
+            .list_peers(&self.config.peer_id)
+            .await?
             .into_iter()
-            .find(|peer| peer.peer_id == target_peer_id)
-            .ok_or_else(|| RuntimeError::PeerNotFound(target_peer_id.to_owned()))
+            .find(|peer| peer.peer_id == peer_id)
+            .map(|peer| peer.endpoint);
+        let cloud_endpoint = external_peer(&self.external_peers, peer_id).map(|peer| peer.endpoint);
+        if lan_endpoint.is_none() && cloud_endpoint.is_none() {
+            return Err(RuntimeError::PeerNotFound(peer_id.to_owned()));
+        }
+        Ok(PeerRoutes {
+            lan_endpoint,
+            cloud_endpoint,
+        })
+    }
+
+    pub async fn upsert_external_peer(&self, peer: ExternalPeer) -> Result<(), RuntimeError> {
+        validate_external_peer(&peer)?;
+        if peer.peer_id == self.config.peer_id {
+            return Err(RuntimeError::InvalidConfig(
+                "external peer must not identify this runtime".into(),
+            ));
+        }
+        self.external_peers
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(peer.peer_id.clone(), peer);
+        Ok(())
+    }
+
+    pub async fn list_external_peers(&self) -> Vec<ExternalPeer> {
+        external_peers(&self.external_peers)
+    }
+
+    pub async fn remove_external_peer(&self, peer_id: &str) -> Result<(), RuntimeError> {
+        self.external_peers
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(peer_id);
+        Ok(())
+    }
+
+    pub async fn clear_external_peers(&self) -> Result<(), RuntimeError> {
+        self.external_peers
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        Ok(())
     }
 
     pub(super) fn discovered_peer(
@@ -34,7 +114,8 @@ impl TransferRuntime {
         let trusted = self
             .trusted_peer_record(&peer.peer_id)?
             .map(|record| record.public_key == peer.public_key)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || external_key_is_trusted(&self.external_peers, &peer.peer_id, &peer.public_key);
 
         Ok(DiscoveredPeer {
             peer_id: peer.peer_id,
@@ -63,7 +144,39 @@ impl TransferRuntime {
         Ok(())
     }
 
-    pub(super) fn ensure_peer_is_trusted(
+    pub fn ensure_peer_is_trusted(
+        &self,
+        peer_id: &str,
+        observed_public_key: &str,
+    ) -> Result<(), RuntimeError> {
+        if external_key_is_trusted(&self.external_peers, peer_id, observed_public_key) {
+            return Ok(());
+        }
+        ensure_peer_is_trusted_for(
+            &self.config.registry_dir,
+            &self.config.peer_id,
+            peer_id,
+            observed_public_key,
+        )
+    }
+
+    pub(super) fn ensure_peer_is_trusted_for_transport(
+        &self,
+        peer_id: &str,
+        observed_public_key: &str,
+        transport: TransferTransport,
+    ) -> Result<(), RuntimeError> {
+        ensure_peer_is_trusted_for_transport(
+            &self.config.registry_dir,
+            &self.config.peer_id,
+            &self.external_peers,
+            peer_id,
+            observed_public_key,
+            transport,
+        )
+    }
+
+    pub(super) fn ensure_peer_is_durably_trusted(
         &self,
         peer_id: &str,
         observed_public_key: &str,

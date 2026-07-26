@@ -378,8 +378,9 @@
   },
   "taskTransfer": {
     "pushToMachine": "マシンへ送る",
+    "pullToThisMachine": "このマシンへ取り込む",
     "pairPeer": "マシンをペアリング",
-    "noPeersFound": "ネットワーク上で利用可能なマシンがまだ見つかっていません。",
+    "noPeersFound": "利用可能なマシンが見つかりません。",
     "incomingTitle": "受信中のタスク転送",
     "approve": "承認",
     "reject": "拒否"

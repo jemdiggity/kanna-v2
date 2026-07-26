@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deleteApp, initializeApp, type App } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import WebSocket from "ws";
 import {
   beginCloudTaskPublicationSession,
@@ -561,14 +561,43 @@ describe("Relay integration", () => {
     expect(after).toBe(before);
   });
 
-  it("authenticates a desktop with desktop_id and desktop_secret", async () => {
+  it("authenticates a desktop and clears its transfer capability when the session disconnects", async () => {
+    const desktopRef = testFirestore.doc(
+      `users/${TEST_USER_ID}/desktops/${SECRET_DESKTOP_ID}`,
+    );
     const { ws, userId } = await connectAndAuth({
       desktop_id: SECRET_DESKTOP_ID,
       desktop_secret: SECRET_DESKTOP_SECRET,
     });
 
     expect(userId).toBe(TEST_USER_ID);
+    const publicationAck = waitForMessage(ws, (message) =>
+      message.type === "task_snapshot_ack" && message.id === "publish-transfer");
+    const snapshot = publishedSnapshot("idle");
+    snapshot.desktop = {
+      displayName: "Studio Mac",
+      transfer: {
+        peerId: "peer-secret-auth",
+        publicKey: "public-key",
+        protocolVersion: 1,
+        acceptingTransfers: true,
+      },
+    };
+    ws.send(JSON.stringify({
+      type: "task_snapshot_publish",
+      id: "publish-transfer",
+      snapshot,
+    }));
+    await expect(publicationAck).resolves.toMatchObject({ ok: true });
+    expect((await desktopRef.get()).data()?.transfer).toMatchObject({
+      peerId: "peer-secret-auth",
+      acceptingTransfers: true,
+    });
+
     await closeAndWait(ws);
+    await vi.waitFor(async () => {
+      expect((await desktopRef.get()).data()?.transfer).toBeUndefined();
+    });
   });
 
   it("reconciles only the authenticated desktop task subtree and carries activity-only changes", async () => {
@@ -938,6 +967,7 @@ describe("Relay integration", () => {
 
     const signal = await establishSignal;
     expect(signal.tunnelId).toEqual(expect.any(String));
+    expect(signal.service).toBe("ksp");
 
     const desktopTunnel = new WebSocket(relayUrl());
     const readyOrder: string[] = [];
@@ -982,8 +1012,14 @@ describe("Relay integration", () => {
       }),
     );
 
-    await expect(desktopReady).resolves.toMatchObject({ type: "tunnel_ready" });
-    await expect(clientReady).resolves.toMatchObject({ type: "tunnel_ready" });
+    await expect(desktopReady).resolves.toMatchObject({
+      type: "tunnel_ready",
+      service: "ksp",
+    });
+    await expect(clientReady).resolves.toMatchObject({
+      type: "tunnel_ready",
+      service: "ksp",
+    });
     expect(readyOrder.slice(0, 2)).toEqual(["desktop", "client"]);
 
     const desktopSawJson = waitForRawMessage(
@@ -1002,6 +1038,132 @@ describe("Relay integration", () => {
 
     await closeAndWait(clientTunnel);
     await closeAndWait(desktopTunnel);
+    await closeAndWait(desktopControl);
+  });
+
+  it("routes same-user task-transfer tunnels with the requested service", async () => {
+    const { ws: desktopControl } = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: "desktop-transfer-service",
+    });
+    const { ws: clientTunnel } = await connectAndAuth({
+      id_token: idToken,
+    });
+
+    const establishSignal = waitForMessage(
+      desktopControl,
+      (msg) =>
+        msg.type === "tunnel_establish"
+        && msg.desktopId === "desktop-transfer-service",
+    );
+    clientTunnel.send(JSON.stringify({
+      type: "tunnel_request",
+      id: "transfer-tunnel-1",
+      desktopId: "desktop-transfer-service",
+      service: "task-transfer",
+    }));
+
+    const signal = await establishSignal;
+    expect(signal).toMatchObject({
+      type: "tunnel_establish",
+      desktopId: "desktop-transfer-service",
+      service: "task-transfer",
+    });
+
+    const desktopTunnel = new WebSocket(relayUrl());
+    const desktopReady = waitForMessage(
+      desktopTunnel,
+      (msg) => msg.type === "tunnel_ready" && msg.tunnelId === signal.tunnelId,
+    );
+    const clientReady = waitForMessage(
+      clientTunnel,
+      (msg) => msg.type === "tunnel_ready" && msg.tunnelId === signal.tunnelId,
+    );
+    await new Promise<void>((resolve) => desktopTunnel.on("open", resolve));
+    desktopTunnel.send(JSON.stringify({
+      type: "auth",
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: "desktop-transfer-service",
+      tunnel_id: signal.tunnelId,
+    }));
+
+    await expect(desktopReady).resolves.toMatchObject({
+      service: "task-transfer",
+    });
+    await expect(clientReady).resolves.toMatchObject({
+      service: "task-transfer",
+    });
+
+    await closeAndWait(clientTunnel);
+    await closeAndWait(desktopTunnel);
+    await closeAndWait(desktopControl);
+  });
+
+  it("rejects unsupported tunnel services before creating a pending tunnel", async () => {
+    const { ws: desktopControl } = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: "desktop-unsupported-service",
+    });
+    const { ws: client } = await connectAndAuth({ id_token: idToken });
+    const unexpectedEstablish = waitForMessage(
+      desktopControl,
+      (msg) => msg.type === "tunnel_establish",
+      250,
+    ).then(
+      () => "established",
+      () => "timeout",
+    );
+
+    client.send(JSON.stringify({
+      type: "tunnel_request",
+      id: "unsupported-service",
+      desktopId: "desktop-unsupported-service",
+      service: "ssh",
+    }));
+
+    const response = await waitForMessage(
+      client,
+      (msg) => msg.type === "response" && msg.id === "unsupported-service",
+    );
+    expect(response.error).toBe("Unsupported tunnel service");
+    await expect(unexpectedEstablish).resolves.toBe("timeout");
+
+    await closeAndWait(client);
+    await closeAndWait(desktopControl);
+  });
+
+  it("does not route task-transfer tunnels to another user's desktop", async () => {
+    const { ws: desktopControl } = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: "desktop-cross-user-transfer",
+    });
+    const { ws: otherUserClient } = await connectAndAuth({
+      id_token: otherIdToken,
+    });
+    const unexpectedEstablish = waitForMessage(
+      desktopControl,
+      (msg) => msg.type === "tunnel_establish",
+      250,
+    ).then(
+      () => "established",
+      () => "timeout",
+    );
+
+    otherUserClient.send(JSON.stringify({
+      type: "tunnel_request",
+      id: "cross-user-transfer",
+      desktopId: "desktop-cross-user-transfer",
+      service: "task-transfer",
+    }));
+
+    const response = await waitForMessage(
+      otherUserClient,
+      (msg) => msg.type === "response" && msg.id === "cross-user-transfer",
+    );
+    expect(response.error).toBe("Desktop offline");
+    await expect(unexpectedEstablish).resolves.toBe("timeout");
+
+    await closeAndWait(otherUserClient);
     await closeAndWait(desktopControl);
   });
 

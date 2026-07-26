@@ -2,6 +2,7 @@ import { doc, serverTimestamp, setDoc } from "firebase/firestore";
 import { invoke } from "../invoke";
 import { getConfiguredDesktopAuthSession } from "./desktopAuthSdk";
 import { getConfiguredDesktopFirestore } from "./desktopCloudTaskIndex";
+import { reconnectDesktopCloudRelay } from "./desktopServerClient";
 
 const GENERIC_DESKTOP_NAME = "Kanna Desktop";
 
@@ -68,6 +69,7 @@ export async function revokeDesktopCloudCredential(): Promise<void> {
     uid: auth.user.uid,
     updatedAt: serverTimestamp(),
   }, { merge: true });
+  await reconnectDesktopCloudRelay();
 }
 
 function desktopDocumentId(desktopId: string): string {

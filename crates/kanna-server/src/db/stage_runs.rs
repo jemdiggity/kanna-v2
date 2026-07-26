@@ -8,6 +8,24 @@ pub struct FinishedStageRun {
 }
 
 impl Db {
+    pub fn has_durable_running_task_session(&self, task_id: &str) -> Result<bool, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM stage_run sr
+                JOIN terminal_session ts
+                  ON ts.pipeline_item_id = sr.task_id
+                 AND ts.daemon_session_id = sr.session_id
+                WHERE sr.task_id = ?
+                  AND sr.status = 'running'
+                  AND sr.session_id IS NOT NULL
+                  AND sr.session_id != ''
+            )",
+            [task_id],
+            |row| row.get(0),
+        )
+    }
+
     pub fn insert_stage_run(&self, run: NewStageRun<'_>) -> Result<(), rusqlite::Error> {
         self.insert_stage_run_with_completion_transition(run, None)
     }

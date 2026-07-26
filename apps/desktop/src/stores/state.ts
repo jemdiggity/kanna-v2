@@ -103,6 +103,7 @@ export interface KannaSnapshot {
 }
 
 export interface CreateItemOptions {
+  requestedTaskId?: string;
   baseBranch?: string;
   baseRef?: string | null;
   pipelineName?: string;

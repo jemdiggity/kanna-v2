@@ -1,10 +1,15 @@
 import type { PipelineItem, Repo } from "../types/kanna";
 import {
   completeDesktopTaskTransfer,
+  fetchClosedTaskIdentities,
   getDesktopTaskTransfer,
   insertDesktopTaskTransfer,
   insertDesktopTaskTransferProvenance,
+  markDesktopTaskTransferAwaitingAcknowledgment,
+  markDesktopTaskTransferImporting,
+  markIncomingTransferSidecarCleanupCompleted,
   rejectDesktopTaskTransfer,
+  setDesktopTaskCloudIdentity,
   updateDesktopTaskTransferPayload,
 } from "../services/desktopServerClient";
 import { loadSessionRecoveryState } from "../composables/sessionRecoveryState";
@@ -49,8 +54,18 @@ interface TransferDependencies {
   sessions: Pick<SessionsApi, "waitForSessionExit">;
 }
 
+export interface PushTaskTransferOptions {
+  transport?: "lan" | "cloud";
+  cloudFallback?: boolean;
+  targetDesktopId?: string | null;
+}
+
 export interface TransferApi {
-  pushTaskToPeer: (taskId: string, peerId: string) => Promise<void>;
+  pushTaskToPeer: (
+    taskId: string,
+    peerId: string,
+    options?: PushTaskTransferOptions,
+  ) => Promise<void>;
   recordIncomingTransfer: (request: IncomingTransferRequest) => Promise<void>;
   finalizeOutgoingTransfer: (transferId: string) => Promise<FinalizedOutgoingTransferResult>;
   approveIncomingTransfer: (transferId: string) => Promise<string>;
@@ -60,6 +75,21 @@ export interface TransferApi {
 
 function isDuplicateTaskTransferError(error: unknown): boolean {
   return error instanceof Error && error.message.includes("UNIQUE constraint failed: task_transfer.id");
+}
+
+function isPreflightConnectionFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return [
+    "i/o error:",
+    "peer not found:",
+    "timed out after",
+    "connection refused",
+    "connection reset",
+    "connection closed",
+    "no route to host",
+    "network is unreachable",
+    "broken pipe",
+  ].some((fragment) => message.toLowerCase().includes(fragment));
 }
 
 function applyWorktreeProcessIsolation(env: Record<string, string>): Record<string, string> {
@@ -104,6 +134,14 @@ function buildClaudeSessionArtifactId(transferId: string): string {
 
 function buildCopilotSessionArtifactId(transferId: string): string {
   return `${transferId}-copilot-session`;
+}
+
+async function destinationTaskIdForTransfer(transferId: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`kanna-transfer-destination:${transferId}`),
+  );
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function buildTransferArchivePath(transferId: string, suffix: string): string {
@@ -388,6 +426,8 @@ export function createTransferApi(
   context: StoreContext,
   { tasks, queries, sessions }: TransferDependencies,
 ): TransferApi {
+  const outgoingPushesInFlight = new Set<string>();
+  const outgoingPushesDurablyStarted = new Set<string>();
   async function allocateTransferredRepoPath(repoName: string): Promise<string> {
     const home = await invoke<string>("read_env_var", { name: "HOME" });
     const parentDir = defaultReposHome(home);
@@ -510,10 +550,24 @@ export function createTransferApi(
     throw new Error(`unsupported repo acquisition mode: ${payload.repo.mode satisfies never}`);
   }
 
-  async function pushTaskToPeer(taskId: string, peerId: string): Promise<void> {
+  async function pushTaskToPeer(
+    taskId: string,
+    peerId: string,
+    options: PushTaskTransferOptions = {},
+  ): Promise<void> {
     const item = context.state.items.value.find((candidate) => candidate.id === taskId);
     if (!item) {
       throw new Error(`task not found: ${taskId}`);
+    }
+    if (
+      item.closed_at != null
+      || ["pending", "streaming", "importing", "awaiting_acknowledgment"].includes(
+        item.transfer_status ?? "",
+      )
+      || outgoingPushesInFlight.has(taskId)
+      || outgoingPushesDurablyStarted.has(taskId)
+    ) {
+      throw new Error(`task is already transferring: ${taskId}`);
     }
 
     const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id);
@@ -521,89 +575,129 @@ export function createTransferApi(
       throw new Error(`repo not found for task: ${taskId}`);
     }
 
-    const preflightRaw = await invoke<unknown>("prepare_outgoing_transfer", {
-      payload: {
+    outgoingPushesInFlight.add(taskId);
+    try {
+      const sourceDesktopId = options.targetDesktopId
+        ? await invoke<{ desktopId?: string }>("mobile_server_status")
+          .then((status) => status.desktopId?.trim() || null)
+          .catch(() => null)
+        : null;
+      if (options.targetDesktopId && !sourceDesktopId) {
+        throw new Error("source desktop identity is unavailable for cloud transfer");
+      }
+      const preflightPayload = (transport?: "lan" | "cloud") => ({
         phase: "preflight",
         sourceTaskId: taskId,
         targetPeerId: peerId,
-      },
-    });
-    const preflight = parseOutgoingTransferPreflightResult(preflightRaw);
-
-    const recovery = await loadSessionRecoveryState(taskId);
-    const repoRemoteUrl = preflight.targetHasRepo
-      ? null
-      : await invoke<string | null>("git_remote_url", {
-          repoPath: repo.path,
-        }).catch((error) => {
-          console.debug("[store] failed to read repo remote URL while preparing transfer:", error);
-          return null;
+        ...(transport ? { transport } : {}),
+      });
+      let preflightRaw: unknown;
+      try {
+        preflightRaw = await invoke<unknown>("prepare_outgoing_transfer", {
+          payload: preflightPayload(options.transport),
         });
-    let bundle: {
-      artifactId: string;
-      filename: string;
-      refName: string | null;
-    } | null = null;
-    if (!preflight.targetHasRepo && !repoRemoteUrl) {
-      const bundlePath = buildTransferBundlePath(preflight.transferId);
-      const artifactId = buildTransferBundleArtifactId(preflight.transferId);
-      const refName = normalizeTransferRefName(item.branch) ?? normalizeTransferRefName(item.base_ref);
-      const refs = buildTransferBundleRefs(item);
-      const bundleTargets = refs.length > 0 ? refs.map((ref) => shellQuote(ref)).join(" ") : "--all";
+      } catch (error: unknown) {
+        if (
+          options.transport !== "lan"
+          || !options.cloudFallback
+          || !isPreflightConnectionFailure(error)
+        ) {
+          throw error;
+        }
+        preflightRaw = await invoke<unknown>("prepare_outgoing_transfer", {
+          payload: preflightPayload("cloud"),
+        });
+      }
+      const preflight = parseOutgoingTransferPreflightResult(preflightRaw);
 
-      await invoke("run_script", {
-        script: `git bundle create ${shellQuote(bundlePath)} ${bundleTargets}`,
-        cwd: repo.path,
-        env: applyWorktreeProcessIsolation({ KANNA_WORKTREE: "1" }),
+      const recovery = await loadSessionRecoveryState(taskId);
+      const repoRemoteUrl = preflight.targetHasRepo
+        ? null
+        : await invoke<string | null>("git_remote_url", {
+            repoPath: repo.path,
+          }).catch((error) => {
+            console.debug("[store] failed to read repo remote URL while preparing transfer:", error);
+            return null;
+          });
+      let bundle: {
+        artifactId: string;
+        filename: string;
+        refName: string | null;
+      } | null = null;
+      if (!preflight.targetHasRepo && !repoRemoteUrl) {
+        const bundlePath = buildTransferBundlePath(preflight.transferId);
+        const artifactId = buildTransferBundleArtifactId(preflight.transferId);
+        const refName =
+          normalizeTransferRefName(item.branch) ?? normalizeTransferRefName(item.base_ref);
+        const refs = buildTransferBundleRefs(item);
+        const bundleTargets =
+          refs.length > 0 ? refs.map((ref) => shellQuote(ref)).join(" ") : "--all";
+
+        await invoke("run_script", {
+          script: `git bundle create ${shellQuote(bundlePath)} ${bundleTargets}`,
+          cwd: repo.path,
+          env: applyWorktreeProcessIsolation({ KANNA_WORKTREE: "1" }),
+        });
+        await invoke("stage_transfer_artifact", {
+          transferId: preflight.transferId,
+          artifactId,
+          path: bundlePath,
+        });
+        bundle = {
+          artifactId,
+          filename: `${preflight.transferId}.bundle`,
+          refName,
+        };
+      }
+
+      const artifacts = await stageTransferredSessionArtifacts(
+        preflight.transferId,
+        item,
+        repo.path,
+      );
+      const payload = buildOutgoingTransferPayload({
+        sourcePeerId: preflight.sourcePeerId,
+        sourceDesktopId,
+        sourceTaskId: taskId,
+        targetPeerId: peerId,
+        targetDesktopId: options.targetDesktopId,
+        item,
+        repoPath: repo.path,
+        repoName: repo.name,
+        repoDefaultBranch: repo.default_branch,
+        repoRemoteUrl,
+        recovery,
+        artifacts,
+        targetHasRepo: preflight.targetHasRepo,
+        bundle,
       });
-      await invoke("stage_transfer_artifact", {
-        transferId: preflight.transferId,
-        artifactId,
-        path: bundlePath,
+
+      await insertDesktopTaskTransfer({
+        id: preflight.transferId,
+        direction: "outgoing",
+        status: "pending",
+        source_peer_id: preflight.sourcePeerId,
+        target_peer_id: peerId,
+        source_desktop_id: payload.task.source_desktop_id,
+        target_desktop_id: payload.target_desktop_id,
+        source_task_id: taskId,
+        local_task_id: taskId,
+        error: null,
+        payload_json: JSON.stringify(payload),
       });
-      bundle = {
-        artifactId,
-        filename: `${preflight.transferId}.bundle`,
-        refName,
-      };
+      outgoingPushesDurablyStarted.add(taskId);
+
+      await invoke("prepare_outgoing_transfer", {
+        payload: {
+          phase: "commit",
+          transferId: preflight.transferId,
+          payload,
+        },
+      });
+      await queries.reloadSnapshot();
+    } finally {
+      outgoingPushesInFlight.delete(taskId);
     }
-
-    const artifacts = await stageTransferredSessionArtifacts(preflight.transferId, item, repo.path);
-    const payload = buildOutgoingTransferPayload({
-      sourcePeerId: preflight.sourcePeerId,
-      sourceTaskId: taskId,
-      targetPeerId: peerId,
-      item,
-      repoPath: repo.path,
-      repoName: repo.name,
-      repoDefaultBranch: repo.default_branch,
-      repoRemoteUrl,
-      recovery,
-      artifacts,
-      targetHasRepo: preflight.targetHasRepo,
-      bundle,
-    });
-
-    await insertDesktopTaskTransfer({
-      id: preflight.transferId,
-      direction: "outgoing",
-      status: "pending",
-      source_peer_id: preflight.sourcePeerId,
-      target_peer_id: peerId,
-      source_task_id: taskId,
-      local_task_id: taskId,
-      error: null,
-      payload_json: JSON.stringify(payload),
-    });
-
-    await invoke("prepare_outgoing_transfer", {
-      payload: {
-        phase: "commit",
-        transferId: preflight.transferId,
-        payload,
-      },
-    });
-    await queries.reloadSnapshot();
   }
 
   async function recordIncomingTransfer(request: IncomingTransferRequest): Promise<void> {
@@ -614,6 +708,8 @@ export function createTransferApi(
         status: "pending",
         source_peer_id: request.sourcePeerId,
         target_peer_id: null,
+        source_desktop_id: request.payload.task.source_desktop_id,
+        target_desktop_id: request.payload.target_desktop_id,
         source_task_id: request.sourceTaskId,
         local_task_id: null,
         error: null,
@@ -685,8 +781,10 @@ export function createTransferApi(
     const artifacts = await stageTransferredSessionArtifacts(transferId, refreshedItem, repo.path);
     const payload = buildOutgoingTransferPayload({
       sourcePeerId,
+      sourceDesktopId: transfer.source_desktop_id ?? existingPayload.task.source_desktop_id,
       sourceTaskId,
       targetPeerId: transfer.target_peer_id ?? existingPayload.target_peer_id,
+      targetDesktopId: transfer.target_desktop_id ?? existingPayload.target_desktop_id,
       item: refreshedItem,
       repoPath: repo.path,
       repoName: repo.name,
@@ -716,47 +814,69 @@ export function createTransferApi(
     if (transfer.direction !== "incoming") {
       throw new Error(`transfer is not incoming: ${transferId}`);
     }
-    if (transfer.status !== "pending" && transfer.status !== "streaming") {
-      throw new Error(`incoming transfer is not pending: ${transferId}`);
+    if (!["pending", "streaming", "importing", "awaiting_acknowledgment"].includes(transfer.status)) {
+      throw new Error(`incoming transfer is not resumable: ${transferId}`);
     }
 
-    const finalized = parseFinalizedOutgoingTransferResult(await invoke("finalize_outgoing_transfer", {
-      transferId,
-    }));
-    const payload = finalized.payload;
-    const { repoId, repoPath } = await ensureIncomingTransferRepo(transferId, payload);
-    const resumeSessionId = await importTransferredResumeState(transferId, payload, repoPath);
-    const localTaskId = await tasks.createItem(
-      repoId,
-      repoPath,
-      payload.task.prompt ?? "",
-      payload.task.agent_type === "agent" || payload.task.agent_type === "sdk" ? "agent" : "pty",
-      {
-        agentProvider: payload.task.agent_provider,
-        baseBranch: resolveIncomingTransferBaseBranch(payload),
-        pipelineName: payload.task.pipeline,
-        stage: payload.task.stage,
-        displayName: payload.task.display_name,
-        resumeSessionId,
-        recoverySnapshot: payload.recovery,
-      },
-    );
+    let payload: OutgoingTransferPayload;
+    let localTaskId = transfer.local_task_id;
+    if (localTaskId) {
+      payload = parsePersistedOutgoingTransferPayload(transfer.payload_json);
+    } else {
+      const finalized = parseFinalizedOutgoingTransferResult(await invoke("finalize_outgoing_transfer", {
+        transferId,
+      }));
+      payload = finalized.payload;
+      if (!await updateDesktopTaskTransferPayload(transferId, JSON.stringify(payload))) {
+        throw new Error(`failed to persist finalized incoming transfer payload: ${transferId}`);
+      }
+      const { repoId, repoPath } = await ensureIncomingTransferRepo(transferId, payload);
+      const resumeSessionId = await importTransferredResumeState(transferId, payload, repoPath);
+      localTaskId = await tasks.createItem(
+        repoId,
+        repoPath,
+        payload.task.prompt ?? "",
+        payload.task.agent_type === "agent" || payload.task.agent_type === "sdk" ? "agent" : "pty",
+        {
+          requestedTaskId: await destinationTaskIdForTransfer(transferId),
+          agentProvider: payload.task.agent_provider,
+          baseBranch: resolveIncomingTransferBaseBranch(payload),
+          pipelineName: payload.task.pipeline,
+          stage: payload.task.stage,
+          displayName: payload.task.display_name,
+          resumeSessionId,
+          recoverySnapshot: payload.recovery,
+        },
+      );
+      if (!await markDesktopTaskTransferImporting(transferId, localTaskId)) {
+        throw new Error(`failed to claim imported task for transfer: ${transferId}`);
+      }
+    }
 
-    await completeDesktopTaskTransfer(transferId, localTaskId);
+    await setDesktopTaskCloudIdentity(localTaskId, payload.task.cloud_task_id);
     await insertDesktopTaskTransferProvenance({
       pipeline_item_id: localTaskId,
       source_peer_id: payload.task.source_peer_id,
       source_task_id: payload.task.source_task_id,
       source_machine_task_label: payload.task.branch,
     });
+    if (!await markDesktopTaskTransferAwaitingAcknowledgment(transferId, localTaskId)) {
+      throw new Error(`failed to mark incoming transfer awaiting acknowledgment: ${transferId}`);
+    }
+    await queries.reloadSnapshot();
 
     await invoke("acknowledge_incoming_transfer_commit", {
       transferId,
       sourceTaskId: payload.task.source_task_id,
       destinationLocalTaskId: localTaskId,
-    }).catch((error: unknown) => {
-      console.error("[store] failed to acknowledge incoming transfer commit:", error);
     });
+    if (!await completeDesktopTaskTransfer(transferId, localTaskId)) {
+      throw new Error(`failed to complete acknowledged incoming transfer: ${transferId}`);
+    }
+    await invoke("mark_incoming_transfer_ack_completed", { transferId });
+    if (!await markIncomingTransferSidecarCleanupCompleted(transferId)) {
+      throw new Error(`failed to mark sidecar cleanup completed: ${transferId}`);
+    }
     await queries.reloadSnapshot();
 
     return localTaskId;
@@ -774,7 +894,13 @@ export function createTransferApi(
       throw new Error(`incoming transfer is not pending: ${transferId}`);
     }
 
-    await rejectDesktopTaskTransfer(transferId, "Rejected locally");
+    if (!await rejectDesktopTaskTransfer(transferId, "Rejected locally")) {
+      throw new Error(`failed to reject incoming transfer: ${transferId}`);
+    }
+    await invoke("mark_incoming_transfer_ack_completed", { transferId });
+    if (!await markIncomingTransferSidecarCleanupCompleted(transferId)) {
+      throw new Error(`failed to mark sidecar cleanup completed: ${transferId}`);
+    }
     await queries.reloadSnapshot();
   }
 
@@ -785,17 +911,31 @@ export function createTransferApi(
     if (!transfer || transfer.direction !== "outgoing") {
       return;
     }
-    if (transfer.status === "completed") {
-      return;
-    }
     if (transfer.source_task_id !== event.sourceTaskId) {
       throw new Error(
         `outgoing transfer source task mismatch for ${event.transferId}: expected ${transfer.source_task_id}, got ${event.sourceTaskId}`,
       );
     }
 
-    await completeDesktopTaskTransfer(event.transferId, transfer.local_task_id ?? event.sourceTaskId);
-    await tasks.closeTask(event.sourceTaskId);
+    const closedNow = await tasks.closeTask(event.sourceTaskId);
+    if (!closedNow) {
+      const sourceIsDurablyClosed = (await fetchClosedTaskIdentities())
+        .some((identity) => identity.id === event.sourceTaskId);
+      if (!sourceIsDurablyClosed) {
+        throw new Error(
+          `failed to confirm source task closure for outgoing transfer: ${event.transferId}`,
+        );
+      }
+    }
+    if (!await completeDesktopTaskTransfer(
+      event.transferId,
+      transfer.local_task_id ?? event.sourceTaskId,
+    )) {
+      throw new Error(`failed to complete outgoing transfer: ${event.transferId}`);
+    }
+    await invoke("mark_outgoing_transfer_commit_applied", {
+      transferId: event.transferId,
+    });
     await queries.reloadSnapshot();
   }
 

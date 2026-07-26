@@ -67,6 +67,47 @@ async function runCommandPaletteAction(
   await client.click(command);
 }
 
+async function openCommandPaletteAction(
+  client: WebDriverClient,
+  commandLabel: string,
+): Promise<void> {
+  await client.executeSync(buildGlobalKeydownScript({
+    key: "P",
+    meta: true,
+    shift: true,
+  }));
+  const input = await client.waitForElement(".palette-input", 5_000);
+  await client.sendKeys(input, commandLabel);
+  const command = await client.waitForText(".command-item", commandLabel, 5_000);
+  await client.click(command);
+}
+
+async function peerPickerRowsForCommand(
+  client: WebDriverClient,
+  commandLabel: string,
+): Promise<string[]> {
+  await openCommandPaletteAction(client, commandLabel);
+  await client.waitForElement(".modal-card", 10_000);
+  const deadline = Date.now() + 10_000;
+  let rows: string[] = [];
+  while (Date.now() < deadline) {
+    rows = await client.executeSync<string[]>(`
+      return Array.from(document.querySelectorAll(".peer-row .peer-name"))
+        .map((element) => element.textContent?.trim() || "")
+        .filter(Boolean);
+    `);
+    const loading = await client.executeSync<boolean>(
+      `return document.querySelector(".modal-card .state-text")?.textContent?.trim() === "Loading…";`,
+    );
+    if (!loading) break;
+    await sleep(100);
+  }
+  const cancel = await client.waitForElement(".modal-card .btn-danger", 5_000);
+  await client.click(cancel);
+  await client.waitForNoElement(".modal-card", 5_000);
+  return rows;
+}
+
 async function isTransferPeerTrusted(
   client: WebDriverClient,
   peerId: string,
@@ -113,12 +154,15 @@ async function installPairingPromptStub(
 async function selectPeerAndConfirm(
   client: WebDriverClient,
   peerName: string,
+  waitForDismissal = true,
 ): Promise<void> {
   const peer = await client.waitForText(".peer-row", peerName, 10_000);
   await client.click(peer);
   const confirm = await client.waitForElement(".modal-card .btn-primary:not(:disabled)", 5_000);
   await client.click(confirm);
-  await client.waitForNoElement(".modal-card", 10_000);
+  if (waitForDismissal) {
+    await client.waitForNoElement(".modal-card", 10_000);
+  }
 }
 
 export async function waitForTransferPeerTrusted(
@@ -168,8 +212,45 @@ export async function pairWithPeerThroughUi(
 export async function pushSelectedTaskToPeerThroughUi(
   client: WebDriverClient,
   peerName: string,
+  options: { waitForDismissal?: boolean } = {},
 ): Promise<void> {
   await runCommandPaletteAction(client, "Push to Machine");
-  await selectPeerAndConfirm(client, peerName);
+  try {
+    await selectPeerAndConfirm(client, peerName, options.waitForDismissal ?? true);
+  } catch (error) {
+    const cancel = await client.findElements(".modal-card .btn-danger");
+    if (cancel[0]) {
+      await client.click(cancel[0]).catch(() => undefined);
+      await client.waitForNoElement(".modal-card", 5_000).catch(() => undefined);
+    }
+    throw error;
+  }
   await pauseForSlowMode(`pushed selected task to ${peerName}`);
+}
+
+export async function pullSelectedTaskToThisMachineThroughUi(
+  client: WebDriverClient,
+): Promise<void> {
+  await runCommandPaletteAction(client, "Pull to This Machine");
+  await client.waitForNoElement(".command-palette", 5_000).catch(() => undefined);
+  await pauseForSlowMode("pulled selected task to this machine");
+}
+
+export async function listTransferPickerRows(
+  client: WebDriverClient,
+): Promise<string[]> {
+  const deadline = Date.now() + 30_000;
+  let rows: string[] = [];
+  while (Date.now() < deadline) {
+    rows = await peerPickerRowsForCommand(client, "Push to Machine");
+    if (rows.length > 0) return rows;
+    await sleep(250);
+  }
+  return rows;
+}
+
+export async function listPairMachineRows(
+  client: WebDriverClient,
+): Promise<string[]> {
+  return peerPickerRowsForCommand(client, "Pair Machine");
 }

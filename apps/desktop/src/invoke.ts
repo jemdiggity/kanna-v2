@@ -15,6 +15,10 @@ export async function invoke<T = unknown>(
     if (import.meta.env.DEV && window.__KANNA_E2E__) {
       e2eAppMetrics.recordInvoke(cmd, args);
       e2eInvokeHistory.record(cmd, args);
+      if (window.__KANNA_E2E__.failNextInvoke === cmd) {
+        window.__KANNA_E2E__.failNextInvoke = undefined;
+        throw new Error(`simulated one-shot E2E invoke failure: ${cmd}`);
+      }
     }
     return await tauriInvoke<T>(cmd, args);
   } catch (error) {

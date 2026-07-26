@@ -1,9 +1,8 @@
 use super::events::{FinalizedOutgoingTransfer, PreflightResult, RuntimeError, RuntimeEvent};
 use super::state::StagedTransferArtifact;
 use super::state::{OutgoingTransferReservation, TransferArtifactRecord, TransferRuntime};
-use super::utils::{
-    prune_incoming_reservations, prune_outgoing_transfers, prune_transfer_artifacts,
-};
+use super::utils::{prune_outgoing_transfers, prune_transfer_artifacts};
+use super::TransferTransport;
 use crate::crypto::{open_json, parse_public_key, seal_json};
 use crate::protocol::{PeerRequest, PeerResponse};
 use serde_json::Value;
@@ -16,8 +15,28 @@ impl TransferRuntime {
         target_peer_id: &str,
         source_task_id: &str,
     ) -> Result<PreflightResult, RuntimeError> {
-        let target_peer = self.find_peer(target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        self.prepare_transfer_preflight_with_transport(
+            target_peer_id,
+            source_task_id,
+            TransferTransport::Auto,
+        )
+        .await
+    }
+
+    pub async fn prepare_transfer_preflight_with_transport(
+        &self,
+        target_peer_id: &str,
+        source_task_id: &str,
+        transport: TransferTransport,
+    ) -> Result<PreflightResult, RuntimeError> {
+        let (target_peer, resolved_transport) = self
+            .resolve_peer_with_transport(target_peer_id, transport)
+            .await?;
+        self.ensure_peer_is_trusted_for_transport(
+            &target_peer.peer_id,
+            &target_peer.public_key,
+            resolved_transport,
+        )?;
         let target_public_key = parse_public_key(&target_peer.public_key)?;
         let sealed_payload = seal_json(
             &self.identity,
@@ -53,14 +72,21 @@ impl TransferRuntime {
                 }
 
                 let mut transfers = self.outgoing_transfers.lock().await;
-                prune_outgoing_transfers(&mut transfers, self.config.pending_transfer_ttl);
-                transfers.insert(
-                    transfer_id.clone(),
-                    OutgoingTransferReservation {
-                        target_peer_id: target_peer_id.to_owned(),
-                        created_at: Instant::now(),
-                    },
-                );
+                for expired in
+                    prune_outgoing_transfers(&mut transfers, self.config.pending_transfer_ttl)
+                {
+                    self.replay_store.remove_reservation(&expired);
+                }
+                let reservation = OutgoingTransferReservation {
+                    target_peer_id: target_peer_id.to_owned(),
+                    source_task_id: source_task_id.to_owned(),
+                    target_peer: Some(target_peer),
+                    transport: Some(resolved_transport),
+                    created_at: Instant::now(),
+                };
+                self.replay_store
+                    .save_reservation(&transfer_id, &reservation)?;
+                transfers.insert(transfer_id.clone(), reservation);
 
                 Ok(PreflightResult {
                     transfer_id,
@@ -70,6 +96,9 @@ impl TransferRuntime {
             }
             PeerResponse::StartPairing { .. } => Err(RuntimeError::Protocol(
                 "unexpected pairing response during preflight".into(),
+            )),
+            PeerResponse::RequestTaskPull { .. } => Err(RuntimeError::Protocol(
+                "unexpected task-pull response during preflight".into(),
             )),
             PeerResponse::SubmitTransferPayload { .. } => Err(RuntimeError::Protocol(
                 "unexpected submit-transfer response during preflight".into(),
@@ -107,12 +136,14 @@ impl TransferRuntime {
         transfer_id: &str,
         payload: Value,
     ) -> Result<(), RuntimeError> {
-        let target_peer_id = {
+        let reservation = {
             let mut transfers = self.outgoing_transfers.lock().await;
-            prune_outgoing_transfers(&mut transfers, self.config.pending_transfer_ttl);
-            transfers
-                .get(transfer_id)
-                .map(|reservation| reservation.target_peer_id.clone())
+            for expired in
+                prune_outgoing_transfers(&mut transfers, self.config.pending_transfer_ttl)
+            {
+                self.replay_store.remove_reservation(&expired);
+            }
+            transfers.get(transfer_id).cloned()
         }
         .ok_or_else(|| {
             RuntimeError::Protocol(format!(
@@ -121,8 +152,20 @@ impl TransferRuntime {
             ))
         })?;
 
-        let target_peer = self.find_peer(&target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        let target_peer = match reservation.target_peer {
+            Some(peer) => peer,
+            None => self.find_peer(&reservation.target_peer_id).await?,
+        };
+        match reservation.transport {
+            Some(transport) => self.ensure_peer_is_trusted_for_transport(
+                &target_peer.peer_id,
+                &target_peer.public_key,
+                transport,
+            )?,
+            None => {
+                self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+            }
+        }
         let target_public_key = parse_public_key(&target_peer.public_key)?;
         let sealed_payload = seal_json(&self.identity, &target_public_key, &payload)?;
         let request_id = self.next_request_id("commit");
@@ -161,6 +204,9 @@ impl TransferRuntime {
             PeerResponse::StartPairing { .. } => Err(RuntimeError::Protocol(
                 "unexpected pairing response during transfer commit".into(),
             )),
+            PeerResponse::RequestTaskPull { .. } => Err(RuntimeError::Protocol(
+                "unexpected task-pull response during transfer commit".into(),
+            )),
             PeerResponse::PrepareTransfer { .. } => Err(RuntimeError::Protocol(
                 "unexpected preflight response during transfer commit".into(),
             )),
@@ -198,7 +244,8 @@ impl TransferRuntime {
     ) -> Result<FinalizedOutgoingTransfer, RuntimeError> {
         let source_peer_id = {
             let mut reservations = self.incoming_reservations.lock().await;
-            prune_incoming_reservations(&mut reservations, self.config.pending_transfer_ttl);
+            self.replay_store
+                .prune_incoming_reservations(&mut reservations);
             reservations
                 .get(transfer_id)
                 .map(|reservation| reservation.source_peer_id.clone())
@@ -259,6 +306,7 @@ impl TransferRuntime {
                 })
             }
             PeerResponse::StartPairing { .. }
+            | PeerResponse::RequestTaskPull { .. }
             | PeerResponse::PrepareTransfer { .. }
             | PeerResponse::SubmitTransferPayload { .. }
             | PeerResponse::FetchTransferArtifact { .. }
@@ -305,11 +353,38 @@ impl TransferRuntime {
     }
 
     pub async fn next_event(&self) -> Result<RuntimeEvent, RuntimeError> {
-        let mut receiver = self.incoming_events.lock().await;
-        receiver
-            .recv()
-            .await
-            .ok_or(RuntimeError::IncomingEventChannelClosed)
+        enum NextEvent {
+            General(Option<RuntimeEvent>),
+            Receipt(Option<super::events::OutgoingTransferCommittedEvent>),
+        }
+
+        loop {
+            let next = {
+                let mut general = self.incoming_events.lock().await;
+                let mut receipts = self.receipt_events.lock().await;
+                tokio::select! {
+                    event = general.recv() => NextEvent::General(event),
+                    event = receipts.recv() => NextEvent::Receipt(event),
+                }
+            };
+            match next {
+                NextEvent::General(Some(event)) => return Ok(event),
+                NextEvent::Receipt(Some(event)) => {
+                    let mut receipts = self.import_commit_receipts.lock().await;
+                    let Some(receipt) = receipts.get_mut(&event.transfer_id) else {
+                        continue;
+                    };
+                    receipt.event_queued = false;
+                    if receipt.applied {
+                        continue;
+                    }
+                    return Ok(RuntimeEvent::OutgoingTransferCommitted(event));
+                }
+                NextEvent::General(None) | NextEvent::Receipt(None) => {
+                    return Err(RuntimeError::IncomingEventChannelClosed);
+                }
+            }
+        }
     }
 
     pub async fn stage_transfer_artifact(
@@ -347,7 +422,8 @@ impl TransferRuntime {
 
         let source_peer_id = {
             let mut reservations = self.incoming_reservations.lock().await;
-            prune_incoming_reservations(&mut reservations, self.config.pending_transfer_ttl);
+            self.replay_store
+                .prune_incoming_reservations(&mut reservations);
             reservations
                 .get(transfer_id)
                 .map(|reservation| reservation.source_peer_id.clone())
@@ -435,6 +511,7 @@ impl TransferRuntime {
                 Ok(StagedTransferArtifact { path })
             }
             PeerResponse::StartPairing { .. }
+            | PeerResponse::RequestTaskPull { .. }
             | PeerResponse::PrepareTransfer { .. }
             | PeerResponse::SubmitTransferPayload { .. }
             | PeerResponse::ImportCommitted { .. }
@@ -464,10 +541,14 @@ impl TransferRuntime {
     ) -> Result<(), RuntimeError> {
         let source_peer_id = {
             let mut reservations = self.incoming_reservations.lock().await;
-            prune_incoming_reservations(&mut reservations, self.config.pending_transfer_ttl);
-            reservations
-                .get(transfer_id)
-                .map(|reservation| reservation.source_peer_id.clone())
+            self.replay_store
+                .prune_incoming_reservations(&mut reservations);
+            reservations.get(transfer_id).map(|reservation| {
+                (
+                    reservation.source_peer_id.clone(),
+                    reservation.source_task_id.clone(),
+                )
+            })
         }
         .ok_or_else(|| {
             RuntimeError::Protocol(format!(
@@ -476,6 +557,13 @@ impl TransferRuntime {
             ))
         })?;
 
+        let (source_peer_id, reserved_source_task_id) = source_peer_id;
+        if reserved_source_task_id != source_task_id {
+            return Err(RuntimeError::Protocol(format!(
+                "unexpected source task {} for import acknowledgment {}",
+                source_task_id, transfer_id
+            )));
+        }
         let source_peer = self.find_peer(&source_peer_id).await?;
         self.ensure_peer_is_trusted(&source_peer.peer_id, &source_peer.public_key)?;
         let source_public_key = parse_public_key(&source_peer.public_key)?;
@@ -519,10 +607,10 @@ impl TransferRuntime {
                     )));
                 }
 
-                self.incoming_reservations.lock().await.remove(transfer_id);
                 Ok(())
             }
             PeerResponse::StartPairing { .. }
+            | PeerResponse::RequestTaskPull { .. }
             | PeerResponse::PrepareTransfer { .. }
             | PeerResponse::SubmitTransferPayload { .. }
             | PeerResponse::FetchTransferArtifact { .. }
@@ -542,5 +630,49 @@ impl TransferRuntime {
                 message,
             } => Err(RuntimeError::Protocol(message)),
         }
+    }
+
+    pub async fn mark_import_ack_completed(&self, transfer_id: &str) -> Result<(), RuntimeError> {
+        self.incoming_reservations.lock().await.remove(transfer_id);
+        self.replay_store.remove_incoming_reservation(transfer_id);
+        Ok(())
+    }
+
+    pub async fn mark_incoming_event_recorded(
+        &self,
+        transfer_id: &str,
+    ) -> Result<(), RuntimeError> {
+        let mut reservations = self.incoming_reservations.lock().await;
+        let reservation = reservations.get_mut(transfer_id).ok_or_else(|| {
+            RuntimeError::Protocol(format!(
+                "missing incoming transfer reservation {}",
+                transfer_id
+            ))
+        })?;
+        if reservation.event_recorded {
+            return Ok(());
+        }
+        let mut recorded = reservation.clone();
+        recorded.event_recorded = true;
+        self.replay_store
+            .save_incoming_reservation(transfer_id, &recorded)?;
+        *reservation = recorded;
+        Ok(())
+    }
+
+    pub async fn mark_import_commit_applied(&self, transfer_id: &str) -> Result<(), RuntimeError> {
+        let mut receipts = self.import_commit_receipts.lock().await;
+        let receipt = receipts.get_mut(transfer_id).ok_or_else(|| {
+            RuntimeError::Protocol(format!("missing import commit receipt {}", transfer_id))
+        })?;
+        if receipt.applied {
+            return Ok(());
+        }
+        let mut applied = receipt.clone();
+        applied.applied = true;
+        self.replay_store.save_receipt(transfer_id, &applied)?;
+        *receipt = applied;
+        self.replay_store.compact_receipts(&mut receipts);
+        Ok(())
     }
 }

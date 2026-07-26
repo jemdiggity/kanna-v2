@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,12 +33,15 @@ pub struct SeededRecoverySnapshot {
     pub cursor_row: u16,
     pub cursor_col: u16,
     pub cursor_visible: bool,
+    pub saved_at: u64,
+    pub sequence: u64,
 }
 
 #[derive(Clone)]
 pub struct RecoveryManager {
     launcher: Option<RecoveryLauncher>,
     snapshot_dir: PathBuf,
+    seeded_for_next_start: Arc<StdMutex<HashSet<String>>>,
     sequences: Arc<StdMutex<HashMap<String, u64>>>,
     state: Arc<Mutex<RecoveryState>>,
 }
@@ -208,8 +211,8 @@ impl RecoveryManager {
             cursor_row: snapshot.cursor_row,
             cursor_col: snapshot.cursor_col,
             cursor_visible: snapshot.cursor_visible,
-            saved_at: now_millis(),
-            sequence: 0,
+            saved_at: snapshot.saved_at,
+            sequence: snapshot.sequence,
         };
 
         let payload = serde_json::to_vec(&snapshot)
@@ -230,6 +233,26 @@ impl RecoveryManager {
             )
         })?;
         Ok(())
+    }
+
+    pub fn seed_snapshot_for_next_start(
+        &self,
+        session_id: &str,
+        snapshot: &SeededRecoverySnapshot,
+    ) -> Result<(), String> {
+        self.seed_snapshot(session_id, snapshot)?;
+        lock_seeded_for_next_start(&self.seeded_for_next_start).insert(session_id.to_string());
+        Ok(())
+    }
+
+    pub fn take_seeded_snapshot_for_start(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<RecoverySnapshot>, String> {
+        if !lock_seeded_for_next_start(&self.seeded_for_next_start).remove(session_id) {
+            return Ok(None);
+        }
+        self.read_persisted_snapshot(session_id)
     }
 
     pub fn next_sequence(&self, session_id: &str) -> u64 {
@@ -438,6 +461,7 @@ impl RecoveryManager {
         Self {
             launcher,
             snapshot_dir,
+            seeded_for_next_start: Arc::new(StdMutex::new(HashSet::new())),
             sequences: Arc::new(StdMutex::new(HashMap::new())),
             state: Arc::new(Mutex::new(RecoveryState {
                 sender: None,
@@ -596,6 +620,18 @@ fn lock_sequences(
         Ok(guard) => guard,
         Err(poisoned) => {
             log::warn!("recovery sequence map was poisoned; continuing");
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn lock_seeded_for_next_start(
+    seeded: &Arc<StdMutex<HashSet<String>>>,
+) -> std::sync::MutexGuard<'_, HashSet<String>> {
+    match seeded.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("seeded recovery session set was poisoned; continuing");
             poisoned.into_inner()
         }
     }
@@ -917,6 +953,23 @@ mod tests {
                     cursor_row: 23,
                     cursor_col: 0,
                     cursor_visible: true,
+                    saved_at: 1234,
+                    sequence: 56,
+                },
+            )
+            .unwrap();
+        manager
+            .seed_snapshot(
+                "seeded-session",
+                &SeededRecoverySnapshot {
+                    serialized: "RECOVERY_DONE\r\n".to_string(),
+                    cols: 80,
+                    rows: 24,
+                    cursor_row: 23,
+                    cursor_col: 0,
+                    cursor_visible: true,
+                    saved_at: 1234,
+                    sequence: 56,
                 },
             )
             .unwrap();
@@ -929,6 +982,11 @@ mod tests {
         assert_eq!(snapshot.serialized, "RECOVERY_DONE\r\n");
         assert_eq!(snapshot.cols, 80);
         assert_eq!(snapshot.rows, 24);
+        assert_eq!(snapshot.cursor_row, 23);
+        assert_eq!(snapshot.cursor_col, 0);
+        assert!(snapshot.cursor_visible);
+        assert_eq!(snapshot.saved_at, 1234);
+        assert_eq!(snapshot.sequence, 56);
 
         let _ = std::fs::remove_dir_all(&snapshot_dir);
     }

@@ -529,8 +529,16 @@ pub(super) async fn reopen_task(
                     format!("db error: {}", e),
                 )
             })?;
-            crate::task_creator::reopen_task_for_api(&db, &task_id)
-                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
+            match crate::task_creator::reopen_task_for_api(&db, &task_id) {
+                Ok(task_id) => Ok(task_id),
+                Err(crate::task_creator::ReopenTaskError::OwnershipConflict) => Err((
+                    axum::http::StatusCode::CONFLICT,
+                    "cloud task ownership conflicts with an open local task".to_string(),
+                )),
+                Err(crate::task_creator::ReopenTaskError::Internal(error)) => {
+                    Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))
+                }
+            }
         })
         .await?
     };

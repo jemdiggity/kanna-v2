@@ -1,6 +1,7 @@
 mod analytics;
 mod backup;
 mod blocking;
+mod cloud_relay;
 mod desktop;
 #[cfg(debug_assertions)]
 mod e2e_mobile_controls;
@@ -14,7 +15,7 @@ mod repo_commands;
 mod repos;
 #[path = "http_api/router.rs"]
 mod routes;
-mod settings;
+pub(crate) mod settings;
 mod signal_agent;
 mod snapshot;
 mod state;

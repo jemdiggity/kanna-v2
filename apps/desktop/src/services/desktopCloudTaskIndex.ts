@@ -50,11 +50,33 @@ export interface DesktopCloudTaskSnapshot {
   closedAt?: string | null;
 }
 
+export interface DesktopCloudDesktopSnapshot {
+  desktopId?: string;
+  displayName?: string;
+  transfer?: {
+    peerId?: string;
+    publicKey?: string;
+    protocolVersion?: number;
+    acceptingTransfers?: boolean;
+  } | null;
+}
+
+export interface DesktopCloudTransferMachine {
+  desktopId: string;
+  displayName: string;
+  online: boolean;
+  peerId: string;
+  publicKey: string;
+  protocolVersion: number;
+  acceptingTransfers: boolean;
+}
+
 export interface DesktopCloudSnapshot {
   repos: DesktopCloudRepo[];
   items: PipelineItem[];
   terminalRefs: Record<string, DesktopCloudTerminalRef>;
   blockedByTaskIds: Record<string, string[]>;
+  transferMachines: DesktopCloudTransferMachine[];
 }
 
 export type DesktopCloudRepo = Repo & {
@@ -67,6 +89,8 @@ export interface DesktopCloudTerminalRef {
   ownerLocalRepoId?: string;
   ownerLocalTaskId: string;
   transport?: "cloud" | "lan";
+  transferPeerId?: string;
+  preferredTransferTransport?: "lan" | "cloud";
 }
 
 export interface DesktopCloudTaskIndexOptions {
@@ -115,7 +139,15 @@ export async function listDesktopCloudTasks(
   options: DesktopCloudTaskIndexOptions = {},
 ): Promise<DesktopCloudSnapshot> {
   const firestore = db === undefined ? await getConfiguredDesktopFirestore() : db;
-  if (!firestore) return { repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} };
+  if (!firestore) {
+    return {
+      repos: [],
+      items: [],
+      terminalRefs: {},
+      blockedByTaskIds: {},
+      transferMachines: [],
+    };
+  }
 
   const desktopsRef = collection(firestore, "users", uid, "desktops");
   const [desktopSnapshot, activeDesktopIds, currentDesktopId] = await Promise.all([
@@ -136,6 +168,10 @@ export async function listDesktopCloudTasks(
   return mapDesktopCloudTasks(
     taskSnapshots,
     { ...options, activeDesktopIds, currentDesktopId },
+    desktopSnapshot.docs.map((desktopDoc) => ({
+      documentId: desktopDoc.id,
+      snapshot: desktopDoc.data() as DesktopCloudDesktopSnapshot,
+    })),
   );
 }
 
@@ -159,6 +195,10 @@ export function subscribeDesktopCloudTasks(
   let desktopsUnsub: (() => void) | null = null;
   const taskUnsubs = new Map<string, () => void>();
   const tasksByDesktop = new Map<string, DesktopCloudTaskSnapshot[]>();
+  const desktopsById = new Map<
+    string,
+    { documentId: string; snapshot: DesktopCloudDesktopSnapshot }
+  >();
 
   const emit = async () => {
     const base = options.getOptions();
@@ -170,14 +210,24 @@ export function subscribeDesktopCloudTasks(
     ]);
     if (cancelled) return;
     const snapshots = [...tasksByDesktop.values()].flat();
-    onUpdate(mapDesktopCloudTasks(snapshots, { ...base, activeDesktopIds, currentDesktopId }));
+    onUpdate(mapDesktopCloudTasks(
+      snapshots,
+      { ...base, activeDesktopIds, currentDesktopId },
+      [...desktopsById.values()],
+    ));
   };
 
   void (async () => {
     const firestore = await getConfiguredDesktopFirestore();
     if (cancelled) return;
     if (!firestore) {
-      onUpdate({ repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} });
+      onUpdate({
+        repos: [],
+        items: [],
+        terminalRefs: {},
+        blockedByTaskIds: {},
+        transferMachines: [],
+      });
       return;
     }
     const desktopsRef = collection(firestore, "users", uid, "desktops");
@@ -185,6 +235,10 @@ export function subscribeDesktopCloudTasks(
       const present = new Set<string>();
       for (const desktopDoc of desktopsSnapshot.docs) {
         present.add(desktopDoc.id);
+        desktopsById.set(desktopDoc.id, {
+          documentId: desktopDoc.id,
+          snapshot: desktopDoc.data() as DesktopCloudDesktopSnapshot,
+        });
         if (taskUnsubs.has(desktopDoc.id)) continue;
         const tasksQuery = query(collection(desktopDoc.ref, "tasks"), where("closedAt", "==", null));
         taskUnsubs.set(
@@ -203,6 +257,7 @@ export function subscribeDesktopCloudTasks(
         unsub();
         taskUnsubs.delete(desktopId);
         tasksByDesktop.delete(desktopId);
+        desktopsById.delete(desktopId);
       }
       void emit();
     });
@@ -215,17 +270,34 @@ export function subscribeDesktopCloudTasks(
     for (const unsub of taskUnsubs.values()) unsub();
     taskUnsubs.clear();
     tasksByDesktop.clear();
+    desktopsById.clear();
   };
 }
 
 export function mapDesktopCloudTasks(
   snapshots: DesktopCloudTaskSnapshot[],
   options: DesktopCloudTaskIndexOptions = {},
+  desktopSnapshots: Array<{
+    documentId: string;
+    snapshot: DesktopCloudDesktopSnapshot;
+  }> = [],
 ): DesktopCloudSnapshot {
   const reposById = new Map<string, DesktopCloudRepo>();
   const items: PipelineItem[] = [];
   const terminalRefs: Record<string, DesktopCloudTerminalRef> = {};
   const blockedByTaskIds: Record<string, string[]> = {};
+  const transferMachines = mapDesktopCloudTransferMachines(
+    desktopSnapshots,
+    options.activeDesktopIds,
+  );
+  const transferMachineByDesktopId = new Map(
+    transferMachines
+      .filter((machine) =>
+        machine.online
+        && machine.protocolVersion === 1
+        && machine.acceptingTransfers)
+      .map((machine) => [machine.desktopId, machine]),
+  );
   const localRepoById = new Map(
     (options.localRepos ?? []).map((entry) => [entry.repo.id, entry.repo]),
   );
@@ -280,11 +352,18 @@ export function mapDesktopCloudTasks(
       blockedByTaskIds[itemId] = uniqueBlockerIds;
     }
     if (ownerDesktopIsReachable(snapshot.ownerDesktopId, options.activeDesktopIds)) {
+      const transferMachine = transferMachineByDesktopId.get(snapshot.ownerDesktopId);
       terminalRefs[itemId] = {
         ownerDesktopId: snapshot.ownerDesktopId,
         ownerLocalRepoId: snapshotLocalRepoId,
         ownerLocalTaskId: snapshot.ownerLocalTaskId,
         transport: "cloud",
+        ...(transferMachine
+          ? {
+              transferPeerId: transferMachine.peerId,
+              preferredTransferTransport: "cloud" as const,
+            }
+          : {}),
       };
     }
 
@@ -334,7 +413,51 @@ export function mapDesktopCloudTasks(
     items,
     terminalRefs,
     blockedByTaskIds,
+    transferMachines,
   };
+}
+
+function mapDesktopCloudTransferMachines(
+  desktops: Array<{
+    documentId: string;
+    snapshot: DesktopCloudDesktopSnapshot;
+  }>,
+  activeDesktopIds: Set<string> | null | undefined,
+): DesktopCloudTransferMachine[] {
+  return desktops
+    .flatMap(({ documentId, snapshot }) => {
+      const desktopId = nonblankString(snapshot.desktopId) ?? nonblankString(documentId);
+      const transfer = snapshot.transfer;
+      const peerId = nonblankString(transfer?.peerId);
+      const publicKey = nonblankString(transfer?.publicKey);
+      const protocolVersion = transfer?.protocolVersion;
+      if (
+        !desktopId
+        || !peerId
+        || !publicKey
+        || !Number.isSafeInteger(protocolVersion)
+        || (protocolVersion as number) <= 0
+        || typeof transfer?.acceptingTransfers !== "boolean"
+      ) {
+        return [];
+      }
+      return [{
+        desktopId,
+        displayName: nonblankString(snapshot.displayName) ?? desktopId,
+        online: ownerDesktopIsReachable(desktopId, activeDesktopIds),
+        peerId,
+        publicKey,
+        protocolVersion: protocolVersion as number,
+        acceptingTransfers: transfer.acceptingTransfers,
+      }];
+    })
+    .sort((left, right) =>
+      left.displayName.localeCompare(right.displayName)
+      || left.desktopId.localeCompare(right.desktopId));
+}
+
+function nonblankString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
 function ownerDesktopIsReachable(ownerDesktopId: string, activeDesktopIds: Set<string> | null | undefined): boolean {

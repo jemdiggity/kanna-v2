@@ -39,12 +39,12 @@ use provider::{
 use std::collections::HashMap;
 use std::str::FromStr;
 use types::{
-    CreatedTask, ForkedWorkspace, PreparedRunWorkspace, PreparedSessionSpawn, PreparedStageRerun,
-    RunWorkspaceSpec, TaskCreationRequest,
+    CreatedTask, ForkedWorkspace, PreparedRunWorkspace, PreparedSessionSpawn, RunWorkspaceSpec,
+    TaskCreationRequest,
 };
 pub(crate) use types::{
-    PrepareTaskError, PreparedStageRunSpawn, PreparedStageTransition, PreparedTaskSpawn,
-    PreparedWorkspaceTeardown,
+    PrepareTaskError, PreparedStageRerun, PreparedStageRunSpawn, PreparedStageTransition,
+    PreparedTaskSpawn, PreparedWorkspaceTeardown,
 };
 use worktree::{
     create_worktree, fetch_start_point, generate_task_id, merge_branches_into_worktree,
@@ -438,8 +438,258 @@ pub(crate) fn prepare_rerun_stage_for_api(
         } else {
             Vec::new()
         },
+        recovery_snapshot: None,
         session,
     })
+}
+
+/// Rebuild the initial spawn from the canonical API request retained while a
+/// prepared task has no durable running run. Older tasks without an intent
+/// return `None` and continue through the legacy generic-rerun repair path.
+pub(crate) fn prepare_create_task_repair_for_api(
+    db: &Db,
+    config: &Config,
+    task_id: &str,
+) -> Result<Option<PreparedStageRerun>, String> {
+    let Some(request_json) = db
+        .get_create_task_intent(task_id)
+        .map_err(|error| format!("db error: {error}"))?
+    else {
+        return Ok(None);
+    };
+    let request_value: serde_json::Value = serde_json::from_str(&request_json)
+        .map_err(|error| format!("invalid stored create task intent for {task_id}: {error}"))?;
+    let resolved_intent = request_value
+        .get("_kannaResolved")
+        .cloned()
+        .map(serde_json::from_value::<ResolvedCreateTaskIntent>)
+        .transpose()
+        .map_err(|error| format!("invalid resolved create task intent for {task_id}: {error}"))?;
+    let request: crate::mobile_api::CreateTaskRequest = serde_json::from_value(request_value)
+        .map_err(|error| format!("invalid stored create task intent for {task_id}: {error}"))?;
+    let source_task = db
+        .get_task_stage_source(task_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .ok_or_else(|| format!("task not found: {task_id}"))?;
+    if source_task.closed_at.is_some() {
+        return Err(format!("task is closed: {task_id}"));
+    }
+    let repo = db
+        .get_repo(&source_task.repo_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .ok_or_else(|| format!("repo not found for task: {task_id}"))?;
+    let definitions = RepoDefinitions::resolve(&repo)?;
+    let repo_config = definitions.config();
+    let branch = source_task
+        .branch
+        .as_deref()
+        .ok_or_else(|| format!("task has no branch: {task_id}"))?;
+    let stored_worktree_path = db
+        .get_task_worktree_path(task_id)
+        .map_err(|error| format!("db error: {error}"))?;
+    let worktree_path = stored_worktree_path
+        .clone()
+        .unwrap_or_else(|| format!("{}/.kanna-worktrees/{branch}", repo.path));
+    if !std::path::Path::new(&worktree_path).is_dir() {
+        create_new_task_worktree(
+            db,
+            &repo,
+            task_id,
+            branch,
+            &worktree_path,
+            source_task.base_ref.as_deref(),
+        )?;
+    } else if stored_worktree_path.is_none() {
+        db.upsert_worktree(&format!("wt-{task_id}"), task_id, &worktree_path, branch)
+            .map_err(|error| format!("db error: {error}"))?;
+        db.upsert_terminal_session(
+            &format!("agent-{task_id}"),
+            &repo.id,
+            Some(task_id),
+            Some("agent"),
+            Some(&worktree_path),
+            Some(task_id),
+        )
+        .map_err(|error| format!("db error: {error}"))?;
+    }
+
+    if let Some(resolved) = resolved_intent {
+        let provider = AgentProvider::from_str(&resolved.provider)
+            .map_err(|_| format!("unsupported stored agent provider: {}", resolved.provider))?;
+        let agent_type = resolve_agent_type(Some(&resolved.agent_type), provider)?;
+        let port_env = claim_task_ports(db, task_id, repo_config)?;
+        persist_task_ports(db, task_id, &port_env)?;
+        let mut spawn_env =
+            build_spawn_env(config, task_id, &port_env, &worktree_path, repo_config)?;
+        let mcp_config_path = write_kanna_mcp_config(
+            &config.daemon_dir,
+            task_id,
+            &kanna_server_base_url(config),
+            &mut spawn_env,
+        )?;
+        let defer_headless_setup =
+            agent_type == AgentSessionType::Agent && !resolved.setup.is_empty();
+        let (mut session, provider_session_id) = build_prepared_session(
+            provider,
+            agent_type,
+            task_id,
+            &resolved.stage_name,
+            &resolved.pipeline_name,
+            Some(resolved.stage_transition.as_str()),
+            resolved.final_prompt,
+            resolved.model.clone(),
+            resolved.permission_mode,
+            resolved.allowed_tools,
+            resolved.disallowed_tools,
+            resolved.max_turns,
+            resolved.max_budget_usd,
+            mcp_config_path,
+            &spawn_env,
+            &worktree_path,
+            &resolved.setup,
+            defer_headless_setup,
+            resolved.resume_session_id.as_deref(),
+        )?;
+        if let Some((initial_cols, initial_rows)) = resolved.initial_terminal_geometry {
+            if let PreparedSessionSpawn::Pty { cols, rows, .. } = &mut session {
+                *cols = initial_cols;
+                *rows = initial_rows;
+            }
+        }
+        let session_id = db
+            .resolve_task_terminal_session_id(task_id)
+            .map_err(|error| format!("db error: {error}"))?
+            .unwrap_or_else(|| task_id.to_string());
+        return Ok(Some(PreparedStageRerun {
+            task_id: task_id.to_string(),
+            session_id,
+            stage: resolved.stage_name,
+            run_kind: "main",
+            stage_agent: resolved.stage_agent,
+            agent_provider: provider.as_str().to_string(),
+            model: resolved.model,
+            completion_transition: resolved.stage_transition,
+            provider_session_id,
+            cwd: worktree_path,
+            env: spawn_env,
+            deferred_setup: if defer_headless_setup {
+                resolved.setup
+            } else {
+                Vec::new()
+            },
+            recovery_snapshot: resolved.recovery_snapshot,
+            session,
+        }));
+    }
+
+    let initial_terminal_geometry =
+        resolve_initial_terminal_geometry(request.terminal_cols, request.terminal_rows);
+    let resolved = resolve_task_spawn(
+        &repo,
+        TaskCreationRequest {
+            requested_task_id: None,
+            create_intent_json: None,
+            task_prompt: request.prompt,
+            display_name: request.display_name,
+            pipeline_name: source_task.pipeline.clone().or(request.pipeline_name),
+            pipeline_def: source_task.pipeline_def.clone(),
+            base_ref: request.base_ref,
+            stored_base_ref: source_task.base_ref,
+            stage_override: request.stage,
+            agent: request.agent,
+            explicit_provider: source_task
+                .agent_provider
+                .clone()
+                .or(request.agent_provider),
+            default_provider: None,
+            agent_type: source_task.agent_type.clone().or(request.agent_type),
+            initial_terminal_geometry,
+            model: request.model,
+            permission_mode: request.permission_mode,
+            allowed_tools: request.allowed_tools.unwrap_or_default(),
+            disallowed_tools: request.disallowed_tools.unwrap_or_default(),
+            max_turns: request.max_turns,
+            max_budget_usd: request.max_budget_usd,
+            setup_cmds: request.setup_cmds.unwrap_or_default(),
+            task_template: request.task_template,
+            resume_session_id: request.resume_session_id,
+            recovery_snapshot: request.recovery_snapshot,
+            notify_task_id: request.notify_task_id,
+            parent_task_id: request.parent_task_id,
+        },
+        &definitions,
+    )?;
+
+    let provider_name = source_task
+        .agent_provider
+        .as_deref()
+        .ok_or_else(|| format!("task has no agent provider: {task_id}"))?;
+    let provider = AgentProvider::from_str(provider_name)
+        .map_err(|_| format!("unsupported stored agent provider: {provider_name}"))?;
+    let agent_type = resolve_agent_type(source_task.agent_type.as_deref(), provider)?;
+    let port_env = claim_task_ports(db, task_id, repo_config)?;
+    persist_task_ports(db, task_id, &port_env)?;
+    let mut spawn_env = build_spawn_env(config, task_id, &port_env, &worktree_path, repo_config)?;
+    let mcp_config_path = write_kanna_mcp_config(
+        &config.daemon_dir,
+        task_id,
+        &kanna_server_base_url(config),
+        &mut spawn_env,
+    )?;
+    let setup = new_task_setup_cmds(repo_config, &resolved.stage_setup, &resolved.setup_cmds);
+    let defer_headless_setup = agent_type == AgentSessionType::Agent && !setup.is_empty();
+    let (mut session, provider_session_id) = build_prepared_session(
+        provider,
+        agent_type,
+        task_id,
+        &resolved.stage_name,
+        &resolved.pipeline_name,
+        Some(resolved.stage_transition.as_str()),
+        resolved.final_prompt,
+        resolved.model.clone(),
+        resolved.permission_mode,
+        resolved.allowed_tools,
+        resolved.disallowed_tools,
+        resolved.max_turns,
+        resolved.max_budget_usd,
+        mcp_config_path,
+        &spawn_env,
+        &worktree_path,
+        &setup,
+        defer_headless_setup,
+        resolved.resume_session_id.as_deref(),
+    )?;
+    if let Some((initial_cols, initial_rows)) = resolved.initial_terminal_geometry {
+        if let PreparedSessionSpawn::Pty { cols, rows, .. } = &mut session {
+            *cols = initial_cols;
+            *rows = initial_rows;
+        }
+    }
+    let session_id = db
+        .resolve_task_terminal_session_id(task_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .unwrap_or_else(|| task_id.to_string());
+
+    Ok(Some(PreparedStageRerun {
+        task_id: task_id.to_string(),
+        session_id,
+        stage: resolved.stage_name,
+        run_kind: "main",
+        stage_agent: resolved.stage_agent,
+        agent_provider: provider.as_str().to_string(),
+        model: resolved.model,
+        completion_transition: resolved.stage_transition,
+        provider_session_id,
+        cwd: worktree_path,
+        env: spawn_env,
+        deferred_setup: if defer_headless_setup {
+            setup
+        } else {
+            Vec::new()
+        },
+        recovery_snapshot: resolved.recovery_snapshot,
+        session,
+    }))
 }
 
 /// Prepare a new stage run to be spawned on an existing task. Used for stage
@@ -1065,7 +1315,7 @@ pub(crate) fn prepare_task_for_api_with_error(
 
     let initial_terminal_geometry =
         resolve_initial_terminal_geometry(request.terminal_cols, request.terminal_rows);
-    let explicit_provider = request.agent_provider;
+    let explicit_provider = request.agent_provider.clone();
     let default_provider = if explicit_provider.is_none() {
         read_default_agent_provider_setting(db)?
     } else {
@@ -1091,6 +1341,13 @@ pub(crate) fn prepare_task_for_api_with_error(
     } else {
         None
     };
+    let mut create_intent = request.clone();
+    if create_intent.agent_provider.is_none() {
+        create_intent.agent_provider = default_provider.clone();
+    }
+    create_intent.parent_task_id = parent_task_id.clone();
+    let create_intent_json =
+        serde_json::to_string(&create_intent).map_err(|e| format!("serialize error: {e}"))?;
 
     prepare_task_spawn_with_error(
         db,
@@ -1098,6 +1355,7 @@ pub(crate) fn prepare_task_for_api_with_error(
         &repo,
         TaskCreationRequest {
             requested_task_id,
+            create_intent_json: Some(create_intent_json),
             task_prompt: request.prompt.clone(),
             display_name: request.display_name,
             pipeline_name: request.pipeline_name,
@@ -1119,6 +1377,7 @@ pub(crate) fn prepare_task_for_api_with_error(
             setup_cmds: request.setup_cmds.unwrap_or_default(),
             task_template: request.task_template,
             resume_session_id: request.resume_session_id,
+            recovery_snapshot: request.recovery_snapshot,
             notify_task_id: request.notify_task_id,
             parent_task_id,
         },
@@ -1170,6 +1429,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
         &repo,
         TaskCreationRequest {
             requested_task_id: None,
+            create_intent_json: None,
             task_prompt: message.to_string(),
             display_name,
             pipeline_name: Some(pipeline_name),
@@ -1191,6 +1451,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
             setup_cmds: Vec::new(),
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
         },
@@ -1266,6 +1527,7 @@ completion with status success so Kanna can run the commit post and close this i
         &repo,
         TaskCreationRequest {
             requested_task_id: None,
+            create_intent_json: None,
             task_prompt: prompt,
             display_name: Some(format!("Integrate: {dependent_name}")),
             pipeline_name: Some(pipeline_name),
@@ -1287,6 +1549,7 @@ completion with status success so Kanna can run the commit post and close this i
             setup_cmds: Vec::new(),
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: Some(dependent_task_id.to_string()),
         },
@@ -1298,6 +1561,8 @@ pub(crate) fn create_dormant_task_for_api_with_error(
     request: crate::mobile_api::CreateTaskRequest,
     requested_task_id: Option<String>,
 ) -> Result<crate::mobile_api::CreateTaskResponse, PrepareTaskError> {
+    let create_intent_json =
+        serde_json::to_string(&request).map_err(|e| format!("serialize error: {e}"))?;
     let repo = db
         .get_repo(&request.repo_id)
         .map_err(|e| format!("db error: {}", e))?
@@ -1374,26 +1639,31 @@ pub(crate) fn create_dormant_task_for_api_with_error(
     let branch = format!("task-{}", task_id);
     let stage_name = stage.name.clone();
 
-    db.insert_pipeline_item(NewPipelineItem {
-        id: &task_id,
-        repo_id: &repo.id,
-        prompt: &request.prompt,
-        display_name: request.display_name.as_deref(),
-        pipeline: &pipeline_name,
-        pipeline_def: Some(&pipeline_def_json),
-        stage: &stage_name,
-        branch: &branch,
-        agent_type: agent_type.as_str(),
-        agent_provider: provider.as_str(),
-        activity: "idle",
-        port_offset: None,
-        port_env_json: None,
-        agent_spawn_options_json: None,
-        base_ref: None,
-        notify_task_id: request.notify_task_id.as_deref(),
-        parent_task_id: parent_task_id.as_deref(),
-    })
-    .map_err(|error| classify_pipeline_item_insert_error(error, has_requested_task_id))?;
+    db.with_immediate_transaction(|db| {
+        db.insert_pipeline_item(NewPipelineItem {
+            id: &task_id,
+            repo_id: &repo.id,
+            prompt: &request.prompt,
+            display_name: request.display_name.as_deref(),
+            pipeline: &pipeline_name,
+            pipeline_def: Some(&pipeline_def_json),
+            stage: &stage_name,
+            branch: &branch,
+            agent_type: agent_type.as_str(),
+            agent_provider: provider.as_str(),
+            activity: "idle",
+            port_offset: None,
+            port_env_json: None,
+            agent_spawn_options_json: None,
+            base_ref: None,
+            notify_task_id: request.notify_task_id.as_deref(),
+            parent_task_id: parent_task_id.as_deref(),
+        })
+        .map_err(|error| classify_pipeline_item_insert_error(error, has_requested_task_id))?;
+        db.insert_create_task_intent(&task_id, &create_intent_json)
+            .map_err(|error| PrepareTaskError::Other(format!("db error: {error}")))?;
+        Ok::<(), PrepareTaskError>(())
+    })?;
 
     let prompt = request.prompt;
     let title = request.display_name.unwrap_or_else(|| prompt.clone());
@@ -1429,6 +1699,16 @@ pub(crate) fn prepare_start_dormant_task_for_api(
     if item.closed_at.is_some() {
         return Ok(None);
     }
+    let recovery_snapshot = db
+        .get_create_task_intent(task_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .map(|request_json| {
+            serde_json::from_str::<crate::mobile_api::CreateTaskRequest>(&request_json).map_err(
+                |error| format!("invalid stored create task intent for {task_id}: {error}"),
+            )
+        })
+        .transpose()?
+        .and_then(|request| request.recovery_snapshot);
     let repo = db
         .get_repo(&item.repo_id)
         .map_err(|e| format!("db error: {}", e))?
@@ -1635,6 +1915,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         model: stage_run_model,
         completion_transition: stage.policy.transition,
         provider_session_id,
+        recovery_snapshot,
         session,
     }))
 }
@@ -1691,10 +1972,71 @@ struct ResolvedTaskSpawn {
     setup_cmds: Vec<String>,
     task_template: Option<crate::mobile_api::TaskTemplateLaunch>,
     resume_session_id: Option<String>,
+    recovery_snapshot: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
     base_ref: Option<String>,
     stored_base_ref: Option<String>,
     notify_task_id: Option<String>,
     parent_task_id: Option<String>,
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedCreateTaskIntent {
+    final_prompt: String,
+    pipeline_name: String,
+    stage_name: String,
+    stage_transition: PipelineStageTransition,
+    stage_agent: Option<String>,
+    provider: String,
+    agent_type: String,
+    initial_terminal_geometry: Option<(u16, u16)>,
+    setup: Vec<String>,
+    model: Option<String>,
+    permission_mode: Option<String>,
+    allowed_tools: Vec<String>,
+    disallowed_tools: Vec<String>,
+    max_turns: Option<u32>,
+    max_budget_usd: Option<f64>,
+    resume_session_id: Option<String>,
+    recovery_snapshot: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
+}
+
+fn resolved_create_task_intent_json(
+    request_json: &str,
+    resolved: &ResolvedTaskSpawn,
+    repo_config: &RepoConfig,
+    provider: AgentProvider,
+    agent_type: AgentSessionType,
+) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(request_json).map_err(|error| format!("serialize error: {error}"))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "serialized create task request was not an object".to_string())?;
+    object.insert(
+        "_kannaResolved".to_string(),
+        serde_json::to_value(ResolvedCreateTaskIntent {
+            final_prompt: resolved.final_prompt.clone(),
+            pipeline_name: resolved.pipeline_name.clone(),
+            stage_name: resolved.stage_name.clone(),
+            stage_transition: resolved.stage_transition,
+            stage_agent: resolved.stage_agent.clone(),
+            provider: provider.as_str().to_string(),
+            agent_type: agent_type.as_str().to_string(),
+            initial_terminal_geometry: resolved.initial_terminal_geometry,
+            setup: new_task_setup_cmds(repo_config, &resolved.stage_setup, &resolved.setup_cmds),
+            model: resolved.model.clone(),
+            permission_mode: resolved.permission_mode.clone(),
+            allowed_tools: resolved.allowed_tools.clone(),
+            disallowed_tools: resolved.disallowed_tools.clone(),
+            max_turns: resolved.max_turns,
+            max_budget_usd: resolved.max_budget_usd,
+            resume_session_id: resolved.resume_session_id.clone(),
+            recovery_snapshot: resolved.recovery_snapshot.clone(),
+        })
+        .map_err(|error| format!("serialize error: {error}"))?,
+    );
+    serde_json::to_string(&value).map_err(|error| format!("serialize error: {error}"))
 }
 
 pub(in crate::task_creator) fn prepare_task_spawn(
@@ -1715,6 +2057,7 @@ fn prepare_task_spawn_with_error(
     let definitions = RepoDefinitions::resolve(repo)?;
     let repo_config = definitions.config();
     let requested_task_id = request.requested_task_id.clone();
+    let create_intent_json = request.create_intent_json.clone();
     let has_requested_task_id = requested_task_id.is_some();
     let resolved = resolve_task_spawn(repo, request, &definitions)?;
     let stage_run_model = resolved.model.clone();
@@ -1726,6 +2069,18 @@ fn prepare_task_spawn_with_error(
     // prepared. Do not validate the requested session type against the first
     // candidate here: setup may install a later, compatible fallback.
     let provisional_agent_type = resolve_agent_type(None, provisional_provider)?;
+    let mut create_intent_json = create_intent_json
+        .as_deref()
+        .map(|request_json| {
+            resolved_create_task_intent_json(
+                request_json,
+                &resolved,
+                repo_config,
+                provisional_provider,
+                provisional_agent_type,
+            )
+        })
+        .transpose()?;
 
     let task_id = match requested_task_id {
         Some(task_id) => task_id,
@@ -1734,16 +2089,23 @@ fn prepare_task_spawn_with_error(
     let branch = format!("task-{}", task_id);
     let worktree_path = format!("{}/.kanna-worktrees/{}", repo.path, branch);
 
-    insert_new_task_record(
-        db,
-        repo,
-        &task_id,
-        &branch,
-        &resolved,
-        provisional_provider,
-        provisional_agent_type,
-        has_requested_task_id,
-    )?;
+    db.with_immediate_transaction(|db| {
+        insert_new_task_record(
+            db,
+            repo,
+            &task_id,
+            &branch,
+            &resolved,
+            provisional_provider,
+            provisional_agent_type,
+            has_requested_task_id,
+        )?;
+        if let Some(request_json) = create_intent_json.as_deref() {
+            db.insert_create_task_intent(&task_id, request_json)
+                .map_err(|error| PrepareTaskError::Other(format!("db error: {error}")))?;
+        }
+        Ok::<(), PrepareTaskError>(())
+    })?;
 
     let prepared = (|| {
         let port_env = claim_task_ports(db, &task_id, repo_config)?;
@@ -1780,6 +2142,17 @@ fn prepare_task_spawn_with_error(
             return Err(format!("task {task_id} failed to prepare: {err}").into());
         }
     };
+    if let Some(request_json) = create_intent_json.as_mut() {
+        *request_json = resolved_create_task_intent_json(
+            request_json,
+            &resolved,
+            repo_config,
+            provider,
+            agent_type,
+        )?;
+        db.update_create_task_intent(&task_id, request_json)
+            .map_err(|error| format!("db error: {error}"))?;
+    }
     db.update_pipeline_item_agent_binding(&task_id, provider.as_str(), agent_type.as_str())
         .map_err(|error| format!("db error: {error}"))?;
     let title = resolved
@@ -1806,6 +2179,7 @@ fn prepare_task_spawn_with_error(
         model: stage_run_model,
         completion_transition: resolved.stage_transition,
         provider_session_id,
+        recovery_snapshot: resolved.recovery_snapshot,
         session,
     })
 }
@@ -1986,6 +2360,7 @@ fn resolve_task_spawn(
         setup_cmds: request.setup_cmds,
         task_template: request.task_template,
         resume_session_id: request.resume_session_id,
+        recovery_snapshot: request.recovery_snapshot,
         base_ref: request.base_ref,
         stored_base_ref,
         notify_task_id: request.notify_task_id,
@@ -2084,28 +2459,84 @@ fn persist_task_ports(
         .map_err(|e| format!("db error: {}", e))
 }
 
-pub(crate) fn reopen_task_for_api(db: &Db, task_or_branch_id: &str) -> Result<String, String> {
+#[derive(Debug)]
+pub(crate) enum ReopenTaskError {
+    OwnershipConflict,
+    Internal(String),
+}
+
+impl ReopenTaskError {
+    fn internal(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
+    }
+}
+
+impl From<rusqlite::Error> for ReopenTaskError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::internal(format!("db error: {error}"))
+    }
+}
+
+pub(crate) fn reopen_task_for_api(
+    db: &Db,
+    task_or_branch_id: &str,
+) -> Result<String, ReopenTaskError> {
+    reopen_task_for_api_with_hook(db, task_or_branch_id, || Ok(()))
+}
+
+#[cfg(test)]
+pub(crate) fn reopen_task_for_api_with_test_hook(
+    db: &Db,
+    task_or_branch_id: &str,
+    after_reopen_update: impl FnOnce() -> Result<(), String>,
+) -> Result<String, ReopenTaskError> {
+    reopen_task_for_api_with_hook(db, task_or_branch_id, after_reopen_update)
+}
+
+fn reopen_task_for_api_with_hook(
+    db: &Db,
+    task_or_branch_id: &str,
+    after_reopen_update: impl FnOnce() -> Result<(), String>,
+) -> Result<String, ReopenTaskError> {
     let task_id = db
         .resolve_pipeline_item_id(task_or_branch_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .ok_or_else(|| format!("task not found: {task_or_branch_id}"))?;
+        .map_err(|e| ReopenTaskError::internal(format!("db error: {e}")))?
+        .ok_or_else(|| ReopenTaskError::internal(format!("task not found: {task_or_branch_id}")))?;
     let item = db
         .get_pipeline_item(&task_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .ok_or_else(|| format!("task not found: {task_id}"))?;
+        .map_err(|e| ReopenTaskError::internal(format!("db error: {e}")))?
+        .ok_or_else(|| ReopenTaskError::internal(format!("task not found: {task_id}")))?;
     let repo = db
         .get_repo(&item.repo_id)
-        .map_err(|e| format!("db error: {}", e))?
-        .ok_or_else(|| format!("repo not found for task: {task_id}"))?;
-    let definitions = RepoDefinitions::resolve(&repo)?;
+        .map_err(|e| ReopenTaskError::internal(format!("db error: {e}")))?
+        .ok_or_else(|| ReopenTaskError::internal(format!("repo not found for task: {task_id}")))?;
+    let definitions = RepoDefinitions::resolve(&repo).map_err(ReopenTaskError::internal)?;
 
-    db.release_task_ports(&task_id)
-        .map_err(|e| format!("db error: {}", e))?;
-    let port_env = claim_task_ports(db, &task_id, definitions.config())?;
-    persist_task_ports(db, &task_id, &port_env)?;
-    db.reopen_pipeline_item(&task_id)
-        .map_err(|e| format!("db error: {}", e))?;
-    Ok(task_id)
+    db.with_immediate_transaction(|db| {
+        let guarded_item = db
+            .get_pipeline_item(&task_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if guarded_item.closed_at.is_none() {
+            return Ok(task_id.clone());
+        }
+
+        match db.reopen_pipeline_item(&task_id) {
+            Ok(()) => {}
+            Err(crate::db::ReopenPipelineItemError::OwnershipConflict) => {
+                return Err(ReopenTaskError::OwnershipConflict);
+            }
+            Err(crate::db::ReopenPipelineItemError::Database(error)) => {
+                return Err(error.into());
+            }
+        }
+        after_reopen_update().map_err(ReopenTaskError::internal)?;
+        db.release_task_ports(&task_id)
+            .map_err(ReopenTaskError::from)?;
+        let port_env = claim_task_ports(db, &task_id, definitions.config())
+            .map_err(ReopenTaskError::internal)?;
+        persist_task_ports(db, &task_id, &port_env).map_err(ReopenTaskError::internal)?;
+        Ok(task_id.clone())
+    })
 }
 
 fn create_new_task_worktree(

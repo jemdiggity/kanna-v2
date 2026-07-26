@@ -4,17 +4,23 @@ use super::daemon::{
 };
 use super::discovery::PeerDiscovery;
 use super::events::{
-    IncomingTransferEvent, OutgoingTransferCommittedEvent,
-    OutgoingTransferFinalizationRequestedEvent, PairingCompletedEvent, PairingRequestedEvent,
-    RuntimeError, RuntimeEvent,
+    IncomingTransferEvent, OutgoingTransferFinalizationRequestedEvent, PairingCompletedEvent,
+    PairingRequestedEvent, RuntimeError, RuntimeEvent, TaskPullRequestedEvent,
 };
+use super::external_peers::{
+    ensure_peer_is_trusted, ensure_peer_is_trusted_for_transport, find_peer, ExternalPeerRegistry,
+    TransferTransport,
+};
+use super::pull::{prune_task_pull_requests, validate_source_task_id};
+use super::replay_store::unix_ms;
 use super::state::{
-    IncomingTransferReservation, ListenerContext, PairingDecision, PendingPairingRequest,
+    ImportCommitReceipt, IncomingTransferReservation, ListenerContext, OutgoingTransferReservation,
+    PairingDecision, PendingPairingRequest, PendingTaskPullRequest,
 };
 use super::utils::{
     ensure_peer_is_trusted_for, extract_request_id, load_or_create_identity,
-    local_capabilities_json, pairing_verification_code, peer_store, prune_incoming_reservations,
-    prune_outgoing_transfers, prune_transfer_artifacts, write_json_line,
+    local_capabilities_json, pairing_verification_code, peer_store, prune_outgoing_transfers,
+    prune_transfer_artifacts, write_json_line,
 };
 use crate::crypto::{open_json, parse_public_key, seal_json};
 use crate::peer_store::PeerRecord;
@@ -22,12 +28,12 @@ use crate::protocol::{PairingPeer, PeerRequest, PeerResponse};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
+use rand_core::{OsRng, RngCore};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex};
@@ -46,6 +52,73 @@ pub(super) async fn run_listener(listener: TcpListener, context: ListenerContext
             let _ = handle_connection(stream, connection_context).await;
         });
     }
+}
+
+async fn trusted_reserved_target(
+    context: &ListenerContext,
+    reservation: &OutgoingTransferReservation,
+) -> Result<crate::protocol::PeerRegistryEntry, RuntimeError> {
+    if let Some(peer) = reservation.target_peer.clone() {
+        ensure_peer_is_trusted_for_transport(
+            &context.registry_root,
+            &context.self_peer_id,
+            &context.external_peers,
+            &peer.peer_id,
+            &peer.public_key,
+            reservation.transport.unwrap_or(TransferTransport::Auto),
+        )?;
+        return Ok(peer);
+    }
+
+    let peer = find_peer(
+        &context.discovery,
+        &context.external_peers,
+        &context.self_peer_id,
+        &reservation.target_peer_id,
+        TransferTransport::Auto,
+    )
+    .await?;
+    ensure_peer_is_trusted(
+        &context.registry_root,
+        &context.self_peer_id,
+        &context.external_peers,
+        &peer.peer_id,
+        &peer.public_key,
+    )?;
+    Ok(peer)
+}
+
+async fn trusted_receipt_target(
+    context: &ListenerContext,
+    receipt: &ImportCommitReceipt,
+) -> Result<crate::protocol::PeerRegistryEntry, RuntimeError> {
+    if let Some(peer) = receipt.target_peer.clone() {
+        ensure_peer_is_trusted_for_transport(
+            &context.registry_root,
+            &context.self_peer_id,
+            &context.external_peers,
+            &peer.peer_id,
+            &peer.public_key,
+            receipt.transport.unwrap_or(TransferTransport::Auto),
+        )?;
+        return Ok(peer);
+    }
+    let peer = find_peer(
+        &context.discovery,
+        &context.external_peers,
+        &context.self_peer_id,
+        &receipt.target_peer_id,
+        TransferTransport::Auto,
+    )
+    .await?;
+    ensure_peer_is_trusted(
+        &context.registry_root,
+        &context.self_peer_id,
+        &context.external_peers,
+        &peer.peer_id,
+        &peer.public_key,
+    )?;
+    Ok(peer)
 }
 
 async fn handle_connection(
@@ -154,21 +227,18 @@ async fn handle_connection(
             source_peer_id,
             sealed_payload,
         }) => match async {
-            let source_peer = context
-                .discovery
-                .list_peers(&context.self_peer_id)
-                .await?
-                .into_iter()
-                .find(|peer| peer.peer_id == source_peer_id)
-                .ok_or_else(|| {
-                    RuntimeError::Protocol(format!(
-                        "source peer {} is not currently discovered",
-                        source_peer_id
-                    ))
-                })?;
-            ensure_peer_is_trusted_for(
+            let source_peer = find_peer(
+                &context.discovery,
+                &context.external_peers,
+                &context.self_peer_id,
+                &source_peer_id,
+                TransferTransport::Auto,
+            )
+            .await?;
+            ensure_peer_is_trusted(
                 &context.registry_root,
                 &context.self_peer_id,
+                &context.external_peers,
                 &source_peer_id,
                 &source_peer.public_key,
             )?;
@@ -183,26 +253,122 @@ async fn handle_connection(
                 })?
                 .to_string();
             let mut reservations = context.incoming_reservations.lock().await;
-            prune_incoming_reservations(&mut reservations, context.pending_transfer_ttl);
-            let transfer_id = format!(
-                "{}-transfer-{}",
-                context.self_peer_id,
-                context.request_counter.fetch_add(1, Ordering::Relaxed)
-            );
-            reservations.insert(
-                transfer_id.clone(),
-                IncomingTransferReservation {
-                    source_peer_id: source_peer_id.clone(),
-                    source_task_id,
-                    created_at: Instant::now(),
-                },
-            );
+            context
+                .replay_store
+                .prune_incoming_reservations(&mut reservations);
+            if reservations.len() >= context.replay_store.max_incoming_reservations() {
+                return Err(RuntimeError::Protocol(format!(
+                    "too many active incoming transfer reservations (maximum {})",
+                    context.replay_store.max_incoming_reservations()
+                )));
+            }
+            let transfer_id = loop {
+                let candidate = random_transfer_id();
+                if !reservations.contains_key(&candidate) {
+                    break candidate;
+                }
+            };
+            let reservation = IncomingTransferReservation {
+                source_peer_id: source_peer_id.clone(),
+                source_task_id,
+                created_at_unix_ms: unix_ms(),
+                committed: false,
+                event: None,
+                event_recorded: false,
+            };
+            context
+                .replay_store
+                .save_incoming_reservation(&transfer_id, &reservation)?;
+            reservations.insert(transfer_id.clone(), reservation);
 
             Ok::<PeerResponse, RuntimeError>(PeerResponse::PrepareTransfer {
                 request_id: request_id.clone(),
                 transfer_id,
                 source_peer_id,
                 target_has_repo: false,
+            })
+        }
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => PeerResponse::Error {
+                request_id,
+                message: error.to_string(),
+            },
+        },
+        Ok(PeerRequest::RequestTaskPull {
+            request_id,
+            requester_peer_id,
+            sealed_payload,
+        }) => match async {
+            if requester_peer_id == context.self_peer_id {
+                return Err(RuntimeError::Protocol(
+                    "cannot request a task pull from this runtime".into(),
+                ));
+            }
+            let requester_peer = find_peer(
+                &context.discovery,
+                &context.external_peers,
+                &context.self_peer_id,
+                &requester_peer_id,
+                TransferTransport::Auto,
+            )
+            .await?;
+            ensure_peer_is_trusted(
+                &context.registry_root,
+                &context.self_peer_id,
+                &context.external_peers,
+                &requester_peer_id,
+                &requester_peer.public_key,
+            )?;
+            let requester_public_key = parse_public_key(&requester_peer.public_key)?;
+            let identity = load_or_create_identity(&context.registry_root, &context.self_peer_id)?;
+            let decrypted_payload = open_json(&identity, &requester_public_key, &sealed_payload)?;
+            let source_task_id = decrypted_payload
+                .get("source_task_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    RuntimeError::Protocol("task-pull payload missing source_task_id".into())
+                })?
+                .to_owned();
+            validate_source_task_id(&source_task_id)?;
+
+            let key = (requester_peer_id.clone(), source_task_id.clone());
+            let mut requests = context.pending_task_pull_requests.lock().await;
+            prune_task_pull_requests(&mut requests);
+            if let Some(existing) = requests.get(&key) {
+                return Ok::<PeerResponse, RuntimeError>(PeerResponse::RequestTaskPull {
+                    request_id: existing.request_id.clone(),
+                });
+            }
+
+            let pull_request_id = format!(
+                "pull-{}-{}",
+                context.self_peer_id,
+                context.request_counter.fetch_add(1, Ordering::Relaxed)
+            );
+            requests.insert(
+                key.clone(),
+                PendingTaskPullRequest {
+                    request_id: pull_request_id.clone(),
+                    created_at: std::time::Instant::now(),
+                },
+            );
+            if context
+                .incoming_sender
+                .send(RuntimeEvent::TaskPullRequested(TaskPullRequestedEvent {
+                    request_id: pull_request_id.clone(),
+                    requester_peer_id,
+                    source_task_id,
+                }))
+                .is_err()
+            {
+                requests.remove(&key);
+                return Err(RuntimeError::IncomingEventChannelClosed);
+            }
+
+            Ok(PeerResponse::RequestTaskPull {
+                request_id: pull_request_id,
             })
         }
         .await
@@ -222,18 +388,43 @@ async fn handle_connection(
                 &context.self_peer_id,
                 &context.registry_root,
                 &context.discovery,
+                &context.external_peers,
                 &transfer_id,
-                context.pending_transfer_ttl,
                 sealed_payload,
                 &context.incoming_reservations,
+                &context.replay_store,
             )
             .await
             {
                 Ok(event) => {
-                    context
-                        .incoming_sender
-                        .send(RuntimeEvent::IncomingTransferRequest(event))
-                        .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
+                    let event_was_newly_committed = {
+                        let mut reservations = context.incoming_reservations.lock().await;
+                        let mut reservation =
+                            reservations.get(&transfer_id).cloned().ok_or_else(|| {
+                                RuntimeError::Protocol(format!(
+                                    "unknown transfer id {}",
+                                    transfer_id
+                                ))
+                            })?;
+                        if reservation.committed && reservation.event.is_some() {
+                            false
+                        } else {
+                            reservation.committed = true;
+                            reservation.event = Some(event.clone());
+                            reservation.event_recorded = false;
+                            context
+                                .replay_store
+                                .save_incoming_reservation(&transfer_id, &reservation)?;
+                            reservations.insert(transfer_id.clone(), reservation);
+                            true
+                        }
+                    };
+                    if event_was_newly_committed {
+                        context
+                            .incoming_sender
+                            .send(RuntimeEvent::IncomingTransferRequest(event))
+                            .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
+                    }
                     PeerResponse::SubmitTransferPayload {
                         request_id,
                         transfer_id,
@@ -252,12 +443,14 @@ async fn handle_connection(
         }) => {
             let transfer_id_for_cleanup = transfer_id.clone();
             match async {
-                let expected_target_peer_id = {
+                let reservation = {
                     let mut transfers = context.outgoing_transfers.lock().await;
-                    prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl);
-                    transfers
-                        .get(&transfer_id)
-                        .map(|reservation| reservation.target_peer_id.clone())
+                    for expired in
+                        prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl)
+                    {
+                        context.replay_store.remove_reservation(&expired);
+                    }
+                    transfers.get(&transfer_id).cloned()
                 }
                 .ok_or_else(|| {
                     RuntimeError::Protocol(format!(
@@ -266,31 +459,14 @@ async fn handle_connection(
                     ))
                 })?;
 
-                if requester_peer_id != expected_target_peer_id {
+                if requester_peer_id != reservation.target_peer_id {
                     return Err(RuntimeError::Protocol(format!(
                         "unexpected outgoing transfer finalization requester {} for transfer {}",
                         requester_peer_id, transfer_id
                     )));
                 }
 
-                let requester_peer = context
-                    .discovery
-                    .list_peers(&context.self_peer_id)
-                    .await?
-                    .into_iter()
-                    .find(|peer| peer.peer_id == requester_peer_id)
-                    .ok_or_else(|| {
-                        RuntimeError::Protocol(format!(
-                            "requester peer {} is not currently discovered",
-                            requester_peer_id
-                        ))
-                    })?;
-                ensure_peer_is_trusted_for(
-                    &context.registry_root,
-                    &context.self_peer_id,
-                    &requester_peer_id,
-                    &requester_peer.public_key,
-                )?;
+                let requester_peer = trusted_reserved_target(&context, &reservation).await?;
 
                 let (tx, rx) = oneshot::channel();
                 context
@@ -359,12 +535,14 @@ async fn handle_connection(
             sealed_payload,
         }) => {
             match async {
-                let expected_target_peer_id = {
+                let reservation = {
                     let mut transfers = context.outgoing_transfers.lock().await;
-                    prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl);
-                    transfers
-                        .get(&transfer_id)
-                        .map(|reservation| reservation.target_peer_id.clone())
+                    for expired in
+                        prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl)
+                    {
+                        context.replay_store.remove_reservation(&expired);
+                    }
+                    transfers.get(&transfer_id).cloned()
                 }
                 .ok_or_else(|| {
                     RuntimeError::Protocol(format!(
@@ -373,31 +551,14 @@ async fn handle_connection(
                     ))
                 })?;
 
-                if requester_peer_id != expected_target_peer_id {
+                if requester_peer_id != reservation.target_peer_id {
                     return Err(RuntimeError::Protocol(format!(
                         "unexpected artifact fetch requester {} for transfer {}",
                         requester_peer_id, transfer_id
                     )));
                 }
 
-                let requester_peer = context
-                    .discovery
-                    .list_peers(&context.self_peer_id)
-                    .await?
-                    .into_iter()
-                    .find(|peer| peer.peer_id == requester_peer_id)
-                    .ok_or_else(|| {
-                        RuntimeError::Protocol(format!(
-                            "requester peer {} is not currently discovered",
-                            requester_peer_id
-                        ))
-                    })?;
-                ensure_peer_is_trusted_for(
-                    &context.registry_root,
-                    &context.self_peer_id,
-                    &requester_peer_id,
-                    &requester_peer.public_key,
-                )?;
+                let requester_peer = trusted_reserved_target(&context, &reservation).await?;
                 let requester_public_key = parse_public_key(&requester_peer.public_key)?;
                 let identity =
                     load_or_create_identity(&context.registry_root, &context.self_peer_id)?;
@@ -461,19 +622,36 @@ async fn handle_connection(
             sealed_payload,
         }) => {
             match async {
-                let expected_target_peer_id = {
+                // Keep receipt creation serialized for the full validation and durable write.
+                // Otherwise concurrent acknowledgments could both observe no receipt and race
+                // incompatible bindings onto disk.
+                let mut receipts = context.import_commit_receipts.lock().await;
+                let existing_receipt = receipts.get(&transfer_id).cloned();
+                let reservation = if existing_receipt.is_none() {
                     let mut transfers = context.outgoing_transfers.lock().await;
-                    prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl);
-                    transfers
-                        .get(&transfer_id)
-                        .map(|reservation| reservation.target_peer_id.clone())
-                }
-                .ok_or_else(|| {
-                    RuntimeError::Protocol(format!(
-                        "missing target peer for import acknowledgment {}",
-                        transfer_id
-                    ))
-                })?;
+                    for expired in
+                        prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl)
+                    {
+                        context.replay_store.remove_reservation(&expired);
+                    }
+                    transfers.get(&transfer_id).cloned()
+                } else {
+                    None
+                };
+                let expected_target_peer_id = existing_receipt
+                    .as_ref()
+                    .map(|receipt| receipt.target_peer_id.clone())
+                    .or_else(|| {
+                        reservation
+                            .as_ref()
+                            .map(|reservation| reservation.target_peer_id.clone())
+                    })
+                    .ok_or_else(|| {
+                        RuntimeError::Protocol(format!(
+                            "missing target peer for import acknowledgment {}",
+                            transfer_id
+                        ))
+                    })?;
 
                 if requester_peer_id != expected_target_peer_id {
                     return Err(RuntimeError::Protocol(format!(
@@ -482,24 +660,18 @@ async fn handle_connection(
                     )));
                 }
 
-                let requester_peer = context
-                    .discovery
-                    .list_peers(&context.self_peer_id)
-                    .await?
-                    .into_iter()
-                    .find(|peer| peer.peer_id == requester_peer_id)
-                    .ok_or_else(|| {
-                        RuntimeError::Protocol(format!(
-                            "requester peer {} is not currently discovered",
-                            requester_peer_id
-                        ))
-                    })?;
-                ensure_peer_is_trusted_for(
-                    &context.registry_root,
-                    &context.self_peer_id,
-                    &requester_peer_id,
-                    &requester_peer.public_key,
-                )?;
+                let requester_peer = match (&existing_receipt, &reservation) {
+                    (Some(receipt), _) => trusted_receipt_target(&context, receipt).await?,
+                    (None, Some(reservation)) => {
+                        trusted_reserved_target(&context, reservation).await?
+                    }
+                    (None, None) => {
+                        return Err(RuntimeError::Protocol(format!(
+                            "missing target peer for import acknowledgment {}",
+                            transfer_id
+                        )));
+                    }
+                };
                 let requester_public_key = parse_public_key(&requester_peer.public_key)?;
                 let identity =
                     load_or_create_identity(&context.registry_root, &context.self_peer_id)?;
@@ -524,17 +696,61 @@ async fn handle_connection(
                     })?
                     .to_string();
 
-                context
-                    .incoming_sender
-                    .send(RuntimeEvent::OutgoingTransferCommitted(
-                        OutgoingTransferCommittedEvent {
-                            transfer_id: transfer_id.clone(),
-                            source_task_id,
-                            destination_local_task_id,
-                        },
+                if let Some(mut receipt) = existing_receipt {
+                    if receipt.source_task_id != source_task_id
+                        || receipt.destination_local_task_id != destination_local_task_id
+                    {
+                        return Err(RuntimeError::Protocol(format!(
+                            "mismatched duplicate import acknowledgment for transfer {}",
+                            transfer_id
+                        )));
+                    }
+                    receipt.try_queue_event(&transfer_id, &context.receipt_sender)?;
+                    receipts.insert(transfer_id.clone(), receipt);
+                    return Ok::<PeerResponse, RuntimeError>(PeerResponse::ImportCommitted {
+                        request_id: request_id.clone(),
+                        transfer_id,
+                    });
+                }
+
+                let reservation = reservation.ok_or_else(|| {
+                    RuntimeError::Protocol(format!(
+                        "missing target peer for import acknowledgment {}",
+                        transfer_id
                     ))
-                    .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
+                })?;
+                if reservation.source_task_id != source_task_id {
+                    return Err(RuntimeError::Protocol(format!(
+                        "unexpected source task {} for import acknowledgment {}",
+                        source_task_id, transfer_id
+                    )));
+                }
+                if receipts.values().filter(|receipt| !receipt.applied).count()
+                    >= context.replay_store.max_unapplied_receipts()
+                {
+                    return Err(RuntimeError::Protocol(format!(
+                        "too many unapplied import acknowledgments (maximum {})",
+                        context.replay_store.max_unapplied_receipts()
+                    )));
+                }
+                let receipt = ImportCommitReceipt {
+                    target_peer_id: requester_peer_id,
+                    target_peer: reservation.target_peer.clone(),
+                    transport: reservation.transport,
+                    source_task_id: source_task_id.clone(),
+                    destination_local_task_id: destination_local_task_id.clone(),
+                    created_at_unix_ms: unix_ms(),
+                    applied: false,
+                    event_queued: false,
+                };
+                context.replay_store.save_receipt(&transfer_id, &receipt)?;
                 context.outgoing_transfers.lock().await.remove(&transfer_id);
+                context.replay_store.remove_reservation(&transfer_id);
+                receipts.insert(transfer_id.clone(), receipt);
+                receipts
+                    .get_mut(&transfer_id)
+                    .expect("receipt was just inserted")
+                    .try_queue_event(&transfer_id, &context.receipt_sender)?;
                 Ok::<PeerResponse, RuntimeError>(PeerResponse::ImportCommitted {
                     request_id: request_id.clone(),
                     transfer_id,
@@ -553,18 +769,14 @@ async fn handle_connection(
             request_id,
             requester_peer_id,
         }) => match async {
-            let requester_peer = context
-                .discovery
-                .list_peers(&context.self_peer_id)
-                .await?
-                .into_iter()
-                .find(|peer| peer.peer_id == requester_peer_id)
-                .ok_or_else(|| {
-                    RuntimeError::Protocol(format!(
-                        "requester peer {} is not currently discovered",
-                        requester_peer_id
-                    ))
-                })?;
+            let requester_peer = find_peer(
+                &context.discovery,
+                &context.external_peers,
+                &context.self_peer_id,
+                &requester_peer_id,
+                TransferTransport::Auto,
+            )
+            .await?;
             ensure_peer_is_trusted_for(
                 &context.registry_root,
                 &context.self_peer_id,
@@ -682,21 +894,18 @@ async fn handle_connection(
             requester_peer_id,
             sealed_payload,
         }) => match async {
-            let requester_peer = context
-                .discovery
-                .list_peers(&context.self_peer_id)
-                .await?
-                .into_iter()
-                .find(|peer| peer.peer_id == requester_peer_id)
-                .ok_or_else(|| {
-                    RuntimeError::Protocol(format!(
-                        "requester peer {} is not currently discovered",
-                        requester_peer_id
-                    ))
-                })?;
-            ensure_peer_is_trusted_for(
+            let requester_peer = find_peer(
+                &context.discovery,
+                &context.external_peers,
+                &context.self_peer_id,
+                &requester_peer_id,
+                TransferTransport::Auto,
+            )
+            .await?;
+            ensure_peer_is_trusted(
                 &context.registry_root,
                 &context.self_peer_id,
+                &context.external_peers,
                 &requester_peer_id,
                 &requester_peer.public_key,
             )?;
@@ -751,34 +960,33 @@ async fn build_incoming_event(
     self_peer_id: &str,
     registry_root: &Path,
     discovery: &PeerDiscovery,
+    external_peers: &ExternalPeerRegistry,
     transfer_id: &str,
-    pending_transfer_ttl: Duration,
     sealed_payload: String,
     incoming_reservations: &Arc<Mutex<HashMap<String, IncomingTransferReservation>>>,
+    replay_store: &super::replay_store::TransferReplayStore,
 ) -> Result<IncomingTransferEvent, RuntimeError> {
     let reservation = {
         let mut reservations = incoming_reservations.lock().await;
-        prune_incoming_reservations(&mut reservations, pending_transfer_ttl);
+        replay_store.prune_incoming_reservations(&mut reservations);
         reservations
             .get(transfer_id)
             .cloned()
             .ok_or_else(|| RuntimeError::Protocol(format!("unknown transfer id {}", transfer_id)))?
     };
 
-    let source_peer = discovery
-        .list_peers(self_peer_id)
-        .await?
-        .into_iter()
-        .find(|peer| peer.peer_id == reservation.source_peer_id)
-        .ok_or_else(|| {
-            RuntimeError::Protocol(format!(
-                "source peer {} is not currently discovered",
-                reservation.source_peer_id
-            ))
-        })?;
-    ensure_peer_is_trusted_for(
+    let source_peer = find_peer(
+        discovery,
+        external_peers,
+        self_peer_id,
+        &reservation.source_peer_id,
+        TransferTransport::Auto,
+    )
+    .await?;
+    ensure_peer_is_trusted(
         registry_root,
         self_peer_id,
+        external_peers,
         &reservation.source_peer_id,
         &source_peer.public_key,
     )?;
@@ -786,19 +994,30 @@ async fn build_incoming_event(
     let identity = load_or_create_identity(registry_root, self_peer_id)?;
     let payload = open_json(&identity, &source_public_key, &sealed_payload)?;
 
-    let source_task_id = payload
+    let payload_source_task_id = payload
         .pointer("/task/source_task_id")
         .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .unwrap_or(reservation.source_task_id);
+        .unwrap_or(&reservation.source_task_id);
+    if payload_source_task_id != reservation.source_task_id {
+        return Err(RuntimeError::Protocol(format!(
+            "transfer {} payload source task does not match its reservation",
+            transfer_id
+        )));
+    }
 
     let source_name = Some(source_peer.display_name);
 
     Ok(IncomingTransferEvent {
         transfer_id: transfer_id.to_owned(),
         source_peer_id: reservation.source_peer_id,
-        source_task_id,
+        source_task_id: reservation.source_task_id,
         source_name,
         payload,
     })
+}
+
+fn random_transfer_id() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

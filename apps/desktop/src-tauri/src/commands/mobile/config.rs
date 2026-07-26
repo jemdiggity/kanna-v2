@@ -167,9 +167,16 @@ pub(super) fn build_server_config(state: &MobileServerState) -> Result<String, S
     let server_binary_sha256_line = sidecar_sha256_config_line("kanna-server")
         .map(|line| format!("{line}\n"))
         .unwrap_or_default();
+    let transfer_port = std::env::var("KANNA_TRANSFER_PORT")
+        .unwrap_or_else(|_| kanna_runtime_defaults::DEFAULT_TRANSFER_PORT.to_string())
+        .parse::<u16>()
+        .map_err(|_| "KANNA_TRANSFER_PORT must be a valid nonzero port".to_string())?;
+    if transfer_port == 0 {
+        return Err("KANNA_TRANSFER_PORT must be a valid nonzero port".to_string());
+    }
 
     Ok(format!(
-        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}{}desktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nversion = \"{}\"\nenvironment = \"{}\"\n{}lan_host = \"0.0.0.0\"\nlan_port = {}\npairing_store_path = \"{}\"\n",
+        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}{}desktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nversion = \"{}\"\nenvironment = \"{}\"\n{}lan_host = \"0.0.0.0\"\nlan_port = {}\ntransfer_port = {}\npairing_store_path = \"{}\"\n",
         escape_toml_string(&relay_url),
         escape_toml_string(&device_token),
         escape_toml_string(&daemon_dir),
@@ -183,6 +190,7 @@ pub(super) fn build_server_config(state: &MobileServerState) -> Result<String, S
         escape_toml_string(server_environment(state.cloud_env)),
         firebase_config,
         local_server_port_for_cloud_env(state.cloud_env),
+        transfer_port,
         escape_toml_string(&pairing_store_path.to_string_lossy()),
     ))
 }
@@ -252,6 +260,15 @@ pub(super) fn server_config_matches_runtime(
         ),
         format!("lan_port = {}", local_server_port_for_cloud_env(cloud_env)),
     ];
+    let expected_transfer_port = std::env::var("KANNA_TRANSFER_PORT")
+        .unwrap_or_else(|_| kanna_runtime_defaults::DEFAULT_TRANSFER_PORT.to_string())
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0);
+    let Some(expected_transfer_port) = expected_transfer_port else {
+        return false;
+    };
+    required_lines.push(format!("transfer_port = {expected_transfer_port}"));
     if let Some(device_token) = expected_device_token {
         required_lines.push(format!(
             "device_token = \"{}\"",
@@ -566,6 +583,31 @@ mod tests {
         }
 
         assert!(config.contains("lan_port = 48129"));
+    }
+
+    #[test]
+    fn build_server_config_requires_and_writes_transfer_port() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            set_env_var("KANNA_TRANSFER_PORT", "4459");
+        }
+
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
+            started: false,
+            cloud_env: None,
+        };
+
+        let config = build_server_config(&state).unwrap();
+
+        unsafe {
+            unset_env_var("KANNA_TRANSFER_PORT");
+        }
+
+        assert!(config.contains("transfer_port = 4459"));
     }
 
     #[test]

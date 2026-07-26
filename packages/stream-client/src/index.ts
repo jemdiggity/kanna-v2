@@ -719,6 +719,7 @@ class RelayTunnelSocket implements WebSocketLike {
           type: "tunnel_request",
           id: this.nextId(),
           desktopId: this.desktopId,
+          service: "ksp",
         }),
       );
       return;

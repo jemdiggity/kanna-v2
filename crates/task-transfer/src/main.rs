@@ -43,6 +43,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     display_name: event.display_name,
                     verification_code: event.verification_code,
                 },
+                RuntimeEvent::TaskPullRequested(event) => SidecarEvent::TaskPullRequested {
+                    request_id: event.request_id,
+                    requester_peer_id: event.requester_peer_id,
+                    source_task_id: event.source_task_id,
+                },
                 RuntimeEvent::IncomingTransferRequest(event) => {
                     SidecarEvent::IncomingTransferRequest {
                         transfer_id: event.transfer_id,
@@ -105,10 +110,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> ControlResponse {
     match request {
+        ControlRequest::GetLocalIdentity { request_id } => {
+            let identity = runtime.local_identity();
+            ControlResponse::GetLocalIdentity {
+                request_id,
+                peer_id: identity.peer_id,
+                display_name: identity.display_name,
+                public_key: identity.public_key,
+                protocol_version: identity.protocol_version,
+                accepting_transfers: identity.accepting_transfers,
+            }
+        }
         ControlRequest::ListPeers { request_id } => match runtime.list_peers().await {
             Ok(peers) => ControlResponse::ListPeers { request_id, peers },
             Err(error) => control_error(request_id, error),
         },
+        ControlRequest::UpsertExternalPeer { request_id, peer } => {
+            match runtime.upsert_external_peer(peer).await {
+                Ok(()) => ControlResponse::UpsertExternalPeer { request_id },
+                Err(error) => control_error(request_id, error),
+            }
+        }
+        ControlRequest::RemoveExternalPeer {
+            request_id,
+            peer_id,
+        } => match runtime.remove_external_peer(&peer_id).await {
+            Ok(()) => ControlResponse::RemoveExternalPeer { request_id },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::ClearExternalPeers { request_id } => {
+            match runtime.clear_external_peers().await {
+                Ok(()) => ControlResponse::ClearExternalPeers { request_id },
+                Err(error) => control_error(request_id, error),
+            }
+        }
         ControlRequest::SetTaskSnapshot {
             request_id,
             snapshot,
@@ -290,8 +325,9 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             request_id,
             source_task_id,
             target_peer_id,
+            transport,
         } => match runtime
-            .prepare_transfer_preflight(&target_peer_id, &source_task_id)
+            .prepare_transfer_preflight_with_transport(&target_peer_id, &source_task_id, transport)
             .await
         {
             Ok(result) => ControlResponse::PrepareTransferPreflight {
@@ -299,6 +335,21 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
                 transfer_id: result.transfer_id,
                 source_peer_id: result.source_peer_id,
                 target_has_repo: result.target_has_repo,
+            },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::RequestTaskPull {
+            request_id,
+            target_peer_id,
+            source_task_id,
+            transport,
+        } => match runtime
+            .request_task_pull(&target_peer_id, &source_task_id, transport)
+            .await
+        {
+            Ok(pull_request_id) => ControlResponse::RequestTaskPull {
+                request_id,
+                pull_request_id,
             },
             Err(error) => control_error(request_id, error),
         },
@@ -367,6 +418,36 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             .await
         {
             Ok(()) => ControlResponse::AcknowledgeImportCommitted {
+                request_id,
+                transfer_id,
+            },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::MarkIncomingEventRecorded {
+            request_id,
+            transfer_id,
+        } => match runtime.mark_incoming_event_recorded(&transfer_id).await {
+            Ok(()) => ControlResponse::MarkIncomingEventRecorded {
+                request_id,
+                transfer_id,
+            },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::MarkImportCommitApplied {
+            request_id,
+            transfer_id,
+        } => match runtime.mark_import_commit_applied(&transfer_id).await {
+            Ok(()) => ControlResponse::MarkImportCommitApplied {
+                request_id,
+                transfer_id,
+            },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::MarkImportAckCompleted {
+            request_id,
+            transfer_id,
+        } => match runtime.mark_import_ack_completed(&transfer_id).await {
+            Ok(()) => ControlResponse::MarkImportAckCompleted {
                 request_id,
                 transfer_id,
             },

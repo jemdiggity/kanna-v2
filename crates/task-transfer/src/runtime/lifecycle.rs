@@ -2,14 +2,16 @@ use super::config::{DiscoveryMode, RuntimeConfig};
 use super::daemon::stream_peer_session;
 use super::discovery::{MdnsDiscovery, PeerDiscovery};
 use super::events::{RuntimeError, RuntimeEvent};
+use super::external_peers;
 use super::listener::run_listener;
+use super::replay_store::TransferReplayStore;
 use super::state::{ListenerContext, TransferRuntime};
 use super::utils::{
     load_or_create_identity, registry_entry_path, terminal_observer_key, unexpected_peer_response,
 };
 use crate::crypto::{parse_public_key, public_key_to_string, seal_json};
 use crate::discovery::encode_txt_record;
-use crate::protocol::{DiscoveredPeer, PeerTaskSnapshot};
+use crate::protocol::{DiscoveredPeer, LocalTransferIdentity, PeerTaskSnapshot};
 use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalEvent};
 use crate::registry::PeerRegistry;
 use serde_json::Value;
@@ -21,6 +23,16 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 
 impl TransferRuntime {
+    pub fn local_identity(&self) -> LocalTransferIdentity {
+        LocalTransferIdentity {
+            peer_id: self.config.peer_id.clone(),
+            display_name: self.config.display_name.clone(),
+            public_key: public_key_to_string(&self.identity.public_key),
+            protocol_version: 1,
+            accepting_transfers: true,
+        }
+    }
+
     pub async fn spawn(mut config: RuntimeConfig) -> Result<Self, RuntimeError> {
         let listener = TcpListener::bind((config.bind_host(), config.listen_port)).await?;
         config.listen_port = listener.local_addr()?.port();
@@ -61,10 +73,42 @@ impl TransferRuntime {
             ),
         };
         let (incoming_sender, incoming_receiver) = mpsc::unbounded_channel();
+        let (receipt_sender, receipt_receiver) =
+            mpsc::channel(config.max_unapplied_receipts.max(1));
         let pending_pairing_requests = Arc::new(Mutex::new(HashMap::new()));
-        let outgoing_transfers = Arc::new(Mutex::new(HashMap::new()));
+        let pending_task_pull_requests = Arc::new(Mutex::new(HashMap::new()));
+        let external_peers = external_peers::registry();
+        let replay_store = Arc::new(TransferReplayStore::new(
+            &config.registry_dir,
+            &config.peer_id,
+            config.pending_transfer_ttl,
+            config.applied_receipt_ttl,
+            config.max_unapplied_receipts,
+            config.max_applied_receipts,
+            config.max_incoming_reservations,
+        ));
+        let mut loaded_outgoing_transfers = replay_store.load_outgoing_reservations()?;
+        let mut loaded_receipts = replay_store.load_receipts()?;
+        for (transfer_id, receipt) in &mut loaded_receipts {
+            if loaded_outgoing_transfers.remove(transfer_id).is_some() {
+                replay_store.remove_reservation(transfer_id);
+            }
+            receipt.try_queue_event(transfer_id, &receipt_sender)?;
+        }
+        let outgoing_transfers = Arc::new(Mutex::new(loaded_outgoing_transfers));
+        let import_commit_receipts = Arc::new(Mutex::new(loaded_receipts));
         let pending_outgoing_transfer_finalizations = Arc::new(Mutex::new(HashMap::new()));
-        let incoming_reservations = Arc::new(Mutex::new(HashMap::new()));
+        let loaded_incoming_reservations = replay_store.load_incoming_reservations()?;
+        for reservation in loaded_incoming_reservations.values() {
+            if reservation.committed && !reservation.event_recorded {
+                if let Some(event) = reservation.event.clone() {
+                    incoming_sender
+                        .send(RuntimeEvent::IncomingTransferRequest(event))
+                        .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
+                }
+            }
+        }
+        let incoming_reservations = Arc::new(Mutex::new(loaded_incoming_reservations));
         let transfer_artifacts = Arc::new(Mutex::new(HashMap::new()));
         let task_snapshot = Arc::new(Mutex::new(Value::Null));
         let terminal_observers = Arc::new(Mutex::new(HashMap::new()));
@@ -75,10 +119,14 @@ impl TransferRuntime {
             self_public_key: public_key,
             registry_root: config.registry_dir.clone(),
             discovery: discovery.clone(),
+            external_peers: Arc::clone(&external_peers),
             pending_transfer_ttl: config.pending_transfer_ttl,
             peer_request_timeout: config.peer_request_timeout,
             pending_pairing_requests: Arc::clone(&pending_pairing_requests),
+            pending_task_pull_requests: Arc::clone(&pending_task_pull_requests),
             outgoing_transfers: Arc::clone(&outgoing_transfers),
+            import_commit_receipts: Arc::clone(&import_commit_receipts),
+            replay_store: Arc::clone(&replay_store),
             pending_outgoing_transfer_finalizations: Arc::clone(
                 &pending_outgoing_transfer_finalizations,
             ),
@@ -90,15 +138,37 @@ impl TransferRuntime {
             kanna_server_port: config.kanna_server_port,
             request_counter: Arc::clone(&request_counter),
             incoming_sender: incoming_sender.clone(),
+            receipt_sender: receipt_sender.clone(),
         };
         let listener_task = tokio::spawn(run_listener(listener, listener_context));
+        let retry_receipts = Arc::clone(&import_commit_receipts);
+        let retry_sender = receipt_sender.clone();
+        let retry_interval = config
+            .receipt_retry_interval
+            .max(std::time::Duration::from_millis(1));
+        let receipt_retry_task = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(retry_interval);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let mut receipts = retry_receipts.lock().await;
+                for (transfer_id, receipt) in receipts.iter_mut() {
+                    if receipt.try_queue_event(transfer_id, &retry_sender).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
 
         Ok(Self {
             config,
             discovery,
+            external_peers,
             identity,
             pending_pairing_requests,
             outgoing_transfers,
+            import_commit_receipts,
+            replay_store,
             pending_outgoing_transfer_finalizations,
             incoming_reservations,
             transfer_artifacts,
@@ -106,16 +176,28 @@ impl TransferRuntime {
             terminal_observers,
             incoming_sender,
             incoming_events: Mutex::new(incoming_receiver),
+            receipt_events: Mutex::new(receipt_receiver),
             request_counter,
             listener_task,
+            receipt_retry_task,
             registry_entry_path,
         })
     }
 
     pub async fn list_peers(&self) -> Result<Vec<DiscoveredPeer>, RuntimeError> {
-        self.discovery
-            .list_peers(&self.config.peer_id)
-            .await?
+        let mut peers = self.discovery.list_peers(&self.config.peer_id).await?;
+        let mut external = external_peers::external_peers(&self.external_peers);
+        external.sort_by(|left, right| left.peer_id.cmp(&right.peer_id));
+        for peer in external {
+            if !peers
+                .iter()
+                .any(|existing| existing.peer_id == peer.peer_id)
+            {
+                peers.push(external_peers::external_entry(&peer));
+            }
+        }
+        peers.sort_by(|left, right| left.peer_id.cmp(&right.peer_id));
+        peers
             .into_iter()
             .map(|peer| self.discovered_peer(peer))
             .collect()
@@ -129,7 +211,13 @@ impl TransferRuntime {
     pub async fn list_peer_task_snapshots(&self) -> Result<Vec<PeerTaskSnapshot>, RuntimeError> {
         let peers = self.list_peers().await?;
         let mut snapshots = Vec::new();
-        for peer in peers.into_iter().filter(|peer| peer.trusted) {
+        for peer in peers.into_iter().filter(|peer| {
+            self.trusted_peer_record(&peer.peer_id)
+                .ok()
+                .flatten()
+                .map(|record| record.public_key == peer.public_key)
+                .unwrap_or(false)
+        }) {
             let request_id = self.next_request_id("task-snapshot");
             let response = match self
                 .send_peer_request(
@@ -201,7 +289,7 @@ impl TransferRuntime {
         session_id: &str,
     ) -> Result<(), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let observer_key = terminal_observer_key(target_peer_id, session_id);
         if let Some(handle) = self.terminal_observers.lock().await.remove(&observer_key) {
             handle.abort();
@@ -260,7 +348,7 @@ impl TransferRuntime {
         data: Vec<u8>,
     ) -> Result<(), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("send-input");
         let response = self
             .send_peer_request(
@@ -290,7 +378,7 @@ impl TransferRuntime {
         rows: u16,
     ) -> Result<(), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("resize-session");
         let response = self
             .send_peer_request(
@@ -319,7 +407,7 @@ impl TransferRuntime {
         task_id: &str,
     ) -> Result<(), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("close-task");
         let response = self
             .send_peer_request(
@@ -346,7 +434,7 @@ impl TransferRuntime {
         task_id: &str,
     ) -> Result<(), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("advance-stage");
         let response = self
             .send_peer_request(
@@ -374,7 +462,7 @@ impl TransferRuntime {
         path: &str,
     ) -> Result<(String, String), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
-        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("read-task-file");
         let response = self
             .send_peer_request(
@@ -439,6 +527,7 @@ impl TransferRuntime {
 impl Drop for TransferRuntime {
     fn drop(&mut self) {
         self.listener_task.abort();
+        self.receipt_retry_task.abort();
         self.discovery.shutdown();
         if let Some(registry_entry_path) = &self.registry_entry_path {
             let _ = std::fs::remove_file(registry_entry_path);

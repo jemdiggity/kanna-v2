@@ -247,6 +247,7 @@ async fn close_task_route_releases_claimed_ports() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-close-ports-{unique}.json"),
     };
     let app = super::router(Arc::new(super::AppState::new(config)));
@@ -368,6 +369,7 @@ async fn reopen_task_route_reopens_and_reclaims_ports_from_remote_default_config
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-reopen-ports-{unique}.json"),
     };
     let app = super::router(Arc::new(super::AppState::new(config)));
@@ -394,6 +396,122 @@ async fn reopen_task_route_reopens_and_reclaims_ports_from_remote_default_config
     let ports = db.list_task_ports_for_item("task-closed").unwrap();
     assert_eq!(ports.get("KANNA_DEV_PORT"), Some(&1421));
     assert_eq!(ports.get("API_PORT"), Some(&3001));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn reopen_task_route_rejects_cloud_identity_conflict_without_claiming_ports() {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-reopen-identity-{unique}"));
+    init_test_git_repo(&repo_root);
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        r#"{"ports":{"KANNA_DEV_PORT":1420}}"#,
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna/config.json"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "publish port config"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    super::publish_test_origin_main(&repo_root);
+
+    let db_path = Db::test_db_path(&format!("http-reopen-identity-{unique}"));
+    let db = Db::open_for_tests(&db_path).expect("open test db");
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-old",
+        "repo-1",
+        "old prompt",
+        Some("Old Task"),
+        "in progress",
+        "2026-07-25 07:00:00",
+    )
+    .unwrap();
+    assert_eq!(
+        db.set_cloud_task_identity("task-old", "task-source-stable")
+            .unwrap(),
+        crate::db::CloudTaskIdentityWrite::Updated
+    );
+    db.close_pipeline_item("task-old").unwrap();
+    let original = db.get_pipeline_item("task-old").unwrap().unwrap();
+    let original_ports = db.get_test_pipeline_item_ports("task-old").unwrap();
+
+    db.insert_test_pipeline_item(
+        "task-new",
+        "repo-1",
+        "new prompt",
+        Some("New Task"),
+        "in progress",
+        "2026-07-25 08:00:00",
+    )
+    .unwrap();
+    assert_eq!(
+        db.set_cloud_task_identity("task-new", "task-source-stable")
+            .unwrap(),
+        crate::db::CloudTaskIdentityWrite::Updated
+    );
+    drop(db);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: "/tmp/kanna-daemon".to_string(),
+        db_path: db_path.clone(),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        pairing_store_path: format!("/tmp/kanna-pairings-reopen-identity-{unique}.json"),
+    };
+    let app = super::router(Arc::new(super::AppState::new(config)));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-old/actions/reopen")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let db = Db::open(&db_path).unwrap();
+    let unchanged = db.get_pipeline_item("task-old").unwrap().unwrap();
+    assert_eq!(unchanged.closed_at, original.closed_at);
+    assert_eq!(unchanged.updated_at, original.updated_at);
+    assert_eq!(
+        db.get_test_pipeline_item_ports("task-old").unwrap(),
+        original_ports
+    );
+    assert!(
+        db.list_task_ports_for_item("task-old").unwrap().is_empty(),
+        "ownership conflict must not leave claimed task ports"
+    );
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -623,6 +741,7 @@ async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_ru
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-close-pr-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1001,6 +1120,7 @@ async fn close_task_route_resolves_branch_style_task_id() {
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-close-{unique}.json"),
     };
     let app = super::router(Arc::new(super::AppState::new(config)));
@@ -1235,6 +1355,7 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-close-env-{unique}.json"),
     };
     let app = super::router(Arc::new(super::AppState::new(config)));
@@ -1532,6 +1653,7 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-pr-optimistic-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1622,7 +1744,17 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
                         "prompt": "Build on task A",
                         "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
                         "agentProvider": "claude",
-                        "blockerTaskIds": ["task-a"]
+                        "blockerTaskIds": ["task-a"],
+                        "recoverySnapshot": {
+                            "serialized": "DORMANT-RECOVERY\u{001b}[32m",
+                            "cols": 111,
+                            "rows": 39,
+                            "cursorRow": 12,
+                            "cursorCol": 34,
+                            "cursorVisible": false,
+                            "savedAt": 1785000000555_u64,
+                            "sequence": 61
+                        }
                     })
                     .to_string(),
                 ))
@@ -1645,6 +1777,7 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut spawned = Vec::new();
+        let mut recovery_seeded = false;
         loop {
             let mut line = String::new();
             if reader.read_line(&mut line).await.unwrap() == 0 {
@@ -1661,12 +1794,34 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
                         .await
                         .unwrap();
                 }
+                DaemonCommand::SeedSnapshot {
+                    session_id,
+                    snapshot,
+                } => {
+                    assert_eq!(session_id, expected_task_id);
+                    assert_eq!(snapshot.version, 1);
+                    assert_eq!(snapshot.vt, "DORMANT-RECOVERY\u{1b}[32m");
+                    assert_eq!((snapshot.cols, snapshot.rows), (111, 39));
+                    assert_eq!((snapshot.cursor_row, snapshot.cursor_col), (12, 34));
+                    assert!(!snapshot.cursor_visible);
+                    assert_eq!(snapshot.saved_at, 1_785_000_000_555);
+                    assert_eq!(snapshot.sequence, 61);
+                    recovery_seeded = true;
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
                 DaemonCommand::Spawn {
                     session_id,
                     cwd,
                     agent_provider,
                     ..
                 } => {
+                    assert!(recovery_seeded, "Spawn preceded dormant recovery seed");
                     assert_eq!(session_id, expected_task_id);
                     assert!(cwd.contains(".kanna-worktrees/task-"));
                     assert_eq!(agent_provider, Some(AgentProvider::Claude));
@@ -1685,6 +1840,7 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
                     break;
                 }
                 DaemonCommand::SpawnAgent { session_id, params } => {
+                    assert!(recovery_seeded, "SpawnAgent preceded dormant recovery seed");
                     assert_eq!(session_id, expected_task_id);
                     assert!(params.cwd.contains(".kanna-worktrees/task-"));
                     assert_eq!(params.agent_provider, AgentProvider::Claude);
@@ -1822,6 +1978,7 @@ async fn complete_pr_stage_without_pr_url_leaves_dormant_dependent_unstarted() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-pr-stays-blocked-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1943,6 +2100,7 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-close-unblocks-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2254,6 +2412,7 @@ async fn conflicting_sibling_blockers_create_integration_task_and_leave_dependen
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-conflict-integrates-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2498,6 +2657,7 @@ async fn closing_integration_task_starts_dependent_from_integration_branch() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-integration-closes-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2774,6 +2934,7 @@ async fn renamed_multi_blocker_pr_branches_survive_earlier_worktree_cleanup() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-clean-multi-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2998,6 +3159,7 @@ async fn close_non_final_blocker_leaves_dormant_dependent_unstarted() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-close-non-final-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -3290,6 +3452,7 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-advance-stage-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -3564,6 +3727,7 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-advance-close-race-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -3808,6 +3972,7 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-final-close-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -4168,6 +4333,7 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-post-refinish-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -4435,6 +4601,7 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-builtin-approve-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -4695,6 +4862,7 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-advance-block-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -4818,6 +4986,7 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-close-unblock-block-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -5037,6 +5206,7 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-pr-optimistic-block-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();

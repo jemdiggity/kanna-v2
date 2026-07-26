@@ -15,6 +15,7 @@ import App from "./App.vue";
 import { createWindowWorkspace, parseWindowBootstrap, resolveWindowBootstrap } from "./windowWorkspace";
 import { e2eAppMetrics, e2eTerminalOutputPerf } from "./e2eAppMetrics";
 import { e2eInvokeHistory } from "./e2eInvokeHistory";
+import { e2eEventHistory } from "./e2eEventHistory";
 import {
   getSharedStreamClient,
   resetSharedStreamClientForTests,
@@ -269,6 +270,7 @@ try {
       appMetrics: e2eAppMetrics,
       terminalOutputPerf: e2eTerminalOutputPerf,
       invokes: e2eInvokeHistory,
+      events: e2eEventHistory,
       resetStreamClient: resetSharedStreamClientForTests,
       serverWork: e2eServerWork,
       terminalStreams: e2eTerminalStreams,

@@ -95,6 +95,7 @@ interface UseAppTaskNavigationOptions {
   repoCommandCatalog: Ref<DesktopRepoCommandCatalog | null>;
   openPeerPicker: (taskId: string) => void;
   openPairPeerPicker: () => void;
+  pullSelectedWorkspaceTask?: (task: WorkspaceTask) => void | Promise<void>;
 }
 
 function isActivityShortcutCandidate(item: { stage?: string; teardown_started_at?: string | null }): boolean {
@@ -124,6 +125,7 @@ export function useAppTaskNavigation({
   repoCommandCatalog,
   openPeerPicker,
   openPairPeerPicker,
+  pullSelectedWorkspaceTask,
 }: UseAppTaskNavigationOptions) {
   const effectiveTaskBlockers = taskBlockers
     ?? computed(() => store.taskBlockers ?? []);
@@ -488,6 +490,14 @@ export function useAppTaskNavigation({
 
   const paletteDynamicCommands = computed<DynamicCommand[]>(() => {
     const cmds: DynamicCommand[] = [];
+    const selectedId = selectedCloudItemId.value ?? store.selectedItemId;
+    const selectedSidebarItem = sidebarItemForSelection(selectedId);
+    const selectedWorkspaceTask = selectedId
+      ? workspaceTasksByItemId.value.get(selectedId)
+        ?? (selectedSidebarItem?.task_id
+          ? workspaceTasksByItemId.value.get(selectedSidebarItem.task_id)
+          : undefined)
+      : undefined;
     // Rename task (only when a task is selected)
     if (store.currentItem) {
       cmds.push({
@@ -496,11 +506,26 @@ export function useAppTaskNavigation({
         execute: () => sidebarRef.value?.renameSelectedItem(),
       });
     }
-    if (store.currentItem && store.currentItem.closed_at == null) {
+    if (
+      selectedWorkspaceTask?.capabilities.canPushToMachine
+      && selectedWorkspaceTask.item.closed_at == null
+      && selectedWorkspaceTask.localTaskId
+    ) {
       cmds.push({
         id: "push-to-machine",
         label: t('taskTransfer.pushToMachine'),
-        execute: () => openPeerPicker(store.currentItem!.id),
+        execute: () => openPeerPicker(selectedWorkspaceTask.localTaskId!),
+      });
+    }
+    if (
+      selectedWorkspaceTask?.capabilities.canPullFromMachine
+      && selectedWorkspaceTask.item.closed_at == null
+      && pullSelectedWorkspaceTask
+    ) {
+      cmds.push({
+        id: "pull-to-machine",
+        label: t('taskTransfer.pullToThisMachine'),
+        execute: () => void pullSelectedWorkspaceTask(selectedWorkspaceTask),
       });
     }
     cmds.push({

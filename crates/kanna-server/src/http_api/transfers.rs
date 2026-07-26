@@ -5,10 +5,22 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SetCloudTaskIdentityRequest {
+    cloud_task_id: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct PendingIncomingTransfersResponse {
     transfers: Vec<crate::db::PendingIncomingTransfer>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IncomingTransferCleanupCandidatesResponse {
+    transfer_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +79,27 @@ pub(super) async fn list_pending_incoming_transfers(
     Ok(Json(PendingIncomingTransfersResponse { transfers }))
 }
 
+pub(super) async fn list_incoming_transfer_cleanup_candidates(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<IncomingTransferCleanupCandidatesResponse>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    let transfer_ids = db.list_terminal_incoming_transfer_ids().map_err(db_error)?;
+    Ok(Json(IncomingTransferCleanupCandidatesResponse {
+        transfer_ids,
+    }))
+}
+
+pub(super) async fn mark_incoming_transfer_sidecar_cleanup_completed(
+    State(state): State<Arc<AppState>>,
+    Path(transfer_id): Path<String>,
+) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    let updated = db
+        .mark_incoming_transfer_sidecar_cleanup_completed(&transfer_id)
+        .map_err(db_error)?;
+    Ok(Json(TransferUpdateResponse { updated }))
+}
+
 pub(super) async fn insert_task_transfer(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UpsertTransferRequest>,
@@ -106,6 +139,30 @@ pub(super) async fn complete_task_transfer(
     let db = open_db(&state)?;
     let updated = db
         .mark_task_transfer_completed(&transfer_id, &payload.local_task_id)
+        .map_err(db_error)?;
+    Ok(Json(TransferUpdateResponse { updated }))
+}
+
+pub(super) async fn mark_incoming_transfer_importing(
+    State(state): State<Arc<AppState>>,
+    Path(transfer_id): Path<String>,
+    Json(payload): Json<CompleteTransferRequest>,
+) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    let updated = db
+        .mark_incoming_transfer_importing(&transfer_id, &payload.local_task_id)
+        .map_err(db_error)?;
+    Ok(Json(TransferUpdateResponse { updated }))
+}
+
+pub(super) async fn mark_incoming_transfer_awaiting_acknowledgment(
+    State(state): State<Arc<AppState>>,
+    Path(transfer_id): Path<String>,
+    Json(payload): Json<CompleteTransferRequest>,
+) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    let updated = db
+        .mark_incoming_transfer_awaiting_acknowledgment(&transfer_id, &payload.local_task_id)
         .map_err(db_error)?;
     Ok(Json(TransferUpdateResponse { updated }))
 }
@@ -155,6 +212,46 @@ pub(super) async fn fail_pending_incoming_transfer(
         .fail_pending_incoming_transfer(&transfer_id, &payload.reason)
         .map_err(db_error)?;
     Ok(Json(TransferUpdateResponse { updated }))
+}
+
+pub(super) async fn set_task_cloud_identity(
+    State(state): State<Arc<AppState>>,
+    Path(task_id): Path<String>,
+    Json(payload): Json<SetCloudTaskIdentityRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    if payload.cloud_task_id.trim().is_empty()
+        || payload.cloud_task_id.chars().any(char::is_control)
+    {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "cloudTaskId must be non-blank and contain no control characters".to_string(),
+        ));
+    }
+
+    let cloud_task_id = payload.cloud_task_id;
+    let db_path = state.config.db_path.clone();
+    let task_id_for_write = task_id.clone();
+    let write = super::blocking::run_handler_blocking("cloud task identity write", move || {
+        let db = Db::open(&db_path).map_err(db_error)?;
+        db.set_cloud_task_identity(&task_id_for_write, &cloud_task_id)
+            .map_err(db_error)
+            .map(|write| (write, cloud_task_id))
+    })
+    .await?;
+    match write {
+        (crate::db::CloudTaskIdentityWrite::Updated, cloud_task_id)
+        | (crate::db::CloudTaskIdentityWrite::Unchanged, cloud_task_id) => {
+            Ok(Json(serde_json::json!({ "cloudTaskId": cloud_task_id })))
+        }
+        (crate::db::CloudTaskIdentityWrite::Conflict, _) => Err((
+            axum::http::StatusCode::CONFLICT,
+            "cloud task identity conflicts with existing ownership".to_string(),
+        )),
+        (crate::db::CloudTaskIdentityWrite::TaskNotFound, _) => Err((
+            axum::http::StatusCode::NOT_FOUND,
+            format!("task not found: {task_id}"),
+        )),
+    }
 }
 
 fn open_db(state: &AppState) -> Result<Db, (axum::http::StatusCode, String)> {

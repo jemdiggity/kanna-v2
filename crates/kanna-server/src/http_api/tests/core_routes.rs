@@ -670,6 +670,49 @@ async fn settings_routes_get_and_put_setting_values() {
 }
 
 #[tokio::test]
+async fn cloud_transfer_identity_route_persists_canonical_json_setting() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |_| {});
+    let identity = serde_json::json!({
+        "peerId": "peer-a",
+        "displayName": "Studio Mac",
+        "publicKey": "base64-key",
+        "protocolVersion": 1,
+        "acceptingTransfers": true,
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::put("/v1/settings/cloud-transfer-identity")
+                .header("content-type", "application/json")
+                .body(Body::from(identity.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let stored = app
+        .oneshot(
+            Request::get("/v1/settings/cloud_transfer_identity_v1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(stored.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(payload["key"], "cloud_transfer_identity_v1");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(payload["value"].as_str().unwrap()).unwrap(),
+        identity,
+    );
+}
+
+#[tokio::test]
 async fn window_workspace_mutations_do_not_resurrect_a_concurrently_removed_window() {
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
         db.set_test_setting(
@@ -1179,7 +1222,55 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
     let claim_json: serde_json::Value = from_slice(&claim_body).unwrap();
     assert_eq!(claim_json["updated"], true);
 
+    let importing_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/transfers/transfer-1/actions/importing")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "localTaskId": "task-local" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(importing_response.status(), StatusCode::OK);
+
+    let awaiting_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/transfers/transfer-1/actions/awaiting-acknowledgment")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "localTaskId": "task-local" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(awaiting_response.status(), StatusCode::OK);
+
+    let resumable_response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/transfers/incoming/pending")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let resumable_body = axum::body::to_bytes(resumable_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let resumable_json: serde_json::Value = from_slice(&resumable_body).unwrap();
+    assert_eq!(
+        resumable_json["transfers"][0]["status"],
+        "awaiting_acknowledgment"
+    );
+    assert_eq!(resumable_json["transfers"][0]["localTaskId"], "task-local");
+
     let fail_response = app
+        .clone()
         .oneshot(
             Request::post("/v1/transfers/transfer-1/actions/fail")
                 .header("content-type", "application/json")
@@ -1195,7 +1286,312 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
         .await
         .unwrap();
     let fail_json: serde_json::Value = from_slice(&fail_body).unwrap();
-    assert_eq!(fail_json["updated"], true);
+    assert_eq!(fail_json["updated"], false);
+
+    let complete_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/transfers/transfer-1/actions/complete")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "localTaskId": "task-local" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(complete_response.status(), StatusCode::OK);
+    let completed_list = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/transfers/incoming/pending")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let completed_body = axum::body::to_bytes(completed_list.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let completed_json: serde_json::Value = from_slice(&completed_body).unwrap();
+    assert!(completed_json["transfers"].as_array().unwrap().is_empty());
+
+    let cleanup_list = app
+        .oneshot(
+            Request::get("/v1/transfers/incoming/cleanup-candidates")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleanup_list.status(), StatusCode::OK);
+    let cleanup_body = axum::body::to_bytes(cleanup_list.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cleanup_json: serde_json::Value = from_slice(&cleanup_body).unwrap();
+    assert_eq!(
+        cleanup_json["transferIds"],
+        serde_json::json!(["transfer-1"])
+    );
+}
+
+#[tokio::test]
+async fn incoming_cleanup_candidates_include_completed_rejected_and_failed_rows() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        for (id, direction, status) in [
+            ("transfer-completed", "incoming", "completed"),
+            ("transfer-rejected", "incoming", "rejected"),
+            ("transfer-failed", "incoming", "failed"),
+            ("transfer-pending", "incoming", "pending"),
+            ("transfer-outgoing", "outgoing", "completed"),
+        ] {
+            db.insert_test_task_transfer(id, direction, status, Some("{}"))
+                .unwrap();
+        }
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/transfers/incoming/cleanup-candidates")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = from_slice(&body).unwrap();
+    let mut ids = json["transferIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec!["transfer-completed", "transfer-failed", "transfer-rejected"]
+    );
+
+    let cleanup_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/transfers/transfer-completed/actions/sidecar-cleanup-complete")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleanup_response.status(), StatusCode::OK);
+    let cleanup_body = axum::body::to_bytes(cleanup_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cleanup_json: serde_json::Value = from_slice(&cleanup_body).unwrap();
+    assert_eq!(cleanup_json["updated"], true);
+
+    let remaining_response = app
+        .oneshot(
+            Request::get("/v1/transfers/incoming/cleanup-candidates")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let remaining_body = axum::body::to_bytes(remaining_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let remaining_json: serde_json::Value = from_slice(&remaining_body).unwrap();
+    assert!(!remaining_json["transferIds"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("transfer-completed")));
+}
+
+#[tokio::test]
+async fn cloud_task_identity_route_sets_once_and_rejects_open_task_collision() {
+    let app = super::test_router_with_seed("desktop-cloud-identity", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        for task_id in ["task-1", "task-2"] {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-1",
+                "transferred prompt",
+                None,
+                "in progress",
+                "2026-07-25 10:00:00",
+            )
+            .unwrap();
+        }
+    });
+
+    let set_response = app
+        .clone()
+        .oneshot(
+            Request::put("/v1/tasks/task-1/actions/cloud-task-identity")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "cloudTaskId": "task-source-stable" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(set_response.status(), StatusCode::OK);
+
+    let snapshot_response = app
+        .clone()
+        .oneshot(Request::get("/v1/snapshot").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let snapshot_body = axum::body::to_bytes(snapshot_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let snapshot_json: serde_json::Value = from_slice(&snapshot_body).unwrap();
+    let task = snapshot_json["entries"][0]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == "task-1")
+        .unwrap();
+    assert_eq!(task["cloud_task_id"], "task-source-stable");
+
+    let unchanged_response = app
+        .clone()
+        .oneshot(
+            Request::put("/v1/tasks/task-1/actions/cloud-task-identity")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "cloudTaskId": "task-source-stable" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unchanged_response.status(), StatusCode::OK);
+
+    let changed_response = app
+        .clone()
+        .oneshot(
+            Request::put("/v1/tasks/task-1/actions/cloud-task-identity")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "cloudTaskId": "task-source-different" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed_response.status(), StatusCode::CONFLICT);
+
+    let collision_response = app
+        .oneshot(
+            Request::put("/v1/tasks/task-2/actions/cloud-task-identity")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "cloudTaskId": "task-source-stable" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(collision_response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn cloud_task_identity_route_rejects_invalid_identity_and_missing_task() {
+    let app = super::test_router_with_seed("desktop-cloud-identity-invalid", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "transferred prompt",
+            None,
+            "in progress",
+            "2026-07-25 10:00:00",
+        )
+        .unwrap();
+    });
+
+    for identity in ["   ", "task-source\nstable"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put("/v1/tasks/task-1/actions/cloud-task-identity")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "cloudTaskId": identity }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    let missing_response = app
+        .oneshot(
+            Request::put("/v1/tasks/task-missing/actions/cloud-task-identity")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "cloudTaskId": "task-source-stable" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cloud_task_identity_route_stays_responsive_while_database_write_is_blocked() {
+    let state = super::test_state_with_seed("desktop-cloud-identity-blocked", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "transferred prompt",
+            None,
+            "in progress",
+            "2026-07-25 10:00:00",
+        )
+        .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let locker = std::thread::spawn(move || {
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+        conn.execute_batch("COMMIT").unwrap();
+    });
+    locked_rx.recv().unwrap();
+
+    let started_at = Instant::now();
+    let request = tokio::spawn(
+        app.oneshot(
+            Request::put("/v1/tasks/task-1/actions/cloud-task-identity")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "cloudTaskId": "task-source-stable" }).to_string(),
+                ))
+                .unwrap(),
+        ),
+    );
+    tokio::task::yield_now().await;
+    let scheduler_delay = started_at.elapsed();
+    let response = request.await.unwrap().unwrap();
+    locker.join().unwrap();
+
+    assert!(
+        scheduler_delay < Duration::from_millis(100),
+        "cloud identity write blocked the async runtime for {scheduler_delay:?}"
+    );
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -1297,6 +1693,47 @@ async fn add_repo_route_registers_existing_git_repo() {
     assert_eq!(repo.name, "Registered Repo");
     assert_eq!(repo.default_branch.as_deref(), Some("main"));
     assert_eq!(repo.hidden, Some(0));
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[tokio::test]
+async fn add_repo_route_honors_requested_default_branch() {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-add-repo-branch-{unique}"));
+    init_test_git_repo(&repo_root);
+    let app = super::test_router("desktop-1", "Studio Mac");
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/repos")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "path": repo_root,
+                        "name": "Transferred Repo",
+                        "defaultBranch": "trunk"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let repo: crate::mobile_api::RepoDetail = from_slice(&body).unwrap();
+    assert_eq!(repo.default_branch.as_deref(), Some("trunk"));
 
     let _ = std::fs::remove_dir_all(repo_root);
 }
@@ -2471,6 +2908,7 @@ async fn task_file_route_maps_database_failure_to_internal_server_error() {
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: temp_dir
             .path()
             .join("pairings.json")
@@ -3063,6 +3501,7 @@ async fn create_pairing_session_route_uses_local_identity_without_desktop_secret
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: PathBuf::from("/tmp/kanna-pairings-http-local.json")
             .to_string_lossy()
             .to_string(),

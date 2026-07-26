@@ -5,8 +5,10 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct PendingIncomingTransfer {
     pub id: String,
+    pub status: String,
     pub source_peer_id: Option<String>,
     pub source_task_id: Option<String>,
+    pub local_task_id: Option<String>,
     pub payload_json: Option<String>,
 }
 
@@ -17,6 +19,8 @@ pub struct TaskTransfer {
     pub status: String,
     pub source_peer_id: Option<String>,
     pub target_peer_id: Option<String>,
+    pub source_desktop_id: Option<String>,
+    pub target_desktop_id: Option<String>,
     pub source_task_id: Option<String>,
     pub local_task_id: Option<String>,
     pub started_at: Option<String>,
@@ -32,6 +36,8 @@ pub struct NewTaskTransfer {
     pub status: String,
     pub source_peer_id: Option<String>,
     pub target_peer_id: Option<String>,
+    pub source_desktop_id: Option<String>,
+    pub target_desktop_id: Option<String>,
     pub source_task_id: Option<String>,
     pub local_task_id: Option<String>,
     pub error: Option<String>,
@@ -50,14 +56,17 @@ impl Db {
     pub fn insert_task_transfer(&self, transfer: &NewTaskTransfer) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO task_transfer
-             (id, direction, status, source_peer_id, target_peer_id, source_task_id, local_task_id, error, payload_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, direction, status, source_peer_id, target_peer_id, source_desktop_id, target_desktop_id, source_task_id, local_task_id, error, payload_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO NOTHING",
             (
                 &transfer.id,
                 &transfer.direction,
                 &transfer.status,
                 transfer.source_peer_id.as_deref(),
                 transfer.target_peer_id.as_deref(),
+                transfer.source_desktop_id.as_deref(),
+                transfer.target_desktop_id.as_deref(),
                 transfer.source_task_id.as_deref(),
                 transfer.local_task_id.as_deref(),
                 transfer.error.as_deref(),
@@ -72,7 +81,8 @@ impl Db {
         transfer_id: &str,
     ) -> Result<Option<TaskTransfer>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, direction, status, source_peer_id, target_peer_id, source_task_id,
+            "SELECT id, direction, status, source_peer_id, target_peer_id,
+                    source_desktop_id, target_desktop_id, source_task_id,
                     local_task_id, started_at, completed_at, error, payload_json
              FROM task_transfer WHERE id = ?",
         )?;
@@ -83,12 +93,14 @@ impl Db {
                 status: row.get(2)?,
                 source_peer_id: row.get(3)?,
                 target_peer_id: row.get(4)?,
-                source_task_id: row.get(5)?,
-                local_task_id: row.get(6)?,
-                started_at: row.get(7)?,
-                completed_at: row.get(8)?,
-                error: row.get(9)?,
-                payload_json: row.get(10)?,
+                source_desktop_id: row.get(5)?,
+                target_desktop_id: row.get(6)?,
+                source_task_id: row.get(7)?,
+                local_task_id: row.get(8)?,
+                started_at: row.get(9)?,
+                completed_at: row.get(10)?,
+                error: row.get(11)?,
+                payload_json: row.get(12)?,
             })
         })?;
         match rows.next() {
@@ -115,8 +127,54 @@ impl Db {
         local_task_id: &str,
     ) -> Result<bool, rusqlite::Error> {
         let rows_affected = self.conn.execute(
-            "UPDATE task_transfer SET status = 'completed', local_task_id = ?, completed_at = datetime('now'), error = NULL WHERE id = ?",
-            (local_task_id, transfer_id),
+            "UPDATE task_transfer
+             SET status = 'completed', local_task_id = ?, completed_at = datetime('now'), error = NULL
+             WHERE id = ?
+               AND (
+                 (direction = 'outgoing'
+                   AND (
+                     status IN ('pending', 'streaming')
+                     OR (status = 'completed' AND local_task_id = ?)
+                   ))
+                 OR
+                 (direction = 'incoming'
+                   AND local_task_id = ?
+                   AND status IN ('awaiting_acknowledgment', 'completed'))
+               )",
+            (local_task_id, transfer_id, local_task_id, local_task_id),
+        )?;
+        Ok(rows_affected == 1)
+    }
+
+    pub fn mark_incoming_transfer_importing(
+        &self,
+        transfer_id: &str,
+        local_task_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE task_transfer
+             SET status = 'importing', local_task_id = ?, error = NULL
+             WHERE id = ? AND direction = 'incoming'
+               AND (
+                 status IN ('pending', 'streaming')
+                 OR (status = 'importing' AND local_task_id = ?)
+               )",
+            (local_task_id, transfer_id, local_task_id),
+        )?;
+        Ok(rows_affected == 1)
+    }
+
+    pub fn mark_incoming_transfer_awaiting_acknowledgment(
+        &self,
+        transfer_id: &str,
+        local_task_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE task_transfer
+             SET status = 'awaiting_acknowledgment', error = NULL
+             WHERE id = ? AND direction = 'incoming' AND local_task_id = ?
+               AND status IN ('importing', 'awaiting_acknowledgment')",
+            (transfer_id, local_task_id),
         )?;
         Ok(rows_affected == 1)
     }
@@ -140,7 +198,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO task_transfer_provenance
              (pipeline_item_id, source_peer_id, source_task_id, source_machine_task_label)
-             VALUES (?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(pipeline_item_id) DO NOTHING",
             (
                 &provenance.pipeline_item_id,
                 &provenance.source_peer_id,
@@ -155,20 +214,51 @@ impl Db {
         &self,
     ) -> Result<Vec<PendingIncomingTransfer>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, source_peer_id, source_task_id, payload_json
+            "SELECT id, status, source_peer_id, source_task_id, local_task_id, payload_json
              FROM task_transfer
-             WHERE direction = 'incoming' AND status = 'pending'
+             WHERE direction = 'incoming'
+               AND status IN ('pending', 'streaming', 'importing', 'awaiting_acknowledgment')
              ORDER BY started_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(PendingIncomingTransfer {
                 id: row.get(0)?,
-                source_peer_id: row.get(1)?,
-                source_task_id: row.get(2)?,
-                payload_json: row.get(3)?,
+                status: row.get(1)?,
+                source_peer_id: row.get(2)?,
+                source_task_id: row.get(3)?,
+                local_task_id: row.get(4)?,
+                payload_json: row.get(5)?,
             })
         })?;
         rows.collect()
+    }
+
+    pub fn list_terminal_incoming_transfer_ids(&self) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id
+             FROM task_transfer
+             WHERE direction = 'incoming'
+               AND status IN ('completed', 'rejected', 'failed')
+               AND sidecar_cleanup_completed_at IS NULL
+             ORDER BY completed_at ASC, started_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+
+    pub fn mark_incoming_transfer_sidecar_cleanup_completed(
+        &self,
+        transfer_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE task_transfer
+             SET sidecar_cleanup_completed_at =
+                 COALESCE(sidecar_cleanup_completed_at, datetime('now'))
+             WHERE id = ? AND direction = 'incoming'
+               AND status IN ('completed', 'rejected', 'failed')",
+            [transfer_id],
+        )?;
+        Ok(rows_affected == 1)
     }
 
     pub fn claim_pending_incoming_transfer(
@@ -177,8 +267,10 @@ impl Db {
     ) -> Result<bool, rusqlite::Error> {
         let rows_affected = self.conn.execute(
             "UPDATE task_transfer
-             SET status = 'streaming', error = NULL
-             WHERE id = ? AND direction = 'incoming' AND status = 'pending'",
+             SET status = CASE WHEN status = 'pending' THEN 'streaming' ELSE status END,
+                 error = NULL
+             WHERE id = ? AND direction = 'incoming'
+               AND status IN ('pending', 'streaming', 'importing', 'awaiting_acknowledgment')",
             [transfer_id],
         )?;
         Ok(rows_affected == 1)

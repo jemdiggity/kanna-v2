@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   closeDesktopTask,
+  createDesktopTask,
   createDesktopBackup,
   fetchDesktopRepoAgentDefinition,
   fetchDesktopRepoAgentProviders,
@@ -9,9 +10,14 @@ import {
   fetchDesktopRepoCommands,
   runDesktopRepoCommand,
   fetchDesktopSnapshot,
+  fetchIncomingTransferCleanupCandidates,
   fetchPendingIncomingTransfers,
   getDesktopSetting,
+  addDesktopRepo,
   mutateDesktopWindowWorkspace,
+  markIncomingTransferSidecarCleanupCompleted,
+  putDesktopCloudTransferIdentity,
+  setDesktopTaskCloudIdentity,
   setDesktopServerClientHandlersForTests,
   setDesktopSnapshotFetcherForTests,
 } from "./desktopServerClient";
@@ -76,6 +82,81 @@ describe("desktopServerClient", () => {
         method: "GET",
         headers: undefined,
         body: undefined,
+      },
+    );
+  });
+
+  it("uses PUT only for requested task IDs and preserves POST for ordinary creation", async () => {
+    const response = {
+      taskId: "task-created",
+      repoId: "repo-1",
+      title: "Ship it",
+      stage: "in progress",
+      agentType: "pty",
+      worktreePath: "/tmp/task-created",
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const ordinaryRequest = { repoId: "repo-1", prompt: "Ship it" };
+    await createDesktopTask(ordinaryRequest);
+    await createDesktopTask({
+      ...ordinaryRequest,
+      requestedTaskId: "0123456789abcdef".repeat(4),
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:48121/v1/tasks",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(ordinaryRequest),
+      },
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      `http://127.0.0.1:48121/v1/tasks/${"0123456789abcdef".repeat(4)}`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(ordinaryRequest),
+      },
+    );
+  });
+
+  it("passes the requested default branch when registering a transferred repo", async () => {
+    const response = {
+      id: "repo-1",
+      path: "/tmp/transferred-repo",
+      name: "Transferred Repo",
+      defaultBranch: "trunk",
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(addDesktopRepo({
+      path: "/tmp/transferred-repo",
+      name: "Transferred Repo",
+      defaultBranch: "trunk",
+    })).resolves.toEqual(response);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/repos",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          path: "/tmp/transferred-repo",
+          name: "Transferred Repo",
+          defaultBranch: "trunk",
+        }),
       },
     );
   });
@@ -371,6 +452,73 @@ describe("desktopServerClient", () => {
     );
   });
 
+  it("sets a task cloud identity through the encoded task endpoint", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ cloudTaskId: "task-source-stable" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      setDesktopTaskCloudIdentity("task/with space", "task-source-stable"),
+    ).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/tasks/task%2Fwith%20space/actions/cloud-task-identity",
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cloudTaskId: "task-source-stable" }),
+      },
+    );
+  });
+
+  it("stores the local transfer identity through the dedicated loopback endpoint", async () => {
+    const identity = {
+      peerId: "peer-a",
+      displayName: "Studio Mac",
+      publicKey: "base64-key",
+      protocolVersion: 1,
+      acceptingTransfers: true,
+    };
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ key: "cloud_transfer_identity_v1", value: identity }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(putDesktopCloudTransferIdentity(identity)).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/settings/cloud-transfer-identity",
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(identity),
+      },
+    );
+  });
+
+  it("allows tests to override task cloud identity writes", async () => {
+    const setTaskCloudIdentity = vi.fn(async () => {});
+    const fetchMock = vi.fn(() => {
+      throw new Error("unexpected fetch");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    setDesktopServerClientHandlersForTests({ setTaskCloudIdentity });
+
+    await expect(
+      setDesktopTaskCloudIdentity("task-1", "task-source-stable"),
+    ).resolves.toBeUndefined();
+
+    expect(setTaskCloudIdentity).toHaveBeenCalledWith("task-1", "task-source-stable");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("retries transient setting read failures during startup", async () => {
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(new TypeError("Load failed"))
@@ -423,8 +571,10 @@ describe("desktopServerClient", () => {
           transfers: [
             {
               id: "transfer-1",
+              status: "pending",
               sourcePeerId: "peer-source",
               sourceTaskId: "task-source",
+              localTaskId: null,
               payloadJson: "{\"task\":{},\"repo\":{}}",
             },
           ],
@@ -440,8 +590,10 @@ describe("desktopServerClient", () => {
     await expect(fetchPendingIncomingTransfers()).resolves.toEqual([
       {
         id: "transfer-1",
+        status: "pending",
         source_peer_id: "peer-source",
         source_task_id: "task-source",
+        local_task_id: null,
         payload_json: "{\"task\":{},\"repo\":{}}",
       },
     ]);
@@ -449,6 +601,48 @@ describe("desktopServerClient", () => {
       "http://127.0.0.1:48121/v1/transfers/incoming/pending",
       {
         method: "GET",
+        headers: undefined,
+        body: undefined,
+      },
+    );
+  });
+
+  it("lists terminal incoming transfer cleanup candidates", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ transferIds: ["transfer-completed"] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchIncomingTransferCleanupCandidates()).resolves.toEqual(["transfer-completed"]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/transfers/incoming/cleanup-candidates",
+      {
+        method: "GET",
+        headers: undefined,
+        body: undefined,
+      },
+    );
+  });
+
+  it("marks terminal incoming sidecar cleanup completed", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ updated: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      markIncomingTransferSidecarCleanupCompleted("transfer-completed"),
+    ).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/transfers/transfer-completed/actions/sidecar-cleanup-complete",
+      {
+        method: "POST",
         headers: undefined,
         body: undefined,
       },

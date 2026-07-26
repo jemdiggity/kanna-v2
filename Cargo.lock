@@ -2892,6 +2892,7 @@ dependencies = [
  "block2",
  "chrono",
  "claude-agent-sdk",
+ "futures-util",
  "git2",
  "ignore",
  "image",
@@ -2913,6 +2914,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-plugin-webdriver",
  "tokio",
+ "tokio-tungstenite 0.26.2",
 ]
 
 [[package]]

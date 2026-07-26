@@ -101,7 +101,13 @@ const desktopCloudTaskSnapshotListeners = vi.hoisted(
 const subscribeDesktopCloudTasksMock = vi.hoisted(() =>
   vi.fn((_uid: string, onSnapshot: (snapshot: DesktopCloudSnapshot) => void) => {
     desktopCloudTaskSnapshotListeners.add(onSnapshot);
-    onSnapshot({ repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} });
+    onSnapshot({
+      repos: [],
+      items: [],
+      terminalRefs: {},
+      blockedByTaskIds: {},
+      transferMachines: [],
+    });
     return () => desktopCloudTaskSnapshotListeners.delete(onSnapshot);
   }),
 );
@@ -119,7 +125,7 @@ const lanCloseMock = vi.hoisted(() => vi.fn());
 const relayTerminalClientFactoryMock = vi.hoisted(() => vi.fn());
 const lanTerminalClientFactoryMock = vi.hoisted(() => vi.fn());
 const lanTasksMock = vi.hoisted(() =>
-  vi.fn(async () => ({ repos: [], items: [], terminalRefs: {} })),
+  vi.fn(async () => ({ repos: [], items: [], terminalRefs: {}, transferMachines: [] })),
 );
 const openLatestTerminalFileLinkMock = vi.hoisted(() => vi.fn(async () => true));
 const dbSelectMock = vi.fn(async () => []);
@@ -427,6 +433,7 @@ vi.mock("./services/desktopCloudTaskIndex", () => ({
     items: tasks,
     terminalRefs: {},
     blockedByTaskIds: {},
+    transferMachines: [],
   })),
   subscribeDesktopCloudTasks: subscribeDesktopCloudTasksMock,
 }));
@@ -560,6 +567,7 @@ function remoteTaskSnapshot(
         transport,
       },
     },
+    transferMachines: [],
   };
 }
 
@@ -675,8 +683,10 @@ function buildIncomingTransferEvent() {
 function buildPendingIncomingTransferRow() {
   return {
     id: "transfer-1",
+    status: "pending" as const,
     source_peer_id: "peer-source",
     source_task_id: "task-source",
+    local_task_id: null,
     payload_json: JSON.stringify(buildIncomingTransferEvent().payload.payload),
   };
 }
@@ -933,7 +943,12 @@ describe("App", () => {
       close: lanCloseMock,
     });
     lanTasksMock.mockReset();
-    lanTasksMock.mockResolvedValue({ repos: [], items: [], terminalRefs: {} });
+    lanTasksMock.mockResolvedValue({
+      repos: [],
+      items: [],
+      terminalRefs: {},
+      transferMachines: [],
+    });
     openLatestTerminalFileLinkMock.mockReset();
     openLatestTerminalFileLinkMock.mockResolvedValue(true);
     store.repos = [{ id: "repo-1", path: "/tmp/repo", name: "repo" }];
@@ -1003,6 +1018,14 @@ describe("App", () => {
         ],
       }),
       runRepoCommand: async () => ({ taskId: "repo-command-task", reused: false }),
+      fetchIncomingTransferCleanupCandidates: async () => [],
+      markIncomingTransferSidecarCleanupCompleted: async (transferId) => {
+        await dbMock.execute(
+          "UPDATE task_transfer SET sidecar_cleanup_completed_at = datetime('now') WHERE id = ?",
+          [transferId],
+        );
+        return true;
+      },
       fetchPendingIncomingTransfers: async () => await dbSelectMock(),
       claimPendingIncomingTransfer: async (transferId) => {
         const result = await dbMock.execute(
@@ -1044,6 +1067,8 @@ describe("App", () => {
       if (command === "git_list_base_branches") return ["feature/x", "main", "origin/main"];
       if (command === "read_env_var") return "/Users/test";
       if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
+      if (command === "mark_incoming_transfer_ack_completed") return null;
+      if (command === "mark_incoming_transfer_event_recorded") return null;
       throw new Error(`unexpected invoke: ${command}`);
     });
   });
@@ -2127,7 +2152,12 @@ describe("App", () => {
     await wrapper.get('[data-testid="remote-task"]').trigger("click");
     await nextTick();
     const presentationSlotId = store.selectedItemId;
-    lanTasksMock.mockResolvedValue({ repos: [], items: [], terminalRefs: {} });
+    lanTasksMock.mockResolvedValue({
+      repos: [],
+      items: [],
+      terminalRefs: {},
+      transferMachines: [],
+    });
 
     await vi.advanceTimersByTimeAsync(500);
     await flushPromises();
@@ -4745,8 +4775,52 @@ describe("App", () => {
         sourcePeerId: "peer-source",
       }),
     );
+    expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_event_recorded", {
+      transferId: "transfer-1",
+    });
+    const recordedCallIndex = invokeMock.mock.calls.findIndex(
+      ([command]) => command === "mark_incoming_transfer_event_recorded",
+    );
+    expect(store.recordIncomingTransfer.mock.invocationCallOrder[0]).toBeLessThan(
+      invokeMock.mock.invocationCallOrder[recordedCallIndex],
+    );
+    expect(invokeMock.mock.invocationCallOrder[recordedCallIndex]).toBeLessThan(
+      store.approveIncomingTransfer.mock.invocationCallOrder[0],
+    );
     expect(store.approveIncomingTransfer).toHaveBeenCalledWith("transfer-1");
     expect(wrapper.text()).not.toContain("peer-source");
+  });
+
+  it("registers transfer replay handling before LAN sync can spawn the sidecar", async () => {
+    lanTasksMock.mockImplementationOnce(async () => {
+      expect(listenHandlers.has("transfer-request")).toBe(true);
+      return { repos: [], items: [], terminalRefs: {}, transferMachines: [] };
+    });
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await waitForCondition(() => lanTasksMock.mock.calls.length > 0);
+
+    expect(lanTasksMock).toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("does not mark an incoming event recorded when its DB write fails", async () => {
+    store.recordIncomingTransfer.mockRejectedValueOnce(new Error("db unavailable"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+    const handler = listenHandlers.get("transfer-request");
+
+    await handler?.(buildIncomingTransferEvent());
+    await flushPromises();
+
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "mark_incoming_transfer_event_recorded",
+      expect.anything(),
+    );
+    expect(store.approveIncomingTransfer).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+    wrapper.unmount();
   });
 
   it("auto-imports any pending incoming transfer on mount", async () => {
@@ -4767,6 +4841,77 @@ describe("App", () => {
       ["transfer-db-1"],
     );
     expect(wrapper.text()).not.toContain("peer-source");
+  });
+
+  it("cleans up completed, rejected, and failed incoming sidecar reservations on restart", async () => {
+    updateDesktopServerClientHandlersForTests({
+      fetchIncomingTransferCleanupCandidates: async () => [
+        "transfer-completed",
+        "transfer-rejected",
+        "transfer-failed",
+      ],
+    });
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+    await waitForCondition(() =>
+      dbMock.execute.mock.calls.filter(
+        ([statement]) => String(statement).includes("sidecar_cleanup_completed_at"),
+      ).length === 3,
+    );
+
+    expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
+      transferId: "transfer-completed",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
+      transferId: "transfer-rejected",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
+      transferId: "transfer-failed",
+    });
+    for (const transferId of [
+      "transfer-completed",
+      "transfer-rejected",
+      "transfer-failed",
+    ]) {
+      expect(dbMock.execute).toHaveBeenCalledWith(
+        expect.stringContaining("sidecar_cleanup_completed_at"),
+        [transferId],
+      );
+    }
+    wrapper.unmount();
+  });
+
+  it("retries idempotent sidecar cleanup after the DB marker response is lost", async () => {
+    let markerAttempts = 0;
+    updateDesktopServerClientHandlersForTests({
+      fetchIncomingTransferCleanupCandidates: async () => ["transfer-rejected"],
+      markIncomingTransferSidecarCleanupCompleted: async () => {
+        markerAttempts += 1;
+        if (markerAttempts === 1) {
+          throw new Error("marker response lost");
+        }
+        return true;
+      },
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const first = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+    first.unmount();
+    const second = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+
+    const cleanupCalls = invokeMock.mock.calls.filter(
+      ([command, args]) =>
+        command === "mark_incoming_transfer_ack_completed" &&
+        args?.transferId === "transfer-rejected",
+    );
+    expect(cleanupCalls).toHaveLength(2);
+    expect(markerAttempts).toBe(2);
+
+    warnSpy.mockRestore();
+    second.unmount();
   });
 
   it("does not auto-import the same pending transfer twice across restored windows", async () => {
@@ -4806,11 +4951,32 @@ describe("App", () => {
 
     const wrapper = await mountApp(SidebarWithRepoStub);
     await flushPromises();
+    await waitForCondition(() =>
+      warnSpy.mock.calls.some(
+        ([message]) => message === "[App] disabled malformed pending incoming transfer:",
+      ),
+    );
 
     expect(store.approveIncomingTransfer).not.toHaveBeenCalled();
     expect(dbMock.execute).toHaveBeenCalledWith(
       expect.stringContaining("status = 'failed'"),
       [expect.stringContaining("missing source_peer_id"), "transfer-bad"],
+    );
+    expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
+      transferId: "transfer-bad",
+    });
+    expect(dbMock.execute).toHaveBeenCalledWith(
+      expect.stringContaining("sidecar_cleanup_completed_at"),
+      ["transfer-bad"],
+    );
+    const cleanupCallIndex = invokeMock.mock.calls.findIndex(
+      ([command]) => command === "mark_incoming_transfer_ack_completed",
+    );
+    const failureWriteIndex = dbMock.execute.mock.calls.findIndex(
+      ([statement]) => String(statement).includes("status = 'failed'"),
+    );
+    expect(dbMock.execute.mock.invocationCallOrder[failureWriteIndex]).toBeLessThan(
+      invokeMock.mock.invocationCallOrder[cleanupCallIndex],
     );
     expect(warnSpy).toHaveBeenCalledWith(
       "[App] disabled malformed pending incoming transfer:",
@@ -4819,6 +4985,38 @@ describe("App", () => {
         reason: expect.stringContaining("missing source_peer_id"),
       }),
     );
+
+    warnSpy.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("cleans every repeatedly failed malformed incoming reservation", async () => {
+    dbSelectMock.mockResolvedValue(
+      ["transfer-bad-1", "transfer-bad-2"].map((id) => ({
+        id,
+        source_peer_id: null,
+        source_task_id: "task-source",
+        payload_json: JSON.stringify(buildIncomingTransferEvent().payload.payload),
+      })),
+    );
+    dbMock.execute.mockResolvedValue({ rowsAffected: 1 });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+    await waitForCondition(() =>
+      invokeMock.mock.calls.filter(
+        ([command]) => command === "mark_incoming_transfer_ack_completed",
+      ).length === 2,
+    );
+
+    const cleanupCalls = invokeMock.mock.calls.filter(
+      ([command]) => command === "mark_incoming_transfer_ack_completed",
+    );
+    expect(cleanupCalls).toEqual([
+      ["mark_incoming_transfer_ack_completed", { transferId: "transfer-bad-1" }],
+      ["mark_incoming_transfer_ack_completed", { transferId: "transfer-bad-2" }],
+    ]);
 
     warnSpy.mockRestore();
     wrapper.unmount();
@@ -4842,6 +5040,10 @@ describe("App", () => {
 
     const wrapper = await mountApp(SidebarWithRepoStub);
     await flushPromises();
+    await waitForCondition(() =>
+      store.approveIncomingTransfer.mock.calls.some(([transferId]) =>
+        transferId === "transfer-stale"),
+    );
 
     expect(store.approveIncomingTransfer).toHaveBeenCalledWith("transfer-stale");
     expect(dbMock.execute).toHaveBeenCalledWith(
@@ -4851,6 +5053,9 @@ describe("App", () => {
         "transfer-stale",
       ],
     );
+    expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
+      transferId: "transfer-stale",
+    });
     warnSpy.mockRestore();
     wrapper.unmount();
   });
@@ -5022,11 +5227,15 @@ describe("App", () => {
   it("adds Push to Machine to command palette commands for active tasks", async () => {
     store.currentItem = {
       id: "task-1",
+      repo_id: "repo-1",
+      closed_at: null,
       stage: "in progress",
       branch: "task-1",
       prompt: "Fix handoff",
       tags: "[]",
     };
+    store.items = [store.currentItem];
+    store.selectedItemId = "task-1";
 
     const CommandPaletteModalStub = defineComponent({
       name: "CommandPaletteModal",
@@ -5493,11 +5702,15 @@ describe("App", () => {
   it("keeps Push to Machine pending while transfer push is in flight and ignores duplicate selections", async () => {
     store.currentItem = {
       id: "task-1",
+      repo_id: "repo-1",
+      closed_at: null,
       stage: "in progress",
       branch: "task-1",
       prompt: "Fix handoff",
       tags: "[]",
     };
+    store.items = [store.currentItem];
+    store.selectedItemId = "task-1";
     const push = createDeferred<void>();
     store.pushTaskToPeer.mockImplementation(() => push.promise);
     invokeMock.mockImplementation(async (command: string, args?: { name?: string; repoPath?: string }) => {

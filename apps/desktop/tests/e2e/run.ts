@@ -278,7 +278,7 @@ async function waitForApp(baseUrl: string, timeoutMs: number): Promise<void> {
 function needsSecondaryInstance(testTargets: string[]): boolean {
   return testTargets.some((target) =>
     /real\/local-transfer-.*\.test\.ts$/.test(target) ||
-    /real\/cloud-task-sync\.test\.ts$/.test(target)
+    /real\/cloud-task-(?:sync|transfer)\.test\.ts$/.test(target)
   );
 }
 
@@ -287,14 +287,14 @@ function targetNeedsSecondaryInstance(testTarget: string): boolean {
 }
 
 function targetNeedsEmulators(testTarget: string): boolean {
-  return /real\/cloud-task-(?:sync|mobile-index)\.test\.ts$/.test(testTarget) ||
+  return /real\/cloud-task-(?:sync|mobile-index|transfer)\.test\.ts$/.test(testTarget) ||
     /real\/mobile-relay-auth-recovery\.test\.ts$/.test(testTarget) ||
     /real\/mobile-pairing-ui\.test\.ts$/.test(testTarget) ||
     /real\/auth-indexeddb-fallback\.test\.ts$/.test(testTarget);
 }
 
 function targetNeedsRelay(testTarget: string): boolean {
-  return /real\/cloud-task-(?:sync|mobile-index)\.test\.ts$/.test(testTarget) ||
+  return /real\/cloud-task-(?:sync|mobile-index|transfer)\.test\.ts$/.test(testTarget) ||
     /real\/mobile-relay-auth-recovery\.test\.ts$/.test(testTarget) ||
     /real\/mobile-pairing-ui\.test\.ts$/.test(testTarget);
 }
@@ -413,6 +413,8 @@ async function main(): Promise<void> {
   const runSuffix = sanitizeSuffix(`${process.pid}-${Date.now()}`);
   const sessionName = `kanna-e2e-${worktreeName}-${runSuffix}`;
   const transferRegistryDir = join(repoRoot, ".kanna-transfer-registry-e2e", runSuffix);
+  const primaryCloudTransferRegistryDir = join(transferRegistryDir, "primary");
+  const secondaryCloudTransferRegistryDir = join(transferRegistryDir, "secondary");
   const primaryDevPort = await findFreePort();
   const primaryWebDriverPort = await findFreePort();
   const primaryTransferPort = await findFreePort();
@@ -517,8 +519,23 @@ async function main(): Promise<void> {
   function realE2eRuntimeEnvForTarget(testTarget: string): Record<string, string> {
     return {
       ...realE2eRuntimeEnv,
+      ...(/real\/cloud-task-transfer\.test\.ts$/.test(testTarget)
+        ? {
+            KANNA_TRANSFER_REGISTRY_DIR: primaryCloudTransferRegistryDir,
+            KANNA_E2E_TARGET_TRANSFER_REGISTRY_DIR: secondaryCloudTransferRegistryDir,
+          }
+        : {}),
       ...(targetNeedsAuthIndexedDbOpenFailure(testTarget)
         ? { KANNA_E2E_FIREBASE_AUTH_INDEXEDDB_OPEN_FAILURE: "1" }
+        : {}),
+    };
+  }
+
+  function secondaryRealE2eRuntimeEnvForTarget(testTarget: string): Record<string, string> {
+    return {
+      ...realE2eRuntimeEnv,
+      ...(/real\/cloud-task-transfer\.test\.ts$/.test(testTarget)
+        ? { KANNA_TRANSFER_REGISTRY_DIR: secondaryCloudTransferRegistryDir }
         : {}),
     };
   }
@@ -549,6 +566,7 @@ async function main(): Promise<void> {
     useAgentCliFixtures: boolean,
     runtimeEnv: Record<string, string> = realE2eRuntimeEnv,
     isolateAgentProviders = false,
+    secondaryRuntimeEnv: Record<string, string> = runtimeEnv,
   ): Promise<RunningInstances> {
     const fixtureEnv = useAgentCliFixtures
       ? {
@@ -569,7 +587,7 @@ async function main(): Promise<void> {
     if (secondaryInstance) {
       await runCommand(secondaryInstance.startCommand, {
         cwd: repoRoot,
-        env: { ...secondaryInstance.env, ...runtimeEnv, ...fixtureEnv },
+        env: { ...secondaryInstance.env, ...secondaryRuntimeEnv, ...fixtureEnv },
       });
       console.log(`[e2e] waiting for secondary app at ${secondaryInstance.baseUrl}`);
       await waitForApp(secondaryInstance.baseUrl, 10 * 60_000);
@@ -804,6 +822,8 @@ async function main(): Promise<void> {
           needsSecondaryForTarget,
           false,
           realE2eRuntimeEnvForTarget(testTarget),
+          false,
+          secondaryRealE2eRuntimeEnvForTarget(testTarget),
         );
         runningMockAgentProviderIsolation = null;
       } else if (runningMockAgentProviderIsolation !== isolateAgentProviders) {

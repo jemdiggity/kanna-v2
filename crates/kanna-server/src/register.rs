@@ -27,12 +27,14 @@ daemon_dir = "{}"
 db_path = "{}"
 version = "{}"
 environment = "development"
+transfer_port = {}
 "#,
         relay_url,
         device_token,
         config_dir.to_string_lossy(),
         db_path.to_string_lossy(),
         version,
+        kanna_runtime_defaults::DEFAULT_TRANSFER_PORT,
     );
 
     std::fs::write(&config_path, &config_content)?;

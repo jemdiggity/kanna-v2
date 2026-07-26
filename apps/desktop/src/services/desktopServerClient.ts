@@ -46,6 +46,7 @@ export interface DesktopServerClientHandlersForTests {
   releaseTaskPorts?: (taskId: string) => MaybePromise<void>;
   createTask?: (request: CreateDesktopTaskRequest) => MaybePromise<CreateDesktopTaskResponse>;
   closeTask?: (taskId: string) => MaybePromise<void>;
+  setTaskCloudIdentity?: (taskId: string, cloudTaskId: string) => MaybePromise<void>;
   reopenTask?: (taskId: string) => MaybePromise<void>;
   blockTask?: (taskId: string, blockerTaskIds: string[]) => MaybePromise<void>;
   unblockTask?: (taskId: string) => MaybePromise<void>;
@@ -68,6 +69,8 @@ export interface DesktopServerClientHandlersForTests {
   ) => MaybePromise<RunDesktopRepoCommandResponse>;
   findRepoByPath?: (path: string) => MaybePromise<DesktopRepoResponse | null>;
   reorderRepos?: (orderedIds: string[]) => MaybePromise<void>;
+  fetchIncomingTransferCleanupCandidates?: () => MaybePromise<string[]>;
+  markIncomingTransferSidecarCleanupCompleted?: (transferId: string) => MaybePromise<boolean>;
   fetchPendingIncomingTransfers?: () => MaybePromise<PendingIncomingTransfer[]>;
   claimPendingIncomingTransfer?: (transferId: string) => MaybePromise<boolean>;
   failPendingIncomingTransfer?: (transferId: string, reason: string) => MaybePromise<boolean>;
@@ -80,6 +83,8 @@ export interface DesktopServerClientHandlersForTests {
   insertTaskTransfer?: (transfer: NewTaskTransferInput) => MaybePromise<void>;
   getTaskTransfer?: (transferId: string) => MaybePromise<TaskTransfer | null>;
   updateTaskTransferPayload?: (transferId: string, payloadJson: string) => MaybePromise<boolean>;
+  markTaskTransferImporting?: (transferId: string, localTaskId: string) => MaybePromise<boolean>;
+  markTaskTransferAwaitingAcknowledgment?: (transferId: string, localTaskId: string) => MaybePromise<boolean>;
   completeTaskTransfer?: (transferId: string, localTaskId: string) => MaybePromise<boolean>;
   rejectTaskTransfer?: (transferId: string, reason: string) => MaybePromise<boolean>;
   insertTaskTransferProvenance?: (provenance: NewTaskTransferProvenanceInput) => MaybePromise<void>;
@@ -177,6 +182,7 @@ export async function fetchDesktopSnapshot(): Promise<DesktopSnapshot> {
 }
 
 export interface CreateDesktopTaskRequest {
+  requestedTaskId?: string;
   repoId: string;
   prompt: string;
   displayName?: string | null;
@@ -213,9 +219,14 @@ export async function createDesktopTask(
   request: CreateDesktopTaskRequest,
 ): Promise<CreateDesktopTaskResponse> {
   if (clientHandlersForTests?.createTask) return await clientHandlersForTests.createTask(request);
-  return await requestJson<CreateDesktopTaskResponse>("/v1/tasks", {
-    method: "POST",
-    body: request,
+  const { requestedTaskId, ...body } = request;
+  const path = requestedTaskId
+    ? `/v1/tasks/${encodeURIComponent(requestedTaskId)}`
+    : "/v1/tasks";
+  return await requestJson<CreateDesktopTaskResponse>(path, {
+    method: requestedTaskId ? "PUT" : "POST",
+    body,
+    retryMs: requestedTaskId ? 15_000 : undefined,
   });
 }
 
@@ -332,6 +343,29 @@ export async function fetchDesktopRepoAgentProviders(repoId: string): Promise<Ag
 export interface DesktopSettingResponse {
   key: string;
   value: string;
+}
+
+export interface DesktopCloudTransferIdentity {
+  peerId: string;
+  displayName: string;
+  publicKey: string;
+  protocolVersion: number;
+  acceptingTransfers: boolean;
+}
+
+export async function putDesktopCloudTransferIdentity(
+  identity: DesktopCloudTransferIdentity,
+): Promise<void> {
+  await requestJson<DesktopSettingResponse>("/v1/settings/cloud-transfer-identity", {
+    method: "PUT",
+    body: identity,
+  });
+}
+
+export async function reconnectDesktopCloudRelay(): Promise<void> {
+  await requestJson<void>("/v1/cloud/relay/actions/reconnect", {
+    method: "POST",
+  });
 }
 
 export interface DesktopWorkspaceWindowState {
@@ -598,6 +632,23 @@ export async function closeDesktopTask(taskId: string): Promise<void> {
   });
 }
 
+export async function setDesktopTaskCloudIdentity(
+  taskId: string,
+  cloudTaskId: string,
+): Promise<void> {
+  if (clientHandlersForTests?.setTaskCloudIdentity) {
+    await clientHandlersForTests.setTaskCloudIdentity(taskId, cloudTaskId);
+    return;
+  }
+  await requestJson<{ cloudTaskId: string }>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/actions/cloud-task-identity`,
+    {
+      method: "PUT",
+      body: { cloudTaskId },
+    },
+  );
+}
+
 export async function reopenDesktopTask(taskId: string): Promise<void> {
   if (clientHandlersForTests?.reopenTask) {
     await clientHandlersForTests.reopenTask(taskId);
@@ -656,6 +707,7 @@ export interface DesktopRepoResponse {
 export interface AddDesktopRepoInput {
   path: string;
   name?: string | null;
+  defaultBranch?: string | null;
 }
 
 export async function findDesktopRepoByPath(path: string): Promise<DesktopRepoResponse | null> {
@@ -747,26 +799,33 @@ export async function reorderPinnedDesktopTasks(repoId: string, orderedIds: stri
 
 export interface PendingIncomingTransfer {
   id: string;
+  status: TaskTransfer["status"];
   source_peer_id: string | null;
   source_task_id: string | null;
+  local_task_id: string | null;
   payload_json: string | null;
 }
 
 interface PendingIncomingTransferResponse {
   id: string;
+  status: TaskTransfer["status"];
   sourcePeerId?: string | null;
   sourceTaskId?: string | null;
   payloadJson?: string | null;
   source_peer_id?: string | null;
   source_task_id?: string | null;
+  localTaskId?: string | null;
+  local_task_id?: string | null;
   payload_json?: string | null;
 }
 
 function normalizePendingIncomingTransfer(row: PendingIncomingTransferResponse): PendingIncomingTransfer {
   return {
     id: row.id,
+    status: row.status,
     source_peer_id: row.source_peer_id ?? row.sourcePeerId ?? null,
     source_task_id: row.source_task_id ?? row.sourceTaskId ?? null,
+    local_task_id: row.local_task_id ?? row.localTaskId ?? null,
     payload_json: row.payload_json ?? row.payloadJson ?? null,
   };
 }
@@ -777,6 +836,29 @@ export async function fetchPendingIncomingTransfers(): Promise<PendingIncomingTr
   }
   const response = await requestJson<{ transfers: PendingIncomingTransferResponse[] }>("/v1/transfers/incoming/pending");
   return response.transfers.map(normalizePendingIncomingTransfer);
+}
+
+export async function fetchIncomingTransferCleanupCandidates(): Promise<string[]> {
+  if (clientHandlersForTests?.fetchIncomingTransferCleanupCandidates) {
+    return await clientHandlersForTests.fetchIncomingTransferCleanupCandidates();
+  }
+  const response = await requestJson<{ transferIds: string[] }>(
+    "/v1/transfers/incoming/cleanup-candidates",
+  );
+  return response.transferIds;
+}
+
+export async function markIncomingTransferSidecarCleanupCompleted(
+  transferId: string,
+): Promise<boolean> {
+  if (clientHandlersForTests?.markIncomingTransferSidecarCleanupCompleted) {
+    return await clientHandlersForTests.markIncomingTransferSidecarCleanupCompleted(transferId);
+  }
+  const response = await requestJson<{ updated: boolean }>(
+    `/v1/transfers/${encodeURIComponent(transferId)}/actions/sidecar-cleanup-complete`,
+    { method: "POST" },
+  );
+  return response.updated;
 }
 
 export async function claimPendingIncomingTransfer(transferId: string): Promise<boolean> {
@@ -875,6 +957,37 @@ export async function completeDesktopTaskTransfer(
       method: "POST",
       body: { localTaskId },
     },
+  );
+  return response.updated;
+}
+
+export async function markDesktopTaskTransferImporting(
+  transferId: string,
+  localTaskId: string,
+): Promise<boolean> {
+  if (clientHandlersForTests?.markTaskTransferImporting) {
+    return await clientHandlersForTests.markTaskTransferImporting(transferId, localTaskId);
+  }
+  const response = await requestJson<{ updated: boolean }>(
+    `/v1/transfers/${encodeURIComponent(transferId)}/actions/importing`,
+    { method: "POST", body: { localTaskId } },
+  );
+  return response.updated;
+}
+
+export async function markDesktopTaskTransferAwaitingAcknowledgment(
+  transferId: string,
+  localTaskId: string,
+): Promise<boolean> {
+  if (clientHandlersForTests?.markTaskTransferAwaitingAcknowledgment) {
+    return await clientHandlersForTests.markTaskTransferAwaitingAcknowledgment(
+      transferId,
+      localTaskId,
+    );
+  }
+  const response = await requestJson<{ updated: boolean }>(
+    `/v1/transfers/${encodeURIComponent(transferId)}/actions/awaiting-acknowledgment`,
+    { method: "POST", body: { localTaskId } },
   );
   return response.updated;
 }

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 mod analytics;
 mod blockers;
+mod create_intents;
 mod notifications;
 mod operator_events;
 mod pipeline_items;
@@ -67,11 +68,16 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "027_pipeline_item_pr_branch",
     "028_stage_run_completion_transition",
     "029_pipeline_item_activity_revision",
+    "030_pipeline_item_cloud_task_id",
+    "031_task_transfer_cloud_desktop_ids",
+    "032_task_transfer_sidecar_cleanup",
+    "033_create_task_intent",
 ];
 
 #[derive(Debug, Serialize)]
 pub struct PipelineItem {
     pub id: String,
+    pub cloud_task_id: Option<String>,
     pub repo_id: String,
     pub issue_number: Option<i64>,
     pub issue_title: Option<String>,
@@ -130,6 +136,14 @@ pub struct SnapshotRepo {
 #[derive(Debug, Serialize)]
 pub struct SnapshotPipelineItem {
     pub id: String,
+    pub cloud_task_id: String,
+    pub transfer_id: Option<String>,
+    pub transfer_direction: Option<String>,
+    pub transfer_status: Option<String>,
+    pub transfer_source_peer_id: Option<String>,
+    pub transfer_target_peer_id: Option<String>,
+    pub transfer_source_desktop_id: Option<String>,
+    pub transfer_target_desktop_id: Option<String>,
     pub repo_id: String,
     pub issue_number: Option<i64>,
     pub issue_title: Option<String>,
@@ -188,6 +202,26 @@ impl SnapshotBlockerTaskState {
 pub struct ClosedTaskIdentity {
     pub id: String,
     pub repo_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudTaskIdentityWrite {
+    Updated,
+    Unchanged,
+    Conflict,
+    TaskNotFound,
+}
+
+#[derive(Debug)]
+pub enum ReopenPipelineItemError {
+    OwnershipConflict,
+    Database(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for ReopenPipelineItemError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1192,6 +1226,49 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         Ok(())
     })?;
 
+    run_migration(conn, "030_pipeline_item_cloud_task_id", |conn| {
+        add_column(conn, "pipeline_item", "cloud_task_id", "TEXT")?;
+        conn.execute_batch(
+            r#"
+            UPDATE pipeline_item
+            SET cloud_task_id = id
+            WHERE cloud_task_id IS NULL;
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_pipeline_item_open_cloud_task_id
+            ON pipeline_item(cloud_task_id)
+            WHERE closed_at IS NULL;
+            "#,
+        )
+    })?;
+
+    run_migration(conn, "031_task_transfer_cloud_desktop_ids", |conn| {
+        add_column(conn, "task_transfer", "source_desktop_id", "TEXT")?;
+        add_column(conn, "task_transfer", "target_desktop_id", "TEXT")?;
+        Ok(())
+    })?;
+
+    run_migration(conn, "032_task_transfer_sidecar_cleanup", |conn| {
+        add_column(
+            conn,
+            "task_transfer",
+            "sidecar_cleanup_completed_at",
+            "TEXT",
+        )?;
+        Ok(())
+    })?;
+
+    run_migration(conn, "033_create_task_intent", |conn| {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS create_task_intent (
+                task_id TEXT PRIMARY KEY,
+                request_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (task_id) REFERENCES pipeline_item(id) ON DELETE CASCADE
+            );
+            "#,
+        )
+    })?;
+
     Ok(())
 }
 
@@ -1199,6 +1276,33 @@ impl Db {
     #[cfg(debug_assertions)]
     pub(crate) fn connection_for_e2e_tests(&self) -> &Connection {
         &self.conn
+    }
+
+    pub(crate) fn with_immediate_transaction<T, E>(
+        &self,
+        operation: impl FnOnce(&Self) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<rusqlite::Error>,
+    {
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(E::from)?;
+        match operation(self) {
+            Ok(value) => {
+                if let Err(error) = self.conn.execute_batch("COMMIT") {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(E::from(error));
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = self.conn.execute_batch("ROLLBACK") {
+                    log::error!("failed to roll back immediate transaction: {rollback_error}");
+                }
+                Err(error)
+            }
+        }
     }
 
     pub fn open(path: &str) -> Result<Self, rusqlite::Error> {

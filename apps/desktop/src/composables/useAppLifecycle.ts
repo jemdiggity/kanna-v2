@@ -19,6 +19,8 @@ import {
   parseOutgoingTransferFinalizationRequestEvent,
   parsePairingCompletedEvent,
   parsePairingRequestedEvent,
+  parseTaskPullRequestedEvent,
+  type TaskPullRequestedEvent,
 } from "../utils/taskTransfer";
 import {
   WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT,
@@ -38,6 +40,7 @@ import { parseRecentAgentChoices } from "../utils/agentChoiceUsage";
 import type { useAppUpdate } from "./useAppUpdate";
 import type { useToast } from "./useToast";
 import { showTerminalFileLinkHintOnce } from "./terminalFileLinkHint";
+import type { TransferMachine } from "../services/desktopTransferMachines";
 
 type AppPreferences = ReturnType<typeof useAppPreferences>["preferences"];
 type AppUpdateController = ReturnType<typeof useAppUpdate>;
@@ -71,6 +74,7 @@ interface UseAppLifecycleOptions {
   ) => void;
   openImageUrlPreview: (imageUrl: string) => void;
   preferences: AppPreferences;
+  refreshCloudTransferRoute: (peerId: string) => Promise<void>;
   remoteTaskDiagnostics: Ref<unknown>;
   restoreSidebarWidth: () => Promise<void>;
   shortcutsStartFull: Ref<boolean>;
@@ -80,12 +84,80 @@ interface UseAppLifecycleOptions {
   stopSystemThemeListener: () => void;
   store: ReturnType<typeof useKannaStore>;
   toast: ReturnType<typeof useToast>;
+  transferMachines: Readonly<Ref<TransferMachine[]>>;
   warmTransferSidecar: () => Promise<void>;
   windowWorkspace: WindowWorkspaceController;
 }
 
 function eventPayload(event: unknown): unknown {
   return (event as { payload?: unknown })?.payload ?? event;
+}
+
+export async function handleTaskPullRequested(
+  request: TaskPullRequestedEvent,
+  store: Pick<ReturnType<typeof useKannaStore>, "items" | "pushTaskToPeer">,
+  inFlightSourceTaskIds: Set<string>,
+  transferMachines: readonly TransferMachine[] | (() => readonly TransferMachine[]),
+  options: {
+    maxAttempts?: number;
+    retryDelayMs?: number;
+    signal?: AbortSignal;
+    refreshCloudTransferRoute?: (peerId: string) => Promise<void>;
+    waitForRetry?: (delayMs: number) => Promise<void>;
+  } = {},
+): Promise<boolean> {
+  const readMachines = typeof transferMachines === "function"
+    ? transferMachines
+    : () => transferMachines;
+  const maxAttempts = options.maxAttempts
+    ?? (typeof transferMachines === "function" ? 41 : 1);
+  const retryDelayMs = options.retryDelayMs ?? 250;
+  const waitForRetry = options.waitForRetry
+    ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+  const sourceIsEligible = () => {
+    const source = store.items.find((item) => item.id === request.sourceTaskId);
+    if (
+      !source
+      || source.closed_at != null
+      || ["pending", "streaming", "importing", "awaiting_acknowledgment"].includes(
+        source.transfer_status ?? "",
+      )
+    ) {
+      return null;
+    }
+    return source;
+  };
+  const initialSource = sourceIsEligible();
+  if (!initialSource || inFlightSourceTaskIds.has(initialSource.id)) return false;
+
+  inFlightSourceTaskIds.add(initialSource.id);
+  try {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      if (options.signal?.aborted) return false;
+      const source = sourceIsEligible();
+      if (!source) return false;
+      const requester = readMachines().find((machine) =>
+        machine.peerId === request.requesterPeerId);
+      if (requester) {
+        if (requester.relayDesktopId && options.refreshCloudTransferRoute) {
+          await options.refreshCloudTransferRoute(request.requesterPeerId);
+          if (options.signal?.aborted) return false;
+        }
+        await store.pushTaskToPeer(source.id, request.requesterPeerId, {
+          transport: requester.preferredTransport,
+          cloudFallback: requester.cloudFallback,
+          targetDesktopId: requester.desktopId,
+        });
+        return true;
+      }
+      if (attempt + 1 < maxAttempts) {
+        await waitForRetry(retryDelayMs);
+      }
+    }
+    return false;
+  } finally {
+    inFlightSourceTaskIds.delete(initialSource.id);
+  }
 }
 
 function focusAgentTerminal() {
@@ -109,6 +181,7 @@ export function useAppLifecycle({
   openFilePreview,
   openImageUrlPreview,
   preferences,
+  refreshCloudTransferRoute,
   remoteTaskDiagnostics,
   restoreSidebarWidth,
   shortcutsStartFull,
@@ -118,11 +191,14 @@ export function useAppLifecycle({
   stopSystemThemeListener,
   store,
   toast,
+  transferMachines,
   warmTransferSidecar,
   windowWorkspace,
 }: UseAppLifecycleOptions) {
   const appUnlisteners: Array<() => void> = [];
   const fatalInitializationError = ref<string | null>(null);
+  const taskPullPushesInFlight = new Set<string>();
+  const taskPullAbortController = new AbortController();
   let currentWindowClosePhase: "open" | "preparing" | "recovering" | "destroying" = "open";
   let resolveWindowMembershipInitialization: (() => void) | null = null;
   const windowMembershipInitialization = new Promise<void>((resolve) => {
@@ -296,6 +372,46 @@ export function useAppLifecycle({
     if (windowWorkspace && windowWorkspace.bootstrap.windowId === "main") {
       scheduleStartupBackup(dbName);
     }
+    try {
+      const unlistenTransferRequest = await listen("transfer-request", async (event: unknown) => {
+        try {
+          const request = parseIncomingTransferRequest(eventPayload(event));
+          await store.recordIncomingTransfer(request);
+          await invoke("mark_incoming_transfer_event_recorded", {
+            transferId: request.transferId,
+          });
+          await store.approveIncomingTransfer(request.transferId);
+        } catch (e: unknown) {
+          console.error("[App] failed to import incoming transfer request:", e);
+          toast.error(e instanceof Error ? e.message : String(e));
+        }
+      });
+      appUnlisteners.push(unlistenTransferRequest);
+    } catch (e: unknown) {
+      console.error("[App] transfer-request listener registration failed:", e);
+    }
+    try {
+      const unlistenTaskPullRequested = await listen("task-pull-requested", async (event: unknown) => {
+        try {
+          await handleTaskPullRequested(
+            parseTaskPullRequestedEvent(eventPayload(event)),
+            store,
+            taskPullPushesInFlight,
+            () => transferMachines.value,
+            {
+              refreshCloudTransferRoute,
+              signal: taskPullAbortController.signal,
+            },
+          );
+        } catch (e: unknown) {
+          console.error("[App] failed to handle task pull request:", e);
+          toast.error(e instanceof Error ? e.message : String(e));
+        }
+      });
+      appUnlisteners.push(unlistenTaskPullRequested);
+    } catch (e: unknown) {
+      console.error("[App] task-pull-requested listener registration failed:", e);
+    }
     void initializeDesktopCloudAuth().catch((error) =>
       console.warn("[cloud] failed to initialize desktop auth:", error),
     );
@@ -344,22 +460,6 @@ export function useAppLifecycle({
       getKeyboardActions().navigateRepoDown,
       "navigate-repo-down",
     );
-
-    try {
-      const unlistenTransferRequest = await listen("transfer-request", async (event: unknown) => {
-        try {
-          const request = parseIncomingTransferRequest(eventPayload(event));
-          await store.recordIncomingTransfer(request);
-          await store.approveIncomingTransfer(request.transferId);
-        } catch (e: unknown) {
-          console.error("[App] failed to import incoming transfer request:", e);
-          toast.error(e instanceof Error ? e.message : String(e));
-        }
-      });
-      appUnlisteners.push(unlistenTransferRequest);
-    } catch (e: unknown) {
-      console.error("[App] transfer-request listener registration failed:", e);
-    }
 
     try {
       const unlistenPairingStarted = await listen("pairing-started", async (event: unknown) => {
@@ -530,6 +630,7 @@ export function useAppLifecycle({
   });
 
   onBeforeUnmount(() => {
+    taskPullAbortController.abort();
     disposeDesktopCloudWorkspace();
     stopSidebarResize();
     window.removeEventListener("dragenter", suppressFileDropNavigation);

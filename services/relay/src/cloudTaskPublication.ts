@@ -11,8 +11,16 @@ export type CloudTaskDocument = Record<string, unknown> & {
   ownerLocalTaskId: string;
 };
 
+export interface CloudTransferIdentity {
+  peerId: string;
+  publicKey: string;
+  protocolVersion: number;
+  acceptingTransfers: boolean;
+}
+
 export interface ValidatedCloudTaskPublication {
   displayName: string;
+  transfer: CloudTransferIdentity | null;
   tasks: CloudTaskDocument[];
 }
 
@@ -27,6 +35,7 @@ export interface CloudTaskPublicationStore {
     desktopId: string;
     generation: CloudTaskPublicationGeneration;
     displayName: string;
+    transfer: CloudTransferIdentity | null;
     tasks: CloudTaskDocument[];
   }): Promise<void>;
 }
@@ -36,6 +45,11 @@ export interface CloudTaskPublicationSessionStore extends CloudTaskPublicationSt
     userId: string;
     desktopId: string;
   }): Promise<number>;
+  endSession(input: {
+    userId: string;
+    desktopId: string;
+    generation: number;
+  }): Promise<boolean>;
 }
 
 export interface CloudTaskPublicationFaultInjection {
@@ -66,6 +80,9 @@ export function validateCloudTaskPublication(
   }
   const desktop = requiredRecord(root.desktop, "task snapshot desktop");
   const displayName = requiredString(desktop.displayName, "desktop.displayName", 256);
+  const transfer = desktop.transfer === undefined || desktop.transfer === null
+    ? null
+    : validateCloudTransferIdentity(desktop.transfer);
   if (!Array.isArray(root.tasks)) {
     throw new Error("task snapshot tasks must be an array");
   }
@@ -83,12 +100,31 @@ export function validateCloudTaskPublication(
     identities.add(key);
     return task;
   });
-  return { displayName, tasks };
+  return { displayName, transfer, tasks };
+}
+
+function validateCloudTransferIdentity(value: unknown): CloudTransferIdentity {
+  const transfer = requiredRecord(value, "desktop.transfer");
+  return {
+    peerId: requiredNonblankString(transfer.peerId, "desktop.transfer.peerId", 256),
+    publicKey: requiredNonblankString(transfer.publicKey, "desktop.transfer.publicKey", 4096),
+    protocolVersion: requiredPositiveInteger(
+      transfer.protocolVersion,
+      "desktop.transfer.protocolVersion",
+    ),
+    acceptingTransfers: requiredBoolean(
+      transfer.acceptingTransfers,
+      "desktop.transfer.acceptingTransfers",
+    ),
+  };
 }
 
 function validateTask(value: unknown, index: number, desktopId: string): CloudTaskDocument {
   const path = `tasks[${index}]`;
   const task = requiredRecord(value, path);
+  const cloudTaskId = task.cloudTaskId === undefined
+    ? undefined
+    : requiredString(task.cloudTaskId, `${path}.cloudTaskId`, 128);
   const ownerDesktopId = requiredString(task.ownerDesktopId, `${path}.ownerDesktopId`, 128);
   if (ownerDesktopId !== desktopId) {
     throw new Error(`${path}.ownerDesktopId must match the authenticated desktop`);
@@ -98,9 +134,41 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
   const repo = requiredRecord(task.repo, `${path}.repo`);
   const agent = requiredRecord(task.agent, `${path}.agent`);
   const transfer = requiredRecord(task.transfer, `${path}.transfer`);
-  if (transfer.state !== "none") throw new Error(`${path}.transfer.state must be none`);
-  for (const field of ["transferId", "sourceDesktopId", "destinationDesktopId"] as const) {
-    if (transfer[field] !== null) throw new Error(`${path}.transfer.${field} must be null`);
+  const transferState = requiredString(transfer.state, `${path}.transfer.state`, 32);
+  if (!new Set(["none", "outgoing", "incoming", "finalization_pending"]).has(transferState)) {
+    throw new Error(`${path}.transfer.state is invalid`);
+  }
+  const validatedTransfer = transferState === "none"
+    ? validateEmptyTransfer(transfer, path)
+    : {
+        state: transferState,
+        transferId: requiredNonblankString(
+          transfer.transferId,
+          `${path}.transfer.transferId`,
+          128,
+        ),
+        sourceDesktopId: requiredNonblankString(
+          transfer.sourceDesktopId,
+          `${path}.transfer.sourceDesktopId`,
+          128,
+        ),
+        destinationDesktopId: requiredNonblankString(
+          transfer.destinationDesktopId,
+          `${path}.transfer.destinationDesktopId`,
+          128,
+        ),
+      };
+  if (
+    transferState === "outgoing"
+    && validatedTransfer.sourceDesktopId !== desktopId
+  ) {
+    throw new Error(`${path}.transfer.sourceDesktopId must match the authenticated desktop`);
+  }
+  if (
+    (transferState === "incoming" || transferState === "finalization_pending")
+    && validatedTransfer.destinationDesktopId !== desktopId
+  ) {
+    throw new Error(`${path}.transfer.destinationDesktopId must match the authenticated desktop`);
   }
   if (!Array.isArray(task.blockedByTaskIds) || task.blockedByTaskIds.length > 100) {
     throw new Error(`${path}.blockedByTaskIds must be an array of at most 100 ids`);
@@ -118,6 +186,7 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
   );
 
   return {
+    ...(cloudTaskId === undefined ? {} : { cloudTaskId }),
     localRepoId,
     ownerDesktopId,
     ownerLocalTaskId,
@@ -149,17 +218,34 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
       provider: requiredString(agent.provider, `${path}.agent.provider`, 64),
       type: requiredString(agent.type, `${path}.agent.type`, 32),
     },
-    transfer: {
-      state: "none",
-      transferId: null,
-      sourceDesktopId: null,
-      destinationDesktopId: null,
-    },
+    transfer: validatedTransfer,
     blockedByTaskIds,
     parentTaskId: optionalNullableString(task.parentTaskId, `${path}.parentTaskId`, 128),
     createdAt: requiredString(task.createdAt, `${path}.createdAt`, 64),
     updatedAt: requiredString(task.updatedAt, `${path}.updatedAt`, 64),
     closedAt: null,
+  };
+}
+
+function validateEmptyTransfer(
+  transfer: Record<string, unknown>,
+  path: string,
+): {
+  state: "none";
+  transferId: null;
+  sourceDesktopId: null;
+  destinationDesktopId: null;
+} {
+  for (const field of ["transferId", "sourceDesktopId", "destinationDesktopId"] as const) {
+    if (transfer[field] !== null) {
+      throw new Error(`${path}.transfer.${field} must be null`);
+    }
+  }
+  return {
+    state: "none",
+    transferId: null,
+    sourceDesktopId: null,
+    destinationDesktopId: null,
   };
 }
 
@@ -204,6 +290,7 @@ export async function handleCloudTaskPublication(input: {
     desktopId: input.desktopId,
     generation: input.generation,
     displayName: publication.displayName,
+    transfer: publication.transfer,
     tasks: publication.tasks,
   });
 }
@@ -217,6 +304,20 @@ export async function beginCloudTaskPublicationSession(input: {
   return await store.beginSession({
     userId: input.userId,
     desktopId: input.desktopId,
+  });
+}
+
+export async function endCloudTaskPublicationSession(input: {
+  userId: string;
+  desktopId: string;
+  generation: number;
+  store?: CloudTaskPublicationSessionStore;
+}): Promise<boolean> {
+  const store = input.store ?? createFirestoreCloudTaskPublicationStore();
+  return await store.endSession({
+    userId: input.userId,
+    desktopId: input.desktopId,
+    generation: input.generation,
   });
 }
 
@@ -248,7 +349,25 @@ export function createFirestoreCloudTaskPublicationStore(
       });
     },
 
-    async reconcile({ userId, desktopId, generation, displayName, tasks }) {
+    async endSession({ userId, desktopId, generation }) {
+      const desktopDocId = cloudDesktopDocumentId(desktopId);
+      const desktopRef = db.doc(`users/${userId}/desktops/${desktopDocId}`);
+      return await db.runTransaction(async (transaction) => {
+        const current = await transaction.get(desktopRef);
+        if (storedGenerationPart(
+          current.data()?.publicationSessionGeneration,
+        ) !== generation) {
+          return false;
+        }
+        transaction.set(desktopRef, {
+          transfer: FieldValue.delete(),
+          updatedAt: FieldValue.serverTimestamp(),
+        }, { merge: true });
+        return true;
+      });
+    },
+
+    async reconcile({ userId, desktopId, generation, displayName, transfer, tasks }) {
       validatePublicationGeneration(generation);
       const desktopDocId = cloudDesktopDocumentId(desktopId);
       const desktopsRef = db.collection(`users/${userId}/desktops`);
@@ -265,6 +384,7 @@ export function createFirestoreCloudTaskPublicationStore(
         transaction.set(desktopRef, {
           desktopId,
           displayName,
+          transfer: transfer ?? FieldValue.delete(),
           publicationSequence: generation.sequence,
           updatedAt: FieldValue.serverTimestamp(),
         }, { merge: true });
@@ -401,6 +521,14 @@ function requiredString(value: unknown, field: string, maxLength: number): strin
   return value;
 }
 
+function requiredNonblankString(value: unknown, field: string, maxLength: number): string {
+  const stringValue = requiredString(value, field, maxLength);
+  if (stringValue.trim().length === 0) {
+    throw new Error(`${field} must be a nonblank string`);
+  }
+  return stringValue;
+}
+
 function nullableString(value: unknown, field: string, maxLength: number): string | null {
   if (value === null) return null;
   if (typeof value !== "string" || value.length > maxLength) {
@@ -454,4 +582,18 @@ function optionalNonNegativeInteger(value: unknown, field: string): number | und
     throw new Error(`${field} must be a non-negative integer when present`);
   }
   return value as number;
+}
+
+function requiredPositiveInteger(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new Error(`${field} must be a positive integer`);
+  }
+  return value as number;
+}
+
+function requiredBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(`${field} must be a boolean`);
+  }
+  return value;
 }

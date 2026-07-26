@@ -65,6 +65,7 @@ impl Db {
 
             CREATE TABLE pipeline_item (
                 id TEXT PRIMARY KEY,
+                cloud_task_id TEXT,
                 repo_id TEXT NOT NULL,
                 issue_number INTEGER,
                 issue_title TEXT,
@@ -99,6 +100,9 @@ impl Db {
                 agent_spawn_options TEXT,
                 teardown_started_at TEXT
             );
+            CREATE UNIQUE INDEX idx_pipeline_item_open_cloud_task_id
+            ON pipeline_item(cloud_task_id)
+            WHERE closed_at IS NULL;
 
             CREATE TABLE worktree (
                 id TEXT PRIMARY KEY,
@@ -112,6 +116,13 @@ impl Db {
                 port INTEGER PRIMARY KEY,
                 pipeline_item_id TEXT NOT NULL,
                 env_name TEXT NOT NULL
+            );
+
+            CREATE TABLE create_task_intent (
+                task_id TEXT PRIMARY KEY,
+                request_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (task_id) REFERENCES pipeline_item(id) ON DELETE CASCADE
             );
 
             CREATE TABLE stage_run (
@@ -181,12 +192,15 @@ impl Db {
                 status TEXT NOT NULL,
                 source_peer_id TEXT,
                 target_peer_id TEXT,
+                source_desktop_id TEXT,
+                target_desktop_id TEXT,
                 source_task_id TEXT,
                 local_task_id TEXT,
                 started_at TEXT NOT NULL DEFAULT (datetime('now')),
                 completed_at TEXT,
                 error TEXT,
-                payload_json TEXT
+                payload_json TEXT,
+                sidecar_cleanup_completed_at TEXT
             );
             "#,
         )?;
@@ -385,6 +399,33 @@ impl Db {
                 id, direction, status, source_peer_id, source_task_id, payload_json
              ) VALUES (?, ?, ?, 'peer-1', 'source-task-1', ?)",
             (id, direction, status, payload_json),
+        )?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn insert_test_task_transfer_with_desktops(
+        &self,
+        id: &str,
+        direction: &str,
+        status: &str,
+        local_task_id: Option<&str>,
+        source_desktop_id: Option<&str>,
+        target_desktop_id: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO task_transfer (
+                id, direction, status, source_peer_id, target_peer_id,
+                source_desktop_id, target_desktop_id, source_task_id, local_task_id
+             ) VALUES (?, ?, ?, 'peer-1', 'peer-2', ?, ?, 'source-task-1', ?)",
+            (
+                id,
+                direction,
+                status,
+                source_desktop_id,
+                target_desktop_id,
+                local_task_id,
+            ),
         )?;
         Ok(())
     }

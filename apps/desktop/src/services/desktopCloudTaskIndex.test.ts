@@ -66,6 +66,31 @@ describe("mapDesktopCloudTasks", () => {
     });
   });
 
+  it("attaches the reachable owner's transfer route to remote terminal refs", () => {
+    const snapshot = mapDesktopCloudTasks([
+      remoteTaskSnapshot({ ownerDesktopId: "desktop-owner" }),
+    ], {
+      activeDesktopIds: new Set(["desktop-owner"]),
+    }, [{
+      documentId: "desktop-owner",
+      snapshot: {
+        desktopId: "desktop-owner",
+        displayName: "Owner Mac",
+        transfer: {
+          peerId: "peer-owner",
+          publicKey: "owner-key",
+          protocolVersion: 1,
+          acceptingTransfers: true,
+        },
+      },
+    }]);
+
+    expect(snapshot.terminalRefs["cloud:remote-repo-id:task-1"]).toMatchObject({
+      transferPeerId: "peer-owner",
+      preferredTransferTransport: "cloud",
+    });
+  });
+
   it("maps cloud snapshots into sidebar-compatible repos and tasks", () => {
     const snapshot = mapDesktopCloudTasks([
       {
@@ -438,6 +463,44 @@ describe("mapDesktopCloudTasks", () => {
       },
     ]);
     expect(snapshot.terminalRefs).toEqual({});
+  });
+
+  it("derives transfer machines from the authenticated desktop documents", async () => {
+    vi.mocked(getDocs)
+      .mockResolvedValueOnce({
+        docs: [{
+          id: "desktop-doc-a",
+          ref: { kind: "desktop-ref", id: "desktop-doc-a" },
+          data: () => ({
+            desktopId: "desktop-a",
+            displayName: "Studio Mac",
+            transfer: {
+              peerId: "peer-a",
+              publicKey: "base64-key",
+              protocolVersion: 1,
+              acceptingTransfers: true,
+            },
+          }),
+        }],
+      } as never)
+      .mockResolvedValueOnce({ docs: [] } as never);
+    vi.mocked(listActiveDesktopIdsViaRelay).mockResolvedValue(new Set(["desktop-a"]));
+
+    const snapshot = await listDesktopCloudTasks("user-1", {} as never, {
+      currentDesktopId: "desktop-current",
+    });
+
+    expect(snapshot).toMatchObject({
+      transferMachines: [{
+        desktopId: "desktop-a",
+        displayName: "Studio Mac",
+        online: true,
+        peerId: "peer-a",
+        publicKey: "base64-key",
+        protocolVersion: 1,
+        acceptingTransfers: true,
+      }],
+    });
   });
 
   it("does not remove cloud tasks when relay presence misses the owner", async () => {

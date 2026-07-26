@@ -7,15 +7,981 @@ use kanna_task_transfer::peer_store::{PeerRecord, PeerStore};
 use kanna_task_transfer::protocol::{PeerRequest, PeerResponse};
 use kanna_task_transfer::registry::{PeerRegistry, PeerRegistryEntry};
 use kanna_task_transfer::runtime::{
-    DiscoveryMode, PairingResult, RuntimeConfig, RuntimeError, RuntimeEvent, TransferRuntime,
+    DiscoveryMode, ExternalPeer, PairingResult, RuntimeConfig, RuntimeError, RuntimeEvent,
+    TransferRuntime, TransferTransport,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn runtime_endpoint(registry_root: &Path, peer_id: &str) -> String {
+    PeerRegistry::new(registry_root.to_path_buf())
+        .list_peers("")
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == peer_id)
+        .unwrap()
+        .endpoint
+}
+
+async fn send_raw_task_pull(
+    registry_root: &Path,
+    source_peer_id: &str,
+    request_id: &str,
+    requester_peer_id: &str,
+    sealed_payload: String,
+) -> PeerResponse {
+    let request = PeerRequest::RequestTaskPull {
+        request_id: request_id.into(),
+        requester_peer_id: requester_peer_id.into(),
+        sealed_payload,
+    };
+    let mut stream = TcpStream::connect(runtime_endpoint(registry_root, source_peer_id))
+        .await
+        .unwrap();
+    stream
+        .write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    stream.flush().await.unwrap();
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .await
+        .unwrap();
+    serde_json::from_str(response.trim()).unwrap()
+}
+
+fn peer_error_message(response: PeerResponse) -> String {
+    let PeerResponse::Error { message, .. } = response else {
+        panic!("expected peer error response");
+    };
+    message
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_peer_is_session_trusted_and_never_persisted() {
+    let temp = tempfile::tempdir().unwrap();
+    let identity = TransferIdentity::generate();
+    let public_key = public_key_to_string(&identity.public_key);
+    let runtime_config = RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0);
+    let runtime = TransferRuntime::spawn(runtime_config.clone())
+        .await
+        .unwrap();
+
+    runtime
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-cloud".into(),
+            display_name: "Cloud Mac".into(),
+            endpoint: "127.0.0.1:4456".into(),
+            public_key: public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    let peer = runtime.find_peer("peer-cloud").await.unwrap();
+    assert_eq!(peer.endpoint, "127.0.0.1:4456");
+    let listed = runtime
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-cloud")
+        .unwrap();
+    assert!(listed.trusted);
+    assert_eq!(
+        runtime
+            .peer_routes("peer-cloud")
+            .await
+            .unwrap()
+            .cloud_endpoint,
+        Some("127.0.0.1:4456".into())
+    );
+    assert!(
+        !trusted_peer_store_path(temp.path(), "peer-primary").exists(),
+        "external trust must remain runtime-only"
+    );
+
+    runtime.remove_external_peer("peer-cloud").await.unwrap();
+    assert!(runtime.find_peer("peer-cloud").await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_peer_key_rotation_immediately_revokes_old_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let old_identity = TransferIdentity::generate();
+    let old_public_key = public_key_to_string(&old_identity.public_key);
+    let new_identity = TransferIdentity::generate();
+    let new_public_key = public_key_to_string(&new_identity.public_key);
+    let runtime_config = RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0);
+    let runtime = TransferRuntime::spawn(runtime_config.clone())
+        .await
+        .unwrap();
+
+    for public_key in [&old_public_key, &new_public_key] {
+        runtime
+            .upsert_external_peer(ExternalPeer {
+                peer_id: "peer-cloud".into(),
+                display_name: "Cloud Mac".into(),
+                endpoint: "127.0.0.1:4456".into(),
+                public_key: public_key.clone(),
+                protocol_version: 1,
+                accepting_transfers: true,
+            })
+            .await
+            .unwrap();
+    }
+
+    assert!(runtime
+        .ensure_peer_is_trusted("peer-cloud", &old_public_key)
+        .is_err());
+    runtime
+        .ensure_peer_is_trusted("peer-cloud", &new_public_key)
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_peer_validation_rejects_unsafe_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let valid_key = public_key_to_string(&TransferIdentity::generate().public_key);
+
+    for peer in [
+        ExternalPeer {
+            peer_id: " ".into(),
+            display_name: "Cloud Mac".into(),
+            endpoint: "127.0.0.1:4456".into(),
+            public_key: valid_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        },
+        ExternalPeer {
+            peer_id: "peer-cloud".into(),
+            display_name: "Cloud Mac".into(),
+            endpoint: "192.168.1.10:4456".into(),
+            public_key: valid_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        },
+        ExternalPeer {
+            peer_id: "peer-cloud".into(),
+            display_name: "Cloud Mac".into(),
+            endpoint: "127.0.0.1:4456".into(),
+            public_key: valid_key.clone(),
+            protocol_version: 2,
+            accepting_transfers: true,
+        },
+        ExternalPeer {
+            peer_id: "peer-cloud".into(),
+            display_name: "Cloud Mac".into(),
+            endpoint: "127.0.0.1:4456".into(),
+            public_key: "not-a-key".into(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        },
+    ] {
+        assert!(runtime.upsert_external_peer(peer).await.is_err());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_peer_merges_lan_and_cloud_routes_and_selects_requested_transport() {
+    let temp = tempfile::tempdir().unwrap();
+    let identity = TransferIdentity::generate();
+    let public_key = public_key_to_string(&identity.public_key);
+    let lan_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let lan_endpoint = lan_listener.local_addr().unwrap().to_string();
+    let cloud_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let cloud_endpoint = cloud_listener.local_addr().unwrap().to_string();
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-target".into(),
+            display_name: "Target LAN".into(),
+            endpoint: lan_endpoint.clone(),
+            pid: std::process::id(),
+            public_key: public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    runtime
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-target".into(),
+            display_name: "Target Cloud".into(),
+            endpoint: cloud_endpoint.clone(),
+            public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    let routes = runtime.peer_routes("peer-target").await.unwrap();
+    assert_eq!(routes.lan_endpoint, Some(lan_endpoint));
+    assert_eq!(routes.cloud_endpoint, Some(cloud_endpoint));
+
+    let cloud_server = tokio::spawn(respond_to_preflight(cloud_listener, "transfer-cloud"));
+    runtime
+        .prepare_transfer_preflight_with_transport(
+            "peer-target",
+            "task-cloud",
+            TransferTransport::Cloud,
+        )
+        .await
+        .unwrap();
+    cloud_server.await.unwrap();
+
+    let lan_server = tokio::spawn(respond_to_preflight(lan_listener, "transfer-lan"));
+    runtime
+        .prepare_transfer_preflight_with_transport(
+            "peer-target",
+            "task-auto",
+            TransferTransport::Auto,
+        )
+        .await
+        .unwrap();
+    lan_server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_is_sealed_idempotent_and_emitted_once_for_paired_peers() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&destination, &source, "peer-source").await;
+    consume_pairing_completed(&source).await;
+
+    let first = destination
+        .request_task_pull("peer-source", "task-source", TransferTransport::Lan)
+        .await
+        .unwrap();
+    let RuntimeEvent::TaskPullRequested(event) = source.next_event().await.unwrap() else {
+        panic!("expected task pull request");
+    };
+    assert_eq!(event.request_id, first);
+    assert_eq!(event.source_task_id, "task-source");
+    assert_eq!(event.requester_peer_id, "peer-destination");
+
+    let repeated = destination
+        .request_task_pull("peer-source", "task-source", TransferTransport::Lan)
+        .await
+        .unwrap();
+    assert_eq!(repeated, first);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), source.next_event())
+            .await
+            .is_err(),
+        "duplicate pull request emitted a second event"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_uses_requested_cloud_route_for_externally_trusted_peers() {
+    let source_root = tempfile::tempdir().unwrap();
+    let destination_root = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        source_root.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        destination_root.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let source_identity = source.local_identity();
+    let destination_identity = destination.local_identity();
+
+    destination
+        .upsert_external_peer(ExternalPeer {
+            peer_id: source_identity.peer_id.clone(),
+            display_name: source_identity.display_name,
+            endpoint: runtime_endpoint(source_root.path(), "peer-source"),
+            public_key: source_identity.public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+    source
+        .upsert_external_peer(ExternalPeer {
+            peer_id: destination_identity.peer_id.clone(),
+            display_name: destination_identity.display_name,
+            endpoint: runtime_endpoint(destination_root.path(), "peer-destination"),
+            public_key: destination_identity.public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    destination
+        .request_task_pull("peer-source", "task-cloud", TransferTransport::Cloud)
+        .await
+        .unwrap();
+    let RuntimeEvent::TaskPullRequested(event) = source.next_event().await.unwrap() else {
+        panic!("expected task pull request");
+    };
+    assert_eq!(event.source_task_id, "task-cloud");
+    assert_eq!(event.requester_peer_id, "peer-destination");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_rejects_unknown_peer_self_request_and_unsafe_task_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        runtime
+            .request_task_pull("peer-missing", "task-source", TransferTransport::Auto)
+            .await,
+        Err(RuntimeError::PeerNotFound(_))
+    ));
+    for source_task_id in ["", "   ", "task\r\nsmuggled"] {
+        assert!(runtime
+            .request_task_pull("peer-missing", source_task_id, TransferTransport::Auto)
+            .await
+            .is_err());
+    }
+    assert!(runtime
+        .request_task_pull("peer-primary", "task-source", TransferTransport::Auto)
+        .await
+        .is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_rejects_mismatched_requester_key_without_emitting_event() {
+    let source_root = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        source_root.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let expected_requester = TransferIdentity::generate();
+    source
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-destination".into(),
+            display_name: "Destination".into(),
+            endpoint: "127.0.0.1:9".into(),
+            public_key: public_key_to_string(&expected_requester.public_key),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    let rogue_requester = TransferIdentity::generate();
+    let source_public_key = parse_public_key(&source.local_identity().public_key).unwrap();
+    let sealed_payload = seal_json(
+        &rogue_requester,
+        &source_public_key,
+        &json!({ "source_task_id": "task-source" }),
+    )
+    .unwrap();
+    assert!(matches!(
+        send_raw_task_pull(
+            source_root.path(),
+            "peer-source",
+            "rogue-pull",
+            "peer-destination",
+            sealed_payload,
+        )
+        .await,
+        PeerResponse::Error { .. }
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), source.next_event())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_listener_rejects_unknown_and_self_requesters_before_decryption() {
+    let source_root = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        source_root.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    let unknown_error = peer_error_message(
+        send_raw_task_pull(
+            source_root.path(),
+            "peer-source",
+            "unknown-pull",
+            "peer-unknown",
+            "deliberately-not-a-sealed-envelope".into(),
+        )
+        .await,
+    );
+    assert!(
+        unknown_error.contains("peer not found: peer-unknown"),
+        "unknown requester must be rejected before malformed ciphertext is parsed: {unknown_error}"
+    );
+
+    let self_error = peer_error_message(
+        send_raw_task_pull(
+            source_root.path(),
+            "peer-source",
+            "self-pull",
+            "peer-source",
+            "deliberately-not-a-sealed-envelope".into(),
+        )
+        .await,
+    );
+    assert!(self_error.contains("cannot request a task pull from this runtime"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), source.next_event())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_listener_rejects_malformed_ciphertext_before_emitting_event() {
+    let source_root = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        source_root.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let requester = TransferIdentity::generate();
+    source
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-destination".into(),
+            display_name: "Destination".into(),
+            endpoint: "127.0.0.1:9".into(),
+            public_key: public_key_to_string(&requester.public_key),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    let error = peer_error_message(
+        send_raw_task_pull(
+            source_root.path(),
+            "peer-source",
+            "malformed-pull",
+            "peer-destination",
+            "deliberately-not-a-sealed-envelope".into(),
+        )
+        .await,
+    );
+    assert!(error.contains("crypto error"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), source.next_event())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_listener_rejects_blank_and_control_character_task_ids() {
+    let source_root = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        source_root.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let requester = TransferIdentity::generate();
+    source
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-destination".into(),
+            display_name: "Destination".into(),
+            endpoint: "127.0.0.1:9".into(),
+            public_key: public_key_to_string(&requester.public_key),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+    let source_public_key = parse_public_key(&source.local_identity().public_key).unwrap();
+
+    for (request_id, task_id, expected_error) in [
+        ("blank-pull", "   ", "must not be blank"),
+        (
+            "control-pull",
+            "task\r\nsmuggled",
+            "contains a control character",
+        ),
+    ] {
+        let sealed_payload = seal_json(
+            &requester,
+            &source_public_key,
+            &json!({ "source_task_id": task_id }),
+        )
+        .unwrap();
+        let error = peer_error_message(
+            send_raw_task_pull(
+                source_root.path(),
+                "peer-source",
+                request_id,
+                "peer-destination",
+                sealed_payload,
+            )
+            .await,
+        );
+        assert!(
+            error.contains(expected_error),
+            "unexpected task ID validation error: {error}"
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), source.next_event())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outgoing_reservation_pins_cloud_route_across_external_peer_updates() {
+    let temp = tempfile::tempdir().unwrap();
+    let identity = TransferIdentity::generate();
+    let public_key = public_key_to_string(&identity.public_key);
+    let pinned_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let pinned_endpoint = pinned_listener.local_addr().unwrap().to_string();
+    let replacement_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let replacement_endpoint = replacement_listener.local_addr().unwrap().to_string();
+    let runtime_config = RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0);
+    let runtime = TransferRuntime::spawn(runtime_config.clone())
+        .await
+        .unwrap();
+    runtime
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-cloud".into(),
+            display_name: "Cloud Mac".into(),
+            endpoint: pinned_endpoint,
+            public_key: public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    let pinned_server = tokio::spawn(async move {
+        let (preflight, _) = pinned_listener.accept().await.unwrap();
+        let mut reader = BufReader::new(preflight);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let PeerRequest::PrepareTransfer { request_id, .. } =
+            serde_json::from_str(line.trim()).unwrap()
+        else {
+            panic!("expected preflight");
+        };
+        let mut stream = reader.into_inner();
+        write_peer_response(
+            &mut stream,
+            &PeerResponse::PrepareTransfer {
+                request_id,
+                transfer_id: "transfer-pinned".into(),
+                source_peer_id: "peer-primary".into(),
+                target_has_repo: true,
+            },
+        )
+        .await;
+
+        let (commit, _) = pinned_listener.accept().await.unwrap();
+        let mut reader = BufReader::new(commit);
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let PeerRequest::SubmitTransferPayload {
+            request_id,
+            transfer_id,
+            ..
+        } = serde_json::from_str(line.trim()).unwrap()
+        else {
+            panic!("expected commit");
+        };
+        let mut stream = reader.into_inner();
+        write_peer_response(
+            &mut stream,
+            &PeerResponse::SubmitTransferPayload {
+                request_id,
+                transfer_id,
+            },
+        )
+        .await;
+    });
+
+    let preflight = runtime
+        .prepare_transfer_preflight_with_transport(
+            "peer-cloud",
+            "task-source",
+            TransferTransport::Cloud,
+        )
+        .await
+        .unwrap();
+    drop(runtime);
+    let runtime = TransferRuntime::spawn(runtime_config).await.unwrap();
+    runtime
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-cloud".into(),
+            display_name: "Cloud Mac".into(),
+            endpoint: replacement_endpoint,
+            public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    runtime
+        .prepare_transfer_commit(&preflight.transfer_id, json!({"task": "payload"}))
+        .await
+        .unwrap();
+    pinned_server.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), replacement_listener.accept())
+            .await
+            .is_err(),
+        "commit unexpectedly switched to the replacement route"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_peer_registry_authorizes_inbound_transfer_without_lan_trust() {
+    let temp = tempfile::tempdir().unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let registry = PeerRegistry::new(temp.path().to_path_buf());
+    let source_entry = registry
+        .list_peers("peer-destination")
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-source")
+        .unwrap();
+    let destination_entry = registry
+        .list_peers("peer-source")
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-destination")
+        .unwrap();
+
+    destination
+        .upsert_external_peer(ExternalPeer {
+            peer_id: source_entry.peer_id.clone(),
+            display_name: source_entry.display_name.clone(),
+            endpoint: source_entry.endpoint.clone(),
+            public_key: source_entry.public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+    source
+        .upsert_external_peer(ExternalPeer {
+            peer_id: destination_entry.peer_id.clone(),
+            display_name: destination_entry.display_name.clone(),
+            endpoint: destination_entry.endpoint.clone(),
+            public_key: destination_entry.public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    for peer_id in ["peer-source", "peer-destination"] {
+        std::fs::remove_file(
+            temp.path()
+                .join(format!("{}.json", URL_SAFE_NO_PAD.encode(peer_id))),
+        )
+        .unwrap();
+    }
+    assert!(!trusted_peer_store_path(temp.path(), "peer-source").exists());
+    assert!(!trusted_peer_store_path(temp.path(), "peer-destination").exists());
+
+    let result = source
+        .prepare_transfer_preflight_with_transport(
+            "peer-destination",
+            "task-source",
+            TransferTransport::Cloud,
+        )
+        .await
+        .unwrap();
+    assert!(!result.transfer_id.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn copied_cloud_peer_identity_does_not_authorize_plaintext_lan_snapshot_access() {
+    let temp = tempfile::tempdir().unwrap();
+    let copied_identity = TransferIdentity::generate();
+    let copied_public_key = public_key_to_string(&copied_identity.public_key);
+    let lan_spoof = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let lan_endpoint = lan_spoof.local_addr().unwrap().to_string();
+    let cloud_proxy = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let cloud_endpoint = cloud_proxy.local_addr().unwrap().to_string();
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-cloud".into(),
+            display_name: "LAN Spoof".into(),
+            endpoint: lan_endpoint,
+            pid: std::process::id(),
+            public_key: copied_public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    runtime
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-cloud".into(),
+            display_name: "Real Cloud Mac".into(),
+            endpoint: cloud_endpoint,
+            public_key: copied_public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    let spoof_contact = tokio::spawn(async move {
+        let Ok(Ok((stream, _))) =
+            tokio::time::timeout(Duration::from_millis(150), lan_spoof.accept()).await
+        else {
+            return false;
+        };
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let PeerRequest::GetTaskSnapshot { request_id, .. } =
+            serde_json::from_str(line.trim()).unwrap()
+        else {
+            panic!("expected task snapshot request");
+        };
+        let mut stream = reader.into_inner();
+        write_peer_response(
+            &mut stream,
+            &PeerResponse::TaskSnapshot {
+                request_id,
+                peer_id: "peer-cloud".into(),
+                display_name: "LAN Spoof".into(),
+                snapshot: json!({"stolen": true}),
+            },
+        )
+        .await;
+        true
+    });
+
+    assert!(runtime.list_peer_task_snapshots().await.unwrap().is_empty());
+    assert!(
+        !spoof_contact.await.unwrap(),
+        "plaintext task snapshot was sent using external cloud trust"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rotated_external_key_rejects_all_pinned_transfer_continuations() {
+    let temp = tempfile::tempdir().unwrap();
+    let old_target = TransferIdentity::generate();
+    let old_public_key = public_key_to_string(&old_target.public_key);
+    let new_target = TransferIdentity::generate();
+    let new_public_key = public_key_to_string(&new_target.public_key);
+    let old_route = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let old_endpoint = old_route.local_addr().unwrap().to_string();
+    let replacement_route = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let replacement_endpoint = replacement_route.local_addr().unwrap().to_string();
+    let source_config = RuntimeConfig::for_tests("peer-source", "Source", temp.path(), 0)
+        .with_peer_request_timeout(Duration::from_millis(50));
+    let source = TransferRuntime::spawn(source_config).await.unwrap();
+    let source_endpoint = PeerRegistry::new(temp.path().to_path_buf())
+        .list_peers("peer-observer")
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-source")
+        .unwrap()
+        .endpoint;
+    source
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            endpoint: old_endpoint,
+            public_key: old_public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    let preflight_server = tokio::spawn(respond_to_preflight(old_route, "transfer-pinned-key"));
+    source
+        .prepare_transfer_preflight_with_transport(
+            "peer-target",
+            "task-source",
+            TransferTransport::Cloud,
+        )
+        .await
+        .unwrap();
+    preflight_server.await.unwrap();
+    source
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            endpoint: replacement_endpoint,
+            public_key: new_public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    for request in [
+        PeerRequest::FinalizeTransfer {
+            request_id: "rotate-finalize".into(),
+            transfer_id: "transfer-pinned-key".into(),
+            requester_peer_id: "peer-target".into(),
+        },
+        PeerRequest::FetchTransferArtifact {
+            request_id: "rotate-artifact".into(),
+            transfer_id: "transfer-pinned-key".into(),
+            requester_peer_id: "peer-target".into(),
+            sealed_payload: "not-reached".into(),
+        },
+        PeerRequest::ImportCommitted {
+            request_id: "rotate-ack".into(),
+            transfer_id: "transfer-pinned-key".into(),
+            requester_peer_id: "peer-target".into(),
+            sealed_payload: "not-reached".into(),
+        },
+    ] {
+        let PeerResponse::Error { message, .. } =
+            send_raw_peer_request(&source_endpoint, &request).await
+        else {
+            panic!("rotated continuation unexpectedly succeeded");
+        };
+        assert!(
+            message.contains("not trusted for cloud transfer"),
+            "unexpected continuation error: {message}"
+        );
+    }
+}
+
+async fn respond_to_preflight(listener: TcpListener, transfer_id: &str) {
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let PeerRequest::PrepareTransfer { request_id, .. } =
+        serde_json::from_str(line.trim()).unwrap()
+    else {
+        panic!("expected preflight request");
+    };
+    let mut stream = reader.into_inner();
+    write_peer_response(
+        &mut stream,
+        &PeerResponse::PrepareTransfer {
+            request_id,
+            transfer_id: transfer_id.into(),
+            source_peer_id: "peer-primary".into(),
+            target_has_repo: true,
+        },
+    )
+    .await;
+}
+
+async fn write_peer_response(stream: &mut TcpStream, response: &PeerResponse) {
+    stream
+        .write_all(format!("{}\n", serde_json::to_string(response).unwrap()).as_bytes())
+        .await
+        .unwrap();
+}
+
+async fn send_raw_peer_request(endpoint: &str, request: &PeerRequest) -> PeerResponse {
+    let mut stream = TcpStream::connect(endpoint).await.unwrap();
+    stream
+        .write_all(format!("{}\n", serde_json::to_string(request).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    serde_json::from_str(line.trim()).unwrap()
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn peers_become_trusted_after_explicit_pairing() {
@@ -1250,6 +2216,967 @@ async fn destination_can_acknowledge_import_commit_back_to_source() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destination_reloads_awaiting_ack_reservation_after_sidecar_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary_config = RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0);
+    let secondary = TransferRuntime::spawn(secondary_config.clone())
+        .await
+        .unwrap();
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source")
+        .await
+        .unwrap();
+    primary
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-secondary",
+                "task": { "source_task_id": "task-source" }
+            }),
+        )
+        .await
+        .unwrap();
+    let incoming = next_incoming_transfer_request(&secondary).await;
+    assert_eq!(incoming.transfer_id, preflight.transfer_id);
+
+    drop(secondary);
+    let secondary = TransferRuntime::spawn(secondary_config.clone())
+        .await
+        .unwrap();
+    secondary
+        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .await
+        .unwrap();
+    let ack = next_outgoing_transfer_committed(&primary).await;
+    assert_eq!(ack.transfer_id, preflight.transfer_id);
+
+    secondary
+        .mark_import_ack_completed(&preflight.transfer_id)
+        .await
+        .unwrap();
+    drop(secondary);
+    let secondary = TransferRuntime::spawn(secondary_config).await.unwrap();
+    let error = secondary
+        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("missing source peer"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destination_restart_allocates_a_new_id_after_source_retains_first_tombstone() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary_config = RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0);
+    let secondary = TransferRuntime::spawn(secondary_config.clone())
+        .await
+        .unwrap();
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    let first = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source-1")
+        .await
+        .unwrap();
+    primary
+        .prepare_transfer_commit(
+            &first.transfer_id,
+            json!({"task": {"source_task_id": "task-source-1"}}),
+        )
+        .await
+        .unwrap();
+    let _ = next_incoming_transfer_request(&secondary).await;
+    secondary
+        .acknowledge_import_committed(&first.transfer_id, "task-source-1", "task-dest-1")
+        .await
+        .unwrap();
+    let _ = next_outgoing_transfer_committed(&primary).await;
+    primary
+        .mark_import_commit_applied(&first.transfer_id)
+        .await
+        .unwrap();
+    secondary
+        .mark_import_ack_completed(&first.transfer_id)
+        .await
+        .unwrap();
+
+    drop(secondary);
+    let secondary = TransferRuntime::spawn(secondary_config).await.unwrap();
+    let second = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source-2")
+        .await
+        .unwrap();
+    assert_ne!(second.transfer_id, first.transfer_id);
+    assert!(second
+        .transfer_id
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    primary
+        .prepare_transfer_commit(
+            &second.transfer_id,
+            json!({"task": {"source_task_id": "task-source-2"}}),
+        )
+        .await
+        .unwrap();
+    let _ = next_incoming_transfer_request(&secondary).await;
+    secondary
+        .acknowledge_import_committed(&second.transfer_id, "task-source-2", "task-dest-2")
+        .await
+        .unwrap();
+    let second_ack = next_outgoing_transfer_committed(&primary).await;
+    assert_eq!(second_ack.transfer_id, second.transfer_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_reloads_outgoing_reservation_after_sidecar_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let primary_config = RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0);
+    let primary = TransferRuntime::spawn(primary_config.clone())
+        .await
+        .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source")
+        .await
+        .unwrap();
+    drop(primary);
+    let primary = TransferRuntime::spawn(primary_config).await.unwrap();
+
+    primary
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-secondary",
+                "task": { "source_task_id": "task-source" }
+            }),
+        )
+        .await
+        .unwrap();
+
+    let incoming = next_incoming_transfer_request(&secondary).await;
+    assert_eq!(incoming.transfer_id, preflight.transfer_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destination_replays_exact_incoming_event_after_submit_success_and_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary_config = RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0);
+    let secondary = TransferRuntime::spawn(secondary_config.clone())
+        .await
+        .unwrap();
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source")
+        .await
+        .unwrap();
+    let payload = json!({
+        "target_peer_id": "peer-secondary",
+        "task": {
+            "source_task_id": "task-source",
+            "title": "Durably replay me"
+        },
+        "nested": { "preserve": ["this", 42, true] }
+    });
+    primary
+        .prepare_transfer_commit(&preflight.transfer_id, payload.clone())
+        .await
+        .unwrap();
+
+    // Simulate the destination sidecar crashing after it acknowledged submit to
+    // the source but before its consumer received and recorded the event.
+    drop(secondary);
+    let secondary = TransferRuntime::spawn(secondary_config.clone())
+        .await
+        .unwrap();
+
+    let replay = tokio::time::timeout(
+        Duration::from_secs(1),
+        next_incoming_transfer_request(&secondary),
+    )
+    .await
+    .expect("destination did not replay the persisted incoming event");
+    assert_eq!(replay.transfer_id, preflight.transfer_id);
+    assert_eq!(replay.source_peer_id, "peer-primary");
+    assert_eq!(replay.source_task_id, "task-source");
+    assert_eq!(replay.source_name.as_deref(), Some("Primary"));
+    assert_eq!(replay.payload, payload);
+
+    secondary
+        .mark_incoming_event_recorded(&preflight.transfer_id)
+        .await
+        .unwrap();
+    secondary
+        .mark_incoming_event_recorded(&preflight.transfer_id)
+        .await
+        .expect("recording the same incoming event twice should be idempotent");
+
+    drop(secondary);
+    let secondary = TransferRuntime::spawn(secondary_config).await.unwrap();
+    tokio::time::timeout(Duration::from_millis(100), secondary.next_event())
+        .await
+        .expect_err("recorded incoming event replayed after restart");
+
+    // Recording the event is independent of the destination's final import
+    // acknowledgment; the reservation must remain usable until that completes.
+    secondary
+        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .await
+        .unwrap();
+    let committed = next_outgoing_transfer_committed(&primary).await;
+    assert_eq!(committed.transfer_id, preflight.transfer_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unapplied_import_commit_receipt_older_than_pending_ttl_replays_after_source_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let primary_config = RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0);
+    let primary = TransferRuntime::spawn(primary_config.clone())
+        .await
+        .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source")
+        .await
+        .unwrap();
+
+    secondary
+        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .await
+        .unwrap();
+    drop(primary);
+    age_import_commit_receipt_past_pending_ttl(temp.path(), "peer-primary", &preflight.transfer_id);
+    let primary = TransferRuntime::spawn(primary_config).await.unwrap();
+
+    let replay = tokio::time::timeout(
+        Duration::from_secs(1),
+        next_outgoing_transfer_committed(&primary),
+    )
+    .await
+    .expect("unapplied receipt was not replayed after restart");
+    assert_eq!(replay.transfer_id, preflight.transfer_id);
+    assert_eq!(replay.source_task_id, "task-source");
+    assert_eq!(replay.destination_local_task_id, "task-dest");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unapplied_import_commit_receipt_retries_without_restart_or_duplicate() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let primary = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
+            .with_receipt_retry_interval(Duration::from_millis(75)),
+    )
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source")
+        .await
+        .unwrap();
+
+    secondary
+        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .await
+        .unwrap();
+    let first = next_outgoing_transfer_committed(&primary).await;
+    assert_eq!(first.transfer_id, preflight.transfer_id);
+
+    let retry = tokio::time::timeout(
+        Duration::from_secs(1),
+        next_outgoing_transfer_committed(&primary),
+    )
+    .await
+    .expect("unapplied receipt was not retried while the runtime stayed alive");
+    assert_eq!(retry.transfer_id, preflight.transfer_id);
+
+    primary
+        .mark_import_commit_applied(&preflight.transfer_id)
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_millis(225),
+        next_outgoing_transfer_committed(&primary),
+    )
+    .await
+    .expect_err("applied receipt continued retrying");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_receipt_consumer_has_one_bounded_pending_event_per_receipt_then_retries() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let primary = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
+            .with_replay_limits(2, 2)
+            .with_receipt_retry_interval(Duration::from_millis(20)),
+    )
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    let mut transfer_ids = Vec::new();
+    for index in 0..2 {
+        let source_task_id = format!("task-source-{index}");
+        let destination_task_id = format!("task-dest-{index}");
+        let preflight = primary
+            .prepare_transfer_preflight("peer-secondary", &source_task_id)
+            .await
+            .unwrap();
+        secondary
+            .acknowledge_import_committed(
+                &preflight.transfer_id,
+                &source_task_id,
+                &destination_task_id,
+            )
+            .await
+            .unwrap();
+        transfer_ids.push(preflight.transfer_id);
+    }
+
+    // Let many retry intervals pass while no consumer drains the runtime.
+    tokio::time::sleep(Duration::from_millis(180)).await;
+
+    let first = next_outgoing_transfer_committed(&primary).await;
+    let second = next_outgoing_transfer_committed(&primary).await;
+    let delivered = std::collections::HashSet::from([first.transfer_id, second.transfer_id]);
+    assert_eq!(
+        delivered,
+        transfer_ids.iter().cloned().collect(),
+        "the bounded queue should contain one event for each active receipt"
+    );
+    for transfer_id in &transfer_ids {
+        primary
+            .mark_import_commit_applied(transfer_id)
+            .await
+            .unwrap();
+    }
+    tokio::time::timeout(
+        Duration::from_millis(40),
+        next_outgoing_transfer_committed(&primary),
+    )
+    .await
+    .expect_err("stalled retries accumulated duplicate queued receipt events");
+
+    let retry_transfer = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source-retry")
+        .await
+        .unwrap();
+    secondary
+        .acknowledge_import_committed(
+            &retry_transfer.transfer_id,
+            "task-source-retry",
+            "task-dest-retry",
+        )
+        .await
+        .unwrap();
+    let initial = next_outgoing_transfer_committed(&primary).await;
+    assert_eq!(initial.transfer_id, retry_transfer.transfer_id);
+    let retry = tokio::time::timeout(
+        Duration::from_millis(100),
+        next_outgoing_transfer_committed(&primary),
+    )
+    .await
+    .expect("a dequeued but unapplied receipt was not retried");
+    assert_eq!(retry.transfer_id, retry_transfer.transfer_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn receipt_limits_compact_applied_tombstones_and_reject_excess_unapplied() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let primary_config = RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
+        .with_replay_limits(1, 2);
+    let primary = TransferRuntime::spawn(primary_config.clone())
+        .await
+        .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    let mut applied_ids = Vec::new();
+    for index in 0..3 {
+        let source_task_id = format!("task-applied-{index}");
+        let destination_task_id = format!("task-dest-{index}");
+        let preflight = primary
+            .prepare_transfer_preflight("peer-secondary", &source_task_id)
+            .await
+            .unwrap();
+        secondary
+            .acknowledge_import_committed(
+                &preflight.transfer_id,
+                &source_task_id,
+                &destination_task_id,
+            )
+            .await
+            .unwrap();
+        let _ = next_outgoing_transfer_committed(&primary).await;
+        primary
+            .mark_import_commit_applied(&preflight.transfer_id)
+            .await
+            .unwrap();
+        applied_ids.push((preflight.transfer_id, source_task_id, destination_task_id));
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-primary", "receipts"),
+        2
+    );
+
+    let pending_one = primary
+        .prepare_transfer_preflight("peer-secondary", "task-pending-1")
+        .await
+        .unwrap();
+    secondary
+        .acknowledge_import_committed(
+            &pending_one.transfer_id,
+            "task-pending-1",
+            "task-pending-dest-1",
+        )
+        .await
+        .unwrap();
+    let _ = next_outgoing_transfer_committed(&primary).await;
+    let pending_two = primary
+        .prepare_transfer_preflight("peer-secondary", "task-pending-2")
+        .await
+        .unwrap();
+    let cap_error = secondary
+        .acknowledge_import_committed(
+            &pending_two.transfer_id,
+            "task-pending-2",
+            "task-pending-dest-2",
+        )
+        .await
+        .unwrap_err();
+    assert!(cap_error.to_string().contains("too many unapplied"));
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-primary", "receipts"),
+        3,
+        "two compacted tombstones plus the existing unapplied receipt must remain"
+    );
+    drop(primary);
+    let _primary = TransferRuntime::spawn(primary_config).await.unwrap();
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-primary", "receipts"),
+        3,
+        "restart must preserve unapplied work and keep applied tombstones bounded"
+    );
+
+    let (oldest_id, oldest_source, oldest_destination) = &applied_ids[0];
+    let oldest_retry = send_raw_import_committed(
+        temp.path(),
+        &secondary,
+        "peer-primary",
+        oldest_id,
+        oldest_source,
+        oldest_destination,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(oldest_retry, PeerResponse::Error { .. }));
+    let (newest_id, newest_source, newest_destination) = &applied_ids[2];
+    let newest_retry = send_raw_import_committed(
+        temp.path(),
+        &secondary,
+        "peer-primary",
+        newest_id,
+        newest_source,
+        newest_destination,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(newest_retry, PeerResponse::ImportCommitted { .. }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_ttl_pruning_removes_outgoing_and_incoming_reservation_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0)
+            .with_pending_transfer_ttl(Duration::from_millis(25)),
+    )
+    .await
+    .unwrap();
+    let primary = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
+            .with_pending_transfer_ttl(Duration::from_millis(25)),
+    )
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary", "task-expiring")
+        .await
+        .unwrap();
+    let outgoing_path = replay_record_path(
+        temp.path(),
+        "peer-primary",
+        "reservations",
+        &preflight.transfer_id,
+    );
+    let incoming_path = replay_record_path(
+        temp.path(),
+        "peer-secondary",
+        "incoming-reservations",
+        &preflight.transfer_id,
+    );
+    assert!(outgoing_path.exists());
+    assert!(incoming_path.exists());
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let _ = primary
+        .prepare_transfer_commit(&preflight.transfer_id, json!({}))
+        .await
+        .unwrap_err();
+    let _ = secondary
+        .finalize_outgoing_transfer(&preflight.transfer_id)
+        .await
+        .unwrap_err();
+    assert!(!outgoing_path.exists());
+    assert!(!incoming_path.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_incoming_reservations_survive_pending_ttl_and_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary_config = RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0)
+        .with_pending_transfer_ttl(Duration::from_secs(1))
+        .with_max_incoming_reservations(2);
+    let secondary = TransferRuntime::spawn(secondary_config.clone())
+        .await
+        .unwrap();
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    let first = primary
+        .prepare_transfer_preflight("peer-secondary", "task-committed-1")
+        .await
+        .unwrap();
+    primary
+        .prepare_transfer_commit(
+            &first.transfer_id,
+            json!({"task": {"source_task_id": "task-committed-1"}}),
+        )
+        .await
+        .unwrap();
+    let _ = next_incoming_transfer_request(&secondary).await;
+    let first_path = replay_record_path(
+        temp.path(),
+        "peer-secondary",
+        "incoming-reservations",
+        &first.transfer_id,
+    );
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let _ = primary
+        .prepare_transfer_preflight("peer-secondary", "task-trigger-live-prune")
+        .await
+        .unwrap();
+    assert!(first_path.exists());
+
+    age_incoming_reservation(&first_path);
+    drop(secondary);
+    let secondary = TransferRuntime::spawn(secondary_config).await.unwrap();
+    assert!(first_path.exists());
+    secondary
+        .acknowledge_import_committed(&first.transfer_id, "task-committed-1", "task-dest-1")
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incoming_reservation_capacity_rejects_without_displacing_committed_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0)
+            .with_max_incoming_reservations(2),
+    )
+    .await
+    .unwrap();
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    let mut committed_ids = Vec::new();
+    for index in 0..2 {
+        let source_task = format!("task-committed-{index}");
+        let transfer = primary
+            .prepare_transfer_preflight("peer-secondary", &source_task)
+            .await
+            .unwrap();
+        primary
+            .prepare_transfer_commit(
+                &transfer.transfer_id,
+                json!({"task": {"source_task_id": source_task}}),
+            )
+            .await
+            .unwrap();
+        let _ = next_incoming_transfer_request(&secondary).await;
+        committed_ids.push(transfer.transfer_id);
+    }
+    let capacity_error = primary
+        .prepare_transfer_preflight("peer-secondary", "task-over-capacity")
+        .await
+        .unwrap_err();
+    assert!(capacity_error
+        .to_string()
+        .contains("too many active incoming"));
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-secondary", "incoming-reservations"),
+        2
+    );
+    secondary
+        .acknowledge_import_committed(&committed_ids[0], "task-committed-0", "task-dest-oldest")
+        .await
+        .unwrap();
+    secondary
+        .mark_import_ack_completed(&committed_ids[0])
+        .await
+        .unwrap();
+    let admitted_after_cleanup = primary
+        .prepare_transfer_preflight("peer-secondary", "task-after-cleanup")
+        .await
+        .unwrap();
+    assert!(!admitted_after_cleanup.transfer_id.is_empty());
+    secondary
+        .acknowledge_import_committed(
+            committed_ids.last().unwrap(),
+            "task-committed-1",
+            "task-dest-newest",
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_capacity_restart_preserves_existing_committed_work_and_closes_admission() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0)
+            .with_max_incoming_reservations(2),
+    )
+    .await
+    .unwrap();
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    let mut committed = Vec::new();
+    for index in 0..2 {
+        let source_task_id = format!("task-legacy-{index}");
+        let transfer = primary
+            .prepare_transfer_preflight("peer-secondary", &source_task_id)
+            .await
+            .unwrap();
+        primary
+            .prepare_transfer_commit(
+                &transfer.transfer_id,
+                json!({"task": {"source_task_id": source_task_id}}),
+            )
+            .await
+            .unwrap();
+        let _ = next_incoming_transfer_request(&secondary).await;
+        committed.push(transfer.transfer_id);
+    }
+
+    drop(secondary);
+    let secondary = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0)
+            .with_max_incoming_reservations(1),
+    )
+    .await
+    .unwrap();
+    let admission_error = primary
+        .prepare_transfer_preflight("peer-secondary", "task-over-legacy-cap")
+        .await
+        .unwrap_err();
+    assert!(admission_error
+        .to_string()
+        .contains("too many active incoming"));
+
+    for (index, transfer_id) in committed.iter().enumerate() {
+        secondary
+            .acknowledge_import_committed(
+                transfer_id,
+                &format!("task-legacy-{index}"),
+                &format!("task-dest-{index}"),
+            )
+            .await
+            .unwrap();
+        secondary
+            .mark_import_ack_completed(transfer_id)
+            .await
+            .unwrap();
+    }
+    let admitted = primary
+        .prepare_transfer_preflight("peer-secondary", "task-after-legacy-cleanup")
+        .await
+        .unwrap();
+    assert!(!admitted.transfer_id.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_terminal_cleanup_reopens_incoming_admission_live() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0)
+            .with_max_incoming_reservations(1),
+    )
+    .await
+    .unwrap();
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    for index in 0..2 {
+        let source_task_id = format!("task-terminal-{index}");
+        let transfer = primary
+            .prepare_transfer_preflight("peer-secondary", &source_task_id)
+            .await
+            .unwrap();
+        primary
+            .prepare_transfer_commit(
+                &transfer.transfer_id,
+                json!({"task": {"source_task_id": source_task_id}}),
+            )
+            .await
+            .unwrap();
+        let _ = next_incoming_transfer_request(&secondary).await;
+        let capacity_error = primary
+            .prepare_transfer_preflight("peer-secondary", "task-blocked")
+            .await
+            .unwrap_err();
+        assert!(capacity_error
+            .to_string()
+            .contains("too many active incoming"));
+
+        secondary
+            .mark_import_ack_completed(&transfer.transfer_id)
+            .await
+            .unwrap();
+    }
+
+    let admitted = primary
+        .prepare_transfer_preflight("peer-secondary", "task-after-terminal-cleanup")
+        .await
+        .unwrap();
+    assert!(!admitted.transfer_id.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lost_import_commit_response_accepts_identical_retry_and_rejects_mismatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source")
+        .await
+        .unwrap();
+
+    send_raw_import_committed(
+        temp.path(),
+        &secondary,
+        "peer-primary",
+        &preflight.transfer_id,
+        "task-source",
+        "task-dest",
+        false,
+    )
+    .await;
+    let first = next_outgoing_transfer_committed(&primary).await;
+    assert_eq!(first.transfer_id, preflight.transfer_id);
+
+    let retry = send_raw_import_committed(
+        temp.path(),
+        &secondary,
+        "peer-primary",
+        &preflight.transfer_id,
+        "task-source",
+        "task-dest",
+        true,
+    )
+    .await
+    .expect("identical retry response");
+    assert!(matches!(retry, PeerResponse::ImportCommitted { .. }));
+
+    let mismatch = send_raw_import_committed(
+        temp.path(),
+        &secondary,
+        "peer-primary",
+        &preflight.transfer_id,
+        "task-source",
+        "task-other",
+        true,
+    )
+    .await
+    .expect("mismatched retry response");
+    assert!(matches!(mismatch, PeerResponse::Error { .. }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn applied_receipt_older_than_pending_ttl_remains_an_idempotent_tombstone() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let primary_config = RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0);
+    let primary = TransferRuntime::spawn(primary_config.clone())
+        .await
+        .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source")
+        .await
+        .unwrap();
+    secondary
+        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .await
+        .unwrap();
+    let _ = next_outgoing_transfer_committed(&primary).await;
+    primary
+        .mark_import_commit_applied(&preflight.transfer_id)
+        .await
+        .unwrap();
+    drop(primary);
+    age_import_commit_receipt_past_pending_ttl(temp.path(), "peer-primary", &preflight.transfer_id);
+    let primary = TransferRuntime::spawn(primary_config).await.unwrap();
+
+    let retry = send_raw_import_committed(
+        temp.path(),
+        &secondary,
+        "peer-primary",
+        &preflight.transfer_id,
+        "task-source",
+        "task-dest",
+        true,
+    )
+    .await
+    .expect("applied duplicate response");
+    assert!(matches!(retry, PeerResponse::ImportCommitted { .. }));
+    let mismatch = send_raw_import_committed(
+        temp.path(),
+        &secondary,
+        "peer-primary",
+        &preflight.transfer_id,
+        "task-source",
+        "different-task-dest",
+        true,
+    )
+    .await
+    .expect("mismatched applied duplicate response");
+    assert!(matches!(mismatch, PeerResponse::Error { .. }));
+    tokio::time::timeout(Duration::from_millis(100), primary.next_event())
+        .await
+        .expect_err("applied duplicate emitted another event");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn destination_can_finalize_outgoing_transfer_after_approval() {
     let temp = tempfile::tempdir().unwrap();
 
@@ -1911,6 +3838,9 @@ async fn next_incoming_transfer_request(
             RuntimeEvent::PairingStarted(_) => {}
             RuntimeEvent::PairingRequested(_) => {}
             RuntimeEvent::PairingCompleted(_) => {}
+            RuntimeEvent::TaskPullRequested(_) => {
+                panic!("expected incoming transfer event");
+            }
             RuntimeEvent::OutgoingTransferFinalizationRequested(_) => {
                 panic!("expected incoming transfer event");
             }
@@ -1931,6 +3861,9 @@ async fn next_outgoing_transfer_committed(
             RuntimeEvent::PairingStarted(_) => {}
             RuntimeEvent::PairingRequested(_) => {}
             RuntimeEvent::PairingCompleted(_) => {}
+            RuntimeEvent::TaskPullRequested(_) => {
+                panic!("expected outgoing transfer committed event");
+            }
             RuntimeEvent::OutgoingTransferFinalizationRequested(_) => {
                 panic!("expected outgoing transfer committed event");
             }
@@ -1942,12 +3875,141 @@ async fn next_outgoing_transfer_committed(
     }
 }
 
+fn age_import_commit_receipt_past_pending_ttl(
+    registry_root: &Path,
+    peer_id: &str,
+    transfer_id: &str,
+) {
+    let receipt_path = replay_record_path(registry_root, peer_id, "receipts", transfer_id);
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).expect("read receipt"))
+            .expect("parse receipt");
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    receipt["created_at_unix_ms"] = json!(now_ms.saturating_sub(301_000));
+    std::fs::write(
+        receipt_path,
+        serde_json::to_vec_pretty(&receipt).expect("serialize aged receipt"),
+    )
+    .expect("age receipt");
+}
+
+fn replay_record_path(
+    registry_root: &Path,
+    peer_id: &str,
+    kind: &str,
+    transfer_id: &str,
+) -> std::path::PathBuf {
+    let digest = Sha256::digest(transfer_id.as_bytes());
+    let transfer_key = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    registry_root
+        .join("transfer-replay")
+        .join(URL_SAFE_NO_PAD.encode(peer_id))
+        .join(kind)
+        .join(format!("{transfer_key}.json"))
+}
+
+fn replay_json_count(registry_root: &Path, peer_id: &str, kind: &str) -> usize {
+    let directory = registry_root
+        .join("transfer-replay")
+        .join(URL_SAFE_NO_PAD.encode(peer_id))
+        .join(kind);
+    std::fs::read_dir(directory)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn age_incoming_reservation(path: &Path) {
+    let mut reservation: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).expect("read incoming reservation"))
+            .expect("parse incoming reservation");
+    reservation["created_at_unix_ms"] = json!(1);
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(&reservation).expect("serialize aged reservation"),
+    )
+    .expect("age incoming reservation");
+}
+
+async fn send_raw_import_committed(
+    registry_root: &Path,
+    requester: &TransferRuntime,
+    target_peer_id: &str,
+    transfer_id: &str,
+    source_task_id: &str,
+    destination_local_task_id: &str,
+    read_response: bool,
+) -> Option<PeerResponse> {
+    let target = requester
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == target_peer_id)
+        .expect("target peer");
+    let identity_path = registry_root
+        .join("transfer-identities")
+        .join(format!("{}.json", URL_SAFE_NO_PAD.encode("peer-secondary")));
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(identity_path).unwrap()).unwrap();
+    let requester_identity = TransferIdentity::from_secret_string(
+        stored["secret_key"].as_str().expect("stored secret key"),
+    )
+    .unwrap();
+    let target_public_key = parse_public_key(&target.public_key).unwrap();
+    let sealed_payload = seal_json(
+        &requester_identity,
+        &target_public_key,
+        &json!({
+            "source_task_id": source_task_id,
+            "destination_local_task_id": destination_local_task_id,
+        }),
+    )
+    .unwrap();
+    let request = PeerRequest::ImportCommitted {
+        request_id: format!("raw-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)),
+        transfer_id: transfer_id.to_owned(),
+        requester_peer_id: "peer-secondary".into(),
+        sealed_payload,
+    };
+    let mut stream = TcpStream::connect(&target.endpoint).await.unwrap();
+    stream
+        .write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    stream.flush().await.unwrap();
+    if !read_response {
+        drop(stream);
+        return None;
+    }
+
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .await
+        .unwrap();
+    Some(serde_json::from_str(response.trim()).unwrap())
+}
+
 async fn consume_pairing_completed(runtime: &TransferRuntime) {
     let event = runtime.next_event().await.unwrap();
     match event {
         RuntimeEvent::PairingCompleted(_) => {}
         RuntimeEvent::PairingStarted(_) => panic!("expected pairing completed event"),
         RuntimeEvent::PairingRequested(_) => panic!("expected pairing completed event"),
+        RuntimeEvent::TaskPullRequested(_) => panic!("expected pairing completed event"),
         RuntimeEvent::IncomingTransferRequest(_) => panic!("expected pairing completed event"),
         RuntimeEvent::OutgoingTransferCommitted(_) => panic!("expected pairing completed event"),
         RuntimeEvent::OutgoingTransferFinalizationRequested(_) => {
@@ -1982,6 +4044,9 @@ async fn pair_peers(
                         panic!("source should not receive its own pairing request event");
                     }
                     RuntimeEvent::PairingCompleted(_) => {}
+                    RuntimeEvent::TaskPullRequested(_) => {
+                        panic!("expected pairing started event");
+                    }
                     RuntimeEvent::IncomingTransferRequest(_) => {
                         panic!("expected pairing started event");
                     }
@@ -2003,6 +4068,9 @@ async fn pair_peers(
                         panic!("target should not receive pairing started event");
                     }
                     RuntimeEvent::PairingCompleted(_) => {}
+                    RuntimeEvent::TaskPullRequested(_) => {
+                        panic!("expected pairing request event");
+                    }
                     RuntimeEvent::IncomingTransferRequest(_) => {
                         panic!("expected pairing request event");
                     }

@@ -48,6 +48,8 @@ async fn recovery_end_session_removes_snapshot_artifact() {
                 cursor_row: 0,
                 cursor_col: 0,
                 cursor_visible: true,
+                saved_at: 0,
+                sequence: 0,
             },
         )
         .expect("should seed persisted recovery snapshot");
@@ -114,6 +116,8 @@ async fn recovery_seeded_snapshot_can_resume_adopted_session() {
                 cursor_row: 1,
                 cursor_col: 2,
                 cursor_visible: true,
+                saved_at: 0,
+                sequence: 0,
             },
         )
         .expect("should seed adopted recovery snapshot");
@@ -433,5 +437,196 @@ fn daemon_seed_snapshot_command_serves_seeded_snapshot() {
             assert_eq!(snapshot.vt, "seeded snapshot output");
         }
         other => panic!("expected seeded Snapshot response, got {:?}", other),
+    }
+}
+
+#[test]
+fn daemon_seed_snapshot_survives_next_spawn_and_appends_live_output() {
+    let daemon = DaemonHandle::start();
+    let session_id = "seeded-spawn-session";
+    let mut conn = daemon.connect();
+
+    conn.send(&Cmd::SeedSnapshot {
+        session_id: session_id.to_string(),
+        snapshot: SeedSnapshotPayload {
+            version: 1,
+            rows: 31,
+            cols: 101,
+            cursor_row: 4,
+            cursor_col: 7,
+            cursor_visible: false,
+            vt: "\u{1b}[2J\u{1b}[Hseeded snapshot output".to_string(),
+        },
+    });
+    match conn.recv() {
+        Evt::Ok => {}
+        other => panic!("expected Ok from seed snapshot, got {:?}", other),
+    }
+
+    conn.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-lc".to_string(),
+            "sleep 0.4; printf '\\r\\nnew live output'; sleep 2".to_string(),
+        ],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+    });
+    match conn.recv() {
+        Evt::SessionCreated {
+            session_id: created,
+        } => assert_eq!(created, session_id),
+        other => panic!("expected SessionCreated, got {:?}", other),
+    }
+
+    conn.send(&Cmd::Snapshot {
+        session_id: session_id.to_string(),
+    });
+    match conn.recv() {
+        Evt::Snapshot { snapshot, .. } => {
+            assert_eq!((snapshot.cols, snapshot.rows), (101, 31));
+            assert_eq!((snapshot.cursor_row, snapshot.cursor_col), (4, 7));
+            assert!(!snapshot.cursor_visible);
+            assert!(snapshot.vt.contains("seeded snapshot output"));
+        }
+        other => panic!("expected restored Snapshot, got {:?}", other),
+    }
+
+    std::thread::sleep(Duration::from_millis(700));
+    conn.send(&Cmd::Snapshot {
+        session_id: session_id.to_string(),
+    });
+    match conn.recv() {
+        Evt::Snapshot { snapshot, .. } => {
+            assert_eq!((snapshot.cols, snapshot.rows), (101, 31));
+            assert!(snapshot.vt.contains("seeded snapshot output"));
+            assert!(snapshot.vt.contains("new live output"));
+        }
+        other => panic!("expected appended Snapshot, got {:?}", other),
+    }
+}
+
+#[test]
+fn daemon_spawn_does_not_resume_an_unmarked_stale_snapshot() {
+    let daemon = DaemonHandle::start();
+    let session_id = "stale-spawn-session";
+    let snapshot_dir = daemon._dir.join("terminal-recovery");
+    std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir should exist");
+    std::fs::write(
+        snapshot_dir.join(format!("{session_id}.json")),
+        serde_json::to_vec(&serde_json::json!({
+            "sessionId": session_id,
+            "serialized": "\u{1b}[2J\u{1b}[Hstale snapshot output",
+            "cols": 101,
+            "rows": 31,
+            "cursorRow": 4,
+            "cursorCol": 7,
+            "cursorVisible": true,
+            "savedAt": 1,
+            "sequence": 1
+        }))
+        .unwrap(),
+    )
+    .expect("stale snapshot should write");
+
+    let mut conn = daemon.connect();
+    conn.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec!["-lc".to_string(), "sleep 2".to_string()],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+    });
+    match conn.recv() {
+        Evt::SessionCreated {
+            session_id: created,
+        } => assert_eq!(created, session_id),
+        other => panic!("expected SessionCreated, got {:?}", other),
+    }
+
+    conn.send(&Cmd::Snapshot {
+        session_id: session_id.to_string(),
+    });
+    match conn.recv() {
+        Evt::Snapshot { snapshot, .. } => {
+            assert_eq!((snapshot.cols, snapshot.rows), (80, 24));
+            assert!(!snapshot.vt.contains("stale snapshot output"));
+        }
+        other => panic!("expected fresh Snapshot, got {:?}", other),
+    }
+}
+
+#[test]
+fn concurrent_duplicate_spawn_cannot_steal_the_seeded_snapshot() {
+    let daemon = DaemonHandle::start();
+    let session_id = "concurrent-seeded-spawn-session";
+    let mut seed_conn = daemon.connect();
+    let seeded_vt = format!("\u{1b}[2J\u{1b}[H{}seeded race marker", "x".repeat(10_000));
+
+    seed_conn.send(&Cmd::SeedSnapshot {
+        session_id: session_id.to_string(),
+        snapshot: SeedSnapshotPayload {
+            version: 1,
+            rows: 31,
+            cols: 101,
+            cursor_row: 4,
+            cursor_col: 7,
+            cursor_visible: false,
+            vt: seeded_vt,
+        },
+    });
+    match seed_conn.recv() {
+        Evt::Ok => {}
+        other => panic!("expected Ok from seed snapshot, got {:?}", other),
+    }
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let spawn = |mut conn: ClientConn, barrier: std::sync::Arc<std::sync::Barrier>| {
+        std::thread::spawn(move || {
+            barrier.wait();
+            conn.send(&Cmd::Spawn {
+                session_id: session_id.to_string(),
+                executable: "/bin/sh".to_string(),
+                args: vec!["-lc".to_string(), "sleep 2".to_string()],
+                cwd: "/tmp".to_string(),
+                env: HashMap::new(),
+                cols: 80,
+                rows: 24,
+            });
+            conn.recv()
+        })
+    };
+    let first = spawn(daemon.connect(), barrier.clone());
+    let second = spawn(daemon.connect(), barrier.clone());
+    barrier.wait();
+
+    let first_event = first.join().expect("first spawn thread should finish");
+    let second_event = second.join().expect("second spawn thread should finish");
+    assert!(
+        matches!(
+            (&first_event, &second_event),
+            (Evt::SessionCreated { .. }, Evt::Error { .. })
+                | (Evt::Error { .. }, Evt::SessionCreated { .. })
+        ),
+        "expected one winning and one rejected spawn, got {first_event:?} and {second_event:?}"
+    );
+
+    let mut snapshot_conn = daemon.connect();
+    snapshot_conn.send(&Cmd::Snapshot {
+        session_id: session_id.to_string(),
+    });
+    match snapshot_conn.recv() {
+        Evt::Snapshot { snapshot, .. } => {
+            assert_eq!((snapshot.cols, snapshot.rows), (101, 31));
+            assert_eq!((snapshot.cursor_row, snapshot.cursor_col), (4, 7));
+            assert!(!snapshot.cursor_visible);
+            assert!(snapshot.vt.contains("seeded race marker"));
+        }
+        other => panic!("expected seeded Snapshot from winning spawn, got {other:?}"),
     }
 }

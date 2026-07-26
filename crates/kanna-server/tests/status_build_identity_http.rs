@@ -94,6 +94,7 @@ fn launch_server(
              environment = \"{environment}\"\n\
              lan_host = \"127.0.0.1\"\n\
              lan_port = {port}\n\
+             transfer_port = 4455\n\
              pairing_store_path = \"{}\"\n",
             toml_string(&daemon_dir),
             toml_string(&db_path),
@@ -225,6 +226,7 @@ async fn register_emits_a_startable_development_config_with_build_identity() {
     let expected_version = include_str!("../../../VERSION").trim();
     assert!(registered_config.contains(&format!("version = \"{expected_version}\"")));
     assert!(registered_config.contains("environment = \"development\""));
+    assert!(registered_config.contains("transfer_port = 4455"));
 
     let port = free_loopback_port();
     writeln!(

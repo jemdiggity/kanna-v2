@@ -20,7 +20,17 @@ import {
   type DesktopRelayTerminalClient,
 } from "../services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLanTerminal";
-import { fetchClosedTaskIdentities } from "../services/desktopServerClient";
+import {
+  fetchClosedTaskIdentities,
+  putDesktopCloudTransferIdentity,
+  type DesktopCloudTransferIdentity,
+} from "../services/desktopServerClient";
+import {
+  createDesktopTransferMachineSync,
+  parseLanTransferPeers,
+  resolveCloudTransferRelayUrl,
+  type TransferMachine,
+} from "../services/desktopTransferMachines";
 import {
   parseRemoteTaskPins,
   pinRemoteTask,
@@ -65,12 +75,14 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     items: [],
     terminalRefs: {},
     blockedByTaskIds: {},
+    transferMachines: [],
   });
   const lanSnapshot = ref<DesktopCloudSnapshot>({
     repos: [],
     items: [],
     terminalRefs: {},
     blockedByTaskIds: {},
+    transferMachines: [],
   });
   const locallyClosedRemoteTaskIds = ref<Set<string>>(new Set());
   let unsubscribeDesktopAuth: (() => void) | null = null;
@@ -84,9 +96,43 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   const activeMarkReadClients = new Set<ActiveMarkReadClient>();
   const associatedCloudUsers = new Set<string>();
   let lastCloudBackendErrorToastAt: number | null = null;
+  let currentDesktopId: string | null = null;
+  const transferMachineRevision = ref(0);
+  let hadSignedInTransferSession = false;
   const selectedCloudRepoId = ref<string | null>(null);
   const selectedCloudItemId = ref<string | null>(null);
   const workspaceSidebarProjector = createWorkspaceSidebarProjector();
+  const transferMachineSync = createDesktopTransferMachineSync({
+    getTransferIdentity: async () =>
+      parseTransferIdentity(await invoke<unknown>("get_transfer_identity")),
+    putLocalIdentity: putDesktopCloudTransferIdentity,
+    resolveRelayUrl: () => resolveCloudTransferRelayUrl(
+      async (name) => {
+        const value = await invoke<unknown>("read_env_var", { name }).catch(() => "");
+        return typeof value === "string" ? value : "";
+      },
+      import.meta.env.DEV,
+    ),
+    ensureProxy: (input) => invoke("ensure_cloud_transfer_proxy", input),
+    removeProxy: (input) => invoke("remove_cloud_transfer_proxy", input),
+    clearProxies: () => invoke("clear_cloud_transfer_proxies"),
+    upsertExternalPeer: ({ peer }) => invoke("upsert_external_transfer_peer", {
+      peer: {
+        peer_id: peer.peerId,
+        display_name: peer.displayName,
+        endpoint: peer.endpoint,
+        public_key: peer.publicKey,
+        protocol_version: peer.protocolVersion,
+        accepting_transfers: peer.acceptingTransfers,
+      },
+    }),
+    removeExternalPeer: (input) => invoke("remove_external_transfer_peer", input),
+    clearExternalPeers: () => invoke("clear_external_transfer_peers"),
+  });
+  const transferMachines = computed<TransferMachine[]>(() => {
+    void transferMachineRevision.value;
+    return transferMachineSync.getTransferMachines();
+  });
 
   const localReposForCloudMatching = computedAsync(async () => {
     return Promise.all(store.repos.map(async (repo) => {
@@ -153,6 +199,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       ...cloudSnapshot.value.blockedByTaskIds,
       ...lanSnapshot.value.blockedByTaskIds,
     },
+    transferMachines: cloudSnapshot.value.transferMachines,
   }));
 
   const remoteTaskPins = computed(() => parseRemoteTaskPins(store.snapshotSettings));
@@ -174,6 +221,16 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   // through the composable's active component scope.
   watchEffect(() => {
     void workspaceSidebarProjection.value;
+  }, { flush: "sync" });
+  watchEffect(() => {
+    const machines = cloudSnapshot.value.transferMachines;
+    void transferMachineSync.setCloudMachines(machines)
+      .then((changed) => {
+        if (changed) transferMachineRevision.value += 1;
+      })
+      .catch((error) => {
+        console.warn("[cloud] failed to synchronize transfer machines:", error);
+      });
   }, { flush: "sync" });
   const workspaceTasksByItemId = computed(
     () => workspaceSidebarProjection.value.workspaceTasksByItemId,
@@ -274,6 +331,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
           retainedTaskIds.has(taskId),
         ),
       ),
+      transferMachines: snapshot.transferMachines,
     };
   }
 
@@ -349,6 +407,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       items: snapshot.items,
       terminalRefs: snapshot.terminalRefs ?? {},
       blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
+      transferMachines: snapshot.transferMachines,
     };
   }
 
@@ -372,6 +431,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
           items: snapshot.items,
           terminalRefs: snapshot.terminalRefs ?? {},
           blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
+          transferMachines: snapshot.transferMachines,
         };
       },
       {
@@ -403,6 +463,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       items: snapshot.items,
       terminalRefs: snapshot.terminalRefs ?? {},
       blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
+      transferMachines: snapshot.transferMachines,
     };
   }
 
@@ -410,10 +471,17 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     const session = await getConfiguredDesktopAuthSession();
     desktopAuthSession.value = session;
     await session.initialize();
+    currentDesktopId = await resolveTransferDesktopId();
     unsubscribeDesktopAuth?.();
     unsubscribeDesktopAuth = session.subscribe((state) => {
       desktopAuthState.value = state;
       if (state.status === "signedIn") {
+        hadSignedInTransferSession = true;
+        void transferMachineSync.setSignedInSession(session, currentDesktopId)
+          .catch((error) => {
+            console.warn("[cloud] failed to initialize signed-in transfer session:", error);
+          });
+        transferMachineRevision.value += 1;
         if (!associatedCloudUsers.has(state.user.uid)) {
           void associateDesktopCloudCredential()
             .then(() => {
@@ -438,7 +506,23 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         associatedCloudUsers.clear();
         stopCloudTaskSubscription();
         cloudSnapshotRevision += 1;
-        cloudSnapshot.value = { repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} };
+        cloudSnapshot.value = {
+          repos: [],
+          items: [],
+          terminalRefs: {},
+          blockedByTaskIds: {},
+          transferMachines: [],
+        };
+        if (hadSignedInTransferSession) {
+          hadSignedInTransferSession = false;
+          void transferMachineSync.signOut()
+            .then(() => {
+              transferMachineRevision.value += 1;
+            })
+            .catch((error) => {
+              console.warn("[cloud] failed to clear transfer machine session:", error);
+            });
+        }
       }
     });
     void runDesktopAutoSignIn({
@@ -447,6 +531,25 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       getState: () => desktopAuthState.value,
       readEnv: (name) => invoke<string>("read_env_var", { name }),
     });
+  }
+
+  async function markTransferSidecarReady(): Promise<void> {
+    try {
+      await transferMachineSync.markSidecarReady();
+      transferMachineRevision.value += 1;
+    } catch (error) {
+      console.warn("[cloud] failed to initialize transfer machine sync:", error);
+    }
+  }
+
+  async function refreshCloudTransferRoute(peerId: string): Promise<void> {
+    await transferMachineSync.refreshCloudRoute(peerId);
+    transferMachineRevision.value += 1;
+  }
+
+  function updateLanTransferPeers(rawPeers: unknown): void {
+    transferMachineSync.setLanPeers(parseLanTransferPeers(rawPeers));
+    transferMachineRevision.value += 1;
   }
 
   function initializeDesktopLanTaskSync(): void {
@@ -696,6 +799,9 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     }
     unsubscribeDesktopAuth?.();
     stopCloudTaskSubscription();
+    void transferMachineSync.dispose().catch((error) => {
+      console.warn("[cloud] failed to dispose transfer machine sync:", error);
+    });
     if (lanRefreshTimer) {
       clearInterval(lanRefreshTimer);
     }
@@ -706,6 +812,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     desktopAuthState,
     cloudSnapshot,
     lanSnapshot,
+    transferMachines,
     locallyClosedRemoteTaskIds,
     selectedCloudRepoId,
     selectedCloudItemId,
@@ -732,6 +839,9 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     refreshLanTasks,
     initializeDesktopCloudAuth,
     initializeDesktopLanTaskSync,
+    markTransferSidecarReady,
+    refreshCloudTransferRoute,
+    updateLanTransferPeers,
     closeSelectedWorkspaceTask,
     advanceSelectedRemoteWorkspaceTask,
     pinSidebarTask,
@@ -739,4 +849,48 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     reorderPinnedSidebarTasks,
     disposeDesktopCloudWorkspace,
   };
+}
+
+function parseTransferIdentity(value: unknown): DesktopCloudTransferIdentity {
+  if (!value || typeof value !== "object") {
+    throw new Error("transfer sidecar returned an invalid local identity");
+  }
+  const record = value as Record<string, unknown>;
+  const peerId = transferIdentityString(record.peer_id ?? record.peerId, "peer id");
+  const displayName = transferIdentityString(
+    record.display_name ?? record.displayName,
+    "display name",
+  );
+  const publicKey = transferIdentityString(record.public_key ?? record.publicKey, "public key");
+  const protocolVersion = record.protocol_version ?? record.protocolVersion;
+  const acceptingTransfers = record.accepting_transfers ?? record.acceptingTransfers;
+  if (!Number.isSafeInteger(protocolVersion) || (protocolVersion as number) <= 0) {
+    throw new Error("transfer sidecar returned an invalid protocol version");
+  }
+  if (typeof acceptingTransfers !== "boolean") {
+    throw new Error("transfer sidecar returned an invalid accepting-transfers flag");
+  }
+  return {
+    peerId,
+    displayName,
+    publicKey,
+    protocolVersion: protocolVersion as number,
+    acceptingTransfers,
+  };
+}
+
+function transferIdentityString(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`transfer sidecar returned an invalid ${label}`);
+  }
+  return value.trim();
+}
+
+async function resolveTransferDesktopId(): Promise<string | null> {
+  const mobileStatus = await invoke<{ desktopId?: string }>("mobile_server_status").catch(() => null);
+  if (mobileStatus?.desktopId?.trim()) return mobileStatus.desktopId.trim();
+  const envId = await invoke<unknown>("read_env_var", {
+    name: "KANNA_TRANSFER_PEER_ID",
+  }).catch(() => "");
+  return typeof envId === "string" && envId.trim() ? envId.trim() : null;
 }

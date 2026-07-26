@@ -261,20 +261,75 @@ pub(crate) async fn handle_command(
             lost_handoff_sessions.lock().await.remove(&session_id);
 
             match pty::PtySession::spawn(&executable, &args, &cwd, &env, cols, rows) {
-                Ok(pty_session) => {
+                Ok(mut pty_session) => {
+                    // Keep the authoritative duplicate check, one-shot seed
+                    // consumption, and insertion under the same lock. Otherwise
+                    // a losing concurrent Spawn can consume the seed before the
+                    // winning session is registered.
+                    let mut mgr = sessions.lock().await;
+                    if mgr.contains(&session_id) {
+                        drop(mgr);
+                        let evt = error_event(
+                            Some(protocol::ErrorCode::SessionAlreadyExists),
+                            format!("session already exists: {}", session_id),
+                        );
+                        let _ = write_event(&mut *writer.lock().await, &evt).await;
+                        return;
+                    }
+                    if mgr.is_sealed_for_handoff() || mgr.is_tearing_down(&session_id) {
+                        drop(mgr);
+                        log::warn!(
+                            "[spawn] refusing session {}: handoff transfer or teardown in flight",
+                            session_id
+                        );
+                        let _ = pty_session.kill();
+                        let evt = error_event(
+                            Some(protocol::ErrorCode::PtySpawnFailed),
+                            format!(
+                                "daemon handoff or session teardown in progress; retry session {session_id}"
+                            ),
+                        );
+                        let _ = write_event(&mut *writer.lock().await, &evt).await;
+                        return;
+                    }
                     let stream_control = StreamControl::new();
-                    let headless_terminal =
-                        match headless_terminal::HeadlessTerminal::new(cols, rows, 10_000) {
-                            Ok(headless_terminal) => headless_terminal,
-                            Err(e) => {
+                    let seeded_snapshot =
+                        match recovery_manager.take_seeded_snapshot_for_start(&session_id) {
+                            Ok(snapshot) => snapshot,
+                            Err(error) => {
+                                drop(mgr);
                                 let evt = error_event(
-                                    Some(protocol::ErrorCode::HeadlessTerminalInitFailed),
-                                    format!("failed to create headless terminal: {}", e),
+                                    None,
+                                    format!(
+                                        "failed to load seeded recovery snapshot for {}: {}",
+                                        session_id, error
+                                    ),
                                 );
                                 let _ = write_event(&mut *writer.lock().await, &evt).await;
                                 return;
                             }
                         };
+                    let terminal_snapshot = seeded_snapshot
+                        .clone()
+                        .map(recovery_snapshot_to_terminal_snapshot);
+                    let headless_terminal = match terminal_snapshot.as_ref() {
+                        Some(snapshot) => {
+                            headless_terminal::HeadlessTerminal::from_snapshot(snapshot, 10_000)
+                        }
+                        None => headless_terminal::HeadlessTerminal::new(cols, rows, 10_000),
+                    };
+                    let headless_terminal = match headless_terminal {
+                        Ok(headless_terminal) => headless_terminal,
+                        Err(e) => {
+                            drop(mgr);
+                            let evt = error_event(
+                                Some(protocol::ErrorCode::HeadlessTerminalInitFailed),
+                                format!("failed to create headless terminal: {}", e),
+                            );
+                            let _ = write_event(&mut *writer.lock().await, &evt).await;
+                            return;
+                        }
+                    };
                     let handle = Arc::new(SessionHandle::new(SessionRecord {
                         pty: pty_session,
                         headless_terminal,
@@ -287,6 +342,7 @@ pub(crate) async fn handle_command(
                     let io_fd = match handle.try_clone_io_fd().await {
                         Ok(fd) => fd,
                         Err(e) => {
+                            drop(mgr);
                             let evt = error_event(
                                 Some(protocol::ErrorCode::PtyCloneFailed),
                                 format!("failed to clone PTY fd: {}", e),
@@ -296,49 +352,47 @@ pub(crate) async fn handle_command(
                         }
                     };
                     let Some(input_rx) = handle.take_input_rx().await else {
+                        drop(mgr);
                         let evt = error_event(None, "failed to take PTY input queue".to_string());
                         let _ = write_event(&mut *writer.lock().await, &evt).await;
                         return;
                     };
-                    {
-                        let mut mgr = sessions.lock().await;
-                        if mgr.contains(&session_id) {
-                            let evt = error_event(
-                                Some(protocol::ErrorCode::SessionAlreadyExists),
-                                format!("session already exists: {}", session_id),
-                            );
-                            let _ = write_event(&mut *writer.lock().await, &evt).await;
-                            return;
-                        }
-                        if !mgr.insert_unless_sealed(session_id.clone(), Arc::clone(&handle)) {
-                            // A handoff transfer is in flight: this session's
-                            // master fd was not in the snapshot, so it would
-                            // be silently lost when this daemon exits. Refuse
-                            // the spawn instead and tear the child down.
-                            drop(mgr);
-                            log::warn!(
-                                "[spawn] refusing session {}: handoff transfer in flight",
-                                session_id
-                            );
-                            let _ = handle.kill().await;
-                            let evt = error_event(
-                                Some(protocol::ErrorCode::PtySpawnFailed),
-                                format!(
-                                    "daemon handoff in progress; retry session {session_id} against the new daemon"
-                                ),
-                            );
-                            let _ = write_event(&mut *writer.lock().await, &evt).await;
-                            return;
-                        }
+                    if !mgr.insert_unless_sealed(session_id.clone(), Arc::clone(&handle)) {
+                        drop(mgr);
+                        log::warn!(
+                            "[spawn] refusing session {}: handoff transfer or teardown in flight",
+                            session_id
+                        );
+                        let _ = handle.kill().await;
+                        let evt = error_event(
+                            Some(protocol::ErrorCode::PtySpawnFailed),
+                            format!(
+                                "daemon handoff or session teardown in progress; retry session {session_id}"
+                            ),
+                        );
+                        let _ = write_event(&mut *writer.lock().await, &evt).await;
+                        return;
                     }
+                    drop(mgr);
 
+                    let (recovery_cols, recovery_rows) = seeded_snapshot
+                        .as_ref()
+                        .map(|snapshot| (snapshot.cols, snapshot.rows))
+                        .unwrap_or((cols, rows));
+                    let resume_seeded_snapshot = seeded_snapshot.is_some();
                     if let Err(error) = recovery_manager
-                        .start_session(&session_id, cols, rows, false)
+                        .start_session(
+                            &session_id,
+                            recovery_cols,
+                            recovery_rows,
+                            resume_seeded_snapshot,
+                        )
                         .await
                     {
                         log::warn!(
-                            "[recovery] failed to start mirrored session {}: {}",
+                            "[recovery] failed to start mirrored session {} (resume_seeded_snapshot={}): {}",
                             session_id,
+                            resume_seeded_snapshot,
                             error
                         );
                     }
@@ -958,7 +1012,7 @@ pub(crate) async fn handle_command(
             session_id,
             snapshot,
         } => {
-            let evt = match recovery_manager.seed_snapshot(
+            let evt = match recovery_manager.seed_snapshot_for_next_start(
                 &session_id,
                 &SeededRecoverySnapshot {
                     serialized: snapshot.vt,
@@ -967,6 +1021,8 @@ pub(crate) async fn handle_command(
                     cursor_row: snapshot.cursor_row,
                     cursor_col: snapshot.cursor_col,
                     cursor_visible: snapshot.cursor_visible,
+                    saved_at: snapshot.saved_at,
+                    sequence: snapshot.sequence,
                 },
             ) {
                 Ok(()) => Event::Ok,

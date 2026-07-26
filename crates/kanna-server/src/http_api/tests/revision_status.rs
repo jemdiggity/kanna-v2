@@ -215,6 +215,7 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-revision-branch-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -499,6 +500,7 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-revision-loop-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -806,6 +808,7 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-revision-title-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();

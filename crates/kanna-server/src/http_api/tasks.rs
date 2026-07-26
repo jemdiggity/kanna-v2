@@ -202,6 +202,11 @@ pub(super) async fn create_task_with_requested_id(
     if let Some(task_id) = requested_task_id.as_deref() {
         validate_requested_task_id(task_id)?;
     }
+    if let Some(snapshot) = payload.recovery_snapshot.as_ref() {
+        snapshot
+            .validate()
+            .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
+    }
 
     #[cfg(test)]
     if let Some(task_creator) = state.task_creator.clone() {
@@ -216,6 +221,10 @@ pub(super) async fn create_task_with_requested_id(
     enum PreparedCreateOutcome {
         Done(crate::mobile_api::CreateTaskResponse),
         DormantCreated(crate::mobile_api::CreateTaskResponse),
+        Repair {
+            existing: crate::mobile_api::CreateTaskResponse,
+            prepared: crate::task_creator::PreparedStageRerun,
+        },
         Spawn {
             prepared: crate::task_creator::PreparedTaskSpawn,
             resolved_blocker_ids: Vec<String>,
@@ -234,6 +243,37 @@ pub(super) async fn create_task_with_requested_id(
                 if let Some(existing) =
                     existing_create_task_response(&db, task_id, &payload.repo_id, &payload.prompt)?
                 {
+                    let existing_is_open = db
+                        .get_pipeline_item(task_id)
+                        .map_err(|e| db_write_error("db error", e))?
+                        .is_some_and(|item| item.closed_at.is_none());
+                    if existing_is_open
+                        && !db
+                            .has_durable_running_task_session(task_id)
+                            .map_err(|e| db_write_error("db error", e))?
+                    {
+                        let prepared = crate::task_creator::prepare_create_task_repair_for_api(
+                            &db,
+                            &state.config,
+                            task_id,
+                        )
+                        .and_then(|prepared| {
+                            prepared.map(Ok).unwrap_or_else(|| {
+                                crate::task_creator::prepare_rerun_stage_for_api(
+                                    &db,
+                                    &state.config,
+                                    task_id,
+                                )
+                            })
+                        })
+                        .map_err(|error| {
+                            (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("task spawn repair prepare failed: {error}"),
+                            )
+                        })?;
+                        return Ok(PreparedCreateOutcome::Repair { existing, prepared });
+                    }
                     return Ok(PreparedCreateOutcome::Done(existing));
                 }
             }
@@ -377,6 +417,31 @@ pub(super) async fn create_task_with_requested_id(
             state.publish_state_changed(StateChangeScope::Tasks);
             state.publish_state_changed(StateChangeScope::Blockers);
             return Ok(Json(created));
+        }
+        PreparedCreateOutcome::Repair { existing, prepared } => {
+            let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
+                .await
+                .map_err(|e| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("daemon error: {}", e),
+                    )
+                })?;
+            crate::task_creator::rerun_prepared_stage_for_api(
+                &state.config.db_path,
+                &mut daemon,
+                &state.session_replacements,
+                prepared,
+            )
+            .await
+            .map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("task spawn repair failed: {error}"),
+                )
+            })?;
+            state.publish_state_changed(StateChangeScope::Tasks);
+            return Ok(Json(existing));
         }
         PreparedCreateOutcome::Spawn {
             prepared,

@@ -36,7 +36,9 @@ import {
   insertTaskTransfer,
   listTaskTransfersForItem,
   getTaskTransfer,
+  markTaskTransferAwaitingAcknowledgment,
   markTaskTransferCompleted,
+  markTaskTransferImporting,
   markTaskTransferRejected,
   insertTaskTransferProvenance,
   getTaskTransferProvenance,
@@ -273,19 +275,35 @@ function createMockDb(): DbHandle & {
           string,
           string | null,
         ];
-        tables.task_transfer_provenance.push({
-          pipeline_item_id,
-          source_peer_id,
-          source_task_id,
-          source_machine_task_label,
-          imported_at: new Date().toISOString(),
-        });
+        if (!tables.task_transfer_provenance.some((row) => row.pipeline_item_id === pipeline_item_id)) {
+          tables.task_transfer_provenance.push({
+            pipeline_item_id,
+            source_peer_id,
+            source_task_id,
+            source_machine_task_label,
+            imported_at: new Date().toISOString(),
+          });
+        }
       } else if (q.startsWith("INSERT INTO TASK_TRANSFER")) {
-        const [id, direction, status, source_peer_id, target_peer_id, source_task_id, local_task_id, error, payload_json] =
+        const [
+          id,
+          direction,
+          status,
+          source_peer_id,
+          target_peer_id,
+          source_desktop_id,
+          target_desktop_id,
+          source_task_id,
+          local_task_id,
+          error,
+          payload_json,
+        ] =
           bindValues as [
             string,
             TaskTransfer["direction"],
             TaskTransfer["status"],
+            string | null,
+            string | null,
             string | null,
             string | null,
             string | null,
@@ -299,6 +317,8 @@ function createMockDb(): DbHandle & {
           status,
           source_peer_id,
           target_peer_id,
+          source_desktop_id,
+          target_desktop_id,
           source_task_id,
           local_task_id,
           started_at: new Date().toISOString(),
@@ -308,8 +328,18 @@ function createMockDb(): DbHandle & {
         });
       } else if (q.startsWith("UPDATE TASK_TRANSFER")) {
         const [firstValue, secondValue] = bindValues as [string, string];
-        const transfer = tables.task_transfer.find((row) => row.id === secondValue);
-        if (transfer && q.includes("STATUS = 'COMPLETED'")) {
+        const transferId = q.includes("STATUS = 'AWAITING_ACKNOWLEDGMENT'")
+          ? firstValue
+          : secondValue;
+        const transfer = tables.task_transfer.find((row) => row.id === transferId);
+        if (transfer && q.includes("STATUS = 'IMPORTING'")) {
+          transfer.status = "importing";
+          transfer.local_task_id = firstValue;
+          transfer.error = null;
+        } else if (transfer && q.includes("STATUS = 'AWAITING_ACKNOWLEDGMENT'")) {
+          transfer.status = "awaiting_acknowledgment";
+          transfer.error = null;
+        } else if (transfer && q.includes("STATUS = 'COMPLETED'")) {
           transfer.status = "completed";
           transfer.local_task_id = firstValue;
           transfer.completed_at = new Date().toISOString();
@@ -1328,6 +1358,8 @@ describe("task_transfer queries", () => {
       status: "completed",
       source_peer_id: "peer-alpha",
       target_peer_id: "peer-beta",
+      source_desktop_id: "desktop-alpha",
+      target_desktop_id: "desktop-beta",
       source_task_id: "task-source",
       local_task_id: "task-local",
       error: null,
@@ -1339,6 +1371,8 @@ describe("task_transfer queries", () => {
       status: "pending",
       source_peer_id: "peer-gamma",
       target_peer_id: "peer-delta",
+      source_desktop_id: null,
+      target_desktop_id: null,
       source_task_id: "task-older",
       local_task_id: "task-local",
       started_at: "2026-04-08T00:00:00.000Z",
@@ -1361,6 +1395,8 @@ describe("task_transfer queries", () => {
       source_peer_id: "peer-alpha",
       source_task_id: "task-source",
       target_peer_id: "peer-beta",
+      source_desktop_id: "desktop-alpha",
+      target_desktop_id: "desktop-beta",
       status: "completed",
     });
     expect(await getTaskTransferProvenance(db, "task-local")).toMatchObject({
@@ -1380,6 +1416,8 @@ describe("task_transfer queries", () => {
       status: "pending",
       source_peer_id: "peer-source",
       target_peer_id: "peer-target",
+      source_desktop_id: null,
+      target_desktop_id: null,
       source_task_id: "task-source",
       local_task_id: null,
       error: null,
@@ -1393,21 +1431,43 @@ describe("task_transfer queries", () => {
     expect(await getTaskTransfer(db, "missing-transfer")).toBeNull();
   });
 
-  it("markTaskTransferCompleted records completion state and local task id", async () => {
+  it("records the durable incoming handoff states and idempotent provenance", async () => {
     await insertTaskTransfer(db, {
       id: "transfer-1",
       direction: "incoming",
       status: "pending",
       source_peer_id: "peer-source",
       target_peer_id: "peer-target",
+      source_desktop_id: null,
+      target_desktop_id: null,
       source_task_id: "task-source",
       local_task_id: null,
       error: "pending",
       payload_json: "{}",
     });
 
-    await markTaskTransferCompleted(db, "transfer-1", "task-local");
+    await markTaskTransferImporting(db, "transfer-1", "task-local");
+    expect(await getTaskTransfer(db, "transfer-1")).toMatchObject({
+      status: "importing",
+      local_task_id: "task-local",
+    });
+    const provenance = {
+      pipeline_item_id: "task-local",
+      source_peer_id: "peer-source",
+      source_task_id: "task-source",
+      source_machine_task_label: "source-branch",
+    };
+    await insertTaskTransferProvenance(db, provenance);
+    await insertTaskTransferProvenance(db, provenance);
+    expect(db.tables.task_transfer_provenance).toHaveLength(1);
 
+    await markTaskTransferAwaitingAcknowledgment(db, "transfer-1", "task-local");
+    expect(await getTaskTransfer(db, "transfer-1")).toMatchObject({
+      status: "awaiting_acknowledgment",
+      local_task_id: "task-local",
+    });
+
+    await markTaskTransferCompleted(db, "transfer-1", "task-local");
     expect(await getTaskTransfer(db, "transfer-1")).toMatchObject({
       id: "transfer-1",
       status: "completed",
@@ -1423,6 +1483,8 @@ describe("task_transfer queries", () => {
       status: "pending",
       source_peer_id: "peer-source",
       target_peer_id: "peer-target",
+      source_desktop_id: null,
+      target_desktop_id: null,
       source_task_id: "task-source",
       local_task_id: null,
       error: null,

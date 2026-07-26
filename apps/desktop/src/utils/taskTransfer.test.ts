@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { OutgoingTransferPayload } from "./taskTransfer";
-import { resolveIncomingTransferBaseBranch } from "./taskTransfer";
+import {
+  buildOutgoingTransferPayload,
+  parseTaskPullRequestedEvent,
+  resolveIncomingTransferBaseBranch,
+} from "./taskTransfer";
 
 function buildPayload(overrides: Partial<OutgoingTransferPayload> = {}): OutgoingTransferPayload {
   const {
@@ -11,8 +15,11 @@ function buildPayload(overrides: Partial<OutgoingTransferPayload> = {}): Outgoin
 
   return {
     target_peer_id: "peer-target",
+    target_desktop_id: null,
     task: {
+      cloud_task_id: "task-source",
       source_peer_id: "peer-source",
+      source_desktop_id: null,
       source_task_id: "task-source",
       prompt: "Fix handoff",
       stage: "in progress",
@@ -92,5 +99,89 @@ describe("resolveIncomingTransferBaseBranch", () => {
     });
 
     expect(resolveIncomingTransferBaseBranch(payload)).toBe("origin/main");
+  });
+});
+
+describe("buildOutgoingTransferPayload", () => {
+  it("preserves stable cloud identity and authenticated desktop ids", () => {
+    const payload = buildOutgoingTransferPayload({
+      sourcePeerId: "peer-a",
+      sourceDesktopId: "desktop-a",
+      sourceTaskId: "local-a",
+      targetPeerId: "peer-b",
+      targetDesktopId: "desktop-b",
+      item: {
+        id: "local-a",
+        cloud_task_id: "cloud-stable",
+        prompt: "Transfer ownership",
+        stage: "in progress",
+        branch: "task-local-a",
+        pipeline: "default",
+        display_name: null,
+        base_ref: "main",
+        agent_type: "pty",
+        agent_provider: "claude",
+        agent_session_id: null,
+      },
+      repoRemoteUrl: null,
+      recovery: null,
+      targetHasRepo: true,
+      bundle: null,
+    });
+
+    expect(payload.task.cloud_task_id).toBe("cloud-stable");
+    expect(payload.task.source_desktop_id).toBe("desktop-a");
+    expect(payload.target_desktop_id).toBe("desktop-b");
+  });
+
+  it("falls back to the local task id and leaves LAN desktop ids null", () => {
+    const payload = buildOutgoingTransferPayload({
+      sourcePeerId: "peer-a",
+      sourceTaskId: "local-a",
+      targetPeerId: "peer-b",
+      item: {
+        id: "local-a",
+        cloud_task_id: null,
+        prompt: "Transfer ownership",
+        stage: "in progress",
+        branch: "task-local-a",
+        pipeline: "default",
+        display_name: null,
+        base_ref: "main",
+        agent_type: "pty",
+        agent_provider: "claude",
+        agent_session_id: null,
+      },
+      repoRemoteUrl: null,
+      recovery: null,
+      targetHasRepo: true,
+      bundle: null,
+    });
+
+    expect(payload.task.cloud_task_id).toBe("local-a");
+    expect(payload.task.source_desktop_id).toBeNull();
+    expect(payload.target_desktop_id).toBeNull();
+  });
+});
+
+describe("parseTaskPullRequestedEvent", () => {
+  it("parses snake-case sidecar event payloads", () => {
+    expect(parseTaskPullRequestedEvent({
+      type: "task_pull_requested",
+      request_id: "pull-1",
+      requester_peer_id: "peer-destination",
+      source_task_id: "task-source",
+    })).toEqual({
+      requestId: "pull-1",
+      requesterPeerId: "peer-destination",
+      sourceTaskId: "task-source",
+    });
+  });
+
+  it("rejects incomplete event payloads", () => {
+    expect(() => parseTaskPullRequestedEvent({
+      request_id: "pull-1",
+      requester_peer_id: "peer-destination",
+    })).toThrow("source task id");
   });
 });

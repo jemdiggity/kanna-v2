@@ -355,6 +355,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: format!("/tmp/kanna-pairings-command-close-{unique}.json"),
         }
     }

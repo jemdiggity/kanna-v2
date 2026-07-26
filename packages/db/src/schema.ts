@@ -17,6 +17,7 @@ export interface Repo {
 
 export interface PipelineItem {
   id: string;
+  cloud_task_id?: string | null;
   repo_id: string;
   issue_number: number | null;
   issue_title: string | null;
@@ -112,9 +113,11 @@ export interface TrustedPeer {
 export interface TaskTransfer {
   id: string;
   direction: "incoming" | "outgoing";
-  status: "pending" | "streaming" | "completed" | "failed" | "rejected";
+  status: "pending" | "streaming" | "importing" | "awaiting_acknowledgment" | "completed" | "failed" | "rejected";
   source_peer_id: string | null;
   target_peer_id: string | null;
+  source_desktop_id: string | null;
+  target_desktop_id: string | null;
   source_task_id: string | null;
   local_task_id: string | null;
   started_at: string;

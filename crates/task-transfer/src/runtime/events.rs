@@ -2,6 +2,7 @@ use crate::crypto::CryptoError;
 use crate::peer_store::PeerStoreError;
 use crate::protocol::{DiscoveredPeer, PeerTerminalEvent};
 use crate::registry::RegistryError;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -18,7 +19,7 @@ pub struct FinalizedOutgoingTransfer {
     pub finalized_cleanly: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncomingTransferEvent {
     pub transfer_id: String,
     pub source_peer_id: String,
@@ -68,10 +69,18 @@ pub struct PairingResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskPullRequestedEvent {
+    pub request_id: String,
+    pub requester_peer_id: String,
+    pub source_task_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
     PairingStarted(PairingStartedEvent),
     PairingRequested(PairingRequestedEvent),
     PairingCompleted(PairingCompletedEvent),
+    TaskPullRequested(TaskPullRequestedEvent),
     IncomingTransferRequest(IncomingTransferEvent),
     OutgoingTransferCommitted(OutgoingTransferCommittedEvent),
     OutgoingTransferFinalizationRequested(OutgoingTransferFinalizationRequestedEvent),

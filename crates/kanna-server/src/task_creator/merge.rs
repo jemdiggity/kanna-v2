@@ -71,6 +71,7 @@ fn build_merge_task_request() -> Result<TaskCreationRequest, String> {
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
     Ok(TaskCreationRequest {
         requested_task_id: None,
+        create_intent_json: None,
         task_prompt: String::new(),
         display_name: Some("Merge Master".to_string()),
         pipeline_name: Some(pipeline_name),
@@ -92,6 +93,7 @@ fn build_merge_task_request() -> Result<TaskCreationRequest, String> {
         setup_cmds: Vec::new(),
         task_template: None,
         resume_session_id: None,
+        recovery_snapshot: None,
         notify_task_id: None,
         parent_task_id: None,
     })

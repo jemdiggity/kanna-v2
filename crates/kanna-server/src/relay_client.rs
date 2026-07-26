@@ -10,6 +10,14 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 pub type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 pub type WsStream = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TunnelService {
+    #[default]
+    Ksp,
+    TaskTransfer,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RelayId {
@@ -104,6 +112,8 @@ pub enum RelayMessage {
         desktop_id: String,
         #[serde(rename = "tunnelId")]
         tunnel_id: String,
+        #[serde(default)]
+        service: TunnelService,
     },
     #[serde(rename = "tunnel_ready")]
     TunnelReady {
@@ -111,6 +121,8 @@ pub enum RelayMessage {
         desktop_id: String,
         #[serde(rename = "tunnelId")]
         tunnel_id: String,
+        #[serde(default)]
+        service: TunnelService,
     },
 }
 
@@ -182,6 +194,7 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
+            transfer_port: 4455,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         }
     }
@@ -254,6 +267,44 @@ mod tests {
         assert_eq!(id, "task-snapshot-9");
         assert!(!ok);
         assert_eq!(error.as_deref(), Some("credential revoked"));
+    }
+
+    #[test]
+    fn tunnel_establish_deserializes_task_transfer_service() {
+        let message: super::RelayMessage = serde_json::from_value(serde_json::json!({
+            "type": "tunnel_establish",
+            "desktopId": "desktop-1",
+            "tunnelId": "tunnel-transfer-1",
+            "service": "task-transfer"
+        }))
+        .expect("task-transfer tunnel should deserialize");
+
+        let super::RelayMessage::TunnelEstablish {
+            desktop_id,
+            tunnel_id,
+            service,
+        } = message
+        else {
+            panic!("expected tunnel establish");
+        };
+        assert_eq!(desktop_id, "desktop-1");
+        assert_eq!(tunnel_id, "tunnel-transfer-1");
+        assert_eq!(service, super::TunnelService::TaskTransfer);
+    }
+
+    #[test]
+    fn tunnel_establish_defaults_missing_service_to_ksp() {
+        let message: super::RelayMessage = serde_json::from_value(serde_json::json!({
+            "type": "tunnel_establish",
+            "desktopId": "desktop-1",
+            "tunnelId": "tunnel-ksp-1"
+        }))
+        .expect("legacy KSP tunnel should deserialize");
+
+        let super::RelayMessage::TunnelEstablish { service, .. } = message else {
+            panic!("expected tunnel establish");
+        };
+        assert_eq!(service, super::TunnelService::Ksp);
     }
 
     #[test]

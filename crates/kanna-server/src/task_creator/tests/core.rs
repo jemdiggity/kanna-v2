@@ -56,6 +56,7 @@ fn repo_command_template_identity_persists_the_selected_teardown_for_close() {
             setup_cmds: launch.setup_cmds,
             task_template: launch.task_template,
             resume_session_id: None,
+            recovery_snapshot: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -80,6 +81,234 @@ fn repo_command_template_identity_persists_the_selected_teardown_for_close() {
     };
     assert!(command.contains("SELECTED_TEMPLATE_TEARDOWN"), "{command}");
     assert!(!command.contains("WRONG_TEMPLATE_TEARDOWN"), "{command}");
+
+    let _ = std::fs::remove_dir_all(repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+fn seed_closed_reopen_task(label: &str) -> (std::path::PathBuf, Config) {
+    let repo_root = init_git_repo(label);
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        r#"{"ports":{"KANNA_DEV_PORT":1420}}"#,
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish reopen port config");
+
+    let config = test_config(label);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-closed",
+        "repo-1",
+        "task prompt",
+        Some("Task"),
+        "in progress",
+        "2026-07-25 06:00:00",
+    )
+    .unwrap();
+    db.set_test_pipeline_item_closed_at("task-closed", "2026-07-25 07:00:00")
+        .unwrap();
+    (repo_root, config)
+}
+
+#[test]
+fn reopen_failure_rolls_back_lifecycle_port_metadata_and_claims_exactly() {
+    let (repo_root, config) = seed_closed_reopen_task("reopen-atomic-rollback");
+    let db = Db::open(&config.db_path).unwrap();
+    db.update_pipeline_item_ports(
+        "task-closed",
+        Some(4101),
+        Some(r#"{"ORIGINAL_PORT":"4101"}"#),
+    )
+    .unwrap();
+    assert!(db
+        .claim_task_port("task-closed", "ORIGINAL_PORT", 4101)
+        .unwrap());
+    drop(db);
+
+    let raw = Connection::open(&config.db_path).unwrap();
+    raw.execute_batch(
+        r#"
+        CREATE TRIGGER inject_reopen_port_persistence_failure
+        BEFORE UPDATE OF port_env ON pipeline_item
+        WHEN NEW.id = 'task-closed' AND NEW.closed_at IS NULL
+        BEGIN
+          SELECT RAISE(ABORT, 'injected reopen persistence failure');
+        END;
+        "#,
+    )
+    .unwrap();
+    let original: (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    ) = raw
+        .query_row(
+            "SELECT closed_at, teardown_started_at, updated_at, port_offset, port_env
+             FROM pipeline_item WHERE id = 'task-closed'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    drop(raw);
+
+    let db = Db::open(&config.db_path).unwrap();
+    let error = reopen_task_for_api(&db, "task-closed").unwrap_err();
+    assert!(
+        matches!(error, ReopenTaskError::Internal(ref message) if message.contains("injected reopen persistence failure")),
+        "unexpected reopen error: {error:?}"
+    );
+    let current: (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    ) = Connection::open(&config.db_path)
+        .unwrap()
+        .query_row(
+            "SELECT closed_at, teardown_started_at, updated_at, port_offset, port_env
+             FROM pipeline_item WHERE id = 'task-closed'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        current, original,
+        "failed reopen must restore exact row state"
+    );
+    assert_eq!(
+        db.list_task_ports_for_item("task-closed").unwrap(),
+        HashMap::from([("ORIGINAL_PORT".to_string(), 4101)]),
+        "failed reopen must restore the exact prior claims"
+    );
+
+    let _ = std::fs::remove_dir_all(repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+#[test]
+fn reopen_retry_of_open_task_is_a_guarded_noop() {
+    let (repo_root, config) = seed_closed_reopen_task("reopen-atomic-retry");
+    let db = Db::open(&config.db_path).unwrap();
+    assert_eq!(
+        reopen_task_for_api(&db, "task-closed").unwrap(),
+        "task-closed"
+    );
+    let original_item = db.get_pipeline_item("task-closed").unwrap().unwrap();
+    let original_metadata = db.get_test_pipeline_item_ports("task-closed").unwrap();
+    let original_claims = db.list_task_ports_for_item("task-closed").unwrap();
+    let hook_called = std::sync::atomic::AtomicBool::new(false);
+
+    let retried = reopen_task_for_api_with_test_hook(&db, "task-closed", || {
+        hook_called.store(true, std::sync::atomic::Ordering::SeqCst);
+        Err("already-open retry reached the reopen mutation".to_string())
+    });
+
+    assert_eq!(retried.unwrap(), "task-closed");
+    assert!(!hook_called.load(std::sync::atomic::Ordering::SeqCst));
+    let current_item = db.get_pipeline_item("task-closed").unwrap().unwrap();
+    assert_eq!(current_item.closed_at, original_item.closed_at);
+    assert_eq!(current_item.updated_at, original_item.updated_at);
+    assert_eq!(
+        db.get_test_pipeline_item_ports("task-closed").unwrap(),
+        original_metadata
+    );
+    assert_eq!(
+        db.list_task_ports_for_item("task-closed").unwrap(),
+        original_claims
+    );
+
+    let _ = std::fs::remove_dir_all(repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+#[test]
+fn concurrent_close_cannot_observe_or_interleave_with_partial_reopen() {
+    let (repo_root, config) = seed_closed_reopen_task("reopen-atomic-concurrent-close");
+    let reopen_db = Db::open(&config.db_path).unwrap();
+    let observer_db = Db::open(&config.db_path).unwrap();
+    let close_db = Db::open(&config.db_path).unwrap();
+    let (start_close_tx, start_close_rx) = std::sync::mpsc::channel();
+    let (close_attempted_tx, close_attempted_rx) = std::sync::mpsc::channel();
+    let (close_done_tx, close_done_rx) = std::sync::mpsc::channel();
+    let close_thread = std::thread::spawn(move || {
+        start_close_rx.recv().unwrap();
+        close_attempted_tx.send(()).unwrap();
+        let result = close_db.close_pipeline_item("task-closed");
+        close_done_tx.send(()).unwrap();
+        result
+    });
+    let partial_reopen_was_visible = std::sync::atomic::AtomicBool::new(false);
+    let close_interleaved = std::sync::atomic::AtomicBool::new(false);
+
+    let reopened = reopen_task_for_api_with_test_hook(&reopen_db, "task-closed", || {
+        let visible_item = observer_db
+            .get_pipeline_item("task-closed")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "task disappeared during reopen".to_string())?;
+        partial_reopen_was_visible.store(
+            visible_item.closed_at.is_none(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        start_close_tx.send(()).map_err(|error| error.to_string())?;
+        close_attempted_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .map_err(|error| error.to_string())?;
+        close_interleaved.store(
+            close_done_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_ok(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        Ok(())
+    });
+
+    assert_eq!(reopened.unwrap(), "task-closed");
+    close_thread.join().unwrap().unwrap();
+    assert!(
+        !partial_reopen_was_visible.load(std::sync::atomic::Ordering::SeqCst),
+        "other connections must keep seeing the task as closed until reopen commits"
+    );
+    assert!(
+        !close_interleaved.load(std::sync::atomic::Ordering::SeqCst),
+        "a concurrent close must block behind the complete reopen transaction"
+    );
+    let db = Db::open(&config.db_path).unwrap();
+    assert!(
+        db.get_pipeline_item("task-closed")
+            .unwrap()
+            .unwrap()
+            .closed_at
+            .is_some(),
+        "the serialized close should win after reopen commits"
+    );
+    assert!(
+        db.list_task_ports_for_item("task-closed")
+            .unwrap()
+            .is_empty(),
+        "the serialized close must release every port claimed by reopen"
+    );
 
     let _ = std::fs::remove_dir_all(repo_root);
     let _ = std::fs::remove_file(config.db_path);
@@ -397,6 +626,7 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -2144,6 +2374,7 @@ fn prepare_task_rejects_unsupported_headless_provider_before_persisting_state() 
                 setup_cmds: None,
                 task_template: None,
                 resume_session_id: None,
+                recovery_snapshot: None,
                 blocker_task_ids: None,
                 notify_task_id: None,
                 parent_task_id: None,
@@ -2518,6 +2749,7 @@ fn prepare_task_defaults_to_pty_session_for_claude_and_codex() {
                 setup_cmds: None,
                 task_template: None,
                 resume_session_id: None,
+                recovery_snapshot: None,
                 notify_task_id: None,
                 parent_task_id: None,
                 blocker_task_ids: None,
@@ -2601,6 +2833,7 @@ fn prepare_task_uses_requested_initial_terminal_geometry() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -2652,6 +2885,7 @@ fn prepare_task_uses_default_initial_terminal_geometry_for_oversized_request() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -2712,6 +2946,7 @@ fn prepare_task_uses_create_request_agent_selector() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -2783,6 +3018,7 @@ fn prepare_task_binds_specialty_agent_on_specialty_review_pipeline() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: Some("parent-1".to_string()),
             parent_task_id: Some("parent-1".to_string()),
             blocker_task_ids: None,
@@ -2842,6 +3078,7 @@ fn prepare_task_persists_create_spawn_options_and_custom_setup() {
             ]),
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -2921,6 +3158,7 @@ fn prepare_task_for_api_resumes_requested_claude_session() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: Some(resume_session_id.to_string()),
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -2976,6 +3214,7 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3031,6 +3270,7 @@ fn prepare_task_for_api_uses_requested_task_id() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3076,6 +3316,7 @@ fn create_dormant_task_for_api_uses_requested_task_id() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3132,6 +3373,7 @@ fn prepare_task_for_api_classifies_requested_task_id_primary_key_collision() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3191,6 +3433,7 @@ fn create_dormant_task_for_api_classifies_requested_task_id_primary_key_collisio
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3245,6 +3488,7 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3317,6 +3561,7 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3377,6 +3622,7 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3449,6 +3695,7 @@ fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3525,6 +3772,7 @@ fn prepare_task_stores_parent_task_id_for_subtasks() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: Some("parent-1".to_string()),
@@ -3574,6 +3822,7 @@ fn prepare_task_rejects_missing_parent_task() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: Some("missing-parent".to_string()),
@@ -3673,6 +3922,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -3712,6 +3962,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             blocker_task_ids: None,
             notify_task_id: None,
 
@@ -3797,6 +4048,7 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
         environment: "development".to_string(),
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -3831,6 +4083,7 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             blocker_task_ids: None,
             notify_task_id: None,
 
@@ -3869,6 +4122,7 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
             setup_cmds: None,
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             blocker_task_ids: None,
             notify_task_id: None,
 
