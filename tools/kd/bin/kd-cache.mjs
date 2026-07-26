@@ -5,6 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -12,17 +13,23 @@ import {
   statSync,
   writeFileSync
 } from "node:fs";
-import { homedir } from "node:os";
-import { join, relative, resolve, sep } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, parse, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 export const KD_CACHE_SCHEMA = 1;
 export const KD_CACHE_MAX_ENTRIES = 20;
 export const KD_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 export const KD_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+export const KD_CACHE_ROOT_MARKER = ".kanna-kd-cache-root.json";
 export const KD_ENTRYPOINTS = Object.freeze({
   kd: "bin/kd.js",
   "kd-mcp": "bin/kd-mcp.js"
+});
+const KD_IDENTITY_PATTERN = /^[0-9a-f]{64}$/;
+const KD_CACHE_ROOT_MARKER_VALUE = Object.freeze({
+  kind: "kanna-kd-cache",
+  schema: KD_CACHE_SCHEMA
 });
 
 function errorMessage(error) {
@@ -266,24 +273,160 @@ export function writeKdManifest(outputDir, identity, runtime) {
   );
 }
 
-export function validateKdInstallation(entryDir, identity, runtime) {
+function readKdManifest(entryDir) {
   try {
-    const manifest = JSON.parse(
-      readFileSync(join(entryDir, "manifest.json"), "utf8")
-    );
-    return (
-      manifest.schema === KD_CACHE_SCHEMA &&
-      manifest.identity === identity &&
-      JSON.stringify(manifest.runtime) === JSON.stringify(runtime) &&
-      Object.entries(KD_ENTRYPOINTS).every(
-        ([name, path]) =>
-          manifest.entrypoints?.[name] === path &&
-          statSync(join(entryDir, path)).isFile()
-      )
+    return JSON.parse(readFileSync(join(entryDir, "manifest.json"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function validateKdInstallationOwnership(entryDir, identity) {
+  const manifest = readKdManifest(entryDir);
+  if (
+    !manifest ||
+    manifest.schema !== KD_CACHE_SCHEMA ||
+    manifest.identity !== identity
+  ) {
+    return false;
+  }
+  try {
+    return Object.entries(KD_ENTRYPOINTS).every(
+      ([name, path]) =>
+        manifest.entrypoints?.[name] === path &&
+        statSync(join(entryDir, path)).isFile()
     );
   } catch {
     return false;
   }
+}
+
+export function validateKdInstallation(entryDir, identity, runtime) {
+  const manifest = readKdManifest(entryDir);
+  return (
+    validateKdInstallationOwnership(entryDir, identity) &&
+    JSON.stringify(manifest.runtime) === JSON.stringify(runtime)
+  );
+}
+
+function canonicalBoundary(path) {
+  const resolvedPath = resolve(path);
+  try {
+    return realpathSync(resolvedPath);
+  } catch {
+    return resolvedPath;
+  }
+}
+
+function isRecognizedLegacyCacheEntry(cacheRoot, entry) {
+  if (entry.name === KD_CACHE_ROOT_MARKER) {
+    return true;
+  }
+  if (entry.name.startsWith(".")) {
+    return (
+      entry.name === ".reclamation.guard" ||
+      /^\.[0-9a-f]{64}\.(?:used|lock|lease-.+)$/.test(entry.name)
+    );
+  }
+  return (
+    entry.isDirectory() &&
+    KD_IDENTITY_PATTERN.test(entry.name) &&
+    validateKdInstallationOwnership(join(cacheRoot, entry.name), entry.name)
+  );
+}
+
+function validateKdCacheRootMarker(markerPath, readMarker = readFileSync) {
+  let marker;
+  try {
+    marker = JSON.parse(readMarker(markerPath, "utf8"));
+  } catch {
+    throw new Error(`Kd cache root marker is invalid: ${markerPath}`);
+  }
+  if (
+    marker.kind !== KD_CACHE_ROOT_MARKER_VALUE.kind ||
+    marker.schema !== KD_CACHE_ROOT_MARKER_VALUE.schema
+  ) {
+    throw new Error(`Kd cache root marker is invalid: ${markerPath}`);
+  }
+}
+
+export function initializeKdCacheRoot({
+  cacheRoot,
+  home = homedir(),
+  tempRoot = tmpdir(),
+  allowLegacyAdoption = false,
+  writeMarker = writeFileSync,
+  readMarker = readFileSync,
+  waitForMarkerPublication = (delayMs) => {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+  }
+}) {
+  const resolvedRoot = resolve(cacheRoot);
+  const unsafeRoots = new Set([
+    parse(resolvedRoot).root,
+    canonicalBoundary(home),
+    canonicalBoundary(tempRoot)
+  ]);
+  if (unsafeRoots.has(canonicalBoundary(resolvedRoot))) {
+    throw new Error(`Unsafe kd cache root: ${resolvedRoot}`);
+  }
+  if (existsSync(resolvedRoot) && lstatSync(resolvedRoot).isSymbolicLink()) {
+    throw new Error(`Unsafe kd cache root symlink: ${resolvedRoot}`);
+  }
+  mkdirSync(resolvedRoot, { recursive: true });
+  const canonicalRoot = realpathSync(resolvedRoot);
+  if (unsafeRoots.has(canonicalRoot)) {
+    throw new Error(`Unsafe kd cache root: ${canonicalRoot}`);
+  }
+
+  const markerPath = join(resolvedRoot, KD_CACHE_ROOT_MARKER);
+  if (existsSync(markerPath)) {
+    validateKdCacheRootMarker(markerPath, readMarker);
+    return resolvedRoot;
+  }
+
+  const entries = readdirSync(resolvedRoot, { withFileTypes: true });
+  if (
+    entries.length > 0 &&
+    !(
+      allowLegacyAdoption &&
+      entries.every((entry) => isRecognizedLegacyCacheEntry(resolvedRoot, entry))
+    )
+  ) {
+    throw new Error(`Cache root is not owned by kd: ${canonicalRoot}`);
+  }
+  try {
+    writeMarker(
+      markerPath,
+      `${JSON.stringify(KD_CACHE_ROOT_MARKER_VALUE)}\n`,
+      { flag: "wx", mode: 0o600 }
+    );
+  } catch (error) {
+    if (
+      !error ||
+      typeof error !== "object" ||
+      error.code !== "EEXIST"
+    ) {
+      throw error;
+    }
+    let markerError;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        validateKdCacheRootMarker(markerPath, readMarker);
+        markerError = undefined;
+        break;
+      } catch (validationError) {
+        markerError = validationError;
+        if (attempt < 19) {
+          waitForMarkerPublication(5);
+        }
+      }
+    }
+    if (markerError) {
+      throw markerError;
+    }
+  }
+  return resolvedRoot;
 }
 
 function kdUseMarkerPath(cacheRoot, identity) {
@@ -299,7 +442,7 @@ export function createKdInstallationLease({
   if (!Number.isSafeInteger(pid) || pid <= 0) {
     throw new Error(`kd installation lease requires a positive pid, got ${pid}`);
   }
-  mkdirSync(cacheRoot, { recursive: true });
+  cacheRoot = initializeKdCacheRoot({ cacheRoot });
   const releaseGuard = acquireCacheReclamationGuard({
     cacheRoot,
     isProcessAlive: defaultIsProcessAlive
@@ -371,11 +514,14 @@ export function pruneKdInstallations({
   maxEntries = KD_CACHE_MAX_ENTRIES,
   maxBytes = KD_CACHE_MAX_BYTES,
   maxAgeMs = KD_CACHE_MAX_AGE_MS,
-  isProcessAlive = defaultIsProcessAlive
+  isProcessAlive = defaultIsProcessAlive,
+  home = homedir(),
+  tempRoot = tmpdir()
 }) {
   if (!existsSync(cacheRoot)) {
     return { removedIdentities: [], retainedEntries: 0, retainedBytes: 0 };
   }
+  cacheRoot = initializeKdCacheRoot({ cacheRoot, home, tempRoot });
   const releaseGuard = acquireCacheReclamationGuard({
     cacheRoot,
     isProcessAlive
@@ -430,7 +576,11 @@ function pruneKdInstallationsLocked({
   }
 
   let entries = readdirSync(cacheRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+    .filter((entry) =>
+      entry.isDirectory() &&
+      KD_IDENTITY_PATTERN.test(entry.name) &&
+      validateKdInstallationOwnership(join(cacheRoot, entry.name), entry.name)
+    )
     .map((entry) => {
       const path = join(cacheRoot, entry.name);
       return {
@@ -724,21 +874,10 @@ export async function ensureKdInstallation({
     throw new Error(`Unknown kd entrypoint: ${entrypoint}`);
   }
 
+  cacheRoot = initializeKdCacheRoot({ cacheRoot });
   const entryRoot = join(cacheRoot, identity);
   if (validateKdInstallation(entryRoot, identity, runtime)) {
     return join(entryRoot, entrypointPath);
-  }
-
-  try {
-    mkdirSync(cacheRoot, { recursive: true });
-  } catch (error) {
-    throw installationFailure({
-      identity,
-      cachePath: entryRoot,
-      phase: "cache-root",
-      error,
-      onCacheEvent
-    });
   }
 
   let lock;

@@ -17,6 +17,10 @@ const DEFAULT_MAX_APPLIED_RECEIPTS: usize = 4096;
 // Incoming reservations are active work until destination acknowledgment
 // completes. Bound admission rather than evicting committed user-pending work.
 const DEFAULT_MAX_INCOMING_RESERVATIONS: usize = 256;
+const DEFAULT_MAX_PEER_REQUESTS: usize = 32;
+const DEFAULT_MAX_MARK_READ_PEER_REQUESTS: usize = 4;
+const DEFAULT_TERMINAL_OBSERVER_TOMBSTONE_TTL: Duration = Duration::from_secs(5 * 60);
+const DEFAULT_MAX_TERMINAL_OBSERVER_TOMBSTONES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoveryMode {
@@ -42,6 +46,10 @@ pub struct RuntimeConfig {
     pub(super) max_applied_receipts: usize,
     pub(super) max_incoming_reservations: usize,
     pub(super) mark_read_timeout: Duration,
+    pub(super) max_peer_requests: usize,
+    pub(super) max_mark_read_peer_requests: usize,
+    pub(super) terminal_observer_tombstone_ttl: Duration,
+    pub(super) max_terminal_observer_tombstones: usize,
     pub(super) peer_discovery_delays: Arc<Mutex<VecDeque<Duration>>>,
 }
 
@@ -69,6 +77,10 @@ impl RuntimeConfig {
             max_applied_receipts: DEFAULT_MAX_APPLIED_RECEIPTS,
             max_incoming_reservations: DEFAULT_MAX_INCOMING_RESERVATIONS,
             mark_read_timeout: Duration::from_secs(2),
+            max_peer_requests: DEFAULT_MAX_PEER_REQUESTS,
+            max_mark_read_peer_requests: DEFAULT_MAX_MARK_READ_PEER_REQUESTS,
+            terminal_observer_tombstone_ttl: DEFAULT_TERMINAL_OBSERVER_TOMBSTONE_TTL,
+            max_terminal_observer_tombstones: DEFAULT_MAX_TERMINAL_OBSERVER_TOMBSTONES,
             peer_discovery_delays: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
@@ -115,6 +127,26 @@ impl RuntimeConfig {
 
     pub fn with_mark_read_timeout(mut self, mark_read_timeout: Duration) -> Self {
         self.mark_read_timeout = mark_read_timeout;
+        self
+    }
+
+    pub fn with_peer_request_limits(
+        mut self,
+        max_peer_requests: usize,
+        max_mark_read_peer_requests: usize,
+    ) -> Self {
+        self.max_peer_requests = max_peer_requests.max(1);
+        self.max_mark_read_peer_requests = max_mark_read_peer_requests.max(1);
+        self
+    }
+
+    pub fn with_terminal_observer_tombstone_policy(
+        mut self,
+        ttl: Duration,
+        maximum: usize,
+    ) -> Self {
+        self.terminal_observer_tombstone_ttl = ttl;
+        self.max_terminal_observer_tombstones = maximum.max(1);
         self
     }
 
@@ -219,6 +251,10 @@ impl RuntimeConfig {
             max_applied_receipts: DEFAULT_MAX_APPLIED_RECEIPTS,
             max_incoming_reservations: DEFAULT_MAX_INCOMING_RESERVATIONS,
             mark_read_timeout: Duration::from_secs(2),
+            max_peer_requests: DEFAULT_MAX_PEER_REQUESTS,
+            max_mark_read_peer_requests: DEFAULT_MAX_MARK_READ_PEER_REQUESTS,
+            terminal_observer_tombstone_ttl: DEFAULT_TERMINAL_OBSERVER_TOMBSTONE_TTL,
+            max_terminal_observer_tombstones: DEFAULT_MAX_TERMINAL_OBSERVER_TOMBSTONES,
             peer_discovery_delays: Arc::new(Mutex::new(VecDeque::new())),
         })
     }

@@ -68,6 +68,8 @@ interface RemoteStageAdvancePending {
   expectedTransitionRevision: string | null;
   sourceGeneration: number;
   sourceKind: "cloud" | "lan";
+  sourceRepoId: string;
+  sourceTaskId: string;
   ownerDesktopId: string;
   ownerTaskId: string;
 }
@@ -722,23 +724,34 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       return;
     }
     if (workspaceTask.item.has_running_post) return;
+    const sourceKind = workspaceTask.terminal.kind === "lan" ? "lan" : "cloud";
+    const selectedSource = workspaceTask.sources.find((source) =>
+      source.kind === sourceKind
+      && source.terminalRef?.ownerDesktopId === remoteRef.ownerDesktopId
+      && source.terminalRef.ownerLocalTaskId === remoteRef.ownerLocalTaskId
+    );
+    if (!selectedSource) {
+      toast.error("Remote task source is no longer authoritative.");
+      return;
+    }
     const expectedTransitionRevision =
-      typeof workspaceTask.item.transition_revision === "string"
-      && workspaceTask.item.transition_revision.trim().length > 0
-        ? workspaceTask.item.transition_revision.trim()
+      typeof selectedSource.transitionRevision === "string"
+      && selectedSource.transitionRevision.trim().length > 0
+        ? selectedSource.transitionRevision.trim()
         : null;
 
     const requestKey = JSON.stringify([
       remoteRef.ownerDesktopId,
       remoteRef.ownerLocalTaskId,
     ]);
-    const sourceKind = workspaceTask.terminal.kind === "lan" ? "lan" : "cloud";
     const pending: RemoteStageAdvancePending = {
       expectedTransitionRevision,
       sourceGeneration: sourceKind === "cloud"
         ? cloudAuthoritativeGeneration.value
         : lanAuthoritativeGeneration.value,
       sourceKind,
+      sourceRepoId: selectedSource.repoId,
+      sourceTaskId: selectedSource.taskId,
       ownerDesktopId: remoteRef.ownerDesktopId,
       ownerTaskId: remoteRef.ownerLocalTaskId,
     };
@@ -760,6 +773,38 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         return;
       }
       if (desktopCloudWorkspaceDisposed) return;
+      const authoritativeGeneration = pending.sourceKind === "cloud"
+        ? cloudAuthoritativeGeneration.value
+        : lanAuthoritativeGeneration.value;
+      const authoritativeTask = workspace.value.tasks.find((candidate) =>
+        candidate.owner.kind === "remote"
+        && candidate.sources.some((source) =>
+          source.kind === pending.sourceKind
+          && source.repoId === pending.sourceRepoId
+          && source.taskId === pending.sourceTaskId
+          && source.terminalRef?.ownerDesktopId === pending.ownerDesktopId
+          && source.terminalRef.ownerLocalTaskId === pending.ownerTaskId
+        ),
+      );
+      const authoritativeSource = authoritativeTask?.sources.find((source) =>
+        source.kind === pending.sourceKind
+        && source.repoId === pending.sourceRepoId
+        && source.taskId === pending.sourceTaskId
+        && source.terminalRef?.ownerDesktopId === pending.ownerDesktopId
+        && source.terminalRef.ownerLocalTaskId === pending.ownerTaskId
+      );
+      const authoritativeRevision =
+        typeof authoritativeSource?.transitionRevision === "string"
+        && authoritativeSource.transitionRevision.trim().length > 0
+          ? authoritativeSource.transitionRevision.trim()
+          : null;
+      if (
+        remoteStageAdvancesPending.get(requestKey) !== pending
+        || authoritativeGeneration !== pending.sourceGeneration
+        || !authoritativeTask
+        || !authoritativeSource
+        || authoritativeRevision !== pending.expectedTransitionRevision
+      ) return;
       await client.advanceStage({
         desktopId: remoteRef.ownerDesktopId,
         taskId: remoteRef.ownerLocalTaskId,

@@ -1450,6 +1450,75 @@ async fn delayed_observe_cannot_install_after_unobserve() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closed_observer_tombstones_are_bounded_without_losing_recent_race_protection() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let target_identity = TransferIdentity::generate();
+    let target_public_key = public_key_to_string(&target_identity.public_key);
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            endpoint: format!("127.0.0.1:{port}"),
+            pid: std::process::id(),
+            public_key: target_public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    PeerStore::new(trusted_peer_store_path(temp.path(), "peer-primary"))
+        .upsert(PeerRecord {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            public_key: target_public_key,
+            capabilities_json: "{\"protocolVersion\":1}".into(),
+            paired_at: "2026-07-26T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+    let runtime = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
+            .with_terminal_observer_tombstone_policy(Duration::from_secs(60), 2),
+    )
+    .await
+    .unwrap();
+
+    for index in 1..=3 {
+        runtime
+            .unobserve_peer_session(
+                "peer-target",
+                &format!("task-{index}"),
+                &format!("lease-{index}"),
+            )
+            .await
+            .unwrap();
+    }
+
+    runtime
+        .observe_peer_session("peer-target", "task-1", "lease-1")
+        .await
+        .unwrap();
+    let (oldest_stream, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept())
+        .await
+        .expect("oldest reclaimed tombstone still suppressed observe")
+        .unwrap();
+    drop(oldest_stream);
+
+    runtime
+        .observe_peer_session("peer-target", "task-3", "lease-3")
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), listener.accept())
+            .await
+            .is_err(),
+        "recent unobserve-before-observe tombstone lost race protection",
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_observe_replacement_aborts_displaced_generation() {
     let temp = tempfile::tempdir().unwrap();
@@ -1574,6 +1643,16 @@ async fn old_unobserve_cannot_remove_replacement_observer_lease() {
         .await
         .unwrap();
     drop(old_stream);
+    runtime
+        .observe_peer_session("peer-target", "task-replaced", "lease-old")
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), listener.accept())
+            .await
+            .is_err(),
+        "delayed old observe displaced the replacement after its unobserve",
+    );
 
     let mut new_reader = BufReader::new(new_stream);
     let mut request = String::new();
@@ -1612,10 +1691,12 @@ async fn old_unobserve_cannot_remove_replacement_observer_lease() {
         RuntimeEvent::TerminalEvent {
             peer_id,
             session_id,
+            observer_lease_id,
             event: kanna_task_transfer::protocol::PeerTerminalEvent::Output { data, .. },
         } => {
             assert_eq!(peer_id, "peer-target");
             assert_eq!(session_id, "task-replaced");
+            assert_eq!(observer_lease_id, "lease-new");
             assert_eq!(data, b"replacement-live");
         }
         other => panic!("unexpected replacement observer event: {other:?}"),
@@ -2073,7 +2154,8 @@ async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snaps
         TransferRuntime::spawn(
             RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
                 .with_peer_request_timeout(Duration::from_secs(5))
-                .with_mark_read_timeout(Duration::from_millis(75)),
+                .with_mark_read_timeout(Duration::from_millis(75))
+                .with_peer_request_limits(2, 1),
         )
         .await
         .unwrap(),
@@ -2137,6 +2219,16 @@ async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snaps
             .await
     });
     assert_eq!(event_rx.recv().await, Some("mark-started"));
+    let overload = runtime
+        .mark_peer_task_read("peer-target", "task-unread", 8)
+        .await
+        .unwrap_err();
+    assert!(
+        overload
+            .to_string()
+            .contains("mark-read peer request capacity"),
+        "unexpected mark-read overload: {overload}"
+    );
 
     let controls = tokio::time::timeout(Duration::from_millis(250), async {
         let (input, snapshots) = tokio::join!(

@@ -24,7 +24,7 @@ use std::process;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 
 impl TransferRuntime {
     pub fn local_identity(&self) -> LocalTransferIdentity {
@@ -123,6 +123,9 @@ impl TransferRuntime {
         let authenticated_peer_requests = Arc::new(Mutex::new(HashMap::new()));
         let task_snapshot = Arc::new(Mutex::new(Value::Null));
         let terminal_observers = Arc::new(Mutex::new(HashMap::new()));
+        let peer_request_permits = Arc::new(Semaphore::new(config.max_peer_requests));
+        let mark_read_peer_request_permits =
+            Arc::new(Semaphore::new(config.max_mark_read_peer_requests));
         let request_counter = Arc::new(AtomicU64::new(1));
         let listener_context = ListenerContext {
             self_peer_id: config.peer_id.clone(),
@@ -186,6 +189,8 @@ impl TransferRuntime {
             transfer_artifacts,
             task_snapshot,
             terminal_observers,
+            peer_request_permits,
+            mark_read_peer_request_permits,
             incoming_sender,
             incoming_events: Mutex::new(incoming_receiver),
             receipt_events: Mutex::new(receipt_receiver),
@@ -328,25 +333,40 @@ impl TransferRuntime {
     ) -> Result<(), RuntimeError> {
         let observer_key = terminal_observer_key(target_peer_id, session_id);
         let lease_id = observer_lease_id.to_owned();
+        let observer_lease_key = (observer_key.clone(), lease_id.clone());
         let mut observers = self.terminal_observers.lock().await;
+        prune_terminal_observer_tombstones(
+            &mut observers,
+            self.config.terminal_observer_tombstone_ttl,
+            self.config.max_terminal_observer_tombstones,
+        );
         if observers
-            .get(&observer_key)
-            .is_some_and(|slot| slot.lease_id == lease_id && slot.closed)
+            .get(&observer_lease_key)
+            .is_some_and(|slot| slot.closed)
         {
             return Ok(());
         }
-        if let Some(displaced) = observers.insert(
-            observer_key.clone(),
-            TerminalObserverSlot {
-                lease_id: lease_id.clone(),
-                closed: false,
-                handle: None,
-            },
-        ) {
-            if let Some(handle) = displaced.handle {
-                handle.abort();
+        let displaced_keys = observers
+            .iter()
+            .filter_map(|(key, slot)| {
+                (key.0 == observer_key && !slot.closed).then_some(key.clone())
+            })
+            .collect::<Vec<_>>();
+        for displaced_key in displaced_keys {
+            if let Some(displaced) = observers.remove(&displaced_key) {
+                if let Some(handle) = displaced.handle {
+                    handle.abort();
+                }
             }
         }
+        observers.insert(
+            observer_lease_key.clone(),
+            TerminalObserverSlot {
+                closed: false,
+                closed_at: None,
+                handle: None,
+            },
+        );
         drop(observers);
 
         let target_peer = match self.find_peer(target_peer_id).await {
@@ -372,10 +392,11 @@ impl TransferRuntime {
         let peer_for_task = target_peer.clone();
         let peer_id_for_error = target_peer.peer_id.clone();
         let session_id_for_error = session_id.clone();
+        let observer_lease_id_for_task = lease_id.clone();
         let mut observers = self.terminal_observers.lock().await;
         let Some(slot) = observers
-            .get_mut(&observer_key)
-            .filter(|slot| slot.lease_id == lease_id && !slot.closed)
+            .get_mut(&observer_lease_key)
+            .filter(|slot| !slot.closed)
         else {
             return Ok(());
         };
@@ -385,6 +406,7 @@ impl TransferRuntime {
                 request_id,
                 self_peer_id,
                 session_id.clone(),
+                observer_lease_id_for_task.clone(),
                 incoming_sender.clone(),
             )
             .await
@@ -392,6 +414,7 @@ impl TransferRuntime {
                 let _ = incoming_sender.send(RuntimeEvent::TerminalEvent {
                     peer_id: peer_id_for_error,
                     session_id: session_id_for_error.clone(),
+                    observer_lease_id: observer_lease_id_for_task,
                     event: PeerTerminalEvent::Error {
                         session_id: session_id_for_error,
                         message: error.to_string(),
@@ -412,36 +435,48 @@ impl TransferRuntime {
         observer_lease_id: &str,
     ) -> Result<(), RuntimeError> {
         let observer_key = terminal_observer_key(target_peer_id, session_id);
+        let observer_lease_key = (observer_key, observer_lease_id.to_owned());
         let mut observers = self.terminal_observers.lock().await;
-        match observers.get_mut(&observer_key) {
-            Some(slot) if slot.lease_id == observer_lease_id => {
+        prune_terminal_observer_tombstones(
+            &mut observers,
+            self.config.terminal_observer_tombstone_ttl,
+            self.config.max_terminal_observer_tombstones,
+        );
+        match observers.get_mut(&observer_lease_key) {
+            Some(slot) => {
                 slot.closed = true;
+                slot.closed_at = Some(std::time::Instant::now());
                 if let Some(handle) = slot.handle.take() {
                     handle.abort();
                 }
             }
-            Some(_) => {}
             None => {
                 observers.insert(
-                    observer_key,
+                    observer_lease_key,
                     TerminalObserverSlot {
-                        lease_id: observer_lease_id.to_owned(),
                         closed: true,
+                        closed_at: Some(std::time::Instant::now()),
                         handle: None,
                     },
                 );
             }
         }
+        prune_terminal_observer_tombstones(
+            &mut observers,
+            self.config.terminal_observer_tombstone_ttl,
+            self.config.max_terminal_observer_tombstones,
+        );
         Ok(())
     }
 
     async fn clear_terminal_observer_lease(&self, observer_key: &str, lease_id: &str) {
+        let observer_lease_key = (observer_key.to_owned(), lease_id.to_owned());
         let mut observers = self.terminal_observers.lock().await;
         if observers
-            .get(observer_key)
-            .is_some_and(|slot| slot.lease_id == lease_id && !slot.closed)
+            .get(&observer_lease_key)
+            .is_some_and(|slot| !slot.closed)
         {
-            if let Some(slot) = observers.remove(observer_key) {
+            if let Some(slot) = observers.remove(&observer_lease_key) {
                 if let Some(handle) = slot.handle {
                     handle.abort();
                 }
@@ -632,7 +667,7 @@ impl TransferRuntime {
         )?;
         let request_id = self.next_request_id("mark-read");
         let response = self
-            .send_peer_request_with_timeout(
+            .send_mark_read_peer_request_with_timeout(
                 &target_peer,
                 PeerRequest::MarkTaskRead {
                     request_id: request_id.clone(),
@@ -649,6 +684,32 @@ impl TransferRuntime {
             PeerResponse::Error { message, .. } => Err(RuntimeError::Protocol(message)),
             other => Err(unexpected_peer_response("mark-read", &other)),
         }
+    }
+}
+
+fn prune_terminal_observer_tombstones(
+    observers: &mut HashMap<(String, String), TerminalObserverSlot>,
+    ttl: std::time::Duration,
+    maximum: usize,
+) {
+    let now = std::time::Instant::now();
+    observers.retain(|_, slot| {
+        !slot.closed
+            || slot
+                .closed_at
+                .is_some_and(|closed_at| now.saturating_duration_since(closed_at) <= ttl)
+    });
+    let closed_count = observers.values().filter(|slot| slot.closed).count();
+    if closed_count <= maximum {
+        return;
+    }
+    let mut closed = observers
+        .iter()
+        .filter_map(|(key, slot)| slot.closed_at.map(|closed_at| (key.clone(), closed_at)))
+        .collect::<Vec<_>>();
+    closed.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+    for (key, _) in closed.into_iter().take(closed_count - maximum) {
+        observers.remove(&key);
     }
 }
 

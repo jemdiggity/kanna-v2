@@ -566,6 +566,7 @@ pub enum SidecarEvent {
     TerminalEvent {
         peer_id: String,
         session_id: String,
+        observer_lease_id: String,
         event: PeerTerminalEvent,
     },
 }

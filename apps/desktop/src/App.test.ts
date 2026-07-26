@@ -3502,6 +3502,68 @@ describe("App", () => {
     wrapper.unmount();
   });
 
+  it.each([
+    {
+      label: "revisioned snapshot",
+      initialRevision: "run-before-route-replacement",
+      replacementRevision: "run-after-route-replacement",
+    },
+    {
+      label: "legacy snapshot without transition revisions",
+      initialRevision: null,
+      replacementRevision: null,
+    },
+  ])(
+    "does not send through a delayed client after replacing a $label",
+    async ({ initialRevision, replacementRevision }) => {
+      const firstClient = createDeferred<{
+        advanceStage: typeof relayAdvanceStageMock;
+        close: typeof relayCloseMock;
+      }>();
+      const replacementClient = createDeferred<{
+        advanceStage: typeof relayAdvanceStageMock;
+        close: typeof relayCloseMock;
+      }>();
+      const staleAdvance = vi.fn(async () => {});
+      const staleClose = vi.fn();
+      relayTerminalClientFactoryMock
+        .mockImplementationOnce(() => firstClient.promise)
+        .mockImplementationOnce(() => replacementClient.promise);
+      const wrapper = await mountApp(RemoteTaskSelectionStub);
+      emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+        blocked: false,
+        transitionRevision: initialRevision,
+        updatedAt: "2026-07-26T05:00:00.000Z",
+      }));
+      await flushPromises();
+
+      await wrapper.get('[data-testid="remote-task"]').trigger("click");
+      await flushPromises();
+      capturedKeyboardActions?.advanceStage();
+      await waitForCondition(() => relayTerminalClientFactoryMock.mock.calls.length === 1);
+
+      emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+        blocked: false,
+        transitionRevision: replacementRevision,
+        updatedAt: "2026-07-26T05:01:00.000Z",
+      }));
+      await flushPromises();
+      capturedKeyboardActions?.advanceStage();
+      await waitForCondition(() => relayTerminalClientFactoryMock.mock.calls.length === 2);
+
+      firstClient.resolve({
+        advanceStage: staleAdvance,
+        close: staleClose,
+      });
+      await flushPromises();
+
+      expect(staleAdvance).not.toHaveBeenCalled();
+      expect(staleClose).toHaveBeenCalledOnce();
+      wrapper.unmount();
+    },
+    15_000,
+  );
+
   it("renders the modal with the preferred existing base branch selected", async () => {
     const wrapper = await mountApp(SidebarWithRepoStub);
 

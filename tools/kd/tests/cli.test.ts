@@ -16,7 +16,10 @@ import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import pkg from "../package.json";
 // @ts-expect-error The checked-in prebuild resolver is intentionally plain ESM.
-import { validateKdInstallation } from "../bin/kd-cache.mjs";
+import {
+  KD_CACHE_ROOT_MARKER,
+  validateKdInstallation
+} from "../bin/kd-cache.mjs";
 import { parseCliArgs, runCli } from "../src/cli";
 import { getTaskDefinition } from "../src/tasks/registry";
 
@@ -366,7 +369,8 @@ describe("kd CLI", () => {
       const cacheMetadata = readdirSync(cacheRoot).filter((name) =>
         name.startsWith(".")
       );
-      expect(cacheMetadata).toHaveLength(3);
+      expect(cacheMetadata).toHaveLength(4);
+      expect(cacheMetadata).toContain(KD_CACHE_ROOT_MARKER);
       expect(cacheMetadata.filter((name) => name.includes(".lease-")))
         .toHaveLength(2);
       expect(cacheMetadata.filter((name) => name.endsWith(".used")))

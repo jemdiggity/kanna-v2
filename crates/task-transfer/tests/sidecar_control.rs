@@ -13,7 +13,7 @@ use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 struct SidecarProcess {
     child: Child,
@@ -64,12 +64,18 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
     })
     .unwrap();
 
-    let (peer_event_tx, mut peer_event_rx) = mpsc::unbounded_channel::<&'static str>();
+    let (peer_event_tx, mut peer_event_rx) = mpsc::unbounded_channel::<String>();
+    let first_input_release = std::sync::Arc::new(Notify::new());
+    let snapshot_release = std::sync::Arc::new(Notify::new());
+    let peer_first_input_release = std::sync::Arc::clone(&first_input_release);
+    let peer_snapshot_release = std::sync::Arc::clone(&snapshot_release);
     let peer_server = tokio::spawn(async move {
         let mut handlers = tokio::task::JoinSet::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             let (stream, _) = listener.accept().await.unwrap();
             let peer_event_tx = peer_event_tx.clone();
+            let first_input_release = std::sync::Arc::clone(&peer_first_input_release);
+            let snapshot_release = std::sync::Arc::clone(&peer_snapshot_release);
             handlers.spawn(async move {
                 let mut reader = BufReader::new(stream);
                 let mut line = String::new();
@@ -77,12 +83,19 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
                 let request: PeerRequest = serde_json::from_str(line.trim()).unwrap();
                 match request {
                     PeerRequest::MarkTaskRead { .. } => {
-                        peer_event_tx.send("mark-started").unwrap();
+                        peer_event_tx.send("mark-started".into()).unwrap();
                         let mut remainder = Vec::new();
                         reader.read_to_end(&mut remainder).await.unwrap();
-                        peer_event_tx.send("mark-closed").unwrap();
+                        peer_event_tx.send("mark-closed".into()).unwrap();
                     }
-                    PeerRequest::SendSessionInput { request_id, .. } => {
+                    PeerRequest::SendSessionInput {
+                        request_id, data, ..
+                    } => {
+                        let input = String::from_utf8(data).unwrap();
+                        peer_event_tx.send(format!("input:{input}")).unwrap();
+                        if input == "first" {
+                            first_input_release.notified().await;
+                        }
                         let response = PeerResponse::SendSessionInput { request_id };
                         reader
                             .get_mut()
@@ -94,6 +107,8 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
                             .unwrap();
                     }
                     PeerRequest::GetTaskSnapshot { request_id, .. } => {
+                        peer_event_tx.send("snapshot-started".into()).unwrap();
+                        snapshot_release.notified().await;
                         let response = PeerResponse::TaskSnapshot {
                             request_id,
                             peer_id: "peer-target".into(),
@@ -123,6 +138,8 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
         .env("KANNA_TRANSFER_DISPLAY_NAME", "Primary")
         .env("KANNA_TRANSFER_DISCOVERY", "registry")
         .env("KANNA_TRANSFER_PORT", "0")
+        .env("KANNA_TRANSFER_CONTROL_MAX_IN_FLIGHT", "3")
+        .env("KANNA_TRANSFER_MARK_READ_CONTROL_MAX_IN_FLIGHT", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -150,14 +167,45 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
             expected_activity_revision: 7,
         },
     );
-    assert_eq!(peer_event_rx.recv().await, Some("mark-started"));
+    assert_eq!(peer_event_rx.recv().await.as_deref(), Some("mark-started"));
+    write_control(
+        &mut sidecar.stdin,
+        &ControlRequest::MarkPeerTaskRead {
+            request_id: "mark-overload".into(),
+            target_peer_id: "peer-target".into(),
+            task_id: "task-unread".into(),
+            expected_activity_revision: 7,
+        },
+    );
+    let overloaded = response_rx
+        .recv_timeout(Duration::from_millis(500))
+        .expect("excess mark-read control did not receive bounded backpressure");
+    assert!(
+        matches!(
+            overloaded,
+            ControlResponse::Error {
+                ref request_id,
+                ref message,
+            } if request_id == "mark-overload" && message.contains("too many mark-read")
+        ),
+        "unexpected overload response: {overloaded:?}",
+    );
     write_control(
         &mut sidecar.stdin,
         &ControlRequest::SendPeerSessionInput {
-            request_id: "input".into(),
+            request_id: "input-first".into(),
             target_peer_id: "peer-target".into(),
             session_id: "task-unread".into(),
-            data: b"x".to_vec(),
+            data: b"first".to_vec(),
+        },
+    );
+    write_control(
+        &mut sidecar.stdin,
+        &ControlRequest::SendPeerSessionInput {
+            request_id: "input-second".into(),
+            target_peer_id: "peer-target".into(),
+            session_id: "task-unread".into(),
+            data: b"second".to_vec(),
         },
     );
     write_control(
@@ -166,6 +214,43 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
             request_id: "refresh".into(),
         },
     );
+    let mut started = vec![
+        peer_event_rx.recv().await.unwrap(),
+        peer_event_rx.recv().await.unwrap(),
+    ];
+    started.sort_unstable();
+    assert_eq!(started, vec!["input:first", "snapshot-started"]);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), peer_event_rx.recv())
+            .await
+            .is_err(),
+        "second terminal input overtook the first response",
+    );
+    write_control(
+        &mut sidecar.stdin,
+        &ControlRequest::ResizePeerSession {
+            request_id: "ordinary-overload".into(),
+            target_peer_id: "peer-target".into(),
+            session_id: "task-unread".into(),
+            cols: 100,
+            rows: 30,
+        },
+    );
+    let ordinary_overload = response_rx
+        .recv_timeout(Duration::from_millis(500))
+        .expect("excess ordinary control did not receive bounded backpressure");
+    assert!(
+        matches!(
+            ordinary_overload,
+            ControlResponse::Error {
+                ref request_id,
+                ref message,
+            } if request_id == "ordinary-overload" && message.contains("too many transfer")
+        ),
+        "unexpected ordinary overload response: {ordinary_overload:?}",
+    );
+    first_input_release.notify_one();
+    snapshot_release.notify_one();
 
     let first = response_rx
         .recv_timeout(Duration::from_millis(500))
@@ -173,9 +258,17 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
     let second = response_rx
         .recv_timeout(Duration::from_millis(500))
         .expect("LAN refresh waited behind stalled mark-read");
+    let third = response_rx
+        .recv_timeout(Duration::from_millis(500))
+        .expect("second terminal input did not run after the first response");
     let mut completed_ids = vec![control_response_id(&first), control_response_id(&second)];
+    completed_ids.push(control_response_id(&third));
     completed_ids.sort_unstable();
-    assert_eq!(completed_ids, vec!["input", "refresh"]);
+    assert_eq!(
+        completed_ids,
+        vec!["input-first", "input-second", "refresh"]
+    );
+    assert_eq!(peer_event_rx.recv().await.as_deref(), Some("input:second"));
 
     let mark = response_rx
         .recv_timeout(Duration::from_secs(3))
@@ -189,7 +282,7 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
         tokio::time::timeout(Duration::from_millis(500), peer_event_rx.recv())
             .await
             .expect("stalled peer work survived mark-read timeout"),
-        Some("mark-closed"),
+        Some("mark-closed".into()),
     );
     peer_server.await.unwrap();
 }

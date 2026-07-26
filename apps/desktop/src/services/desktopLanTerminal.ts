@@ -29,10 +29,13 @@ export function createDesktopLanTerminalClient(): DesktopRelayTerminalClient {
   const handleTransferTerminalEvent = (payload: Record<string, unknown>) => {
     const peerId = getStringField(payload, "peer_id") ?? getStringField(payload, "peerId");
     const sessionId = getStringField(payload, "session_id") ?? getStringField(payload, "sessionId");
+    const observerLeaseId =
+      getStringField(payload, "observer_lease_id")
+      ?? getStringField(payload, "observerLeaseId");
     const event = asRecord(payload.event);
-    if (!peerId || !sessionId || !event) return;
+    if (!peerId || !sessionId || !observerLeaseId || !event) return;
     const observer = observers.get(observerKey(peerId, sessionId));
-    if (!observer) return;
+    if (!observer || observer.leaseId !== observerLeaseId) return;
     const normalized = normalizeTerminalEvent(sessionId, event);
     if (normalized) observer.options.listener(normalized);
   };

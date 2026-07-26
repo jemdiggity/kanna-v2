@@ -87,6 +87,7 @@ pub enum RuntimeEvent {
     TerminalEvent {
         peer_id: String,
         session_id: String,
+        observer_lease_id: String,
         event: PeerTerminalEvent,
     },
 }
@@ -109,6 +110,8 @@ pub enum RuntimeError {
     PeerNotFound(String),
     #[error("protocol error: {0}")]
     Protocol(String),
+    #[error("{0}")]
+    Backpressure(String),
     #[error("peer request to {peer_id} timed out after {timeout_ms}ms")]
     PeerRequestTimeout { peer_id: String, timeout_ms: u128 },
     #[error("discovery error: {0}")]

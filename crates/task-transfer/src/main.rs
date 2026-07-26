@@ -1,8 +1,13 @@
 use kanna_task_transfer::protocol::{ControlRequest, ControlResponse, SidecarEvent};
 use kanna_task_transfer::runtime::{RuntimeConfig, RuntimeError, RuntimeEvent, TransferRuntime};
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 use std::sync::Mutex;
+use tokio::sync::{oneshot, Semaphore};
+
+const DEFAULT_CONTROL_MAX_IN_FLIGHT: usize = 32;
+const DEFAULT_MARK_READ_CONTROL_MAX_IN_FLIGHT: usize = 4;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -72,10 +77,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 RuntimeEvent::TerminalEvent {
                     peer_id,
                     session_id,
+                    observer_lease_id,
                     event,
                 } => SidecarEvent::TerminalEvent {
                     peer_id,
                     session_id,
+                    observer_lease_id,
                     event,
                 },
             };
@@ -87,8 +94,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let mut command_tasks = tokio::task::JoinSet::new();
+    let control_permits = Arc::new(Semaphore::new(control_limit(
+        "KANNA_TRANSFER_CONTROL_MAX_IN_FLIGHT",
+        DEFAULT_CONTROL_MAX_IN_FLIGHT,
+    )));
+    let mark_read_control_permits = Arc::new(Semaphore::new(control_limit(
+        "KANNA_TRANSFER_MARK_READ_CONTROL_MAX_IN_FLIGHT",
+        DEFAULT_MARK_READ_CONTROL_MAX_IN_FLIGHT,
+    )));
+    let mut input_tails = HashMap::<(String, String), oneshot::Receiver<()>>::new();
     for line in std::io::stdin().lock().lines() {
         while command_tasks.try_join_next().is_some() {}
+        input_tails.retain(|_, receiver| match receiver.try_recv() {
+            Ok(()) | Err(oneshot::error::TryRecvError::Closed) => false,
+            Err(oneshot::error::TryRecvError::Empty) => true,
+        });
         let line = line?;
         if line.trim().is_empty() {
             continue;
@@ -97,12 +117,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let request_id = extract_request_id(&line);
         match serde_json::from_str::<ControlRequest>(&line) {
             Ok(request) => {
+                let is_mark_read = matches!(&request, ControlRequest::MarkPeerTaskRead { .. });
+                let permits = if is_mark_read {
+                    Arc::clone(&mark_read_control_permits)
+                } else {
+                    Arc::clone(&control_permits)
+                };
+                let permit = match permits.try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        write_json_line(
+                            &stdout,
+                            &ControlResponse::Error {
+                                request_id,
+                                message: if is_mark_read {
+                                    "too many mark-read controls are already in flight".into()
+                                } else {
+                                    "too many transfer controls are already in flight".into()
+                                },
+                            },
+                        )?;
+                        continue;
+                    }
+                };
+                let (input_predecessor, input_completion) = match &request {
+                    ControlRequest::SendPeerSessionInput {
+                        target_peer_id,
+                        session_id,
+                        ..
+                    } => {
+                        let key = (target_peer_id.clone(), session_id.clone());
+                        let (completion, tail) = oneshot::channel();
+                        (input_tails.insert(key, tail), Some(completion))
+                    }
+                    _ => (None, None),
+                };
                 let request_runtime = Arc::clone(&runtime);
                 let request_stdout = Arc::clone(&stdout);
                 command_tasks.spawn(async move {
+                    let _permit = permit;
+                    if let Some(predecessor) = input_predecessor {
+                        let _ = predecessor.await;
+                    }
                     let response = handle_request(&request_runtime, request).await;
                     if let Err(error) = write_json_line(&request_stdout, &response) {
                         eprintln!("[task-transfer] failed writing control response: {error}");
+                    }
+                    if let Some(completion) = input_completion {
+                        let _ = completion.send(());
                     }
                 });
             }
@@ -121,6 +183,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     command_tasks.shutdown().await;
     event_task.abort();
     Ok(())
+}
+
+fn control_limit(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
 }
 
 async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> ControlResponse {

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
@@ -87,8 +87,8 @@ pub(super) struct TransferArtifactRecord {
 }
 
 pub(super) struct TerminalObserverSlot {
-    pub(super) lease_id: String,
     pub(super) closed: bool,
+    pub(super) closed_at: Option<Instant>,
     pub(super) handle: Option<JoinHandle<()>>,
 }
 
@@ -159,7 +159,9 @@ pub struct TransferRuntime {
     pub(super) transfer_artifacts:
         Arc<Mutex<HashMap<String, HashMap<String, TransferArtifactRecord>>>>,
     pub(super) task_snapshot: Arc<Mutex<Value>>,
-    pub(super) terminal_observers: Arc<Mutex<HashMap<String, TerminalObserverSlot>>>,
+    pub(super) terminal_observers: Arc<Mutex<HashMap<(String, String), TerminalObserverSlot>>>,
+    pub(super) peer_request_permits: Arc<Semaphore>,
+    pub(super) mark_read_peer_request_permits: Arc<Semaphore>,
     pub(super) incoming_sender: mpsc::UnboundedSender<RuntimeEvent>,
     pub(super) incoming_events: Mutex<mpsc::UnboundedReceiver<RuntimeEvent>>,
     pub(super) receipt_events: Mutex<mpsc::Receiver<OutgoingTransferCommittedEvent>>,

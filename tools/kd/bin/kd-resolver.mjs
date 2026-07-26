@@ -9,6 +9,7 @@ import {
   createKdInstallationLease,
   ensureKdInstallation,
   formatKdCacheEvent,
+  initializeKdCacheRoot,
   pruneKdInstallations,
   resolveKdCacheRoot,
   writeKdManifest
@@ -90,6 +91,10 @@ async function resolveEntrypoint(entrypoint) {
     platform: process.platform,
     home: homedir(),
     env: process.env
+  });
+  initializeKdCacheRoot({
+    cacheRoot,
+    allowLegacyAdoption: !process.env.KANNA_KD_CACHE_ROOT?.trim()
   });
 
   createKdInstallationLease({

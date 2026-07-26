@@ -1,5 +1,5 @@
 use kanna_task_transfer::protocol::{
-    ControlRequest, ControlResponse, PeerRequest, PeerResponse, SidecarEvent,
+    ControlRequest, ControlResponse, PeerRequest, PeerResponse, PeerTerminalEvent, SidecarEvent,
 };
 use kanna_task_transfer::runtime::{ExternalPeer, TransferTransport};
 use serde_json::json;
@@ -78,6 +78,30 @@ fn terminal_observer_control_messages_carry_subscription_leases() {
         session_id: "task-1".into(),
         observer_lease_id: "lease-new".into(),
     });
+    let event = SidecarEvent::TerminalEvent {
+        peer_id: "peer-owner".into(),
+        session_id: "task-1".into(),
+        observer_lease_id: "lease-new".into(),
+        event: PeerTerminalEvent::Output {
+            session_id: "task-1".into(),
+            data: b"hello".to_vec(),
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        json!({
+            "type": "terminal_event",
+            "peer_id": "peer-owner",
+            "session_id": "task-1",
+            "observer_lease_id": "lease-new",
+            "event": {
+                "type": "output",
+                "session_id": "task-1",
+                "data": [104, 101, 108, 108, 111],
+            },
+        }),
+    );
+    assert_roundtrip(event);
 }
 
 #[test]

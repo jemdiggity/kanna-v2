@@ -1,11 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const listenHarness = vi.hoisted(() => ({
+  listener: null as ((event: { payload: Record<string, unknown> }) => void) | null,
+}));
+
 vi.mock("../invoke", () => ({
   invoke: vi.fn(async () => null),
 }));
 
 vi.mock("../listen", () => ({
-  listen: vi.fn(async () => () => undefined),
+  listen: vi.fn(async (_event, listener) => {
+    listenHarness.listener = listener;
+    return () => undefined;
+  }),
 }));
 
 import { invoke } from "../invoke";
@@ -17,7 +24,11 @@ describe("createDesktopLanTerminalClient", () => {
     vi.mocked(invoke).mockReset();
     vi.mocked(invoke).mockResolvedValue(null);
     vi.mocked(listen).mockReset();
-    vi.mocked(listen).mockResolvedValue(() => undefined);
+    vi.mocked(listen).mockImplementation(async (_event, listener) => {
+      listenHarness.listener = listener;
+      return () => undefined;
+    });
+    listenHarness.listener = null;
   });
   it("sends LAN terminal control actions through Tauri commands", async () => {
     const client = createDesktopLanTerminalClient();
@@ -174,5 +185,53 @@ describe("createDesktopLanTerminalClient", () => {
       "observe_transfer_peer_session",
       expect.anything(),
     );
+  });
+
+  it("rejects delayed terminal events from a replaced observer lease", async () => {
+    const firstEvents: unknown[] = [];
+    const replacementEvents: unknown[] = [];
+    const client = createDesktopLanTerminalClient();
+
+    client.observeTerminal({
+      desktopId: "peer-primary",
+      taskId: "task-1",
+      listener: (event) => firstEvents.push(event),
+    });
+    await vi.waitFor(() => expect(firstEvents).toHaveLength(1));
+    const firstLease = vi.mocked(invoke).mock.calls
+      .find(([command]) => command === "observe_transfer_peer_session")?.[1]
+      ?.observerLeaseId;
+
+    client.observeTerminal({
+      desktopId: "peer-primary",
+      taskId: "task-1",
+      listener: (event) => replacementEvents.push(event),
+    });
+    await vi.waitFor(() => expect(replacementEvents).toHaveLength(1));
+    const replacementLease = vi.mocked(invoke).mock.calls
+      .filter(([command]) => command === "observe_transfer_peer_session")
+      .at(-1)?.[1]?.observerLeaseId;
+
+    listenHarness.listener?.({
+      payload: {
+        peer_id: "peer-primary",
+        session_id: "task-1",
+        observer_lease_id: firstLease,
+        event: { type: "output", session_id: "task-1", data: [111, 108, 100] },
+      },
+    });
+    listenHarness.listener?.({
+      payload: {
+        peer_id: "peer-primary",
+        session_id: "task-1",
+        observer_lease_id: replacementLease,
+        event: { type: "output", session_id: "task-1", data: [110, 101, 119] },
+      },
+    });
+
+    expect(replacementEvents).toEqual([
+      { type: "ready", taskId: "task-1" },
+      { type: "output", taskId: "task-1", text: "new" },
+    ]);
   });
 });

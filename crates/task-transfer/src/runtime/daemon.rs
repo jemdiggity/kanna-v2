@@ -21,6 +21,7 @@ pub(super) async fn stream_peer_session(
     request_id: String,
     requester_peer_id: String,
     session_id: String,
+    observer_lease_id: String,
     incoming_sender: mpsc::UnboundedSender<RuntimeEvent>,
 ) -> Result<(), RuntimeError> {
     let mut stream = TcpStream::connect(&peer.endpoint).await?;
@@ -65,6 +66,7 @@ pub(super) async fn stream_peer_session(
             .send(RuntimeEvent::TerminalEvent {
                 peer_id: peer.peer_id.clone(),
                 session_id: event_session_id,
+                observer_lease_id: observer_lease_id.clone(),
                 event,
             })
             .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
