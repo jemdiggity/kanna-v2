@@ -362,7 +362,7 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
             DaemonCommand::Spawn {
                 session_id, cwd, ..
             } => {
-                assert_eq!(session_id, task_id);
+                assert_run_scoped_session_id(&session_id, task_id);
                 assert!(cwd.ends_with(&format!("/task-{task_id}")));
                 session_id
             }
@@ -2081,6 +2081,8 @@ async fn create_task_route_preserves_failed_recovery_seed_diagnostics_without_sp
     assert!(body.contains("task "));
     assert!(body.contains("recovery seed"));
     let task_id = daemon_server.await.unwrap();
+    assert!(body.contains("failed to spawn"));
+    let (daemon_session_id, worktree_path) = daemon_server.await.unwrap();
     let db = Db::open(&config.db_path).unwrap();
     let worktree_path = db
         .get_task_worktree_path(&task_id)
@@ -2096,10 +2098,20 @@ async fn create_task_route_preserves_failed_recovery_seed_diagnostics_without_sp
         std::path::Path::new(&worktree_path).exists(),
         "failed spawn should preserve prepared worktree {worktree_path}"
     );
-    let created_item = db.get_pipeline_item(&task_id).unwrap().unwrap();
+    let created_item = db
+        .list_pipeline_items("repo-1")
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("failed task remains durable");
+    let task_id = created_item.id.clone();
     assert_eq!(created_item.activity.as_deref(), Some("unread"));
     let runs = db.list_stage_runs_for_task(&task_id).unwrap();
     assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].session_id.as_deref(),
+        Some(daemon_session_id.as_str())
+    );
     assert_eq!(runs[0].status, "failed");
     assert!(runs[0]
         .result

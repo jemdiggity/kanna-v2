@@ -55,6 +55,13 @@ fn pipeline_socket_path_for_daemon_dir(daemon_dir: &str) -> String {
         .to_string()
 }
 
+fn assert_run_scoped_session_id(session_id: &str, task_id: &str) {
+    assert!(
+        session_id.starts_with(&format!("run-{task_id}-")),
+        "expected daemon session {session_id:?} to be scoped to task {task_id:?}'s stage run"
+    );
+}
+
 fn ensure_test_kanna_cli_sidecar() -> (PathBuf, bool) {
     ensure_test_sidecar("kanna-cli")
 }

@@ -277,7 +277,7 @@ fn prepare_post_dispatch(
     let completion_instruction = format!(
         "When this work is complete, record stage completion: call MCP `kanna_complete_stage {{\"task_id\": \"{task_id}\", \"status\": \"success\", \"summary\": \"...\"}}`; only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"{task_id}\" --status success --summary \"...\"`. Kanna will then advance this task's pipeline."
     );
-    let (fallback, message) = prepare_stage_run_for_target_returning_prompt(
+    let (mut fallback, message) = prepare_stage_run_for_target_returning_prompt(
         db,
         config,
         context,
@@ -290,11 +290,28 @@ fn prepare_post_dispatch(
         None,
         Some(&completion_instruction),
     )?;
+    // Auto-completion marks the main run succeeded before preparing its
+    // post. The provider process is still the continuation target, so retain
+    // that just-finished run's daemon identity instead of falling back to the
+    // durable task id after the "running" resolver no longer finds it.
+    let continuation_session_id = db
+        .latest_stage_run(task_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .and_then(|run| {
+            let session_id = run.session_id?;
+            if run.provider_session_id.as_deref() == Some(session_id.as_str()) {
+                None
+            } else {
+                Some(session_id)
+            }
+        })
+        .unwrap_or_else(|| fallback.source_session_id.clone());
+    fallback.source_session_id = continuation_session_id.clone();
 
     Ok(PreparedStageTransition::Post(Box::new(
         PreparedPostDispatch {
             task_id: context.source_task_id.to_string(),
-            session_id: fallback.source_session_id.clone(),
+            session_id: continuation_session_id,
             message,
             run_stage,
             fallback,

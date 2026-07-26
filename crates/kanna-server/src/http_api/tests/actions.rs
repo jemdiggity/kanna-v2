@@ -1954,6 +1954,7 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
                 } => {
                     assert!(recovery_seeded, "Spawn preceded dormant recovery seed");
                     assert_eq!(session_id, expected_task_id);
+                    assert_run_scoped_session_id(&session_id, &expected_task_id);
                     assert!(cwd.contains(".kanna-worktrees/task-"));
                     assert_eq!(agent_provider, Some(AgentProvider::Claude));
                     spawned.push((session_id.clone(), cwd));
@@ -1976,6 +1977,7 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
                 DaemonCommand::SpawnAgent { session_id, params } => {
                     assert!(recovery_seeded, "SpawnAgent preceded dormant recovery seed");
                     assert_eq!(session_id, expected_task_id);
+                    assert_run_scoped_session_id(&session_id, &expected_task_id);
                     assert!(params.cwd.contains(".kanna-worktrees/task-"));
                     assert_eq!(params.agent_provider, AgentProvider::Claude);
                     spawned.push((session_id.clone(), params.cwd));
@@ -2360,7 +2362,7 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
                     agent_provider,
                     ..
                 } => {
-                    assert_eq!(session_id, expected_task_id);
+                    assert_run_scoped_session_id(&session_id, &expected_task_id);
                     assert!(cwd.contains(".kanna-worktrees/task-"));
                     assert_eq!(agent_provider, Some(AgentProvider::Claude));
                     spawned.push((session_id.clone(), cwd));
@@ -2381,7 +2383,7 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
                     break;
                 }
                 DaemonCommand::SpawnAgent { session_id, params } => {
-                    assert_eq!(session_id, expected_task_id);
+                    assert_run_scoped_session_id(&session_id, &expected_task_id);
                     assert!(params.cwd.contains(".kanna-worktrees/task-"));
                     assert_eq!(params.agent_provider, AgentProvider::Claude);
                     spawned.push((session_id.clone(), params.cwd));
@@ -2994,10 +2996,19 @@ async fn closing_integration_task_starts_dependent_from_integration_branch() {
         .expect("dependent was not spawned after integration closed")
         .unwrap();
     assert_eq!(spawned.len(), 2);
-    assert_eq!(spawned[0].0, integration.id);
-    assert_eq!(spawned[1].0, dependent.task_id);
-
     let db = Db::open(&config.db_path).unwrap();
+    let integration_run = db.latest_stage_run(&integration.id).unwrap().unwrap();
+    let dependent_run = db.latest_stage_run(&dependent.task_id).unwrap().unwrap();
+    assert_eq!(
+        spawned[0].0,
+        integration_run
+            .session_id
+            .expect("integration daemon session")
+    );
+    assert_eq!(
+        spawned[1].0,
+        dependent_run.session_id.expect("dependent daemon session")
+    );
     let dependent_item = db.get_pipeline_item(&dependent.task_id).unwrap().unwrap();
     assert_eq!(
         dependent_item.base_ref.as_deref(),
@@ -3176,7 +3187,7 @@ async fn renamed_multi_blocker_pr_branches_survive_earlier_worktree_cleanup() {
                     }
                     DaemonCommand::Spawn { session_id, .. }
                     | DaemonCommand::SpawnAgent { session_id, .. } => {
-                        assert_eq!(session_id, expected_task_id);
+                        assert_run_scoped_session_id(&session_id, &expected_task_id);
                         write_half
                             .write_all(
                                 format!(
@@ -3674,7 +3685,7 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
     assert_eq!(runs[0].agent.as_deref(), Some("reviewer"));
     assert_eq!(runs[0].agent_provider.as_deref(), Some("claude"));
     assert_eq!(runs[0].status, "running");
-    assert_eq!(runs[0].session_id.as_deref(), Some("source-1"));
+    assert_eq!(runs[0].session_id.as_deref(), Some(runs[0].id.as_str()));
 
     daemon_server.await.unwrap();
     if created_sidecar {
@@ -5468,7 +5479,7 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
                         .unwrap();
                 }
                 DaemonCommand::Spawn { session_id, .. } => {
-                    assert_eq!(session_id, expected_task_id);
+                    assert_run_scoped_session_id(&session_id, &expected_task_id);
                     spawned.push(session_id.clone());
                     write_half
                         .write_all(
@@ -5487,7 +5498,7 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
                     break;
                 }
                 DaemonCommand::SpawnAgent { session_id, params } => {
-                    assert_eq!(session_id, expected_task_id);
+                    assert_run_scoped_session_id(&session_id, &expected_task_id);
                     assert_eq!(params.agent_provider, AgentProvider::Claude);
                     spawned.push(session_id.clone());
                     write_half
@@ -5701,7 +5712,7 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
                         .unwrap();
                 }
                 DaemonCommand::Spawn { session_id, .. } => {
-                    assert_eq!(session_id, expected_task_id);
+                    assert_run_scoped_session_id(&session_id, &expected_task_id);
                     spawned.push(session_id.clone());
                     write_half
                         .write_all(
@@ -5720,7 +5731,7 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
                     break;
                 }
                 DaemonCommand::SpawnAgent { session_id, params } => {
-                    assert_eq!(session_id, expected_task_id);
+                    assert_run_scoped_session_id(&session_id, &expected_task_id);
                     assert_eq!(params.agent_provider, AgentProvider::Claude);
                     spawned.push(session_id.clone());
                     write_half
