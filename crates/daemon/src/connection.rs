@@ -238,6 +238,8 @@ pub(crate) async fn handle_command(
             agent_provider,
             terminal_prelude,
         } => {
+            let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+            let _lifecycle_guard = lifecycle.lock().await;
             log::info!(
                 "[spawn] session={} executable={} cwd={} cols={} rows={}",
                 session_id,
@@ -711,6 +713,8 @@ pub(crate) async fn handle_command(
         }
 
         Command::Kill { session_id } => {
+            let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+            let _lifecycle_guard = lifecycle.lock().await;
             log::info!("[kill] session={}", session_id);
             if session_handle(&sessions, &session_id).await.is_none()
                 && agent_runtime::kill_agent_session(&session_id, &agent_sessions, &broadcast_tx)
@@ -720,6 +724,16 @@ pub(crate) async fn handle_command(
                 return;
             }
             let session = session_handle(&sessions, &session_id).await;
+            let stream_control = match &session {
+                Some(session) => {
+                    let control = session.stream_control().await;
+                    if let Some(control) = control.as_ref() {
+                        control.request_stop();
+                    }
+                    control
+                }
+                None => None,
+            };
             let result = match &session {
                 Some(session) => session.kill().await,
                 None => Err(std::io::Error::new(
@@ -730,16 +744,15 @@ pub(crate) async fn handle_command(
             let success = result.is_ok();
             let killed_fanout = fanouts.lock().await.remove(&session_id);
             if success {
-                sessions.lock().await.remove(&session_id);
-                // A kill removes the session from the map, so the output
-                // reader's exit cleanup is skipped ("current session changed")
-                // and would never announce the death. Announce it here —
-                // before replying — so every session termination broadcasts
-                // exactly one Exit, and a kill-then-respawn of the same
-                // session id always orders Exit before the new
-                // SessionCreated. `killed` marks it as an orchestrated kill,
-                // not the agent finishing; Subscribe consumers (e.g. the
-                // completion-notify watcher) filter killed exits themselves.
+                if let Some(session) = session.as_ref() {
+                    session.retire();
+                }
+                if let Some(control) = stream_control.as_ref() {
+                    control.wait_until_stopped().await;
+                }
+                // The lifecycle guard keeps a same-id Spawn on another
+                // connection behind the old reader's stop acknowledgement,
+                // killed Exit, and recovery teardown.
                 let exit_evt = Event::Exit {
                     session_id: session_id.clone(),
                     code: 128 + libc::SIGKILL,
@@ -763,6 +776,12 @@ pub(crate) async fn handle_command(
                     fanout.state.lock().await.deliver_final(&exit_evt);
                 }
                 recovery_manager.end_session(&session_id).await;
+                if let Some(session) = session.as_ref() {
+                    let mut manager = sessions.lock().await;
+                    if manager.is_current(&session_id, session) {
+                        manager.remove(&session_id);
+                    }
+                }
             }
             drop(killed_fanout);
             terminal_emulator_clients.lock().await.remove(&session_id);

@@ -33,6 +33,8 @@ enum Cmd {
         env: HashMap<String, String>,
         cols: u16,
         rows: u16,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_provider: Option<String>,
     },
     AttachSnapshot {
         session_id: String,
@@ -49,7 +51,7 @@ enum Cmd {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum SessionStatus {
     Busy,
@@ -240,6 +242,7 @@ fn spawn_echo(conn: &mut ClientConn, id: &str) {
         env: HashMap::new(),
         cols: 80,
         rows: 24,
+        agent_provider: None,
     });
     match conn.recv() {
         Evt::SessionCreated { .. } => {}
@@ -258,6 +261,35 @@ fn attach(conn: &mut ClientConn, id: &str) {
             Evt::Error { code, message } => panic!("attach failed: {:?}: {}", code, message),
             other => panic!("expected Snapshot, got: {:?}", other),
         }
+    }
+}
+
+fn wait_for_session_status(
+    conn: &mut ClientConn,
+    session_id: &str,
+    expected: SessionStatus,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    let expected = serde_json::to_value(expected).unwrap();
+    loop {
+        conn.send(&Cmd::List);
+        match conn.recv() {
+            Evt::SessionList { sessions } => {
+                if sessions.iter().any(|session| {
+                    session["session_id"] == session_id && session["status"] == expected
+                }) {
+                    return;
+                }
+            }
+            Evt::Error { code, message } => panic!("list failed: {:?}: {}", code, message),
+            other => panic!("expected SessionList, got: {:?}", other),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "session {session_id:?} never reached status {expected:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -689,6 +721,60 @@ fn test_handoff_transfers_session() {
     cleanup(&dir);
 }
 
+#[test]
+fn test_adopted_pty_tracks_status_before_first_attach() {
+    let dir = test_dir("status-before-attach");
+    let release_path = dir.join("release-idle");
+
+    let daemon_a = DaemonHandle::start_in(&dir);
+    let mut conn_a = daemon_a.connect();
+    let mut env = HashMap::new();
+    env.insert(
+        "KANNA_HANDOFF_RELEASE".to_string(),
+        release_path.to_string_lossy().into_owned(),
+    );
+    conn_a.send(&Cmd::Spawn {
+        session_id: "sess-adopted-stream".to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "printf 'Header\\r\\n• Working (0s • esc to interrupt)\\r\\n› Run /review'; while [ ! -f \"$KANNA_HANDOFF_RELEASE\" ]; do sleep 0.05; done; printf '\\033[2J\\033[HHeader\\r\\n› '; sleep 30".to_string(),
+        ],
+        cwd: "/tmp".to_string(),
+        env,
+        cols: 80,
+        rows: 24,
+        agent_provider: Some("codex".to_string()),
+    });
+    match conn_a.recv() {
+        Evt::SessionCreated { .. } => {}
+        other => panic!("expected SessionCreated, got: {:?}", other),
+    }
+    wait_for_session_status(
+        &mut conn_a,
+        "sess-adopted-stream",
+        SessionStatus::Busy,
+        Duration::from_secs(2),
+    );
+
+    drop(conn_a);
+    let daemon_b = DaemonHandle::start_in(&dir);
+    let mut conn_b = daemon_b.connect();
+    std::fs::write(&release_path, b"go").unwrap();
+
+    // Deliberately never send AttachSnapshot: the adopted reader and status
+    // detector must already be running before any terminal client selects it.
+    wait_for_session_status(
+        &mut conn_b,
+        "sess-adopted-stream",
+        SessionStatus::Idle,
+        Duration::from_secs(2),
+    );
+
+    drop(daemon_b);
+    cleanup(&dir);
+}
+
 /// If snapshot generation fails during handoff, the live PTY should still move
 /// to the new daemon and remain interactive.
 #[test]
@@ -709,6 +795,7 @@ fn test_handoff_keeps_live_session_when_snapshot_fails() {
         env: HashMap::new(),
         cols: 80,
         rows: 24,
+        agent_provider: None,
     });
     match conn_a.recv() {
         Evt::SessionCreated { .. } => {}

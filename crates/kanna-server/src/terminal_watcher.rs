@@ -47,12 +47,19 @@ fn persist_waiting_prompt(
     Ok(())
 }
 
-fn apply_unattached_runtime_status(
+fn apply_watcher_runtime_status(
     state: &http_api::AppState,
     session_id: &str,
     status: kanna_daemon::protocol::SessionStatus,
 ) -> Result<(), String> {
-    if state.terminal_attachments().is_attached(session_id) {
+    // Busy is selection-independent: every live observer agrees it means
+    // working, so the watcher remains an authoritative writer even while a
+    // terminal client is attached. Idle/waiting still belong to the attached
+    // client because only it knows whether the task is selected (idle) or
+    // unselected (unread).
+    if state.terminal_attachments().is_attached(session_id)
+        && !matches!(status, kanna_daemon::protocol::SessionStatus::Busy)
+    {
         return Ok(());
     }
 
@@ -119,9 +126,10 @@ async fn reconcile_detached_terminal_status(
                 .into_iter()
                 .find(|session| session.session_id == session_id)
             {
-                // apply_unattached_runtime_status re-checks the lease after the
-                // daemon round-trip, closing a concurrent reattach race.
-                apply_unattached_runtime_status(state, session_id, session.status)?;
+                // The runtime-status helper re-checks the lease after the
+                // daemon round-trip, closing a concurrent reattach race for
+                // selection-dependent idle/waiting updates.
+                apply_watcher_runtime_status(state, session_id, session.status)?;
             }
             Ok(())
         }
@@ -200,7 +208,7 @@ async fn terminal_state_watcher_once(
         DaemonEvent::SessionList { sessions } => {
             for session in sessions {
                 if let Err(error) =
-                    apply_unattached_runtime_status(state, &session.session_id, session.status)
+                    apply_watcher_runtime_status(state, &session.session_id, session.status)
                 {
                     log::warn!(
                         "failed to reconcile terminal status for {}: {}",
@@ -236,7 +244,7 @@ async fn terminal_state_watcher_once(
                         );
                     }
                 }
-                if let Err(error) = apply_unattached_runtime_status(state, &session_id, status) {
+                if let Err(error) = apply_watcher_runtime_status(state, &session_id, status) {
                     log::warn!(
                         "failed to apply terminal status for {}: {}",
                         session_id,
@@ -812,13 +820,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watcher_skips_attached_terminal_status() {
-        let unique = unique_name("terminal-watcher-attached");
+    async fn watcher_applies_attached_busy_as_working() {
+        let unique = unique_name("terminal-watcher-attached-busy");
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
         seed_plain_task(&config);
+        Db::open(&config.db_path)
+            .unwrap()
+            .update_pipeline_item_activity("task-child", "unread")
+            .unwrap();
         let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
         let state = http_api::AppState::new(config.clone());
+        let mut state_changes = state.subscribe_state_changes();
         let _attachment = state.terminal_attachments().attach("task-child");
 
         let server = tokio::spawn(async move {
@@ -848,7 +861,59 @@ mod tests {
             .get_pipeline_item("task-child")
             .unwrap()
             .unwrap();
-        assert_eq!(item.activity.as_deref(), Some("idle"));
+        assert_eq!(item.activity.as_deref(), Some("working"));
+        assert!(matches!(
+            state_changes.try_recv(),
+            Ok(kanna_agent_protocol::ServerFrame::StateChanged {
+                scope: kanna_agent_protocol::StateChangeScope::Tasks
+            })
+        ));
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_skips_attached_idle_status() {
+        let unique = unique_name("terminal-watcher-attached-idle");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        Db::open(&config.db_path)
+            .unwrap()
+            .update_pipeline_item_activity("task-child", "working")
+            .unwrap();
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let state = http_api::AppState::new(config.clone());
+        let _attachment = state.terminal_attachments().attach("task-child");
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe(&listener).await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::StatusChanged {
+                    session_id: "task-child".to_string(),
+                    status: kanna_daemon::protocol::SessionStatus::Idle,
+                    waiting_prompt_snippet: None,
+                },
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+        });
+
+        terminal_state_watcher_once(
+            &state,
+            &session_replacements::SessionReplacements::default(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let item = Db::open(&config.db_path)
+            .unwrap()
+            .get_pipeline_item("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.activity.as_deref(), Some("working"));
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
