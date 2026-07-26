@@ -969,3 +969,96 @@ fn kill_removes_agent_session() {
     let last: SeqAgentEvent = serde_json::from_str(journal.lines().last().unwrap()).unwrap();
     assert!(matches!(last.event, AgentEvent::SessionEnded { .. }));
 }
+
+/// Fake agent whose resume run announces its own pid to `$RESUME_PID_FILE`
+/// and then blocks. Lets tests kill the session while a resumed child is
+/// running and assert the child's whole process group actually dies.
+const SLOW_RESUME_AGENT: &str = r#"#!/bin/sh
+resume_id=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--resume" ]; then
+    shift
+    resume_id="${1:-}"
+    break
+  fi
+  shift
+done
+if [ -n "$resume_id" ]; then
+  echo "$$" > "$RESUME_PID_FILE"
+  echo '{"type":"system","subtype":"init","session_id":"fake-sess-slow","model":"fake-model"}'
+  sleep 300
+  exit 0
+fi
+read -r first
+echo '{"type":"system","subtype":"init","session_id":"fake-sess-slow","model":"fake-model"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"initial done"}]}}'
+echo '{"type":"result","subtype":"success","duration_ms":5,"num_turns":1,"total_cost_usd":0.01,"usage":{},"session_id":"fake-sess-slow"}'
+"#;
+
+/// Kill during a resumed turn must terminate the resumed child's process
+/// group through its verified identity (the identity is re-captured on every
+/// respawn) instead of leaking the child.
+#[test]
+fn kill_during_resumed_turn_terminates_the_resumed_child() {
+    let dir = temp_dir("kill-resumed");
+    let script = write_script(&dir, "slow-resume-agent.sh", SLOW_RESUME_AGENT);
+    let pid_file = dir.join("resume.pid");
+    let daemon = DaemonHandle::start_in(&dir);
+
+    let mut conn = daemon.connect();
+    let mut params = spawn_params(&dir, &script, "first prompt");
+    params.env.insert(
+        "RESUME_PID_FILE".to_string(),
+        pid_file.to_string_lossy().to_string(),
+    );
+    conn.send(&Command::SpawnAgent {
+        session_id: "agent-slow".to_string(),
+        params,
+    });
+    conn.recv_until(|e| matches!(e, Event::SessionCreated { .. }));
+    conn.send(&Command::AttachAgent {
+        session_id: "agent-slow".to_string(),
+        from_seq: 0,
+    });
+    conn.recv_until(|e| matches!(e, Event::AgentSnapshot { .. }));
+    conn.collect_agent_events_until(is_turn_completed);
+    // Let the daemon observe EOF so the next input takes the resume path.
+    std::thread::sleep(Duration::from_millis(500));
+
+    conn.send(&Command::AgentInput {
+        session_id: "agent-slow".to_string(),
+        text: "resume prompt".to_string(),
+    });
+
+    // The resumed child announces itself, proving the respawn is live.
+    let resumed_pid: i32 = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = contents.trim().parse() {
+                    break pid;
+                }
+            }
+            assert!(Instant::now() < deadline, "resumed child never started");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    assert_eq!(unsafe { libc::kill(resumed_pid, 0) }, 0);
+
+    conn.send(&Command::Kill {
+        session_id: "agent-slow".to_string(),
+    });
+    conn.recv_until(|e| matches!(e, Event::Ok));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if unsafe { libc::kill(resumed_pid, 0) } != 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "resumed child {resumed_pid} must die with the killed session"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

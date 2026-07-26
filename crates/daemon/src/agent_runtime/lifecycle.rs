@@ -8,6 +8,18 @@ use kanna_daemon::protocol::{self, Event, SessionState, SessionStatus};
 
 use super::{broadcast_event, fan_out};
 
+/// Outcome of a Kill against the agent registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentKillOutcome {
+    /// The session was removed and its single Exit published.
+    Killed,
+    /// No agent session by that id — the caller may try the PTY registry.
+    NotFound,
+    /// A handoff transfer is in flight and this session is already inside the
+    /// successor's snapshot. Refuse; the client retries against the new daemon.
+    HandoffInFlight,
+}
+
 /// Kill an agent session (task close): SIGKILL the child's process group,
 /// journal the end, drop the record. The journal file stays on disk until
 /// task cleanup.
@@ -15,20 +27,67 @@ pub async fn kill_agent_session(
     session_id: &str,
     agents: &AgentSessions,
     broadcast_tx: &broadcast::Sender<String>,
-) -> bool {
-    let record = agents.lock().await.remove(session_id);
-    let Some(mut record) = record else {
-        return false;
-    };
-    if !record.exited {
-        let _ = agent::signal_agent_pid(record.pid, libc::SIGKILL);
-        if let Some(mut child) = record.child.take() {
-            let _ = child.wait();
+) -> AgentKillOutcome {
+    // Fence the Kill against an in-flight handoff, testing the seal in the
+    // SAME registry lock acquisition that removes the session. Reading the
+    // seal outside this critical section is not enough: the snapshot could
+    // capture the session between an unsealed read and the removal, so this
+    // daemon would answer Ok while the successor resurrected the very session
+    // it just acknowledged killing.
+    //
+    // The seal is armed before the snapshot acquires this lock, which leaves
+    // exactly two orderings, both correct:
+    //   - Kill takes the lock first: it reads an unsealed registry, removes
+    //     the session, and the later snapshot simply does not see it.
+    //   - The snapshot takes the lock first: the seal is already armed, so
+    //     Kill reads it as sealed and refuses.
+    let claim = {
+        let mut registry = agents.lock().await;
+        if super::agent_handoff_sealed() {
+            Err(())
+        } else {
+            Ok(registry.remove(session_id))
         }
-        // An exited session already broadcast its Exit from the reader; a
-        // live session killed here never reaches that path, so announce the
-        // death now. Every termination must broadcast exactly one Exit —
-        // consume-once kill orchestration (SessionReplacements) depends on it.
+    };
+    let record = match claim {
+        Err(()) => return AgentKillOutcome::HandoffInFlight,
+        Ok(record) => record,
+    };
+    let Some(mut record) = record else {
+        return AgentKillOutcome::NotFound;
+    };
+    // Every successful termination must broadcast exactly one Exit —
+    // consume-once kill orchestration (SessionReplacements) depends on it.
+    // The predicate is "has a terminal Exit been PUBLISHED", never "has the
+    // process exited": two states carry `exited: true` while having announced
+    // nothing at all — an INITIAL SpawnAgent reservation (no child, no reader)
+    // and an idle PER-TURN session (its child exits cleanly after every turn
+    // and the reader deliberately publishes no Exit for that churn). Gating on
+    // `exited` emitted zero Exits for both, leaving any consumer awaiting the
+    // Exit to wait forever. A session that already published its Exit from the
+    // reader must not publish a second one.
+    let must_announce_exit = !record.exit_published;
+    if !record.exited {
+        // Group-kill only through a verified identity; the direct
+        // `child.kill()` below is safe regardless (std tracks our own child).
+        if let Err(error) = agent::kill_agent_group_verified(record.pid, record.child_start) {
+            super::log_info(format_args!(
+                "[agent] kill {}: group signal refused: {}",
+                session_id, error
+            ));
+        }
+        if let Some(mut child) = record.child.take() {
+            let _ = child.kill();
+            // Hand the child to the central reaper instead of blocking this
+            // task on `wait()`: a child stuck exiting in the kernel must not
+            // wedge the caller (Kill is issued from a client connection).
+            kanna_daemon::reaper::reap_detached(child, record.child_start);
+        }
+    }
+    if must_announce_exit {
+        // A live session killed here never reaches the reader's exit path, and
+        // a cancelled reservation has no reader at all: announce the death now
+        // so exactly one Exit is emitted per successful Kill.
         broadcast_event(
             broadcast_tx,
             &Event::Exit {
@@ -42,6 +101,11 @@ pub async fn kill_agent_session(
     if let Some(fds) = record.handoff_fds.take() {
         fds.close();
     }
+    // Close the child's stdin explicitly, and drop the record (with it, the
+    // stdout/stderr pipe handles the readers were given). The child is dead
+    // and its whole descendant tree with it, so the read ends see EOF and the
+    // reader tasks exit instead of lingering on inherited descriptors.
+    drop(record.stdin.take());
     let mut sh = record.shared.lock().await;
     let entry = sh.journal.append(AgentEvent::SessionEnded {
         reason: SessionEndReason::Interrupted,
@@ -54,6 +118,11 @@ pub async fn kill_agent_session(
         event: entry.event,
     };
     fan_out(&mut sh.writers, &wire).await;
+    // Deliver the final event, then detach every writer: the session is gone,
+    // so retaining client sockets here would hold them (and the shared state)
+    // alive across session churn.
+    sh.writers.clear();
+    drop(sh);
     broadcast_event(
         broadcast_tx,
         &Event::StatusChanged {
@@ -62,7 +131,7 @@ pub async fn kill_agent_session(
             waiting_prompt_snippet: None,
         },
     );
-    true
+    AgentKillOutcome::Killed
 }
 
 /// Merge agent sessions into a List response.

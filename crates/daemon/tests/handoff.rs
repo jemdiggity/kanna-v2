@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 //! Integration tests for daemon handoff (session transfer on upgrade).
 //!
 //! These tests spawn real daemon processes and verify that:
@@ -7,15 +9,18 @@
 //!   - Handoff with no active sessions works
 //!   - Old daemon exits after handoff
 
+mod support;
+
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use kanna_daemon::protocol::{AgentProvider, AgentSpawnParams, NeutralAgentEvent, SeqAgentEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -46,6 +51,21 @@ enum Cmd {
     Snapshot {
         session_id: String,
     },
+    Kill {
+        session_id: String,
+    },
+    SpawnAgent {
+        session_id: String,
+        params: AgentSpawnParams,
+    },
+    AttachAgent {
+        session_id: String,
+        from_seq: u64,
+    },
+    AgentInput {
+        session_id: String,
+        text: String,
+    },
     List,
     Subscribe,
 }
@@ -72,6 +92,9 @@ enum ErrorCode {
     HeadlessTerminalInitFailed,
     WriteFailed,
     UnknownSignal,
+    AgentSpawnFailed,
+    NotAgentSession,
+    UnknownPermissionRequest,
 }
 
 #[allow(dead_code)]
@@ -99,6 +122,16 @@ enum Evt {
     StatusChanged {
         session_id: String,
         status: SessionStatus,
+    },
+    AgentSnapshot {
+        session_id: String,
+        next_seq: u64,
+        events: Vec<SeqAgentEvent>,
+    },
+    AgentEvent {
+        session_id: String,
+        seq: u64,
+        event: NeutralAgentEvent,
     },
     Ok,
     Error {
@@ -137,16 +170,34 @@ impl DaemonHandle {
     /// Start a daemon in the given directory. If a daemon is already running
     /// there (from a previous start), the new one will attempt handoff.
     fn start_in(dir: &PathBuf) -> Self {
+        Self::start_in_with_env(dir, &[])
+    }
+
+    fn start_in_with_env(dir: &PathBuf, extra_env: &[(&str, &str)]) -> Self {
+        Self::start_binary_in_with_env(
+            Path::new(env!("CARGO_BIN_EXE_kanna-daemon")),
+            dir,
+            extra_env,
+        )
+    }
+
+    fn start_binary_in(binary: &Path, dir: &PathBuf) -> Self {
+        Self::start_binary_in_with_env(binary, dir, &[])
+    }
+
+    fn start_binary_in_with_env(binary: &Path, dir: &PathBuf, extra_env: &[(&str, &str)]) -> Self {
         std::fs::create_dir_all(dir).unwrap();
 
-        let daemon_bin = PathBuf::from(env!("CARGO_BIN_EXE_kanna-daemon"));
         let socket_path = compute_socket_path(dir);
         let pid_path = dir.join("daemon.pid");
 
-        let child = Command::new(&daemon_bin)
-            .env("KANNA_DAEMON_DIR", dir.to_str().unwrap())
-            .spawn()
-            .expect("failed to start daemon");
+        let mut command = Command::new(binary);
+        command.env("KANNA_DAEMON_DIR", dir.to_str().unwrap());
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let child = command.spawn().expect("failed to start daemon");
 
         let expected_pid = child.id();
 
@@ -209,6 +260,41 @@ impl ClientConn {
         self.reader.read_line(&mut line).expect("read timed out");
         serde_json::from_str(line.trim())
             .unwrap_or_else(|e| panic!("failed to parse: {} — {:?}", e, line.trim()))
+    }
+
+    fn try_round_trip_until(
+        &mut self,
+        cmd: &Cmd,
+        expected: impl Fn(&Evt) -> bool,
+    ) -> Result<Evt, String> {
+        let mut json = serde_json::to_string(cmd).map_err(|error| error.to_string())?;
+        json.push('\n');
+        self.writer
+            .write_all(json.as_bytes())
+            .and_then(|_| self.writer.flush())
+            .map_err(|error| error.to_string())?;
+        loop {
+            let mut line = String::new();
+            let read = self
+                .reader
+                .read_line(&mut line)
+                .map_err(|error| error.to_string())?;
+            if read == 0 {
+                return Err("daemon disconnected before replying".to_string());
+            }
+            let event: Evt =
+                serde_json::from_str(line.trim()).map_err(|error| format!("{error}: {line:?}"))?;
+            if expected(&event) {
+                return Ok(event);
+            }
+            match event {
+                Evt::StatusChanged { .. } => {}
+                Evt::Error { code, message } => {
+                    return Err(format!("daemon returned {code:?}: {message}"));
+                }
+                other => return Err(format!("unexpected daemon reply: {other:?}")),
+            }
+        }
     }
 
     fn drain_output(&mut self, timeout: Duration) -> Vec<u8> {
@@ -397,6 +483,9 @@ impl FakeOldDaemon {
             while std::time::Instant::now() < deadline {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        stream
+                            .set_nonblocking(false)
+                            .expect("fake daemon stream should become blocking");
                         handler(stream, requests_for_thread);
                         break;
                     }
@@ -450,6 +539,17 @@ fn write_event_line(stream: &mut UnixStream, value: Value) {
     stream.flush().unwrap();
 }
 
+fn read_handoff_adopted(stream: &mut UnixStream, expected_version: u32) {
+    let mut line = String::new();
+    BufReader::new(stream.try_clone().unwrap())
+        .read_line(&mut line)
+        .expect("failed to read handoff acknowledgement");
+    let value: Value =
+        serde_json::from_str(line.trim()).expect("invalid handoff acknowledgement json");
+    assert_eq!(value["type"], "HandoffAdopted");
+    assert_eq!(value["version"], expected_version);
+}
+
 fn unique_session_id(prefix: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -472,7 +572,343 @@ fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Option<std::proc
     }
 }
 
+const STEERABLE_AGENT: &str = r#"#!/bin/sh
+read -r first
+echo '{"type":"system","subtype":"init","session_id":"handoff-v2-agent","model":"fake-model"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"hello from v2"}]}}'
+echo '{"type":"result","subtype":"success","duration_ms":5,"num_turns":1,"total_cost_usd":0.01,"usage":{},"session_id":"handoff-v2-agent"}'
+while read -r line; do
+  echo '{"type":"assistant","message":{"content":[{"type":"text","text":"steered after handoff"}]}}'
+  echo '{"type":"result","subtype":"success","duration_ms":5,"num_turns":2,"total_cost_usd":0.02,"usage":{},"session_id":"handoff-v2-agent"}'
+done
+"#;
+
+fn write_steerable_agent(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = dir.join("handoff-v2-agent.sh");
+    std::fs::write(&path, STEERABLE_AGENT).expect("write fake agent");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("make fake agent executable");
+    path
+}
+
+fn agent_params(script: &Path, prompt: &str) -> AgentSpawnParams {
+    AgentSpawnParams {
+        agent_provider: AgentProvider::Claude,
+        prompt: prompt.to_string(),
+        cwd: script
+            .parent()
+            .expect("fake agent parent")
+            .to_string_lossy()
+            .to_string(),
+        env: HashMap::new(),
+        model: None,
+        permission_mode: None,
+        allowed_tools: Vec::new(),
+        disallowed_tools: Vec::new(),
+        max_turns: None,
+        max_budget_usd: None,
+        system_prompt: None,
+        mcp_config_path: None,
+        executable: Some(script.to_string_lossy().to_string()),
+    }
+}
+
+fn spawn_agent(conn: &mut ClientConn, id: &str, script: &Path, prompt: &str) {
+    conn.send(&Cmd::SpawnAgent {
+        session_id: id.to_string(),
+        params: agent_params(script, prompt),
+    });
+    loop {
+        match conn.recv() {
+            Evt::SessionCreated { session_id } if session_id == id => return,
+            Evt::StatusChanged { .. } => {}
+            Evt::Error { code, message } => {
+                panic!("spawn agent failed for {id}: {code:?}: {message}")
+            }
+            other => panic!("expected agent SessionCreated, got {other:?}"),
+        }
+    }
+}
+
+fn wait_for_agent_turn(conn: &mut ClientConn, id: &str) {
+    conn.send(&Cmd::AttachAgent {
+        session_id: id.to_string(),
+        from_seq: 0,
+    });
+    loop {
+        match conn.recv() {
+            Evt::AgentSnapshot {
+                session_id, events, ..
+            } if session_id == id => {
+                if events
+                    .iter()
+                    .any(|entry| matches!(entry.event, NeutralAgentEvent::TurnCompleted { .. }))
+                {
+                    return;
+                }
+            }
+            Evt::AgentEvent {
+                session_id, event, ..
+            } if session_id == id => {
+                if matches!(event, NeutralAgentEvent::TurnCompleted { .. }) {
+                    return;
+                }
+            }
+            Evt::StatusChanged { .. } => {}
+            Evt::Error { code, message } => {
+                panic!("attach agent failed for {id}: {code:?}: {message}")
+            }
+            other => panic!("unexpected event waiting for agent turn: {other:?}"),
+        }
+    }
+}
+
+fn assert_agent_steers_after_handoff(daemon: &DaemonHandle, id: &str) {
+    let mut conn = daemon.connect();
+    wait_for_agent_turn(&mut conn, id);
+    conn.send(&Cmd::AgentInput {
+        session_id: id.to_string(),
+        text: "still alive?".to_string(),
+    });
+
+    let mut saw_text = false;
+    let mut saw_completion = false;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline && !(saw_text && saw_completion) {
+        match conn.recv() {
+            Evt::AgentEvent {
+                session_id, event, ..
+            } if session_id == id => match event {
+                NeutralAgentEvent::AssistantText { text, .. }
+                    if text == "steered after handoff" =>
+                {
+                    saw_text = true;
+                }
+                NeutralAgentEvent::TurnCompleted { .. } => saw_completion = true,
+                _ => {}
+            },
+            Evt::Ok | Evt::StatusChanged { .. } => {}
+            Evt::Error { code, message } => {
+                panic!("agent input failed for {id}: {code:?}: {message}")
+            }
+            other => panic!("unexpected event steering adopted agent: {other:?}"),
+        }
+    }
+    assert!(saw_text, "adopted agent did not emit steered response");
+    assert!(
+        saw_completion,
+        "adopted agent did not complete steered turn"
+    );
+}
+
+fn run_successful_lifecycle_churn(conn: &mut ClientConn, script: &Path) -> usize {
+    let mut completed = 0;
+    for sequence in 1..=4 {
+        let pty_id = format!("churn-pty-{sequence}");
+        let cycle = conn
+            .try_round_trip_until(
+                &Cmd::Spawn {
+                    session_id: pty_id.clone(),
+                    executable: "/bin/cat".to_string(),
+                    args: Vec::new(),
+                    cwd: "/tmp".to_string(),
+                    env: HashMap::new(),
+                    cols: 80,
+                    rows: 24,
+                    agent_provider: None,
+                },
+                |event| matches!(event, Evt::SessionCreated { session_id } if session_id == &pty_id),
+            )
+            .and_then(|_| {
+                conn.try_round_trip_until(
+                    &Cmd::Kill {
+                        session_id: pty_id,
+                    },
+                    |event| matches!(event, Evt::Ok),
+                )
+            });
+        if cycle.is_err() {
+            break;
+        }
+
+        let agent_id = format!("churn-agent-{sequence}");
+        let cycle = conn
+            .try_round_trip_until(
+                &Cmd::SpawnAgent {
+                    session_id: agent_id.clone(),
+                    params: agent_params(script, "churn"),
+                },
+                |event| matches!(event, Evt::SessionCreated { session_id } if session_id == &agent_id),
+            )
+            .and_then(|_| {
+                conn.try_round_trip_until(
+                    &Cmd::Kill {
+                        session_id: agent_id,
+                    },
+                    |event| matches!(event, Evt::Ok),
+                )
+            });
+        if cycle.is_err() {
+            break;
+        }
+        completed += 1;
+    }
+    completed
+}
+
+fn daemon_logs(dir: &Path) -> String {
+    let mut logs = String::new();
+    for entry in std::fs::read_dir(dir).expect("read daemon directory") {
+        let path = entry.expect("daemon directory entry").path();
+        let is_log = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("kanna-daemon_") && name.ends_with(".log"));
+        if is_log {
+            logs.push_str(&std::fs::read_to_string(path).unwrap_or_default());
+        }
+    }
+    logs
+}
+
+fn wait_for_daemon_log_contains(dir: &Path, needle: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if daemon_logs(dir).contains(needle) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("expected daemon logs to contain {needle:?} within {timeout:?}");
+}
+
+fn assert_daemon_log_contains(dir: &Path, needle: &str) {
+    let logs = daemon_logs(dir);
+    assert!(
+        logs.contains(needle),
+        "expected daemon logs to contain {needle:?}"
+    );
+}
+
 // ---- Tests ----
+
+#[test]
+fn previous_daemon_fixture_is_the_shipped_v2_binary() {
+    let binary = support::previous_daemon::binary();
+    let output = Command::new(binary)
+        .arg("--version")
+        .output()
+        .expect("run previous daemon");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("kanna-daemon"));
+}
+
+#[test]
+fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
+    let dir = test_dir("v2-v3-race");
+    cleanup(&dir);
+    std::fs::create_dir_all(&dir).expect("create cross-version daemon directory");
+    let script = write_steerable_agent(&dir);
+    let previous = support::previous_daemon::binary();
+    let mut old = DaemonHandle::start_binary_in(&previous, &dir);
+
+    spawn_echo(&mut old.connect(), "stable-pty");
+    spawn_agent(
+        &mut old.connect(),
+        "stable-agent",
+        &script,
+        "before handoff",
+    );
+    let mut old_pty = old.connect();
+    attach(&mut old_pty, "stable-pty");
+    send_input_and_wait_for_echo(&mut old_pty, "stable-pty", b"before\n", "before");
+    wait_for_agent_turn(&mut old.connect(), "stable-agent");
+
+    // Keep the management connection open before takeover so this test
+    // exercises the deployed v2 daemon after it has already sent the
+    // non-transactional snapshot. The current adopter's test hook holds ACK
+    // long enough to prove a complete PTY + agent lifecycle cycle overlaps
+    // that pre-commit transfer window.
+    let mut old_churn = old.connect();
+    drop(old_pty);
+    let current_dir = dir.clone();
+    let current_start = std::thread::spawn(move || {
+        DaemonHandle::start_in_with_env(
+            &current_dir,
+            &[("KANNA_TEST_HANDOFF_ACK_DELAY_MS", "1500")],
+        )
+    });
+    wait_for_daemon_log_contains(
+        &dir,
+        "TEST HOOK: delaying adoption acknowledgement",
+        Duration::from_secs(5),
+    );
+    let cycles = run_successful_lifecycle_churn(&mut old_churn, &script);
+    assert!(
+        cycles > 0,
+        "the deployed v2 daemon must complete PTY and agent lifecycle churn after its snapshot \
+         was transferred but before the current adopter ACKed"
+    );
+    drop(old_churn);
+    let current = current_start.join().expect("current daemon start thread");
+
+    assert!(
+        wait_for_child_exit(&mut old.child, Duration::from_secs(10)).is_some(),
+        "v2 incumbent should exit after its snapshot is adopted"
+    );
+    let mut current_pty = current.connect();
+    attach(&mut current_pty, "stable-pty");
+    send_input_and_wait_for_echo(&mut current_pty, "stable-pty", b"after\n", "after");
+    assert_agent_steers_after_handoff(&current, "stable-agent");
+    assert_daemon_log_contains(&dir, "selected legacy-v2 mode");
+
+    drop(current_pty);
+    drop(current);
+    drop(old);
+    cleanup(&dir);
+}
+
+#[test]
+fn current_v3_hands_stable_pty_and_agent_to_shipped_v2_adopter() {
+    let dir = test_dir("v3-v2-adopter");
+    cleanup(&dir);
+    std::fs::create_dir_all(&dir).expect("create cross-version daemon directory");
+    let script = write_steerable_agent(&dir);
+    let mut current = DaemonHandle::start_in(&dir);
+
+    spawn_echo(&mut current.connect(), "stable-pty");
+    spawn_agent(
+        &mut current.connect(),
+        "stable-agent",
+        &script,
+        "before handoff",
+    );
+    let mut current_pty = current.connect();
+    attach(&mut current_pty, "stable-pty");
+    send_input_and_wait_for_echo(&mut current_pty, "stable-pty", b"before\n", "before");
+    wait_for_agent_turn(&mut current.connect(), "stable-agent");
+
+    drop(current_pty);
+    let previous = support::previous_daemon::binary();
+    let old_adopter = DaemonHandle::start_binary_in(&previous, &dir);
+    assert!(
+        wait_for_child_exit(&mut current.child, Duration::from_secs(10)).is_some(),
+        "current v3 sender should exit after the shipped v2 adopter ACKs"
+    );
+
+    let mut adopted_pty = old_adopter.connect();
+    attach(&mut adopted_pty, "stable-pty");
+    send_input_and_wait_for_echo(&mut adopted_pty, "stable-pty", b"after\n", "after");
+    assert_agent_steers_after_handoff(&old_adopter, "stable-agent");
+    assert_daemon_log_contains(&dir, "accepted mode legacy-v2");
+
+    drop(adopted_pty);
+    drop(old_adopter);
+    drop(current);
+    cleanup(&dir);
+}
 
 #[test]
 fn test_version_exits_without_handoff_or_socket() {
@@ -505,9 +941,9 @@ fn test_version_exits_without_handoff_or_socket() {
     cleanup(&dir);
 }
 
-/// If the old daemon accepts the v2 handoff command and then drops the
+/// If the old daemon accepts the v3 handoff command and then drops the
 /// connection, the new daemon cannot know whether sessions were detached.
-/// It must not send a second compat handoff request or start a competing
+/// It must not send a legacy-v2 handoff request or start a competing
 /// daemon while the old daemon is still alive.
 #[test]
 fn test_handoff_ambiguous_post_send_failure_exits_without_split_brain() {
@@ -533,8 +969,8 @@ fn test_handoff_ambiguous_post_send_failure_exits_without_split_brain() {
     let requests = fake.join();
     assert_eq!(
         requests,
-        vec![2],
-        "ambiguous failure after sending Handoff must not retry compat"
+        vec![3],
+        "ambiguous failure after sending v3 Handoff must not retry legacy v2"
     );
 
     cleanup(&dir);
@@ -635,28 +1071,28 @@ fn test_handoff_fd_transfer_failure_exits_without_split_brain() {
     let requests = fake.join();
     assert_eq!(
         requests,
-        vec![2],
-        "fd transfer failure after metadata must not retry compat"
+        vec![3],
+        "fd transfer failure after v3 metadata must not retry legacy v2"
     );
 
     cleanup(&dir);
 }
 
 /// Explicit protocol version mismatch is the safe case for falling back to the
-/// compat handoff version.
+/// deployed legacy v2 handoff version.
 #[test]
-fn test_handoff_explicit_version_mismatch_retries_compat() {
-    let dir = test_dir("version-mismatch-compat");
+fn test_handoff_explicit_v3_mismatch_retries_legacy_v2() {
+    let dir = test_dir("version-mismatch-legacy");
     let fake = FakeOldDaemon::start(&dir, |mut stream, requests| {
         let version = read_handoff_version(&mut stream);
         requests.lock().unwrap().push(version);
-        if version == 2 {
+        if version == 3 {
             write_event_line(
                 &mut stream,
                 serde_json::json!({
                     "type": "Error",
                     "code": "handoff_version_mismatch",
-                    "message": "handoff version mismatch: expected 1, got 2"
+                    "message": "handoff version mismatch: expected 1 or 2, got 3"
                 }),
             );
         } else {
@@ -667,6 +1103,7 @@ fn test_handoff_explicit_version_mismatch_retries_compat() {
                     "sessions": []
                 }),
             );
+            read_handoff_adopted(&mut stream, version);
         }
     });
 
@@ -674,13 +1111,13 @@ fn test_handoff_explicit_version_mismatch_retries_compat() {
     let requests = fake.join();
     assert_eq!(
         requests,
-        vec![2, 1],
-        "explicit version mismatch should retry exactly once with compat"
+        vec![3, 2],
+        "explicit v3 mismatch should retry exactly once with legacy v2"
     );
 
     let mut conn = daemon.connect();
-    spawn_echo(&mut conn, "fresh-after-compat-fallback");
-    attach(&mut conn, "fresh-after-compat-fallback");
+    spawn_echo(&mut conn, "fresh-after-legacy-fallback");
+    attach(&mut conn, "fresh-after-legacy-fallback");
 
     drop(daemon);
     cleanup(&dir);
@@ -956,6 +1393,63 @@ fn test_handoff_broadcasts_shutting_down() {
         matches!(evt_b, Evt::ShuttingDown),
         "sub_b should get ShuttingDown, got: {:?}",
         evt_b
+    );
+
+    cleanup(&dir);
+}
+
+/// Release-complete regression: even when the old daemon is slow to
+/// relinquish its PTY readers after acknowledging adoption (fault-injected
+/// via KANNA_TEST_HANDOFF_RELEASE_DELAY_MS), the adopting daemon must not
+/// publish itself (pid file + socket) until the old daemon has actually
+/// exited — otherwise both daemons would consume and split session output.
+#[test]
+fn test_adopter_publishes_only_after_delayed_old_daemon_exits() {
+    let dir = test_dir("delayed-release");
+    let session_id = unique_session_id("delayed-release");
+
+    // Old daemon with a delayed reader release.
+    let mut daemon_a =
+        DaemonHandle::start_in_with_env(&dir, &[("KANNA_TEST_HANDOFF_RELEASE_DELAY_MS", "1500")]);
+    let mut conn_a = daemon_a.connect();
+    spawn_echo(&mut conn_a, &session_id);
+    attach(&mut conn_a, &session_id);
+    send_input_and_wait_for_echo(
+        &mut conn_a,
+        &session_id,
+        b"before-handoff\n",
+        "before-handoff",
+    );
+
+    // New daemon adopts. start_in returns only once B's pid file and socket
+    // are live — by then the delayed old daemon must have exited (it may be
+    // an unreaped zombie of this test process, so probe with try_wait, not
+    // kill(pid, 0)).
+    let publish_started = Instant::now();
+    let daemon_b = DaemonHandle::start_in(&dir);
+    let waited = publish_started.elapsed();
+    assert!(
+        daemon_a
+            .child
+            .try_wait()
+            .expect("old daemon status should be queryable")
+            .is_some(),
+        "old daemon must have exited before the adopter published its socket"
+    );
+    assert!(
+        waited >= Duration::from_millis(1400),
+        "the adopter must have actually waited out the delayed release, waited {waited:?}"
+    );
+
+    // The adopted session still works end-to-end through the new daemon —
+    // no split reader consumed its output.
+    let mut conn_b = daemon_b.connect();
+    attach(&mut conn_b, &session_id);
+    send_input_and_wait_for_echo(
+        &mut conn_b,
+        &session_id,
+        b"after-handoff\n",
+        "after-handoff",
     );
 
     cleanup(&dir);

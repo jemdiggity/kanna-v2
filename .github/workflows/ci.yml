@@ -62,3 +62,17 @@ jobs:
           echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
       - run: pnpm install --frozen-lockfile
       - run: ./kd test rust
+
+  daemon-handoff:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The cross-version regression builds the fixed shipped-v2 tag
+          # from local history; tests never fetch source at runtime.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.93.1
+      - run: cd crates/daemon && cargo test -- --test-threads=1

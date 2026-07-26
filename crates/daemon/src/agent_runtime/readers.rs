@@ -1,69 +1,64 @@
 use std::io::{BufRead, BufReader, Read, Write as IoWrite};
-use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 
 use kanna_agent_protocol::{AgentEvent, PermissionDecision, SessionEndReason, TurnModel};
-use kanna_daemon::agent::{event_status, signal_agent_pid, AgentSessions};
+use kanna_daemon::agent::{event_status, AgentSessions};
 use kanna_daemon::protocol::{Event, SessionStatus};
 
 use super::{broadcast_event, journal_and_fan_out, log_info, set_status};
 
-/// Grace a child gets to exit on its own after its stdout closed and its
-/// stdin was dropped, before the reaper SIGKILLs its process group.
-const LINGERING_CHILD_GRACE: Duration = Duration::from_secs(2);
-const LINGERING_CHILD_POLL: Duration = Duration::from_millis(50);
+/// Everything a reader owns for the exact child life it was started for.
+/// Readers never resolve these through the registry: a reader that outlives
+/// a kill+recreate of the same session id would otherwise pick up the
+/// replacement record's adapter and journal its old-life output into the new
+/// session's transcript. `incarnation` gates every registry mutation.
+#[derive(Clone)]
+pub struct ReaderLife {
+    pub session_id: String,
+    pub incarnation: u64,
+    pub adapter:
+        std::sync::Arc<std::sync::Mutex<Box<dyn kanna_agent_protocol::ProviderAdapter + Send>>>,
+    pub shared: std::sync::Arc<tokio::sync::Mutex<kanna_daemon::agent::AgentShared>>,
+}
 
 /// Spawn the stdout + stderr reader threads for a (re)spawned agent child.
-/// `pid` identifies the child these readers belong to: exit bookkeeping is
-/// skipped when the record has since been respawned onto a newer child.
+/// The readers carry `life`: the adapter, journal, and incarnation of the
+/// child they watch, so neither parsing nor journaling nor registry
+/// mutation can ever touch a later life of the same session id.
 pub fn start_agent_readers(
-    session_id: String,
-    pid: u32,
+    life: ReaderLife,
     stdout: std::process::ChildStdout,
     stderr: std::process::ChildStderr,
     agents: AgentSessions,
     broadcast_tx: broadcast::Sender<String>,
 ) {
     {
-        let session_id = session_id.clone();
+        let life = life.clone();
         let agents = agents.clone();
         let broadcast_tx = broadcast_tx.clone();
         tokio::task::spawn_blocking(move || {
-            run_agent_reader(
-                session_id,
-                pid,
-                Box::new(stdout),
-                false,
-                agents,
-                broadcast_tx,
-            );
+            run_agent_reader(life, Box::new(stdout), false, agents, broadcast_tx);
         });
     }
     tokio::task::spawn_blocking(move || {
-        run_agent_reader(
-            session_id,
-            pid,
-            Box::new(stderr),
-            true,
-            agents,
-            broadcast_tx,
-        );
+        run_agent_reader(life, Box::new(stderr), true, agents, broadcast_tx);
     });
 }
 
 fn run_agent_reader(
-    session_id: String,
-    pid: u32,
+    life: ReaderLife,
     reader: Box<dyn Read + Send>,
     is_stderr: bool,
     agents: AgentSessions,
     broadcast_tx: broadcast::Sender<String>,
 ) {
     let rt = tokio::runtime::Handle::current();
+    let session_id = life.session_id.clone();
+    let generation = life.incarnation;
     log_info(format_args!(
-        "[agent] reader start session={} stderr={}",
-        session_id, is_stderr
+        "[agent] reader start session={} incarnation={} stderr={}",
+        session_id, generation, is_stderr
     ));
 
     for line in BufReader::new(reader).lines().map_while(Result::ok) {
@@ -73,18 +68,10 @@ fn run_agent_reader(
         let events = if is_stderr {
             vec![AgentEvent::Diagnostic { message: line }]
         } else {
-            let adapter = rt.block_on(async {
-                agents
-                    .lock()
-                    .await
-                    .get(&session_id)
-                    .map(|record| record.adapter.clone())
-            });
-            let Some(adapter) = adapter else {
-                // Session removed (killed) — stop reading.
-                return;
-            };
-            let mut guard = match adapter.lock() {
+            // Parse through the reader's OWN adapter. Resolving it from the
+            // registry would hand an old life's output to the replacement
+            // session's adapter after a kill+recreate of the same id.
+            let mut guard = match life.adapter.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
@@ -92,79 +79,64 @@ fn run_agent_reader(
         };
 
         for event in events {
-            rt.block_on(process_event(&session_id, event, &agents, &broadcast_tx));
+            rt.block_on(process_event(&life, event, &agents, &broadcast_tx));
         }
     }
 
     log_info(format_args!(
-        "[agent] reader eof session={} stderr={}",
-        session_id, is_stderr
+        "[agent] reader eof session={} incarnation={} stderr={}",
+        session_id, generation, is_stderr
     ));
     if !is_stderr {
-        rt.block_on(handle_child_exit(&session_id, pid, &agents, &broadcast_tx));
-    }
-}
-
-enum ChildReap {
-    Done(i32),
-    Lingering(std::process::Child),
-}
-
-/// Reap a child that closed its stdout but has not exited, WITHOUT holding
-/// the registry lock. Its stdin was just dropped — which is how a lingering
-/// provider is told to finish — so give it a short grace, then SIGKILL its
-/// process group and collect the status.
-async fn reap_lingering_child(session_id: &str, pid: u32, mut child: std::process::Child) -> i32 {
-    log_info(format_args!(
-        "[agent] child outlived its stdout session={} pid={}; reaping off-lock",
-        session_id, pid
-    ));
-    let deadline = Instant::now() + LINGERING_CHILD_GRACE;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.code().unwrap_or(-1),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    log_info(format_args!(
-                        "[agent] child ignored stdin close session={} pid={}; killing process group",
-                        session_id, pid
-                    ));
-                    let _ = signal_agent_pid(pid, libc::SIGKILL);
-                    return child
-                        .wait()
-                        .ok()
-                        .and_then(|status| status.code())
-                        .unwrap_or(-1);
-                }
-                tokio::time::sleep(LINGERING_CHILD_POLL).await;
-            }
-            Err(_) => {
-                return child
-                    .wait()
-                    .ok()
-                    .and_then(|status| status.code())
-                    .unwrap_or(-1)
-            }
-        }
+        rt.block_on(handle_child_exit(&life, &agents, &broadcast_tx));
     }
 }
 
 async fn process_event(
-    session_id: &str,
+    life: &ReaderLife,
     event: AgentEvent,
     agents: &AgentSessions,
     broadcast_tx: &broadcast::Sender<String>,
 ) {
+    let session_id = life.session_id.as_str();
+    let generation = life.incarnation;
     // Registry pass: capture provider session id, permission bookkeeping,
     // status derivation, auto-allow.
     let mut auto_resolve: Option<String> = None;
     let mut provider_session_to_persist: Option<String> = None;
+    // One registry pass, and never an await while the guard is alive: journal
+    // + fan-out write to client sockets, so awaiting under the global agents
+    // mutex would let one slow client stall every registry operation in the
+    // daemon. Not-our-life dispositions (session gone, or a newer child owns
+    // the record) journal into this life's own transcript afterwards.
+    let is_our_life = {
+        let mut registry = agents.lock().await;
+        match registry.get_mut(session_id) {
+            None => false,
+            Some(record) if record.incarnation != generation => false,
+            Some(record) => {
+                record.last_activity_at = std::time::Instant::now();
+                true
+            }
+        }
+    };
+    if !is_our_life {
+        journal_and_fan_out(session_id, &life.shared, event).await;
+        return;
+    }
+
     let shared = {
         let mut registry = agents.lock().await;
-        let Some(record) = registry.get_mut(session_id) else {
-            return;
+        // Re-resolve after the brief gap above; a life change here is still
+        // handled without awaiting under the guard.
+        let record = match registry.get_mut(session_id) {
+            Some(record) if record.incarnation == generation => record,
+            _ => {
+                drop(registry);
+                journal_and_fan_out(session_id, &life.shared, event).await;
+                return;
+            }
         };
-        record.last_activity_at = std::time::Instant::now();
 
         if let AgentEvent::AssistantText { text, .. } = &event {
             if let Some(prompt) = kanna_daemon::headless_terminal::bound_waiting_prompt(text) {
@@ -190,7 +162,9 @@ async fn process_event(
                 ..
             } => {
                 if record.session_allowed_tools.contains(tool_name) {
-                    let line = match record.adapter.lock() {
+                    // This life's own adapter (identical to the record's while
+                    // the incarnation matches, but never registry-resolved).
+                    let line = match life.adapter.lock() {
                         Ok(mut adapter) => adapter
                             .encode_permission_response(request_id, &PermissionDecision::Allow),
                         Err(poisoned) => poisoned
@@ -232,7 +206,7 @@ async fn process_event(
             );
         }
 
-        record.shared.clone()
+        life.shared.clone()
     };
 
     if let Some(provider_session_id) = provider_session_to_persist {
@@ -254,86 +228,178 @@ async fn process_event(
     }
 }
 
-async fn handle_child_exit(
-    session_id: &str,
-    reader_pid: u32,
+/// Reap an exited-or-exiting child without holding any lock. Bounded: poll
+/// for the natural exit first (stdin and the handoff stdin duplicate were
+/// already closed, so a provider waiting for EOF can finish), then escalate
+/// to an identity-verified group SIGKILL plus a direct kill, and finally —
+/// if the child is stuck in the kernel — hand it to a detached blocking
+/// reaper rather than wedging the reader thread. Returns the exit code
+/// (`-1` when unknown).
+fn reap_exited_child(
+    mut child: std::process::Child,
+    child_start: Option<kanna_daemon::proc_info::StartTime>,
+) -> i32 {
+    const NATURAL_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+    const POST_KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+    let poll_until = |child: &mut std::process::Child, grace: std::time::Duration| {
+        let deadline = std::time::Instant::now() + grace;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Some(status.code().unwrap_or(-1)),
+                Ok(None) => {}
+                Err(_) => return Some(-1),
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    };
+
+    if let Some(code) = poll_until(&mut child, NATURAL_EXIT_GRACE) {
+        return code;
+    }
+    // Lingering child: its stdout closed but the process stayed alive.
+    // Identity-verified group kill (never a recycled pid), then direct kill
+    // of our own child handle.
+    log_info(format_args!(
+        "[agent] child {} lingering after stdout EOF; killing its process group",
+        child.id()
+    ));
+    // We hold the `Child` handle, so this is our own unreaped fork: its pid
+    // cannot be recycled across delivery.
+    let _ = kanna_daemon::agent::signal_agent_pid(child.id(), child_start, true, libc::SIGKILL);
+    let _ = child.kill();
+    if let Some(code) = poll_until(&mut child, POST_KILL_GRACE) {
+        return code;
+    }
+    log_info(format_args!(
+        "[agent] child {} unreapable after SIGKILL; handing it to the central reaper",
+        child.id()
+    ));
+    // The central reaper retains ownership and retries until the child is
+    // actually reaped — never a forever-detached per-child thread.
+    kanna_daemon::reaper::reap_detached(child, child_start);
+    -1
+}
+
+/// Test-only entry point for the reader's exit handling.
+#[cfg(test)]
+pub(crate) async fn handle_child_exit_for_test(
+    life: &ReaderLife,
     agents: &AgentSessions,
     broadcast_tx: &broadcast::Sender<String>,
 ) {
-    // Reap under the registry lock only when it cannot block. The lock is
-    // global: with a blocking `wait()` held inside it, one child that closed
-    // stdout without exiting queued every registry operation behind it —
-    // List, Kill of any non-PTY session id, agent commands — which silently
-    // stranded every stage transition at its teardown-session Kill
-    // (2026-07-24 staging outage).
-    let pending = {
+    handle_child_exit(life, agents, broadcast_tx).await
+}
+
+/// Test-only entry point for the reader's per-event handling.
+#[cfg(test)]
+pub(crate) async fn process_event_for_test(
+    life: &ReaderLife,
+    event: AgentEvent,
+    agents: &AgentSessions,
+    broadcast_tx: &broadcast::Sender<String>,
+) {
+    process_event(life, event, agents, broadcast_tx).await
+}
+
+async fn handle_child_exit(
+    life: &ReaderLife,
+    agents: &AgentSessions,
+    broadcast_tx: &broadcast::Sender<String>,
+) {
+    let session_id = life.session_id.as_str();
+    let generation = life.incarnation;
+    // Phase 1 (under the lock): verify the incarnation and take everything
+    // that must be released — the child handle, its stdin, and the handoff
+    // duplicates (including the stdin dup, so a provider reading stdin to
+    // EOF can actually exit). No blocking wait happens under the registry
+    // lock.
+    let Some((child, child_start, stdin, handoff_fds)) = ({
+        let mut registry = agents.lock().await;
+        match registry.get_mut(session_id) {
+            None => None,
+            Some(record) if record.incarnation != generation => {
+                // The exited child belongs to a superseded incarnation; the
+                // respawn installer already took responsibility for reaping
+                // it. Touching the record would clobber the live child.
+                log_info(format_args!(
+                    "[agent] stale reader (incarnation={}) observed exit for session {} \
+                     (record incarnation={}); ignoring",
+                    generation, session_id, record.incarnation
+                ));
+                None
+            }
+            Some(record) => Some((
+                record.child.take(),
+                record.child_start,
+                record.stdin.take(),
+                record.handoff_fds.take(),
+            )),
+        }
+    }) else {
+        return;
+    };
+
+    // Phase 2 (off-lock): close stdin + handoff dups, then reap bounded.
+    drop(stdin);
+    if let Some(fds) = handoff_fds {
+        fds.close();
+    }
+    // Blocking is acceptable here: production calls arrive on the dedicated
+    // reader thread (spawn_blocking), never on a runtime worker.
+    let code = match child {
+        Some(child) => reap_exited_child(child, child_start),
+        None => -1,
+    };
+
+    // Phase 3 (relock): revalidate the incarnation before mutating session
+    // state — a kill/recreate or respawn while we were reaping owns the
+    // record now.
+    let (shared, reason) = {
         let mut registry = agents.lock().await;
         let Some(record) = registry.get_mut(session_id) else {
             return;
         };
-        if record.pid != reader_pid {
-            // The record was respawned onto a newer child while this
-            // reader's EOF was in flight; the newer child's reader owns the
-            // exit bookkeeping.
-            return;
-        }
-        // Drop our ends of the child's stdin — the record's handle and the
-        // dup reserved for handoff — BEFORE reaping. A provider that lingers
-        // reading stdin can only exit once these close; the old
-        // wait-before-close order turned such a child into a deadlock.
-        record.stdin = None;
-        if let Some(fds) = record.handoff_fds.take() {
-            fds.close();
-        }
-        match record.child.take() {
-            None => ChildReap::Done(-1),
-            Some(mut child) => match child.try_wait() {
-                Ok(Some(status)) => ChildReap::Done(status.code().unwrap_or(-1)),
-                Ok(None) | Err(_) => ChildReap::Lingering(child),
-            },
-        }
-    };
-
-    let code = match pending {
-        ChildReap::Done(code) => code,
-        ChildReap::Lingering(child) => reap_lingering_child(session_id, reader_pid, child).await,
-    };
-
-    let (shared, per_turn, interrupted) = {
-        let mut registry = agents.lock().await;
-        let Some(record) = registry.get_mut(session_id) else {
-            // Killed while reaping: kill_agent_session already announced the
-            // session's end.
-            return;
-        };
-        if record.pid != reader_pid {
-            // A respawn claimed the record while the lingering child was
-            // being reaped, so the session lives on with a new child.
-            // Announce nothing — an Exit here would read as the session
-            // completing.
+        if record.incarnation != generation {
+            log_info(format_args!(
+                "[agent] session {} changed incarnation during exit reaping; skipping state update",
+                session_id
+            ));
             return;
         }
         record.exited = true;
         let interrupted = std::mem::replace(&mut record.interrupt_requested, false);
         set_status(record, broadcast_tx, session_id, SessionStatus::Idle, None);
         let per_turn = matches!(record.turn_model, TurnModel::PerTurn);
-        (record.shared.clone(), per_turn, interrupted)
+        // A user-initiated stop signals the child to exit; surface it as an
+        // interruption (never a crash) and end the turn so the UI stops showing
+        // activity. Per-turn sessions stay usable — the next message respawns
+        // the provider.
+        let reason = if interrupted {
+            Some(SessionEndReason::Interrupted)
+        } else if per_turn && code == 0 {
+            // Per-turn providers exit after every turn by design — process
+            // churn is an implementation detail, not a session event, so this
+            // exit publishes NO terminal Exit.
+            None
+        } else if code == 0 {
+            Some(SessionEndReason::Completed)
+        } else {
+            Some(SessionEndReason::Crashed)
+        };
+        // Decide publication once, here, and record it: a later Kill needs to
+        // tell "the process exited" from "the session already announced its
+        // death", and re-deriving that predicate at the Kill site is exactly
+        // how the two drifted apart. Every early return above this line leaves
+        // the flag untouched (still false) — correct, since none published.
+        record.exit_published = reason.is_some();
+        (life.shared.clone(), reason)
     };
-
-    // A user-initiated stop signals the child to exit; surface it as an
-    // interruption (never a crash) and end the turn so the UI stops showing
-    // activity. Per-turn sessions stay usable — the next message respawns the
-    // provider.
-    let reason = if interrupted {
-        SessionEndReason::Interrupted
-    } else if per_turn && code == 0 {
-        // Per-turn providers exit after every turn by design — process churn is
-        // an implementation detail, not a session event.
+    let Some(reason) = reason else {
         return;
-    } else if code == 0 {
-        SessionEndReason::Completed
-    } else {
-        SessionEndReason::Crashed
     };
     journal_and_fan_out(
         session_id,
@@ -354,4 +420,183 @@ async fn handle_child_exit(
             killed: false,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build the reader-owned life for a record already in the registry.
+    async fn life_for(agents: &AgentSessions, session_id: &str, incarnation: u64) -> ReaderLife {
+        let registry = agents.lock().await;
+        let record = registry.get(session_id).expect("session present");
+        ReaderLife {
+            session_id: session_id.to_string(),
+            incarnation,
+            adapter: record.adapter.clone(),
+            shared: record.shared.clone(),
+        }
+    }
+
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    /// A reader that outlives a respawn must not clobber the newer child's
+    /// state: exit bookkeeping from a superseded generation is ignored, while
+    /// the owning generation's exit is applied.
+    #[tokio::test]
+    async fn stale_generation_exit_does_not_clobber_current_child() {
+        let dir = crate::tests::temp_daemon_dir("reader-gen");
+        let agents: AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+        let mut record = crate::tests::agent_record_fixture(&dir, "sess");
+        record.incarnation = 2;
+        record.exited = false;
+        agents.lock().await.insert("sess".to_string(), record);
+        let (broadcast_tx, _rx) = broadcast::channel(16);
+
+        handle_child_exit(&life_for(&agents, "sess", 1).await, &agents, &broadcast_tx).await;
+        assert!(
+            !agents.lock().await.get("sess").unwrap().exited,
+            "a stale reader's exit must not mark the live child exited"
+        );
+
+        handle_child_exit(&life_for(&agents, "sess", 2).await, &agents, &broadcast_tx).await;
+        assert!(
+            agents.lock().await.get("sess").unwrap().exited,
+            "the owning generation's exit must be applied"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Status mutations from a stale generation's output are dropped while
+    /// its events still reach the journal.
+    #[tokio::test]
+    async fn stale_generation_events_journal_without_mutating_status() {
+        let dir = crate::tests::temp_daemon_dir("reader-gen-status");
+        let agents: AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+        let mut record = crate::tests::agent_record_fixture(&dir, "sess");
+        record.incarnation = 2;
+        record.status = SessionStatus::Busy;
+        agents.lock().await.insert("sess".to_string(), record);
+        let (broadcast_tx, _rx) = broadcast::channel(16);
+
+        // SessionEnded from the stale generation would normally flip status.
+        process_event(
+            &life_for(&agents, "sess", 1).await,
+            AgentEvent::SessionEnded {
+                reason: SessionEndReason::Completed,
+                exit_code: Some(0),
+                message: None,
+            },
+            &agents,
+            &broadcast_tx,
+        )
+        .await;
+
+        let registry = agents.lock().await;
+        let record = registry.get("sess").unwrap();
+        assert_eq!(
+            record.status,
+            SessionStatus::Busy,
+            "stale generation must not mutate live status"
+        );
+        let journaled = {
+            let shared = record.shared.clone();
+            drop(registry);
+            let sh = shared.lock().await;
+            sh.journal.events_from(0)
+        };
+        assert!(
+            journaled
+                .iter()
+                .any(|entry| matches!(entry.event, AgentEvent::SessionEnded { .. })),
+            "stale generation output still belongs in the journal"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Lingering child: the provider closes stdout but stays alive (here,
+    /// blocked on a `sleep` in its process group). Exit handling must not
+    /// hold the registry mutex across the wait, must close stdin plus the
+    /// handoff stdin duplicate so an EOF-waiting provider can finish, and
+    /// must escalate to an identity-verified group kill so the child never
+    /// lingers forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn lingering_child_is_reaped_without_holding_the_registry_lock() {
+        let dir = crate::tests::temp_daemon_dir("reader-linger");
+        let agents: AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+        let (broadcast_tx, _rx) = broadcast::channel(16);
+
+        // Child closes stdout immediately, then lives on.
+        let spawned = kanna_daemon::agent::spawn_agent_child(
+            &kanna_agent_protocol::SpawnSpec {
+                executable: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "exec 1>&-; sleep 300".to_string()],
+                env: Vec::new(),
+                initial_stdin: None,
+            },
+            "/tmp",
+            &HashMap::new(),
+        )
+        .expect("lingering child spawn should succeed");
+        let child_pid = spawned.pid as libc::pid_t;
+
+        let mut record = crate::tests::agent_record_fixture(&dir, "linger");
+        let incarnation = kanna_daemon::agent::next_agent_incarnation();
+        record.incarnation = incarnation;
+        record.exited = false;
+        record.pid = spawned.pid;
+        record.child_start = spawned.child_start;
+        record.child = Some(spawned.child);
+        record.stdin = spawned.stdin;
+        record.handoff_fds = spawned.handoff_fds;
+        agents.lock().await.insert("linger".to_string(), record);
+
+        // The registry mutex must stay acquirable throughout the reap.
+        let probe_agents = agents.clone();
+        let lock_probe = tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            let mut acquisitions = 0;
+            while std::time::Instant::now() < deadline {
+                {
+                    let _guard = probe_agents.lock().await;
+                    acquisitions += 1;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            acquisitions
+        });
+
+        handle_child_exit(
+            &life_for(&agents, "linger", incarnation).await,
+            &agents,
+            &broadcast_tx,
+        )
+        .await;
+
+        let acquisitions = lock_probe.await.expect("probe should not panic");
+        assert!(
+            acquisitions > 5,
+            "registry lock must remain acquirable during the reap, got {acquisitions} acquisitions"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while unsafe { libc::kill(child_pid, 0) } == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lingering child {child_pid} must be killed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        {
+            let registry = agents.lock().await;
+            let record = registry.get("linger").expect("session still present");
+            assert!(record.exited, "exit bookkeeping must be applied");
+            assert!(record.child.is_none());
+            assert!(record.stdin.is_none());
+            assert!(record.handoff_fds.is_none());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

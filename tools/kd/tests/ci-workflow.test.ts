@@ -43,4 +43,19 @@ describe("canonical CI workflow", () => {
       "sudo apt-get install -y --no-install-recommends zsh tmux",
     );
   });
+
+  it("runs authenticated daemon handoff coverage on macOS with shipped history", () => {
+    const workflow = readFileSync(workflowPath, "utf8");
+    const rustJob = workflowJob(workflow, "rust");
+    const daemonHandoffJob = workflowJob(workflow, "daemon-handoff");
+
+    expect(rustJob).toContain("runs-on: ubuntu-latest");
+    expect(rustJob).toContain("run: ./kd test rust");
+    expect(rustJob).not.toContain("fetch-depth: 0");
+    expect(daemonHandoffJob).toContain("runs-on: macos-14");
+    expect(daemonHandoffJob).toContain("fetch-depth: 0");
+    expect(daemonHandoffJob).toContain(
+      "run: cd crates/daemon && cargo test -- --test-threads=1",
+    );
+  });
 });

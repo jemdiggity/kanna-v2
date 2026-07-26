@@ -9,9 +9,14 @@ use std::io;
 use std::os::unix::io::RawFd;
 use std::time::{Duration, Instant};
 
+// An SCM_RIGHTS message must be queued atomically, and the peer may still be
+// draining a large payload written just before the fd send (the handoff writes
+// the whole HandoffReady response first). These bounds are incident-proven: a
+// single unretried sendmsg lost a 33-session handoff on 2026-07-24.
 const RECV_FDS_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
 const RECV_FDS_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 const SEND_FDS_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
+const SEND_FDS_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Send file descriptors over a Unix socket.
 ///
@@ -62,28 +67,32 @@ pub fn send_fds(socket: RawFd, fds: &[RawFd]) -> io::Result<()> {
         std::ptr::copy_nonoverlapping(fds.as_ptr() as *const u8, libc::CMSG_DATA(cmsg), fds_size);
     }
 
-    // An SCM_RIGHTS message must be queued atomically, and the peer may
-    // still be draining a large payload written just before this call (the
-    // handoff writes the whole HandoffReady response first). On a
-    // nonblocking socket whose send buffer is still full, macOS rejects the
-    // ancillary-bearing message — observed as EMSGSIZE, not just EAGAIN —
-    // so retry both until the peer drains or the deadline passes. A single
-    // unretried sendmsg here lost a 33-session handoff on 2026-07-24.
+    // On a nonblocking socket whose send buffer is still full, macOS rejects
+    // an ancillary-bearing message as EMSGSIZE rather than EAGAIN, so EMSGSIZE
+    // is a *backpressure* signal here and is retried too — verified by
+    // `send_fds_retries_across_socket_backpressure`, where the identical send
+    // succeeds once the receiver drains. The bounded deadline is what stops a
+    // genuinely oversized payload from retrying forever.
     let deadline = Instant::now() + SEND_FDS_RETRY_TIMEOUT;
     loop {
         let ret = unsafe { libc::sendmsg(socket, &msg, 0) };
         if ret >= 0 {
             return Ok(());
         }
-
         let error = io::Error::last_os_error();
-        let transient = error.kind() == io::ErrorKind::WouldBlock
-            || error.raw_os_error() == Some(libc::EMSGSIZE);
-        if !transient || Instant::now() >= deadline {
+        let retryable = error.kind() == io::ErrorKind::WouldBlock
+            || matches!(
+                error.raw_os_error(),
+                Some(libc::EAGAIN)
+                    | Some(libc::ENOBUFS)
+                    | Some(libc::ENOMEM)
+                    | Some(libc::EINTR)
+                    | Some(libc::EMSGSIZE)
+            );
+        if !retryable || Instant::now() >= deadline {
             return Err(error);
         }
-
-        std::thread::sleep(RECV_FDS_RETRY_INTERVAL);
+        std::thread::sleep(SEND_FDS_RETRY_INTERVAL);
     }
 }
 
@@ -112,6 +121,12 @@ pub fn recv_fds(socket: RawFd, count: usize) -> io::Result<Vec<RawFd>> {
     msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
     msg.msg_controllen = cmsg_space as _;
 
+    // Received fds enter this process inheritable (macOS has no
+    // MSG_CMSG_CLOEXEC), so the whole receive-and-mark window must be inside
+    // the process-wide spawn/fd boundary: no fork/exec may run before the
+    // adopted fds are close-on-exec.
+    let _spawn_boundary = crate::fd::spawn_fd_boundary();
+
     let deadline = Instant::now() + RECV_FDS_RETRY_TIMEOUT;
     let ret = loop {
         let ret = unsafe { libc::recvmsg(socket, &mut msg, 0) };
@@ -133,29 +148,105 @@ pub fn recv_fds(socket: RawFd, count: usize) -> io::Result<Vec<RawFd>> {
         ));
     }
 
-    // Extract fds from the control message
-    let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
-    if cmsg.is_null() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "no control message received",
-        ));
+    collect_scm_rights_fds(&msg, count)
+}
+
+/// Validate a received `msghdr`'s ancillary data and extract exactly
+/// `expected` SCM_RIGHTS descriptors, marked close-on-exec.
+///
+/// Every malformed shape — truncated control data (`MSG_CTRUNC`), a control
+/// message that is not `SOL_SOCKET`/`SCM_RIGHTS`, a `cmsg_len` that is too
+/// short or overruns the control buffer, a non-integral descriptor payload,
+/// or a descriptor count other than `expected` — is an error. Only
+/// descriptors actually present in valid SCM_RIGHTS payloads are ever
+/// touched, and on failure exactly those are closed: nothing here can
+/// fabricate, close, or mutate an fd (such as fd 0) that was never received.
+fn collect_scm_rights_fds(msg: &libc::msghdr, expected: usize) -> io::Result<Vec<RawFd>> {
+    fn close_all(fds: &[RawFd]) {
+        for &fd in fds {
+            unsafe { libc::close(fd) };
+        }
+    }
+    fn invalid(message: String) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData, message)
     }
 
-    let cmsg_ref = unsafe { &*cmsg };
-    if cmsg_ref.cmsg_level != libc::SOL_SOCKET || cmsg_ref.cmsg_type != libc::SCM_RIGHTS {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
+    let truncated = msg.msg_flags & libc::MSG_CTRUNC != 0;
+    let control_start = msg.msg_control as usize;
+    let control_end = control_start + msg.msg_controllen as usize;
+    let header_len = unsafe { libc::CMSG_LEN(0) } as usize;
+    let fd_size = std::mem::size_of::<RawFd>();
+
+    let mut fds: Vec<RawFd> = Vec::new();
+    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(msg) };
+    while !cmsg.is_null() {
+        let cmsg_ref = unsafe { &*cmsg };
+        let cmsg_addr = cmsg as usize;
+        let cmsg_len = cmsg_ref.cmsg_len as usize;
+        if cmsg_len < header_len || cmsg_addr < control_start || cmsg_addr + cmsg_len > control_end
+        {
+            close_all(&fds);
+            return Err(invalid(if truncated {
+                "control message truncated (MSG_CTRUNC)".to_string()
+            } else {
+                format!("invalid control message length: {}", cmsg_len)
+            }));
+        }
+        if cmsg_ref.cmsg_level != libc::SOL_SOCKET || cmsg_ref.cmsg_type != libc::SCM_RIGHTS {
+            close_all(&fds);
+            return Err(invalid(format!(
                 "unexpected control message: level={}, type={}",
                 cmsg_ref.cmsg_level, cmsg_ref.cmsg_type
-            ),
-        ));
+            )));
+        }
+        let data_len = cmsg_len - header_len;
+        if !data_len.is_multiple_of(fd_size) {
+            close_all(&fds);
+            return Err(invalid(format!(
+                "SCM_RIGHTS payload of {} bytes is not a whole number of fds",
+                data_len
+            )));
+        }
+        let data = unsafe { libc::CMSG_DATA(cmsg) };
+        for index in 0..data_len / fd_size {
+            let mut fd: RawFd = -1;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.add(index * fd_size),
+                    &mut fd as *mut RawFd as *mut u8,
+                    fd_size,
+                );
+            }
+            fds.push(fd);
+        }
+        cmsg = unsafe { libc::CMSG_NXTHDR(msg, cmsg) };
     }
 
-    let mut fds = vec![0 as RawFd; count];
-    unsafe {
-        std::ptr::copy_nonoverlapping(libc::CMSG_DATA(cmsg), fds.as_mut_ptr() as *mut u8, fds_size);
+    if truncated {
+        close_all(&fds);
+        return Err(invalid(
+            "control message truncated (MSG_CTRUNC)".to_string(),
+        ));
+    }
+    if fds.is_empty() {
+        return Err(invalid("no control message received".to_string()));
+    }
+    if fds.len() != expected {
+        close_all(&fds);
+        return Err(invalid(format!(
+            "expected {} transferred fds, received {}",
+            expected,
+            fds.len()
+        )));
+    }
+
+    // Mark close-on-exec so adopted PTY masters never leak into children
+    // spawned by the adopting daemon.
+    for &fd in &fds {
+        if let Err(error) = crate::fd::set_cloexec(fd) {
+            close_all(&fds);
+            return Err(error);
+        }
     }
 
     Ok(fds)
@@ -256,6 +347,36 @@ mod tests {
     }
 
     #[test]
+    fn test_received_fds_are_close_on_exec() {
+        let (s1, s2) = socketpair();
+
+        let mut pipe_fds = [0 as RawFd; 2];
+        assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+        let (pipe_read, pipe_write) = (pipe_fds[0], pipe_fds[1]);
+
+        send_fds(s1, &[pipe_read]).unwrap();
+        let received = recv_fds(s2, 1).unwrap();
+        assert_eq!(received.len(), 1);
+
+        // Adopted fds (e.g. handoff PTY masters) must never leak into
+        // children spawned by the receiving daemon.
+        let flags = unsafe { libc::fcntl(received[0], libc::F_GETFD) };
+        assert!(flags >= 0, "fcntl(F_GETFD) failed");
+        assert!(
+            flags & libc::FD_CLOEXEC != 0,
+            "received fd should be close-on-exec"
+        );
+
+        unsafe {
+            libc::close(s1);
+            libc::close(s2);
+            libc::close(pipe_read);
+            libc::close(pipe_write);
+            libc::close(received[0]);
+        }
+    }
+
+    #[test]
     fn test_send_empty() {
         let (s1, s2) = socketpair();
         send_fds(s1, &[]).unwrap();
@@ -274,6 +395,366 @@ mod tests {
         unsafe {
             libc::close(s1);
             libc::close(s2);
+        }
+    }
+
+    /// Build a msghdr over a hand-crafted control buffer so malformed
+    /// ancillary shapes can be exercised without kernel cooperation. The
+    /// returned msghdr points into the returned buffer; keep both alive.
+    fn crafted_control(
+        fds: &[RawFd],
+        level: libc::c_int,
+        ctype: libc::c_int,
+        len_override: Option<usize>,
+        flags: libc::c_int,
+    ) -> (Vec<u8>, libc::msghdr) {
+        let fds_size = std::mem::size_of_val(fds);
+        let space = unsafe { libc::CMSG_SPACE(fds_size as u32) } as usize;
+        let mut buf = vec![0u8; space];
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_control = buf.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = space as _;
+        msg.msg_flags = flags;
+        let cmsg = unsafe { &mut *libc::CMSG_FIRSTHDR(&msg) };
+        cmsg.cmsg_level = level;
+        cmsg.cmsg_type = ctype;
+        cmsg.cmsg_len =
+            len_override.unwrap_or(unsafe { libc::CMSG_LEN(fds_size as u32) } as usize) as _;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                fds.as_ptr() as *const u8,
+                libc::CMSG_DATA(libc::CMSG_FIRSTHDR(&msg)),
+                fds_size,
+            );
+        }
+        (buf, msg)
+    }
+
+    fn probe_pipe() -> (RawFd, RawFd) {
+        let mut fds = [0 as RawFd; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        (fds[0], fds[1])
+    }
+
+    /// Identity of the open file behind an fd. Closure assertions must
+    /// compare file identity rather than probe the fd number: a concurrent
+    /// test can reuse a just-closed number immediately.
+    fn fd_file_identity(fd: RawFd) -> (libc::dev_t, libc::ino_t) {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::fstat(fd, &mut st) },
+            0,
+            "fstat should succeed"
+        );
+        (st.st_dev, st.st_ino)
+    }
+
+    fn fd_still_refers_to(fd: RawFd, identity: (libc::dev_t, libc::ino_t)) -> bool {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut st) } != 0 {
+            return false;
+        }
+        (st.st_dev, st.st_ino) == identity
+    }
+
+    #[test]
+    fn collect_rejects_wrong_control_level_without_touching_fds() {
+        let (probe, probe_write) = probe_pipe();
+        let pipe_identity = fd_file_identity(probe);
+        let (_buf, msg) = crafted_control(&[probe], libc::IPPROTO_TCP, libc::SCM_RIGHTS, None, 0);
+        let error = collect_scm_rights_fds(&msg, 1).expect_err("wrong level must be rejected");
+        assert!(error.to_string().contains("unexpected control message"));
+        assert!(
+            fd_still_refers_to(probe, pipe_identity),
+            "fds in a non-rights control message were never received and must not be closed"
+        );
+        unsafe {
+            libc::close(probe);
+            libc::close(probe_write);
+        }
+    }
+
+    #[test]
+    fn collect_rejects_wrong_control_type_without_touching_fds() {
+        let (probe, probe_write) = probe_pipe();
+        let pipe_identity = fd_file_identity(probe);
+        let (_buf, msg) = crafted_control(&[probe], libc::SOL_SOCKET, 0x99, None, 0);
+        let error = collect_scm_rights_fds(&msg, 1).expect_err("wrong type must be rejected");
+        assert!(error.to_string().contains("unexpected control message"));
+        assert!(fd_still_refers_to(probe, pipe_identity));
+        unsafe {
+            libc::close(probe);
+            libc::close(probe_write);
+        }
+    }
+
+    #[test]
+    fn collect_rejects_invalid_cmsg_lengths() {
+        let header_len = unsafe { libc::CMSG_LEN(0) } as usize;
+        let (probe, probe_write) = probe_pipe();
+        let pipe_identity = fd_file_identity(probe);
+
+        // Shorter than a header.
+        let (_buf, msg) = crafted_control(
+            &[probe],
+            libc::SOL_SOCKET,
+            libc::SCM_RIGHTS,
+            Some(header_len - 1),
+            0,
+        );
+        let error = collect_scm_rights_fds(&msg, 1).expect_err("undersized cmsg_len");
+        assert!(error.to_string().contains("invalid control message length"));
+
+        // Overruns the control buffer.
+        let (_buf, msg) = crafted_control(
+            &[probe],
+            libc::SOL_SOCKET,
+            libc::SCM_RIGHTS,
+            Some(unsafe { libc::CMSG_SPACE(4) } as usize + 16),
+            0,
+        );
+        let error = collect_scm_rights_fds(&msg, 1).expect_err("overrunning cmsg_len");
+        assert!(error.to_string().contains("invalid control message length"));
+
+        // Payload that is not a whole number of descriptors.
+        let (_buf, msg) = crafted_control(
+            &[probe],
+            libc::SOL_SOCKET,
+            libc::SCM_RIGHTS,
+            Some(header_len + 2),
+            0,
+        );
+        let error = collect_scm_rights_fds(&msg, 1).expect_err("fractional fd payload");
+        assert!(error.to_string().contains("whole number of fds"));
+
+        assert!(
+            fd_still_refers_to(probe, pipe_identity),
+            "malformed shapes must not close caller fds"
+        );
+        unsafe {
+            libc::close(probe);
+            libc::close(probe_write);
+        }
+    }
+
+    #[test]
+    fn collect_rejects_short_fd_count_and_closes_only_received() {
+        let (probe, probe_write) = probe_pipe();
+        let pipe_identity = fd_file_identity(probe);
+        let received = unsafe { libc::fcntl(probe, libc::F_DUPFD_CLOEXEC, 0) };
+        assert!(received >= 0);
+        let (_buf, msg) = crafted_control(&[received], libc::SOL_SOCKET, libc::SCM_RIGHTS, None, 0);
+        let error = collect_scm_rights_fds(&msg, 2).expect_err("short fd count");
+        assert!(error
+            .to_string()
+            .contains("expected 2 transferred fds, received 1"));
+        assert!(
+            !fd_still_refers_to(received, pipe_identity),
+            "received fd must be closed on error"
+        );
+        assert!(
+            fd_still_refers_to(probe, pipe_identity),
+            "unrelated fds must stay open"
+        );
+        unsafe {
+            libc::close(probe);
+            libc::close(probe_write);
+        }
+    }
+
+    #[test]
+    fn collect_rejects_extra_fd_count_and_closes_all_received() {
+        let (probe, probe_write) = probe_pipe();
+        let pipe_identity = fd_file_identity(probe);
+        let first = unsafe { libc::fcntl(probe, libc::F_DUPFD_CLOEXEC, 0) };
+        let second = unsafe { libc::fcntl(probe, libc::F_DUPFD_CLOEXEC, 0) };
+        assert!(first >= 0 && second >= 0);
+        let (_buf, msg) = crafted_control(
+            &[first, second],
+            libc::SOL_SOCKET,
+            libc::SCM_RIGHTS,
+            None,
+            0,
+        );
+        let error = collect_scm_rights_fds(&msg, 1).expect_err("extra fd count");
+        assert!(error
+            .to_string()
+            .contains("expected 1 transferred fds, received 2"));
+        assert!(
+            !fd_still_refers_to(first, pipe_identity) && !fd_still_refers_to(second, pipe_identity),
+            "all received fds must be closed on error"
+        );
+        assert!(fd_still_refers_to(probe, pipe_identity));
+        unsafe {
+            libc::close(probe);
+            libc::close(probe_write);
+        }
+    }
+
+    #[test]
+    fn collect_rejects_truncated_control_data_and_closes_received() {
+        let (probe, probe_write) = probe_pipe();
+        let pipe_identity = fd_file_identity(probe);
+        let received = unsafe { libc::fcntl(probe, libc::F_DUPFD_CLOEXEC, 0) };
+        assert!(received >= 0);
+        let (_buf, msg) = crafted_control(
+            &[received],
+            libc::SOL_SOCKET,
+            libc::SCM_RIGHTS,
+            None,
+            libc::MSG_CTRUNC,
+        );
+        let error = collect_scm_rights_fds(&msg, 1).expect_err("truncated control data");
+        assert!(error.to_string().contains("MSG_CTRUNC"));
+        assert!(
+            !fd_still_refers_to(received, pipe_identity),
+            "received fd must be closed on error"
+        );
+        assert!(fd_still_refers_to(probe, pipe_identity));
+        unsafe {
+            libc::close(probe);
+            libc::close(probe_write);
+        }
+    }
+
+    /// The pre-fix parser copied `expected` descriptors regardless of how
+    /// many arrived, then marked and later closed fabricated fd 0. A count
+    /// mismatch over a real socket must error without mutating stdin.
+    #[test]
+    fn recv_count_mismatch_over_socket_does_not_mutate_unrelated_fds() {
+        let stdin_flags_before = unsafe { libc::fcntl(0, libc::F_GETFD) };
+
+        let (s1, s2) = socketpair();
+        let mut pipe_fds = [0 as RawFd; 2];
+        assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+        let (pipe_read, pipe_write) = (pipe_fds[0], pipe_fds[1]);
+
+        send_fds(s1, &[pipe_read]).unwrap();
+        let error = recv_fds(s2, 2).expect_err("count mismatch must be rejected");
+        assert!(
+            error.to_string().contains("received 1") || error.to_string().contains("MSG_CTRUNC"),
+            "unexpected error: {error}"
+        );
+
+        let stdin_flags_after = unsafe { libc::fcntl(0, libc::F_GETFD) };
+        assert_eq!(
+            stdin_flags_before, stdin_flags_after,
+            "stdin flags must not be mutated by a malformed transfer"
+        );
+
+        unsafe {
+            libc::close(s1);
+            libc::close(s2);
+            libc::close(pipe_read);
+            libc::close(pipe_write);
+        }
+    }
+
+    /// More fds on the wire than the receive buffer expects: the kernel
+    /// truncates the control data and the transfer must be rejected.
+    #[test]
+    fn recv_truncated_transfer_is_rejected() {
+        let (s1, s2) = socketpair();
+        let mut probes = Vec::new();
+        for _ in 0..3 {
+            probes.push(probe_pipe());
+        }
+        let read_ends: Vec<RawFd> = probes.iter().map(|&(read, _)| read).collect();
+        send_fds(s1, &read_ends).unwrap();
+        let error = recv_fds(s2, 1).expect_err("truncated transfer must be rejected");
+        assert!(
+            error.to_string().contains("MSG_CTRUNC")
+                || error.to_string().contains("expected 1 transferred fds"),
+            "unexpected error: {error}"
+        );
+        unsafe {
+            libc::close(s1);
+            libc::close(s2);
+            for (read, write) in probes {
+                libc::close(read);
+                libc::close(write);
+            }
+        }
+    }
+
+    /// Backpressure: SCM_RIGHTS send against a socket whose buffer is full
+    /// must retry under its bounded deadline rather than abandoning the
+    /// handoff. The receiver drains after a delay, so the send must succeed.
+    #[test]
+    fn send_fds_retries_across_socket_backpressure() {
+        let (s1, s2) = socketpair();
+        // Non-blocking sender + a tiny send buffer makes EAGAIN reachable.
+        let flags = unsafe { libc::fcntl(s1, libc::F_GETFL) };
+        assert!(flags >= 0);
+        assert_eq!(
+            unsafe { libc::fcntl(s1, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+            0
+        );
+        // Realistic (not pathologically tiny) buffer: small enough to fill,
+        // large enough that the ancillary message still FITS — otherwise the
+        // kernel returns EMSGSIZE, which is a permanent error and correctly
+        // not retried.
+        let small: libc::c_int = 8192;
+        unsafe {
+            libc::setsockopt(
+                s1,
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &small as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+        // Fill the pipe so the ancillary send meets real backpressure.
+        let filler = [0u8; 1024];
+        for _ in 0..256 {
+            let ret =
+                unsafe { libc::send(s1, filler.as_ptr() as *const libc::c_void, filler.len(), 0) };
+            if ret < 0 {
+                break;
+            }
+        }
+
+        let (pipe_read, pipe_write) = probe_pipe();
+        // Drain concurrently so the retry window can make progress.
+        // The receiver must be non-blocking too: a blocking `recv` would hang
+        // this thread forever once the buffer is drained.
+        let s2_flags = unsafe { libc::fcntl(s2, libc::F_GETFL) };
+        assert!(s2_flags >= 0);
+        assert_eq!(
+            unsafe { libc::fcntl(s2, libc::F_SETFL, s2_flags | libc::O_NONBLOCK) },
+            0
+        );
+        let drainer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            let mut sink = [0u8; 4096];
+            let deadline = Instant::now() + Duration::from_millis(400);
+            while Instant::now() < deadline {
+                let ret = unsafe {
+                    libc::recv(s2, sink.as_mut_ptr() as *mut libc::c_void, sink.len(), 0)
+                };
+                if ret == 0 {
+                    break;
+                }
+                if ret < 0 {
+                    // EAGAIN: nothing buffered right now.
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            s2
+        });
+
+        let result = send_fds(s1, &[pipe_read]);
+        let s2 = drainer.join().expect("drainer should not panic");
+        assert!(
+            result.is_ok(),
+            "send must retry across backpressure, got {result:?}"
+        );
+
+        unsafe {
+            libc::close(s1);
+            libc::close(s2);
+            libc::close(pipe_read);
+            libc::close(pipe_write);
         }
     }
 

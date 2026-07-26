@@ -93,10 +93,16 @@ pub struct MirrorResult {
 }
 
 pub struct SessionHandle {
-    pty: Mutex<PtySession>,
+    pub(crate) pty: Mutex<PtySession>,
+    /// Set by the first teardown to claim this session. Makes Kill
+    /// single-flight per session so concurrent/retried Kill calls cannot
+    /// enqueue unbounded whole-table sweep jobs.
+    teardown_claimed: std::sync::atomic::AtomicBool,
     state: Mutex<SessionRuntimeState>,
     input_tx: mpsc::UnboundedSender<Vec<u8>>,
     input_rx: Mutex<Option<mpsc::UnboundedReceiver<Vec<u8>>>>,
+    /// Permanently fences an outgoing incarnation from publishing output or
+    /// mutating id-keyed state after a same-id replacement is allowed.
     retired: AtomicBool,
 }
 
@@ -105,6 +111,7 @@ impl SessionHandle {
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         Self {
             pty: Mutex::new(record.pty),
+            teardown_claimed: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(SessionRuntimeState {
                 headless_terminal: record.headless_terminal,
                 stream_control: record.stream_control,
@@ -276,7 +283,7 @@ impl SessionHandle {
         ));
         let snapshot = state.headless_terminal.snapshot();
         serialize_operation.finish();
-        snapshot.map_err(Into::into)
+        snapshot
     }
 
     pub async fn rows_cols(&self) -> (u16, u16) {
@@ -306,14 +313,53 @@ impl SessionHandle {
         self.pty.lock().await.signal(sig)
     }
 
+    /// Claim teardown for this session. Returns true exactly once; later
+    /// callers get false and must not enqueue another sweep.
+    pub(crate) fn claim_teardown(&self) -> bool {
+        self.teardown_claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
     pub async fn kill(&self) -> std::io::Result<()> {
-        let pid = {
+        // Termination ownership is decided atomically under the PTY lock:
+        // the kill strike and the one-shot reap token are taken in the same
+        // critical section, so concurrent kills spawn exactly one reaper and
+        // any later kill/signal on this session sees terminated ownership
+        // instead of a pid that may have been recycled after the reap.
+        // Single-flight: a repeated or concurrent Kill for this session must
+        // not enqueue a second whole-table sweep. The first claimant owns
+        // teardown; later callers observe the already-terminated session.
+        if !self.claim_teardown() {
+            return Ok(());
+        }
+        // Phase 1 under the lock: freeze the leader and consume the
+        // one-shot reap token. No process-table scan or SIGKILL happens here.
+        let (plan, pid) = {
             let mut pty = self.pty.lock().await;
-            pty.kill()?;
-            pty.pid() as libc::pid_t
+            let plan = pty.begin_kill();
+            (plan, pty.take_reap_token())
         };
-        reap_child_in_background(pid);
-        Ok(())
+        // Phase 2 off-lock, off the Tokio workers: the whole-process-table
+        // sweep and every SIGKILL run on the bounded lifecycle executor.
+        let result =
+            kanna_daemon::reaper::run_teardown_and_wait::<std::io::Result<()>>(move || {
+                plan.execute(None)
+            })
+            .await
+            .unwrap_or(Ok(()));
+        // Only an owned, unreaped child may be waited on: waitpid on an
+        // adopted or unproven pid would either fail or reap an unrelated
+        // process-group child.
+        if let Some(pid) = pid {
+            reap_child_in_background(pid);
+        }
+        result
     }
 
     pub async fn try_wait(&self) -> Option<i32> {
@@ -351,6 +397,7 @@ impl SessionHandle {
             return Ok(None);
         }
         let pid = pty.pid();
+        let child_start = pty.child_identity();
         let cwd = pty.cwd.clone();
         let rows = pty.rows();
         let cols = pty.cols();
@@ -361,6 +408,7 @@ impl SessionHandle {
         let snapshot = state.headless_terminal.snapshot().ok();
         Ok(Some(SessionHandoffParts {
             pid,
+            child_start,
             cwd,
             rows,
             cols,
@@ -374,6 +422,9 @@ impl SessionHandle {
 
 pub struct SessionHandoffParts {
     pub pid: u32,
+    /// Start-time identity of the child, so the adopting daemon can
+    /// authenticate the pid against the live process table.
+    pub child_start: Option<crate::proc_info::StartTime>,
     pub cwd: String,
     pub rows: u16,
     pub cols: u16,
@@ -386,6 +437,18 @@ pub struct SessionHandoffParts {
 pub struct SessionManager {
     pub sessions: HashMap<String, Arc<SessionHandle>>,
     lifecycle_locks: HashMap<String, Weak<Mutex<()>>>,
+    /// Ids whose outgoing incarnation is still being torn down. A same-id
+    /// Spawn must not install while the old session's id-keyed state (fanout,
+    /// terminal clients, sizes, recovery) is still being cleared, or that
+    /// cleanup would clobber the replacement's state.
+    teardown_tombstones: std::collections::HashSet<String>,
+    /// Bumped on every handoff snapshot; adoption revalidates against it.
+    handoff_epoch: u64,
+    /// True between a handoff snapshot and its commit-or-abort. Published
+    /// through a watch channel so a task that must not act while sealed can
+    /// park until the transfer resolves, with no lost-wakeup race and no
+    /// polling.
+    sealed_for_handoff: tokio::sync::watch::Sender<bool>,
 }
 
 impl Default for SessionManager {
@@ -422,7 +485,103 @@ impl SessionManager {
         SessionManager {
             sessions: HashMap::new(),
             lifecycle_locks: HashMap::new(),
+            teardown_tombstones: std::collections::HashSet::new(),
+            handoff_epoch: 0,
+            sealed_for_handoff: tokio::sync::watch::Sender::new(false),
         }
+    }
+
+    /// Seal the manager for a handoff transfer and return the epoch the
+    /// snapshot was taken at. While sealed, `insert` is refused: a PTY
+    /// session spawned after the snapshot would be lost when this daemon
+    /// exits (its master fd is never transferred), and a killed session must
+    /// not be reinserted behind the transfer. The seal lifts if the handoff
+    /// aborts and this daemon keeps serving.
+    pub fn seal_for_handoff(&mut self) -> u64 {
+        // `send_replace`, never `send`: `send` reports failure and skips the
+        // update when no receiver exists, and receivers here are transient —
+        // they only exist while a task is parked on the seal.
+        self.sealed_for_handoff.send_replace(true);
+        self.handoff_epoch += 1;
+        self.handoff_epoch
+    }
+
+    pub fn unseal_for_handoff(&mut self) {
+        // Wakes everyone parked in `seal_lifted` — the handoff aborted, so
+        // this daemon keeps serving and owns its sessions again.
+        self.sealed_for_handoff.send_replace(false);
+    }
+
+    pub fn is_sealed_for_handoff(&self) -> bool {
+        *self.sealed_for_handoff.borrow()
+    }
+
+    /// How many tasks are currently parked waiting for the seal to lift.
+    /// Test-only: lets a regression prove a task really reached the fence
+    /// instead of sleeping and hoping.
+    #[cfg(test)]
+    pub fn seal_waiter_count(&self) -> usize {
+        self.sealed_for_handoff.receiver_count()
+    }
+
+    /// Wait until no handoff transfer is in flight.
+    ///
+    /// Returns a future deliberately detached from the manager lock: callers
+    /// take it while holding the lock and await it after releasing, and
+    /// `watch` re-reads the current value on entry, so a seal that lifts in
+    /// that gap resolves immediately instead of parking forever.
+    ///
+    /// A COMMITTED handoff never lifts the seal — this daemon exits instead —
+    /// so a waiter on the commit path is dropped with the process, which is
+    /// exactly the intent: the successor now owns that session.
+    pub fn seal_lifted(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut rx = self.sealed_for_handoff.subscribe();
+        async move {
+            // An error means the manager is gone; the daemon is shutting down
+            // and there is nothing left to reconcile.
+            let _ = rx.wait_for(|sealed| !*sealed).await;
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn handoff_epoch(&self) -> u64 {
+        self.handoff_epoch
+    }
+
+    /// Insert a session unless the manager is sealed for an in-flight
+    /// handoff. Returns false when refused, so the caller can fail the Spawn
+    /// loudly instead of silently stranding the child.
+    #[must_use]
+    pub fn insert_unless_sealed(
+        &mut self,
+        session_id: String,
+        session: Arc<SessionHandle>,
+    ) -> bool {
+        if self.is_sealed_for_handoff() || self.teardown_tombstones.contains(&session_id) {
+            return false;
+        }
+        if let Some(previous) = self.sessions.insert(session_id, session) {
+            previous.retire();
+        }
+        true
+    }
+
+    /// Mark `session_id` as being torn down. Held until the outgoing
+    /// incarnation's Exit is published and all of its id-keyed state is
+    /// cleared, so a replacement can never install into a half-cleaned slot.
+    /// Returns false if a teardown is already in flight for the id.
+    #[must_use]
+    pub fn begin_teardown(&mut self, session_id: &str) -> bool {
+        self.teardown_tombstones.insert(session_id.to_string())
+    }
+
+    pub fn end_teardown(&mut self, session_id: &str) {
+        self.teardown_tombstones.remove(session_id);
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn is_tearing_down(&self, session_id: &str) -> bool {
+        self.teardown_tombstones.contains(session_id)
     }
 
     pub fn insert(&mut self, session_id: String, session: Arc<SessionHandle>) {
@@ -443,14 +602,32 @@ impl SessionManager {
         removed
     }
 
-    pub fn contains(&self, session_id: &str) -> bool {
-        self.sessions.contains_key(session_id)
+    /// Remove `session_id` only if it still maps to `expected` — the exact
+    /// incarnation the caller resolved. A same-id session installed in the
+    /// meantime is left alone, so teardown of an old incarnation can never
+    /// evict its replacement.
+    pub fn remove_if_same(
+        &mut self,
+        session_id: &str,
+        expected: &Arc<SessionHandle>,
+    ) -> Option<Arc<SessionHandle>> {
+        let matches = self
+            .sessions
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, expected));
+        if matches {
+            let removed = self.sessions.remove(session_id);
+            if let Some(session) = removed.as_ref() {
+                session.retire();
+            }
+            removed
+        } else {
+            None
+        }
     }
 
-    pub fn is_current(&self, session_id: &str, session: &Arc<SessionHandle>) -> bool {
-        self.sessions
-            .get(session_id)
-            .is_some_and(|current| Arc::ptr_eq(current, session))
+    pub fn contains(&self, session_id: &str) -> bool {
+        self.sessions.contains_key(session_id)
     }
 
     pub fn handles(&self) -> Vec<(String, Arc<SessionHandle>)> {
@@ -458,6 +635,13 @@ impl SessionManager {
             .iter()
             .map(|(id, session)| (id.clone(), Arc::clone(session)))
             .collect()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn is_current(&self, session_id: &str, session: &Arc<SessionHandle>) -> bool {
+        self.sessions
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, session))
     }
 
     pub fn lifecycle_lock(&mut self, session_id: &str) -> Arc<Mutex<()>> {
@@ -482,9 +666,108 @@ impl SessionManager {
         handles
     }
 
+    /// Kill every session with scan rounds batched across all of them (one
+    /// process-table snapshot per round for the whole batch).
+    ///
+    /// Phase 1 (freeze + reap token) runs under each session's own lock; the
+    /// sweep runs on the lifecycle executor.
+    ///
+    /// Ordering is load-bearing: every kill plan must COMPLETE before its
+    /// reap token is handed to the reaper. Reaping first would let the child's
+    /// pid be recycled while the plan still holds it as a signal target.
+    pub async fn kill_all_with_shared_scan(&mut self) -> Vec<(String, Arc<SessionHandle>)> {
+        let handles = self.kill_all_handles();
+        let mut ids = Vec::with_capacity(handles.len());
+        let mut plans = Vec::with_capacity(handles.len());
+        let mut reap_pids = Vec::with_capacity(handles.len());
+        for (id, handle) in &handles {
+            if !handle.claim_teardown() {
+                continue; // already being torn down (single-flight)
+            }
+            let (plan, pid) = {
+                let mut pty = handle.pty.lock().await;
+                let plan = pty.begin_kill();
+                (plan, pty.take_reap_token())
+            };
+            ids.push(id.clone());
+            plans.push(plan);
+            reap_pids.push(pid);
+        }
+        if !plans.is_empty() {
+            let batch_ids = ids.clone();
+            let results = kanna_daemon::reaper::run_teardown_and_wait(move || {
+                crate::pty::PtyKillPlan::execute_batch(plans)
+            })
+            .await;
+            if let Some(results) = results {
+                for (id, result) in batch_ids.iter().zip(results) {
+                    if let Err(error) = result {
+                        log::warn!("[kill-all] session {} teardown failed: {}", id, error);
+                    }
+                }
+            }
+            // Only now may the children be reaped.
+            for pid in reap_pids.into_iter().flatten() {
+                kanna_daemon::reaper::reap_pid(pid);
+            }
+        }
+        handles
+    }
+
     #[allow(dead_code)]
     pub fn session_ids(&self) -> Vec<String> {
         self.sessions.keys().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+pub mod test_support {
+    use super::*;
+
+    /// A live PTY session whose child exits on its own almost immediately,
+    /// for tests that need to observe the natural-exit path.
+    pub fn spawn_exiting_record(
+        stream_control: &StreamControl,
+    ) -> Result<SessionRecord, Box<dyn std::error::Error + Send + Sync>> {
+        let pty = PtySession::spawn(
+            "/bin/sh",
+            &[String::from("-c"), String::from("exit 0")],
+            "/tmp",
+            &HashMap::new(),
+            80,
+            24,
+        )?;
+        Ok(SessionRecord {
+            pty,
+            headless_terminal: HeadlessTerminal::new(80, 24, 10_000)?,
+            stream_control: Some(stream_control.clone()),
+            agent_provider: None,
+            status: SessionStatus::Idle,
+            status_observed: false,
+            last_status_check_at: None,
+        })
+    }
+
+    /// A minimal live PTY session record for lifecycle tests.
+    pub fn spawn_sleeper_record() -> Result<SessionRecord, Box<dyn std::error::Error + Send + Sync>>
+    {
+        let pty = PtySession::spawn(
+            "/bin/sh",
+            &[String::from("-c"), String::from("sleep 30")],
+            "/tmp",
+            &HashMap::new(),
+            80,
+            24,
+        )?;
+        Ok(SessionRecord {
+            pty,
+            headless_terminal: HeadlessTerminal::new(80, 24, 10_000)?,
+            stream_control: None,
+            agent_provider: None,
+            status: SessionStatus::Idle,
+            status_observed: false,
+            last_status_check_at: None,
+        })
     }
 }
 
@@ -492,44 +775,13 @@ fn status_detection_throttle() -> Duration {
     Duration::from_millis(STATUS_DETECTION_THROTTLE_MS)
 }
 
-const REAP_GIVE_UP_AFTER: Duration = Duration::from_secs(60);
-
-/// Reap a SIGKILLed child without ever blocking the async runtime. A child
-/// stuck exiting inside the kernel keeps a blocking `waitpid` from returning
-/// indefinitely; polling with WNOHANG lets the kill command complete and the
-/// connection keep serving commands regardless of the child's fate.
+/// Hand a SIGKILLed PTY child to the central reaper. Never blocks the async
+/// runtime, and — unlike the old 60-second give-up — never abandons the
+/// child: an abandoned zombie keeps its pty slot allocated for the daemon's
+/// remaining life, which is precisely the exhaustion this branch fixes.
+/// Ownership is one-shot; the caller has already consumed the reap token.
 fn reap_child_in_background(pid: libc::pid_t) {
-    tokio::spawn(async move {
-        let reaped =
-            reap_child(move || unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) })
-                .await;
-        if !reaped {
-            log::warn!(
-                "[kill] child {} still not reapable after {:?}; abandoning reap",
-                pid,
-                REAP_GIVE_UP_AFTER
-            );
-        }
-    });
-}
-
-/// Poll a WNOHANG-style waiter until the child is gone or the deadline passes.
-/// `poll` returns the child pid once reaped, `-1` when the child was already
-/// reaped elsewhere (or is not ours), and `0` while it is still exiting.
-/// Returns false only when the child never became reapable.
-async fn reap_child(mut poll: impl FnMut() -> libc::pid_t) -> bool {
-    let deadline = tokio::time::Instant::now() + REAP_GIVE_UP_AFTER;
-    let mut delay = Duration::from_millis(20);
-    loop {
-        if poll() != 0 {
-            return true;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(delay).await;
-        delay = (delay * 2).min(Duration::from_secs(1));
-    }
+    kanna_daemon::reaper::reap_pid(pid);
 }
 
 fn detect_headless_terminal_status_if_due(
@@ -619,7 +871,7 @@ mod tests {
 
     use super::{
         replay_headless_terminal_for_benchmark, BenchmarkStatusState, SessionHandle,
-        SessionManager, SessionRecord,
+        SessionManager, SessionRecord, StreamControl,
     };
     use crate::bench::transcript::{BenchmarkMode, BenchmarkProvider, TranscriptSpec};
     use crate::headless_terminal::{initial_session_status, HeadlessTerminal};
@@ -659,30 +911,6 @@ mod tests {
         )?)))
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn reap_child_gives_up_when_child_never_becomes_reapable() {
-        // A child stuck exiting inside the kernel is never reapable; the loop
-        // must give up at the deadline instead of hanging the runtime forever
-        // the way the old blocking `waitpid` did.
-        let reaped = super::reap_child(|| 0).await;
-        assert!(!reaped);
-    }
-
-    #[tokio::test]
-    async fn reap_child_returns_once_child_is_reaped() {
-        let mut polls = 0;
-        let reaped = super::reap_child(move || {
-            polls += 1;
-            if polls < 3 {
-                0
-            } else {
-                42
-            }
-        })
-        .await;
-        assert!(reaped);
-    }
-
     #[tokio::test]
     async fn kill_returns_and_releases_pty_lock_before_child_is_reaped() {
         let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
@@ -692,6 +920,28 @@ mod tests {
         // The pty mutex must be free as soon as kill returns; the old code
         // held it through a blocking reap of the child.
         assert!(handle.pty.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn concurrent_kills_are_single_flight_and_block_later_signals() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+
+        // Both kills succeed, but termination ownership is taken exactly
+        // once: the reap token is consumed under the PTY lock, so only one
+        // background reaper can exist and a pid recycled after the reap can
+        // never be targeted through this session.
+        let (first, second) = tokio::join!(handle.kill(), handle.kill());
+        first.expect("first kill should succeed");
+        second.expect("second kill should be a safe no-op");
+
+        assert!(
+            handle.pty.lock().await.take_reap_token().is_none(),
+            "the reap token must have been consumed exactly once"
+        );
+        assert!(
+            handle.signal(libc::SIGTERM).await.is_err(),
+            "signals after termination must be refused"
+        );
     }
 
     #[tokio::test]
@@ -718,7 +968,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_control_waits_for_stop_acknowledgement() {
-        let control = super::StreamControl::new();
+        let control = StreamControl::new();
         let reader_control = control.clone();
         tokio::spawn(async move {
             tokio::task::yield_now().await;

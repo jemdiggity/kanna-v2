@@ -27,6 +27,71 @@ struct AdoptedPtyReader {
     cols: u16,
 }
 
+/// Wait for the replaced daemon to actually exit before this daemon adopts
+/// sessions or publishes itself. Liveness is identity-checked (start time),
+/// so a zombie or a recycled pid counts as exited. If the old daemon
+/// overstays the deadline, it is SIGKILLed — but only after revalidating,
+/// immediately before the signal, that the pid is still the authenticated
+/// socket peer's process; an unauthenticated or identity-mismatched pid is
+/// never signaled (fail closed) and is treated as exited.
+async fn wait_for_old_daemon_release(old_daemon: &crate::handoff::OldDaemon) {
+    wait_for_old_daemon_release_with(
+        old_daemon,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(2),
+    )
+    .await
+}
+
+pub(crate) async fn wait_for_old_daemon_release_with(
+    old_daemon: &crate::handoff::OldDaemon,
+    exit_deadline: std::time::Duration,
+    post_kill_deadline: std::time::Duration,
+) {
+    let deadline = std::time::Instant::now() + exit_deadline;
+    while old_daemon.is_alive() {
+        if std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            continue;
+        }
+
+        // Revalidate before the kill: authenticated peer, identity intact.
+        let identity_intact = old_daemon.identity_intact();
+        if old_daemon.authenticated && identity_intact {
+            log::warn!(
+                "[handoff] old daemon (pid={}) still alive after {:?}; killing it before adopting sessions",
+                old_daemon.pid,
+                exit_deadline
+            );
+            // Freeze-verified: a raw kill here could land on a recycled pid if
+            // the old daemon exited between the identity check above and the
+            // signal. A verified-stopped process cannot exit, so its pid stays
+            // pinned across the window; failure means no signal at all.
+            let killed = old_daemon.kill_verified();
+            if !killed {
+                log::warn!(
+                    "[handoff] refused to kill old daemon (pid={}): identity could not be pinned \
+                     across the signal window",
+                    old_daemon.pid
+                );
+            }
+            let post_kill_deadline = std::time::Instant::now() + post_kill_deadline;
+            while old_daemon.is_alive() && std::time::Instant::now() < post_kill_deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        } else {
+            log::warn!(
+                "[handoff] old daemon (pid={}) overstayed but cannot be authenticated \
+                 (authenticated={}, identity_intact={}); refusing to signal and proceeding",
+                old_daemon.pid,
+                old_daemon.authenticated,
+                identity_intact
+            );
+        }
+        break;
+    }
+}
+
 pub(crate) async fn run_daemon() {
     match handle_cli_args() {
         CliAction::RunDaemon => {}
@@ -60,6 +125,38 @@ pub(crate) async fn run_daemon() {
         std::process::exit(1);
     }
     let has_adopted_agents = !handoff_result.adopted_agents.is_empty();
+
+    // Release-complete barrier: the old daemon keeps its PTY readers (and
+    // agent pipe readers) until after it acknowledges adoption, then stops
+    // them and exits. Wait for its authenticated exit before adopting
+    // anything or publishing this daemon (pid file + socket), so two daemons
+    // can never consume the same PTY output concurrently. The barrier only
+    // matters when sessions were actually transferred — without adopted
+    // sessions there are no shared descriptors to split, and the peer (which
+    // may be a test harness speaking the protocol) is not ours to kill.
+    let adopted_any_sessions =
+        !handoff_result.adopted.is_empty() || !handoff_result.adopted_agents.is_empty();
+    if adopted_any_sessions {
+        if let Some(old_daemon) = handoff_result.old_daemon {
+            wait_for_old_daemon_release(&old_daemon).await;
+            // Publishing while the previous owner still holds these sessions
+            // would put two daemons on the same descriptors. If it never
+            // released, abort instead of publishing: the sessions stay with
+            // the live old daemon, which is recoverable, whereas a split
+            // owner is not.
+            if old_daemon.is_alive() {
+                log::error!(
+                    "[handoff] old daemon (pid={}) still owns adopted sessions; refusing to publish",
+                    old_daemon.pid
+                );
+                eprintln!(
+                    "kanna-daemon: refusing to start: previous daemon (pid={}) never released ownership",
+                    old_daemon.pid
+                );
+                std::process::exit(1);
+            }
+        }
+    }
 
     let sessions: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
     let fanouts: SessionFanouts = Arc::new(Mutex::new(HashMap::new()));
@@ -186,8 +283,9 @@ pub(crate) async fn run_daemon() {
         }
     }
 
-    // attempt_handoff returns only after the old daemon closes the dedicated
-    // handoff connection, which fences its readers before these start.
+    // The release barrier above fences the old readers before these start.
+    // Adopted PTYs begin streaming immediately so detached task activity
+    // remains authoritative even before a terminal client first attaches.
     for reader in adopted_pty_readers {
         let resume_from_disk = recovery_manager.has_persisted_snapshot(&reader.session_id);
         if let Err(error) = recovery_manager
@@ -237,7 +335,10 @@ pub(crate) async fn run_daemon() {
         });
     }
 
-    // Adopt handed-off agent sessions after the same handoff barrier.
+    // Adopt handed-off agent sessions after the same release barrier. It
+    // guarantees the old daemon exited: its blocked reader threads held the
+    // same pipes until then, and its final journal appends must land before
+    // we reload from disk.
     if has_adopted_agents {
         for (info, fds) in handoff_result.adopted_agents {
             agent_runtime::adopt_agent_session(
@@ -276,11 +377,21 @@ pub(crate) async fn run_daemon() {
         sigterm.recv().await;
         log::info!("kanna-daemon shutting down");
         recovery_shutdown.flush_and_shutdown().await;
-        let handles = sessions_shutdown.lock().await.kill_all_handles();
-        for (id, session) in handles {
-            if let Err(error) = session.kill().await {
-                eprintln!("failed to kill session {}: {}", id, error);
-            }
+        // Scan rounds batched across every session. This awaits plan
+        // completion, so teardown finishes before the exit below; the bounded
+        // timeout keeps a wedged sweep from blocking shutdown forever.
+        let teardown = async {
+            sessions_shutdown
+                .lock()
+                .await
+                .kill_all_with_shared_scan()
+                .await
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(10), teardown)
+            .await
+            .is_err()
+        {
+            log::warn!("[shutdown] session teardown did not finish within 10s; exiting anyway");
         }
         let _ = std::fs::remove_file(&pid_path_clone);
         let _ = std::fs::remove_file(&socket_path_clone);
