@@ -1,3 +1,5 @@
+#![cfg(target_os = "macos")]
+
 //! Integration tests for daemon handoff (session transfer on upgrade).
 //!
 //! These tests spawn real daemon processes and verify that:

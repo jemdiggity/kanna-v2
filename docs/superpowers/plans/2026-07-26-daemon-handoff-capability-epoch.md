@@ -720,3 +720,89 @@ Confirm that v3 uniquely identifies the hardened guarantees; explicit mismatch
 is the only v2 fallback; v1 is gone; the actual shipped v2 daemon transfers
 stable PTY and agent sessions under lifecycle churn; and documentation names
 the unavoidable ordering limitation for raced v2 ids.
+
+### Task 8: Execute Authenticated Handoff Coverage on macOS CI
+
+**Files:**
+- Modify: `tools/kd/tests/ci-workflow.test.ts`
+- Modify: `.github/workflows/ci.yml`
+- Modify: `crates/daemon/tests/handoff.rs`
+
+**Interfaces:**
+- Consumes: the full-history previous-daemon fixture and the complete
+  `kanna-daemon` test suite.
+- Produces: a `daemon-handoff` macOS CI job that runs every authenticated
+  handoff pairing, while Ubuntu retains the remaining canonical Rust suite.
+
+- [ ] **Step 1: Write the failing CI contract test**
+
+Add a test that extracts `daemon-handoff` from `.github/workflows/ci.yml` and
+asserts that it:
+
+```typescript
+expect(daemonHandoffJob).toContain("runs-on: macos-14");
+expect(daemonHandoffJob).toContain("fetch-depth: 0");
+expect(daemonHandoffJob).toContain(
+  "run: cd crates/daemon && cargo test -- --test-threads=1",
+);
+```
+
+Also assert that the Ubuntu `rust` job still runs `./kd test rust` and no
+longer needs full history.
+
+- [ ] **Step 2: Run the contract test and verify RED**
+
+Run:
+
+```bash
+pnpm --dir tools/kd exec vitest run tests/ci-workflow.test.ts
+```
+
+Expected: failure with `missing daemon-handoff job`.
+
+- [ ] **Step 3: Gate the authenticated integration target to macOS**
+
+Add this crate-level attribute to `crates/daemon/tests/handoff.rs`:
+
+```rust
+#![cfg(target_os = "macos")]
+```
+
+The unit tests and all non-handoff integration targets remain cross-platform.
+The real handoff target is not ignored: it is executed by the dedicated macOS
+job.
+
+- [ ] **Step 4: Add the dedicated macOS job**
+
+Add `daemon-handoff` to `.github/workflows/ci.yml` with `macos-14`, a
+full-history checkout, Rust `1.93.1`, and:
+
+```yaml
+- run: cd crates/daemon && cargo test -- --test-threads=1
+```
+
+Remove `fetch-depth: 0` from the Ubuntu Rust job because it no longer builds
+the shipped tag.
+
+- [ ] **Step 5: Run the contract test and verify GREEN**
+
+Run:
+
+```bash
+pnpm --dir tools/kd exec vitest run tests/ci-workflow.test.ts
+```
+
+Expected: all CI workflow contract tests pass.
+
+- [ ] **Step 6: Verify on the CI platform and run required full checks**
+
+On macOS, run:
+
+```bash
+cd crates/daemon && cargo test -- --test-threads=1
+pnpm test
+cargo test -p kanna-server
+```
+
+Expected: the complete daemon suite (including both cross-binary pairings),
+the JavaScript suite, and the server tests all pass.

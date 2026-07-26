@@ -210,6 +210,28 @@ transactional transfer. Focused unit tests cover negotiation: v3 success,
 explicit mismatch followed by one v2 attempt, and no fallback after any
 ambiguous failure.
 
+## CI Platform Boundary
+
+The authenticated handoff integration suite runs only on macOS. Its required
+process start identity, Unix-socket peer PID, PTY-master provenance, and
+agent-pipe provenance checks are implemented with macOS kernel interfaces.
+Non-macOS implementations deliberately return "unknown" so production callers
+fail closed rather than granting authority from unverified metadata.
+
+The general Rust CI job remains on Ubuntu and continues to run `./kd test rust`,
+but the `handoff` integration-test target compiles to no tests there. A
+dedicated macOS CI job checks out full git history and runs:
+
+```bash
+cd crates/daemon && cargo test -- --test-threads=1
+```
+
+This executes the complete daemon suite on the same supported OS as the
+shipped application, including current-to-current handoff and both
+shipped-v2/current binary pairings. Full history is required only in that job
+because the previous-daemon fixture materializes the fixed shipped tag from
+the local checkout.
+
 ## Documentation and Invariants
 
 `crates/daemon/SPEC.md` and `CLAUDE.md` describe the two modes explicitly:
