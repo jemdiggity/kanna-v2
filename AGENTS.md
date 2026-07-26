@@ -132,6 +132,17 @@ Run it through `kd` (`./kd dev up --mobile`, `./kd mobile run --device`) — bar
 troubleshooting: `docs/dev/dev-workflow.md`; OTA operations:
 `docs/specs/mobile-ota-updates.md`.
 
+## Daemon handoff security
+
+At startup, while the app is still its live direct parent, the daemon records
+kernel-derived executable paths for itself and the app launcher. For every
+supported v3 or legacy-v2 `Handoff`, the sender pins `LOCAL_PEERPID` and the
+peer's live direct parent by PID/start time, matches both executable paths, and
+rechecks the identities and paths before acquiring daemon-lifecycle ownership,
+sealing registries, snapshotting, writing `HandoffReady`, or sending any fd.
+The receiver separately retains its old-daemon peer/start-time check before
+acknowledging transferred descriptors.
+
 ## Conventions
 
 - Task stage lives in `pipeline_item.stage`. **Visibility is governed by
