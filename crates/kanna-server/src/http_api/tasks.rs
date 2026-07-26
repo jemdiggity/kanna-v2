@@ -243,16 +243,24 @@ pub(super) async fn create_task_with_requested_id(
                         .map_err(|e| db_write_error("db error", e))?
                         .is_some_and(|item| item.closed_at.is_none());
                     if existing_is_open
-                        && existing.worktree_path.is_some()
                         && !db
                             .has_durable_running_task_session(task_id)
                             .map_err(|e| db_write_error("db error", e))?
                     {
-                        let prepared = crate::task_creator::prepare_rerun_stage_for_api(
+                        let prepared = crate::task_creator::prepare_create_task_repair_for_api(
                             &db,
                             &state.config,
                             task_id,
                         )
+                        .and_then(|prepared| {
+                            prepared.map(Ok).unwrap_or_else(|| {
+                                crate::task_creator::prepare_rerun_stage_for_api(
+                                    &db,
+                                    &state.config,
+                                    task_id,
+                                )
+                            })
+                        })
                         .map_err(|error| {
                             (
                                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,

@@ -625,31 +625,33 @@ fn spawn_session_command(
 
 fn record_spawned_stage_run(db_path: &str, prepared: &PreparedTaskSpawn) -> Result<(), String> {
     let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
-    db.update_pipeline_item_agent_session_id(
-        &prepared.created_task.task_id,
-        prepared.provider_session_id.as_deref(),
-    )
-    .map_err(|e| format!("db error: {}", e))?;
     let run_id = generate_stage_run_id(&prepared.created_task.task_id);
-    db.insert_stage_run_with_completion_transition(
-        NewStageRun {
-            id: &run_id,
-            task_id: &prepared.created_task.task_id,
-            stage: &prepared.created_task.stage,
-            kind: "main",
-            agent: prepared.stage_agent.as_deref(),
-            agent_provider: Some(prepared.agent_provider.as_str()),
-            model: prepared.model.as_deref(),
-            status: "running",
-            result: None,
-            feedback: None,
-            session_id: Some(&prepared.session_id),
-            provider_session_id: prepared.provider_session_id.as_deref(),
-            cwd: Some(&prepared.cwd),
-            resumed_from_run_id: None,
-        },
-        Some(prepared.completion_transition.as_str()),
-    )
+    db.with_immediate_transaction(|db| {
+        db.update_pipeline_item_agent_session_id(
+            &prepared.created_task.task_id,
+            prepared.provider_session_id.as_deref(),
+        )?;
+        db.insert_stage_run_with_completion_transition(
+            NewStageRun {
+                id: &run_id,
+                task_id: &prepared.created_task.task_id,
+                stage: &prepared.created_task.stage,
+                kind: "main",
+                agent: prepared.stage_agent.as_deref(),
+                agent_provider: Some(prepared.agent_provider.as_str()),
+                model: prepared.model.as_deref(),
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some(&prepared.session_id),
+                provider_session_id: prepared.provider_session_id.as_deref(),
+                cwd: Some(&prepared.cwd),
+                resumed_from_run_id: None,
+            },
+            Some(prepared.completion_transition.as_str()),
+        )?;
+        db.delete_create_task_intent(&prepared.created_task.task_id)
+    })
     .map_err(|e| format!("db error: {}", e))
 }
 
@@ -701,32 +703,32 @@ fn record_rerun_stage_run(
     cwd: &str,
 ) -> Result<(), String> {
     let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
-    db.cancel_running_stage_runs(task_id)
-        .map_err(|e| format!("db error: {}", e))?;
-    db.update_pipeline_item_activity(task_id, "working")
-        .map_err(|e| format!("db error: {}", e))?;
-    db.update_pipeline_item_agent_session_id(task_id, provider_session_id)
-        .map_err(|e| format!("db error: {}", e))?;
     let run_id = generate_stage_run_id(task_id);
-    db.insert_stage_run_with_completion_transition(
-        NewStageRun {
-            id: &run_id,
-            task_id,
-            stage,
-            kind: run_kind,
-            agent: stage_agent,
-            agent_provider: Some(agent_provider),
-            model,
-            status: "running",
-            result: None,
-            feedback: None,
-            session_id: Some(session_id),
-            provider_session_id,
-            cwd: Some(cwd),
-            resumed_from_run_id: None,
-        },
-        Some(completion_transition),
-    )
+    db.with_immediate_transaction(|db| {
+        db.cancel_running_stage_runs(task_id)?;
+        db.update_pipeline_item_activity(task_id, "working")?;
+        db.update_pipeline_item_agent_session_id(task_id, provider_session_id)?;
+        db.insert_stage_run_with_completion_transition(
+            NewStageRun {
+                id: &run_id,
+                task_id,
+                stage,
+                kind: run_kind,
+                agent: stage_agent,
+                agent_provider: Some(agent_provider),
+                model,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some(session_id),
+                provider_session_id,
+                cwd: Some(cwd),
+                resumed_from_run_id: None,
+            },
+            Some(completion_transition),
+        )?;
+        db.delete_create_task_intent(task_id)
+    })
     .map_err(|e| format!("db error: {}", e))
 }
 

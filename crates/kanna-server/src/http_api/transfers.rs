@@ -89,6 +89,17 @@ pub(super) async fn list_incoming_transfer_cleanup_candidates(
     }))
 }
 
+pub(super) async fn mark_incoming_transfer_sidecar_cleanup_completed(
+    State(state): State<Arc<AppState>>,
+    Path(transfer_id): Path<String>,
+) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    let updated = db
+        .mark_incoming_transfer_sidecar_cleanup_completed(&transfer_id)
+        .map_err(db_error)?;
+    Ok(Json(TransferUpdateResponse { updated }))
+}
+
 pub(super) async fn insert_task_transfer(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UpsertTransferRequest>,

@@ -7,6 +7,7 @@ import {
   insertDesktopTaskTransferProvenance,
   markDesktopTaskTransferAwaitingAcknowledgment,
   markDesktopTaskTransferImporting,
+  markIncomingTransferSidecarCleanupCompleted,
   rejectDesktopTaskTransfer,
   setDesktopTaskCloudIdentity,
   updateDesktopTaskTransferPayload,
@@ -794,6 +795,9 @@ export function createTransferApi(
       throw new Error(`failed to complete acknowledged incoming transfer: ${transferId}`);
     }
     await invoke("mark_incoming_transfer_ack_completed", { transferId });
+    if (!await markIncomingTransferSidecarCleanupCompleted(transferId)) {
+      throw new Error(`failed to mark sidecar cleanup completed: ${transferId}`);
+    }
     await queries.reloadSnapshot();
 
     return localTaskId;
@@ -815,6 +819,9 @@ export function createTransferApi(
       throw new Error(`failed to reject incoming transfer: ${transferId}`);
     }
     await invoke("mark_incoming_transfer_ack_completed", { transferId });
+    if (!await markIncomingTransferSidecarCleanupCompleted(transferId)) {
+      throw new Error(`failed to mark sidecar cleanup completed: ${transferId}`);
+    }
     await queries.reloadSnapshot();
   }
 

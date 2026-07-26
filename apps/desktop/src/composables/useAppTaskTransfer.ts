@@ -15,6 +15,7 @@ import {
   failPendingIncomingTransfer,
   fetchIncomingTransferCleanupCandidates,
   fetchPendingIncomingTransfers,
+  markIncomingTransferSidecarCleanupCompleted,
   type PendingIncomingTransfer,
 } from "../services/desktopServerClient";
 
@@ -177,6 +178,9 @@ export function useAppTaskTransfer({
     async function cleanupTerminalIncomingTransfer(transferId: string): Promise<void> {
       try {
         await invoke("mark_incoming_transfer_ack_completed", { transferId });
+        if (!await markIncomingTransferSidecarCleanupCompleted(transferId)) {
+          throw new Error(`failed to mark sidecar cleanup completed: ${transferId}`);
+        }
       } catch (error: unknown) {
         console.warn("[App] failed to clean up terminal incoming transfer reservation:", {
           transferId,

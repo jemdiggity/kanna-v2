@@ -1308,6 +1308,7 @@ async fn incoming_cleanup_candidates_include_completed_rejected_and_failed_rows(
     });
 
     let response = app
+        .clone()
         .oneshot(
             Request::get("/v1/transfers/incoming/cleanup-candidates")
                 .body(Body::empty())
@@ -1331,6 +1332,39 @@ async fn incoming_cleanup_candidates_include_completed_rejected_and_failed_rows(
         ids,
         vec!["transfer-completed", "transfer-failed", "transfer-rejected"]
     );
+
+    let cleanup_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/transfers/transfer-completed/actions/sidecar-cleanup-complete")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleanup_response.status(), StatusCode::OK);
+    let cleanup_body = axum::body::to_bytes(cleanup_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cleanup_json: serde_json::Value = from_slice(&cleanup_body).unwrap();
+    assert_eq!(cleanup_json["updated"], true);
+
+    let remaining_response = app
+        .oneshot(
+            Request::get("/v1/transfers/incoming/cleanup-candidates")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let remaining_body = axum::body::to_bytes(remaining_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let remaining_json: serde_json::Value = from_slice(&remaining_body).unwrap();
+    assert!(!remaining_json["transferIds"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("transfer-completed")));
 }
 
 #[tokio::test]

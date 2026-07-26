@@ -1420,6 +1420,84 @@ async fn source_reloads_outgoing_reservation_after_sidecar_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destination_replays_exact_incoming_event_after_submit_success_and_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary_config = RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0);
+    let secondary = TransferRuntime::spawn(secondary_config.clone())
+        .await
+        .unwrap();
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source")
+        .await
+        .unwrap();
+    let payload = json!({
+        "target_peer_id": "peer-secondary",
+        "task": {
+            "source_task_id": "task-source",
+            "title": "Durably replay me"
+        },
+        "nested": { "preserve": ["this", 42, true] }
+    });
+    primary
+        .prepare_transfer_commit(&preflight.transfer_id, payload.clone())
+        .await
+        .unwrap();
+
+    // Simulate the destination sidecar crashing after it acknowledged submit to
+    // the source but before its consumer received and recorded the event.
+    drop(secondary);
+    let secondary = TransferRuntime::spawn(secondary_config.clone())
+        .await
+        .unwrap();
+
+    let replay = tokio::time::timeout(
+        Duration::from_secs(1),
+        next_incoming_transfer_request(&secondary),
+    )
+    .await
+    .expect("destination did not replay the persisted incoming event");
+    assert_eq!(replay.transfer_id, preflight.transfer_id);
+    assert_eq!(replay.source_peer_id, "peer-primary");
+    assert_eq!(replay.source_task_id, "task-source");
+    assert_eq!(replay.source_name.as_deref(), Some("Primary"));
+    assert_eq!(replay.payload, payload);
+
+    secondary
+        .mark_incoming_event_recorded(&preflight.transfer_id)
+        .await
+        .unwrap();
+    secondary
+        .mark_incoming_event_recorded(&preflight.transfer_id)
+        .await
+        .expect("recording the same incoming event twice should be idempotent");
+
+    drop(secondary);
+    let secondary = TransferRuntime::spawn(secondary_config).await.unwrap();
+    tokio::time::timeout(Duration::from_millis(100), secondary.next_event())
+        .await
+        .expect_err("recorded incoming event replayed after restart");
+
+    // Recording the event is independent of the destination's final import
+    // acknowledgment; the reservation must remain usable until that completes.
+    secondary
+        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .await
+        .unwrap();
+    let committed = next_outgoing_transfer_committed(&primary).await;
+    assert_eq!(committed.transfer_id, preflight.transfer_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unapplied_import_commit_receipt_older_than_pending_ttl_replays_after_source_restart() {
     let temp = tempfile::tempdir().unwrap();
     let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
@@ -1507,6 +1585,92 @@ async fn unapplied_import_commit_receipt_retries_without_restart_or_duplicate() 
     )
     .await
     .expect_err("applied receipt continued retrying");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_receipt_consumer_has_one_bounded_pending_event_per_receipt_then_retries() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let primary = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
+            .with_replay_limits(2, 2)
+            .with_receipt_retry_interval(Duration::from_millis(20)),
+    )
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    let mut transfer_ids = Vec::new();
+    for index in 0..2 {
+        let source_task_id = format!("task-source-{index}");
+        let destination_task_id = format!("task-dest-{index}");
+        let preflight = primary
+            .prepare_transfer_preflight("peer-secondary", &source_task_id)
+            .await
+            .unwrap();
+        secondary
+            .acknowledge_import_committed(
+                &preflight.transfer_id,
+                &source_task_id,
+                &destination_task_id,
+            )
+            .await
+            .unwrap();
+        transfer_ids.push(preflight.transfer_id);
+    }
+
+    // Let many retry intervals pass while no consumer drains the runtime.
+    tokio::time::sleep(Duration::from_millis(180)).await;
+
+    let first = next_outgoing_transfer_committed(&primary).await;
+    let second = next_outgoing_transfer_committed(&primary).await;
+    let delivered = std::collections::HashSet::from([first.transfer_id, second.transfer_id]);
+    assert_eq!(
+        delivered,
+        transfer_ids.iter().cloned().collect(),
+        "the bounded queue should contain one event for each active receipt"
+    );
+    for transfer_id in &transfer_ids {
+        primary
+            .mark_import_commit_applied(transfer_id)
+            .await
+            .unwrap();
+    }
+    tokio::time::timeout(
+        Duration::from_millis(40),
+        next_outgoing_transfer_committed(&primary),
+    )
+    .await
+    .expect_err("stalled retries accumulated duplicate queued receipt events");
+
+    let retry_transfer = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source-retry")
+        .await
+        .unwrap();
+    secondary
+        .acknowledge_import_committed(
+            &retry_transfer.transfer_id,
+            "task-source-retry",
+            "task-dest-retry",
+        )
+        .await
+        .unwrap();
+    let initial = next_outgoing_transfer_committed(&primary).await;
+    assert_eq!(initial.transfer_id, retry_transfer.transfer_id);
+    let retry = tokio::time::timeout(
+        Duration::from_millis(100),
+        next_outgoing_transfer_committed(&primary),
+    )
+    .await
+    .expect("a dequeued but unapplied receipt was not retried");
+    assert_eq!(retry.transfer_id, retry_transfer.transfer_id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

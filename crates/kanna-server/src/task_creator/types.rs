@@ -4,6 +4,9 @@ use std::collections::HashMap;
 
 pub(super) struct TaskCreationRequest {
     pub(super) requested_task_id: Option<String>,
+    /// Canonical API create request retained until the first running stage
+    /// run is durable, so an interrupted prepared spawn can be reconstructed.
+    pub(super) create_intent_json: Option<String>,
     pub(super) task_prompt: String,
     pub(super) display_name: Option<String>,
     pub(super) pipeline_name: Option<String>,
@@ -38,6 +41,12 @@ pub(crate) enum PrepareTaskError {
 impl From<String> for PrepareTaskError {
     fn from(error: String) -> Self {
         Self::Other(error)
+    }
+}
+
+impl From<rusqlite::Error> for PrepareTaskError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Other(format!("db error: {error}"))
     }
 }
 

@@ -407,6 +407,14 @@ function createTransferDb(initial: {
       row.error = reason;
       return true;
     },
+    markIncomingTransferSidecarCleanupCompleted: async (transferId: string) => {
+      const row = tables.task_transfer.find((transfer) => transfer.id === transferId);
+      if (!row || !["completed", "rejected", "failed"].includes(String(row.status))) {
+        return false;
+      }
+      row.sidecar_cleanup_completed_at ??= new Date().toISOString();
+      return true;
+    },
     insertTaskTransferProvenance: async (provenance: NewTaskTransferProvenanceInput) => {
       if (!tables.task_transfer_provenance.some(
         (row) => row.pipeline_item_id === provenance.pipeline_item_id,
@@ -1576,6 +1584,7 @@ describe("incoming transfer approval", () => {
       status: "completed",
       local_task_id: localTaskId,
       error: null,
+      sidecar_cleanup_completed_at: expect.any(String),
     });
     expect(fakeDb.tables.task_transfer_provenance[0]).toMatchObject({
       pipeline_item_id: localTaskId,
@@ -1622,6 +1631,10 @@ describe("incoming transfer approval", () => {
         events.push(`complete:${transferId}:${localTaskId}`);
         return true;
       },
+      markIncomingTransferSidecarCleanupCompleted: async (transferId) => {
+        events.push(`cleanup-recorded:${transferId}`);
+        return true;
+      },
     });
     mockIncomingTransferApprovalInvoke(payload, async (cmd, args) => {
       if (cmd === "file_exists") return (args?.path as string) === "/tmp/repo-1";
@@ -1645,6 +1658,7 @@ describe("incoming transfer approval", () => {
       "ack:transfer-1",
       `complete:transfer-1:${destinationTaskId}`,
       "mark:transfer-1",
+      "cleanup-recorded:transfer-1",
     ]);
   });
 
@@ -3003,6 +3017,7 @@ describe("incoming transfer approval", () => {
       id: "transfer-1",
       status: "rejected",
       error: "Rejected locally",
+      sidecar_cleanup_completed_at: expect.any(String),
     });
     expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
       transferId: "transfer-1",

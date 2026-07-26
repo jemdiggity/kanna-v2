@@ -14,6 +14,7 @@ import {
   fetchPendingIncomingTransfers,
   getDesktopSetting,
   mutateDesktopWindowWorkspace,
+  markIncomingTransferSidecarCleanupCompleted,
   setDesktopTaskCloudIdentity,
   setDesktopServerClientHandlersForTests,
   setDesktopSnapshotFetcherForTests,
@@ -557,6 +558,28 @@ describe("desktopServerClient", () => {
       "http://127.0.0.1:48121/v1/transfers/incoming/cleanup-candidates",
       {
         method: "GET",
+        headers: undefined,
+        body: undefined,
+      },
+    );
+  });
+
+  it("marks terminal incoming sidecar cleanup completed", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ updated: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      markIncomingTransferSidecarCleanupCompleted("transfer-completed"),
+    ).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/transfers/transfer-completed/actions/sidecar-cleanup-complete",
+      {
+        method: "POST",
         headers: undefined,
         body: undefined,
       },

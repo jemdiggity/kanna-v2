@@ -1006,6 +1006,13 @@ describe("App", () => {
       }),
       runRepoCommand: async () => ({ taskId: "repo-command-task", reused: false }),
       fetchIncomingTransferCleanupCandidates: async () => [],
+      markIncomingTransferSidecarCleanupCompleted: async (transferId) => {
+        await dbMock.execute(
+          "UPDATE task_transfer SET sidecar_cleanup_completed_at = datetime('now') WHERE id = ?",
+          [transferId],
+        );
+        return true;
+      },
       fetchPendingIncomingTransfers: async () => await dbSelectMock(),
       claimPendingIncomingTransfer: async (transferId) => {
         const result = await dbMock.execute(
@@ -1048,6 +1055,7 @@ describe("App", () => {
       if (command === "read_env_var") return "/Users/test";
       if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
       if (command === "mark_incoming_transfer_ack_completed") return null;
+      if (command === "mark_incoming_transfer_event_recorded") return null;
       throw new Error(`unexpected invoke: ${command}`);
     });
   });
@@ -4749,8 +4757,52 @@ describe("App", () => {
         sourcePeerId: "peer-source",
       }),
     );
+    expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_event_recorded", {
+      transferId: "transfer-1",
+    });
+    const recordedCallIndex = invokeMock.mock.calls.findIndex(
+      ([command]) => command === "mark_incoming_transfer_event_recorded",
+    );
+    expect(store.recordIncomingTransfer.mock.invocationCallOrder[0]).toBeLessThan(
+      invokeMock.mock.invocationCallOrder[recordedCallIndex],
+    );
+    expect(invokeMock.mock.invocationCallOrder[recordedCallIndex]).toBeLessThan(
+      store.approveIncomingTransfer.mock.invocationCallOrder[0],
+    );
     expect(store.approveIncomingTransfer).toHaveBeenCalledWith("transfer-1");
     expect(wrapper.text()).not.toContain("peer-source");
+  });
+
+  it("registers transfer replay handling before LAN sync can spawn the sidecar", async () => {
+    lanTasksMock.mockImplementationOnce(async () => {
+      expect(listenHandlers.has("transfer-request")).toBe(true);
+      return { repos: [], items: [], terminalRefs: {} };
+    });
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await waitForCondition(() => lanTasksMock.mock.calls.length > 0);
+
+    expect(lanTasksMock).toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("does not mark an incoming event recorded when its DB write fails", async () => {
+    store.recordIncomingTransfer.mockRejectedValueOnce(new Error("db unavailable"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+    const handler = listenHandlers.get("transfer-request");
+
+    await handler?.(buildIncomingTransferEvent());
+    await flushPromises();
+
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "mark_incoming_transfer_event_recorded",
+      expect.anything(),
+    );
+    expect(store.approveIncomingTransfer).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+    wrapper.unmount();
   });
 
   it("auto-imports any pending incoming transfer on mount", async () => {
@@ -4784,6 +4836,11 @@ describe("App", () => {
 
     const wrapper = await mountApp(SidebarWithRepoStub);
     await flushPromises();
+    await waitForCondition(() =>
+      dbMock.execute.mock.calls.filter(
+        ([statement]) => String(statement).includes("sidecar_cleanup_completed_at"),
+      ).length === 3,
+    );
 
     expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
       transferId: "transfer-completed",
@@ -4794,7 +4851,49 @@ describe("App", () => {
     expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
       transferId: "transfer-failed",
     });
+    for (const transferId of [
+      "transfer-completed",
+      "transfer-rejected",
+      "transfer-failed",
+    ]) {
+      expect(dbMock.execute).toHaveBeenCalledWith(
+        expect.stringContaining("sidecar_cleanup_completed_at"),
+        [transferId],
+      );
+    }
     wrapper.unmount();
+  });
+
+  it("retries idempotent sidecar cleanup after the DB marker response is lost", async () => {
+    let markerAttempts = 0;
+    updateDesktopServerClientHandlersForTests({
+      fetchIncomingTransferCleanupCandidates: async () => ["transfer-rejected"],
+      markIncomingTransferSidecarCleanupCompleted: async () => {
+        markerAttempts += 1;
+        if (markerAttempts === 1) {
+          throw new Error("marker response lost");
+        }
+        return true;
+      },
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const first = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+    first.unmount();
+    const second = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+
+    const cleanupCalls = invokeMock.mock.calls.filter(
+      ([command, args]) =>
+        command === "mark_incoming_transfer_ack_completed" &&
+        args?.transferId === "transfer-rejected",
+    );
+    expect(cleanupCalls).toHaveLength(2);
+    expect(markerAttempts).toBe(2);
+
+    warnSpy.mockRestore();
+    second.unmount();
   });
 
   it("does not auto-import the same pending transfer twice across restored windows", async () => {
@@ -4834,6 +4933,11 @@ describe("App", () => {
 
     const wrapper = await mountApp(SidebarWithRepoStub);
     await flushPromises();
+    await waitForCondition(() =>
+      warnSpy.mock.calls.some(
+        ([message]) => message === "[App] disabled malformed pending incoming transfer:",
+      ),
+    );
 
     expect(store.approveIncomingTransfer).not.toHaveBeenCalled();
     expect(dbMock.execute).toHaveBeenCalledWith(
@@ -4843,6 +4947,10 @@ describe("App", () => {
     expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
       transferId: "transfer-bad",
     });
+    expect(dbMock.execute).toHaveBeenCalledWith(
+      expect.stringContaining("sidecar_cleanup_completed_at"),
+      ["transfer-bad"],
+    );
     const cleanupCallIndex = invokeMock.mock.calls.findIndex(
       ([command]) => command === "mark_incoming_transfer_ack_completed",
     );
@@ -4878,6 +4986,11 @@ describe("App", () => {
 
     const wrapper = await mountApp(SidebarWithRepoStub);
     await flushPromises();
+    await waitForCondition(() =>
+      invokeMock.mock.calls.filter(
+        ([command]) => command === "mark_incoming_transfer_ack_completed",
+      ).length === 2,
+    );
 
     const cleanupCalls = invokeMock.mock.calls.filter(
       ([command]) => command === "mark_incoming_transfer_ack_completed",

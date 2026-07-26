@@ -296,6 +296,24 @@ export function useAppLifecycle({
     if (windowWorkspace && windowWorkspace.bootstrap.windowId === "main") {
       scheduleStartupBackup(dbName);
     }
+    try {
+      const unlistenTransferRequest = await listen("transfer-request", async (event: unknown) => {
+        try {
+          const request = parseIncomingTransferRequest(eventPayload(event));
+          await store.recordIncomingTransfer(request);
+          await invoke("mark_incoming_transfer_event_recorded", {
+            transferId: request.transferId,
+          });
+          await store.approveIncomingTransfer(request.transferId);
+        } catch (e: unknown) {
+          console.error("[App] failed to import incoming transfer request:", e);
+          toast.error(e instanceof Error ? e.message : String(e));
+        }
+      });
+      appUnlisteners.push(unlistenTransferRequest);
+    } catch (e: unknown) {
+      console.error("[App] transfer-request listener registration failed:", e);
+    }
     void initializeDesktopCloudAuth().catch((error) =>
       console.warn("[cloud] failed to initialize desktop auth:", error),
     );
@@ -344,22 +362,6 @@ export function useAppLifecycle({
       getKeyboardActions().navigateRepoDown,
       "navigate-repo-down",
     );
-
-    try {
-      const unlistenTransferRequest = await listen("transfer-request", async (event: unknown) => {
-        try {
-          const request = parseIncomingTransferRequest(eventPayload(event));
-          await store.recordIncomingTransfer(request);
-          await store.approveIncomingTransfer(request.transferId);
-        } catch (e: unknown) {
-          console.error("[App] failed to import incoming transfer request:", e);
-          toast.error(e instanceof Error ? e.message : String(e));
-        }
-      });
-      appUnlisteners.push(unlistenTransferRequest);
-    } catch (e: unknown) {
-      console.error("[App] transfer-request listener registration failed:", e);
-    }
 
     try {
       const unlistenPairingStarted = await listen("pairing-started", async (event: unknown) => {

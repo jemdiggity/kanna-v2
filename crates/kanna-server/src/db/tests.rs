@@ -164,7 +164,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "031_task_transfer_cloud_desktop_ids");
+    assert_eq!(latest_migration, "033_create_task_intent");
 
     let stage_run_sql: String = db
         .conn
@@ -188,6 +188,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
         .expect("collect transfer columns");
     assert!(transfer_columns.contains(&"source_desktop_id".to_string()));
     assert!(transfer_columns.contains(&"target_desktop_id".to_string()));
+    assert!(transfer_columns.contains(&"sidecar_cleanup_completed_at".to_string()));
 
     let _ = std::fs::remove_file(path);
 }
@@ -239,6 +240,41 @@ fn task_transfer_round_trip_preserves_nullable_authenticated_desktop_ids() {
         .expect("LAN transfer exists");
     assert_eq!(lan.source_desktop_id, None);
     assert_eq!(lan.target_desktop_id, None);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn incoming_transfer_insert_is_idempotent_for_event_replay() {
+    let path = Db::test_db_path("incoming-transfer-insert-idempotent");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    let transfer = NewTaskTransfer {
+        id: "transfer-replayed".into(),
+        direction: "incoming".into(),
+        status: "pending".into(),
+        source_peer_id: Some("peer-a".into()),
+        target_peer_id: None,
+        source_desktop_id: Some("desktop-a".into()),
+        target_desktop_id: None,
+        source_task_id: Some("task-a".into()),
+        local_task_id: None,
+        error: None,
+        payload_json: Some(r#"{"task":{"source_task_id":"task-a"}}"#.into()),
+    };
+
+    db.insert_task_transfer(&transfer)
+        .expect("insert incoming transfer");
+    db.insert_task_transfer(&transfer)
+        .expect("replay incoming transfer insert");
+    let count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_transfer WHERE id = ?",
+            ["transfer-replayed"],
+            |row| row.get(0),
+        )
+        .expect("count replayed transfer rows");
+    assert_eq!(count, 1);
 
     let _ = std::fs::remove_file(path);
 }
@@ -439,6 +475,20 @@ fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
     assert_eq!(
         cleanup_candidates,
         vec!["transfer-1", "transfer-failed", "transfer-rejected"]
+    );
+    assert!(db
+        .mark_incoming_transfer_sidecar_cleanup_completed("transfer-1")
+        .expect("mark incoming sidecar cleanup completed"));
+    assert!(db
+        .mark_incoming_transfer_sidecar_cleanup_completed("transfer-1")
+        .expect("repeat incoming sidecar cleanup completion"));
+    let mut remaining_cleanup_candidates = db
+        .list_terminal_incoming_transfer_ids()
+        .expect("list remaining cleanup candidates");
+    remaining_cleanup_candidates.sort();
+    assert_eq!(
+        remaining_cleanup_candidates,
+        vec!["transfer-failed", "transfer-rejected"]
     );
 
     let _ = std::fs::remove_file(path);

@@ -313,11 +313,38 @@ impl TransferRuntime {
     }
 
     pub async fn next_event(&self) -> Result<RuntimeEvent, RuntimeError> {
-        let mut receiver = self.incoming_events.lock().await;
-        receiver
-            .recv()
-            .await
-            .ok_or(RuntimeError::IncomingEventChannelClosed)
+        enum NextEvent {
+            General(Option<RuntimeEvent>),
+            Receipt(Option<super::events::OutgoingTransferCommittedEvent>),
+        }
+
+        loop {
+            let next = {
+                let mut general = self.incoming_events.lock().await;
+                let mut receipts = self.receipt_events.lock().await;
+                tokio::select! {
+                    event = general.recv() => NextEvent::General(event),
+                    event = receipts.recv() => NextEvent::Receipt(event),
+                }
+            };
+            match next {
+                NextEvent::General(Some(event)) => return Ok(event),
+                NextEvent::Receipt(Some(event)) => {
+                    let mut receipts = self.import_commit_receipts.lock().await;
+                    let Some(receipt) = receipts.get_mut(&event.transfer_id) else {
+                        continue;
+                    };
+                    receipt.event_queued = false;
+                    if receipt.applied {
+                        continue;
+                    }
+                    return Ok(RuntimeEvent::OutgoingTransferCommitted(event));
+                }
+                NextEvent::General(None) | NextEvent::Receipt(None) => {
+                    return Err(RuntimeError::IncomingEventChannelClosed);
+                }
+            }
+        }
     }
 
     pub async fn stage_transfer_artifact(
@@ -566,6 +593,28 @@ impl TransferRuntime {
     pub async fn mark_import_ack_completed(&self, transfer_id: &str) -> Result<(), RuntimeError> {
         self.incoming_reservations.lock().await.remove(transfer_id);
         self.replay_store.remove_incoming_reservation(transfer_id);
+        Ok(())
+    }
+
+    pub async fn mark_incoming_event_recorded(
+        &self,
+        transfer_id: &str,
+    ) -> Result<(), RuntimeError> {
+        let mut reservations = self.incoming_reservations.lock().await;
+        let reservation = reservations.get_mut(transfer_id).ok_or_else(|| {
+            RuntimeError::Protocol(format!(
+                "missing incoming transfer reservation {}",
+                transfer_id
+            ))
+        })?;
+        if reservation.event_recorded {
+            return Ok(());
+        }
+        let mut recorded = reservation.clone();
+        recorded.event_recorded = true;
+        self.replay_store
+            .save_incoming_reservation(transfer_id, &recorded)?;
+        *reservation = recorded;
         Ok(())
     }
 

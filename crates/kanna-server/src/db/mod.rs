@@ -6,6 +6,7 @@ use std::time::Duration;
 
 mod analytics;
 mod blockers;
+mod create_intents;
 mod notifications;
 mod operator_events;
 mod pipeline_items;
@@ -69,6 +70,8 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "029_pipeline_item_activity_revision",
     "030_pipeline_item_cloud_task_id",
     "031_task_transfer_cloud_desktop_ids",
+    "032_task_transfer_sidecar_cleanup",
+    "033_create_task_intent",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1241,6 +1244,29 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         add_column(conn, "task_transfer", "source_desktop_id", "TEXT")?;
         add_column(conn, "task_transfer", "target_desktop_id", "TEXT")?;
         Ok(())
+    })?;
+
+    run_migration(conn, "032_task_transfer_sidecar_cleanup", |conn| {
+        add_column(
+            conn,
+            "task_transfer",
+            "sidecar_cleanup_completed_at",
+            "TEXT",
+        )?;
+        Ok(())
+    })?;
+
+    run_migration(conn, "033_create_task_intent", |conn| {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS create_task_intent (
+                task_id TEXT PRIMARY KEY,
+                request_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (task_id) REFERENCES pipeline_item(id) ON DELETE CASCADE
+            );
+            "#,
+        )
     })?;
 
     Ok(())

@@ -118,6 +118,13 @@ impl Db {
                 env_name TEXT NOT NULL
             );
 
+            CREATE TABLE create_task_intent (
+                task_id TEXT PRIMARY KEY,
+                request_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (task_id) REFERENCES pipeline_item(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE stage_run (
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
@@ -192,7 +199,8 @@ impl Db {
                 started_at TEXT NOT NULL DEFAULT (datetime('now')),
                 completed_at TEXT,
                 error TEXT,
-                payload_json TEXT
+                payload_json TEXT,
+                sidecar_cleanup_completed_at TEXT
             );
             "#,
         )?;

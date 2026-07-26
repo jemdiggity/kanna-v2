@@ -42,7 +42,8 @@ use super::transfers::{
     get_task_transfer, insert_task_transfer, insert_task_transfer_provenance,
     list_incoming_transfer_cleanup_candidates, list_pending_incoming_transfers,
     mark_incoming_transfer_awaiting_acknowledgment, mark_incoming_transfer_importing,
-    reject_task_transfer, set_task_cloud_identity, update_task_transfer_payload,
+    mark_incoming_transfer_sidecar_cleanup_completed, reject_task_transfer,
+    set_task_cloud_identity, update_task_transfer_payload,
 };
 use super::window_workspace::mutate_window_workspace;
 use axum::body::Body;
@@ -225,6 +226,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/transfers/{transfer_id}/actions/fail",
             post(fail_pending_incoming_transfer),
+        )
+        .route(
+            "/v1/transfers/{transfer_id}/actions/sidecar-cleanup-complete",
+            post(mark_incoming_transfer_sidecar_cleanup_completed),
         )
         .route("/v1/pairing/sessions", post(create_pairing_session))
         .route("/v1/pairing/sessions/claim", post(claim_pairing_session));

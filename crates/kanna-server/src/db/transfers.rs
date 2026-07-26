@@ -57,7 +57,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO task_transfer
              (id, direction, status, source_peer_id, target_peer_id, source_desktop_id, target_desktop_id, source_task_id, local_task_id, error, payload_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO NOTHING",
             (
                 &transfer.id,
                 &transfer.direction,
@@ -238,10 +239,26 @@ impl Db {
              FROM task_transfer
              WHERE direction = 'incoming'
                AND status IN ('completed', 'rejected', 'failed')
+               AND sidecar_cleanup_completed_at IS NULL
              ORDER BY completed_at ASC, started_at ASC",
         )?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect()
+    }
+
+    pub fn mark_incoming_transfer_sidecar_cleanup_completed(
+        &self,
+        transfer_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE task_transfer
+             SET sidecar_cleanup_completed_at =
+                 COALESCE(sidecar_cleanup_completed_at, datetime('now'))
+             WHERE id = ? AND direction = 'incoming'
+               AND status IN ('completed', 'rejected', 'failed')",
+            [transfer_id],
+        )?;
+        Ok(rows_affected == 1)
     }
 
     pub fn claim_pending_incoming_transfer(

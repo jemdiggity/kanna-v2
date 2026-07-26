@@ -4,9 +4,8 @@ use super::daemon::{
 };
 use super::discovery::PeerDiscovery;
 use super::events::{
-    IncomingTransferEvent, OutgoingTransferCommittedEvent,
-    OutgoingTransferFinalizationRequestedEvent, PairingCompletedEvent, PairingRequestedEvent,
-    RuntimeError, RuntimeEvent,
+    IncomingTransferEvent, OutgoingTransferFinalizationRequestedEvent, PairingCompletedEvent,
+    PairingRequestedEvent, RuntimeError, RuntimeEvent,
 };
 use super::replay_store::unix_ms;
 use super::state::{
@@ -205,6 +204,8 @@ async fn handle_connection(
                 source_task_id,
                 created_at_unix_ms: unix_ms(),
                 committed: false,
+                event: None,
+                event_recorded: false,
             };
             context
                 .replay_store
@@ -243,20 +244,34 @@ async fn handle_connection(
             .await
             {
                 Ok(event) => {
-                    {
+                    let event_was_newly_committed = {
                         let mut reservations = context.incoming_reservations.lock().await;
-                        let reservation = reservations.get_mut(&transfer_id).ok_or_else(|| {
-                            RuntimeError::Protocol(format!("unknown transfer id {}", transfer_id))
-                        })?;
-                        reservation.committed = true;
+                        let mut reservation =
+                            reservations.get(&transfer_id).cloned().ok_or_else(|| {
+                                RuntimeError::Protocol(format!(
+                                    "unknown transfer id {}",
+                                    transfer_id
+                                ))
+                            })?;
+                        if reservation.committed && reservation.event.is_some() {
+                            false
+                        } else {
+                            reservation.committed = true;
+                            reservation.event = Some(event.clone());
+                            reservation.event_recorded = false;
+                            context
+                                .replay_store
+                                .save_incoming_reservation(&transfer_id, &reservation)?;
+                            reservations.insert(transfer_id.clone(), reservation);
+                            true
+                        }
+                    };
+                    if event_was_newly_committed {
                         context
-                            .replay_store
-                            .save_incoming_reservation(&transfer_id, reservation)?;
+                            .incoming_sender
+                            .send(RuntimeEvent::IncomingTransferRequest(event))
+                            .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
                     }
-                    context
-                        .incoming_sender
-                        .send(RuntimeEvent::IncomingTransferRequest(event))
-                        .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
                     PeerResponse::SubmitTransferPayload {
                         request_id,
                         transfer_id,
@@ -572,7 +587,7 @@ async fn handle_connection(
                     })?
                     .to_string();
 
-                if let Some(receipt) = existing_receipt {
+                if let Some(mut receipt) = existing_receipt {
                     if receipt.source_task_id != source_task_id
                         || receipt.destination_local_task_id != destination_local_task_id
                     {
@@ -581,18 +596,8 @@ async fn handle_connection(
                             transfer_id
                         )));
                     }
-                    if !receipt.applied {
-                        context
-                            .incoming_sender
-                            .send(RuntimeEvent::OutgoingTransferCommitted(
-                                OutgoingTransferCommittedEvent {
-                                    transfer_id: transfer_id.clone(),
-                                    source_task_id,
-                                    destination_local_task_id,
-                                },
-                            ))
-                            .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
-                    }
+                    receipt.try_queue_event(&transfer_id, &context.receipt_sender)?;
+                    receipts.insert(transfer_id.clone(), receipt);
                     return Ok::<PeerResponse, RuntimeError>(PeerResponse::ImportCommitted {
                         request_id: request_id.clone(),
                         transfer_id,
@@ -625,21 +630,16 @@ async fn handle_connection(
                     destination_local_task_id: destination_local_task_id.clone(),
                     created_at_unix_ms: unix_ms(),
                     applied: false,
+                    event_queued: false,
                 };
                 context.replay_store.save_receipt(&transfer_id, &receipt)?;
-                receipts.insert(transfer_id.clone(), receipt);
                 context.outgoing_transfers.lock().await.remove(&transfer_id);
                 context.replay_store.remove_reservation(&transfer_id);
-                context
-                    .incoming_sender
-                    .send(RuntimeEvent::OutgoingTransferCommitted(
-                        OutgoingTransferCommittedEvent {
-                            transfer_id: transfer_id.clone(),
-                            source_task_id,
-                            destination_local_task_id,
-                        },
-                    ))
-                    .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
+                receipts.insert(transfer_id.clone(), receipt);
+                receipts
+                    .get_mut(&transfer_id)
+                    .expect("receipt was just inserted")
+                    .try_queue_event(&transfer_id, &context.receipt_sender)?;
                 Ok::<PeerResponse, RuntimeError>(PeerResponse::ImportCommitted {
                     request_id: request_id.clone(),
                     transfer_id,

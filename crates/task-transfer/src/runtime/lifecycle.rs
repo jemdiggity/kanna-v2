@@ -62,6 +62,8 @@ impl TransferRuntime {
             ),
         };
         let (incoming_sender, incoming_receiver) = mpsc::unbounded_channel();
+        let (receipt_sender, receipt_receiver) =
+            mpsc::channel(config.max_unapplied_receipts.max(1));
         let pending_pairing_requests = Arc::new(Mutex::new(HashMap::new()));
         let replay_store = Arc::new(TransferReplayStore::new(
             &config.registry_dir,
@@ -73,28 +75,27 @@ impl TransferRuntime {
             config.max_incoming_reservations,
         ));
         let mut loaded_outgoing_transfers = replay_store.load_outgoing_reservations()?;
-        let loaded_receipts = replay_store.load_receipts()?;
-        for (transfer_id, receipt) in &loaded_receipts {
+        let mut loaded_receipts = replay_store.load_receipts()?;
+        for (transfer_id, receipt) in &mut loaded_receipts {
             if loaded_outgoing_transfers.remove(transfer_id).is_some() {
                 replay_store.remove_reservation(transfer_id);
             }
-            if !receipt.applied {
-                incoming_sender
-                    .send(RuntimeEvent::OutgoingTransferCommitted(
-                        super::events::OutgoingTransferCommittedEvent {
-                            transfer_id: transfer_id.clone(),
-                            source_task_id: receipt.source_task_id.clone(),
-                            destination_local_task_id: receipt.destination_local_task_id.clone(),
-                        },
-                    ))
-                    .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
-            }
+            receipt.try_queue_event(transfer_id, &receipt_sender)?;
         }
         let outgoing_transfers = Arc::new(Mutex::new(loaded_outgoing_transfers));
         let import_commit_receipts = Arc::new(Mutex::new(loaded_receipts));
         let pending_outgoing_transfer_finalizations = Arc::new(Mutex::new(HashMap::new()));
-        let incoming_reservations =
-            Arc::new(Mutex::new(replay_store.load_incoming_reservations()?));
+        let loaded_incoming_reservations = replay_store.load_incoming_reservations()?;
+        for reservation in loaded_incoming_reservations.values() {
+            if reservation.committed && !reservation.event_recorded {
+                if let Some(event) = reservation.event.clone() {
+                    incoming_sender
+                        .send(RuntimeEvent::IncomingTransferRequest(event))
+                        .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
+                }
+            }
+        }
+        let incoming_reservations = Arc::new(Mutex::new(loaded_incoming_reservations));
         let transfer_artifacts = Arc::new(Mutex::new(HashMap::new()));
         let task_snapshot = Arc::new(Mutex::new(Value::Null));
         let terminal_observers = Arc::new(Mutex::new(HashMap::new()));
@@ -122,10 +123,11 @@ impl TransferRuntime {
             kanna_server_port: config.kanna_server_port,
             request_counter: Arc::clone(&request_counter),
             incoming_sender: incoming_sender.clone(),
+            receipt_sender: receipt_sender.clone(),
         };
         let listener_task = tokio::spawn(run_listener(listener, listener_context));
         let retry_receipts = Arc::clone(&import_commit_receipts);
-        let retry_sender = incoming_sender.clone();
+        let retry_sender = receipt_sender.clone();
         let retry_interval = config
             .receipt_retry_interval
             .max(std::time::Duration::from_millis(1));
@@ -134,24 +136,9 @@ impl TransferRuntime {
             ticker.tick().await;
             loop {
                 ticker.tick().await;
-                let pending = retry_receipts
-                    .lock()
-                    .await
-                    .iter()
-                    .filter(|(_, receipt)| !receipt.applied)
-                    .map(
-                        |(transfer_id, receipt)| super::events::OutgoingTransferCommittedEvent {
-                            transfer_id: transfer_id.clone(),
-                            source_task_id: receipt.source_task_id.clone(),
-                            destination_local_task_id: receipt.destination_local_task_id.clone(),
-                        },
-                    )
-                    .collect::<Vec<_>>();
-                for event in pending {
-                    if retry_sender
-                        .send(RuntimeEvent::OutgoingTransferCommitted(event))
-                        .is_err()
-                    {
+                let mut receipts = retry_receipts.lock().await;
+                for (transfer_id, receipt) in receipts.iter_mut() {
+                    if receipt.try_queue_event(transfer_id, &retry_sender).is_err() {
                         return;
                     }
                 }
@@ -173,6 +160,7 @@ impl TransferRuntime {
             terminal_observers,
             incoming_sender,
             incoming_events: Mutex::new(incoming_receiver),
+            receipt_events: Mutex::new(receipt_receiver),
             request_counter,
             listener_task,
             receipt_retry_task,

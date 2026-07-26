@@ -365,6 +365,10 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
         1
     );
     assert_eq!(db.list_stage_runs_for_task(task_id).unwrap().len(), 1);
+    assert!(
+        db.get_create_task_intent(task_id).unwrap().is_none(),
+        "successful initial spawn should clear the create intent"
+    );
 
     let _ = std::fs::remove_dir_all(&daemon_dir);
     let _ = std::fs::remove_dir_all(&repo_root);
@@ -416,11 +420,24 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
     drop(db);
 
     let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let resume_session_id = "364643cc-5e6d-48fc-86ca-ca7764380900";
     let request_body = serde_json::json!({
         "repoId": "repo-1",
         "prompt": "Repair the interrupted spawn",
+        "displayName": "Prepared intent repair",
         "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
-        "agentProvider": "claude"
+        "agentProvider": "claude",
+        "agentType": "pty",
+        "terminalCols": 132,
+        "terminalRows": 43,
+        "model": "claude-repair-model",
+        "permissionMode": "acceptEdits",
+        "allowedTools": ["Read", "Bash"],
+        "disallowedTools": ["WebFetch"],
+        "maxTurns": 17,
+        "maxBudgetUsd": 4.25,
+        "setupCmds": ["printf 'prepared-intent-setup\\n'"],
+        "resumeSessionId": resume_session_id
     })
     .to_string();
     let first = app
@@ -442,6 +459,76 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
         1
     );
     assert!(db.list_stage_runs_for_task(task_id).unwrap().is_empty());
+    let stored_intent: serde_json::Value = serde_json::from_str(
+        &db.get_create_task_intent(task_id)
+            .unwrap()
+            .expect("prepared task should retain its create intent"),
+    )
+    .unwrap();
+    assert_eq!(
+        stored_intent["resumeSessionId"],
+        serde_json::json!(resume_session_id)
+    );
+    assert_eq!(
+        stored_intent["setupCmds"],
+        serde_json::json!(["printf 'prepared-intent-setup\\n'"])
+    );
+    assert_eq!(
+        stored_intent["allowedTools"],
+        serde_json::json!(["Read", "Bash"])
+    );
+    assert_eq!(
+        stored_intent["_kannaResolved"]["model"],
+        serde_json::json!("claude-repair-model")
+    );
+    assert_eq!(
+        stored_intent["_kannaResolved"]["initialTerminalGeometry"],
+        serde_json::json!([132, 43])
+    );
+    let interrupted_worktree = db
+        .get_task_worktree_path(task_id)
+        .unwrap()
+        .expect("prepared worktree path");
+    let remove = std::process::Command::new("git")
+        .args(["worktree", "remove", "--force", &interrupted_worktree])
+        .current_dir(&repo_root)
+        .output()
+        .expect("remove prepared worktree");
+    assert!(
+        remove.status.success(),
+        "remove prepared worktree failed: {}",
+        String::from_utf8_lossy(&remove.stderr)
+    );
+    let branch = format!("task-{task_id}");
+    let delete_branch = std::process::Command::new("git")
+        .args(["branch", "-D", &branch])
+        .current_dir(&repo_root)
+        .output()
+        .expect("delete prepared branch");
+    assert!(
+        delete_branch.status.success(),
+        "delete prepared branch failed: {}",
+        String::from_utf8_lossy(&delete_branch.stderr)
+    );
+    db.delete_worktree_rows_for_task(task_id)
+        .expect("remove interrupted worktree row");
+    assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 0);
+    std::fs::write(
+        repo_root
+            .join(".kanna/pipelines")
+            .join(format!("{TEST_PROVIDER_NEUTRAL_PIPELINE}.json")),
+        serde_json::json!({
+            "name": TEST_PROVIDER_NEUTRAL_PIPELINE,
+            "stages": [{
+                "name": "in progress",
+                "prompt": "MUTATED-DEFINITION-$TASK_PROMPT",
+                "setup": ["printf 'mutated-definition-setup\\n'"],
+                "policy": { "transition": "auto" }
+            }]
+        })
+        .to_string(),
+    )
+    .expect("mutate definitions after interrupted preparation");
     drop(db);
 
     let daemon_listener = UnixListener::bind(&socket_path).unwrap();
@@ -472,9 +559,36 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
                         .await
                         .unwrap();
                 }
-                DaemonCommand::Spawn { session_id, .. }
-                | DaemonCommand::SpawnAgent { session_id, .. } => {
+                DaemonCommand::Spawn {
+                    session_id,
+                    args,
+                    cols,
+                    rows,
+                    ..
+                } => {
                     assert_eq!(session_id, task_id);
+                    assert_eq!((cols, rows), (132, 43));
+                    let command = args.join(" ");
+                    for expected in [
+                        "prepared-intent-setup",
+                        "--resume '364643cc-5e6d-48fc-86ca-ca7764380900'",
+                        "--model claude-repair-model",
+                        "--allowedTools Read,Bash",
+                        "--disallowedTools WebFetch",
+                        "--max-turns 17",
+                        "--max-budget-usd 4.25",
+                        "Repair the interrupted spawn",
+                    ] {
+                        assert!(
+                            command.contains(expected),
+                            "repaired spawn did not preserve `{expected}`: {command}"
+                        );
+                    }
+                    assert!(
+                        !command.contains("MUTATED-DEFINITION")
+                            && !command.contains("mutated-definition-setup"),
+                        "repaired spawn re-read mutated repo definitions: {command}"
+                    );
                     write_half
                         .write_all(
                             format!(
@@ -487,6 +601,9 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
                         .await
                         .unwrap();
                     break;
+                }
+                DaemonCommand::SpawnAgent { .. } => {
+                    panic!("prepared intent requested a PTY spawn")
                 }
                 other => panic!("unexpected repair command: {other:?}"),
             }
@@ -518,6 +635,14 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].status, "running");
     assert_eq!(runs[0].session_id.as_deref(), Some(task_id));
+    assert_eq!(
+        runs[0].provider_session_id.as_deref(),
+        Some(resume_session_id)
+    );
+    assert!(
+        db.get_create_task_intent(task_id).unwrap().is_none(),
+        "running stage run should clear the prepared create intent"
+    );
 
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir_all(&daemon_dir);

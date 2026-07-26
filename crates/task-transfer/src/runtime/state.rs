@@ -1,6 +1,9 @@
 use super::config::RuntimeConfig;
 use super::discovery::PeerDiscovery;
-use super::events::{FinalizedOutgoingTransfer, RuntimeError, RuntimeEvent};
+use super::events::{
+    FinalizedOutgoingTransfer, IncomingTransferEvent, OutgoingTransferCommittedEvent, RuntimeError,
+    RuntimeEvent,
+};
 use super::replay_store::TransferReplayStore;
 use crate::crypto::TransferIdentity;
 use serde::{Deserialize, Serialize};
@@ -19,6 +22,8 @@ pub(super) struct IncomingTransferReservation {
     pub(super) source_task_id: String,
     pub(super) created_at_unix_ms: u64,
     pub(super) committed: bool,
+    pub(super) event: Option<IncomingTransferEvent>,
+    pub(super) event_recorded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +40,34 @@ pub(super) struct ImportCommitReceipt {
     pub(super) destination_local_task_id: String,
     pub(super) created_at_unix_ms: u64,
     pub(super) applied: bool,
+    pub(super) event_queued: bool,
+}
+
+impl ImportCommitReceipt {
+    pub(super) fn try_queue_event(
+        &mut self,
+        transfer_id: &str,
+        sender: &mpsc::Sender<OutgoingTransferCommittedEvent>,
+    ) -> Result<(), RuntimeError> {
+        if self.applied || self.event_queued {
+            return Ok(());
+        }
+        let event = OutgoingTransferCommittedEvent {
+            transfer_id: transfer_id.to_owned(),
+            source_task_id: self.source_task_id.clone(),
+            destination_local_task_id: self.destination_local_task_id.clone(),
+        };
+        match sender.try_send(event) {
+            Ok(()) => {
+                self.event_queued = true;
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(RuntimeError::IncomingEventChannelClosed)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +119,7 @@ pub(super) struct ListenerContext {
     pub(super) kanna_server_port: Option<u16>,
     pub(super) request_counter: Arc<AtomicU64>,
     pub(super) incoming_sender: mpsc::UnboundedSender<RuntimeEvent>,
+    pub(super) receipt_sender: mpsc::Sender<OutgoingTransferCommittedEvent>,
 }
 
 pub struct TransferRuntime {
@@ -104,6 +138,7 @@ pub struct TransferRuntime {
     pub(super) terminal_observers: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     pub(super) incoming_sender: mpsc::UnboundedSender<RuntimeEvent>,
     pub(super) incoming_events: Mutex<mpsc::UnboundedReceiver<RuntimeEvent>>,
+    pub(super) receipt_events: Mutex<mpsc::Receiver<OutgoingTransferCommittedEvent>>,
     pub(super) request_counter: Arc<AtomicU64>,
     pub(super) listener_task: JoinHandle<()>,
     pub(super) receipt_retry_task: JoinHandle<()>,

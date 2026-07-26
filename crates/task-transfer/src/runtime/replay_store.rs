@@ -1,4 +1,4 @@
-use super::events::RuntimeError;
+use super::events::{IncomingTransferEvent, RuntimeError};
 use super::state::{ImportCommitReceipt, IncomingTransferReservation, OutgoingTransferReservation};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -39,6 +39,10 @@ struct StoredIncomingTransferReservation {
     source_task_id: String,
     created_at_unix_ms: u64,
     committed: bool,
+    #[serde(default)]
+    event: Option<IncomingTransferEvent>,
+    #[serde(default)]
+    event_recorded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +128,8 @@ impl TransferReplayStore {
                     source_task_id: stored.source_task_id,
                     created_at_unix_ms: stored.created_at_unix_ms,
                     committed: stored.committed,
+                    event: stored.event,
+                    event_recorded: stored.event_recorded,
                 },
             );
         }
@@ -205,6 +211,8 @@ impl TransferReplayStore {
                 source_task_id: reservation.source_task_id.clone(),
                 created_at_unix_ms: reservation.created_at_unix_ms,
                 committed: reservation.committed,
+                event: reservation.event.clone(),
+                event_recorded: reservation.event_recorded,
             },
         )
     }
@@ -374,6 +382,7 @@ impl From<StoredImportCommitReceipt> for ImportCommitReceipt {
             destination_local_task_id: stored.destination_local_task_id,
             created_at_unix_ms: stored.created_at_unix_ms,
             applied: stored.applied,
+            event_queued: false,
         }
     }
 }
