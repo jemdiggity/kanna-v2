@@ -387,6 +387,168 @@ fn live_terminal_transitions_do_not_rebuild_recovery_sessions() {
     assert!(!should_rebuild_recovery_session_on_live_terminal_transition());
 }
 
+#[tokio::test]
+async fn concurrent_agent_kills_share_one_lifecycle_job_and_snapshot_batch() {
+    let dir = std::env::temp_dir().join(format!(
+        "kanna-agent-kill-batch-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir).expect("create agent journal dir");
+
+    let agents: kanna_daemon::agent::AgentSessions =
+        Arc::new(Mutex::new(kanna_daemon::agent::AgentRegistry::default()));
+    let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(256);
+    const SESSIONS: usize = 24;
+
+    for index in 0..SESSIONS {
+        let session_id = format!("batched-kill-{index}");
+        let spec = kanna_agent_protocol::SpawnSpec {
+            executable: "/bin/sleep".to_string(),
+            args: vec!["300".to_string()],
+            env: Vec::new(),
+            initial_stdin: None,
+        };
+        let mut spawned = kanna_daemon::agent::spawn_agent_child(&spec, "/tmp", &HashMap::new())
+            .expect("spawn agent child");
+        let provider = protocol::AgentProvider::Claude;
+        let adapter = kanna_daemon::agent::make_adapter(provider).expect("claude adapter");
+        let turn_model = adapter.turn_model();
+        let params = protocol::AgentSpawnParams {
+            agent_provider: provider,
+            prompt: "wait".to_string(),
+            cwd: "/tmp".to_string(),
+            env: HashMap::new(),
+            model: None,
+            permission_mode: None,
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+            max_turns: None,
+            max_budget_usd: None,
+            system_prompt: None,
+            mcp_config_path: None,
+            executable: Some("/bin/sleep".to_string()),
+        };
+        let record = kanna_daemon::agent::AgentSessionRecord {
+            provider,
+            params,
+            adapter: Arc::new(std::sync::Mutex::new(adapter)),
+            shared: Arc::new(Mutex::new(kanna_daemon::agent::AgentShared {
+                journal: kanna_daemon::agent::AgentJournal::open(&dir, &session_id),
+                writers: Vec::new(),
+            })),
+            child: Some(spawned.child),
+            stdin: spawned.stdin,
+            pid: spawned.pid,
+            child_start: spawned.child_start,
+            incarnation: kanna_daemon::agent::next_agent_incarnation(),
+            spawning: false,
+            reservation_is_initial: false,
+            provider_session_id: None,
+            status: protocol::SessionStatus::Busy,
+            last_assistant_prompt: None,
+            session_allowed_tools: std::collections::HashSet::new(),
+            pending_permissions: std::collections::HashSet::new(),
+            exited: false,
+            exit_publication: kanna_daemon::agent::ExitPublication::new(),
+            interrupt_requested: false,
+            turn_model,
+            created_at: Instant::now(),
+            last_activity_at: Instant::now(),
+            handoff_fds: spawned.handoff_fds.take(),
+        };
+        agents.lock().await.insert(session_id, record);
+    }
+
+    let gate_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let gate_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let gate_entered = Arc::clone(&gate_entered);
+        let gate_released = Arc::clone(&gate_released);
+        kanna_daemon::reaper::run_teardown(Box::new(move || {
+            gate_entered.store(true, std::sync::atomic::Ordering::Release);
+            while !gate_released.load(std::sync::atomic::Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }))
+        .await;
+    }
+    while !gate_entered.load(std::sync::atomic::Ordering::Acquire) {
+        tokio::task::yield_now().await;
+    }
+
+    let (requests_before, batches_before, jobs_before) =
+        kanna_daemon::agent::agent_teardown_stats();
+    let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let heartbeat = {
+        let ticks = Arc::clone(&ticks);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        })
+    };
+
+    let mut kills = Vec::new();
+    for index in 0..SESSIONS {
+        let agents = Arc::clone(&agents);
+        let broadcast_tx = broadcast_tx.clone();
+        kills.push(tokio::spawn(async move {
+            crate::agent_runtime::kill_agent_session(
+                &format!("batched-kill-{index}"),
+                &agents,
+                &broadcast_tx,
+            )
+            .await
+        }));
+    }
+
+    let admission_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (requests, _, _) = kanna_daemon::agent::agent_teardown_stats();
+        if requests - requests_before == SESSIONS as u64 {
+            break;
+        }
+        if Instant::now() >= admission_deadline {
+            gate_released.store(true, std::sync::atomic::Ordering::Release);
+            panic!("all concurrent agent kills must reach batched lifecycle admission");
+        }
+        tokio::task::yield_now().await;
+    }
+    gate_released.store(true, std::sync::atomic::Ordering::Release);
+
+    for kill in kills {
+        assert_eq!(
+            kill.await.expect("kill task"),
+            crate::agent_runtime::AgentKillOutcome::Killed,
+            "session should be killed"
+        );
+    }
+    heartbeat.abort();
+
+    assert!(
+        ticks.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "agent teardown must not pin the Tokio worker"
+    );
+    let (requests_after, batches_after, jobs_after) = kanna_daemon::agent::agent_teardown_stats();
+    assert_eq!(requests_after - requests_before, SESSIONS as u64);
+    assert_eq!(
+        jobs_after - jobs_before,
+        1,
+        "one concurrent kill burst must admit one lifecycle job"
+    );
+    assert_eq!(
+        batches_after - batches_before,
+        1,
+        "one concurrent kill burst must share one process snapshot batch"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn handoff_protocol_epochs_are_distinct() {
     assert_eq!(protocol::HANDOFF_PROTOCOL_VERSION, 3);

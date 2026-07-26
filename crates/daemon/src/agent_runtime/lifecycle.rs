@@ -61,19 +61,16 @@ pub async fn kill_agent_session(
         return AgentKillOutcome::NotFound;
     };
     if !record.exited {
-        let pid = record.pid;
-        let child_start = record.child_start;
-        // Whole-process-table discovery and signalling run on the bounded
-        // lifecycle owner, never inline on this Tokio connection task.
-        if let Some(Err(error)) = kanna_daemon::reaper::run_teardown_and_wait(move || {
-            agent::kill_agent_group_verified(pid, child_start)
-        })
-        .await
-        {
-            super::log_info(format_args!(
+        match agent::kill_agent_group_batched(record.pid, record.child_start).await {
+            Some(Err(error)) => super::log_info(format_args!(
                 "[agent] kill {}: group signal refused: {}",
                 session_id, error
-            ));
+            )),
+            None => super::log_info(format_args!(
+                "[agent] kill {}: lifecycle executor stopped before group teardown completed",
+                session_id
+            )),
+            Some(Ok(())) => {}
         }
         if let Some(mut child) = record.child.take() {
             let _ = child.kill();

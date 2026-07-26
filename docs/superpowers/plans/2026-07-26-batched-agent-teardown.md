@@ -4,92 +4,47 @@
 
 **Goal:** Route concurrent agent kills through one bounded lifecycle executor job that shares process-table snapshots across the kill batch.
 
-**Architecture:** Add typed agent-kill jobs to the existing lifecycle queue, asynchronously backpressure them at `LIFECYCLE_QUEUE_CAP`, and have the lifecycle thread coalesce contiguous requests before calling a new batched verified-kill function. The batched kill freezes every valid leader first, uses `freeze_many` for shared discovery rounds, strikes each group independently, and returns results through per-request one-shot channels.
+**Architecture:** Retarget above the finalized agent-incarnation prerequisite
+at `4f10ee48` while keeping its finalized central bounded lifecycle executor
+from `541717e2` unchanged. Add an agent-specific pending-request coalescer that
+admits one opaque lifecycle job per concurrent burst, then freezes every valid
+leader, uses `freeze_many` for shared discovery rounds, strikes each group
+independently, and returns results through per-request one-shot channels.
 
-**Tech Stack:** Rust, Tokio one-shot/Notify primitives, macOS libproc process discovery, existing Kanna daemon lifecycle executor and test fixtures.
+**Tech Stack:** Rust, Tokio one-shot channels, macOS libproc process discovery, and `kanna_daemon::reaper::{try_run_teardown, run_teardown}`.
 
 ---
 
 ### Task 1: Add the failing concurrent-kill batching regression
 
 **Files:**
-- Modify: `crates/daemon/src/tests.rs:2756`
+- Modify: `crates/daemon/src/tests.rs`
 
-- [ ] **Step 1: Extend the real-child responsiveness test with a lifecycle gate and counters**
+- [x] **Step 1: Add a real-child test with a lifecycle gate and counters**
 
-Before spawning the kill tasks, enqueue an ordinary lifecycle job that waits on
-an atomic release flag. Wait asynchronously until it has entered, record
-`agent_teardown_stats()`, spawn all kills, and wait until all requests have been
-admitted before releasing the gate:
+Spawn 24 real agent records. Enqueue an ordinary lifecycle job that waits on an
+atomic release flag, record `agent_teardown_stats()`, spawn all kills, and wait
+until all requests have reached the coalescer before releasing the gate.
 
-```rust
-let gate_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
-let gate_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
-{
-    let gate_entered = gate_entered.clone();
-    let gate_released = gate_released.clone();
-    kanna_daemon::reaper::run_teardown(move || {
-        gate_entered.store(true, std::sync::atomic::Ordering::Release);
-        while !gate_released.load(std::sync::atomic::Ordering::Acquire) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    });
-}
-while !gate_entered.load(std::sync::atomic::Ordering::Acquire) {
-    tokio::task::yield_now().await;
-}
-let (requests_before, batches_before) =
-    kanna_daemon::reaper::agent_teardown_stats();
-```
+After joining all kills, assert a nonzero heartbeat plus deltas of 24 requests,
+one lifecycle job, and one shared process-snapshot batch.
 
-After spawning the kills:
-
-```rust
-let admission_deadline = Instant::now() + Duration::from_secs(5);
-loop {
-    let (requests, _) = kanna_daemon::reaper::agent_teardown_stats();
-    if requests - requests_before == SESSIONS as u64 {
-        break;
-    }
-    assert!(
-        Instant::now() < admission_deadline,
-        "all concurrent agent kills must reach bounded lifecycle admission"
-    );
-    tokio::task::yield_now().await;
-}
-gate_released.store(true, std::sync::atomic::Ordering::Release);
-```
-
-After joining all kills, assert one batch handled the gated burst:
-
-```rust
-let (requests_after, batches_after) =
-    kanna_daemon::reaper::agent_teardown_stats();
-assert_eq!(requests_after - requests_before, SESSIONS as u64);
-assert_eq!(
-    batches_after - batches_before,
-    1,
-    "concurrent agent kills must share one lifecycle batch"
-);
-```
-
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run:
 
 ```bash
-cargo test -p kanna-daemon concurrent_agent_kills_keep_the_runtime_responsive -- --nocapture
+cargo test -p kanna-daemon concurrent_agent_kills_share_one_lifecycle_job_and_snapshot_batch -- --nocapture
 ```
 
-Expected: compilation fails because `agent_teardown_stats` and typed agent
-teardown admission do not exist yet.
+Observed: compilation failed because `agent_teardown_stats` did not exist.
 
 ### Task 2: Add a batched identity-safe agent kill
 
 **Files:**
 - Modify: `crates/daemon/src/agent.rs:699`
 
-- [ ] **Step 1: Add the internal plan representation**
+- [x] **Step 1: Add the internal plan representation**
 
 Extract validation, leader freezing, and strike behavior:
 
@@ -143,7 +98,7 @@ impl AgentKillPlan {
 }
 ```
 
-- [ ] **Step 2: Add batch execution and make the scalar API delegate**
+- [x] **Step 2: Add batch execution and make the scalar API delegate**
 
 Prepare every request independently, call `freeze_many` only for ready plans,
 and merge ready/error results back in input order:
@@ -187,7 +142,7 @@ pub fn kill_agent_group_verified(
 }
 ```
 
-- [ ] **Step 3: Add focused batch independence coverage**
+- [x] **Step 3: Add focused batch independence coverage**
 
 In the macOS agent tests, spawn one real agent child and include an invalid
 request before it:
@@ -219,7 +174,7 @@ fn verified_group_kill_batch_keeps_results_ordered_and_independent() {
 }
 ```
 
-- [ ] **Step 4: Run the focused agent tests**
+- [x] **Step 4: Run the focused agent tests**
 
 Run:
 
@@ -227,184 +182,59 @@ Run:
 cargo test -p kanna-daemon verified_group_kill -- --nocapture
 ```
 
-Expected: all matching verified group-kill tests pass.
+Observed: the ordered/independent batch regression passed.
 
-### Task 3: Add typed bounded lifecycle batching
+### Task 3: Add agent batching above the central lifecycle executor
 
 **Files:**
-- Modify: `crates/daemon/src/reaper.rs:318`
+- Modify: `crates/daemon/src/agent.rs`
 
-- [ ] **Step 1: Replace the opaque queue item with typed jobs**
+- [x] **Step 1: Add one shared pending-request coalescer**
 
-Add:
+Store pending pid/start identities and one-shot completion senders behind a
+short synchronous mutex. Track whether one lifecycle job is already scheduled.
+The first request schedules; concurrent requests only join the pending batch.
 
-```rust
-struct AgentTeardownJob {
-    pid: u32,
-    child_start: Option<StartTime>,
-    completion: tokio::sync::oneshot::Sender<std::io::Result<()>>,
-}
+- [x] **Step 2: Admit the shared closure through the supplied API**
 
-enum LifecycleJob {
-    Teardown(TeardownJob),
-    AgentTeardown(AgentTeardownJob),
-}
+Call `try_run_teardown` for the first request. On `Full(job)`, retain that same
+owned closure through async `run_teardown(job)` backpressure. The closure waits
+one millisecond, drains pending requests, invokes
+`kill_agent_groups_verified`, delivers ordered results, and repeats if more
+requests arrived during the scan.
 
-struct Lifecycle {
-    jobs: Mutex<VecDeque<LifecycleJob>>,
-    wake: Condvar,
-    capacity_available: tokio::sync::Notify,
-    agent_requests: std::sync::atomic::AtomicU64,
-    agent_batches: std::sync::atomic::AtomicU64,
-}
-```
+- [x] **Step 3: Add request, batch, and lifecycle-job diagnostics**
 
-Initialize the new fields in `lifecycle()`.
-
-- [ ] **Step 2: Batch typed jobs on the lifecycle thread**
-
-When the first job is `AgentTeardown`, allow a one-millisecond coalescing
-window, then drain contiguous `AgentTeardown` entries without crossing an
-ordinary teardown boundary:
-
-```rust
-match job {
-    LifecycleJob::Teardown(job) => job(),
-    LifecycleJob::AgentTeardown(first) => {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        let mut batch = vec![first];
-        let mut jobs = lifecycle
-            .jobs
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        while matches!(jobs.front(), Some(LifecycleJob::AgentTeardown(_))) {
-            if let Some(LifecycleJob::AgentTeardown(job)) = jobs.pop_front() {
-                batch.push(job);
-            }
-        }
-        drop(jobs);
-        lifecycle.capacity_available.notify_waiters();
-        lifecycle
-            .agent_batches
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        let requests: Vec<_> = batch
-            .iter()
-            .map(|job| (job.pid, job.child_start))
-            .collect();
-        let results = crate::agent::kill_agent_groups_verified(&requests);
-        for (job, result) in batch.into_iter().zip(results) {
-            let _ = job.completion.send(result);
-        }
-    }
-}
-```
-
-Notify async capacity waiters whenever jobs are popped from the queue.
-
-- [ ] **Step 3: Preserve existing closure APIs over the typed queue**
-
-Change `try_enqueue_teardown` to accept/return `LifecycleJob`, wrap ordinary
-closures in `LifecycleJob::Teardown`, and retain the current inline fallback
-only for the existing synchronous `run_teardown` API.
-
-- [ ] **Step 4: Add async bounded agent admission and stats**
-
-Use `Notify` with the notification future created before each admission attempt
-to avoid a missed-capacity wakeup:
-
-```rust
-pub async fn run_agent_teardown_and_wait(
-    pid: u32,
-    child_start: Option<StartTime>,
-) -> Option<std::io::Result<()>> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let mut job = LifecycleJob::AgentTeardown(AgentTeardownJob {
-        pid,
-        child_start,
-        completion: tx,
-    });
-    loop {
-        let available = lifecycle().capacity_available.notified();
-        match try_enqueue_teardown(job) {
-            None => {
-                lifecycle()
-                    .agent_requests
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                break;
-            }
-            Some(rejected) => {
-                job = rejected;
-                available.await;
-            }
-        }
-    }
-    rx.await.ok()
-}
-
-pub fn agent_teardown_stats() -> (u64, u64) {
-    let lifecycle = lifecycle();
-    (
-        lifecycle
-            .agent_requests
-            .load(std::sync::atomic::Ordering::Relaxed),
-        lifecycle
-            .agent_batches
-            .load(std::sync::atomic::Ordering::Relaxed),
-    )
-}
-```
-
-- [ ] **Step 5: Run the concurrent test and verify it still fails for wiring**
-
-Run:
-
-```bash
-cargo test -p kanna-daemon concurrent_agent_kills_keep_the_runtime_responsive -- --nocapture
-```
-
-Expected: the test compiles but times out waiting for agent teardown admissions
-because `kill_agent_session` still uses `spawn_blocking`.
+Expose `agent_teardown_stats() -> (u64, u64, u64)` for the real-child
+regression.
 
 ### Task 4: Route agent session teardown through the batch
 
 **Files:**
 - Modify: `crates/daemon/src/agent_runtime/lifecycle.rs:70`
 
-- [ ] **Step 1: Replace `spawn_blocking` with lifecycle admission**
+- [x] **Step 1: Replace the per-kill lifecycle closure**
 
-Replace the ad-hoc blocking job with:
+Call `agent::kill_agent_group_batched(record.pid, record.child_start).await`
+and retain the existing owned-child fallback/reaper handoff.
 
-```rust
-let group_kill =
-    kanna_daemon::reaper::run_agent_teardown_and_wait(record.pid, record.child_start).await;
-match group_kill {
-    Some(Err(error)) => super::log_info(format_args!(
-        "[agent] kill {}: group signal refused: {}",
-        session_id, error
-    )),
-    None => super::log_info(format_args!(
-        "[agent] kill {}: lifecycle executor stopped before group teardown completed",
-        session_id
-    )),
-    Some(Ok(())) => {}
-}
-```
-
-Remove the now-unused `self` import from `kanna_daemon::agent`.
-
-- [ ] **Step 2: Run the concurrent regression and verify GREEN**
+- [x] **Step 2: Run the concurrent regression and verify GREEN**
 
 Run:
 
 ```bash
-cargo test -p kanna-daemon concurrent_agent_kills_keep_the_runtime_responsive -- --nocapture
+cargo test -p kanna-daemon concurrent_agent_kills_share_one_lifecycle_job_and_snapshot_batch -- --nocapture
 ```
 
-Expected: PASS with 24 admitted requests, one lifecycle batch, and a nonzero
+Observed: PASS with 24 requests, one lifecycle job, one batch, and a nonzero
 heartbeat.
 
-- [ ] **Step 3: Run the daemon unit suite**
+- [x] **Step 3: Mutation-test lifecycle-job coalescing**
+
+Temporarily force every request to schedule a lifecycle job. The regression
+must fail with 24 jobs instead of one; restore the coalescer and verify green.
+
+- [x] **Step 4: Run the daemon unit suite**
 
 Run:
 
@@ -412,22 +242,21 @@ Run:
 cargo test -p kanna-daemon --lib
 ```
 
-Expected: PASS.
+Observed after retargeting above `4f10ee48`: 144 passed, 0 failed.
 
 ### Task 5: Refactor, format, and verify
 
 **Files:**
 - Modify: `crates/daemon/src/agent.rs`
-- Modify: `crates/daemon/src/reaper.rs`
 - Modify: `crates/daemon/src/agent_runtime/lifecycle.rs`
 - Modify: `crates/daemon/src/tests.rs`
 
-- [ ] **Step 1: Refactor only after green**
+- [x] **Step 1: Refactor only after green**
 
 Remove duplicated kill logic, make queue/batch comments match actual behavior,
 and ensure no lifecycle lock is held during process scanning or result delivery.
 
-- [ ] **Step 2: Format and inspect**
+- [x] **Step 2: Format and inspect**
 
 Run:
 
@@ -437,9 +266,10 @@ git diff --check
 git diff --stat
 ```
 
-Expected: clean formatting and no whitespace errors.
+Observed: `cargo fmt --all` completed, `git diff --check` was clean, and the
+central `crates/daemon/src/reaper.rs` dependency had no task-local diff.
 
-- [ ] **Step 3: Run Clippy for the daemon**
+- [x] **Step 3: Run Clippy for the daemon**
 
 Run:
 
@@ -447,25 +277,33 @@ Run:
 cargo clippy -p kanna-daemon --all-targets -- -D warnings
 ```
 
-Expected: PASS with no warnings.
+Observed on the earlier `7d7a7cab` checkpoint: PASS with no warnings. On the
+finalized `4f10ee48` prerequisite, all-target Clippy reaches one pre-existing
+`clippy::question_mark` finding in
+`crates/daemon/src/agent_runtime/readers.rs`; this task does not modify that
+reader path.
 
-- [ ] **Step 4: Run canonical Rust verification**
+- [x] **Step 4: Run canonical Rust verification**
 
 Run:
 
 ```bash
-./kd test rust
+CARGO_INCREMENTAL=0 ./kd test rust
 ```
 
-Expected: all workspace Rust tests pass.
+Observed after retargeting above `4f10ee48`: PASS. Protocol/type generation,
+the desktop production build, all six staged sidecars, the workspace suites,
+144 daemon library tests, 161 daemon binary tests, and all 32 reconnect tests
+completed successfully. Incremental compilation remained disabled to limit
+disk pressure from concurrent worktrees.
 
-- [ ] **Step 5: Commit the implementation**
+- [x] **Step 5: Commit the implementation**
 
 ```bash
 git add crates/daemon/src/agent.rs \
-  crates/daemon/src/reaper.rs \
   crates/daemon/src/agent_runtime/lifecycle.rs \
   crates/daemon/src/tests.rs \
-  docs/superpowers/plans/2026-07-26-batched-agent-teardown.md
+  docs/superpowers/plans/2026-07-26-batched-agent-teardown.md \
+  docs/superpowers/specs/2026-07-26-batched-agent-teardown-design.md
 git commit -m "fix(daemon): batch concurrent agent teardown scans"
 ```

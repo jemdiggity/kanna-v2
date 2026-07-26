@@ -2,10 +2,11 @@
 
 ## Context
 
-Agent `Kill` currently removes the session record, then runs
-`kill_agent_group_verified` in a fresh `tokio::task::spawn_blocking` job.
-Moving the process-table walk off the Tokio worker fixed runtime starvation,
-but a burst of N task closes still creates N blocking jobs and performs N
+Agent `Kill` currently removes the session record, then submits
+`kill_agent_group_verified` through
+`kanna_daemon::reaper::run_teardown_and_wait`. That central lifecycle executor
+keeps the process-table walk off Tokio workers and bounds admitted work, but a
+burst of N task closes still creates N lifecycle jobs and performs N
 independent host process-table scans.
 
 PTY teardown already avoids both failure modes. It admits process lifecycle
@@ -32,29 +33,29 @@ kill plans.
 - Change agent `Kill` protocol responses or handoff-seal semantics.
 - Add a time-based process snapshot cache. A snapshot taken before leaders are
   frozen can miss descendants and is not a safe teardown boundary.
-- Combine unrelated lifecycle work across ordering boundaries.
 
 ## Architecture
 
-### Typed lifecycle jobs
+### Agent batching above the lifecycle executor
 
-The lifecycle executor will queue an enum rather than only opaque closures:
+The checkpoint is retargeted above the finalized agent-incarnation prerequisite
+at `4f10ee48`. Its finalized central lifecycle/reaper implementation from
+`541717e2` remains the sole bounded executor and is not modified by this task.
+An agent-specific coalescer in `agent.rs` holds pending pid/start identities
+and per-request one-shot completion senders.
 
-- ordinary teardown work keeps the existing closure form;
-- agent group teardown carries the agent pid, recorded start identity, and a
-  one-shot completion sender.
+The first request in a burst schedules one opaque `TeardownJob` through
+`try_run_teardown`; if the lifecycle cap is full, that same owned job follows
+the executor's async `run_teardown` backpressure path. Later concurrent
+requests join the pending agent batch instead of admitting more lifecycle
+jobs.
 
-The existing `LIFECYCLE_QUEUE_CAP` remains the admission bound. Ordinary
-synchronous callers retain their existing fallback behavior. The new async
-agent API waits asynchronously for queue capacity when saturated, so it never
-runs a rejected scan inline on a Tokio worker and never grows an unbounded
-side queue.
-
-When the lifecycle thread reaches an agent teardown, it gathers the contiguous
-agent teardown requests already queued behind it and executes them as one
-batch. A short coalescing window lets requests from the same concurrent close
-burst reach the queue before the batch is taken. Ordinary jobs retain FIFO
-ordering relative to the batch.
+When the lifecycle owner runs the agent job, a short coalescing window lets
+the rest of the close burst arrive. It drains the pending requests, performs
+one batched verified kill, sends each result to its original caller, and
+continues draining requests that arrived during the scan before relinquishing
+the scheduled slot. No process scan or destructive signal runs on a Tokio
+worker.
 
 ### Batched verified agent kill
 
@@ -75,8 +76,8 @@ identity and error behavior have one implementation.
 
 ### Agent session lifecycle
 
-`kill_agent_session` will replace its ad-hoc `spawn_blocking` call with the
-typed `run_agent_teardown_and_wait` API. It still removes the record before
+`kill_agent_session` will replace its per-kill `run_teardown_and_wait` closure
+with `agent::kill_agent_group_batched`. It still removes the record before
 awaiting teardown, holds no registry/shared-state lock during the wait, kills
 the owned child directly as a fallback, hands the child to the central reaper,
 and performs the existing journal/fanout/`Exit` work after teardown completes.
@@ -87,29 +88,29 @@ cleanup path.
 
 ## Boundedness and ordering
 
-The lifecycle queue contains at most `LIFECYCLE_QUEUE_CAP` admitted jobs.
-Additional async agent requests wait for capacity through a notification
-boundary; waiting consumes neither a blocking thread nor an additional queued
-job. The single lifecycle thread makes full-scan concurrency exactly one.
+The central lifecycle cap counts queued and in-flight jobs. A concurrent agent
+burst contributes one such job; additional agent requests occupy the bounded
+session registry plus the coalescer's pending queue, not lifecycle slots or
+blocking threads. The single lifecycle owner makes full-scan concurrency
+exactly one.
 
-Batching contiguous requests preserves lifecycle FIFO boundaries: an ordinary
-teardown queued between two agent kills is not overtaken. A large concurrent
-agent burst may become two batches if the worker starts the first request
-before the rest arrive, but it cannot become one blocking job per request.
+A large or sustained burst may require more than one shared process-snapshot
+batch if requests arrive while an earlier scan is executing, but it still
+uses one lifecycle job until the coalescer becomes idle.
 
 ## Testing
 
-The existing `concurrent_agent_kills_keep_the_runtime_responsive` test will
-continue to spawn many real agent children and run a Tokio heartbeat. Lifecycle
-test counters will record admitted agent requests and executed agent batches.
+`concurrent_agent_kills_share_one_lifecycle_job_and_snapshot_batch` spawns many
+real agent children and runs a Tokio heartbeat. Agent teardown diagnostics
+record requests, executed process-snapshot batches, and lifecycle jobs.
 The test will hold the lifecycle worker behind a test gate while all kills are
 admitted, release it, then assert:
 
-- every kill returns `AgentKillOutcome::Killed`;
+- every kill succeeds;
 - the heartbeat advanced while teardown ran;
 - the request delta equals the session count;
-- the batch delta is strictly smaller than the request delta (and is one for
-  the gated burst);
+- the lifecycle-job delta is one;
+- the process-snapshot batch delta is one for the gated burst;
 - every child is eventually dead/reaped.
 
 Focused unit coverage will also verify that batch results preserve input order
