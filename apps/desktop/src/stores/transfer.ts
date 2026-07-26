@@ -162,35 +162,11 @@ function buildTransferBundleRefs(item: PipelineItem): string[] {
   return baseRef ? [baseRef] : [];
 }
 
-function parentDirectory(path: string): string {
-  const index = path.lastIndexOf("/");
-  if (index <= 0) return "/";
-  return path.slice(0, index);
-}
-
-function baseName(path: string): string {
-  const index = path.lastIndexOf("/");
-  return index >= 0 ? path.slice(index + 1) : path;
-}
-
-function joinHomeRelativePath(home: string, relativePath: string): string {
-  return `${home.replace(/\/+$/, "")}/${relativePath.replace(/^\/+/, "")}`;
-}
-
 async function listDirectoryNames(path: string): Promise<string[]> {
   return invoke<string[]>("list_dir", { path }).catch((error) => {
     console.debug("[store] failed to list directory names:", { path, error });
     return [];
   });
-}
-
-function resolveTransferArtifactMaterialization(
-  artifact: Pick<TransferArtifactPayload, "kind" | "materialization">,
-): TransferArtifactPayload["materialization"] {
-  if (artifact.materialization === "copy-file" || artifact.materialization === "extract-tar-gz") {
-    return artifact.materialization;
-  }
-  return artifact.kind === "session-archive" ? "extract-tar-gz" : "copy-file";
 }
 
 interface LocatedTransferArtifact {
@@ -361,7 +337,6 @@ async function stageTransferredSessionArtifacts(
 async function importTransferredResumeState(
   transferId: string,
   payload: OutgoingTransferPayload,
-  repoPath: string,
 ): Promise<string | null> {
   const resumeSessionId = payload.task.resume_session_id ?? null;
   const provider = payload.task.agent_provider;
@@ -373,52 +348,49 @@ async function importTransferredResumeState(
   if (!artifact) return null;
 
   try {
-    const home = await invoke<string>("read_env_var", { name: "HOME" });
-    const destinationPath = joinHomeRelativePath(home, artifact.home_rel_path);
-    const destinationParent = parentDirectory(destinationPath);
-    const materialization = resolveTransferArtifactMaterialization(artifact);
-    const destinationExists = await fileExistsSafe(destinationPath);
-    if (destinationExists) {
-      console.warn("[store] skipping transferred session import because destination already exists:", destinationPath);
-      return null;
-    }
-
     const fetched = await invoke<{ path: string }>("fetch_transfer_artifact", {
       transferId,
       artifactId: artifact.artifact_id,
     });
-    await invoke("ensure_directory", { path: destinationParent });
-
-    if (materialization === "copy-file") {
-      await invoke("copy_file", {
-        src: fetched.path,
-        dst: destinationPath,
-      });
-      return resumeSessionId;
+    const materialized = await invoke<boolean>("materialize_transfer_artifact", {
+      sourcePath: fetched.path,
+      provider,
+      resumeSessionId,
+      filename: artifact.filename,
+      kind: artifact.kind,
+      materialization: artifact.materialization,
+    });
+    if (!materialized) {
+      console.warn(
+        "[store] skipping transferred session import because the provider destination already exists",
+        { provider, resumeSessionId },
+      );
+      return null;
     }
-
-    if (materialization === "extract-tar-gz") {
-      const extractedName = baseName(destinationPath);
-      const tempPattern = `${destinationParent}/.kanna-transfer-${transferId}-${extractedName}-XXXXXX`;
-      await invoke("run_script", {
-        script: [
-          `tmp_dir="$(mktemp -d ${shellQuote(tempPattern)})"`,
-          'cleanup() { rm -rf "$tmp_dir"; }',
-          'trap cleanup EXIT',
-          `tar -xzf ${shellQuote(fetched.path)} -C "$tmp_dir"`,
-          `test -e "$tmp_dir/${extractedName}"`,
-          `mv "$tmp_dir/${extractedName}" ${shellQuote(destinationPath)}`,
-        ].join("\n"),
-        cwd: repoPath,
-        env: applyWorktreeProcessIsolation({ KANNA_WORKTREE: "1" }),
-      });
-      return resumeSessionId;
-    }
-
     return resumeSessionId;
   } catch (error) {
     console.error("[store] failed to import transferred session artifact:", error);
     return null;
+  }
+}
+
+function assertIncomingPayloadMatchesTransfer(
+  transfer: {
+    id: string;
+    source_peer_id: string | null;
+    source_task_id: string | null;
+  },
+  payload: OutgoingTransferPayload,
+): void {
+  if (
+    !transfer.source_peer_id
+    || !transfer.source_task_id
+    || payload.task.source_peer_id !== transfer.source_peer_id
+    || payload.task.source_task_id !== transfer.source_task_id
+  ) {
+    throw new Error(
+      `incoming transfer payload source identity does not match reservation: ${transfer.id}`,
+    );
   }
 }
 
@@ -822,16 +794,21 @@ export function createTransferApi(
     let localTaskId = transfer.local_task_id;
     if (localTaskId) {
       payload = parsePersistedOutgoingTransferPayload(transfer.payload_json);
+      assertIncomingPayloadMatchesTransfer(transfer, payload);
     } else {
       const finalized = parseFinalizedOutgoingTransferResult(await invoke("finalize_outgoing_transfer", {
         transferId,
       }));
+      if (finalized.transferId !== transferId) {
+        throw new Error(`finalized incoming transfer id mismatch: ${transferId}`);
+      }
       payload = finalized.payload;
+      assertIncomingPayloadMatchesTransfer(transfer, payload);
       if (!await updateDesktopTaskTransferPayload(transferId, JSON.stringify(payload))) {
         throw new Error(`failed to persist finalized incoming transfer payload: ${transferId}`);
       }
       const { repoId, repoPath } = await ensureIncomingTransferRepo(transferId, payload);
-      const resumeSessionId = await importTransferredResumeState(transferId, payload, repoPath);
+      const resumeSessionId = await importTransferredResumeState(transferId, payload);
       localTaskId = await tasks.createItem(
         repoId,
         repoPath,

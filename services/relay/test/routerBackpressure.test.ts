@@ -1,5 +1,5 @@
 import { createServer } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
 import {
   attachDesktopTunnel,
@@ -7,7 +7,9 @@ import {
   routeMessage,
   setPhoneConnection,
   setServerConnection,
+  TASK_TRANSFER_PENDING_TUNNEL_TIMEOUT_MS,
   TASK_TRANSFER_TUNNEL_MAX_BUFFERED_BYTES,
+  pendingTunnelCountForTests,
   taskTransferTunnelFlowStateForTests,
 } from "../src/router.js";
 
@@ -51,9 +53,71 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<v
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   for (const socket of sockets.splice(0)) socket.terminate();
   await new Promise<void>((resolve) => server?.close(() => resolve()) ?? resolve());
   server = null;
+});
+
+describe("pending task-transfer tunnel lifetime", () => {
+  it("expires a requester that never receives tunnel-ready", async () => {
+    const port = await freePort();
+    server = new WebSocketServer({ port, host: "127.0.0.1" });
+    await new Promise<void>((resolve) => server!.once("listening", resolve));
+    const url = `ws://127.0.0.1:${port}`;
+    const control = await connect(url);
+    setServerConnection("expiry-user", "desktop", control.server);
+    const requester = await connect(url);
+    setPhoneConnection("expiry-user", requester.server);
+
+    vi.useFakeTimers();
+    routeMessage(
+      "expiry-user",
+      "phone",
+      JSON.stringify({
+        type: "tunnel_request",
+        id: "stalled",
+        desktopId: "desktop",
+        service: "task-transfer",
+      }),
+      requester.server,
+    );
+    expect(pendingTunnelCountForTests("expiry-user")).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(TASK_TRANSFER_PENDING_TUNNEL_TIMEOUT_MS);
+
+    expect(pendingTunnelCountForTests("expiry-user")).toBe(0);
+    expect(requester.server.readyState).not.toBe(WebSocket.OPEN);
+  });
+
+  it("removes a pending tunnel as soon as its requester disconnects", async () => {
+    const port = await freePort();
+    server = new WebSocketServer({ port, host: "127.0.0.1" });
+    await new Promise<void>((resolve) => server!.once("listening", resolve));
+    const url = `ws://127.0.0.1:${port}`;
+    const control = await connect(url);
+    setServerConnection("disconnect-user", "desktop", control.server);
+    const requester = await connect(url);
+    setPhoneConnection("disconnect-user", requester.server);
+    routeMessage(
+      "disconnect-user",
+      "phone",
+      JSON.stringify({
+        type: "tunnel_request",
+        id: "disconnect",
+        desktopId: "desktop",
+        service: "task-transfer",
+      }),
+      requester.server,
+    );
+    expect(pendingTunnelCountForTests("disconnect-user")).toBe(1);
+
+    const closed = new Promise<void>((resolve) => requester.server.once("close", resolve));
+    requester.client.close();
+    await closed;
+
+    expect(pendingTunnelCountForTests("disconnect-user")).toBe(0);
+  });
 });
 
 describe("task-transfer tunnel backpressure", () => {

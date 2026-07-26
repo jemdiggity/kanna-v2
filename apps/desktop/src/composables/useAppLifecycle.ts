@@ -199,6 +199,7 @@ export function useAppLifecycle({
   const fatalInitializationError = ref<string | null>(null);
   const taskPullPushesInFlight = new Set<string>();
   const taskPullAbortController = new AbortController();
+  let transferEventConsumerRegistered = false;
   let currentWindowClosePhase: "open" | "preparing" | "recovering" | "destroying" = "open";
   let resolveWindowMembershipInitialization: (() => void) | null = null;
   const windowMembershipInitialization = new Promise<void>((resolve) => {
@@ -372,6 +373,7 @@ export function useAppLifecycle({
     if (windowWorkspace && windowWorkspace.bootstrap.windowId === "main") {
       scheduleStartupBackup(dbName);
     }
+    let transferLifecycleListenersReady = true;
     try {
       const unlistenTransferRequest = await listen("transfer-request", async (event: unknown) => {
         try {
@@ -388,6 +390,7 @@ export function useAppLifecycle({
       });
       appUnlisteners.push(unlistenTransferRequest);
     } catch (e: unknown) {
+      transferLifecycleListenersReady = false;
       console.error("[App] transfer-request listener registration failed:", e);
     }
     try {
@@ -410,17 +413,12 @@ export function useAppLifecycle({
       });
       appUnlisteners.push(unlistenTaskPullRequested);
     } catch (e: unknown) {
+      transferLifecycleListenersReady = false;
       console.error("[App] task-pull-requested listener registration failed:", e);
     }
     void initializeDesktopCloudAuth().catch((error) =>
       console.warn("[cloud] failed to initialize desktop auth:", error),
     );
-    initializeDesktopLanTaskSync();
-    await importPendingIncomingTransfers();
-    if (import.meta.env.DEV && window.__KANNA_E2E__) {
-      void remoteTaskDiagnostics.value;
-      window.__KANNA_E2E__.ready = true;
-    }
 
     try {
       const unlistenNativeNewWindow = await listenCurrentWebviewWindow(WINDOW_WORKSPACE_NATIVE_NEW_WINDOW_EVENT, async () => {
@@ -550,6 +548,7 @@ export function useAppLifecycle({
       });
       appUnlisteners.push(unlistenOutgoingTransferCommitted);
     } catch (e: unknown) {
+      transferLifecycleListenersReady = false;
       console.error("[App] outgoing-transfer-committed listener registration failed:", e);
     }
 
@@ -578,10 +577,29 @@ export function useAppLifecycle({
       });
       appUnlisteners.push(unlistenOutgoingTransferFinalizationRequested);
     } catch (e: unknown) {
+      transferLifecycleListenersReady = false;
       console.error("[App] outgoing-transfer-finalization-requested listener registration failed:", e);
     }
 
-    await warmTransferSidecar();
+    if (transferLifecycleListenersReady) {
+      try {
+        const isAuthoritativeConsumer = await invoke<boolean>("claim_transfer_event_consumer");
+        transferEventConsumerRegistered = true;
+        initializeDesktopLanTaskSync();
+        if (isAuthoritativeConsumer) {
+          await importPendingIncomingTransfers();
+        }
+      } catch (e: unknown) {
+        console.error("[App] transfer lifecycle consumer registration failed:", e);
+      }
+    }
+    if (import.meta.env.DEV && window.__KANNA_E2E__) {
+      void remoteTaskDiagnostics.value;
+      window.__KANNA_E2E__.ready = true;
+    }
+    if (transferEventConsumerRegistered) {
+      await warmTransferSidecar();
+    }
 
     // Cache $HOME for shell-at-home (no repo selected)
     invoke("read_env_var", { name: "HOME" }).then((val) => {
@@ -639,6 +657,12 @@ export function useAppLifecycle({
   });
 
   onBeforeUnmount(() => {
+    if (transferEventConsumerRegistered) {
+      transferEventConsumerRegistered = false;
+      void invoke("release_transfer_event_consumer").catch((e: unknown) => {
+        console.error("[App] transfer lifecycle consumer release failed:", e);
+      });
+    }
     taskPullAbortController.abort();
     disposeDesktopCloudWorkspace();
     stopSidebarResize();

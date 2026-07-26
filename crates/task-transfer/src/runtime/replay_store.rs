@@ -473,3 +473,37 @@ fn transfer_key(transfer_id: &str) -> String {
     let digest = Sha256::digest(transfer_id.as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
+
+#[cfg(test)]
+mod restart_tests {
+    use super::{ImportCommitReceipt, StoredImportCommitReceipt};
+
+    #[test]
+    fn persisted_unapplied_receipt_requeues_after_runtime_restart() {
+        let mut receipt = ImportCommitReceipt::from(StoredImportCommitReceipt {
+            transfer_id: "transfer-1".into(),
+            target_peer_id: "peer-target".into(),
+            target_peer: None,
+            transport: None,
+            source_task_id: "task-source".into(),
+            destination_local_task_id: "task-local".into(),
+            created_at_unix_ms: 1,
+            applied: false,
+        });
+        assert!(!receipt.event_queued);
+        assert!(!receipt.delivery_in_flight);
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        receipt
+            .try_queue_event("transfer-1", &sender)
+            .expect("restarted receipt should be queueable");
+
+        assert!(receipt.event_queued);
+        let event = receiver
+            .try_recv()
+            .expect("restarted receipt should be delivered again");
+        assert_eq!(event.transfer_id, "transfer-1");
+        assert_eq!(event.source_task_id, "task-source");
+        assert_eq!(event.destination_local_task_id, "task-local");
+    }
+}

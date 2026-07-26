@@ -382,6 +382,55 @@ pub async fn fetch_transfer_artifact(
 }
 
 #[tauri::command]
+pub fn materialize_transfer_artifact(
+    source_path: String,
+    provider: String,
+    resume_session_id: String,
+    filename: String,
+    kind: String,
+    materialization: String,
+) -> Result<bool, String> {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "HOME is unavailable for transfer artifact materialization".to_string())?;
+    crate::transfer_artifact::materialize_transfer_artifact_at_home(
+        &home,
+        std::path::Path::new(&source_path),
+        &provider,
+        &resume_session_id,
+        &filename,
+        &kind,
+        &materialization,
+    )
+}
+
+#[tauri::command]
+pub fn claim_transfer_event_consumer(
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::TransferEventConsumerState>,
+) -> Result<bool, String> {
+    crate::transfer_sidecar::claim_transfer_event_consumer_in_state(
+        &app,
+        state.inner(),
+        webview.label(),
+    )
+}
+
+#[tauri::command]
+pub fn release_transfer_event_consumer(
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::TransferEventConsumerState>,
+) -> Result<(), String> {
+    crate::transfer_sidecar::release_transfer_event_consumer_in_state(
+        &app,
+        state.inner(),
+        webview.label(),
+    )
+}
+
+#[tauri::command]
 pub async fn acknowledge_incoming_transfer_commit(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::TransferServiceState>,

@@ -21,7 +21,7 @@ async function flushPromises() {
 }
 
 async function waitForNativeCloseRequestedHandler() {
-  for (let attempt = 0; attempt < 10; attempt++) {
+  for (let attempt = 0; attempt < 20; attempt++) {
     if (closeRequestedHandler) return closeRequestedHandler;
     await flushPromises();
   }
@@ -851,7 +851,7 @@ async function mountApp(sidebarStub: typeof SidebarWithRepoStub | typeof Sidebar
       },
     },
   });
-  for (let attempt = 0; attempt < 10; attempt++) {
+  for (let attempt = 0; attempt < 20; attempt++) {
     await flushPromises();
   }
   return wrapper;
@@ -1079,6 +1079,8 @@ describe("App", () => {
       if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
       if (command === "mark_incoming_transfer_ack_completed") return null;
       if (command === "mark_incoming_transfer_event_recorded") return null;
+      if (command === "claim_transfer_event_consumer") return true;
+      if (command === "release_transfer_event_consumer") return null;
       throw new Error(`unexpected invoke: ${command}`);
     });
   });
@@ -5085,16 +5087,56 @@ describe("App", () => {
     expect(wrapper.text()).not.toContain("peer-source");
   });
 
-  it("registers transfer replay handling before LAN sync can spawn the sidecar", async () => {
+  it("claims transfer event authority only after every lifecycle listener is ready and before LAN sync", async () => {
     lanTasksMock.mockImplementationOnce(async () => {
       expect(listenHandlers.has("transfer-request")).toBe(true);
+      expect(listenHandlers.has("task-pull-requested")).toBe(true);
+      expect(listenHandlers.has("outgoing-transfer-committed")).toBe(true);
+      expect(listenHandlers.has("outgoing-transfer-finalization-requested")).toBe(true);
       return { repos: [], items: [], terminalRefs: {}, transferMachines: [] };
     });
 
     const wrapper = await mountApp(SidebarWithRepoStub);
     await waitForCondition(() => lanTasksMock.mock.calls.length > 0);
 
+    const claimCallIndex = invokeMock.mock.calls.findIndex(
+      ([command]) => command === "claim_transfer_event_consumer",
+    );
+    expect(claimCallIndex).toBeGreaterThanOrEqual(0);
+    expect(invokeMock.mock.invocationCallOrder[claimCallIndex]).toBeLessThan(
+      lanTasksMock.mock.invocationCallOrder[0],
+    );
+    wrapper.unmount();
+  });
+
+  it("keeps standby task sync without running single-owner transfer import", async () => {
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command: string, args?: { name?: string; repoPath?: string }) => {
+      if (command === "claim_transfer_event_consumer") return false;
+      return await defaultInvoke?.(command, args);
+    });
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    expect(listenHandlers.has("transfer-request")).toBe(true);
+    expect(listenHandlers.has("task-pull-requested")).toBe(true);
+    expect(listenHandlers.has("outgoing-transfer-committed")).toBe(true);
+    expect(listenHandlers.has("outgoing-transfer-finalization-requested")).toBe(true);
     expect(lanTasksMock).toHaveBeenCalled();
+    expect(store.approveIncomingTransfer).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("does not start transfer services when a mutating listener is not ready", async () => {
+    const { listen } = await import("./listen");
+    vi.mocked(listen).mockRejectedValueOnce(new Error("listener unavailable"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    expect(invokeMock).not.toHaveBeenCalledWith("claim_transfer_event_consumer");
+    expect(lanTasksMock).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
     wrapper.unmount();
   });
 

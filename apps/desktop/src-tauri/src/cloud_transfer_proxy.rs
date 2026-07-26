@@ -5,12 +5,31 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::{timeout, Duration};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 pub type CloudTransferProxyState = Arc<Mutex<HashMap<String, CloudTransferProxyHandle>>>;
+const DEFAULT_MAX_PROXY_CONNECTIONS: usize = 16;
+const DEFAULT_PROXY_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_PRE_SETUP_LOCAL_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Copy)]
+struct ProxyLimits {
+    max_connections: usize,
+    setup_timeout: Duration,
+}
+
+impl Default for ProxyLimits {
+    fn default() -> Self {
+        Self {
+            max_connections: DEFAULT_MAX_PROXY_CONNECTIONS,
+            setup_timeout: DEFAULT_PROXY_SETUP_TIMEOUT,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,10 +122,32 @@ pub async fn ensure_cloud_transfer_proxy_in_state(
     relay_url: String,
     id_token: String,
 ) -> Result<CloudTransferProxyEndpoint, String> {
+    ensure_cloud_transfer_proxy_with_limits(
+        state,
+        peer_id,
+        desktop_id,
+        relay_url,
+        id_token,
+        ProxyLimits::default(),
+    )
+    .await
+}
+
+async fn ensure_cloud_transfer_proxy_with_limits(
+    state: &CloudTransferProxyState,
+    peer_id: String,
+    desktop_id: String,
+    relay_url: String,
+    id_token: String,
+    limits: ProxyLimits,
+) -> Result<CloudTransferProxyEndpoint, String> {
     validate_nonblank("peer id", &peer_id)?;
     validate_nonblank("desktop id", &desktop_id)?;
     validate_nonblank("ID token", &id_token)?;
     validate_relay_url(&relay_url)?;
+    if limits.max_connections == 0 || limits.setup_timeout.is_zero() {
+        return Err("cloud transfer proxy limits must be positive".into());
+    }
 
     let mut proxies = state.lock().await;
     if let Some(existing) = proxies.get(&peer_id) {
@@ -142,7 +183,12 @@ pub async fn ensure_cloud_transfer_proxy_in_state(
         id_token: id_token_receiver,
     };
     let (cancel, cancel_receiver) = watch::channel(false);
-    let listener_task = tokio::spawn(run_proxy_listener(listener, config, cancel_receiver));
+    let listener_task = tokio::spawn(run_proxy_listener(
+        listener,
+        config,
+        cancel_receiver,
+        limits,
+    ));
 
     proxies.insert(
         peer_id,
@@ -237,9 +283,11 @@ async fn run_proxy_listener(
     listener: TcpListener,
     config: ProxyConfig,
     mut cancel: watch::Receiver<bool>,
+    limits: ProxyLimits,
 ) {
     let mut connections = JoinSet::new();
     let mut next_connection_id = 1_u64;
+    let connection_permits = Arc::new(Semaphore::new(limits.max_connections));
 
     loop {
         tokio::select! {
@@ -251,6 +299,13 @@ async fn run_proxy_listener(
             accepted = listener.accept() => {
                 match accepted {
                     Ok((socket, _)) => {
+                        let permit = match Arc::clone(&connection_permits).try_acquire_owned() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                drop(socket);
+                                continue;
+                            }
+                        };
                         let connection_id = next_connection_id;
                         next_connection_id = next_connection_id.saturating_add(1);
                         connections.spawn(run_proxy_connection(
@@ -258,6 +313,8 @@ async fn run_proxy_listener(
                             config.clone(),
                             connection_id,
                             cancel.clone(),
+                            permit,
+                            limits.setup_timeout,
                         ));
                     }
                     Err(error) => {
@@ -286,9 +343,17 @@ async fn run_proxy_connection(
     config: ProxyConfig,
     connection_id: u64,
     mut cancel: watch::Receiver<bool>,
+    _permit: OwnedSemaphorePermit,
+    setup_timeout: Duration,
 ) {
     let result = tokio::select! {
-        result = connect_and_bridge(&mut local, &config, connection_id, cancel.clone()) => result,
+        result = connect_and_bridge(
+            &mut local,
+            &config,
+            connection_id,
+            cancel.clone(),
+            setup_timeout,
+        ) => result,
         changed = cancel.changed() => {
             if changed.is_err() || *cancel.borrow() {
                 let _ = local.shutdown().await;
@@ -309,7 +374,53 @@ async fn connect_and_bridge(
     config: &ProxyConfig,
     connection_id: u64,
     cancel: watch::Receiver<bool>,
+    setup_timeout: Duration,
 ) -> Result<(), ProxyError> {
+    let mut setup = Box::pin(timeout(
+        setup_timeout,
+        establish_relay(config, connection_id),
+    ));
+    let mut pending_local = Vec::new();
+    let mut cancel = cancel;
+    let mut buffer = [0_u8; 8192];
+    let mut relay = loop {
+        tokio::select! {
+            changed = cancel.changed() => {
+                if changed.is_err() || *cancel.borrow() {
+                    return Ok(());
+                }
+            }
+            read = local.read(&mut buffer) => {
+                let count = read?;
+                if count == 0 {
+                    return Ok(());
+                }
+                if pending_local.len().saturating_add(count) > MAX_PRE_SETUP_LOCAL_BYTES {
+                    return Err(ProxyError::Relay(
+                        "local transfer request exceeded the pre-setup buffer limit".into(),
+                    ));
+                }
+                pending_local.extend_from_slice(&buffer[..count]);
+            }
+            result = &mut setup => {
+                break result
+                    .map_err(|_| ProxyError::Relay("relay tunnel setup timed out".into()))??;
+            }
+        }
+    };
+    if !pending_local.is_empty() {
+        relay.send(Message::Binary(pending_local.into())).await?;
+    }
+    bridge(local, &mut relay, cancel).await
+}
+
+async fn establish_relay(
+    config: &ProxyConfig,
+    connection_id: u64,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ProxyError,
+> {
     let (mut relay, _) = tokio_tungstenite::connect_async(&config.relay_url).await?;
     let id_token = config.id_token.borrow().clone();
     relay
@@ -338,7 +449,7 @@ async fn connect_and_bridge(
         ))
         .await?;
     await_tunnel_ready(&mut relay, &config.desktop_id).await?;
-    bridge(local, &mut relay, cancel).await
+    Ok(relay)
 }
 
 async fn await_auth_ok<S>(
@@ -497,7 +608,8 @@ mod tests {
 
     use super::{
         clear_cloud_transfer_proxies_in_state, ensure_cloud_transfer_proxy_in_state,
-        remove_cloud_transfer_proxy_in_state, validate_relay_url, CloudTransferProxyState,
+        ensure_cloud_transfer_proxy_with_limits, remove_cloud_transfer_proxy_in_state,
+        validate_relay_url, CloudTransferProxyState, ProxyLimits,
     };
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1072,5 +1184,191 @@ mod tests {
                 .expect("clear did not close active relay socket")
                 .is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn stalled_auth_is_bounded_by_the_setup_deadline() {
+        let (relay_url, relay_listener) = test_relay().await;
+        let state = state();
+        let endpoint = ensure_cloud_transfer_proxy_with_limits(
+            &state,
+            "peer-b".into(),
+            "desktop-b".into(),
+            relay_url,
+            "token".into(),
+            ProxyLimits {
+                max_connections: 2,
+                setup_timeout: Duration::from_millis(75),
+            },
+        )
+        .await
+        .expect("ensure proxy");
+        let mut sidecar = TcpStream::connect(&endpoint.endpoint)
+            .await
+            .expect("connect sidecar");
+        let (relay_tcp, _) = relay_listener.accept().await.expect("accept relay");
+        let mut relay = accept_async(relay_tcp).await.expect("accept websocket");
+        let _auth = next_json(&mut relay).await;
+
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            timeout(TEST_TIMEOUT, sidecar.read(&mut byte))
+                .await
+                .expect("stalled auth did not close locally")
+                .expect("read local close"),
+            0,
+        );
+        assert!(timeout(TEST_TIMEOUT, relay.next())
+            .await
+            .expect("stalled auth did not close relay")
+            .is_some());
+        clear_cloud_transfer_proxies_in_state(&state)
+            .await
+            .expect("clear proxy");
+    }
+
+    #[tokio::test]
+    async fn stalled_tunnel_ready_is_bounded_by_the_setup_deadline() {
+        let (relay_url, relay_listener) = test_relay().await;
+        let state = state();
+        let endpoint = ensure_cloud_transfer_proxy_with_limits(
+            &state,
+            "peer-b".into(),
+            "desktop-b".into(),
+            relay_url,
+            "token".into(),
+            ProxyLimits {
+                max_connections: 2,
+                setup_timeout: Duration::from_millis(100),
+            },
+        )
+        .await
+        .expect("ensure proxy");
+        let mut sidecar = TcpStream::connect(&endpoint.endpoint)
+            .await
+            .expect("connect sidecar");
+        let (relay_tcp, _) = relay_listener.accept().await.expect("accept relay");
+        let mut relay = accept_async(relay_tcp).await.expect("accept websocket");
+        let _auth = next_json(&mut relay).await;
+        relay
+            .send(Message::Text(
+                json!({
+                    "type": "auth_ok",
+                    "userId": "user-a",
+                    "capabilities": { "tunnelServices": ["task-transfer"] },
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send auth ok");
+        let _request = next_json(&mut relay).await;
+
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            timeout(TEST_TIMEOUT, sidecar.read(&mut byte))
+                .await
+                .expect("stalled tunnel-ready did not close locally")
+                .expect("read local close"),
+            0,
+        );
+        clear_cloud_transfer_proxies_in_state(&state)
+            .await
+            .expect("clear proxy");
+    }
+
+    #[tokio::test]
+    async fn requester_disconnect_cancels_stalled_setup() {
+        for send_auth_ok in [false, true] {
+            let (relay_url, relay_listener) = test_relay().await;
+            let state = state();
+            let endpoint = ensure_cloud_transfer_proxy_with_limits(
+                &state,
+                "peer-b".into(),
+                "desktop-b".into(),
+                relay_url,
+                "token".into(),
+                ProxyLimits {
+                    max_connections: 2,
+                    setup_timeout: TEST_TIMEOUT,
+                },
+            )
+            .await
+            .expect("ensure proxy");
+            let sidecar = TcpStream::connect(&endpoint.endpoint)
+                .await
+                .expect("connect sidecar");
+            let (relay_tcp, _) = relay_listener.accept().await.expect("accept relay");
+            let mut relay = accept_async(relay_tcp).await.expect("accept websocket");
+            let _auth = next_json(&mut relay).await;
+            if send_auth_ok {
+                relay
+                    .send(Message::Text(
+                        json!({
+                            "type": "auth_ok",
+                            "userId": "user-a",
+                            "capabilities": { "tunnelServices": ["task-transfer"] },
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .expect("send auth ok");
+                let _request = next_json(&mut relay).await;
+            }
+            drop(sidecar);
+
+            assert!(timeout(Duration::from_millis(500), relay.next())
+                .await
+                .expect("local EOF did not cancel stalled setup")
+                .is_some());
+            clear_cloud_transfer_proxies_in_state(&state)
+                .await
+                .expect("clear proxy");
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_cap_rejects_setup_work_before_spawning_another_relay() {
+        let (relay_url, relay_listener) = test_relay().await;
+        let state = state();
+        let endpoint = ensure_cloud_transfer_proxy_with_limits(
+            &state,
+            "peer-b".into(),
+            "desktop-b".into(),
+            relay_url,
+            "token".into(),
+            ProxyLimits {
+                max_connections: 1,
+                setup_timeout: TEST_TIMEOUT,
+            },
+        )
+        .await
+        .expect("ensure proxy");
+        let _first = TcpStream::connect(&endpoint.endpoint)
+            .await
+            .expect("connect first sidecar");
+        let (relay_tcp, _) = relay_listener.accept().await.expect("accept first relay");
+        let _first_relay = accept_async(relay_tcp)
+            .await
+            .expect("accept first websocket");
+
+        let mut second = TcpStream::connect(&endpoint.endpoint)
+            .await
+            .expect("connect second sidecar");
+        assert!(timeout(Duration::from_millis(150), relay_listener.accept())
+            .await
+            .is_err());
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            timeout(Duration::from_millis(500), second.read(&mut byte))
+                .await
+                .expect("saturated proxy did not close second requester")
+                .expect("read saturated requester"),
+            0,
+        );
+        clear_cloud_transfer_proxies_in_state(&state)
+            .await
+            .expect("clear proxy");
     }
 }

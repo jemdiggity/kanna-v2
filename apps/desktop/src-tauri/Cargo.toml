@@ -26,6 +26,8 @@ git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 futures-util = "0.3"
+flate2 = "1"
+tar = "0.4"
 kanna-runtime-defaults = { path = "../../../crates/runtime-defaults" }
 kanna-agent-protocol = { path = "../../../crates/kanna-agent-protocol" }
 chrono = "0.4"

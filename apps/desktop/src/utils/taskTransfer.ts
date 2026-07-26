@@ -1,3 +1,4 @@
+import { isAgentProvider } from "@kanna/agent-protocol";
 import type { PipelineItem } from "../types/kanna";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 
@@ -200,6 +201,21 @@ function readOptionalString(record: Record<string, unknown>, keys: readonly stri
   return null;
 }
 
+function readNullableString(
+  record: Record<string, unknown>,
+  keys: readonly string[],
+  label: string,
+): string | null {
+  for (const key of keys) {
+    if (!(key in record)) continue;
+    const value = record[key];
+    if (value === null || value === undefined) return null;
+    if (typeof value === "string") return value.length > 0 ? value : null;
+    throw new Error(label);
+  }
+  return null;
+}
+
 function readRequiredBoolean(
   record: Record<string, unknown>,
   keys: readonly string[],
@@ -212,6 +228,196 @@ function readRequiredBoolean(
     }
   }
   throw new Error(label);
+}
+
+function readRequiredEnum<T extends string>(
+  record: Record<string, unknown>,
+  keys: readonly string[],
+  values: readonly T[],
+  label: string,
+): T {
+  const value = readRequiredString(record, keys, label);
+  if (!values.includes(value as T)) {
+    throw new Error(`${label}: unsupported value ${value}`);
+  }
+  return value as T;
+}
+
+function parseRecoveryState(value: unknown, invalidMessage: string): SessionRecoveryState | null {
+  if (value === null || value === undefined) return null;
+  const record = asRecord(value);
+  if (!record) throw new Error(`${invalidMessage}: recovery must be an object or null`);
+  const number = (key: keyof SessionRecoveryState): number => {
+    const candidate = record[key];
+    if (typeof candidate !== "number" || !Number.isFinite(candidate)) {
+      throw new Error(`${invalidMessage}: recovery.${key} must be a finite number`);
+    }
+    return candidate;
+  };
+  if (typeof record.serialized !== "string" || typeof record.cursorVisible !== "boolean") {
+    throw new Error(`${invalidMessage}: recovery payload is invalid`);
+  }
+  return {
+    serialized: record.serialized,
+    cols: number("cols"),
+    rows: number("rows"),
+    cursorRow: number("cursorRow"),
+    cursorCol: number("cursorCol"),
+    cursorVisible: record.cursorVisible,
+    savedAt: number("savedAt"),
+    sequence: number("sequence"),
+  };
+}
+
+function validateSimpleComponent(value: string, label: string): string {
+  if (
+    value.length > 1024
+    || value === "."
+    || value === ".."
+    || value.includes("/")
+    || value.includes("\\")
+    || Array.from(value).some((character) => character.charCodeAt(0) < 0x20)
+  ) {
+    throw new Error(`${label} must be one safe path component`);
+  }
+  return value;
+}
+
+function canonicalArtifactHomePath(
+  provider: TransferArtifactPayload["provider"],
+  resumeSessionId: string,
+  filename: string,
+): {
+  kind: TransferArtifactKind;
+  materialization: TransferArtifactMaterialization;
+  homeRelPath: string;
+} {
+  const sessionId = validateSimpleComponent(resumeSessionId, "transfer resume session id");
+  if (provider === "claude") {
+    if (filename !== "claude-session.tar.gz") {
+      throw new Error("transfer artifact filename does not match the Claude session contract");
+    }
+    return {
+      kind: "session-archive",
+      materialization: "extract-tar-gz",
+      homeRelPath: `.claude/tasks/${sessionId}`,
+    };
+  }
+  if (provider === "copilot") {
+    if (filename !== "copilot-session.tar.gz") {
+      throw new Error("transfer artifact filename does not match the Copilot session contract");
+    }
+    return {
+      kind: "session-archive",
+      materialization: "extract-tar-gz",
+      homeRelPath: `.copilot/session-state/${sessionId}`,
+    };
+  }
+  if (provider === "codex") {
+    validateSimpleComponent(filename, "Codex rollout filename");
+    const match = /^rollout-(\d{4})-(\d{2})-(\d{2})T.+\.jsonl$/.exec(filename);
+    if (
+      !match
+      || !filename.endsWith(`-${sessionId}.jsonl`)
+      || Number(match[2]) < 1
+      || Number(match[2]) > 12
+      || Number(match[3]) < 1
+      || Number(match[3]) > 31
+    ) {
+      throw new Error("transfer artifact filename does not match the Codex rollout contract");
+    }
+    return {
+      kind: "session-rollout",
+      materialization: "copy-file",
+      homeRelPath: `.codex/sessions/${match[1]}/${match[2]}/${match[3]}/${filename}`,
+    };
+  }
+  throw new Error(`transfer artifacts are unsupported for provider ${provider}`);
+}
+
+function parseTransferArtifacts(
+  value: unknown,
+  taskProvider: PipelineItem["agent_provider"],
+  resumeSessionId: string | null,
+  invalidMessage: string,
+): TransferArtifactPayload[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new Error(`${invalidMessage}: artifacts must be an array`);
+  }
+  if (value.length > 1) {
+    throw new Error(`${invalidMessage}: at most one resume artifact is supported`);
+  }
+  if (value.length === 0) return [];
+  if (!resumeSessionId) {
+    throw new Error(`${invalidMessage}: artifact requires a resume session id`);
+  }
+
+  return value.map((candidate, index) => {
+    const artifact = asRecord(candidate);
+    if (!artifact) throw new Error(`${invalidMessage}: artifact ${index} must be an object`);
+    const provider = readRequiredString(
+      artifact,
+      ["provider"],
+      `${invalidMessage}: artifact ${index} missing provider`,
+    );
+    if (!isAgentProvider(provider) || provider !== taskProvider) {
+      throw new Error(`${invalidMessage}: artifact provider does not match the task provider`);
+    }
+    const artifactId = validateSimpleComponent(
+      readRequiredString(
+        artifact,
+        ["artifact_id", "artifactId"],
+        `${invalidMessage}: artifact ${index} missing artifact id`,
+      ),
+      "transfer artifact id",
+    );
+    const filename = validateSimpleComponent(
+      readRequiredString(
+        artifact,
+        ["filename"],
+        `${invalidMessage}: artifact ${index} missing filename`,
+      ),
+      "transfer artifact filename",
+    );
+    const contract = canonicalArtifactHomePath(provider, resumeSessionId, filename);
+    const kind = readRequiredEnum(
+      artifact,
+      ["kind"],
+      ["session-rollout", "session-archive"] as const,
+      `${invalidMessage}: artifact ${index} missing kind`,
+    );
+    const materialization = artifact.materialization === undefined
+      ? contract.materialization
+      : readRequiredEnum(
+          artifact,
+          ["materialization"],
+          ["copy-file", "extract-tar-gz"] as const,
+          `${invalidMessage}: artifact ${index} missing materialization`,
+        );
+    const homeRelPath = readRequiredString(
+      artifact,
+      ["home_rel_path", "homeRelPath"],
+      `${invalidMessage}: artifact ${index} missing home_rel_path`,
+    );
+    if (
+      kind !== contract.kind
+      || materialization !== contract.materialization
+      || homeRelPath !== contract.homeRelPath
+    ) {
+      throw new Error(
+        `${invalidMessage}: artifact kind, materialization, or path does not match the provider session contract`,
+      );
+    }
+    return {
+      artifact_id: artifactId,
+      filename,
+      provider,
+      kind,
+      home_rel_path: contract.homeRelPath,
+      materialization,
+    };
+  });
 }
 
 function normalizeOutgoingTransferPayload(
@@ -228,23 +434,156 @@ function normalizeOutgoingTransferPayload(
     ["source_task_id", "sourceTaskId"],
     `${invalidMessage}: task missing source_task_id`,
   );
+  const sourcePeerId = readRequiredString(
+    taskRecord,
+    ["source_peer_id", "sourcePeerId"],
+    `${invalidMessage}: task missing source_peer_id`,
+  );
+  const taskProviderValue = readRequiredString(
+    taskRecord,
+    ["agent_provider", "agentProvider"],
+    `${invalidMessage}: task missing agent_provider`,
+  );
+  if (!isAgentProvider(taskProviderValue)) {
+    throw new Error(`${invalidMessage}: task has unsupported agent_provider`);
+  }
+  const resumeSessionId = readNullableString(
+    taskRecord,
+    ["resume_session_id", "resumeSessionId"],
+    `${invalidMessage}: task resume_session_id must be a string or null`,
+  );
+  const repoMode = readRequiredEnum(
+    repoRecord,
+    ["mode"],
+    ["reuse-local", "clone-remote", "bundle-repo"] as const,
+    `${invalidMessage}: repo missing mode`,
+  );
+  const bundleRecord = repoRecord.bundle === null || repoRecord.bundle === undefined
+    ? null
+    : asRecord(repoRecord.bundle);
+  if (repoRecord.bundle !== null && repoRecord.bundle !== undefined && !bundleRecord) {
+    throw new Error(`${invalidMessage}: repo bundle must be an object or null`);
+  }
+  const bundle = bundleRecord
+    ? {
+        artifact_id: validateSimpleComponent(
+          readRequiredString(
+            bundleRecord,
+            ["artifact_id", "artifactId"],
+            `${invalidMessage}: repo bundle missing artifact id`,
+          ),
+          "transfer bundle artifact id",
+        ),
+        filename: validateSimpleComponent(
+          readRequiredString(
+            bundleRecord,
+            ["filename"],
+            `${invalidMessage}: repo bundle missing filename`,
+          ),
+          "transfer bundle filename",
+        ),
+        ref_name: readNullableString(
+          bundleRecord,
+          ["ref_name", "refName"],
+          `${invalidMessage}: repo bundle ref_name must be a string or null`,
+        ),
+      }
+    : null;
+  if (repoMode === "bundle-repo" && !bundle) {
+    throw new Error(`${invalidMessage}: bundle-repo payload is missing bundle metadata`);
+  }
+  const artifacts = parseTransferArtifacts(
+    payloadRecord.artifacts,
+    taskProviderValue,
+    resumeSessionId,
+    invalidMessage,
+  );
 
   return {
-    ...payloadRecord,
+    target_peer_id: readRequiredString(
+      payloadRecord,
+      ["target_peer_id", "targetPeerId"],
+      `${invalidMessage}: missing target_peer_id`,
+    ),
     target_desktop_id: readOptionalString(payloadRecord, [
       "target_desktop_id",
       "targetDesktopId",
     ]),
     task: {
-      ...taskRecord,
       cloud_task_id: readOptionalString(taskRecord, ["cloud_task_id", "cloudTaskId"])
         ?? sourceTaskId,
+      source_peer_id: sourcePeerId,
       source_desktop_id: readOptionalString(taskRecord, [
         "source_desktop_id",
         "sourceDesktopId",
       ]),
+      source_task_id: sourceTaskId,
+      local_task_id: readNullableString(
+        taskRecord,
+        ["local_task_id", "localTaskId"],
+        `${invalidMessage}: task local_task_id must be a string or null`,
+      ) ?? undefined,
+      resume_session_id: resumeSessionId,
+      prompt: readNullableString(
+        taskRecord,
+        ["prompt"],
+        `${invalidMessage}: task prompt must be a string or null`,
+      ),
+      stage: readRequiredString(taskRecord, ["stage"], `${invalidMessage}: task missing stage`),
+      branch: readNullableString(
+        taskRecord,
+        ["branch"],
+        `${invalidMessage}: task branch must be a string or null`,
+      ),
+      pipeline: readRequiredString(
+        taskRecord,
+        ["pipeline"],
+        `${invalidMessage}: task missing pipeline`,
+      ),
+      display_name: readNullableString(
+        taskRecord,
+        ["display_name", "displayName"],
+        `${invalidMessage}: task display_name must be a string or null`,
+      ),
+      base_ref: readNullableString(
+        taskRecord,
+        ["base_ref", "baseRef"],
+        `${invalidMessage}: task base_ref must be a string or null`,
+      ),
+      agent_type: readNullableString(
+        taskRecord,
+        ["agent_type", "agentType"],
+        `${invalidMessage}: task agent_type must be a string or null`,
+      ),
+      agent_provider: taskProviderValue,
     },
-  } as unknown as OutgoingTransferPayload;
+    repo: {
+      mode: repoMode,
+      remote_url: readNullableString(
+        repoRecord,
+        ["remote_url", "remoteUrl"],
+        `${invalidMessage}: repo remote_url must be a string or null`,
+      ),
+      path: readNullableString(
+        repoRecord,
+        ["path"],
+        `${invalidMessage}: repo path must be a string or null`,
+      ),
+      name: readNullableString(
+        repoRecord,
+        ["name"],
+        `${invalidMessage}: repo name must be a string or null`,
+      ),
+      default_branch: readNullableString(
+        repoRecord,
+        ["default_branch", "defaultBranch"],
+        `${invalidMessage}: repo default_branch must be a string or null`,
+      ),
+      bundle,
+    },
+    recovery: parseRecoveryState(payloadRecord.recovery, invalidMessage),
+    artifacts,
+  };
 }
 
 export function chooseRepoAcquisitionMode(input: {
@@ -452,22 +791,37 @@ export function parseIncomingTransferRequest(value: unknown): IncomingTransferRe
     throw new Error("transfer-request payload missing payload");
   }
 
+  const sourcePeerId = readRequiredString(
+    record,
+    ["sourcePeerId", "source_peer_id"],
+    "transfer-request payload missing sourcePeerId",
+  );
+  const sourceTaskId = readRequiredString(
+    record,
+    ["sourceTaskId", "source_task_id"],
+    "transfer-request payload missing sourceTaskId",
+  );
+  const normalizedPayload = normalizeOutgoingTransferPayload(
+    payloadRecord,
+    "transfer-request payload is missing task or repo",
+  );
+  if (
+    normalizedPayload.task.source_peer_id !== sourcePeerId
+    || normalizedPayload.task.source_task_id !== sourceTaskId
+  ) {
+    throw new Error(
+      "transfer-request payload source identity does not match the authenticated transfer envelope",
+    );
+  }
+
   return {
     transferId: readRequiredString(
       record,
       ["transferId", "transfer_id"],
       "transfer-request payload missing transferId",
     ),
-    sourcePeerId: readRequiredString(
-      record,
-      ["sourcePeerId", "source_peer_id"],
-      "transfer-request payload missing sourcePeerId",
-    ),
-    sourceTaskId: readRequiredString(
-      record,
-      ["sourceTaskId", "source_task_id"],
-      "transfer-request payload missing sourceTaskId",
-    ),
+    sourcePeerId,
+    sourceTaskId,
     sourceName: readOptionalString(record, [
       "sourceName",
       "source_name",
@@ -478,10 +832,7 @@ export function parseIncomingTransferRequest(value: unknown): IncomingTransferRe
       "displayName",
       "display_name",
     ]),
-    payload: normalizeOutgoingTransferPayload(
-      payloadRecord,
-      "transfer-request payload is missing task or repo",
-    ),
+    payload: normalizedPayload,
   };
 }
 

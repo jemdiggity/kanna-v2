@@ -13,6 +13,7 @@ interface PendingTunnel {
   client: WebSocket;
   desktopId: string;
   service: TunnelService;
+  expiry: ReturnType<typeof setTimeout>;
 }
 
 export type TunnelService = "ksp" | "task-transfer";
@@ -40,6 +41,11 @@ const tunnelPeakBufferedBytes = new WeakMap<WebSocket, number>();
 export const TASK_TRANSFER_TUNNEL_HIGH_WATER_BYTES = 512 * 1024;
 export const TASK_TRANSFER_TUNNEL_LOW_WATER_BYTES = 256 * 1024;
 export const TASK_TRANSFER_TUNNEL_MAX_BUFFERED_BYTES = 1024 * 1024;
+export const TASK_TRANSFER_PENDING_TUNNEL_TIMEOUT_MS = 10_000;
+
+export function pendingTunnelCountForTests(userId: string): number {
+  return connections.get(userId)?.pendingTunnels.size ?? 0;
+}
 
 export function taskTransferTunnelFlowStateForTests(ws: WebSocket): {
   paused: boolean;
@@ -209,6 +215,33 @@ function removeClient(pair: ConnectionPair, ws: WebSocket): void {
   }
 }
 
+function removePendingTunnel(pair: ConnectionPair, tunnelId: string): PendingTunnel | undefined {
+  const tunnel = pair.pendingTunnels.get(tunnelId);
+  if (!tunnel) return undefined;
+  clearTimeout(tunnel.expiry);
+  pair.pendingTunnels.delete(tunnelId);
+  return tunnel;
+}
+
+function storePendingTunnel(
+  pair: ConnectionPair,
+  tunnelId: string,
+  client: WebSocket,
+  desktopId: string,
+  service: TunnelService,
+): void {
+  const expiry = setTimeout(() => {
+    const current = pair.pendingTunnels.get(tunnelId);
+    if (!current || current.client !== client) return;
+    pair.pendingTunnels.delete(tunnelId);
+    if (client.readyState <= 1) {
+      client.close(4408, "Tunnel setup timed out");
+    }
+  }, TASK_TRANSFER_PENDING_TUNNEL_TIMEOUT_MS);
+  expiry.unref?.();
+  pair.pendingTunnels.set(tunnelId, { client, desktopId, service, expiry });
+}
+
 function closeTunnelPeer(ws: WebSocket): void {
   const peer = tunnelPeers.get(ws);
   if (pausedTunnelSources.has(ws)) {
@@ -266,7 +299,7 @@ export function setPhoneConnection(userId: string, ws: WebSocket): void {
       removeClient(current, ws);
       for (const [tunnelId, tunnel] of current.pendingTunnels.entries()) {
         if (tunnel.client === ws) {
-          current.pendingTunnels.delete(tunnelId);
+          removePendingTunnel(current, tunnelId);
         }
       }
       if (current.desktops.size === 0) {
@@ -311,7 +344,7 @@ export function setServerConnection(
       for (const [tunnelId, tunnel] of current.pendingTunnels.entries()) {
         if (tunnel.desktopId === desktopId) {
           tunnel.client.close(1011, "Desktop disconnected before tunnel opened");
-          current.pendingTunnels.delete(tunnelId);
+          removePendingTunnel(current, tunnelId);
         }
       }
       // Clean up map entry if both sides are gone
@@ -395,7 +428,7 @@ export function attachDesktopTunnel(
     return false;
   }
 
-  pair.pendingTunnels.delete(tunnelId);
+  removePendingTunnel(pair, tunnelId);
   tunnelSockets.add(tunnel.client);
   tunnelSockets.add(ws);
   tunnelPeers.set(tunnel.client, ws);
@@ -461,7 +494,7 @@ export function routeMessage(
       }
 
       const tunnelId = randomUUID();
-      pair.pendingTunnels.set(tunnelId, { client: source, desktopId, service });
+      storePendingTunnel(pair, tunnelId, source, desktopId, service);
       tunnelSockets.add(source);
       target.send(
         JSON.stringify({

@@ -110,6 +110,9 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
     artifactId: "mock-artifact-1",
     path: "/tmp/mock-transfer-1.bundle",
   }),
+  materialize_transfer_artifact: () => true,
+  claim_transfer_event_consumer: () => true,
+  release_transfer_event_consumer: () => ({}),
   finalize_outgoing_transfer: (args: { transferId?: string }) => ({
     transferId: args.transferId ?? "mock-transfer-1",
     payload: {

@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -9,6 +9,70 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{oneshot, Mutex};
 
 type PendingRequests = Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Value>>>>;
+pub type TransferEventConsumerState = Arc<std::sync::Mutex<TransferEventConsumer>>;
+
+#[derive(Default)]
+pub struct TransferEventConsumer {
+    ready_labels: VecDeque<String>,
+    pending: VecDeque<PendingLifecycleEvent>,
+}
+
+#[derive(Clone)]
+struct PendingLifecycleEvent {
+    name: String,
+    payload: Value,
+}
+
+impl TransferEventConsumer {
+    fn claim(&mut self, candidate: &str) -> bool {
+        if !self.ready_labels.iter().any(|label| label == candidate) {
+            self.ready_labels.push_back(candidate.to_string());
+        }
+        self.ready_labels
+            .front()
+            .is_some_and(|label| label == candidate)
+    }
+
+    fn release(&mut self, candidate: &str) {
+        self.ready_labels.retain(|label| label != candidate);
+    }
+
+    fn dispatch_with(
+        &mut self,
+        event_name: &str,
+        payload: Value,
+        mut emit: impl FnMut(&str, &str, &Value) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.pending.push_back(PendingLifecycleEvent {
+            name: event_name.to_string(),
+            payload,
+        });
+        while let Some(label) = self.ready_labels.front().cloned() {
+            if self
+                .flush_pending_to(&label, |target, name, value| emit(target, name, value))
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        Err("no ready transfer event consumer".into())
+    }
+
+    fn flush_pending_to(
+        &mut self,
+        label: &str,
+        mut emit: impl FnMut(&str, &str, &Value) -> Result<(), String>,
+    ) -> Result<(), String> {
+        while let Some(event) = self.pending.pop_front() {
+            if let Err(error) = emit(label, &event.name, &event.payload) {
+                self.pending.push_front(event);
+                self.release(label);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+}
 
 pub struct TransferSidecarClient {
     _child: Mutex<Child>,
@@ -51,7 +115,17 @@ impl TransferSidecarClient {
             .ok_or_else(|| "transfer sidecar stdout unavailable".to_string())?;
         let pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let dead = Arc::new(AtomicBool::new(false));
-        spawn_reader(app, stdout, Arc::clone(&pending), Arc::clone(&dead));
+        let event_consumer = app
+            .state::<crate::TransferEventConsumerState>()
+            .inner()
+            .clone();
+        spawn_reader(
+            app,
+            stdout,
+            Arc::clone(&pending),
+            Arc::clone(&dead),
+            event_consumer,
+        );
 
         Ok(Self {
             _child: Mutex::new(child),
@@ -852,6 +926,7 @@ fn spawn_reader(
     stdout: ChildStdout,
     pending: PendingRequests,
     dead: Arc<AtomicBool>,
+    event_consumer: TransferEventConsumerState,
 ) {
     tauri::async_runtime::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
@@ -879,21 +954,13 @@ fn spawn_reader(
             };
 
             if let Some(event_name) = forwarded_event_name(&value) {
-                if is_single_consumer_lifecycle_event(event_name) {
-                    let labels = app.webview_windows().into_keys().collect();
-                    if let Some(label) = authoritative_lifecycle_window_label(labels) {
-                        if let Err(error) =
-                            app.emit_to(EventTarget::webview_window(&label), event_name, &value)
-                        {
-                            eprintln!(
-                                "[transfer-sidecar] failed emitting {} to {}: {}",
-                                event_name, label, error
-                            );
-                        }
-                    } else {
+                if is_state_mutating_lifecycle_event(event_name) {
+                    if let Err(error) =
+                        dispatch_lifecycle_event(&app, &event_consumer, event_name, value.clone())
+                    {
                         eprintln!(
-                            "[transfer-sidecar] dropped {} because no webview window is available",
-                            event_name
+                            "[transfer-sidecar] queued undelivered {} event: {}",
+                            event_name, error
                         );
                     }
                 } else {
@@ -970,20 +1037,91 @@ fn forwarded_event_name(value: &Value) -> Option<&'static str> {
     }
 }
 
-fn is_single_consumer_lifecycle_event(event_name: &str) -> bool {
+fn is_state_mutating_lifecycle_event(event_name: &str) -> bool {
     matches!(
         event_name,
-        "outgoing-transfer-committed" | "outgoing-transfer-finalization-requested"
+        "transfer-request"
+            | "task-pull-requested"
+            | "outgoing-transfer-committed"
+            | "outgoing-transfer-finalization-requested"
     )
 }
 
-fn authoritative_lifecycle_window_label(mut labels: Vec<String>) -> Option<String> {
-    labels.sort();
-    labels
-        .iter()
-        .position(|label| label == "main")
-        .map(|index| labels.remove(index))
-        .or_else(|| labels.into_iter().next())
+fn dispatch_lifecycle_event(
+    app: &AppHandle,
+    state: &TransferEventConsumerState,
+    event_name: &str,
+    payload: Value,
+) -> Result<(), String> {
+    let mut consumer = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    consumer.dispatch_with(event_name, payload, |label, name, value| {
+        if app.get_webview_window(label).is_none() {
+            return Err(format!("transfer event consumer {label} is unavailable"));
+        }
+        app.emit_to(EventTarget::webview_window(label), name, value)
+            .map_err(|error| {
+                eprintln!(
+                    "[transfer-sidecar] transfer event consumer {label} rejected {name}: {error}"
+                );
+                error.to_string()
+            })
+    })
+}
+
+pub fn claim_transfer_event_consumer_in_state(
+    app: &AppHandle,
+    state: &TransferEventConsumerState,
+    label: &str,
+) -> Result<bool, String> {
+    let mut consumer = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    consumer
+        .ready_labels
+        .retain(|candidate| app.get_webview_window(candidate).is_some());
+    if !consumer.claim(label) {
+        return Ok(false);
+    }
+
+    consumer.flush_pending_to(label, |target, event_name, payload| {
+        if app.get_webview_window(target).is_none() {
+            return Err(format!(
+                "transfer event consumer {target} is no longer available"
+            ));
+        }
+        app.emit_to(EventTarget::webview_window(target), event_name, payload)
+            .map_err(|error| {
+                format!("failed delivering queued transfer lifecycle event to {target}: {error}")
+            })
+    })?;
+    Ok(true)
+}
+
+pub fn release_transfer_event_consumer_in_state(
+    app: &AppHandle,
+    state: &TransferEventConsumerState,
+    label: &str,
+) -> Result<(), String> {
+    let mut consumer = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    consumer.release(label);
+    let Some(next_label) = consumer.ready_labels.front().cloned() else {
+        return Ok(());
+    };
+    consumer.flush_pending_to(&next_label, |target, event_name, payload| {
+        if app.get_webview_window(target).is_none() {
+            return Err(format!(
+                "standby transfer event consumer {target} is no longer available"
+            ));
+        }
+        app.emit_to(EventTarget::webview_window(target), event_name, payload)
+            .map_err(|error| {
+                format!("failed delivering queued transfer lifecycle event to {target}: {error}")
+            })
+    })
 }
 
 #[cfg(test)]
@@ -1422,29 +1560,137 @@ mod tests {
 
     #[test]
     fn lifecycle_events_select_exactly_one_authoritative_window() {
-        assert_eq!(
-            authoritative_lifecycle_window_label(vec![
-                "window-z".to_string(),
-                "main".to_string(),
-                "window-a".to_string(),
-            ]),
-            Some("main".to_string()),
-        );
-        assert_eq!(
-            authoritative_lifecycle_window_label(vec![
-                "window-z".to_string(),
-                "window-a".to_string(),
-            ]),
-            Some("window-a".to_string()),
-        );
-        assert_eq!(authoritative_lifecycle_window_label(Vec::new()), None);
-        assert!(is_single_consumer_lifecycle_event(
+        let mut consumer = TransferEventConsumer::default();
+        assert!(consumer.claim("window-z"));
+        assert!(!consumer.claim("main"));
+        assert!(!consumer.claim("window-a"));
+        consumer.release("window-z");
+        assert!(consumer.claim("main"));
+        assert!(!consumer.claim("window-a"));
+        assert!(is_state_mutating_lifecycle_event("transfer-request"));
+        assert!(is_state_mutating_lifecycle_event("task-pull-requested"));
+        assert!(is_state_mutating_lifecycle_event(
             "outgoing-transfer-committed"
         ));
-        assert!(is_single_consumer_lifecycle_event(
+        assert!(is_state_mutating_lifecycle_event(
             "outgoing-transfer-finalization-requested"
         ));
-        assert!(!is_single_consumer_lifecycle_event("pairing-completed"));
+        assert!(!is_state_mutating_lifecycle_event("pairing-completed"));
+    }
+
+    #[test]
+    fn lifecycle_events_queue_without_a_ready_window_and_preserve_order_after_failed_flush() {
+        let mut consumer = TransferEventConsumer::default();
+        assert!(consumer
+            .dispatch_with("transfer-request", json!({"sequence": 1}), |_, _, _| {
+                unreachable!("no ready consumer should avoid emit")
+            })
+            .is_err());
+        assert!(consumer
+            .dispatch_with("task-pull-requested", json!({"sequence": 2}), |_, _, _| {
+                unreachable!("no ready consumer should avoid emit")
+            })
+            .is_err());
+        assert!(consumer.claim("main"));
+
+        let error = consumer
+            .flush_pending_to("main", |_, _, _| Err("listener unavailable".into()))
+            .expect_err("failed emit should retain queued work");
+
+        assert_eq!(error, "listener unavailable");
+        assert!(consumer.ready_labels.is_empty());
+        assert_eq!(consumer.pending.len(), 2);
+        assert_eq!(consumer.pending[0].name, "transfer-request");
+        assert_eq!(consumer.pending[1].name, "task-pull-requested");
+    }
+
+    #[test]
+    fn lifecycle_dispatch_replaces_a_stale_owner_with_a_ready_standby() {
+        let mut consumer = TransferEventConsumer::default();
+        assert!(consumer
+            .dispatch_with("transfer-request", json!({"sequence": 1}), |_, _, _| {
+                unreachable!("no ready consumer should avoid emit")
+            })
+            .is_err());
+        assert!(consumer.claim("window-stale"));
+        assert!(!consumer.claim("window-ready"));
+        let mut attempts = Vec::new();
+
+        consumer
+            .dispatch_with(
+                "task-pull-requested",
+                json!({"sequence": 2}),
+                |label, name, payload| {
+                    attempts.push((
+                        label.to_string(),
+                        name.to_string(),
+                        payload["sequence"].clone(),
+                    ));
+                    if label == "window-ready" {
+                        Ok(())
+                    } else {
+                        Err("window unavailable".into())
+                    }
+                },
+            )
+            .expect("standby should receive the event");
+
+        assert_eq!(
+            attempts,
+            [
+                (
+                    "window-stale".to_string(),
+                    "transfer-request".to_string(),
+                    json!(1),
+                ),
+                (
+                    "window-ready".to_string(),
+                    "transfer-request".to_string(),
+                    json!(1),
+                ),
+                (
+                    "window-ready".to_string(),
+                    "task-pull-requested".to_string(),
+                    json!(2),
+                ),
+            ],
+        );
+        assert_eq!(
+            consumer.ready_labels.front().map(String::as_str),
+            Some("window-ready"),
+        );
+        assert!(consumer.pending.is_empty());
+    }
+
+    #[test]
+    fn owner_release_flushes_queued_work_to_the_next_ready_window() {
+        let mut consumer = TransferEventConsumer::default();
+        assert!(consumer
+            .dispatch_with("transfer-request", json!({"sequence": 1}), |_, _, _| {
+                unreachable!("no ready consumer should avoid emit")
+            })
+            .is_err());
+        assert!(consumer.claim("window-owner"));
+        assert!(!consumer.claim("window-standby"));
+        consumer.release("window-owner");
+        let mut delivered = Vec::new();
+
+        consumer
+            .flush_pending_to("window-standby", |label, name, payload| {
+                delivered.push((label.to_string(), name.to_string(), payload.clone()));
+                Ok(())
+            })
+            .expect("standby should accept queued event");
+
+        assert_eq!(
+            delivered,
+            [(
+                "window-standby".to_string(),
+                "transfer-request".to_string(),
+                json!({"sequence": 1}),
+            )],
+        );
+        assert!(consumer.pending.is_empty());
     }
 
     #[test]

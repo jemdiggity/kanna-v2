@@ -1569,6 +1569,39 @@ describe("incoming transfer approval", () => {
     vi.useRealTimers();
   });
 
+  it("rejects finalized payload provenance that differs from the durable reservation", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const payload = buildIncomingTransferPayload();
+    payload.task.source_peer_id = "peer-impersonated";
+    const fakeDb = createTransferDb({
+      transfers: [{
+        id: "transfer-1",
+        direction: "incoming",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: null,
+        source_task_id: "task-source",
+        local_task_id: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(payload),
+      }],
+    });
+
+    await store.init(fakeDb);
+    mockIncomingTransferApprovalInvoke(payload, async (cmd) => {
+      throw new Error(`unexpected invoke: ${cmd}`);
+    });
+
+    await expect(store.approveIncomingTransfer("transfer-1")).rejects.toThrow(
+      /source identity does not match reservation/i,
+    );
+    expect(fakeDb.tables.pipeline_item).toHaveLength(0);
+  });
+
   it("requests source finalization before importing an approved transfer", async () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");
@@ -2389,9 +2422,10 @@ describe("incoming transfer approval", () => {
         if (args?.name === "KANNA_MOBILE_SERVER_PORT") return "";
         return "";
       }
+      if (cmd === "materialize_transfer_artifact") {
+        return true;
+      }
       if (
-        cmd === "ensure_directory" ||
-        cmd === "copy_file" ||
         cmd === "git_worktree_add" ||
         cmd === "acknowledge_incoming_transfer_commit"
       ) {
@@ -2501,11 +2535,10 @@ describe("incoming transfer approval", () => {
       if (cmd === "read_env_var") {
         return "/Users/tester";
       }
-      if (
-        cmd === "ensure_directory" ||
-        cmd === "copy_file" ||
-        cmd === "acknowledge_incoming_transfer_commit"
-      ) {
+      if (cmd === "materialize_transfer_artifact") {
+        return true;
+      }
+      if (cmd === "acknowledge_incoming_transfer_commit") {
         return null;
       }
       if (cmd === "git_worktree_add") {
@@ -2525,13 +2558,15 @@ describe("incoming transfer approval", () => {
       transferId: "transfer-1",
       artifactId: "artifact-codex-rollout",
     });
-    expect(invokeMock).toHaveBeenCalledWith("ensure_directory", {
-      path: "/Users/tester/.codex/sessions/2026/04/18",
+    expect(invokeMock).toHaveBeenCalledWith("materialize_transfer_artifact", {
+      sourcePath: "/tmp/fetched-rollout.jsonl",
+      provider: "codex",
+      resumeSessionId: "019d9a8c-9f39-7240-818f-88367a7c31df",
+      filename: "rollout-2026-04-18T06-27-04-019d9a8c-9f39-7240-818f-88367a7c31df.jsonl",
+      kind: "session-rollout",
+      materialization: "copy-file",
     });
-    expect(invokeMock).toHaveBeenCalledWith("copy_file", {
-      src: "/tmp/fetched-rollout.jsonl",
-      dst: "/Users/tester/.codex/sessions/2026/04/18/rollout-2026-04-18T06-27-04-019d9a8c-9f39-7240-818f-88367a7c31df.jsonl",
-    });
+    expect(invokeMock).not.toHaveBeenCalledWith("copy_file", expect.anything());
     expect(invokeMock).toHaveBeenCalledWith(
       "spawn_session",
       expect.objectContaining({
@@ -2779,15 +2814,14 @@ describe("incoming transfer approval", () => {
       if (cmd === "read_env_var") {
         return "/Users/tester";
       }
+      if (cmd === "materialize_transfer_artifact") {
+        return true;
+      }
       if (
-        cmd === "ensure_directory" ||
         cmd === "git_worktree_add" ||
         cmd === "acknowledge_incoming_transfer_commit"
       ) {
         return null;
-      }
-      if (cmd === "run_script") {
-        return "";
       }
       if (cmd === "spawn_session") {
         return null;
@@ -2799,33 +2833,17 @@ describe("incoming transfer approval", () => {
     await flushBackgroundSetup();
 
     expect(localTaskId).toEqual(expect.any(String));
-    expect(invokeMock).toHaveBeenCalledWith("ensure_directory", {
-      path: "/Users/tester/.claude/tasks",
+    expect(invokeMock).toHaveBeenCalledWith("materialize_transfer_artifact", {
+      sourcePath: "/tmp/fetched-claude-session.tar.gz",
+      provider: "claude",
+      resumeSessionId: "364643cc-5e6d-48fc-86ca-ca7764380900",
+      filename: "claude-session.tar.gz",
+      kind: "session-archive",
+      materialization: "extract-tar-gz",
     });
-    expect(invokeMock).toHaveBeenCalledWith(
-      "run_script",
-      expect.objectContaining({
-        script: expect.stringContaining("mktemp -d"),
-        cwd: "/tmp/repo-1",
-        env: expect.objectContaining({
-          KANNA_WORKTREE: "1",
-        }),
-      }),
-    );
-    const claudeImportCall = invokeMock.mock.calls.find(([cmd, args]) =>
-      cmd === "run_script" &&
-      typeof args === "object" &&
-      args !== null &&
-      "script" in args &&
-      typeof args.script === "string" &&
-      args.script.includes("/tmp/fetched-claude-session.tar.gz"),
-    );
-    expect(claudeImportCall?.[1]).toMatchObject({
-      script: expect.stringContaining("mv "),
-    });
-    expect(JSON.stringify(claudeImportCall?.[1])).not.toContain(
-      "tar -xzf '/tmp/fetched-claude-session.tar.gz' -C '/Users/tester/.claude/tasks'",
-    );
+    expect(invokeMock).not.toHaveBeenCalledWith("run_script", expect.objectContaining({
+      script: expect.stringContaining("/tmp/fetched-claude-session.tar.gz"),
+    }));
     expect(invokeMock).toHaveBeenCalledWith(
       "spawn_session",
       expect.objectContaining({
@@ -2906,15 +2924,14 @@ describe("incoming transfer approval", () => {
       if (cmd === "read_env_var") {
         return "/Users/tester";
       }
+      if (cmd === "materialize_transfer_artifact") {
+        return true;
+      }
       if (
-        cmd === "ensure_directory" ||
         cmd === "git_worktree_add" ||
         cmd === "acknowledge_incoming_transfer_commit"
       ) {
         return null;
-      }
-      if (cmd === "run_script") {
-        return "";
       }
       if (cmd === "spawn_session") {
         return null;
@@ -2926,33 +2943,17 @@ describe("incoming transfer approval", () => {
     await flushBackgroundSetup();
 
     expect(localTaskId).toEqual(expect.any(String));
-    expect(invokeMock).toHaveBeenCalledWith("ensure_directory", {
-      path: "/Users/tester/.copilot/session-state",
+    expect(invokeMock).toHaveBeenCalledWith("materialize_transfer_artifact", {
+      sourcePath: "/tmp/fetched-copilot-session.tar.gz",
+      provider: "copilot",
+      resumeSessionId: "5fc2bd17-1d1b-4ae9-bed8-011fa4011100",
+      filename: "copilot-session.tar.gz",
+      kind: "session-archive",
+      materialization: "extract-tar-gz",
     });
-    expect(invokeMock).toHaveBeenCalledWith(
-      "run_script",
-      expect.objectContaining({
-        script: expect.stringContaining("mktemp -d"),
-        cwd: "/tmp/repo-1",
-        env: expect.objectContaining({
-          KANNA_WORKTREE: "1",
-        }),
-      }),
-    );
-    const copilotImportCall = invokeMock.mock.calls.find(([cmd, args]) =>
-      cmd === "run_script" &&
-      typeof args === "object" &&
-      args !== null &&
-      "script" in args &&
-      typeof args.script === "string" &&
-      args.script.includes("/tmp/fetched-copilot-session.tar.gz"),
-    );
-    expect(copilotImportCall?.[1]).toMatchObject({
-      script: expect.stringContaining("mv "),
-    });
-    expect(JSON.stringify(copilotImportCall?.[1])).not.toContain(
-      "tar -xzf '/tmp/fetched-copilot-session.tar.gz' -C '/Users/tester/.copilot/session-state'",
-    );
+    expect(invokeMock).not.toHaveBeenCalledWith("run_script", expect.objectContaining({
+      script: expect.stringContaining("/tmp/fetched-copilot-session.tar.gz"),
+    }));
     expect(invokeMock).toHaveBeenCalledWith(
       "spawn_session",
       expect.objectContaining({
@@ -3061,6 +3062,9 @@ describe("incoming transfer approval", () => {
       if (cmd === "read_env_var") {
         return "/Users/tester";
       }
+      if (cmd === "materialize_transfer_artifact") {
+        return false;
+      }
       if (
         cmd === "git_worktree_add" ||
         cmd === "acknowledge_incoming_transfer_commit"
@@ -3077,7 +3081,18 @@ describe("incoming transfer approval", () => {
     await flushBackgroundSetup();
 
     expect(localTaskId).toEqual(expect.any(String));
-    expect(invokeMock).not.toHaveBeenCalledWith("fetch_transfer_artifact", expect.anything());
+    expect(invokeMock).toHaveBeenCalledWith("fetch_transfer_artifact", {
+      transferId: "transfer-1",
+      artifactId,
+    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "materialize_transfer_artifact",
+      expect.objectContaining({
+        sourcePath: artifactPath,
+        provider,
+        resumeSessionId,
+      }),
+    );
     expect(invokeMock).not.toHaveBeenCalledWith("run_script", expect.anything());
     const spawnCall = invokeMock.mock.calls.find(([cmd]) => cmd === "spawn_session");
     expect(spawnCall).toBeTruthy();

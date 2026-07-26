@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { OutgoingTransferPayload } from "./taskTransfer";
 import {
   buildOutgoingTransferPayload,
+  parseIncomingTransferRequest,
   parseTaskPullRequestedEvent,
   resolveIncomingTransferBaseBranch,
 } from "./taskTransfer";
@@ -183,5 +184,119 @@ describe("parseTaskPullRequestedEvent", () => {
       request_id: "pull-1",
       requester_peer_id: "peer-destination",
     })).toThrow("source task id");
+  });
+});
+
+describe("parseIncomingTransferRequest artifact validation", () => {
+  function requestWithArtifact(artifact: Record<string, unknown>) {
+    return {
+      type: "incoming_transfer_request",
+      transfer_id: "transfer-1",
+      source_peer_id: "peer-source",
+      source_task_id: "task-source",
+      payload: {
+        target_peer_id: "peer-target",
+        target_desktop_id: null,
+        task: {
+          cloud_task_id: "task-source",
+          source_peer_id: "peer-source",
+          source_desktop_id: null,
+          source_task_id: "task-source",
+          resume_session_id: "364643cc-5e6d-48fc-86ca-ca7764380900",
+          prompt: "Fix handoff",
+          stage: "in progress",
+          branch: "task-source",
+          pipeline: "default",
+          display_name: null,
+          base_ref: "origin/main",
+          agent_type: "pty",
+          agent_provider: "claude",
+        },
+        repo: {
+          mode: "reuse-local",
+          remote_url: null,
+          path: "/tmp/repo-1",
+          name: "repo-1",
+          default_branch: "main",
+          bundle: null,
+        },
+        recovery: null,
+        artifacts: [artifact],
+      },
+    };
+  }
+
+  it.each([
+    "../.ssh/authorized_keys",
+    "/tmp/owned",
+    ".claude/tasks/../../.ssh",
+  ])("rejects peer artifact traversal path %s", (homeRelPath) => {
+    expect(() => parseIncomingTransferRequest(requestWithArtifact({
+      artifact_id: "artifact-1",
+      filename: "claude-session.tar.gz",
+      provider: "claude",
+      kind: "session-archive",
+      materialization: "extract-tar-gz",
+      home_rel_path: homeRelPath,
+    }))).toThrow(/artifact|path|session/i);
+  });
+
+  it("rejects an artifact whose provider does not match the resume provider", () => {
+    expect(() => parseIncomingTransferRequest(requestWithArtifact({
+      artifact_id: "artifact-1",
+      filename: "copilot-session.tar.gz",
+      provider: "copilot",
+      kind: "session-archive",
+      materialization: "extract-tar-gz",
+      home_rel_path: ".copilot/session-state/364643cc-5e6d-48fc-86ca-ca7764380900",
+    }))).toThrow(/provider/i);
+  });
+
+  it.each([
+    ["source_peer_id", "peer-impersonated"],
+    ["source_task_id", "task-impersonated"],
+  ])("rejects an inner %s that does not match the authenticated envelope", (field, value) => {
+    const request = requestWithArtifact({
+      artifact_id: "artifact-1",
+      filename: "claude-session.tar.gz",
+      provider: "claude",
+      kind: "session-archive",
+      materialization: "extract-tar-gz",
+      home_rel_path: ".claude/tasks/364643cc-5e6d-48fc-86ca-ca7764380900",
+    });
+    (request.payload.task as Record<string, unknown>)[field] = value;
+
+    expect(() => parseIncomingTransferRequest(request)).toThrow(/source identity|envelope/i);
+  });
+
+  it("rejects an artifact materialization outside the provider contract", () => {
+    expect(() => parseIncomingTransferRequest(requestWithArtifact({
+      artifact_id: "artifact-1",
+      filename: "claude-session.tar.gz",
+      provider: "claude",
+      kind: "session-rollout",
+      materialization: "copy-file",
+      home_rel_path: ".claude/tasks/364643cc-5e6d-48fc-86ca-ca7764380900",
+    }))).toThrow(/artifact|materialization|kind/i);
+  });
+
+  it("accepts canonical legacy artifact metadata but keeps the destination provider-owned", () => {
+    const request = parseIncomingTransferRequest(requestWithArtifact({
+      artifact_id: "artifact-1",
+      filename: "claude-session.tar.gz",
+      provider: "claude",
+      kind: "session-archive",
+      materialization: "extract-tar-gz",
+      home_rel_path: ".claude/tasks/364643cc-5e6d-48fc-86ca-ca7764380900",
+    }));
+
+    expect(request.payload.artifacts).toEqual([{
+      artifact_id: "artifact-1",
+      filename: "claude-session.tar.gz",
+      provider: "claude",
+      kind: "session-archive",
+      materialization: "extract-tar-gz",
+      home_rel_path: ".claude/tasks/364643cc-5e6d-48fc-86ca-ca7764380900",
+    }]);
   });
 });
