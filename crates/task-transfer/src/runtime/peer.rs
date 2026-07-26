@@ -206,6 +206,9 @@ impl TransferRuntime {
         public_key: &str,
         protocol_version: u32,
     ) -> Result<(), RuntimeError> {
+        if external_key_is_trusted(&self.external_peers, peer_id, public_key) {
+            return Ok(());
+        }
         let record = self
             .trusted_peer_record(peer_id)?
             .filter(|record| record.public_key == public_key)

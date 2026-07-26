@@ -53,6 +53,12 @@ struct StoredIncomingTransferReservation {
     event_recorded: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredAuthenticatedPeerRequest {
+    replay_key: String,
+    expires_at_unix_ms: u64,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct TransferReplayStore {
     root: PathBuf,
@@ -188,6 +194,43 @@ impl TransferReplayStore {
             }
         }
         Ok(loaded)
+    }
+
+    pub(super) fn load_authenticated_peer_requests(
+        &self,
+    ) -> Result<HashMap<String, u64>, RuntimeError> {
+        let now_ms = unix_ms();
+        let mut loaded = HashMap::new();
+        for (path, stored) in self.load_records::<StoredAuthenticatedPeerRequest>(
+            &self.root.join("authenticated-peer-requests"),
+        )? {
+            if path != self.authenticated_peer_request_path(&stored.replay_key)
+                || stored.expires_at_unix_ms < now_ms
+            {
+                self.remove_record(&path);
+                continue;
+            }
+            loaded.insert(stored.replay_key, stored.expires_at_unix_ms);
+        }
+        Ok(loaded)
+    }
+
+    pub(super) fn save_authenticated_peer_request(
+        &self,
+        replay_key: &str,
+        expires_at_unix_ms: u64,
+    ) -> Result<(), RuntimeError> {
+        self.write_atomic(
+            &self.authenticated_peer_request_path(replay_key),
+            &StoredAuthenticatedPeerRequest {
+                replay_key: replay_key.to_owned(),
+                expires_at_unix_ms,
+            },
+        )
+    }
+
+    pub(super) fn remove_authenticated_peer_request(&self, replay_key: &str) {
+        self.remove_record(&self.authenticated_peer_request_path(replay_key));
     }
 
     pub(super) fn save_reservation(
@@ -373,6 +416,12 @@ impl TransferReplayStore {
         self.root
             .join("incoming-reservations")
             .join(format!("{}.json", transfer_key(transfer_id)))
+    }
+
+    fn authenticated_peer_request_path(&self, replay_key: &str) -> PathBuf {
+        self.root
+            .join("authenticated-peer-requests")
+            .join(format!("{}.json", transfer_key(replay_key)))
     }
 
     fn remove_record(&self, path: &Path) {

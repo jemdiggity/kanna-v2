@@ -59,6 +59,62 @@ async fn send_raw_task_pull(
     serde_json::from_str(response.trim()).unwrap()
 }
 
+async fn send_raw_peer_value(endpoint: &str, request: &serde_json::Value) -> PeerResponse {
+    let mut stream = TcpStream::connect(endpoint).await.unwrap();
+    stream
+        .write_all(format!("{}\n", serde_json::to_string(request).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    stream.flush().await.unwrap();
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .await
+        .unwrap();
+    serde_json::from_str(response.trim()).unwrap()
+}
+
+async fn serve_task_file_reads(listener: TcpListener, maximum: usize) -> usize {
+    let mut accepted = 0usize;
+    while accepted < maximum {
+        let next = tokio::time::timeout(Duration::from_secs(1), listener.accept()).await;
+        let Ok(Ok((stream, _))) = next else {
+            break;
+        };
+        accepted += 1;
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).await.unwrap();
+            if header == "\r\n" {
+                break;
+            }
+        }
+        let body = r#"{"path":"src/private.rs","content":"private body"}"#;
+        reader
+            .get_mut()
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    }
+    accepted
+}
+
+fn current_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
 fn peer_error_message(response: PeerResponse) -> String {
     let PeerResponse::Error { message, .. } = response else {
         panic!("expected peer error response");
@@ -1405,7 +1461,7 @@ async fn delayed_observe_cannot_install_after_unobserve() {
             endpoint: format!("127.0.0.1:{port}"),
             pid: std::process::id(),
             public_key: target_public_key.clone(),
-            protocol_version: 1,
+            protocol_version: 2,
             accepting_transfers: true,
         })
         .unwrap();
@@ -1414,7 +1470,9 @@ async fn delayed_observe_cannot_install_after_unobserve() {
             peer_id: "peer-target".into(),
             display_name: "Target".into(),
             public_key: target_public_key,
-            capabilities_json: "{\"protocolVersion\":1}".into(),
+            capabilities_json:
+                "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                    .into(),
             paired_at: "2026-07-26T00:00:00Z".into(),
             last_seen_at: None,
             revoked_at: None,
@@ -1464,7 +1522,7 @@ async fn closed_observer_tombstones_are_bounded_without_losing_recent_race_prote
             endpoint: format!("127.0.0.1:{port}"),
             pid: std::process::id(),
             public_key: target_public_key.clone(),
-            protocol_version: 1,
+            protocol_version: 2,
             accepting_transfers: true,
         })
         .unwrap();
@@ -1473,7 +1531,9 @@ async fn closed_observer_tombstones_are_bounded_without_losing_recent_race_prote
             peer_id: "peer-target".into(),
             display_name: "Target".into(),
             public_key: target_public_key,
-            capabilities_json: "{\"protocolVersion\":1}".into(),
+            capabilities_json:
+                "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                    .into(),
             paired_at: "2026-07-26T00:00:00Z".into(),
             last_seen_at: None,
             revoked_at: None,
@@ -1533,7 +1593,7 @@ async fn concurrent_observe_replacement_aborts_displaced_generation() {
             endpoint: format!("127.0.0.1:{port}"),
             pid: std::process::id(),
             public_key: target_public_key.clone(),
-            protocol_version: 1,
+            protocol_version: 2,
             accepting_transfers: true,
         })
         .unwrap();
@@ -1542,7 +1602,9 @@ async fn concurrent_observe_replacement_aborts_displaced_generation() {
             peer_id: "peer-target".into(),
             display_name: "Target".into(),
             public_key: target_public_key,
-            capabilities_json: "{\"protocolVersion\":1}".into(),
+            capabilities_json:
+                "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                    .into(),
             paired_at: "2026-07-26T00:00:00Z".into(),
             last_seen_at: None,
             revoked_at: None,
@@ -1604,7 +1666,7 @@ async fn old_unobserve_cannot_remove_replacement_observer_lease() {
             endpoint: format!("127.0.0.1:{port}"),
             pid: std::process::id(),
             public_key: target_public_key.clone(),
-            protocol_version: 1,
+            protocol_version: 2,
             accepting_transfers: true,
         })
         .unwrap();
@@ -1613,7 +1675,9 @@ async fn old_unobserve_cannot_remove_replacement_observer_lease() {
             peer_id: "peer-target".into(),
             display_name: "Target".into(),
             public_key: target_public_key,
-            capabilities_json: "{\"protocolVersion\":1}".into(),
+            capabilities_json:
+                "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                    .into(),
             paired_at: "2026-07-26T00:00:00Z".into(),
             last_seen_at: None,
             revoked_at: None,
@@ -2119,6 +2183,89 @@ async fn trusted_peer_mark_read_posts_to_owner_kanna_server() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn externally_trusted_peer_mark_read_keeps_authenticated_read_dwell_routing() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let kanna_port = listener.local_addr().unwrap().port();
+    let (request_tx, request_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).await.unwrap();
+            if header == "\r\n" {
+                break;
+            }
+        }
+        request_tx.send(request_line).unwrap();
+        reader
+            .get_mut()
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .await
+            .unwrap();
+    });
+
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(kanna_port),
+    )
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let owner_identity = owner.local_identity();
+    let secondary_identity = secondary.local_identity();
+    secondary
+        .upsert_external_peer(ExternalPeer {
+            peer_id: owner_identity.peer_id,
+            display_name: owner_identity.display_name,
+            endpoint: runtime_endpoint(temp.path(), "peer-owner"),
+            public_key: owner_identity.public_key,
+            protocol_version: owner_identity.protocol_version.into(),
+            accepting_transfers: owner_identity.accepting_transfers,
+        })
+        .await
+        .unwrap();
+    owner
+        .upsert_external_peer(ExternalPeer {
+            peer_id: secondary_identity.peer_id,
+            display_name: secondary_identity.display_name,
+            endpoint: runtime_endpoint(temp.path(), "peer-secondary"),
+            public_key: secondary_identity.public_key,
+            protocol_version: secondary_identity.protocol_version.into(),
+            accepting_transfers: secondary_identity.accepting_transfers,
+        })
+        .await
+        .unwrap();
+
+    secondary
+        .mark_peer_task_read("peer-owner", "owner-task-1", 9)
+        .await
+        .unwrap();
+    assert_eq!(
+        request_rx.await.unwrap(),
+        "POST /v1/tasks/owner-task-1/actions/mark-read HTTP/1.1\r\n",
+    );
+    server.await.unwrap();
+    assert!(
+        !trusted_peer_store_path(temp.path(), "peer-owner").exists()
+            && !trusted_peer_store_path(temp.path(), "peer-secondary").exists(),
+        "external read-dwell routing persisted session trust",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snapshot_refresh() {
     let temp = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -2548,6 +2695,390 @@ async fn forged_advance_payload_cannot_apply_owner_action() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn privileged_lan_requests_reject_a_spoofed_paired_peer_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-owner",
+        "Owner",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&secondary, &owner, "peer-owner").await;
+    let owner_endpoint = runtime_endpoint(temp.path(), "peer-owner");
+
+    for request in [
+        json!({
+            "type": "observe_session",
+            "request_id": "spoof-observe",
+            "requester_peer_id": "peer-secondary",
+            "session_id": "owner-task-1",
+        }),
+        json!({
+            "type": "send_session_input",
+            "request_id": "spoof-input",
+            "requester_peer_id": "peer-secondary",
+            "session_id": "owner-task-1",
+            "data": [97],
+        }),
+        json!({
+            "type": "resize_session",
+            "request_id": "spoof-resize",
+            "requester_peer_id": "peer-secondary",
+            "session_id": "owner-task-1",
+            "cols": 100,
+            "rows": 40,
+        }),
+        json!({
+            "type": "close_task",
+            "request_id": "spoof-close",
+            "requester_peer_id": "peer-secondary",
+            "task_id": "owner-task-1",
+        }),
+        json!({
+            "type": "read_task_file",
+            "request_id": "spoof-read",
+            "requester_peer_id": "peer-secondary",
+            "task_id": "owner-task-1",
+            "path": "src/private.rs",
+        }),
+    ] {
+        let response = send_raw_peer_value(&owner_endpoint, &request).await;
+        assert!(
+            matches!(
+                response,
+                PeerResponse::Error { ref message, .. }
+                    if message.contains("missing authenticated payload")
+            ),
+            "caller-supplied peer id was accepted for {}: {response:?}",
+            request["type"],
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn privileged_lan_read_rejects_a_forged_sealed_payload() {
+    let temp = tempfile::tempdir().unwrap();
+    let kanna_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(kanna_listener.local_addr().unwrap().port()),
+    )
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&secondary, &owner, "peer-owner").await;
+    let owner_peer = secondary
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap();
+    let forged_payload = seal_json(
+        &TransferIdentity::generate(),
+        &parse_public_key(&owner_peer.public_key).unwrap(),
+        &json!({
+            "action": "read_task_file",
+            "request_id": "forged-read",
+            "issued_at_unix_ms": current_unix_ms(),
+            "task_id": "owner-task-1",
+            "path": "src/private.rs",
+        }),
+    )
+    .unwrap();
+    let request = json!({
+        "type": "read_task_file",
+        "request_id": "forged-read",
+        "requester_peer_id": "peer-secondary",
+        "task_id": "owner-task-1",
+        "path": "src/private.rs",
+        "sealed_payload": forged_payload,
+    });
+
+    let server = tokio::spawn(serve_task_file_reads(kanna_listener, 1));
+    let response = send_raw_peer_value(&owner_peer.endpoint, &request).await;
+    assert!(
+        matches!(
+            response,
+            PeerResponse::Error { ref message, .. }
+                if message.contains("payload decryption failed")
+        ),
+        "forged sealed file read was accepted: {response:?}",
+    );
+    assert_eq!(
+        server.await.unwrap(),
+        0,
+        "forged file read reached the owner Kanna server",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn privileged_lan_read_rejects_replay_before_a_second_owner_action() {
+    let temp = tempfile::tempdir().unwrap();
+    let kanna_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(kanna_listener.local_addr().unwrap().port()),
+    )
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&secondary, &owner, "peer-owner").await;
+    let owner_peer = secondary
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap();
+    let identity_path = temp
+        .path()
+        .join("transfer-identities")
+        .join(format!("{}.json", URL_SAFE_NO_PAD.encode("peer-secondary")));
+    let stored_identity: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(identity_path).unwrap()).unwrap();
+    let secondary_identity =
+        TransferIdentity::from_secret_string(stored_identity["secret_key"].as_str().unwrap())
+            .unwrap();
+    let sealed_payload = seal_json(
+        &secondary_identity,
+        &parse_public_key(&owner_peer.public_key).unwrap(),
+        &json!({
+            "action": "read_task_file",
+            "request_id": "replayed-read",
+            "issued_at_unix_ms": current_unix_ms(),
+            "task_id": "owner-task-1",
+            "path": "src/private.rs",
+        }),
+    )
+    .unwrap();
+    let request = json!({
+        "type": "read_task_file",
+        "request_id": "replayed-read",
+        "requester_peer_id": "peer-secondary",
+        "task_id": "owner-task-1",
+        "path": "src/private.rs",
+        "sealed_payload": sealed_payload,
+    });
+
+    let server = tokio::spawn(serve_task_file_reads(kanna_listener, 2));
+
+    let first = send_raw_peer_value(&owner_peer.endpoint, &request).await;
+    assert!(
+        matches!(first, PeerResponse::ReadTaskFile { .. }),
+        "initial authenticated file read failed: {first:?}",
+    );
+    let replay = send_raw_peer_value(&owner_peer.endpoint, &request).await;
+    assert!(
+        matches!(
+            replay,
+            PeerResponse::Error { ref message, .. }
+                if message.contains("replayed authenticated read_task_file request")
+        ),
+        "replayed file read was accepted: {replay:?}",
+    );
+    assert_eq!(
+        server.await.unwrap(),
+        1,
+        "replayed file read reached the owner Kanna server",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn privileged_lan_replay_is_rejected_after_owner_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let kanna_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let kanna_port = kanna_listener.local_addr().unwrap().port();
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(kanna_port),
+    )
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&secondary, &owner, "peer-owner").await;
+    let owner_peer = secondary
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap();
+    let identity_path = temp
+        .path()
+        .join("transfer-identities")
+        .join(format!("{}.json", URL_SAFE_NO_PAD.encode("peer-secondary")));
+    let stored_identity: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(identity_path).unwrap()).unwrap();
+    let secondary_identity =
+        TransferIdentity::from_secret_string(stored_identity["secret_key"].as_str().unwrap())
+            .unwrap();
+    let sealed_payload = seal_json(
+        &secondary_identity,
+        &parse_public_key(&owner_peer.public_key).unwrap(),
+        &json!({
+            "action": "read_task_file",
+            "request_id": "restart-replay-read",
+            "issued_at_unix_ms": current_unix_ms(),
+            "task_id": "owner-task-1",
+            "path": "src/private.rs",
+        }),
+    )
+    .unwrap();
+    let request = json!({
+        "type": "read_task_file",
+        "request_id": "restart-replay-read",
+        "requester_peer_id": "peer-secondary",
+        "task_id": "owner-task-1",
+        "path": "src/private.rs",
+        "sealed_payload": sealed_payload,
+    });
+    let server = tokio::spawn(serve_task_file_reads(kanna_listener, 2));
+
+    assert!(matches!(
+        send_raw_peer_value(&owner_peer.endpoint, &request).await,
+        PeerResponse::ReadTaskFile { .. }
+    ));
+    drop(owner);
+    let restarted_owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(kanna_port),
+    )
+    .await
+    .unwrap();
+    let replay = send_raw_peer_value(&runtime_endpoint(temp.path(), "peer-owner"), &request).await;
+    assert!(
+        matches!(
+            replay,
+            PeerResponse::Error { ref message, .. }
+                if message.contains("replayed authenticated read_task_file request")
+        ),
+        "owner restart forgot the authenticated replay: {replay:?}",
+    );
+    assert_eq!(
+        server.await.unwrap(),
+        1,
+        "restart replay reached the owner Kanna server",
+    );
+    drop(restarted_owner);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn privileged_lan_read_rejects_stale_and_tampered_arguments() {
+    let temp = tempfile::tempdir().unwrap();
+    let kanna_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(kanna_listener.local_addr().unwrap().port()),
+    )
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&secondary, &owner, "peer-owner").await;
+    let owner_peer = secondary
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap();
+    let identity_path = temp
+        .path()
+        .join("transfer-identities")
+        .join(format!("{}.json", URL_SAFE_NO_PAD.encode("peer-secondary")));
+    let stored_identity: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(identity_path).unwrap()).unwrap();
+    let secondary_identity =
+        TransferIdentity::from_secret_string(stored_identity["secret_key"].as_str().unwrap())
+            .unwrap();
+    let owner_public_key = parse_public_key(&owner_peer.public_key).unwrap();
+    let server = tokio::spawn(serve_task_file_reads(kanna_listener, 2));
+
+    for (request_id, issued_at_unix_ms, outer_path, expected_error) in [
+        ("stale-read", 0, "src/private.rs", "stale"),
+        (
+            "tampered-read",
+            current_unix_ms(),
+            "src/other.rs",
+            "does not match authenticated payload",
+        ),
+    ] {
+        let sealed_payload = seal_json(
+            &secondary_identity,
+            &owner_public_key,
+            &json!({
+                "action": "read_task_file",
+                "request_id": request_id,
+                "issued_at_unix_ms": issued_at_unix_ms,
+                "task_id": "owner-task-1",
+                "path": "src/private.rs",
+            }),
+        )
+        .unwrap();
+        let request = json!({
+            "type": "read_task_file",
+            "request_id": request_id,
+            "requester_peer_id": "peer-secondary",
+            "task_id": "owner-task-1",
+            "path": outer_path,
+            "sealed_payload": sealed_payload,
+        });
+        let response = send_raw_peer_value(&owner_peer.endpoint, &request).await;
+        assert!(
+            matches!(
+                response,
+                PeerResponse::Error { ref message, .. } if message.contains(expected_error)
+            ),
+            "{request_id} was accepted: {response:?}",
+        );
+    }
+
+    assert_eq!(
+        server.await.unwrap(),
+        0,
+        "stale or tampered file read reached the owner Kanna server",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forged_snapshot_payload_cannot_expose_owner_tasks() {
     let temp = tempfile::tempdir().unwrap();
     let owner = TransferRuntime::spawn(RuntimeConfig::for_tests(
@@ -2835,6 +3366,7 @@ async fn replayed_advance_payload_cannot_apply_owner_action_twice() {
         &json!({
             "action": "advance_task_stage",
             "request_id": "replayed-advance",
+            "issued_at_unix_ms": current_unix_ms(),
             "task_id": "owner-task-1",
             "expected_transition_revision": "run-1",
         }),

@@ -340,12 +340,16 @@ pub enum PeerRequest {
         request_id: String,
         requester_peer_id: String,
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
     },
     SendSessionInput {
         request_id: String,
         requester_peer_id: String,
         session_id: String,
         data: Vec<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
     },
     ResizeSession {
         request_id: String,
@@ -353,11 +357,15 @@ pub enum PeerRequest {
         session_id: String,
         cols: u16,
         rows: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
     },
     CloseTask {
         request_id: String,
         requester_peer_id: String,
         task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
     },
     AdvanceTaskStage {
         request_id: String,
@@ -373,6 +381,8 @@ pub enum PeerRequest {
         requester_peer_id: String,
         task_id: String,
         path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
     },
     MarkTaskRead {
         request_id: String,

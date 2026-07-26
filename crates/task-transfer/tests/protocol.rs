@@ -460,6 +460,7 @@ fn remote_task_file_messages_use_expected_wire_names() {
         requester_peer_id: "peer-secondary".into(),
         task_id: "task-owner".into(),
         path: "src/app.ts".into(),
+        sealed_payload: Some("sealed-read".into()),
     };
     assert_eq!(
         serde_json::to_value(&peer_request).unwrap(),
@@ -469,6 +470,7 @@ fn remote_task_file_messages_use_expected_wire_names() {
             "requester_peer_id": "peer-secondary",
             "task_id": "task-owner",
             "path": "src/app.ts",
+            "sealed_payload": "sealed-read",
         })
     );
     assert_roundtrip(peer_request);

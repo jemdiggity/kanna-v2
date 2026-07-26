@@ -8,8 +8,8 @@ use super::events::{
     PairingRequestedEvent, RuntimeError, RuntimeEvent, TaskPullRequestedEvent,
 };
 use super::external_peers::{
-    ensure_peer_is_trusted, ensure_peer_is_trusted_for_transport, find_peer, ExternalPeerRegistry,
-    TransferTransport,
+    ensure_peer_is_trusted, ensure_peer_is_trusted_for_transport, external_key_is_trusted,
+    find_peer, ExternalPeerRegistry, TransferTransport,
 };
 use super::pull::{prune_task_pull_requests, validate_source_task_id};
 use super::replay_store::unix_ms;
@@ -29,12 +29,12 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
 use rand_core::{OsRng, RngCore};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex};
@@ -798,26 +798,39 @@ async fn handle_connection(
             request_id,
             requester_peer_id,
             session_id,
+            sealed_payload,
         }) => {
-            let response =
-                match prepare_session_observer(&context, &requester_peer_id, &session_id).await {
-                    Ok((daemon, initial_snapshot)) => {
-                        write_json_line(
-                            &mut stream,
-                            &PeerResponse::ObserveSession {
-                                request_id,
-                                session_id: session_id.clone(),
-                            },
-                        )
-                        .await?;
-                        stream_daemon_session(daemon, stream, session_id, initial_snapshot).await?;
-                        return Ok(());
-                    }
-                    Err(error) => PeerResponse::Error {
-                        request_id,
-                        message: error.to_string(),
-                    },
-                };
+            let response = match async {
+                let payload = authenticate_peer_request(
+                    &context,
+                    &requester_peer_id,
+                    sealed_payload.as_deref(),
+                    "observe_session",
+                    &request_id,
+                )
+                .await?;
+                ensure_authenticated_argument(&payload, "session_id", &session_id)?;
+                prepare_session_observer(&context, &session_id).await
+            }
+            .await
+            {
+                Ok((daemon, initial_snapshot)) => {
+                    write_json_line(
+                        &mut stream,
+                        &PeerResponse::ObserveSession {
+                            request_id,
+                            session_id: session_id.clone(),
+                        },
+                    )
+                    .await?;
+                    stream_daemon_session(daemon, stream, session_id, initial_snapshot).await?;
+                    return Ok(());
+                }
+                Err(error) => PeerResponse::Error {
+                    request_id,
+                    message: error.to_string(),
+                },
+            };
             response
         }
         Ok(PeerRequest::SendSessionInput {
@@ -825,7 +838,22 @@ async fn handle_connection(
             requester_peer_id,
             session_id,
             data,
-        }) => match send_daemon_input(&context, &requester_peer_id, &session_id, data).await {
+            sealed_payload,
+        }) => match async {
+            let payload = authenticate_peer_request(
+                &context,
+                &requester_peer_id,
+                sealed_payload.as_deref(),
+                "send_session_input",
+                &request_id,
+            )
+            .await?;
+            ensure_authenticated_argument(&payload, "session_id", &session_id)?;
+            ensure_authenticated_argument(&payload, "data", &data)?;
+            send_daemon_input(&context, &session_id, data).await
+        }
+        .await
+        {
             Ok(()) => PeerResponse::SendSessionInput { request_id },
             Err(error) => PeerResponse::Error {
                 request_id,
@@ -838,8 +866,22 @@ async fn handle_connection(
             session_id,
             cols,
             rows,
-        }) => match resize_daemon_session(&context, &requester_peer_id, &session_id, cols, rows)
-            .await
+            sealed_payload,
+        }) => match async {
+            let payload = authenticate_peer_request(
+                &context,
+                &requester_peer_id,
+                sealed_payload.as_deref(),
+                "resize_session",
+                &request_id,
+            )
+            .await?;
+            ensure_authenticated_argument(&payload, "session_id", &session_id)?;
+            ensure_authenticated_argument(&payload, "cols", &cols)?;
+            ensure_authenticated_argument(&payload, "rows", &rows)?;
+            resize_daemon_session(&context, &session_id, cols, rows).await
+        }
+        .await
         {
             Ok(()) => PeerResponse::ResizeSession { request_id },
             Err(error) => PeerResponse::Error {
@@ -851,7 +893,21 @@ async fn handle_connection(
             request_id,
             requester_peer_id,
             task_id,
-        }) => match close_owner_task(&context, &requester_peer_id, &task_id).await {
+            sealed_payload,
+        }) => match async {
+            let payload = authenticate_peer_request(
+                &context,
+                &requester_peer_id,
+                sealed_payload.as_deref(),
+                "close_task",
+                &request_id,
+            )
+            .await?;
+            ensure_authenticated_argument(&payload, "task_id", &task_id)?;
+            close_owner_task(&context, &task_id).await
+        }
+        .await
+        {
             Ok(()) => PeerResponse::CloseTask { request_id },
             Err(error) => PeerResponse::Error {
                 request_id,
@@ -861,8 +917,8 @@ async fn handle_connection(
         Ok(PeerRequest::AdvanceTaskStage {
             request_id,
             requester_peer_id,
-            task_id: _,
-            expected_transition_revision: _,
+            task_id,
+            expected_transition_revision,
             sealed_payload,
         }) => match async {
             let payload = authenticate_peer_request(
@@ -873,22 +929,14 @@ async fn handle_connection(
                 &request_id,
             )
             .await?;
-            let task_id = payload
-                .get("task_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    RuntimeError::Protocol("advance-stage payload missing task_id".into())
-                })?;
-            let expected_transition_revision = payload
-                .get("expected_transition_revision")
-                .and_then(Value::as_str);
-            advance_owner_task_stage(
-                &context,
-                &requester_peer_id,
-                task_id,
-                expected_transition_revision,
-            )
-            .await?;
+            ensure_authenticated_argument(&payload, "task_id", &task_id)?;
+            ensure_authenticated_argument(
+                &payload,
+                "expected_transition_revision",
+                &expected_transition_revision,
+            )?;
+            advance_owner_task_stage(&context, &task_id, expected_transition_revision.as_deref())
+                .await?;
             Ok::<PeerResponse, RuntimeError>(PeerResponse::AdvanceTaskStage {
                 request_id: request_id.clone(),
             })
@@ -906,7 +954,22 @@ async fn handle_connection(
             requester_peer_id,
             task_id,
             path,
-        }) => match read_owner_task_file(&context, &requester_peer_id, &task_id, &path).await {
+            sealed_payload,
+        }) => match async {
+            let payload = authenticate_peer_request(
+                &context,
+                &requester_peer_id,
+                sealed_payload.as_deref(),
+                "read_task_file",
+                &request_id,
+            )
+            .await?;
+            ensure_authenticated_argument(&payload, "task_id", &task_id)?;
+            ensure_authenticated_argument(&payload, "path", &path)?;
+            read_owner_task_file(&context, &task_id, &path).await
+        }
+        .await
+        {
             Ok((path, content)) => PeerResponse::ReadTaskFile {
                 request_id,
                 path,
@@ -922,46 +985,23 @@ async fn handle_connection(
             requester_peer_id,
             sealed_payload,
         }) => match async {
-            let requester_peer = find_peer(
-                &context.discovery,
-                &context.external_peers,
-                &context.self_peer_id,
-                &requester_peer_id,
-                TransferTransport::Auto,
-            )
-            .await?;
-            ensure_peer_is_trusted(
-                &context.registry_root,
-                &context.self_peer_id,
-                &context.external_peers,
-                &requester_peer_id,
-                &requester_peer.public_key,
-            )?;
-            let requester_public_key = parse_public_key(&requester_peer.public_key)?;
-            let identity = load_or_create_identity(&context.registry_root, &context.self_peer_id)?;
-            let payload = open_json(&identity, &requester_public_key, &sealed_payload)?;
-            let task_id = payload
-                .get("task_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    RuntimeError::Protocol("mark-read payload missing task_id".into())
-                })?;
-            let expected_activity_revision = payload
-                .get("expected_activity_revision")
-                .and_then(Value::as_i64)
-                .filter(|revision| *revision >= 0)
-                .ok_or_else(|| {
-                    RuntimeError::Protocol(
-                        "mark-read payload missing expected_activity_revision".into(),
-                    )
-                })?;
-            mark_owner_task_read(
+            let payload = authenticate_peer_request(
                 &context,
                 &requester_peer_id,
-                task_id,
-                expected_activity_revision,
+                Some(&sealed_payload),
+                "mark_task_read",
+                &request_id,
             )
             .await?;
+            let task_id: String = authenticated_argument(&payload, "task_id")?;
+            let expected_activity_revision: i64 =
+                authenticated_argument(&payload, "expected_activity_revision")?;
+            if expected_activity_revision < 0 {
+                return Err(RuntimeError::Protocol(
+                    "authenticated expected_activity_revision must not be negative".into(),
+                ));
+            }
+            mark_owner_task_read(&context, &task_id, expected_activity_revision).await?;
             Ok::<PeerResponse, RuntimeError>(PeerResponse::MarkTaskRead {
                 request_id: request_id.clone(),
             })
@@ -1011,15 +1051,26 @@ async fn authenticate_peer_request(
         .into_iter()
         .find(|peer| {
             peer.peer_id == requester_peer_id && peer.public_key == requester_peer.public_key
-        })
-        .ok_or_else(|| {
-            RuntimeError::Protocol(format!("peer {requester_peer_id} is not trusted"))
-        })?;
+        });
+    let externally_trusted = external_key_is_trusted(
+        &context.external_peers,
+        requester_peer_id,
+        &requester_peer.public_key,
+    );
+    if trusted_peer.is_none() && !externally_trusted {
+        return Err(RuntimeError::Protocol(format!(
+            "peer {requester_peer_id} is not trusted"
+        )));
+    }
     let sealed_payload = sealed_payload.ok_or_else(|| {
-        if supports_authenticated_task_requests(
-            requester_peer.protocol_version,
-            &trusted_peer.capabilities_json,
-        ) {
+        if externally_trusted
+            || trusted_peer.as_ref().is_some_and(|trusted_peer| {
+                supports_authenticated_task_requests(
+                    requester_peer.protocol_version,
+                    &trusted_peer.capabilities_json,
+                )
+            })
+        {
             RuntimeError::Protocol(format!(
                 "{expected_action} request is missing authenticated payload"
             ))
@@ -1044,17 +1095,81 @@ async fn authenticate_peer_request(
         ));
     }
 
+    let issued_at_unix_ms = payload
+        .get("issued_at_unix_ms")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            RuntimeError::Protocol(format!(
+                "authenticated {expected_action} payload is missing issued_at_unix_ms"
+            ))
+        })?;
+    let now_ms = unix_ms();
+    let freshness_ms = u64::try_from(context.pending_transfer_ttl.as_millis()).unwrap_or(u64::MAX);
+    if now_ms.saturating_sub(issued_at_unix_ms) > freshness_ms {
+        return Err(RuntimeError::Protocol(format!(
+            "stale authenticated {expected_action} request"
+        )));
+    }
+    if issued_at_unix_ms.saturating_sub(now_ms) > freshness_ms {
+        return Err(RuntimeError::Protocol(format!(
+            "authenticated {expected_action} request was issued too far in the future"
+        )));
+    }
+
     let replay_key = format!("{requester_peer_id}\n{expected_action}\n{expected_request_id}");
-    let now = Instant::now();
     let mut authenticated_requests = context.authenticated_peer_requests.lock().await;
-    authenticated_requests
-        .retain(|_, created_at| now.duration_since(*created_at) <= context.pending_transfer_ttl);
-    if authenticated_requests.insert(replay_key, now).is_some() {
+    let expired = authenticated_requests
+        .iter()
+        .filter(|(_, expires_at)| **expires_at < now_ms)
+        .map(|(replay_key, _)| replay_key.clone())
+        .collect::<Vec<_>>();
+    for replay_key in expired {
+        authenticated_requests.remove(&replay_key);
+        context
+            .replay_store
+            .remove_authenticated_peer_request(&replay_key);
+    }
+    if authenticated_requests.contains_key(&replay_key) {
         return Err(RuntimeError::Protocol(format!(
             "replayed authenticated {expected_action} request"
         )));
     }
+    let expires_at = now_ms.max(issued_at_unix_ms).saturating_add(freshness_ms);
+    context
+        .replay_store
+        .save_authenticated_peer_request(&replay_key, expires_at)?;
+    authenticated_requests.insert(replay_key, expires_at);
     Ok(payload)
+}
+
+fn authenticated_argument<T>(payload: &Value, name: &str) -> Result<T, RuntimeError>
+where
+    T: DeserializeOwned,
+{
+    let value = payload.get(name).cloned().ok_or_else(|| {
+        RuntimeError::Protocol(format!("authenticated payload is missing {name}"))
+    })?;
+    serde_json::from_value(value).map_err(|error| {
+        RuntimeError::Protocol(format!("authenticated payload has invalid {name}: {error}"))
+    })
+}
+
+fn ensure_authenticated_argument<T>(
+    payload: &Value,
+    name: &str,
+    outer: &T,
+) -> Result<(), RuntimeError>
+where
+    T: DeserializeOwned + PartialEq,
+{
+    let authenticated: T = authenticated_argument(payload, name)?;
+    if authenticated == *outer {
+        Ok(())
+    } else {
+        Err(RuntimeError::Protocol(format!(
+            "{name} does not match authenticated payload"
+        )))
+    }
 }
 
 async fn build_incoming_event(

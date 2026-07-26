@@ -1,7 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -208,10 +208,29 @@ fn validate_relay_url(relay_url: &str) -> Result<(), String> {
     let request = relay_url
         .into_client_request()
         .map_err(|error| format!("invalid relay URL: {error}"))?;
-    match request.uri().scheme_str() {
-        Some("ws" | "wss") if request.uri().authority().is_some() => Ok(()),
+    let uri = request.uri();
+    let host = uri
+        .host()
+        .ok_or_else(|| "relay URL must include an authority".to_string())?;
+    match uri.scheme_str() {
+        Some("wss") => Ok(()),
+        Some("ws") if is_explicit_loopback_host(host) => Ok(()),
+        Some("ws") => Err("relay URL must use wss:// for non-loopback relay hosts".to_string()),
         _ => Err("relay URL must use ws:// or wss://".to_string()),
     }
+}
+
+fn is_explicit_loopback_host(host: &str) -> bool {
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    let ip_literal = normalized
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(&normalized);
+    normalized == "localhost"
+        || normalized.ends_with(".localhost")
+        || ip_literal
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 async fn run_proxy_listener(
@@ -464,7 +483,7 @@ mod tests {
 
     use super::{
         clear_cloud_transfer_proxies_in_state, ensure_cloud_transfer_proxy_in_state,
-        remove_cloud_transfer_proxy_in_state, CloudTransferProxyState,
+        remove_cloud_transfer_proxy_in_state, validate_relay_url, CloudTransferProxyState,
     };
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(3);
@@ -775,6 +794,33 @@ mod tests {
             );
         }
         assert!(state.lock().await.is_empty());
+    }
+
+    #[test]
+    fn relay_url_validation_requires_tls_for_non_loopback_hosts() {
+        for relay_url in [
+            "ws://relay.example.com/task-transfer",
+            "ws://192.168.1.20:8080",
+            "ws://10.0.2.2:8080",
+        ] {
+            assert!(
+                validate_relay_url(relay_url).is_err(),
+                "accepted plaintext non-loopback relay URL: {relay_url}",
+            );
+        }
+
+        for relay_url in [
+            "wss://relay.example.com/task-transfer",
+            "ws://localhost:8080",
+            "ws://dev.localhost:8080",
+            "ws://127.0.0.1:8080",
+            "ws://[::1]:8080",
+        ] {
+            assert!(
+                validate_relay_url(relay_url).is_ok(),
+                "rejected secure or explicit loopback relay URL: {relay_url}",
+            );
+        }
     }
 
     #[tokio::test]

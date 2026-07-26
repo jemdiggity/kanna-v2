@@ -1,8 +1,8 @@
 use super::events::{RuntimeError, RuntimeEvent};
 use super::state::ListenerContext;
 use super::utils::{
-    ensure_peer_is_trusted_for, parse_peer_response_line, parse_peer_terminal_event_line,
-    peer_terminal_event_session_id, unexpected_peer_response, write_json_line,
+    parse_peer_response_line, parse_peer_terminal_event_line, peer_terminal_event_session_id,
+    unexpected_peer_response, write_json_line,
 };
 use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalEvent};
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
@@ -21,6 +21,7 @@ pub(super) async fn stream_peer_session(
     request_id: String,
     requester_peer_id: String,
     session_id: String,
+    sealed_payload: String,
     observer_lease_id: String,
     incoming_sender: mpsc::UnboundedSender<RuntimeEvent>,
 ) -> Result<(), RuntimeError> {
@@ -31,6 +32,7 @@ pub(super) async fn stream_peer_session(
             request_id: request_id.clone(),
             requester_peer_id,
             session_id: session_id.clone(),
+            sealed_payload: Some(sealed_payload),
         },
     )
     .await?;
@@ -75,11 +77,8 @@ pub(super) async fn stream_peer_session(
 
 pub(super) async fn prepare_session_observer(
     context: &ListenerContext,
-    requester_peer_id: &str,
     session_id: &str,
 ) -> Result<(DaemonConnection, kanna_daemon::protocol::TerminalSnapshot), RuntimeError> {
-    ensure_requester_peer_trusted(context, requester_peer_id).await?;
-
     let daemon_dir = context
         .daemon_dir
         .as_ref()
@@ -117,38 +116,11 @@ async fn observe_session_snapshot(
     }
 }
 
-async fn ensure_requester_peer_trusted(
-    context: &ListenerContext,
-    requester_peer_id: &str,
-) -> Result<(), RuntimeError> {
-    let requester_peer = context
-        .discovery
-        .list_peers(&context.self_peer_id)
-        .await?
-        .into_iter()
-        .find(|peer| peer.peer_id == requester_peer_id)
-        .ok_or_else(|| {
-            RuntimeError::Protocol(format!(
-                "requester peer {} is not currently discovered",
-                requester_peer_id
-            ))
-        })?;
-    ensure_peer_is_trusted_for(
-        &context.registry_root,
-        &context.self_peer_id,
-        requester_peer_id,
-        &requester_peer.public_key,
-    )?;
-    Ok(())
-}
-
 pub(super) async fn send_daemon_input(
     context: &ListenerContext,
-    requester_peer_id: &str,
     session_id: &str,
     data: Vec<u8>,
 ) -> Result<(), RuntimeError> {
-    ensure_requester_peer_trusted(context, requester_peer_id).await?;
     let daemon_dir = context
         .daemon_dir
         .as_ref()
@@ -174,12 +146,10 @@ pub(super) async fn send_daemon_input(
 
 pub(super) async fn resize_daemon_session(
     context: &ListenerContext,
-    requester_peer_id: &str,
     session_id: &str,
     cols: u16,
     rows: u16,
 ) -> Result<(), RuntimeError> {
-    ensure_requester_peer_trusted(context, requester_peer_id).await?;
     let daemon_dir = context
         .daemon_dir
         .as_ref()
@@ -206,10 +176,8 @@ pub(super) async fn resize_daemon_session(
 
 pub(super) async fn close_owner_task(
     context: &ListenerContext,
-    requester_peer_id: &str,
     task_id: &str,
 ) -> Result<(), RuntimeError> {
-    ensure_requester_peer_trusted(context, requester_peer_id).await?;
     for session_id in [
         task_id.to_owned(),
         format!("shell-wt-{task_id}"),
@@ -223,11 +191,9 @@ pub(super) async fn close_owner_task(
 
 pub(super) async fn advance_owner_task_stage(
     context: &ListenerContext,
-    requester_peer_id: &str,
     task_id: &str,
     expected_transition_revision: Option<&str>,
 ) -> Result<(), RuntimeError> {
-    ensure_requester_peer_trusted(context, requester_peer_id).await?;
     let port = context
         .kanna_server_port
         .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
@@ -243,11 +209,9 @@ pub(super) async fn advance_owner_task_stage(
 
 pub(super) async fn read_owner_task_file(
     context: &ListenerContext,
-    requester_peer_id: &str,
     task_id: &str,
     path: &str,
 ) -> Result<(String, String), RuntimeError> {
-    ensure_requester_peer_trusted(context, requester_peer_id).await?;
     let port = context
         .kanna_server_port
         .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
@@ -332,11 +296,9 @@ async fn get_local_kanna_task_file(
 
 pub(super) async fn mark_owner_task_read(
     context: &ListenerContext,
-    requester_peer_id: &str,
     task_id: &str,
     expected_activity_revision: i64,
 ) -> Result<(), RuntimeError> {
-    ensure_requester_peer_trusted(context, requester_peer_id).await?;
     let port = context
         .kanna_server_port
         .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;

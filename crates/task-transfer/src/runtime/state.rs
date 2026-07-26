@@ -135,7 +135,7 @@ pub(super) struct ListenerContext {
     pub(super) incoming_reservations: Arc<Mutex<HashMap<String, IncomingTransferReservation>>>,
     pub(super) transfer_artifacts:
         Arc<Mutex<HashMap<String, HashMap<String, TransferArtifactRecord>>>>,
-    pub(super) authenticated_peer_requests: Arc<Mutex<HashMap<String, Instant>>>,
+    pub(super) authenticated_peer_requests: Arc<Mutex<HashMap<String, u64>>>,
     pub(super) task_snapshot: Arc<Mutex<Value>>,
     pub(super) daemon_dir: Option<PathBuf>,
     pub(super) db_path: Option<PathBuf>,

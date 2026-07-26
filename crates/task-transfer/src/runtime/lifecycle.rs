@@ -4,7 +4,7 @@ use super::discovery::{MdnsDiscovery, PeerDiscovery};
 use super::events::{RuntimeError, RuntimeEvent};
 use super::external_peers;
 use super::listener::run_listener;
-use super::replay_store::TransferReplayStore;
+use super::replay_store::{unix_ms, TransferReplayStore};
 use super::state::{ListenerContext, TerminalObserverSlot, TransferRuntime};
 use super::utils::{
     load_or_create_identity, registry_entry_path, terminal_observer_key, unexpected_peer_response,
@@ -120,7 +120,8 @@ impl TransferRuntime {
         }
         let incoming_reservations = Arc::new(Mutex::new(loaded_incoming_reservations));
         let transfer_artifacts = Arc::new(Mutex::new(HashMap::new()));
-        let authenticated_peer_requests = Arc::new(Mutex::new(HashMap::new()));
+        let authenticated_peer_requests =
+            Arc::new(Mutex::new(replay_store.load_authenticated_peer_requests()?));
         let task_snapshot = Arc::new(Mutex::new(Value::Null));
         let terminal_observers = Arc::new(Mutex::new(HashMap::new()));
         let peer_request_permits = Arc::new(Semaphore::new(config.max_peer_requests));
@@ -259,20 +260,14 @@ impl TransferRuntime {
         &self,
         peer: &DiscoveredPeer,
     ) -> Result<PeerTaskSnapshot, RuntimeError> {
-        self.require_authenticated_task_requests(
+        let request_id = self.next_request_id("task-snapshot");
+        let sealed_payload = self.seal_authenticated_peer_request(
             &peer.peer_id,
             &peer.public_key,
             peer.protocol_version,
-        )?;
-        let request_id = self.next_request_id("task-snapshot");
-        let target_public_key = parse_public_key(&peer.public_key)?;
-        let sealed_payload = seal_json(
-            &self.identity,
-            &target_public_key,
-            &serde_json::json!({
-                "action": "get_task_snapshot",
-                "request_id": request_id,
-            }),
+            "get_task_snapshot",
+            &request_id,
+            serde_json::json!({}),
         )?;
         let response = self
             .send_peer_request(
@@ -386,6 +381,21 @@ impl TransferRuntime {
         }
 
         let request_id = self.next_request_id("observe-session");
+        let sealed_payload = match self.seal_authenticated_peer_request(
+            &target_peer.peer_id,
+            &target_peer.public_key,
+            target_peer.protocol_version,
+            "observe_session",
+            &request_id,
+            serde_json::json!({ "session_id": session_id }),
+        ) {
+            Ok(sealed_payload) => sealed_payload,
+            Err(error) => {
+                self.clear_terminal_observer_lease(&observer_key, &lease_id)
+                    .await;
+                return Err(error);
+            }
+        };
         let self_peer_id = self.config.peer_id.clone();
         let session_id = session_id.to_owned();
         let incoming_sender = self.incoming_sender.clone();
@@ -406,6 +416,7 @@ impl TransferRuntime {
                 request_id,
                 self_peer_id,
                 session_id.clone(),
+                sealed_payload,
                 observer_lease_id_for_task.clone(),
                 incoming_sender.clone(),
             )
@@ -493,6 +504,17 @@ impl TransferRuntime {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("send-input");
+        let sealed_payload = self.seal_authenticated_peer_request(
+            &target_peer.peer_id,
+            &target_peer.public_key,
+            target_peer.protocol_version,
+            "send_session_input",
+            &request_id,
+            serde_json::json!({
+                "session_id": session_id,
+                "data": data,
+            }),
+        )?;
         let response = self
             .send_peer_request(
                 &target_peer,
@@ -501,6 +523,7 @@ impl TransferRuntime {
                     requester_peer_id: self.config.peer_id.clone(),
                     session_id: session_id.to_owned(),
                     data,
+                    sealed_payload: Some(sealed_payload),
                 },
             )
             .await?;
@@ -523,6 +546,18 @@ impl TransferRuntime {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("resize-session");
+        let sealed_payload = self.seal_authenticated_peer_request(
+            &target_peer.peer_id,
+            &target_peer.public_key,
+            target_peer.protocol_version,
+            "resize_session",
+            &request_id,
+            serde_json::json!({
+                "session_id": session_id,
+                "cols": cols,
+                "rows": rows,
+            }),
+        )?;
         let response = self
             .send_peer_request(
                 &target_peer,
@@ -532,6 +567,7 @@ impl TransferRuntime {
                     session_id: session_id.to_owned(),
                     cols,
                     rows,
+                    sealed_payload: Some(sealed_payload),
                 },
             )
             .await?;
@@ -552,6 +588,14 @@ impl TransferRuntime {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("close-task");
+        let sealed_payload = self.seal_authenticated_peer_request(
+            &target_peer.peer_id,
+            &target_peer.public_key,
+            target_peer.protocol_version,
+            "close_task",
+            &request_id,
+            serde_json::json!({ "task_id": task_id }),
+        )?;
         let response = self
             .send_peer_request(
                 &target_peer,
@@ -559,6 +603,7 @@ impl TransferRuntime {
                     request_id: request_id.clone(),
                     requester_peer_id: self.config.peer_id.clone(),
                     task_id: task_id.to_owned(),
+                    sealed_payload: Some(sealed_payload),
                 },
             )
             .await?;
@@ -580,22 +625,17 @@ impl TransferRuntime {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("advance-stage");
-        self.require_authenticated_task_requests(
+        let sealed_payload = self.seal_authenticated_peer_request(
             &target_peer.peer_id,
             &target_peer.public_key,
             target_peer.protocol_version,
+            "advance_task_stage",
+            &request_id,
+            serde_json::json!({
+                "task_id": task_id,
+                "expected_transition_revision": expected_transition_revision,
+            }),
         )?;
-        let target_public_key = parse_public_key(&target_peer.public_key)?;
-        let mut authenticated_payload = serde_json::json!({
-            "action": "advance_task_stage",
-            "request_id": request_id,
-            "task_id": task_id,
-        });
-        if let Some(expected_transition_revision) = expected_transition_revision {
-            authenticated_payload["expected_transition_revision"] =
-                serde_json::Value::String(expected_transition_revision.to_owned());
-        }
-        let sealed_payload = seal_json(&self.identity, &target_public_key, &authenticated_payload)?;
         let response = self
             .send_peer_request(
                 &target_peer,
@@ -626,6 +666,17 @@ impl TransferRuntime {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("read-task-file");
+        let sealed_payload = self.seal_authenticated_peer_request(
+            &target_peer.peer_id,
+            &target_peer.public_key,
+            target_peer.protocol_version,
+            "read_task_file",
+            &request_id,
+            serde_json::json!({
+                "task_id": task_id,
+                "path": path,
+            }),
+        )?;
         let response = self
             .send_peer_request(
                 &target_peer,
@@ -634,6 +685,7 @@ impl TransferRuntime {
                     requester_peer_id: self.config.peer_id.clone(),
                     task_id: task_id.to_owned(),
                     path: path.to_owned(),
+                    sealed_payload: Some(sealed_payload),
                 },
             )
             .await?;
@@ -656,16 +708,18 @@ impl TransferRuntime {
     ) -> Result<(), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
-        let target_public_key = parse_public_key(&target_peer.public_key)?;
-        let sealed_payload = seal_json(
-            &self.identity,
-            &target_public_key,
-            &serde_json::json!({
+        let request_id = self.next_request_id("mark-read");
+        let sealed_payload = self.seal_authenticated_peer_request(
+            &target_peer.peer_id,
+            &target_peer.public_key,
+            target_peer.protocol_version,
+            "mark_task_read",
+            &request_id,
+            serde_json::json!({
                 "task_id": task_id,
                 "expected_activity_revision": expected_activity_revision,
             }),
         )?;
-        let request_id = self.next_request_id("mark-read");
         let response = self
             .send_mark_read_peer_request_with_timeout(
                 &target_peer,
@@ -684,6 +738,27 @@ impl TransferRuntime {
             PeerResponse::Error { message, .. } => Err(RuntimeError::Protocol(message)),
             other => Err(unexpected_peer_response("mark-read", &other)),
         }
+    }
+
+    fn seal_authenticated_peer_request(
+        &self,
+        peer_id: &str,
+        public_key: &str,
+        protocol_version: u32,
+        action: &str,
+        request_id: &str,
+        arguments: Value,
+    ) -> Result<String, RuntimeError> {
+        self.require_authenticated_task_requests(peer_id, public_key, protocol_version)?;
+        let mut payload = arguments.as_object().cloned().ok_or_else(|| {
+            RuntimeError::Protocol("authenticated request arguments must be an object".into())
+        })?;
+        payload.insert("action".into(), Value::String(action.to_owned()));
+        payload.insert("request_id".into(), Value::String(request_id.to_owned()));
+        payload.insert("issued_at_unix_ms".into(), Value::from(unix_ms()));
+        let target_public_key = parse_public_key(public_key)?;
+        seal_json(&self.identity, &target_public_key, &Value::Object(payload))
+            .map_err(RuntimeError::from)
     }
 }
 
