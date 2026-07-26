@@ -32,6 +32,7 @@ export interface CloudTaskSnapshot {
   stage: string;
   activity: CloudTaskActivity;
   activityRevision?: number;
+  blockerRevision?: number;
   status: CloudTaskStatus;
   // Missing on documents written by older desktop publishers.
   hasRunningPost?: boolean;

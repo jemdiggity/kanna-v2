@@ -1,4 +1,7 @@
-use super::{configure_shared_database_connection, database_create_flags, Db};
+use super::{
+    configure_shared_database_connection, create_blocker_revision_triggers, database_create_flags,
+    Db,
+};
 use crate::db::CURRENT_SCHEMA_MIGRATIONS;
 use rusqlite::Connection;
 use std::path::PathBuf;
@@ -79,6 +82,7 @@ impl Db {
                 agent_type TEXT,
                 activity TEXT,
                 activity_revision INTEGER NOT NULL DEFAULT 0,
+                blocker_revision INTEGER NOT NULL DEFAULT 0,
                 activity_changed_at TEXT,
                 unread_at TEXT,
                 pinned INTEGER,
@@ -205,6 +209,7 @@ impl Db {
             );
             "#,
         )?;
+        create_blocker_revision_triggers(&self.conn)?;
         let mut stmt = self
             .conn
             .prepare("INSERT INTO schema_migrations (id) VALUES (?1)")?;

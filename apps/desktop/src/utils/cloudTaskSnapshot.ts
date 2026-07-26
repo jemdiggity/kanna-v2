@@ -10,6 +10,7 @@ export interface CloudTaskSnapshotInput {
     | "stage"
     | "activity"
     | "activity_revision"
+    | "blocker_revision"
     | "branch"
     | "base_ref"
     | "pr_number"
@@ -43,6 +44,7 @@ export async function buildCloudTaskSnapshot(input: CloudTaskSnapshotInput) {
     stage: input.item.stage,
     activity: input.item.activity,
     activityRevision: input.item.activity_revision,
+    blockerRevision: input.item.blocker_revision,
     status: deriveStatus(input.item.stage, input.item.closed_at, input.blockedByTaskIds),
     hasRunningPost: Boolean(input.item.has_running_post),
     repo: {

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 impl Db {
     pub fn ui_snapshot(&self) -> Result<UiSnapshot, rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
         let repos = self.list_snapshot_repos()?;
         let mut entries = Vec::with_capacity(repos.len());
         for repo in repos {
@@ -13,13 +14,15 @@ impl Db {
             entries.push(SnapshotEntry { repo, items });
         }
 
-        Ok(UiSnapshot {
+        let snapshot = UiSnapshot {
             entries,
             task_blockers: self.list_snapshot_task_blockers()?,
             blocker_task_states: self.list_snapshot_blocker_task_states()?,
             worktree_paths: self.list_snapshot_worktree_paths()?,
             settings: self.list_snapshot_settings()?,
-        })
+        };
+        transaction.commit()?;
+        Ok(snapshot)
     }
 
     fn list_snapshot_repos(&self) -> Result<Vec<SnapshotRepo>, rusqlite::Error> {
@@ -73,6 +76,7 @@ impl Db {
                         AND stage_run.status = 'running'
                     ) AS has_running_post,
                     pipeline_item.activity_revision,
+                    pipeline_item.blocker_revision,
                     COALESCE(pipeline_item.cloud_task_id, pipeline_item.id) AS cloud_task_id,
                     task_transfer.id,
                     task_transfer.direction,
@@ -144,14 +148,15 @@ impl Db {
                 updated_at: row.get(31)?,
                 has_running_post: row.get(32)?,
                 activity_revision: row.get(33)?,
-                cloud_task_id: row.get(34)?,
-                transfer_id: row.get(35)?,
-                transfer_direction: row.get(36)?,
-                transfer_status: row.get(37)?,
-                transfer_source_peer_id: row.get(38)?,
-                transfer_target_peer_id: row.get(39)?,
-                transfer_source_desktop_id: row.get(40)?,
-                transfer_target_desktop_id: row.get(41)?,
+                blocker_revision: row.get(34)?,
+                cloud_task_id: row.get(35)?,
+                transfer_id: row.get(36)?,
+                transfer_direction: row.get(37)?,
+                transfer_status: row.get(38)?,
+                transfer_source_peer_id: row.get(39)?,
+                transfer_target_peer_id: row.get(40)?,
+                transfer_source_desktop_id: row.get(41)?,
+                transfer_target_desktop_id: row.get(42)?,
             })
         })?;
         rows.collect()

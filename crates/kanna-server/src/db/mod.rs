@@ -73,6 +73,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "032_task_transfer_sidecar_cleanup",
     "033_create_task_intent",
     "034_pipeline_item_revision_rounds",
+    "035_pipeline_item_blocker_revision",
 ];
 
 #[derive(Debug, Serialize)]
@@ -163,6 +164,7 @@ pub struct SnapshotPipelineItem {
     pub agent_provider: String,
     pub activity: String,
     pub activity_revision: i64,
+    pub blocker_revision: i64,
     pub activity_changed_at: Option<String>,
     pub unread_at: Option<String>,
     pub port_offset: Option<i64>,
@@ -751,6 +753,52 @@ fn add_column(
     conn.execute_batch(&sql)
 }
 
+fn create_blocker_revision_triggers(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS task_blocker_insert_revision
+        AFTER INSERT ON task_blocker
+        BEGIN
+          UPDATE pipeline_item
+          SET blocker_revision = blocker_revision + 1
+          WHERE id = NEW.blocked_item_id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS task_blocker_delete_revision
+        AFTER DELETE ON task_blocker
+        BEGIN
+          UPDATE pipeline_item
+          SET blocker_revision = blocker_revision + 1
+          WHERE id = OLD.blocked_item_id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS task_blocker_resolution_revision
+        AFTER UPDATE OF stage, pr_url, closed_at ON pipeline_item
+        WHEN
+          CASE
+            WHEN OLD.closed_at IS NOT NULL
+              OR (OLD.stage = 'pr' AND OLD.pr_url IS NOT NULL)
+            THEN 1 ELSE 0
+          END
+          <>
+          CASE
+            WHEN NEW.closed_at IS NOT NULL
+              OR (NEW.stage = 'pr' AND NEW.pr_url IS NOT NULL)
+            THEN 1 ELSE 0
+          END
+        BEGIN
+          UPDATE pipeline_item
+          SET blocker_revision = blocker_revision + 1
+          WHERE id IN (
+            SELECT blocked_item_id
+            FROM task_blocker
+            WHERE blocker_item_id = NEW.id
+          );
+        END;
+        "#,
+    )
+}
+
 fn drop_column(conn: &Connection, table: &str, column: &str) {
     let sql = format!("ALTER TABLE {table} DROP COLUMN {column}");
     if let Err(error) = conn.execute_batch(&sql) {
@@ -1281,6 +1329,16 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             "INTEGER NOT NULL DEFAULT 0",
         )?;
         Ok(())
+    })?;
+
+    run_migration(conn, "035_pipeline_item_blocker_revision", |conn| {
+        add_column(
+            conn,
+            "pipeline_item",
+            "blocker_revision",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        create_blocker_revision_triggers(conn)
     })?;
 
     Ok(())

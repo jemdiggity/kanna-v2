@@ -164,7 +164,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "034_pipeline_item_revision_rounds");
+    assert_eq!(latest_migration, "035_pipeline_item_blocker_revision");
 
     let stage_run_sql: String = db
         .conn
@@ -632,6 +632,20 @@ fn open_migrates_origin_main_028_activity_revision() {
         .expect("activity revision metadata");
     assert_eq!(
         activity_revision_metadata,
+        ("INTEGER".to_string(), 1, Some("0".to_string()))
+    );
+    let blocker_revision_metadata: (String, i64, Option<String>) = db
+        .conn
+        .query_row(
+            "SELECT type, \"notnull\", dflt_value
+             FROM pragma_table_info('pipeline_item')
+             WHERE name = 'blocker_revision'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("blocker revision metadata");
+    assert_eq!(
+        blocker_revision_metadata,
         ("INTEGER".to_string(), 1, Some("0".to_string()))
     );
 
@@ -1624,6 +1638,76 @@ fn count_open_task_blockers_treats_pr_stage_with_pr_url_as_resolved() {
         db.count_open_task_blockers("dependent-1").expect("count"),
         0
     );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn blocker_revision_advances_without_touching_dependent_updated_at() {
+    let path = Db::test_db_path("blocker-revision");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "blocker-1",
+        "repo-1",
+        "prerequisite",
+        Some("Prerequisite"),
+        "in progress",
+        "2026-07-01T00:00:00Z",
+    )
+    .expect("blocker");
+    db.insert_test_pipeline_item(
+        "dependent-1",
+        "repo-1",
+        "build on it",
+        Some("Dependent"),
+        "in progress",
+        "2026-07-01T00:01:00Z",
+    )
+    .expect("dependent");
+
+    let dependent_freshness = || {
+        db.conn
+            .query_row(
+                "SELECT blocker_revision, updated_at
+                 FROM pipeline_item
+                 WHERE id = 'dependent-1'",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("dependent freshness")
+    };
+    let original_updated_at = dependent_freshness().1;
+
+    db.insert_task_blocker("dependent-1", "blocker-1")
+        .expect("insert blocker edge");
+    assert_eq!(dependent_freshness(), (1, original_updated_at.clone()));
+
+    db.remove_all_task_blockers("dependent-1")
+        .expect("remove blocker edge");
+    assert_eq!(dependent_freshness(), (2, original_updated_at.clone()));
+
+    db.insert_task_blocker("dependent-1", "blocker-1")
+        .expect("restore blocker edge");
+    db.close_pipeline_item("blocker-1")
+        .expect("resolve blocker by closing");
+    assert_eq!(dependent_freshness(), (4, original_updated_at.clone()));
+
+    db.reopen_pipeline_item("blocker-1")
+        .expect("make blocker unresolved again");
+    db.update_pipeline_item_stage("blocker-1", "pr")
+        .expect("advance blocker to pr");
+    db.update_pipeline_item_pr("blocker-1", Some(7), "https://github.com/acme/repo/pull/7")
+        .expect("resolve blocker by publishing pr");
+    assert_eq!(dependent_freshness(), (6, original_updated_at));
+
+    let snapshot = db.ui_snapshot().expect("snapshot");
+    let dependent = snapshot.entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "dependent-1")
+        .expect("dependent snapshot item");
+    assert_eq!(dependent.blocker_revision, 6);
 
     let _ = std::fs::remove_file(path);
 }

@@ -184,6 +184,10 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
     task.activityRevision,
     `${path}.activityRevision`,
   );
+  const blockerRevision = optionalNonNegativeInteger(
+    task.blockerRevision,
+    `${path}.blockerRevision`,
+  );
 
   return {
     ...(cloudTaskId === undefined ? {} : { cloudTaskId }),
@@ -201,6 +205,7 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
     stage: requiredString(task.stage, `${path}.stage`, 64),
     activity: requiredString(task.activity, `${path}.activity`, 32),
     ...(activityRevision === undefined ? {} : { activityRevision }),
+    ...(blockerRevision === undefined ? {} : { blockerRevision }),
     status,
     hasRunningPost: optionalBoolean(task.hasRunningPost, `${path}.hasRunningPost`),
     repo: {

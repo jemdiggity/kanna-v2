@@ -27,6 +27,7 @@ export interface DesktopCloudTaskSnapshot {
   stage: string;
   activity?: string;
   activityRevision?: number;
+  blockerRevision?: number;
   status: string;
   hasRunningPost?: boolean;
   blockedByTaskIds?: string[];
@@ -382,6 +383,11 @@ export function mapDesktopCloudTasks(
         && Number.isSafeInteger(snapshot.activityRevision)
         && snapshot.activityRevision >= 0
         ? snapshot.activityRevision
+        : undefined,
+      blocker_revision: typeof snapshot.blockerRevision === "number"
+        && Number.isSafeInteger(snapshot.blockerRevision)
+        && snapshot.blockerRevision >= 0
+        ? snapshot.blockerRevision
         : undefined,
       activity_changed_at: snapshot.updatedAt,
       has_running_post: snapshot.hasRunningPost ? 1 : 0,

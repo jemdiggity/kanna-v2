@@ -19,6 +19,7 @@ function task(overrides: Record<string, unknown> = {}): Record<string, unknown> 
     stage: "in progress",
     activity: "idle",
     activityRevision: 4,
+    blockerRevision: 6,
     status: "active",
     repo: {
       cloudRepoId: "repo-1",
@@ -80,6 +81,7 @@ describe("cloud task publication validation", () => {
       cloudTaskId: "cloud-stable",
       activity: "idle",
       activityRevision: 4,
+      blockerRevision: 6,
       waitingPromptSnippet: "Ready for review",
       agent: { provider: "codex", type: "pty" },
       repo: { remoteUrlHash: "remote-hash" },
@@ -230,6 +232,21 @@ describe("cloud task publication validation", () => {
         publication([task({ activityRevision })]),
         "desktop-1",
       )).toThrow(/activityRevision/);
+    }
+  });
+
+  it("accepts legacy missing blocker revisions but preserves and validates present revisions", () => {
+    const legacy = validateCloudTaskPublication(
+      publication([task({ blockerRevision: undefined })]),
+      "desktop-1",
+    );
+    expect(legacy.tasks[0]?.blockerRevision).toBeUndefined();
+
+    for (const blockerRevision of [-1, 1.5, "6"]) {
+      expect(() => validateCloudTaskPublication(
+        publication([task({ blockerRevision })]),
+        "desktop-1",
+      )).toThrow(/blockerRevision/);
     }
   });
 

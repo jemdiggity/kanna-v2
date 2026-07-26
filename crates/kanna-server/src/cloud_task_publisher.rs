@@ -52,6 +52,7 @@ struct CloudTaskSnapshot {
     stage: String,
     activity: String,
     activity_revision: i64,
+    blocker_revision: i64,
     status: String,
     has_running_post: bool,
     repo: CloudRepoSnapshot,
@@ -212,6 +213,7 @@ fn map_task(
         stage: truncate(&item.stage, 64),
         activity: truncate(&item.activity, 32),
         activity_revision: item.activity_revision,
+        blocker_revision: item.blocker_revision,
         status: status.into(),
         has_running_post: item.has_running_post != 0,
         repo: CloudRepoSnapshot {
@@ -481,6 +483,7 @@ mod tests {
                     agent_provider: "codex".into(),
                     activity: activity.into(),
                     activity_revision: 7,
+                    blocker_revision: 11,
                     activity_changed_at: Some("2026-07-14 01:02:03".into()),
                     unread_at: None,
                     port_offset: None,
@@ -529,6 +532,7 @@ mod tests {
         );
         assert_eq!(json["tasks"][0]["activity"], "working");
         assert_eq!(json["tasks"][0]["activityRevision"], 7);
+        assert_eq!(json["tasks"][0]["blockerRevision"], 11);
         assert_eq!(json["tasks"][0]["hasRunningPost"], false);
         assert_eq!(json["tasks"][0]["waitingPromptSnippet"], "Ready for review");
         assert_eq!(json["tasks"][0]["status"], "blocked");

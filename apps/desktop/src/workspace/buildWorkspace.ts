@@ -146,6 +146,7 @@ function localCandidate(
       taskId: item.id,
       repoId: item.repo_id,
       updatedAt: item.updated_at,
+      blockerRevision: item.blocker_revision,
       blockedByTaskIds: [],
     },
   };
@@ -177,6 +178,7 @@ function remoteCandidates(
         taskId: item.id,
         repoId: item.repo_id,
         updatedAt: item.updated_at,
+        blockerRevision: item.blocker_revision,
         terminalRef,
         blockedByTaskIds: snapshot.blockedByTaskIds?.[item.id] ?? [],
       },
@@ -275,6 +277,22 @@ function mergeWorkspaceTask(existing: WorkspaceTask, candidate: Candidate): Work
 
 function blockedByTaskIdsForSources(sources: readonly WorkspaceTaskSource[]): string[] {
   if (sources.some((source) => source.kind === "local")) return [];
+  const revisionedSources = sources.filter(
+    (source): source is WorkspaceTaskSource & { blockerRevision: number } =>
+      typeof source.blockerRevision === "number"
+      && Number.isSafeInteger(source.blockerRevision)
+      && source.blockerRevision >= 0,
+  );
+  if (revisionedSources.length > 0) {
+    const newestRevision = Math.max(
+      ...revisionedSources.map((source) => source.blockerRevision),
+    );
+    return [...new Set(
+      revisionedSources
+        .filter((source) => source.blockerRevision === newestRevision)
+        .flatMap((source) => source.blockedByTaskIds),
+    )];
+  }
   const newestUpdatedAt = sources.reduce(
     (newest, source) => source.updatedAt > newest ? source.updatedAt : newest,
     "",
