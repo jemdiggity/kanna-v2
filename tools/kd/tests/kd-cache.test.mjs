@@ -1,11 +1,21 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   computeKdIdentity,
+  ensureKdInstallation,
   kdDependencyProjection,
-  resolveKdCacheRoot
+  resolveKdCacheRoot,
+  validateKdInstallation,
+  writeKdManifest
 } from "../bin/kd-cache.mjs";
 
 const fixtureRoots = [];
@@ -70,6 +80,13 @@ const runtime = {
   platform: "darwin",
   arch: "arm64"
 };
+
+async function successfulFakeBuild({ outputDir, identity }) {
+  mkdirSync(join(outputDir, "bin"), { recursive: true });
+  writeFileSync(join(outputDir, "bin/kd.js"), "#!/usr/bin/env node\n");
+  writeFileSync(join(outputDir, "bin/kd-mcp.js"), "#!/usr/bin/env node\n");
+  writeKdManifest(outputDir, identity, runtime);
+}
 
 describe("kd installation identity", () => {
   it("projects only kd runtime dependencies and the tsup build graph", () => {
@@ -138,5 +155,128 @@ describe("kd installation identity", () => {
         env: { KANNA_KD_CACHE_ROOT: "/tmp/kd cache" }
       })
     ).toBe("/tmp/kd cache");
+  });
+});
+
+describe("kd installation publication", () => {
+  it("publishes one immutable entry for concurrent installers", async () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    let builds = 0;
+    const build = async (input) => {
+      builds += 1;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 40));
+      await successfulFakeBuild(input);
+    };
+    const input = {
+      cacheRoot,
+      identity: "abc123",
+      entrypoint: "kd",
+      runtime,
+      build
+    };
+
+    const [left, right] = await Promise.all([
+      ensureKdInstallation(input),
+      ensureKdInstallation(input)
+    ]);
+
+    expect(left).toBe(right);
+    expect(builds).toBe(1);
+    expect(
+      validateKdInstallation(join(cacheRoot, "abc123"), "abc123", runtime)
+    ).toBe(true);
+  });
+
+  it("does not publish a failed build and retries on the next call", async () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    const input = {
+      cacheRoot,
+      identity: "failed",
+      entrypoint: "kd",
+      runtime
+    };
+
+    await expect(
+      ensureKdInstallation({
+        ...input,
+        build: async () => {
+          throw new Error("synthetic build failure");
+        }
+      })
+    ).rejects.toThrow("synthetic build failure");
+    expect(existsSync(join(cacheRoot, "failed"))).toBe(false);
+
+    const resolved = await ensureKdInstallation({
+      ...input,
+      build: successfulFakeBuild
+    });
+
+    expect(resolved).toBe(join(cacheRoot, "failed/bin/kd.js"));
+  });
+
+  it("repairs an invalid final entry under the installation lock", async () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    const entryRoot = join(cacheRoot, "corrupt");
+    mkdirSync(entryRoot, { recursive: true });
+    writeFileSync(join(entryRoot, "manifest.json"), "{broken");
+
+    const resolved = await ensureKdInstallation({
+      cacheRoot,
+      identity: "corrupt",
+      entrypoint: "kd",
+      runtime,
+      build: successfulFakeBuild
+    });
+
+    expect(resolved).toBe(join(entryRoot, "bin/kd.js"));
+    expect(JSON.parse(readFileSync(join(entryRoot, "manifest.json"), "utf8")))
+      .toMatchObject({ identity: "corrupt" });
+  });
+
+  it("recovers a lock whose recorded owner is dead", async () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    const lockRoot = join(cacheRoot, ".dead.lock");
+    mkdirSync(lockRoot, { recursive: true });
+    writeFileSync(
+      join(lockRoot, "owner.json"),
+      JSON.stringify({ pid: 40404, token: "dead-owner", startedAt: 1 })
+    );
+
+    const resolved = await ensureKdInstallation({
+      cacheRoot,
+      identity: "dead",
+      entrypoint: "kd",
+      runtime,
+      build: successfulFakeBuild,
+      isProcessAlive: () => false
+    });
+
+    expect(resolved).toBe(join(cacheRoot, "dead/bin/kd.js"));
+    expect(existsSync(lockRoot)).toBe(false);
+  });
+
+  it("never removes a lock whose recorded owner is alive", async () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    const lockRoot = join(cacheRoot, ".live.lock");
+    mkdirSync(lockRoot, { recursive: true });
+    writeFileSync(
+      join(lockRoot, "owner.json"),
+      JSON.stringify({ pid: 50505, token: "live-owner", startedAt: Date.now() })
+    );
+
+    await expect(
+      ensureKdInstallation({
+        cacheRoot,
+        identity: "live",
+        entrypoint: "kd",
+        runtime,
+        build: successfulFakeBuild,
+        isProcessAlive: () => true,
+        waitTimeoutMs: 5,
+        pollIntervalMs: 1
+      })
+    ).rejects.toThrow("Timed out waiting for kd installation live");
+
+    expect(existsSync(lockRoot)).toBe(true);
   });
 });

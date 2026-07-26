@@ -1,7 +1,18 @@
-import { createHash } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "node:fs";
 import { homedir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 export const KD_CACHE_SCHEMA = 1;
 export const KD_ENTRYPOINTS = Object.freeze({
@@ -174,4 +185,203 @@ export function resolveKdCacheRoot({
     return join(env.XDG_CACHE_HOME, "kanna", "tools", "kd");
   }
   return join(home, ".cache", "kanna", "tools", "kd");
+}
+
+export function writeKdManifest(outputDir, identity, runtime) {
+  writeFileSync(
+    join(outputDir, "manifest.json"),
+    `${JSON.stringify(
+      {
+        schema: KD_CACHE_SCHEMA,
+        identity,
+        runtime,
+        entrypoints: KD_ENTRYPOINTS
+      },
+      null,
+      2
+    )}\n`
+  );
+}
+
+export function validateKdInstallation(entryDir, identity, runtime) {
+  try {
+    const manifest = JSON.parse(
+      readFileSync(join(entryDir, "manifest.json"), "utf8")
+    );
+    return (
+      manifest.schema === KD_CACHE_SCHEMA &&
+      manifest.identity === identity &&
+      JSON.stringify(manifest.runtime) === JSON.stringify(runtime) &&
+      Object.entries(KD_ENTRYPOINTS).every(
+        ([name, path]) =>
+          manifest.entrypoints?.[name] === path &&
+          statSync(join(entryDir, path)).isFile()
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+function defaultIsProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+
+function readLockOwner(lockRoot) {
+  try {
+    const owner = JSON.parse(
+      readFileSync(join(lockRoot, "owner.json"), "utf8")
+    );
+    if (
+      !Number.isSafeInteger(owner.pid) ||
+      owner.pid <= 0 ||
+      typeof owner.token !== "string" ||
+      owner.token.length === 0
+    ) {
+      return null;
+    }
+    return owner;
+  } catch {
+    return null;
+  }
+}
+
+function removeOwnedLock(lockRoot, token) {
+  const owner = readLockOwner(lockRoot);
+  if (owner?.token === token) {
+    rmSync(lockRoot, { recursive: true, force: true });
+  }
+}
+
+async function acquireInstallationLock({
+  cacheRoot,
+  identity,
+  pid,
+  isProcessAlive,
+  sleep,
+  waitTimeoutMs,
+  pollIntervalMs
+}) {
+  const lockRoot = join(cacheRoot, `.${identity}.lock`);
+  const startedAt = Date.now();
+
+  while (true) {
+    const token = randomUUID();
+    try {
+      mkdirSync(lockRoot);
+      writeFileSync(
+        join(lockRoot, "owner.json"),
+        `${JSON.stringify({ pid, token, startedAt: Date.now() })}\n`
+      );
+      return { lockRoot, token };
+    } catch (error) {
+      if (error?.code !== "EEXIST") {
+        throw error;
+      }
+    }
+
+    const owner = readLockOwner(lockRoot);
+    if (owner && !isProcessAlive(owner.pid)) {
+      const staleRoot = `${lockRoot}.stale-${randomUUID()}`;
+      try {
+        renameSync(lockRoot, staleRoot);
+        rmSync(staleRoot, { recursive: true, force: true });
+        continue;
+      } catch (error) {
+        if (error?.code !== "ENOENT") {
+          throw error;
+        }
+      }
+    }
+
+    if (Date.now() - startedAt >= waitTimeoutMs) {
+      throw new Error(
+        `Timed out waiting for kd installation ${identity} after ${waitTimeoutMs}ms`
+      );
+    }
+    await sleep(pollIntervalMs);
+  }
+}
+
+export async function ensureKdInstallation({
+  cacheRoot,
+  identity,
+  entrypoint,
+  runtime,
+  build,
+  pid = process.pid,
+  isProcessAlive = defaultIsProcessAlive,
+  sleep = delay,
+  waitTimeoutMs = 180_000,
+  pollIntervalMs = 100
+}) {
+  const entrypointPath = KD_ENTRYPOINTS[entrypoint];
+  if (!entrypointPath) {
+    throw new Error(`Unknown kd entrypoint: ${entrypoint}`);
+  }
+
+  const entryRoot = join(cacheRoot, identity);
+  if (validateKdInstallation(entryRoot, identity, runtime)) {
+    return join(entryRoot, entrypointPath);
+  }
+
+  mkdirSync(cacheRoot, { recursive: true });
+  const lock = await acquireInstallationLock({
+    cacheRoot,
+    identity,
+    pid,
+    isProcessAlive,
+    sleep,
+    waitTimeoutMs,
+    pollIntervalMs
+  });
+  let temporaryRoot;
+  let corruptRoot;
+
+  try {
+    if (validateKdInstallation(entryRoot, identity, runtime)) {
+      return join(entryRoot, entrypointPath);
+    }
+
+    if (existsSync(entryRoot)) {
+      corruptRoot = join(cacheRoot, `.${identity}.corrupt-${randomUUID()}`);
+      renameSync(entryRoot, corruptRoot);
+    }
+
+    temporaryRoot = mkdtempSync(join(cacheRoot, `.${identity}.tmp-`));
+    await build({ outputDir: temporaryRoot, identity, runtime });
+    if (!validateKdInstallation(temporaryRoot, identity, runtime)) {
+      throw new Error(
+        `kd build ${identity} did not produce a valid cache installation`
+      );
+    }
+
+    try {
+      renameSync(temporaryRoot, entryRoot);
+      temporaryRoot = undefined;
+    } catch (error) {
+      if (
+        error?.code !== "EEXIST" ||
+        !validateKdInstallation(entryRoot, identity, runtime)
+      ) {
+        throw error;
+      }
+    }
+
+    if (corruptRoot) {
+      rmSync(corruptRoot, { recursive: true, force: true });
+      corruptRoot = undefined;
+    }
+    return join(entryRoot, entrypointPath);
+  } finally {
+    if (temporaryRoot) {
+      rmSync(temporaryRoot, { recursive: true, force: true });
+    }
+    removeOwnedLock(lock.lockRoot, lock.token);
+  }
 }
