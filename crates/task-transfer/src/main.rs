@@ -86,24 +86,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let mut command_tasks = tokio::task::JoinSet::new();
     for line in std::io::stdin().lock().lines() {
+        while command_tasks.try_join_next().is_some() {}
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
 
         let request_id = extract_request_id(&line);
-        let response = match serde_json::from_str::<ControlRequest>(&line) {
-            Ok(request) => handle_request(&runtime, request).await,
-            Err(error) => ControlResponse::Error {
-                request_id,
-                message: error.to_string(),
-            },
-        };
-
-        write_json_line(&stdout, &response)?;
+        match serde_json::from_str::<ControlRequest>(&line) {
+            Ok(request) => {
+                let request_runtime = Arc::clone(&runtime);
+                let request_stdout = Arc::clone(&stdout);
+                command_tasks.spawn(async move {
+                    let response = handle_request(&request_runtime, request).await;
+                    if let Err(error) = write_json_line(&request_stdout, &response) {
+                        eprintln!("[task-transfer] failed writing control response: {error}");
+                    }
+                });
+            }
+            Err(error) => {
+                write_json_line(
+                    &stdout,
+                    &ControlResponse::Error {
+                        request_id,
+                        message: error.to_string(),
+                    },
+                )?;
+            }
+        }
     }
 
+    command_tasks.shutdown().await;
     event_task.abort();
     Ok(())
 }

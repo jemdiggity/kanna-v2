@@ -642,6 +642,15 @@ pub(super) async fn advance_stage(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let response = crate::mobile_api::TaskActionResponse {
+        task_id: task_id.clone(),
+        follow_task: None,
+        revision_budget: None,
+    };
+    let Some(stage_advance) = state.begin_requested_stage_advance(&task_id) else {
+        return Ok(Json(response));
+    };
+
     #[cfg(test)]
     if let Some(stage_advancer) = state.stage_advancer.clone() {
         return stage_advancer(task_id)
@@ -659,17 +668,33 @@ pub(super) async fn advance_stage(
                     format!("db error: {}", e),
                 )
             })?;
+            let latest = db.latest_stage_run(&task_id).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?;
+            if latest
+                .as_ref()
+                .is_some_and(|run| run.kind == "post" && run.status == "running")
+            {
+                return Ok(None);
+            }
             crate::task_creator::prepare_advance_stage_for_api(&db, &state.config, &task_id)
+                .map(Some)
                 .map_err(|e| (stage_action_error_status(&e), e))
         })
         .await?
     };
-    let response = crate::mobile_api::TaskActionResponse {
-        task_id: task_id.clone(),
-        follow_task: None,
-        revision_budget: None,
+    let Some(transition) = transition else {
+        return Ok(Json(response));
     };
-    execute_stage_transition_detached(Arc::clone(&state), task_id, transition);
+    execute_stage_transition_detached_holding(
+        Arc::clone(&state),
+        task_id,
+        transition,
+        Some(stage_advance),
+    );
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(response))
 }

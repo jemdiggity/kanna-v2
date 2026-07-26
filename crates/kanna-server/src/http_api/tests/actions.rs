@@ -3289,6 +3289,69 @@ async fn advance_stage_route_uses_stage_advancer() {
     assert_eq!(created.task_id, "task-2");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_immediate_advance_requests_share_one_owner_transition() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let app = super::test_router_with_stage_advancer(
+        "desktop-single-flight",
+        "Studio Mac",
+        Arc::new({
+            let calls = Arc::clone(&calls);
+            let gate = Arc::clone(&gate);
+            move |task_id| {
+                assert_eq!(task_id, "task-1");
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    started_tx.send(()).unwrap();
+                    let (lock, changed) = &*gate;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = changed.wait(released).unwrap();
+                    }
+                }
+                Ok(TaskActionResponse {
+                    task_id,
+                    follow_task: None,
+                })
+            }
+        }),
+    );
+
+    let first = tokio::spawn(
+        app.clone().oneshot(
+            Request::post("/v1/tasks/task-1/actions/advance-stage")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("first transition did not start");
+    let second = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        app.clone().oneshot(
+            Request::post("/v1/tasks/task-1/actions/advance-stage")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("duplicate advance waited for the first transition")
+    .unwrap();
+
+    assert_eq!(second.status(), StatusCode::OK);
+    let observed_calls = calls.load(std::sync::atomic::Ordering::SeqCst);
+
+    {
+        let (lock, changed) = &*gate;
+        *lock.lock().unwrap() = true;
+        changed.notify_all();
+    }
+    assert_eq!(first.await.unwrap().unwrap().status(), StatusCode::OK);
+    assert_eq!(observed_calls, 1);
+}
+
 #[tokio::test]
 async fn rerun_stage_route_uses_stage_rerunner() {
     let app = super::test_router_with_stage_rerunner(
@@ -4680,6 +4743,32 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
     assert!(
         task.closed_at.is_none(),
         "the advance must not close the task while the approve post runs"
+    );
+
+    let duplicate = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/advance-stage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let task_after_duplicate = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(task_after_duplicate.stage.as_deref(), Some("pr"));
+    assert!(
+        task_after_duplicate.closed_at.is_none(),
+        "a running-post snapshot must make duplicate advance idempotent"
+    );
+    assert_eq!(
+        db.list_stage_runs_for_task("task-1")
+            .unwrap()
+            .iter()
+            .filter(|run| run.kind == "post" && run.stage == "approve")
+            .count(),
+        1,
     );
 
     // The approve prompt went to the live session as typed input.

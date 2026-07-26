@@ -176,6 +176,32 @@ Implementation should follow test-driven development with focused failing tests 
 Run the focused desktop tests during development, followed by the repository's relevant
 frontend test suite and typecheck before completion.
 
+### Review Revision: Interaction And Concurrency Boundaries
+
+The review revision extends the approved design at four integration boundaries:
+
+1. The browser-level App test must mount the real `Sidebar` and `MainPanel` components
+   for the remote blocked-task journey. It should prove Blocked section placement,
+   blocker-panel rendering, keyboard suppression, owner error toast behavior, and
+   terminal restoration after an authoritative unblock snapshot. Component-only and
+   projection-only tests remain useful but do not substitute for this interaction test.
+2. LAN mark-read must have a deadline below the renderer. The desktop-to-sidecar client
+   must multiplex requests without holding the shared service mutex for the duration of
+   peer I/O, and the sidecar control loop must execute independent requests concurrently.
+   A timed-out request must remove its pending response entry so late responses cannot
+   retain abandoned work. LAN polling must also be single-flight so a slow refresh cannot
+   build a one-second interval backlog.
+3. Relay mark-read must validate the resolved response status and body through the same
+   task-action validator used by relay close and advance.
+4. Remote advance must be single-flight per owner/task in each viewer, skip when the
+   latest snapshot reports `has_running_post`, and be serialized per task by the owner.
+   A duplicate owner request while the first transition is being detached is an
+   idempotent success. A request arriving after the post run is recorded is also an
+   idempotent success rather than the historical running-post override.
+
+The regression suite must include a stalled-peer control-path test, relay mark-read
+negative statuses, immediate duplicate advances, and a running-post snapshot.
+
 ## Alternatives Considered
 
 ### Synthetic Remote Rows In The Local Blocker Store

@@ -39,6 +39,7 @@ pub struct RuntimeConfig {
     pub(super) max_unapplied_receipts: usize,
     pub(super) max_applied_receipts: usize,
     pub(super) max_incoming_reservations: usize,
+    pub(super) mark_read_timeout: Duration,
 }
 
 impl RuntimeConfig {
@@ -64,6 +65,7 @@ impl RuntimeConfig {
             max_unapplied_receipts: DEFAULT_MAX_UNAPPLIED_RECEIPTS,
             max_applied_receipts: DEFAULT_MAX_APPLIED_RECEIPTS,
             max_incoming_reservations: DEFAULT_MAX_INCOMING_RESERVATIONS,
+            mark_read_timeout: Duration::from_secs(2),
         }
     }
 
@@ -104,6 +106,11 @@ impl RuntimeConfig {
 
     pub fn with_max_incoming_reservations(mut self, maximum: usize) -> Self {
         self.max_incoming_reservations = maximum;
+        self
+    }
+
+    pub fn with_mark_read_timeout(mut self, mark_read_timeout: Duration) -> Self {
+        self.mark_read_timeout = mark_read_timeout;
         self
     }
 
@@ -199,6 +206,7 @@ impl RuntimeConfig {
             max_unapplied_receipts: DEFAULT_MAX_UNAPPLIED_RECEIPTS,
             max_applied_receipts: DEFAULT_MAX_APPLIED_RECEIPTS,
             max_incoming_reservations: DEFAULT_MAX_INCOMING_RESERVATIONS,
+            mark_read_timeout: Duration::from_secs(2),
         })
     }
 

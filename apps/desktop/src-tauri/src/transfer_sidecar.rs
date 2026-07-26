@@ -8,11 +8,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{oneshot, Mutex};
 
-type PendingRequests = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
+type PendingRequests = Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<Value>>>>;
 
 pub struct TransferSidecarClient {
-    _child: Child,
-    stdin: ChildStdin,
+    _child: Mutex<Child>,
+    stdin: Mutex<ChildStdin>,
     pending: PendingRequests,
     dead: Arc<AtomicBool>,
     request_counter: AtomicU64,
@@ -49,13 +49,13 @@ impl TransferSidecarClient {
             .stdout
             .take()
             .ok_or_else(|| "transfer sidecar stdout unavailable".to_string())?;
-        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let dead = Arc::new(AtomicBool::new(false));
         spawn_reader(app, stdout, Arc::clone(&pending), Arc::clone(&dead));
 
         Ok(Self {
-            _child: child,
-            stdin,
+            _child: Mutex::new(child),
+            stdin: Mutex::new(stdin),
             pending,
             dead,
             request_counter: AtomicU64::new(1),
@@ -66,7 +66,7 @@ impl TransferSidecarClient {
         self.dead.load(Ordering::Relaxed)
     }
 
-    pub async fn get_local_identity(&mut self) -> Result<Value, String> {
+    pub async fn get_local_identity(&self) -> Result<Value, String> {
         let request_id = self.next_request_id("identity");
         let response = self
             .send_request(
@@ -94,7 +94,7 @@ impl TransferSidecarClient {
         }))
     }
 
-    pub async fn list_transfer_peers(&mut self) -> Result<Vec<Value>, String> {
+    pub async fn list_transfer_peers(&self) -> Result<Vec<Value>, String> {
         let request_id = self.next_request_id("list");
         let response = self
             .send_request(
@@ -113,13 +113,13 @@ impl TransferSidecarClient {
         Ok(peers)
     }
 
-    pub async fn upsert_external_peer(&mut self, peer: Value) -> Result<Value, String> {
+    pub async fn upsert_external_peer(&self, peer: Value) -> Result<Value, String> {
         let request_id = self.next_request_id("external-upsert");
         let request = build_upsert_external_peer_request(&request_id, &peer)?;
         self.send_request(request, &request_id).await
     }
 
-    pub async fn remove_external_peer(&mut self, peer_id: String) -> Result<Value, String> {
+    pub async fn remove_external_peer(&self, peer_id: String) -> Result<Value, String> {
         if peer_id.trim().is_empty() {
             return Err("external peer id must not be blank".into());
         }
@@ -135,7 +135,7 @@ impl TransferSidecarClient {
         .await
     }
 
-    pub async fn clear_external_peers(&mut self) -> Result<Value, String> {
+    pub async fn clear_external_peers(&self) -> Result<Value, String> {
         let request_id = self.next_request_id("external-clear");
         self.send_request(
             json!({
@@ -147,7 +147,7 @@ impl TransferSidecarClient {
         .await
     }
 
-    pub async fn set_task_snapshot(&mut self, snapshot: Value) -> Result<Value, String> {
+    pub async fn set_task_snapshot(&self, snapshot: Value) -> Result<Value, String> {
         let request_id = self.next_request_id("set-task-snapshot");
         self.send_request(
             json!({
@@ -160,7 +160,7 @@ impl TransferSidecarClient {
         .await
     }
 
-    pub async fn list_peer_task_snapshots(&mut self) -> Result<Vec<Value>, String> {
+    pub async fn list_peer_task_snapshots(&self) -> Result<Vec<Value>, String> {
         let request_id = self.next_request_id("list-task-snapshots");
         let response = self
             .send_request(
@@ -182,7 +182,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn observe_peer_session(
-        &mut self,
+        &self,
         peer_id: String,
         session_id: String,
     ) -> Result<Value, String> {
@@ -200,7 +200,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn unobserve_peer_session(
-        &mut self,
+        &self,
         peer_id: String,
         session_id: String,
     ) -> Result<Value, String> {
@@ -218,7 +218,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn send_peer_session_input(
-        &mut self,
+        &self,
         peer_id: String,
         session_id: String,
         data: String,
@@ -238,7 +238,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn resize_peer_session(
-        &mut self,
+        &self,
         peer_id: String,
         session_id: String,
         cols: u16,
@@ -259,11 +259,7 @@ impl TransferSidecarClient {
         .await
     }
 
-    pub async fn close_peer_task(
-        &mut self,
-        peer_id: String,
-        task_id: String,
-    ) -> Result<Value, String> {
+    pub async fn close_peer_task(&self, peer_id: String, task_id: String) -> Result<Value, String> {
         let request_id = self.next_request_id("close-task");
         self.send_request(
             json!({
@@ -278,7 +274,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn advance_peer_task_stage(
-        &mut self,
+        &self,
         peer_id: String,
         task_id: String,
     ) -> Result<Value, String> {
@@ -296,7 +292,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn read_peer_task_file(
-        &mut self,
+        &self,
         peer_id: String,
         task_id: String,
         path: String,
@@ -316,7 +312,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn mark_peer_task_read(
-        &mut self,
+        &self,
         peer_id: String,
         task_id: String,
         expected_activity_revision: i64,
@@ -335,7 +331,7 @@ impl TransferSidecarClient {
         .await
     }
 
-    pub async fn start_peer_pairing(&mut self, peer_id: String) -> Result<Value, String> {
+    pub async fn start_peer_pairing(&self, peer_id: String) -> Result<Value, String> {
         let request_id = self.next_request_id("pair");
         eprintln!(
             "[transfer-sidecar] sending start_pairing request_id={} peer_id={}",
@@ -369,7 +365,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn accept_peer_pairing(
-        &mut self,
+        &self,
         pairing_request_id: String,
         verification_code: String,
     ) -> Result<Value, String> {
@@ -391,10 +387,7 @@ impl TransferSidecarClient {
         }))
     }
 
-    pub async fn reject_peer_pairing(
-        &mut self,
-        pairing_request_id: String,
-    ) -> Result<Value, String> {
+    pub async fn reject_peer_pairing(&self, pairing_request_id: String) -> Result<Value, String> {
         let request_id = self.next_request_id("reject-pair");
         let response = self
             .send_request(
@@ -412,7 +405,7 @@ impl TransferSidecarClient {
         }))
     }
 
-    pub async fn prepare_outgoing_transfer(&mut self, payload: Value) -> Result<Value, String> {
+    pub async fn prepare_outgoing_transfer(&self, payload: Value) -> Result<Value, String> {
         let phase = payload
             .get("phase")
             .and_then(Value::as_str)
@@ -460,7 +453,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn stage_transfer_artifact(
-        &mut self,
+        &self,
         transfer_id: String,
         artifact_id: String,
         path: String,
@@ -486,7 +479,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn fetch_transfer_artifact(
-        &mut self,
+        &self,
         transfer_id: String,
         artifact_id: String,
     ) -> Result<Value, String> {
@@ -511,7 +504,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn acknowledge_incoming_transfer_commit(
-        &mut self,
+        &self,
         transfer_id: String,
         source_task_id: String,
         destination_local_task_id: String,
@@ -536,7 +529,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn mark_outgoing_transfer_commit_applied(
-        &mut self,
+        &self,
         transfer_id: String,
     ) -> Result<Value, String> {
         let request_id = self.next_request_id("commit-applied");
@@ -557,7 +550,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn mark_incoming_transfer_event_recorded(
-        &mut self,
+        &self,
         transfer_id: String,
     ) -> Result<Value, String> {
         let request_id = self.next_request_id("event-recorded");
@@ -578,7 +571,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn mark_incoming_transfer_ack_completed(
-        &mut self,
+        &self,
         transfer_id: String,
     ) -> Result<Value, String> {
         let request_id = self.next_request_id("ack-completed");
@@ -599,7 +592,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn finalize_outgoing_transfer(
-        &mut self,
+        &self,
         transfer_id: String,
     ) -> Result<Value, String> {
         let request_id = self.next_request_id("finalize");
@@ -618,7 +611,7 @@ impl TransferSidecarClient {
     }
 
     pub async fn complete_outgoing_transfer_finalization(
-        &mut self,
+        &self,
         transfer_id: String,
         payload: Option<Value>,
         finalized_cleanly: bool,
@@ -644,7 +637,7 @@ impl TransferSidecarClient {
         }))
     }
 
-    async fn prepare_transfer_preflight(&mut self, payload: Value) -> Result<Value, String> {
+    async fn prepare_transfer_preflight(&self, payload: Value) -> Result<Value, String> {
         let source_task_id = required_string(&payload, &["sourceTaskId", "source_task_id"])?;
         let target_peer_id = required_string(&payload, &["targetPeerId", "target_peer_id"])?;
         let transport = transfer_transport(&payload)?;
@@ -669,7 +662,7 @@ impl TransferSidecarClient {
         }))
     }
 
-    async fn prepare_transfer_commit(&mut self, payload: Value) -> Result<Value, String> {
+    async fn prepare_transfer_commit(&self, payload: Value) -> Result<Value, String> {
         let transfer_id = required_string(&payload, &["transferId", "transfer_id"])?;
         let transfer_payload = payload.get("payload").cloned().ok_or_else(|| {
             "prepare_outgoing_transfer commit payload missing payload".to_string()
@@ -692,7 +685,7 @@ impl TransferSidecarClient {
         }))
     }
 
-    async fn send_request(&mut self, request: Value, request_id: &str) -> Result<Value, String> {
+    async fn send_request(&self, request: Value, request_id: &str) -> Result<Value, String> {
         if self.is_dead() {
             return Err("transfer sidecar client is not running".to_string());
         }
@@ -700,32 +693,35 @@ impl TransferSidecarClient {
         let encoded = serde_json::to_vec(&request)
             .map_err(|e| format!("failed to encode transfer sidecar request: {}", e))?;
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(request_id.to_string(), tx);
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(request_id.to_string(), tx);
+        let _registration = PendingRequestRegistration::new(request_id, Arc::clone(&self.pending));
 
-        if let Err(error) = self.stdin.write_all(&encoded).await {
+        let mut stdin = self.stdin.lock().await;
+        if let Err(error) = stdin.write_all(&encoded).await {
             self.dead.store(true, Ordering::Relaxed);
-            self.pending.lock().await.remove(request_id);
             return Err(format!(
                 "failed to write transfer sidecar request {}: {}",
                 request_id, error
             ));
         }
-        if let Err(error) = self.stdin.write_all(b"\n").await {
+        if let Err(error) = stdin.write_all(b"\n").await {
             self.dead.store(true, Ordering::Relaxed);
-            self.pending.lock().await.remove(request_id);
             return Err(format!(
                 "failed to terminate transfer sidecar request {}: {}",
                 request_id, error
             ));
         }
-        if let Err(error) = self.stdin.flush().await {
+        if let Err(error) = stdin.flush().await {
             self.dead.store(true, Ordering::Relaxed);
-            self.pending.lock().await.remove(request_id);
             return Err(format!(
                 "failed to flush transfer sidecar request {}: {}",
                 request_id, error
             ));
         }
+        drop(stdin);
 
         let response = rx.await.map_err(|_| {
             self.dead.store(true, Ordering::Relaxed);
@@ -795,6 +791,29 @@ fn transfer_transport(payload: &Value) -> Result<&str, String> {
     }
 }
 
+struct PendingRequestRegistration {
+    request_id: String,
+    pending: PendingRequests,
+}
+
+impl PendingRequestRegistration {
+    fn new(request_id: &str, pending: PendingRequests) -> Self {
+        Self {
+            request_id: request_id.to_string(),
+            pending,
+        }
+    }
+}
+
+impl Drop for PendingRequestRegistration {
+    fn drop(&mut self) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.request_id);
+    }
+}
+
 fn spawn_reader(
     app: AppHandle,
     stdout: ChildStdout,
@@ -832,7 +851,11 @@ fn spawn_reader(
             }
 
             if let Some(request_id) = value.get("request_id").and_then(Value::as_str) {
-                if let Some(sender) = pending.lock().await.remove(request_id) {
+                if let Some(sender) = pending
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(request_id)
+                {
                     let _ = sender.send(value);
                 } else {
                     eprintln!(
@@ -847,7 +870,10 @@ fn spawn_reader(
         }
 
         dead.store(true, Ordering::Relaxed);
-        pending.lock().await.clear();
+        pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     });
 }
 
@@ -1174,6 +1200,23 @@ mod tests {
             "cloud"
         );
         assert!(transfer_transport(&json!({"transport": "bluetooth"})).is_err());
+    }
+
+    #[test]
+    fn dropped_sidecar_request_removes_its_pending_response_registration() {
+        let pending = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let (sender, _receiver) = oneshot::channel();
+        pending
+            .lock()
+            .unwrap()
+            .insert("mark-read-1".to_string(), sender);
+
+        {
+            let _registration =
+                PendingRequestRegistration::new("mark-read-1", Arc::clone(&pending));
+        }
+
+        assert!(pending.lock().unwrap().is_empty());
     }
 
     #[test]

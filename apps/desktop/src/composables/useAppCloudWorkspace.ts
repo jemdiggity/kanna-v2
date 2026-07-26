@@ -92,8 +92,10 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   let cloudSnapshotRevision = 0;
   let cloudOneShotGeneration = 0;
   let lanRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  let lanRefreshInFlight: Promise<void> | null = null;
   let desktopCloudWorkspaceDisposed = false;
   const activeMarkReadClients = new Set<ActiveMarkReadClient>();
+  const remoteStageAdvancesInFlight = new Set<string>();
   const associatedCloudUsers = new Set<string>();
   let lastCloudBackendErrorToastAt: number | null = null;
   let currentDesktopId: string | null = null;
@@ -452,19 +454,27 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     subscribedCloudUid = null;
   }
 
-  async function refreshLanTasks(): Promise<void> {
-    await publishDesktopLanTaskSnapshot(db);
-    const snapshot = await listDesktopLanTasks({
-      localRepos: localReposForCloudMatching.value,
-      localClosedItems: closedLocalTaskIdentities.value,
+  function refreshLanTasks(): Promise<void> {
+    if (lanRefreshInFlight) return lanRefreshInFlight;
+    const refresh = (async () => {
+      await publishDesktopLanTaskSnapshot(db);
+      const snapshot = await listDesktopLanTasks({
+        localRepos: localReposForCloudMatching.value,
+        localClosedItems: closedLocalTaskIdentities.value,
+      });
+      if (desktopCloudWorkspaceDisposed) return;
+      lanSnapshot.value = {
+        repos: snapshot.repos,
+        items: snapshot.items,
+        terminalRefs: snapshot.terminalRefs ?? {},
+        blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
+        transferMachines: snapshot.transferMachines,
+      };
+    })();
+    lanRefreshInFlight = refresh.finally(() => {
+      lanRefreshInFlight = null;
     });
-    lanSnapshot.value = {
-      repos: snapshot.repos,
-      items: snapshot.items,
-      terminalRefs: snapshot.terminalRefs ?? {},
-      blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
-      transferMachines: snapshot.transferMachines,
-    };
+    return lanRefreshInFlight;
   }
 
   async function initializeDesktopCloudAuth(): Promise<void> {
@@ -630,16 +640,24 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       toast.error("Remote task is not reachable.");
       return;
     }
+    if (workspaceTask.item.has_running_post) return;
 
-    const client = workspaceTask.terminal.kind === "lan"
-      ? await createConfiguredDesktopLanTerminalClient()
-      : await createConfiguredDesktopRelayTerminalClient();
-    if (!client) {
-      toast.error("Remote task owner is unavailable.");
-      return;
-    }
+    const requestKey = JSON.stringify([
+      remoteRef.ownerDesktopId,
+      remoteRef.ownerLocalTaskId,
+    ]);
+    if (remoteStageAdvancesInFlight.has(requestKey)) return;
+    remoteStageAdvancesInFlight.add(requestKey);
 
+    let client: DesktopRelayTerminalClient | null = null;
     try {
+      client = workspaceTask.terminal.kind === "lan"
+        ? await createConfiguredDesktopLanTerminalClient()
+        : await createConfiguredDesktopRelayTerminalClient();
+      if (!client) {
+        toast.error("Remote task owner is unavailable.");
+        return;
+      }
       await client.advanceStage({
         desktopId: remoteRef.ownerDesktopId,
         taskId: remoteRef.ownerLocalTaskId,
@@ -647,7 +665,8 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
     } finally {
-      client.close();
+      client?.close();
+      remoteStageAdvancesInFlight.delete(requestKey);
     }
   }
 

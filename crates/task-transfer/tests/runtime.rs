@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -1749,6 +1749,137 @@ async fn trusted_peer_mark_read_posts_to_owner_kanna_server() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&body).unwrap(),
         json!({ "expectedActivityRevision": 7 }),
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snapshot_refresh() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let target_identity = TransferIdentity::generate();
+    let target_public_key = public_key_to_string(&target_identity.public_key);
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            endpoint: format!("127.0.0.1:{port}"),
+            pid: std::process::id(),
+            public_key: target_public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    PeerStore::new(trusted_peer_store_path(temp.path(), "peer-primary"))
+        .upsert(PeerRecord {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            public_key: target_public_key,
+            capabilities_json: "{\"protocolVersion\":1}".into(),
+            paired_at: "2026-07-26T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+
+    let runtime = std::sync::Arc::new(
+        TransferRuntime::spawn(
+            RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
+                .with_peer_request_timeout(Duration::from_secs(5))
+                .with_mark_read_timeout(Duration::from_millis(75)),
+        )
+        .await
+        .unwrap(),
+    );
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<&'static str>();
+    let server = tokio::spawn(async move {
+        let mut handlers = tokio::task::JoinSet::new();
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let event_tx = event_tx.clone();
+            handlers.spawn(async move {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let request: PeerRequest = serde_json::from_str(line.trim()).unwrap();
+                match request {
+                    PeerRequest::MarkTaskRead { .. } => {
+                        event_tx.send("mark-started").unwrap();
+                        let mut remainder = Vec::new();
+                        reader.read_to_end(&mut remainder).await.unwrap();
+                        event_tx.send("mark-closed").unwrap();
+                    }
+                    PeerRequest::SendSessionInput { request_id, .. } => {
+                        let response = PeerResponse::SendSessionInput { request_id };
+                        reader
+                            .get_mut()
+                            .write_all(
+                                format!("{}\n", serde_json::to_string(&response).unwrap())
+                                    .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    PeerRequest::GetTaskSnapshot { request_id, .. } => {
+                        let response = PeerResponse::TaskSnapshot {
+                            request_id,
+                            peer_id: "peer-target".into(),
+                            display_name: "Target".into(),
+                            snapshot: json!({ "schemaVersion": 1, "tasks": [] }),
+                        };
+                        reader
+                            .get_mut()
+                            .write_all(
+                                format!("{}\n", serde_json::to_string(&response).unwrap())
+                                    .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    other => panic!("unexpected peer request: {other:?}"),
+                }
+            });
+        }
+        while handlers.join_next().await.is_some() {}
+    });
+
+    let mark_runtime = std::sync::Arc::clone(&runtime);
+    let mark_read = tokio::spawn(async move {
+        mark_runtime
+            .mark_peer_task_read("peer-target", "task-unread", 7)
+            .await
+    });
+    assert_eq!(event_rx.recv().await, Some("mark-started"));
+
+    let controls = tokio::time::timeout(Duration::from_millis(250), async {
+        let (input, snapshots) = tokio::join!(
+            runtime.send_peer_session_input("peer-target", "task-unread", b"x".to_vec()),
+            runtime.list_peer_task_snapshots(),
+        );
+        input.unwrap();
+        assert_eq!(snapshots.unwrap().len(), 1);
+    })
+    .await;
+    assert!(
+        controls.is_ok(),
+        "terminal control or LAN snapshot refresh waited behind mark-read"
+    );
+
+    let error = tokio::time::timeout(Duration::from_millis(250), mark_read)
+        .await
+        .expect("mark-read exceeded its lower-layer deadline")
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("timed out after 75ms"),
+        "unexpected mark-read error: {error}"
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(250), event_rx.recv())
+            .await
+            .expect("stalled peer connection survived mark-read timeout"),
+        Some("mark-closed"),
     );
     server.await.unwrap();
 }

@@ -33,8 +33,8 @@ pub(crate) const KANNA_BUILD_COMMIT: &str = env!("KANNA_BUILD_COMMIT");
 pub(crate) const KANNA_BUILD_TASK_ID: &str = env!("KANNA_BUILD_TASK_ID");
 pub(crate) const KANNA_BUILD_WORKTREE: &str = env!("KANNA_BUILD_WORKTREE");
 pub(crate) const KANNA_BUILD_INFO: &str = env!("KANNA_BUILD_INFO");
-pub type TransferServiceState = Arc<Mutex<Option<transfer_sidecar::TransferSidecarClient>>>;
 pub type CloudTransferProxyState = cloud_transfer_proxy::CloudTransferProxyState;
+pub type TransferServiceState = Arc<Mutex<Option<Arc<transfer_sidecar::TransferSidecarClient>>>>;
 static RUNTIME_BUNDLE_IDENTIFIER: OnceLock<String> = OnceLock::new();
 
 /// Process-wide lock serializing tests that read or mutate process env vars.

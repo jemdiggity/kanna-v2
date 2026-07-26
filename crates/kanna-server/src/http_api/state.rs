@@ -23,6 +23,7 @@ pub struct AppState {
     pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
     requested_task_operations: Arc<RequestedTaskOperations>,
     relay_reconnect: Arc<Notify>,
+    requested_stage_advances: Arc<RequestedTaskOperations>,
     state_changes: broadcast::Sender<ServerFrame>,
     #[cfg(test)]
     pub(super) task_creator: Option<TestTaskCreator>,
@@ -175,6 +176,7 @@ impl AppState {
             repo_definitions: Arc::new(crate::task_creator::RepoDefinitionsCache::default()),
             requested_task_operations: Arc::new(RequestedTaskOperations::default()),
             relay_reconnect: Arc::new(Notify::new()),
+            requested_stage_advances: Arc::new(RequestedTaskOperations::default()),
             state_changes: broadcast::channel(256).0,
             #[cfg(test)]
             task_creator: None,
@@ -271,6 +273,24 @@ impl AppState {
             }
             changed.await;
         }
+    }
+
+    pub(super) fn begin_requested_stage_advance(
+        &self,
+        task_id: &str,
+    ) -> Option<RequestedTaskOperation> {
+        let mut flights = self
+            .requested_stage_advances
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !flights.insert(task_id.to_string()) {
+            return None;
+        }
+        Some(RequestedTaskOperation {
+            task_id: task_id.to_string(),
+            operations: Arc::clone(&self.requested_stage_advances),
+        })
     }
 
     #[cfg(test)]

@@ -432,6 +432,56 @@ describe("createDesktopRelayTerminalClient", () => {
 
     await expect(advancePromise).rejects.toThrow("task is blocked: task-blocked");
   });
+
+  it.each([
+    {
+      status: 404,
+      body: { error: "task not found" },
+      expected: "task not found",
+    },
+    {
+      status: 409,
+      body: { message: "activity revision changed" },
+      expected: "activity revision changed",
+    },
+    {
+      status: 500,
+      body: null,
+      expected: "Remote mark read failed with HTTP 500",
+    },
+  ])("rejects mark-read HTTP $status responses", async ({ status, body, expected }) => {
+    const socket = new FakeSocket();
+    const client = createDesktopRelayTerminalClient({
+      createSocket: () => socket,
+      getIdToken: vi.fn(async () => "id-token"),
+      relayUrl: "ws://relay.test",
+    });
+    const markReadPromise = client.markTaskRead({
+      desktopId: "desktop-owner",
+      taskId: "task-unread",
+      expectedActivityRevision: 7,
+    });
+
+    await openRelayTunnel(socket);
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+    await Promise.resolve();
+    const request = socket.sent
+      .map((entry) => JSON.parse(entry))
+      .find((entry) =>
+        entry.path === "/v1/tasks/task-unread/actions/mark-read"
+      );
+
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "response",
+        id: request.id,
+        status,
+        body,
+      }),
+    });
+
+    await expect(markReadPromise).rejects.toThrow(expected);
+  });
 });
 
 describe("resolveDesktopCloudTransportUrlFromEnv", () => {

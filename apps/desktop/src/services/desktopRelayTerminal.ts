@@ -226,11 +226,12 @@ export function createDesktopRelayTerminalClient({
       return { path: body.path, content: body.content };
     },
     async markTaskRead(options) {
-      await clientForDesktop(options.desktopId).request(
+      const response = await clientForDesktop(options.desktopId).request(
         "POST",
         `/v1/tasks/${encodeURIComponent(options.taskId)}/actions/mark-read`,
         { expectedActivityRevision: options.expectedActivityRevision },
       );
+      assertSuccessfulTaskAction(response, "mark read");
     },
   };
 }

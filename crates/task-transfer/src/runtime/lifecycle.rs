@@ -505,13 +505,14 @@ impl TransferRuntime {
         )?;
         let request_id = self.next_request_id("mark-read");
         let response = self
-            .send_peer_request(
+            .send_peer_request_with_timeout(
                 &target_peer,
                 PeerRequest::MarkTaskRead {
                     request_id: request_id.clone(),
                     requester_peer_id: self.config.peer_id.clone(),
                     sealed_payload,
                 },
+                self.config.mark_read_timeout,
             )
             .await?;
         match response {

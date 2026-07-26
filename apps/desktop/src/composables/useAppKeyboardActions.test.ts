@@ -159,6 +159,21 @@ describe("useAppKeyboardActions durable selection", () => {
     expect(toast.warning).toHaveBeenCalledWith("mainPanel.taskBlocked");
   });
 
+  it("does not advance a selected remote task while its owner is running a post", () => {
+    const workspaceTask = remoteWorkspaceTask("cloud:repo:task-remote");
+    workspaceTask.item.has_running_post = 1;
+    workspaceTask.capabilities = {
+      canAdvanceStage: true,
+    } as WorkspaceTask["capabilities"];
+    const { keyboardActions, advanceSelectedRemoteWorkspaceTask } = createHarness({
+      workspaceTask,
+    });
+
+    keyboardActions.advanceStage();
+
+    expect(advanceSelectedRemoteWorkspaceTask).not.toHaveBeenCalled();
+  });
+
   it("routes history shortcuts through workspace-aware navigation", async () => {
     const { keyboardActions, navigateBack, navigateForward } = createHarness();
 

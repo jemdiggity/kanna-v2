@@ -194,7 +194,16 @@ impl TransferRuntime {
         peer: &PeerRegistryEntry,
         request: PeerRequest,
     ) -> Result<PeerResponse, RuntimeError> {
-        let request_timeout = self.config.peer_request_timeout;
+        self.send_peer_request_with_timeout(peer, request, self.config.peer_request_timeout)
+            .await
+    }
+
+    pub(super) async fn send_peer_request_with_timeout(
+        &self,
+        peer: &PeerRegistryEntry,
+        request: PeerRequest,
+        request_timeout: std::time::Duration,
+    ) -> Result<PeerResponse, RuntimeError> {
         let response = tokio::time::timeout(request_timeout, async {
             let mut stream = TcpStream::connect(&peer.endpoint).await?;
             write_json_line(&mut stream, &request).await?;
