@@ -737,12 +737,35 @@ fn execute_stage_transition_detached(
     task_id: String,
     transition: crate::task_creator::PreparedStageTransition,
 ) {
+    execute_stage_transition_detached_holding(state, task_id, transition, None);
+}
+
+/// Same, but the detached worker takes ownership of a per-task operation
+/// guard for the whole transition.
+///
+/// The handler must return before the transition runs — it kills and respawns
+/// the caller's own session — so the guard cannot simply live in the handler:
+/// dropping it at the 200 would reopen the task between the response and the
+/// work landing, and a second request admitted in that window would spend
+/// another budget slot and prepare a workspace from task state the in-flight
+/// transition is about to change. Held here, it drops when the worker exits,
+/// on every path including a daemon that never answers.
+fn execute_stage_transition_detached_holding(
+    state: Arc<AppState>,
+    task_id: String,
+    transition: crate::task_creator::PreparedStageTransition,
+    in_flight: Option<super::state::RequestedTaskOperation>,
+) {
     // Stage execution interleaves async daemon I/O with synchronous git,
     // filesystem, and SQLite work (run records, fork rollback, teardown
     // prep). Drive the whole future from the blocking pool so none of it can
     // occupy a runtime worker and starve the shared KSP terminal transport.
     let worker_task_id = task_id.clone();
     tokio::spawn(async move {
+        // Bound to the worker's own scope: every exit path below — daemon
+        // connect failure, transition error, success, join error, or the task
+        // being dropped at runtime shutdown — releases the task.
+        let _in_flight = in_flight;
         let handle = tokio::runtime::Handle::current();
         let joined = tokio::task::spawn_blocking(move || {
             handle.block_on(async move {
@@ -1175,7 +1198,7 @@ pub(super) async fn request_revision(
     // revision, and spend the task past its cap — defeating the bound this
     // endpoint exists to enforce. The guard releases on drop, including on
     // every error path below.
-    let Some(_revision_in_flight) = state.begin_requested_task_revision(&source_task_id) else {
+    let Some(revision_in_flight) = state.begin_requested_task_revision(&source_task_id) else {
         return Err((
             axum::http::StatusCode::CONFLICT,
             format!("a revision is already in progress for task {source_task_id}"),
@@ -1339,10 +1362,13 @@ pub(super) async fn request_revision(
             prepared,
             budget,
         } => {
-            execute_stage_transition_detached(
+            // Ownership moves into the worker: the task stays claimed until
+            // the revision has actually landed, not just until this response.
+            execute_stage_transition_detached_holding(
                 Arc::clone(&state),
                 source_task_id.clone(),
                 crate::task_creator::PreparedStageTransition::Run(prepared),
+                Some(revision_in_flight),
             );
             state.publish_state_changed(StateChangeScope::Tasks);
 

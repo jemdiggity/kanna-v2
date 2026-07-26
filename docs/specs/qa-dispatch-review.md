@@ -136,6 +136,16 @@ On top of that, one revision action runs per task at a time (the same per-task
 operation flight that guards task creation and abort): a second concurrent
 request gets `409 Conflict` rather than waiting through a workspace fork, and a
 request arriving after the winner finishes sees the spent budget and parks.
+
+That flight is owned by the **detached transition**, not by the handler. The
+response must be sent before the transition runs — it kills and respawns the
+caller's own session — so for the whole window between the 200 and the
+transition landing, the task's stage, branch, and session are still the
+pre-revision ones. A guard released at the response would reopen that window: a
+second request admitted there claims another round and forks another workspace
+from state the in-flight transition is about to replace. Moving ownership into
+the worker closes it, and the guard drops on every worker exit path, including
+a daemon that never answers.
 Without both, two admitted requests also raced on the *same* forked branch name
 — the regression test in `http_api::tests::revision_status` reproduces exactly
 that when either guard is removed.

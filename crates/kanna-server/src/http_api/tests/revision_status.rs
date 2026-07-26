@@ -1031,6 +1031,89 @@ fn setup_revision_budget_fixture(label: &str, revision_limit: i64) -> RevisionBu
     }
 }
 
+/// A permissive fake daemon for a fixture socket: `Kill` is answered with
+/// `SessionNotFound`, spawns with `SessionCreated`, anything else with `Ok`.
+///
+/// When `first_command_seen`/`release` are supplied the daemon reads the first
+/// command, reports it, and then waits — holding the detached stage transition
+/// open so a test can act inside the window between the HTTP response and the
+/// transition landing.
+fn spawn_fixture_daemon(
+    socket_path: std::path::PathBuf,
+    first_command_seen: Option<tokio::sync::oneshot::Sender<()>>,
+    release: Option<tokio::sync::oneshot::Receiver<()>>,
+) -> tokio::task::JoinHandle<()> {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let mut first_command_seen = first_command_seen;
+        let mut release = release;
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let Ok(command) = serde_json::from_str::<DaemonCommand>(line.trim()) else {
+                    break;
+                };
+                if let Some(seen) = first_command_seen.take() {
+                    let _ = seen.send(());
+                }
+                if let Some(gate) = release.take() {
+                    let _ = gate.await;
+                }
+                let response = match command {
+                    DaemonCommand::Kill { .. } => DaemonEvent::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    },
+                    DaemonCommand::SpawnAgent { session_id, .. }
+                    | DaemonCommand::Spawn { session_id, .. } => {
+                        DaemonEvent::SessionCreated { session_id }
+                    }
+                    _ => DaemonEvent::Ok,
+                };
+                if write_half
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                    )
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    })
+}
+
+/// Poll until the task's revision run for `stage` exists, so assertions run
+/// against a transition that actually landed rather than a race.
+async fn wait_for_revision_run(db: &Db, task_id: &str, stage: &str) -> crate::db::StageRun {
+    for _ in 0..500 {
+        if let Some(run) = db
+            .list_stage_runs_for_task(task_id)
+            .unwrap()
+            .into_iter()
+            .find(|run| run.stage == stage && run.kind == "main")
+        {
+            return run;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("no {stage} revision run landed for task {task_id}");
+}
+
 fn cleanup_revision_budget_fixture(fixture: &RevisionBudgetFixture) {
     let _ = std::fs::remove_file(&fixture.socket_path);
     let _ = std::fs::remove_dir_all(&fixture.daemon_dir);
@@ -1539,6 +1622,10 @@ async fn concurrent_agent_revision_requests_cannot_spend_past_the_budget() {
         assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 1);
     }
 
+    // A real (if fake) daemon, so the winning request's detached transition
+    // completes and can be asserted on.
+    let daemon = spawn_fixture_daemon(fixture.socket_path.clone(), None, None);
+
     let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
     let request = || {
         Request::post("/v1/tasks/budget-1/actions/request-revision")
@@ -1609,18 +1696,21 @@ async fn concurrent_agent_revision_requests_cannot_spend_past_the_budget() {
         2,
         "the last slot must be spent exactly once"
     );
-    // And only one revision run was created for the target stage.
+    // The winner's transition must actually land — "no runs at all" would
+    // satisfy a bare upper bound while proving nothing.
+    wait_for_revision_run(&db, "budget-1", "in progress").await;
     let revision_runs = db
         .list_stage_runs_for_task("budget-1")
         .unwrap()
         .into_iter()
         .filter(|run| run.stage == "in progress" && run.kind == "main")
         .count();
-    assert!(
-        revision_runs <= 1,
-        "at most one revision run may be started, found {revision_runs}"
+    assert_eq!(
+        revision_runs, 1,
+        "exactly one revision run must land, found {revision_runs}"
     );
 
+    daemon.abort();
     drop(db);
     cleanup_revision_budget_fixture(&fixture);
 }
@@ -1703,6 +1793,161 @@ async fn concurrent_human_and_agent_revision_requests_are_serialized() {
         "rounds must never exceed the limit, got {rounds}"
     );
 
+    drop(db);
+    cleanup_revision_budget_fixture(&fixture);
+}
+
+/// The window that the simultaneous-request test cannot reach: after the
+/// handler has answered 200 but before the detached transition has landed.
+///
+/// The response has to come first — the transition kills and respawns the
+/// caller's own session — so for that whole window the task's stage, branch,
+/// and session are still the pre-revision ones. A second request admitted
+/// there would spend another budget slot and prepare a workspace from state
+/// the in-flight transition is about to replace. The per-task guard therefore
+/// belongs to the detached worker, not to the handler.
+#[tokio::test]
+async fn a_second_revision_is_refused_until_the_detached_transition_lands() {
+    // Deliberate slack in the budget (limit 3, nothing spent): without the
+    // guard the second request is not stopped by exhaustion, so it would
+    // really claim another round and prepare another workspace from the stale
+    // task state — the failure mode under test, rather than the easier case
+    // where the budget happens to catch it.
+    let fixture = setup_revision_budget_fixture("window", 3);
+    {
+        let db = Db::open(&fixture.config.db_path).unwrap();
+        for _ in 0..3 {
+            db.release_agent_revision_round("budget-1").unwrap();
+        }
+        assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 0);
+    }
+
+    // The daemon holds the first transition open at its first command.
+    let (first_command_tx, first_command_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let daemon = spawn_fixture_daemon(
+        fixture.socket_path.clone(),
+        Some(first_command_tx),
+        Some(release_rx),
+    );
+
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let request = || {
+        Request::post("/v1/tasks/budget-1/actions/request-revision")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "targetStage": "in progress",
+                    "summary": "QA failed: review-ui",
+                    "prompt": "Fix the finding."
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let first = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(first.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let started: TaskActionResponse = from_slice(&body).unwrap();
+    let budget = started.revision_budget.expect("revision budget reported");
+    assert!(!budget.exhausted);
+    assert_eq!(budget.rounds, 1);
+
+    // The response has landed; the transition is now mid-flight, blocked on
+    // the daemon. This is the window under test.
+    tokio::time::timeout(std::time::Duration::from_secs(10), first_command_rx)
+        .await
+        .expect("the detached transition never reached the daemon")
+        .expect("daemon gate dropped");
+
+    let second = app.clone().oneshot(request()).await.unwrap();
+    let second_status = second.status();
+    let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        second_status,
+        StatusCode::CONFLICT,
+        "a revision arriving before the first landed must be refused: {}",
+        String::from_utf8_lossy(&second_body)
+    );
+
+    {
+        // Refusing must not have spent a round or prepared a second workspace,
+        // even though the budget had room for one.
+        let db = Db::open(&fixture.config.db_path).unwrap();
+        assert_eq!(
+            db.task_revision_rounds("budget-1").unwrap(),
+            1,
+            "a refused request must not spend a budget slot"
+        );
+        let workspaces = std::fs::read_dir(fixture.repo_root.join(".kanna-worktrees"))
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert!(
+            workspaces <= 1,
+            "a refused request must not fork a second workspace, found {workspaces}"
+        );
+    }
+
+    let _ = release_tx.send(());
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    wait_for_revision_run(&db, "budget-1", "in progress").await;
+    let revision_runs = db
+        .list_stage_runs_for_task("budget-1")
+        .unwrap()
+        .into_iter()
+        .filter(|run| run.stage == "in progress" && run.kind == "main")
+        .count();
+    assert_eq!(
+        revision_runs, 1,
+        "exactly one revision run may land, found {revision_runs}"
+    );
+    assert_eq!(
+        db.task_revision_rounds("budget-1").unwrap(),
+        1,
+        "exactly one round may be spent while the transition was in flight"
+    );
+
+    // Once the worker exits the task is claimable again — the guard is tied to
+    // the transition, not held forever. With budget still available, the next
+    // request is admitted, which is the released-guard proof.
+    let mut third_status = StatusCode::CONFLICT;
+    let mut third_body = Vec::new();
+    for _ in 0..250 {
+        let third = app.clone().oneshot(request()).await.unwrap();
+        third_status = third.status();
+        third_body = axum::body::to_bytes(third.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        if third_status != StatusCode::CONFLICT {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        third_status,
+        StatusCode::OK,
+        "the guard must release when the transition finishes: {}",
+        String::from_utf8_lossy(&third_body)
+    );
+    let admitted: TaskActionResponse = from_slice(&third_body).unwrap();
+    let admitted_budget = admitted.revision_budget.expect("revision budget reported");
+    assert!(
+        !admitted_budget.exhausted,
+        "budget remained, so the request after the transition must be admitted"
+    );
+    assert_eq!(
+        admitted_budget.rounds, 2,
+        "the admitted request spends the next round"
+    );
+
+    daemon.abort();
     drop(db);
     cleanup_revision_budget_fixture(&fixture);
 }
