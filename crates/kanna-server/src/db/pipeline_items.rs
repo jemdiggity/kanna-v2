@@ -798,6 +798,10 @@ impl Db {
         id: &str,
         tearing_down: bool,
     ) -> Result<(), rusqlite::Error> {
+        // Closing tasks retain their recent durable action responses for
+        // lost-response replay, but opportunistically collect older global
+        // history so databases with long-lived closed tasks stay bounded.
+        let _ = self.prune_task_action_requests();
         self.with_immediate_transaction(|db| {
             let Some(pipeline_item_id) = db.resolve_pipeline_item_id(id)? else {
                 return Err(rusqlite::Error::QueryReturnedNoRows);

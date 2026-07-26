@@ -81,6 +81,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "035_stage_run_ownership_version",
     "036_pending_stage_action",
     "037_task_action_request",
+    "038_task_action_hardening",
 ];
 
 #[derive(Debug, Serialize)]
@@ -695,6 +696,7 @@ fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           cwd TEXT,
           resumed_from_run_id TEXT,
           completion_transition TEXT CHECK (completion_transition IN ('manual', 'auto')),
+          completion_attempt TEXT,
           run_ownership_version INTEGER NOT NULL DEFAULT 0,
           started_at TEXT NOT NULL DEFAULT (datetime('now')),
           finished_at TEXT
@@ -1363,7 +1365,7 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             "stage_run",
             "run_ownership_version",
             "INTEGER NOT NULL DEFAULT 0",
-        );
+        )?;
         Ok(())
     })?;
 
@@ -1412,6 +1414,16 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             );
             "#,
         )
+    })?;
+
+    run_migration(conn, "038_task_action_hardening", |conn| {
+        add_column(conn, "stage_run", "completion_attempt", "TEXT")?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_action_request_updated
+             ON task_action_request(state, updated_at)",
+            [],
+        )?;
+        Ok(())
     })?;
 
     Ok(())

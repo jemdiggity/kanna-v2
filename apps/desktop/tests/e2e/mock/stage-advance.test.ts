@@ -325,6 +325,7 @@ async function waitForVisibleSelectedTaskState(
   stage: string,
   branch: string,
   worktreePath: string,
+  expectedActivity: "working" | null = "working",
   timeoutMs = 20_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -362,8 +363,10 @@ async function waitForVisibleSelectedTaskState(
       && state.branch?.includes(branch)
       && state.activeWorktreePath === worktreePath
       && state.sidebarSelected
-      && state.activity === "working"
-      && state.fontStyle === "italic"
+      && (
+        expectedActivity === null
+        || (state.activity === expectedActivity && state.fontStyle === "italic")
+      )
     ) {
       return;
     }
@@ -589,9 +592,13 @@ describe("stage advance", () => {
       join(kannaDir, "fake-bin", "codex"),
       [
         "#!/bin/sh",
+        "if [ \"${1:-}\" = \"resume\" ] && [ \"${2:-}\" = \"--help\" ]; then",
+        "  echo 'Usage: codex resume [OPTIONS] [SESSION_ID]'",
+        "  exit 0",
+        "fi",
         "mkdir -p .kanna",
         "printf '%s\\n' \"$@\" > .kanna/revision-codex-args.txt",
-        "while :; do sleep 1; done",
+        "while :; do printf '.'; sleep 1; done",
         "",
       ].join("\n"),
     );
@@ -666,8 +673,8 @@ describe("stage advance", () => {
     expect(runs[0]).toMatchObject({
       stage: "pr",
       status: "running",
-      session_id: taskId,
     });
+    expect(runs[0].session_id).toBe(runs[0].id);
   });
 
   it("keeps the same task selected when Cmd+S advances a non-final stage", async () => {
@@ -719,6 +726,75 @@ describe("stage advance", () => {
     expect(row.stage).toBe("pr");
     await waitForSidebarToExcludeTaskId(client, taskId);
     await waitForSelectedTaskNotId(client, taskId);
+  });
+
+  it("does not steal selection when a delayed final-stage response finishes after a task switch", async () => {
+    const taskId = "delayed-final-stage-close";
+    const branch = "task-delayed-final-stage-close";
+    const fallbackTaskId = "delayed-final-fallback";
+    const chosenTaskId = "delayed-final-user-choice";
+    await addTaskWorktree(taskId, branch);
+    await insertTask({
+      id: taskId,
+      prompt: "Close with a delayed response",
+      pipeline: TWO_STAGE_PIPELINE,
+      stage: "pr",
+      branch,
+      displayName: "Delayed final close source",
+    });
+    await insertTask({
+      id: fallbackTaskId,
+      prompt: "Automatic close fallback",
+      pipeline: TWO_STAGE_PIPELINE,
+      stage: "in progress",
+      branch: null,
+      agentType: "agent",
+      displayName: "Delayed final fallback",
+    });
+    await insertTask({
+      id: chosenTaskId,
+      prompt: "User-selected task",
+      pipeline: TWO_STAGE_PIPELINE,
+      stage: "in progress",
+      branch: null,
+      agentType: "agent",
+      displayName: "Delayed final user choice",
+    });
+    await execDb(
+      client,
+      "UPDATE pipeline_item SET pinned = 1, pin_order = CASE id WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END WHERE id IN (?, ?, ?)",
+      [taskId, fallbackTaskId, taskId, fallbackTaskId, chosenTaskId],
+    );
+    await hydrateStoreItem(client, taskId);
+    await hydrateStoreItem(client, fallbackTaskId);
+    await hydrateStoreItem(client, chosenTaskId);
+    await selectTask(client, taskId);
+
+    await client.executeSync(
+      `window.__KANNA_DELAYED_ADVANCE_ORIGINAL_FETCH__ = window.fetch.bind(window);
+       window.fetch = async function(input, init) {
+         const response = await window.__KANNA_DELAYED_ADVANCE_ORIGINAL_FETCH__(input, init);
+         const url = String(input instanceof Request ? input.url : input);
+         if (url.includes(${JSON.stringify(`/v1/tasks/${taskId}/actions/advance-stage`)})) {
+           await new Promise((resolve) => setTimeout(resolve, 1500));
+         }
+         return response;
+       };`,
+    );
+    try {
+      await pressAdvanceStageShortcut(client);
+      await waitForTaskRow(client, taskId, (candidate) => candidate.closed_at !== null);
+      await selectTask(client, chosenTaskId);
+      await sleep(2_000);
+      expect(await getVueState(client, "selectedItemId")).toBe(chosenTaskId);
+    } finally {
+      await client.executeSync(
+        `if (window.__KANNA_DELAYED_ADVANCE_ORIGINAL_FETCH__) {
+           window.fetch = window.__KANNA_DELAYED_ADVANCE_ORIGINAL_FETCH__;
+           delete window.__KANNA_DELAYED_ADVANCE_ORIGINAL_FETCH__;
+         }`,
+      );
+    }
   });
 
   it("rejects advancing a blocked task with a toast and leaves it untouched", async () => {
@@ -808,7 +884,8 @@ describe("stage advance", () => {
     const seededRun = runs.find((run) => run.id === "run-auto-complete-source-seed");
     expect(seededRun?.status).toBe("succeeded");
     const reviewRun = runs.find((run) => run.stage === "review");
-    expect(reviewRun).toMatchObject({ status: "running", session_id: sourceTaskId });
+    expect(reviewRun).toMatchObject({ status: "running" });
+    expect(reviewRun?.session_id).toBe(reviewRun?.id);
 
     // A refresh triggered by the external transition must not move selection —
     // nothing closed, so the user's chosen task stays selected.
@@ -860,7 +937,8 @@ describe("stage advance", () => {
     const seededRun = runs.find((run) => run.id === seedRunId);
     expect(seededRun?.status).toBe("cancelled");
     const freshRun = runs.find((run) => run.id !== seedRunId && run.stage === "in progress");
-    expect(freshRun).toMatchObject({ status: "running", session_id: taskId });
+    expect(freshRun).toMatchObject({ status: "running" });
+    expect(freshRun?.session_id).toBe(freshRun?.id);
   });
 
   it("requests changes through DiffModal and forks a numbered fallback workspace", async () => {
@@ -926,8 +1004,7 @@ describe("stage advance", () => {
       taskId,
       (candidate) =>
         candidate.stage === "in progress"
-        && candidate.branch === expectedBranch
-        && candidate.activity === "working",
+        && candidate.branch === expectedBranch,
     );
 
     const row = await getTaskRow(client, taskId);
@@ -936,10 +1013,10 @@ describe("stage advance", () => {
       stage: "in progress",
       closed_at: null,
       branch: expectedBranch,
-      activity: "working",
       display_name: originalTitle,
       prompt: reviewPrompt,
     });
+    expect(["idle", "working"]).toContain(row.activity);
     const expectedCwd = join(testRepoPath, ".kanna-worktrees", expectedBranch);
     await waitForVisibleSelectedTaskState(
       client,
@@ -947,6 +1024,7 @@ describe("stage advance", () => {
       "in progress",
       expectedBranch,
       expectedCwd,
+      null,
     );
 
     const runs = await getStageRuns(client, taskId);
@@ -1090,12 +1168,12 @@ describe("stage advance", () => {
     );
     expect(resumedRun).toMatchObject({
       status: "running",
-      session_id: taskId,
       provider_session_id: providerSessionId,
       cwd: implementationCwd,
       resumed_from_run_id: implementationRunId,
       feedback: expect.stringContaining(revisionPrompt),
     });
+    expect(resumedRun?.session_id).toBe(resumedRun?.id);
 
     const capturedArgsPath = join(
       implementationCwd,

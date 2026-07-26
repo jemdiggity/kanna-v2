@@ -519,6 +519,7 @@ async fn send_task_input_route_resolves_running_stage_run_session() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();

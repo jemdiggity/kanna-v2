@@ -2090,6 +2090,115 @@ describe("diff view", () => {
     await waitForReviewCommentCount(client, 0);
   });
 
+  it("does not clear another task view after a dismissed revision request finishes", async () => {
+    const originTaskId = await client.executeSync<string>(
+      `return window.__KANNA_E2E__.setupState.selectedItem().id;`
+    );
+    const targetTaskId = `${originTaskId}-stale-revision-target`;
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+    await tauriInvoke(client, "run_script", {
+      script: [
+        "mkdir -p native-review-e2e",
+        "printf 'export const staleRevisionMarker = true;\\n' > native-review-e2e/stale-revision.ts",
+        "git add native-review-e2e/stale-revision.ts",
+        "git commit -m 'e2e stale revision callback content'",
+      ].join("\n"),
+      cwd: worktreePath,
+      env: {},
+    });
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const db = ctx.db.value || ctx.db;
+       const origin = ctx.selectedItem();
+       Promise.all([
+         db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["review", origin.id]),
+         db.execute(
+           "INSERT INTO pipeline_item (id, repo_id, prompt, pipeline, pipeline_def, stage, branch, agent_type, agent_provider, activity, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, 'idle', ?, datetime('now'), datetime('now'))",
+           [
+             ${JSON.stringify(targetTaskId)},
+             origin.repo_id,
+             "Keep the target review state",
+             origin.pipeline,
+             origin.pipeline_def,
+             "review",
+             origin.agent_type,
+             origin.agent_provider,
+             "Stale revision target",
+           ],
+         ),
+       ])
+         .then(function() { return ctx.refreshAllItems(); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + e); });`
+    );
+    await installStageActionRecorder(client, { requestRevisionDelayMs: 1_000 });
+
+    await openDiffModal(client);
+    await setDiffScope(client, "Branch");
+    await waitForDiffText(client, `return text.includes("native-review-e2e/stale-revision.ts");`);
+    await addReviewCommentThroughDiffUi(
+      client,
+      "native-review-e2e/stale-revision.ts",
+      1,
+      "This completion belongs only to the origin task.",
+    );
+    await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true, shift: true }));
+    await client.waitForElement(".summary-composer", 2_000);
+    await client.click(await client.findElement(".summary-actions .primary"));
+    await waitForRecordedStageAction(client, "request-revision");
+
+    await closeDiffModalIfOpen(client);
+    const switched = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const targetTaskId = ${JSON.stringify(targetTaskId)};
+       Promise.resolve(ctx.store.selectItem(targetTaskId))
+         .then(function() {
+           ctx.appModals.updateCurrentDiffViewState({
+             reviewComments: [{
+               id: "target-comment",
+               filePath: "target.ts",
+               side: "new",
+               line: 1,
+               excerpt: "target",
+               note: "Preserve the target task comment.",
+             }],
+           });
+           cb("ok");
+         })
+         .catch(function(e) { cb("err:" + e); });`
+    );
+    expect(switched).toBe("ok");
+
+    await sleep(1_500);
+    const targetState = await client.executeSync<{
+      selectedTaskId: string | null;
+      commentNotes: string[];
+    }>(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const selected = ctx.selectedItem();
+       const stateRef = ctx.appModals.currentDiffViewState;
+       const state = (stateRef && stateRef.__v_isRef ? stateRef.value : stateRef) || {};
+       return {
+         selectedTaskId: selected?.id || null,
+         commentNotes: (state.reviewComments || []).map((comment) => comment.note),
+       };`
+    );
+    expect(targetState).toEqual({
+      selectedTaskId: targetTaskId,
+      commentNotes: ["Preserve the target task comment."],
+    });
+    const restored = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       Promise.resolve(ctx.store.selectItem(${JSON.stringify(originTaskId)}))
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + e); });`
+    );
+    expect(restored).toBe("ok");
+  });
+
   it("jumps, edits, and deletes pending review comments from the drawer", async () => {
     const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
     await tauriInvoke(client, "run_script", {

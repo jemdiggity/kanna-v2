@@ -77,6 +77,14 @@ function setImageUrlPreviewRef(component: Element | ComponentPublicInstance | nu
 function setPreferencesRef(component: Element | ComponentPublicInstance | null) {
   m.preferencesRef.value = component as InstanceType<typeof PreferencesPanel> | null;
 }
+
+function updateReviewCommentsForView(
+  reviewComments: PendingReviewComment[],
+  originViewKey?: string,
+) {
+  if (!originViewKey || m.currentDiffViewKey.value !== originViewKey) return;
+  m.updateCurrentDiffViewState({ reviewComments });
+}
 </script>
 
 <template>
@@ -140,6 +148,7 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
   <DiffModal
     :ref="setDiffModalRef"
     v-if="m.showDiffModal.value && !c.isMobile && c.store.selectedRepo?.path"
+    :key="m.currentDiffViewKey.value"
     :repo-path="c.store.selectedRepo.path"
     :worktree-path="c.store.currentItem?.branch ? m.activeWorktreePath.value : undefined"
     :initial-scope="m.currentDiffViewState.value?.scope"
@@ -158,7 +167,7 @@ function setPreferencesRef(component: Element | ComponentPublicInstance | null) 
     @scroll-state-change="(scrollPositions: DiffScrollPositions) => m.updateCurrentDiffViewState({ scrollPositions })"
     @branch-include-change="(branchInclude: BranchInclude) => m.updateCurrentDiffViewState({ branchInclude })"
     @review-head-change="(reviewHeadCommit: string) => m.updateCurrentDiffViewState({ reviewHeadCommit })"
-    @review-comments-change="(reviewComments: PendingReviewComment[]) => m.updateCurrentDiffViewState({ reviewComments })"
+    @review-comments-change="updateReviewCommentsForView"
     @close="m.showDiffModal.value = false; m.maximizedModal.value = null"
   />
   <CommitGraphModal

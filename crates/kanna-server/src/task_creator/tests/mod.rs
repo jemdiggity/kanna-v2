@@ -220,7 +220,21 @@ fn install_test_provider_binaries(repo_root: &std::path::Path) {
     std::fs::create_dir_all(&bin_dir).unwrap();
     for provider in AgentProvider::ALL {
         let path = bin_dir.join(provider.executable());
-        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        let resume_help = match provider {
+            AgentProvider::Claude | AgentProvider::Copilot => {
+                "if [ \"${1:-}\" = \"--help\" ]; then echo '--resume SESSION'; exit 0; fi"
+            }
+            AgentProvider::Codex => {
+                "if [ \"${1:-}\" = \"resume\" ] && [ \"${2:-}\" = \"--help\" ]; then echo 'Resume a previous session'; exit 0; fi"
+            }
+            AgentProvider::Opencode => {
+                "if [ \"${1:-}\" = \"run\" ] && [ \"${2:-}\" = \"--help\" ]; then echo '--session SESSION'; exit 0; fi"
+            }
+            AgentProvider::Antigravity => {
+                "if [ \"${1:-}\" = \"--help\" ]; then echo '--conversation ID'; exit 0; fi"
+            }
+        };
+        std::fs::write(&path, format!("#!/bin/sh\n{resume_help}\nexit 0\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     std::fs::write(

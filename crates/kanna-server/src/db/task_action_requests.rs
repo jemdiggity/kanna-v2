@@ -1,6 +1,9 @@
 use super::Db;
 use rusqlite::{params, OptionalExtension};
 
+const COMPLETED_TASK_ACTION_RETENTION_DAYS: i64 = 7;
+const MAX_COMPLETED_TASK_ACTION_REQUESTS: i64 = 128;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskActionRequestClaim {
     Claimed,
@@ -32,6 +35,30 @@ impl From<rusqlite::Error> for TaskActionRequestError {
 }
 
 impl Db {
+    pub fn prune_task_action_requests(&self) -> Result<usize, rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let aged = transaction.execute(
+            "DELETE FROM task_action_request
+             WHERE state != 'pending'
+               AND datetime(updated_at) < datetime('now', ?1)",
+            [format!("-{COMPLETED_TASK_ACTION_RETENTION_DAYS} days")],
+        )?;
+        let overflow = transaction.execute(
+            "DELETE FROM task_action_request
+             WHERE state != 'pending'
+               AND idempotency_key IN (
+                 SELECT idempotency_key
+                 FROM task_action_request
+                 WHERE state != 'pending'
+                 ORDER BY datetime(updated_at) DESC, rowid DESC
+                 LIMIT -1 OFFSET ?1
+               )",
+            [MAX_COMPLETED_TASK_ACTION_REQUESTS],
+        )?;
+        transaction.commit()?;
+        Ok(aged + overflow)
+    }
+
     pub fn claim_task_action_request(
         &self,
         key: &str,
@@ -39,6 +66,7 @@ impl Db {
         action: &str,
         request_json: &str,
     ) -> Result<TaskActionRequestClaim, TaskActionRequestError> {
+        self.prune_task_action_requests()?;
         let transaction = self.conn.unchecked_transaction()?;
         let inserted = transaction.execute(
             "INSERT OR IGNORE INTO task_action_request

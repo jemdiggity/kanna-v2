@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS stage_run (
     cwd TEXT,
     resumed_from_run_id TEXT,
     completion_transition TEXT CHECK (completion_transition IN ('manual', 'auto')),
+    completion_attempt TEXT,
     run_ownership_version INTEGER NOT NULL DEFAULT 0,
     started_at TEXT NOT NULL DEFAULT (datetime('now')),
     finished_at TEXT
@@ -118,3 +119,6 @@ CREATE TABLE IF NOT EXISTS task_action_request (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_task_action_request_updated
+    ON task_action_request(state, updated_at);

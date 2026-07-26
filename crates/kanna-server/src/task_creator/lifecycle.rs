@@ -13,7 +13,7 @@ use crate::session_replacements::SessionReplacements;
 use kanna_daemon::protocol::{
     AgentSpawnParams, Command as DaemonCommand, Event as DaemonEvent, TerminalSnapshot,
 };
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 const STARTUP_LIFECYCLE_BUFFER_PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
 #[cfg(not(test))]
@@ -30,13 +30,13 @@ pub(crate) fn prepared_task_id(prepared: &PreparedTaskSpawn) -> &str {
 /// pending successor while recovery compares it with daemon ownership.
 pub(crate) async fn reconcile_pending_stage_actions_on_startup(
     config: &crate::config::Config,
-) -> Result<(), String> {
+) -> Result<Option<crate::terminal_watcher::StartupLifecycleHandoff>, String> {
     let actions = Db::open(&config.db_path)
         .map_err(|error| format!("startup action reconciliation db error: {error}"))?
         .pending_stage_actions()
         .map_err(|error| format!("startup action reconciliation query failed: {error}"))?;
     if actions.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     let mut lifecycle = DaemonClient::connect(&config.daemon_dir)
@@ -88,27 +88,35 @@ pub(crate) async fn reconcile_pending_stage_actions_on_startup(
         })
         .collect::<HashSet<_>>();
     let mut exited_successors = HashSet::new();
+    let mut landed_successors = HashSet::new();
+    let mut buffered_lifecycle_events = VecDeque::new();
     let lifecycle_deadline = tokio::time::Instant::now() + STARTUP_LIFECYCLE_BUFFER_PERIOD;
     loop {
         match tokio::time::timeout_at(lifecycle_deadline, lifecycle.read_event()).await {
             Err(_) => break,
-            Ok(Ok(DaemonEvent::Exit {
-                session_id,
-                run_id,
-                killed: false,
-                ..
-            })) => {
-                let owner = (session_id, run_id);
-                if expected_successors.contains(&owner) {
-                    exited_successors.insert(owner);
+            Ok(Ok(event)) => {
+                match &event {
+                    DaemonEvent::Exit {
+                        session_id,
+                        run_id,
+                        killed: false,
+                        ..
+                    } => {
+                        let owner = (session_id.clone(), run_id.clone());
+                        if expected_successors.contains(&owner) {
+                            exited_successors.insert(owner);
+                        }
+                    }
+                    DaemonEvent::ShuttingDown => {
+                        return Err(
+                            "daemon shut down during startup action lifecycle reconciliation"
+                                .to_string(),
+                        );
+                    }
+                    _ => {}
                 }
+                buffered_lifecycle_events.push_back(event);
             }
-            Ok(Ok(DaemonEvent::ShuttingDown)) => {
-                return Err(
-                    "daemon shut down during startup action lifecycle reconciliation".to_string(),
-                );
-            }
-            Ok(Ok(_)) => {}
             Ok(Err(error)) => {
                 return Err(format!(
                     "startup action lifecycle subscription failed: {error}"
@@ -136,6 +144,7 @@ pub(crate) async fn reconcile_pending_stage_actions_on_startup(
                     action.successor_run_id, action.task_id, error
                 )
             })?;
+            landed_successors.insert(action.successor_run_id.clone());
             log::info!(
                 "landed recovered successor {} for task {}",
                 action.successor_run_id,
@@ -181,7 +190,11 @@ pub(crate) async fn reconcile_pending_stage_actions_on_startup(
             );
         }
     }
-    Ok(())
+    Ok(Some(crate::terminal_watcher::StartupLifecycleHandoff {
+        daemon: lifecycle,
+        buffered: buffered_lifecycle_events,
+        recovered_successor_run_ids: landed_successors,
+    }))
 }
 
 pub(crate) fn rollback_prepared_task_for_api(
@@ -498,6 +511,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             serde_json::to_string(&crate::mobile_api::TaskActionResponse {
                 task_id: task_id.clone(),
                 follow_task: None,
+                revision_budget: None,
             })
         })
         .transpose()
@@ -617,10 +631,13 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         prepared.terminal_prelude.clone(),
         prepared.session.clone(),
     );
-    let event = match daemon.send_command(&command).await {
+    let spawn_result = daemon
+        .send_command(&command)
+        .await
+        .map_err(|error| format!("daemon error: {error}"));
+    let event = match spawn_result {
         Ok(event) => Some(event),
-        Err(e) => {
-            let command_error = format!("daemon error: {e}");
+        Err(command_error) => {
             if let Err(reconcile_error) =
                 reconcile_spawn_acceptance(daemon, &session_id, &run_id).await
             {
@@ -908,7 +925,7 @@ pub(crate) async fn dispatch_prepared_post_for_api(
                 ),
             };
             let run_id = generate_stage_run_id(&task_id);
-            db.insert_stage_run_with_completion_transition(
+            db.insert_stage_run_with_completion_attempt(
                 NewStageRun {
                     id: &run_id,
                     task_id: &task_id,
@@ -929,8 +946,19 @@ pub(crate) async fn dispatch_prepared_post_for_api(
                     resumed_from_run_id: completion_owner_run_id.as_deref(),
                 },
                 Some(prepared.fallback.completion_transition.as_str()),
+                Some(&prepared.completion_attempt),
             )
             .map_err(|e| format!("db error: {}", e))?;
+            if let Some(key) = prepared.action_request_key.as_deref() {
+                let body = serde_json::to_string(&crate::mobile_api::TaskActionResponse {
+                    task_id: task_id.clone(),
+                    follow_task: None,
+                    revision_budget: None,
+                })
+                .map_err(|error| format!("failed to serialize task action response: {error}"))?;
+                db.finish_task_action_request(key, "succeeded", 200, &body)
+                    .map_err(|error| format!("db error: {error}"))?;
+            }
             Ok(crate::mobile_api::TaskActionResponse {
                 task_id,
                 follow_task: None,
@@ -960,16 +988,6 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     let completion_transition = prepared.completion_transition;
     let provider_session_id = prepared.provider_session_id.clone();
     let cwd = prepared.cwd.clone();
-    {
-        // Reruns cancel whatever was running before the kill, for the same
-        // reason stage swaps finish it first: the run record must never
-        // claim a dead session is still running.
-        let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
-        db.cancel_running_stage_runs(&task_id)
-            .map_err(|e| format!("db error: {}", e))?;
-    }
-    kill_session_replacing(daemon, replacements, &session_id).await?;
-
     let run_id = generate_stage_run_id(&task_id);
     let session_id = run_id.clone();
     prepared
@@ -977,6 +995,18 @@ pub(crate) async fn rerun_prepared_stage_for_api(
         .insert("KANNA_STAGE_RUN_ID".to_string(), run_id.clone());
     let replaced_source = {
         let db = Db::open(db_path).map_err(|e| format!("db error: {e}"))?;
+        let action_success_body = prepared
+            .action_request_key
+            .as_ref()
+            .map(|_| {
+                serde_json::to_string(&crate::mobile_api::TaskActionResponse {
+                    task_id: task_id.clone(),
+                    follow_task: None,
+                    revision_budget: None,
+                })
+            })
+            .transpose()
+            .map_err(|error| format!("failed to serialize task action result: {error}"))?;
         db.replace_current_run_with_pending_action(
             NewStageRun {
                 id: &run_id,
@@ -1005,7 +1035,16 @@ pub(crate) async fn rerun_prepared_stage_for_api(
                 branch: None,
                 worktree: None,
                 remove_worktree_on_rollback: false,
-                action_request: None,
+                action_request: prepared
+                    .action_request_key
+                    .as_deref()
+                    .map(|idempotency_key| PendingTaskActionRequest {
+                        idempotency_key,
+                        success_status: 200,
+                        success_response_body: action_success_body
+                            .as_deref()
+                            .expect("action request response was serialized"),
+                    }),
             },
         )
         .map_err(|error| {
@@ -1058,10 +1097,13 @@ pub(crate) async fn rerun_prepared_stage_for_api(
         prepared.session,
     );
 
-    let event = match daemon.send_command(&command).await {
+    let spawn_result = daemon
+        .send_command(&command)
+        .await
+        .map_err(|error| format!("daemon error: {error}"));
+    let event = match spawn_result {
         Ok(event) => Some(event),
-        Err(error) => {
-            let command_error = format!("daemon error: {error}");
+        Err(command_error) => {
             if let Err(reconcile_error) =
                 reconcile_spawn_acceptance(daemon, &session_id, &run_id).await
             {
@@ -1078,6 +1120,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
             Ok(crate::mobile_api::TaskActionResponse {
                 task_id,
                 follow_task: None,
+                revision_budget: None,
             })
         }
         Some(DaemonEvent::SessionCreated {
@@ -1190,6 +1233,7 @@ pub(crate) async fn kill_session_replacing_if_owned(
     let mut kill = daemon
         .send_command(&DaemonCommand::Kill {
             session_id: session_id.to_string(),
+            expected_run_id: expected_run_id.map(str::to_string),
         })
         .await
         .map_err(|e| {

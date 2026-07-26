@@ -146,6 +146,27 @@ describe("requestRevision", () => {
     expect(reloadSnapshot).toHaveBeenCalledTimes(1);
   });
 
+  it("reuses one durable idempotency key when rerun response delivery is lost", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("connection closed after rerun acceptance"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ taskId: "task-1" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { api, reloadSnapshot } = makeApi();
+
+    await expect(api.rerunStage("task-1")).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const call of fetchMock.mock.calls) {
+      expect(call[1]).toEqual(expect.objectContaining({
+        headers: expect.objectContaining({
+          "Idempotency-Key": "revision-key-1",
+        }),
+      }));
+    }
+    expect(reloadSnapshot).toHaveBeenCalledTimes(1);
+  });
+
   it("retries only an explicitly pending idempotent revision response", async () => {
     const fetchMock = vi
       .fn()

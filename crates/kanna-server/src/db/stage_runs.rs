@@ -122,6 +122,7 @@ impl Db {
 
     /// Apply a completion verdict only to the latest run, optionally
     /// requiring the immutable run id supplied by the agent process.
+    #[cfg(test)]
     pub fn finish_active_stage_run(
         &self,
         task_id: &str,
@@ -130,11 +131,31 @@ impl Db {
         result: Option<&str>,
         feedback: Option<&str>,
     ) -> Result<Option<FinishedStageRun>, rusqlite::Error> {
+        self.finish_active_stage_run_with_completion_attempt(
+            task_id,
+            expected_run_id,
+            None,
+            status,
+            result,
+            feedback,
+        )
+    }
+
+    pub fn finish_active_stage_run_with_completion_attempt(
+        &self,
+        task_id: &str,
+        expected_run_id: Option<&str>,
+        completion_attempt: Option<&str>,
+        status: &str,
+        result: Option<&str>,
+        feedback: Option<&str>,
+    ) -> Result<Option<FinishedStageRun>, rusqlite::Error> {
         let transaction = self.conn.unchecked_transaction()?;
         let run = transaction
             .query_row(
                 "SELECT id, kind, completion_transition, status,
-                        resumed_from_run_id, run_ownership_version
+                        resumed_from_run_id, run_ownership_version,
+                        completion_attempt
                  FROM stage_run
                  WHERE task_id = ?1
                  ORDER BY datetime(started_at) DESC, rowid DESC
@@ -148,6 +169,7 @@ impl Db {
                         row.get::<_, String>(3)?,
                         row.get::<_, Option<String>>(4)?,
                         row.get::<_, i64>(5)?,
+                        row.get::<_, Option<String>>(6)?,
                     ))
                 },
             )
@@ -159,6 +181,7 @@ impl Db {
             current_status,
             completion_owner_run_id,
             run_ownership_version,
+            required_completion_attempt,
         )) = run
         else {
             return Ok(None);
@@ -168,7 +191,12 @@ impl Db {
                 || (kind == "post"
                     && completion_owner_run_id
                         .as_deref()
-                        .is_some_and(|owner| owner == expected))
+                        .is_some_and(|owner| owner == expected)
+                    && required_completion_attempt
+                        .as_deref()
+                        .is_some_and(|required| {
+                            completion_attempt.is_some_and(|provided| provided == required)
+                        }))
         });
         if run_ownership_version >= CURRENT_RUN_OWNERSHIP_VERSION && !ownership_matches {
             return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -208,6 +236,15 @@ impl Db {
         run: NewStageRun<'_>,
         completion_transition: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
+        self.insert_stage_run_with_completion_attempt(run, completion_transition, None)
+    }
+
+    pub fn insert_stage_run_with_completion_attempt(
+        &self,
+        run: NewStageRun<'_>,
+        completion_transition: Option<&str>,
+        completion_attempt: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
         let run_ownership_version =
             if let ("post", Some(owner_run_id)) = (run.kind, run.resumed_from_run_id) {
                 self.conn.query_row(
@@ -222,9 +259,9 @@ impl Db {
             "INSERT INTO stage_run
              (id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback,
               session_id, provider_session_id, cwd, resumed_from_run_id, completion_transition,
-              run_ownership_version)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
+              completion_attempt, run_ownership_version)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
                 run.id,
                 run.task_id,
                 run.stage,
@@ -240,8 +277,9 @@ impl Db {
                 run.cwd,
                 run.resumed_from_run_id,
                 completion_transition,
+                completion_attempt,
                 run_ownership_version,
-            ),
+            ],
         )?;
         Ok(())
     }

@@ -221,6 +221,7 @@
         { "name": "status", "description": "'success' records the stage as complete and can trigger configured auto-advance; 'failure' records what blocked the stage and stops advancement.", "type": "string", "required": true, "location": "body", "enum": ["success", "failure"] },
         { "name": "summary", "description": "Short summary of what was accomplished, or on failure, what is blocking.", "type": "string", "required": true, "location": "body" },
         { "name": "run_id", "description": "Immutable current stage-run id. New agents receive KANNA_STAGE_RUN_ID and kanna-mcp binds it automatically; omission is accepted only for pre-upgrade running rows.", "type": "string", "required": false, "location": "body", "key": "runId" },
+        { "name": "completion_attempt", "description": "Post-scoped completion capability supplied in an injected post prompt. Omit for normal stage runs.", "type": "string", "required": false, "location": "body", "key": "completionAttempt" },
         { "name": "metadata", "description": "Optional structured result data (e.g. a review verdict) stored on the stage run and readable from the task detail's latestRun.", "type": "object", "required": false, "location": "body" }
       ]
     },

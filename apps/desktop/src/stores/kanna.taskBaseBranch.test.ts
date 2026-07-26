@@ -2346,7 +2346,10 @@ describe("kanna store task base branch integration", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:48120/v1/tasks/item-existing/actions/rerun-stage",
-      { method: "POST" },
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ "Idempotency-Key": expect.any(String) }),
+      }),
     );
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("run_script", expect.anything());
   });
@@ -2603,7 +2606,10 @@ describe("kanna store task base branch integration", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:48120/v1/tasks/item-existing/actions/advance-stage",
-      { method: "POST" },
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ "Idempotency-Key": expect.any(String) }),
+      }),
     );
     expect(mockState.invokeMock).not.toHaveBeenCalledWith("git_worktree_add", expect.anything());
   });
@@ -2718,7 +2724,10 @@ describe("kanna store task base branch integration", () => {
     });
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:48120/v1/tasks/item-source/actions/advance-stage",
-      { method: "POST" },
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ "Idempotency-Key": expect.any(String) }),
+      }),
     );
     expect(store.currentItem?.stage).toBe("review");
     expect(store.sortedItemsForCurrentRepo.find((item) => item.id === "item-source")?.stage).toBe("review");
@@ -2986,7 +2995,10 @@ describe("kanna store task base branch integration", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:48120/v1/tasks/item-source/actions/rerun-stage",
-      { method: "POST" },
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ "Idempotency-Key": expect.any(String) }),
+      }),
     );
     expect(buildStagePrompt).not.toHaveBeenCalled();
   });

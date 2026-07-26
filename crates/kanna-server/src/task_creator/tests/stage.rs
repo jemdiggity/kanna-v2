@@ -1555,6 +1555,105 @@ async fn spawn_startup_exit_between_list_and_land_daemon(
     })
 }
 
+async fn spawn_startup_exit_during_watcher_handoff_daemon(
+    config: &Config,
+) -> tokio::task::JoinHandle<()> {
+    std::fs::create_dir_all(&config.daemon_dir).unwrap();
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let active_session = kanna_daemon::protocol::SessionInfo {
+            session_id: "task-1".to_string(),
+            pid: 42,
+            cwd: "/tmp/task-1-2".to_string(),
+            state: kanna_daemon::protocol::SessionState::Active,
+            idle_seconds: 0,
+            status: kanna_daemon::protocol::SessionStatus::Busy,
+            kind: Default::default(),
+            run_id: Some("run-successor".to_string()),
+        };
+
+        let (subscription, _) = listener.accept().await.unwrap();
+        let (subscription_read, mut subscription_write) = subscription.into_split();
+        let mut subscription_reader = BufReader::new(subscription_read);
+        let mut line = String::new();
+        subscription_reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::SubscribeEvents { .. }
+        ));
+        write_startup_event(&mut subscription_write, &kanna_daemon::protocol::Event::Ok).await;
+
+        let (startup_control, _) = listener.accept().await.unwrap();
+        let (startup_control_read, mut startup_control_write) = startup_control.into_split();
+        let mut startup_control_reader = BufReader::new(startup_control_read);
+        line.clear();
+        startup_control_reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::List
+        ));
+        write_startup_event(
+            &mut startup_control_write,
+            &kanna_daemon::protocol::Event::SessionList {
+                sessions: vec![active_session.clone()],
+                capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
+            },
+        )
+        .await;
+
+        // This is deliberately later than the startup reconciliation's
+        // buffer period. The original code dropped the subscriber here.
+        tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+        write_startup_event(
+            &mut subscription_write,
+            &kanna_daemon::protocol::Event::Exit {
+                session_id: "task-1".to_string(),
+                run_id: Some("run-successor".to_string()),
+                code: 0,
+                resume_session_id: None,
+                killed: false,
+            },
+        )
+        .await;
+
+        let (legacy, _) = listener.accept().await.unwrap();
+        let (legacy_read, mut legacy_write) = legacy.into_split();
+        let mut legacy_reader = BufReader::new(legacy_read);
+        line.clear();
+        legacy_reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::Subscribe
+        ));
+        write_startup_event(&mut legacy_write, &kanna_daemon::protocol::Event::Ok).await;
+
+        let (watcher_control, _) = listener.accept().await.unwrap();
+        let (watcher_control_read, mut watcher_control_write) = watcher_control.into_split();
+        let mut watcher_control_reader = BufReader::new(watcher_control_read);
+        line.clear();
+        watcher_control_reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::List
+        ));
+        write_startup_event(
+            &mut watcher_control_write,
+            &kanna_daemon::protocol::Event::SessionList {
+                sessions: vec![active_session],
+                capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
+            },
+        )
+        .await;
+        write_startup_event(
+            &mut subscription_write,
+            &kanna_daemon::protocol::Event::ShuttingDown,
+        )
+        .await;
+    })
+}
+
 #[tokio::test]
 async fn startup_reconciliation_times_out_when_subscription_ack_stalls() {
     let config = test_config("startup-reconcile-stalled-subscription");
@@ -1707,6 +1806,51 @@ async fn startup_reconciliation_restores_source_when_successor_exits_after_list(
     );
     let runs = db.list_stage_runs_for_task("task-1").unwrap();
     assert!(runs.iter().all(|run| run.id != "run-successor"));
+}
+
+#[tokio::test]
+async fn startup_reconciliation_hands_post_snapshot_exit_to_terminal_watcher() {
+    let config = test_config("startup-reconcile-watcher-handoff");
+    seed_pending_startup_action(&config);
+    let daemon = spawn_startup_exit_during_watcher_handoff_daemon(&config).await;
+
+    let handoff = crate::task_creator::reconcile_pending_stage_actions_on_startup(&config)
+        .await
+        .unwrap()
+        .expect("pending action reconciliation must retain its lifecycle subscription");
+    assert_eq!(
+        Db::open(&config.db_path)
+            .unwrap()
+            .latest_stage_run("task-1")
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        crate::terminal_watcher::terminal_state_watcher_once_with_startup(
+            &crate::http_api::AppState::new(config.clone()),
+            &crate::session_replacements::SessionReplacements::default(),
+            Some(handoff),
+        ),
+    )
+    .await
+    .expect("watcher did not consume startup handoff")
+    .unwrap();
+    daemon.await.unwrap();
+
+    assert_eq!(
+        Db::open(&config.db_path)
+            .unwrap()
+            .latest_stage_run("task-1")
+            .unwrap()
+            .unwrap()
+            .status,
+        "succeeded",
+        "the successor exit observed after startup List must not remain persisted as running"
+    );
 }
 
 #[tokio::test]
@@ -2858,7 +3002,6 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
         PreparedStageTransition::Post(post) => post,
         _ => panic!("expected post dispatch"),
     };
-
     // Message write + discrete Enter: exactly two Input commands.
     let fake_daemon = spawn_fake_daemon_input_ok(config.daemon_dir.clone(), 2).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
@@ -2938,6 +3081,7 @@ async fn completed_live_post_kills_main_process_owner_before_replacement_spawn()
         PreparedStageTransition::Post(post) => post,
         _ => panic!("expected post dispatch"),
     };
+    let completion_attempt = post.completion_attempt.clone();
     let input_daemon = spawn_fake_daemon_input_ok(config.daemon_dir.clone(), 2).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
     crate::task_creator::dispatch_prepared_post_for_api(
@@ -2951,9 +3095,10 @@ async fn completed_live_post_kills_main_process_owner_before_replacement_spawn()
     input_daemon.await.unwrap();
 
     let finished = db
-        .finish_active_stage_run(
+        .finish_active_stage_run_with_completion_attempt(
             "task-1",
             Some("run-main"),
+            Some(&completion_attempt),
             "succeeded",
             Some(r#"{"status":"success"}"#),
             Some("post complete"),

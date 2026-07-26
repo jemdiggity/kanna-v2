@@ -1,10 +1,12 @@
-use super::state::{db_write_error, AppState};
+use super::state::{db_write_error, AppState, RequestedTaskOperation};
 use super::task_blockers::{
     resolve_existing_task_id, start_dependents_unblocked_by_close_with_daemon,
 };
 use super::task_input::{notify_task_completion, submit_task_input};
-use crate::db::Db;
+use crate::db::{Db, TaskActionRequestClaim, TaskActionRequestError};
 use axum::extract::State;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
 use std::sync::Arc;
@@ -14,6 +16,211 @@ fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
         axum::http::StatusCode::CONFLICT
     } else {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
+async fn resolve_task_action_id(
+    state: &Arc<AppState>,
+    requested_id: String,
+) -> Result<String, (axum::http::StatusCode, String)> {
+    let state = Arc::clone(state);
+    super::blocking::run_handler_blocking("task action identity", move || {
+        let db =
+            Db::open(&state.config.db_path).map_err(|error| db_write_error("db error", error))?;
+        db.resolve_pipeline_item_id(&requested_id)
+            .map_err(|error| db_write_error("db error", error))?
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("task not found: {requested_id}"),
+                )
+            })
+    })
+    .await
+}
+
+fn begin_task_action(
+    state: &Arc<AppState>,
+    task_id: &str,
+) -> Result<RequestedTaskOperation, (axum::http::StatusCode, String)> {
+    state.begin_requested_task_revision(task_id).ok_or_else(|| {
+        (
+            axum::http::StatusCode::CONFLICT,
+            format!("task action already in progress: {task_id}"),
+        )
+    })
+}
+
+const IDEMPOTENCY_PENDING_HEADER: &str = "idempotency-status";
+const IDEMPOTENCY_PENDING_BODY: &str = "idempotent request is still pending";
+
+fn task_action_replay_response(
+    status: u16,
+    body: String,
+) -> Result<Response, (StatusCode, String)> {
+    let status = StatusCode::from_u16(status).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("invalid stored task action status: {error}"),
+        )
+    })?;
+    let mut response = body.into_response();
+    *response.status_mut() = status;
+    if status.is_success() {
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+    }
+    Ok(response)
+}
+
+fn task_action_pending_response() -> Response {
+    let mut response = IDEMPOTENCY_PENDING_BODY.into_response();
+    *response.status_mut() = StatusCode::CONFLICT;
+    response.headers_mut().insert(
+        IDEMPOTENCY_PENDING_HEADER,
+        HeaderValue::from_static("pending"),
+    );
+    response
+}
+
+async fn finish_idempotent_task_action(
+    state: &Arc<AppState>,
+    key: &str,
+    result_state: &'static str,
+    status: StatusCode,
+    body: &str,
+) -> Result<(), (StatusCode, String)> {
+    let state = Arc::clone(state);
+    let key = key.to_string();
+    let body = body.to_string();
+    super::blocking::run_handler_blocking("task action idempotency finish", move || {
+        let db =
+            Db::open(&state.config.db_path).map_err(|error| db_write_error("db error", error))?;
+        db.finish_task_action_request(&key, result_state, status.as_u16(), &body)
+            .map_err(|error| db_write_error("db error", error))
+    })
+    .await
+}
+
+enum DurableTaskActionClaim {
+    Execute {
+        flight: RequestedTaskOperation,
+        key: Option<String>,
+    },
+    Respond(Response),
+}
+
+fn idempotency_key_from_headers(
+    headers: &HeaderMap,
+) -> Result<Option<String>, (StatusCode, String)> {
+    let key = headers
+        .get("idempotency-key")
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::trim)
+                .map(str::to_string)
+                .map_err(|_| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "invalid Idempotency-Key header".to_string(),
+                    )
+                })
+        })
+        .transpose()?;
+    if key
+        .as_deref()
+        .is_some_and(|value| value.is_empty() || value.len() > 200)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Idempotency-Key must contain 1 to 200 characters".to_string(),
+        ));
+    }
+    Ok(key)
+}
+
+async fn claim_durable_task_action(
+    state: &Arc<AppState>,
+    task_id: &str,
+    action: &'static str,
+    request_json: &'static str,
+    headers: &HeaderMap,
+) -> Result<DurableTaskActionClaim, (StatusCode, String)> {
+    let Some(key) = idempotency_key_from_headers(headers)? else {
+        return Ok(DurableTaskActionClaim::Execute {
+            flight: begin_task_action(state, task_id)?,
+            key: None,
+        });
+    };
+    let claim = {
+        let state = Arc::clone(state);
+        let key = key.clone();
+        let task_id = task_id.to_string();
+        super::blocking::run_handler_blocking("task action idempotency claim", move || {
+            let db = Db::open(&state.config.db_path)
+                .map_err(|error| db_write_error("db error", error))?;
+            db.claim_task_action_request(&key, &task_id, action, request_json)
+                .map_err(|error| match error {
+                    TaskActionRequestError::Conflict => (
+                        StatusCode::CONFLICT,
+                        "Idempotency-Key was already used for a different request".to_string(),
+                    ),
+                    TaskActionRequestError::Database(error) => db_write_error("db error", error),
+                })
+        })
+        .await?
+    };
+    match claim {
+        TaskActionRequestClaim::Completed { status, body } => Ok(DurableTaskActionClaim::Respond(
+            task_action_replay_response(status, body)?,
+        )),
+        TaskActionRequestClaim::Pending => {
+            let Some(flight) = state.begin_requested_task_revision(task_id) else {
+                return Ok(DurableTaskActionClaim::Respond(
+                    task_action_pending_response(),
+                ));
+            };
+            let reconciled = {
+                let state = Arc::clone(state);
+                let key = key.clone();
+                super::blocking::run_handler_blocking(
+                    "task action idempotency reconcile",
+                    move || {
+                        let db = Db::open(&state.config.db_path)
+                            .map_err(|error| db_write_error("db error", error))?;
+                        db.reconcile_task_action_request(&key)
+                            .map_err(|error| db_write_error("db error", error))
+                    },
+                )
+                .await?
+            };
+            drop(flight);
+            match reconciled {
+                TaskActionRequestClaim::Completed { status, body } => Ok(
+                    DurableTaskActionClaim::Respond(task_action_replay_response(status, body)?),
+                ),
+                TaskActionRequestClaim::Pending => Ok(DurableTaskActionClaim::Respond(
+                    task_action_pending_response(),
+                )),
+                TaskActionRequestClaim::Claimed => Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "invalid idempotency reconciliation state".to_string(),
+                )),
+            }
+        }
+        TaskActionRequestClaim::Claimed => match begin_task_action(state, task_id) {
+            Ok(flight) => Ok(DurableTaskActionClaim::Execute {
+                flight,
+                key: Some(key),
+            }),
+            Err((status, message)) => {
+                finish_idempotent_task_action(state, &key, "failed", status, &message).await?;
+                Err((status, message))
+            }
+        },
     }
 }
 
@@ -703,16 +910,39 @@ async fn close_task_after_final_stage(
 pub(super) async fn advance_stage(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
-) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    headers: HeaderMap,
+) -> Result<Response, (axum::http::StatusCode, String)> {
+    let task_id = resolve_task_action_id(&state, task_id).await?;
+    let (action_flight, idempotency_key) =
+        match claim_durable_task_action(&state, &task_id, "advance-stage", "{}", &headers).await? {
+            DurableTaskActionClaim::Execute { flight, key } => (flight, key),
+            DurableTaskActionClaim::Respond(response) => return Ok(response),
+        };
     #[cfg(test)]
     if let Some(stage_advancer) = state.stage_advancer.clone() {
-        let _action_flight = begin_task_action(&state, &task_id)?;
-        return stage_advancer(task_id)
-            .map(Json)
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
+        let result = stage_advancer(task_id.clone())
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error));
+        if let Some(key) = idempotency_key.as_deref() {
+            match &result {
+                Ok(response) => {
+                    let body = serde_json::to_string(response).map_err(|error| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("failed to serialize task action response: {error}"),
+                        )
+                    })?;
+                    finish_idempotent_task_action(&state, key, "succeeded", StatusCode::OK, &body)
+                        .await?;
+                }
+                Err((status, message)) => {
+                    finish_idempotent_task_action(&state, key, "failed", *status, message).await?;
+                }
+            }
+        }
+        drop(action_flight);
+        return result.map(|response| Json(response).into_response());
     }
-
-    let transition = {
+    let mut transition = {
         let state = Arc::clone(&state);
         let task_id = task_id.clone();
         super::blocking::run_handler_blocking("stage advance prepare", move || {
@@ -727,14 +957,23 @@ pub(super) async fn advance_stage(
         })
         .await?
     };
+    if let Some(key) = idempotency_key.clone() {
+        transition.set_action_request_key(key);
+    }
     let response = crate::mobile_api::TaskActionResponse {
         task_id: task_id.clone(),
         follow_task: None,
         revision_budget: None,
     };
-    execute_stage_transition_detached(Arc::clone(&state), task_id, transition);
+    execute_stage_transition_detached(
+        Arc::clone(&state),
+        task_id,
+        transition,
+        Some(action_flight),
+        idempotency_key,
+    );
     state.publish_state_changed(StateChangeScope::Tasks);
-    Ok(Json(response))
+    Ok(Json(response).into_response())
 }
 
 /// Execute a prepared transition: swap to the next stage's run, dispatch a
@@ -799,25 +1038,8 @@ fn execute_stage_transition_detached(
     state: Arc<AppState>,
     task_id: String,
     transition: crate::task_creator::PreparedStageTransition,
-) {
-    execute_stage_transition_detached_holding(state, task_id, transition, None);
-}
-
-/// Same, but the detached worker takes ownership of a per-task operation
-/// guard for the whole transition.
-///
-/// The handler must return before the transition runs — it kills and respawns
-/// the caller's own session — so the guard cannot simply live in the handler:
-/// dropping it at the 200 would reopen the task between the response and the
-/// work landing, and a second request admitted in that window would spend
-/// another budget slot and prepare a workspace from task state the in-flight
-/// transition is about to change. Held here, it drops when the worker exits,
-/// on every path including a daemon that never answers.
-fn execute_stage_transition_detached_holding(
-    state: Arc<AppState>,
-    task_id: String,
-    transition: crate::task_creator::PreparedStageTransition,
-    in_flight: Option<super::state::RequestedTaskOperation>,
+    action_flight: Option<RequestedTaskOperation>,
+    idempotency_key: Option<String>,
 ) {
     // Stage execution interleaves async daemon I/O with synchronous git,
     // filesystem, and SQLite work (run records, fork rollback, teardown
@@ -828,7 +1050,7 @@ fn execute_stage_transition_detached_holding(
         // Bound to the worker's own scope: every exit path below — daemon
         // connect failure, transition error, success, join error, or the task
         // being dropped at runtime shutdown — releases the task.
-        let _in_flight = in_flight;
+        let _action_flight = action_flight;
         let handle = tokio::runtime::Handle::current();
         let joined = tokio::task::spawn_blocking(move || {
             handle.block_on(async move {
@@ -846,9 +1068,39 @@ fn execute_stage_transition_detached_holding(
                             return;
                         }
                     };
-                if let Err((_, message)) =
-                    execute_stage_transition(&state, &mut daemon, transition).await
-                {
+                let result = execute_stage_transition(&state, &mut daemon, transition).await;
+                if let Some(key) = idempotency_key.as_deref() {
+                    let finish = match &result {
+                        Ok(Json(response)) => match serde_json::to_string(response) {
+                            Ok(body) => {
+                                finish_idempotent_task_action(
+                                    &state,
+                                    key,
+                                    "succeeded",
+                                    StatusCode::OK,
+                                    &body,
+                                )
+                                .await
+                            }
+                            Err(error) => Err((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("failed to serialize task action response: {error}"),
+                            )),
+                        },
+                        Err((status, message)) => {
+                            finish_idempotent_task_action(&state, key, "failed", *status, message)
+                                .await
+                        }
+                    };
+                    if let Err((_, error)) = finish {
+                        log::error!(
+                            "stage transition for {} could not persist idempotent result: {}",
+                            task_id,
+                            error
+                        );
+                    }
+                }
+                if let Err((_, message)) = result {
                     log::error!("stage transition for {} failed: {}", task_id, message);
                 }
             })
@@ -868,7 +1120,7 @@ async fn execute_stage_transition_awaited(
     state: Arc<AppState>,
     task_id: String,
     transition: crate::task_creator::PreparedStageTransition,
-    action_flight: TaskActionFlight,
+    action_flight: RequestedTaskOperation,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
     let handle = tokio::runtime::Handle::current();
     let worker_task_id = task_id.clone();
@@ -898,15 +1150,39 @@ async fn execute_stage_transition_awaited(
 pub(super) async fn rerun_stage(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
-) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    headers: HeaderMap,
+) -> Result<Response, (axum::http::StatusCode, String)> {
+    let task_id = resolve_task_action_id(&state, task_id).await?;
+    let (action_flight, idempotency_key) =
+        match claim_durable_task_action(&state, &task_id, "rerun-stage", "{}", &headers).await? {
+            DurableTaskActionClaim::Execute { flight, key } => (flight, key),
+            DurableTaskActionClaim::Respond(response) => return Ok(response),
+        };
     #[cfg(test)]
     if let Some(stage_rerunner) = state.stage_rerunner.clone() {
-        return stage_rerunner(task_id)
-            .map(Json)
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
+        let result = stage_rerunner(task_id.clone())
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error));
+        if let Some(key) = idempotency_key.as_deref() {
+            match &result {
+                Ok(response) => {
+                    let body = serde_json::to_string(response).map_err(|error| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("failed to serialize task action response: {error}"),
+                        )
+                    })?;
+                    finish_idempotent_task_action(&state, key, "succeeded", StatusCode::OK, &body)
+                        .await?;
+                }
+                Err((status, message)) => {
+                    finish_idempotent_task_action(&state, key, "failed", *status, message).await?;
+                }
+            }
+        }
+        drop(action_flight);
+        return result.map(|response| Json(response).into_response());
     }
-
-    let prepared = {
+    let mut prepared = {
         let state = Arc::clone(&state);
         let task_id = task_id.clone();
         super::blocking::run_handler_blocking("stage rerun prepare", move || {
@@ -921,6 +1197,9 @@ pub(super) async fn rerun_stage(
         })
         .await?
     };
+    if let Some(key) = idempotency_key.clone() {
+        prepared.set_action_request_key(key);
+    }
     // Detached for the same reason as execute_stage_transition_detached: the
     // rerun kills the session that may carry this very request. Driven from
     // the blocking pool for the same reason as well — the rerun records runs
@@ -928,6 +1207,7 @@ pub(super) async fn rerun_stage(
     let rerun_state = Arc::clone(&state);
     let rerun_task_id = task_id.clone();
     tokio::spawn(async move {
+        let _action_flight = action_flight;
         let handle = tokio::runtime::Handle::current();
         let worker_task_id = rerun_task_id.clone();
         let joined = tokio::task::spawn_blocking(move || {
@@ -947,14 +1227,51 @@ pub(super) async fn rerun_stage(
                         return;
                     }
                 };
-                if let Err(error) = crate::task_creator::rerun_prepared_stage_for_api(
+                let result = crate::task_creator::rerun_prepared_stage_for_api(
                     &rerun_state.config.db_path,
                     &mut daemon,
                     &rerun_state.session_replacements,
                     prepared,
                 )
-                .await
-                {
+                .await;
+                if let Some(key) = idempotency_key.as_deref() {
+                    let finish = match &result {
+                        Ok(response) => match serde_json::to_string(response) {
+                            Ok(body) => {
+                                finish_idempotent_task_action(
+                                    &rerun_state,
+                                    key,
+                                    "succeeded",
+                                    StatusCode::OK,
+                                    &body,
+                                )
+                                .await
+                            }
+                            Err(error) => Err((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("failed to serialize task action response: {error}"),
+                            )),
+                        },
+                        Err(error) => {
+                            finish_idempotent_task_action(
+                                &rerun_state,
+                                key,
+                                "failed",
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                error,
+                            )
+                            .await
+                        }
+                    };
+                    if let Err((_, error)) = finish {
+                        log::error!(
+                            "stage rerun for {} could not persist idempotent result: {}",
+                            rerun_task_id,
+                            error
+                        );
+                    }
+                }
+                if let Err(error) = result {
                     log::error!("stage rerun for {} failed: {}", rerun_task_id, error);
                     rerun_state.publish_state_changed(StateChangeScope::Tasks);
                     return;
@@ -976,7 +1293,8 @@ pub(super) async fn rerun_stage(
         task_id,
         follow_task: None,
         revision_budget: None,
-    }))
+    })
+    .into_response())
 }
 
 /// A pull-request URL carried by a stage-complete verdict: explicitly via
@@ -1026,6 +1344,8 @@ pub(super) async fn complete_stage(
             "status must be success or failure".to_string(),
         ));
     }
+    let task_id = resolve_task_action_id(&state, task_id).await?;
+    let action_flight = begin_task_action(&state, &task_id)?;
     let should_auto_advance = payload.status == "success";
 
     let stage_result = serde_json::to_string(&serde_json::json!({
@@ -1045,6 +1365,8 @@ pub(super) async fn complete_stage(
         let payload_status = payload.status;
         let payload_summary = payload.summary;
         let payload_metadata = payload.metadata;
+        let payload_run_id = payload.run_id;
+        let payload_completion_attempt = payload.completion_attempt;
         super::blocking::run_handler_blocking("stage completion record", move || {
             let db = Db::open(&state.config.db_path).map_err(|e| {
                 (
@@ -1052,44 +1374,32 @@ pub(super) async fn complete_stage(
                     format!("db error: {}", e),
                 )
             })?;
-            let task_id = db
-                .resolve_pipeline_item_id(&task_id)
-                .map_err(|e| db_write_error("db error", e))?
-                .ok_or_else(|| {
-                    (
-                        axum::http::StatusCode::NOT_FOUND,
-                        format!("task not found: {}", task_id),
-                    )
-                })?;
             let run_status = if payload_status == "success" {
                 "succeeded"
             } else {
                 "failed"
             };
             let finished_run = db
-                .finish_latest_running_stage_run(
+                .finish_active_stage_run_with_completion_attempt(
                     &task_id,
+                    payload_run_id.as_deref(),
+                    payload_completion_attempt.as_deref(),
                     run_status,
                     Some(&stage_result),
                     Some(&payload_summary),
                 )
-                .map_err(|e| db_write_error("db error", e))?;
-            // A parked task has no running run (its last verdict finished it).
-            // An agent may recover after reporting failure — e.g. the commit
-            // post cleans up and reports success — and that late verdict must
-            // both stick and keep its run identity, or a corrected post would
-            // never perform its deferred transition.
-            let finished_run = match finished_run {
-                Some(run) => Some(run),
-                None => db
-                    .refinish_latest_stage_run(
-                        &task_id,
-                        run_status,
-                        Some(&stage_result),
-                        Some(&payload_summary),
-                    )
-                    .map_err(|e| db_write_error("db error", e))?,
-            };
+                .map_err(|error| {
+                    if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+                        (
+                            axum::http::StatusCode::CONFLICT,
+                            format!(
+                                "stage run ownership changed before completion for task {task_id}"
+                            ),
+                        )
+                    } else {
+                        db_write_error("db error", error)
+                    }
+                })?;
             if payload_status == "success" {
                 if let Some(pr_url) =
                     pr_url_from_verdict(payload_metadata.as_ref(), &payload_summary)
@@ -1155,7 +1465,13 @@ pub(super) async fn complete_stage(
         follow_task: None,
         revision_budget: None,
     };
-    execute_stage_transition_detached(Arc::clone(&state), task_id, transition);
+    execute_stage_transition_detached(
+        Arc::clone(&state),
+        task_id,
+        transition,
+        Some(action_flight),
+        None,
+    );
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(response))
 }

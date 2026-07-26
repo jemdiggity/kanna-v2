@@ -1,11 +1,30 @@
 use crate::{daemon_client, http_api, session_replacements};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 const SUBSCRIPTION_EVENT_CAPACITY: usize = 256;
 const SUBSCRIPTION_NEGOTIATION_CAPACITY: usize = 256;
 const SUBSCRIPTION_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+pub(crate) struct StartupLifecycleHandoff {
+    pub(crate) daemon: daemon_client::DaemonClient,
+    pub(crate) buffered: VecDeque<kanna_daemon::protocol::Event>,
+    pub(crate) recovered_successor_run_ids: HashSet<String>,
+}
+
+impl std::fmt::Debug for StartupLifecycleHandoff {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StartupLifecycleHandoff")
+            .field("buffered_events", &self.buffered.len())
+            .field(
+                "recovered_successor_run_ids",
+                &self.recovered_successor_run_ids,
+            )
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Clone, Copy)]
 enum SubscriptionStream {
@@ -346,9 +365,14 @@ pub(crate) async fn terminal_detach_reconciliation_loop(
 pub(crate) async fn terminal_state_watcher_loop(
     state: Arc<http_api::AppState>,
     replacements: session_replacements::SessionReplacements,
+    startup_handoff: Option<StartupLifecycleHandoff>,
 ) {
+    let mut startup_handoff = startup_handoff;
     loop {
-        if let Err(error) = terminal_state_watcher_once(&state, &replacements).await {
+        if let Err(error) =
+            terminal_state_watcher_once_with_startup(&state, &replacements, startup_handoff.take())
+                .await
+        {
             log::warn!("terminal state watcher reconnecting after error: {}", error);
         }
         // Exits broadcast while disconnected are lost along with their
@@ -358,9 +382,18 @@ pub(crate) async fn terminal_state_watcher_loop(
     }
 }
 
+#[cfg(test)]
 async fn terminal_state_watcher_once(
     state: &http_api::AppState,
     replacements: &session_replacements::SessionReplacements,
+) -> Result<(), String> {
+    terminal_state_watcher_once_with_startup(state, replacements, None).await
+}
+
+pub(crate) async fn terminal_state_watcher_once_with_startup(
+    state: &http_api::AppState,
+    replacements: &session_replacements::SessionReplacements,
+    startup_handoff: Option<StartupLifecycleHandoff>,
 ) -> Result<(), String> {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 
@@ -433,26 +466,64 @@ async fn terminal_state_watcher_once(
         }
     }
 
+    fn adopt_subscription(handoff: StartupLifecycleHandoff) -> SubscriptionAttempt {
+        let (mut reader, writer) = handoff.daemon.into_split();
+        let (event_tx, events) = mpsc::channel(SUBSCRIPTION_EVENT_CAPACITY);
+        tokio::spawn(async move {
+            loop {
+                let event = match reader.read_event().await {
+                    Ok(event) => Ok(event),
+                    Err(error) => Err(error.to_string()),
+                };
+                let stop = event.is_err();
+                if event_tx.send(event).await.is_err() || stop {
+                    break;
+                }
+            }
+        });
+        SubscriptionAttempt {
+            events,
+            writer,
+            accepted: true,
+            rejection: None,
+            buffered: handoff.buffered,
+        }
+    }
+
+    let mut recovered_successor_run_ids = startup_handoff
+        .as_ref()
+        .map(|handoff| handoff.recovered_successor_run_ids.clone())
+        .unwrap_or_default();
     let config = state.config();
     // Start a legacy overlap before awaiting the versioned acknowledgement.
     // Current daemons accept both and the versioned stream wins; old daemons
     // can close the unknown versioned connection while the legacy receiver is
     // already registered and buffering events.
-    let versioned_daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
-        .await
-        .map_err(|e| format!("daemon connection failed: {}", e))?;
-    let legacy_daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
-        .await
-        .map_err(|e| format!("legacy daemon connection failed: {}", e))?;
-    let (versioned, legacy) = tokio::join!(
-        subscribe(
-            versioned_daemon,
-            DaemonCommand::SubscribeEvents {
-                version: kanna_daemon::protocol::CURRENT_EVENT_STREAM_VERSION,
-            },
-        ),
-        subscribe(legacy_daemon, DaemonCommand::Subscribe),
-    );
+    let (versioned, legacy) = if let Some(handoff) = startup_handoff {
+        let legacy_daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
+            .await
+            .map_err(|e| format!("legacy daemon connection failed: {}", e))?;
+        (
+            Ok(adopt_subscription(handoff)),
+            subscribe(legacy_daemon, DaemonCommand::Subscribe).await,
+        )
+    } else {
+        let versioned_daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
+            .await
+            .map_err(|e| format!("daemon connection failed: {}", e))?;
+        let legacy_daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
+            .await
+            .map_err(|e| format!("legacy daemon connection failed: {}", e))?;
+        tokio::join!(
+            subscribe(
+                versioned_daemon,
+                DaemonCommand::SubscribeEvents {
+                    version: kanna_daemon::protocol::CURRENT_EVENT_STREAM_VERSION,
+                },
+            ),
+            subscribe(legacy_daemon, DaemonCommand::Subscribe),
+        )
+    };
     let legacy = legacy.map_err(|error| format!("legacy daemon subscribe failed: {error}"))?;
     if !legacy.accepted {
         return Err(format!(
@@ -732,7 +803,25 @@ async fn terminal_state_watcher_once(
                     Ok(false)
                 };
                 match owns_active_run {
-                    Ok(true) => {}
+                    Ok(true) => {
+                        if run_id
+                            .as_deref()
+                            .is_some_and(|run_id| recovered_successor_run_ids.remove(run_id))
+                        {
+                            let db = crate::db::Db::open(&state.config().db_path)
+                                .map_err(|error| format!("db error: {error}"))?;
+                            db.finish_stage_run(
+                                run_id.as_deref().expect("checked recovered run id"),
+                                if code == 0 { "succeeded" } else { "failed" },
+                                None,
+                                Some("recovered daemon session exited after startup snapshot"),
+                            )
+                            .map_err(|error| format!("db error: {error}"))?;
+                            state.publish_state_changed(
+                                kanna_agent_protocol::StateChangeScope::Tasks,
+                            );
+                        }
+                    }
                     Ok(false) => {
                         log::info!(
                             "ignoring stale or unowned terminal exit for session {} run {:?}",

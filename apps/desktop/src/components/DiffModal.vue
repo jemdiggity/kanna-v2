@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, nextTick } from "vue";
+import { computed, ref, onMounted, onUnmounted, nextTick } from "vue";
 import DiffView from "./DiffView.vue";
 import { useShortcutContext } from "../composables/useShortcutContext";
 import { useModalZIndex } from "../composables/useModalZIndex";
@@ -19,6 +19,7 @@ const summaryComposerOpen = ref(false);
 const summaryDraft = ref("");
 const sendingRevision = ref(false);
 const approving = ref(false);
+let mounted = true;
 
 const props = defineProps<{
   repoPath: string;
@@ -43,7 +44,7 @@ const emit = defineEmits<{
   (e: "scroll-state-change", positions: Partial<Record<"branch" | "working", number>>): void;
   (e: "branch-include-change", include: "none" | "staged" | "all"): void;
   (e: "review-head-change", headCommit: string): void;
-  (e: "review-comments-change", comments: PendingReviewComment[]): void;
+  (e: "review-comments-change", comments: PendingReviewComment[], originViewKey?: string): void;
 }>();
 
 const comments = computed(() => props.reviewComments ?? []);
@@ -73,6 +74,8 @@ function openRequestChangesComposer() {
 
 async function submitRequestChanges() {
   if (!props.taskId || comments.value.length === 0 || sendingRevision.value) return;
+  const originTaskId = props.taskId;
+  const originViewKey = props.viewKey;
   sendingRevision.value = true;
   const summary = summaryDraft.value.trim() || "Requested changes from Kanna review.";
   const prompt = buildRevisionPrompt({
@@ -83,7 +86,7 @@ async function submitRequestChanges() {
     summary: summaryDraft.value,
   });
   try {
-    const requestDelivered = await store.requestRevision(props.taskId, {
+    const requestDelivered = await store.requestRevision(originTaskId, {
       targetStage: "in progress",
       summary,
       prompt,
@@ -94,7 +97,8 @@ async function submitRequestChanges() {
       },
     });
     if (!requestDelivered) return;
-    emit("review-comments-change", []);
+    if (!mounted || props.taskId !== originTaskId || props.viewKey !== originViewKey) return;
+    emit("review-comments-change", [], originViewKey);
     summaryDraft.value = "";
     summaryComposerOpen.value = false;
   } finally {
@@ -131,6 +135,9 @@ defineExpose({ zIndex, bringToFront, dismiss, requestChanges });
 onMounted(() => {
   nextTick(() => modalRef.value?.focus());
 });
+onUnmounted(() => {
+  mounted = false;
+});
 </script>
 
 <template>
@@ -161,7 +168,7 @@ onMounted(() => {
         @scroll-state-change="emit('scroll-state-change', $event)"
         @branch-include-change="emit('branch-include-change', $event)"
         @review-head-change="emit('review-head-change', $event)"
-        @review-comments-change="emit('review-comments-change', $event)"
+        @review-comments-change="emit('review-comments-change', $event, viewKey)"
         @close="emit('close')"
       />
       <div v-if="summaryComposerOpen" class="summary-composer">

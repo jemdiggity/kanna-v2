@@ -4,6 +4,11 @@ use kanna_agent_protocol::mcp::{
 };
 use kanna_agent_protocol::prompt_with_system_prompt;
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+pub(super) const RESUME_PROBE_UNAVAILABLE_PREFIX: &str = "provider resume unavailable:";
+const RESUME_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How a provider PTY spawn binds to the CLI's own session store. Providers
 /// that accept caller-assigned ids use `Assign` for fresh conversations;
@@ -20,6 +25,77 @@ impl ProviderSessionBinding {
             Self::Assign(id) | Self::Resume(id) => id,
         }
     }
+}
+
+pub(super) fn require_provider_cli_resume_feature(
+    provider: &AgentProvider,
+    executable: &str,
+) -> Result<(), String> {
+    let (args, marker): (&[&str], Option<&str>) = match provider {
+        AgentProvider::Claude | AgentProvider::Copilot => (&["--help"], Some("--resume")),
+        AgentProvider::Codex => (&["resume", "--help"], None),
+        AgentProvider::Opencode => (&["run", "--help"], Some("--session")),
+        AgentProvider::Antigravity => (&["--help"], Some("--conversation")),
+    };
+    let mut child = Command::new(executable)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "{RESUME_PROBE_UNAVAILABLE_PREFIX} could not probe {}: {error}",
+                provider.as_str()
+            )
+        })?;
+    let deadline = Instant::now() + RESUME_PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{RESUME_PROBE_UNAVAILABLE_PREFIX} {} help probe timed out",
+                    provider.as_str()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{RESUME_PROBE_UNAVAILABLE_PREFIX} {} help probe failed: {error}",
+                    provider.as_str()
+                ));
+            }
+        }
+    };
+    let output = child.wait_with_output().map_err(|error| {
+        format!(
+            "{RESUME_PROBE_UNAVAILABLE_PREFIX} could not read {} help: {error}",
+            provider.as_str()
+        )
+    })?;
+    let help = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .to_ascii_lowercase();
+    if !status.success()
+        || marker.is_some_and(|expected| !help.contains(&expected.to_ascii_lowercase()))
+    {
+        return Err(format!(
+            "{RESUME_PROBE_UNAVAILABLE_PREFIX} installed {} CLI does not expose {}",
+            provider.as_str(),
+            marker.unwrap_or("the resume subcommand")
+        ));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

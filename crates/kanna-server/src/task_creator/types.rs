@@ -146,7 +146,11 @@ pub(crate) struct PreparedPostDispatch {
     pub(super) message: String,
     /// Run-history label: the post's name.
     pub(super) run_stage: String,
+    /// One-shot capability that scopes inherited-process completion to this
+    /// exact injected post run.
+    pub(super) completion_attempt: String,
     pub(super) fallback: PreparedStageRunSpawn,
+    pub(super) action_request_key: Option<String>,
 }
 
 pub(crate) struct PreparedStageRerun {
@@ -171,6 +175,7 @@ pub(crate) struct PreparedStageRerun {
     pub(super) recovery_snapshot: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
     pub(super) session: PreparedSessionSpawn,
     pub(super) expected_source: crate::db::TaskActionState,
+    pub(super) action_request_key: Option<String>,
 }
 
 /// A stage-run workspace forked from the task's committed tip: swaps get a
@@ -316,5 +321,21 @@ impl PreparedStageRunSpawn {
             PreparedRunWorkspace::Resumed(workspace) => Some(workspace),
             _ => None,
         }
+    }
+}
+
+impl PreparedStageTransition {
+    pub(crate) fn set_action_request_key(&mut self, key: String) {
+        match self {
+            Self::Run(prepared) => prepared.set_action_request_key(key),
+            Self::Post(prepared) => prepared.action_request_key = Some(key),
+            Self::Close { .. } => {}
+        }
+    }
+}
+
+impl PreparedStageRerun {
+    pub(crate) fn set_action_request_key(&mut self, key: String) {
+        self.action_request_key = Some(key);
     }
 }

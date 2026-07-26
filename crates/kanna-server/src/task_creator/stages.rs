@@ -274,8 +274,9 @@ fn prepare_post_dispatch(
     // an explicit completion instruction before the post's task section.
     // `item_stage` stays the owner: a post never moves the task's stage.
     let task_id = context.source_task_id;
+    let completion_attempt = generate_post_completion_attempt(task_id);
     let completion_instruction = format!(
-        "When this work is complete, record stage completion: call MCP `kanna_complete_stage {{\"task_id\": \"{task_id}\", \"status\": \"success\", \"summary\": \"...\"}}`; only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"{task_id}\" --status success --summary \"...\"`. Kanna will then advance this task's pipeline."
+        "When this work is complete, record stage completion: call MCP `kanna_complete_stage {{\"task_id\": \"{task_id}\", \"status\": \"success\", \"summary\": \"...\", \"completion_attempt\": \"{completion_attempt}\"}}`; only if MCP tools are unavailable, fall back to `kanna-cli stage-complete --task-id \"{task_id}\" --status success --summary \"...\" --completion-attempt \"{completion_attempt}\"`. Kanna will then advance this task's pipeline."
     );
     let (mut fallback, message) = prepare_stage_run_for_target_returning_prompt(
         db,
@@ -314,9 +315,19 @@ fn prepare_post_dispatch(
             session_id: continuation_session_id,
             message,
             run_stage,
+            completion_attempt,
             fallback,
+            action_request_key: None,
         },
     )))
+}
+
+fn generate_post_completion_attempt(task_id: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("post-{task_id}-{nanos}")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -667,7 +678,7 @@ fn prepare_revision_resume(
     // resolve to that run's provider — never the agent def's priority list.
     let explicit_provider = run.agent_provider.clone();
     let resumed_from_run_id = run.id.clone();
-    let mut prepared = prepare_stage_run_spawn(
+    let prepared_result = prepare_stage_run_spawn(
         db,
         config,
         context.repo,
@@ -691,7 +702,14 @@ fn prepare_revision_resume(
         source_task.agent_type.as_deref(),
         explicit_provider,
         source_task.agent_provider.as_deref(),
-    )?;
+    );
+    let mut prepared = match prepared_result {
+        Ok(prepared) => prepared,
+        Err(error) if error.starts_with(super::commands::RESUME_PROBE_UNAVAILABLE_PREFIX) => {
+            return fall_back(&error);
+        }
+        Err(error) => return Err(error),
+    };
     // The stage's current definition must still resolve to the recorded
     // provider and session. A definition that changed provider or session
     // type cannot continue that conversation. Nothing was created on disk

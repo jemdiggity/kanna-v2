@@ -2,7 +2,7 @@ node_modules/
 .pnpm-store/
 dist/
 target/
-.build/
+.build
 .kanna-daemon/
 .kanna-daemon-*/
 .kanna-daemon-e2e/

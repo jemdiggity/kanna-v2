@@ -638,6 +638,79 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
+#[test]
+fn pty_revision_forks_fresh_when_installed_cli_has_no_resume_feature() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let config = test_config("revision-pty-no-resume-cli");
+    let (repo_root, db) = init_resume_revision_fixture("revision-pty-no-resume-cli", &config);
+    let impl_worktree = repo_root.join(".kanna-worktrees/task-review-task");
+    let claude_config_dir = repo_root.join("claude-config");
+    write_resume_transcript(&claude_config_dir, &impl_worktree);
+    let executable = impl_worktree.join(".kanna/test-provider-bin/claude");
+    std::fs::write(
+        &executable,
+        "#!/bin/sh\nif [ \"${1:-}\" = \"--help\" ]; then echo 'legacy claude help'; fi\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let prepared = {
+        let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &claude_config_dir);
+        let prepared = prepare_revision_task_for_api(
+            &db,
+            &config,
+            "review-task",
+            "in progress",
+            "Fork because this installed PTY CLI cannot resume.",
+            None,
+        );
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        prepared.unwrap()
+    };
+
+    assert!(prepared.resumed_workspace().is_none());
+    assert!(prepared.forked_workspace().is_some());
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[test]
+fn headless_revision_forks_fresh_when_installed_cli_rejects_resume_subcommand() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let config = test_config("revision-headless-no-resume-cli");
+    let (repo_root, db) = init_resume_revision_fixture_for_provider(
+        "revision-headless-no-resume-cli",
+        &config,
+        "codex",
+    );
+    db.update_test_pipeline_item_agent_type("review-task", "agent")
+        .unwrap();
+    let impl_worktree = repo_root.join(".kanna-worktrees/task-review-task");
+    let executable = impl_worktree.join(".kanna/test-provider-bin/codex");
+    std::fs::write(
+        &executable,
+        "#!/bin/sh\nif [ \"${1:-}\" = \"resume\" ]; then echo 'unknown command: resume' >&2; exit 2; fi\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let prepared = prepare_revision_task_for_api(
+        &db,
+        &config,
+        "review-task",
+        "in progress",
+        "Fork because this installed headless CLI cannot resume.",
+        None,
+    )
+    .unwrap();
+
+    assert!(prepared.resumed_workspace().is_none());
+    assert!(prepared.forked_workspace().is_some());
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
 #[tokio::test]
 async fn resumed_revision_waits_for_target_teardown_before_setup_and_provider_spawn() {
     let config = test_config("revision-resume-teardown-order");
@@ -687,6 +760,7 @@ async fn resumed_revision_waits_for_target_teardown_before_setup_and_provider_sp
         "review-task",
         "in progress",
         "Resume only after teardown finishes.",
+        None,
     )
     .unwrap();
     assert!(prepared.resumed_workspace().is_some());
@@ -868,6 +942,7 @@ async fn assert_blocking_teardown_kill_failure_aborts(label: &str, disconnect: b
         "review-task",
         "in progress",
         "Do not run setup until teardown is confirmed stopped.",
+        None,
     )
     .unwrap();
     assert!(prepared.resumed_workspace().is_some());
@@ -995,6 +1070,7 @@ async fn failed_owned_kill_restores_source_run_so_revision_can_retry() {
         "review-task",
         "in progress",
         "Retry after a transient kill failure.",
+        None,
     )
     .unwrap();
     std::env::remove_var("CLAUDE_CONFIG_DIR");
@@ -1052,6 +1128,7 @@ async fn failed_owned_kill_restores_source_run_so_revision_can_retry() {
         "review-task",
         "in progress",
         "Retry after a transient kill failure.",
+        None,
     )
     .unwrap();
     std::env::remove_var("CLAUDE_CONFIG_DIR");
@@ -1093,6 +1170,7 @@ async fn old_daemon_cannot_record_a_resumed_revision_run() {
         "review-task",
         "in progress",
         "Retry safely against a legacy daemon.",
+        None,
     )
     .unwrap();
     std::env::remove_var("CLAUDE_CONFIG_DIR");
@@ -1169,6 +1247,7 @@ fn request_revision_resumes_supported_provider_sessions_in_their_worktree() {
             "review-task",
             "in progress",
             "Address the provider-neutral review feedback.",
+            None,
         )
         .unwrap();
 
@@ -1218,6 +1297,7 @@ fn request_revision_resumes_supported_headless_provider_sessions() {
             "review-task",
             "in progress",
             "Continue the headless provider session.",
+            None,
         )
         .unwrap();
 
@@ -1347,6 +1427,7 @@ fn request_revision_falls_back_when_recorded_workspace_is_substituted_at_same_he
         "review-task",
         "in progress",
         "Do not resume in a substituted worktree.",
+        None,
     );
     std::env::remove_var("CLAUDE_CONFIG_DIR");
     let prepared = prepared.unwrap();
@@ -1429,6 +1510,7 @@ fn revision_does_not_skip_newer_null_handle_main_run() {
         "review-task",
         "in progress",
         "Do not resume stale Claude work.",
+        None,
     )
     .unwrap();
     std::env::remove_var("CLAUDE_CONFIG_DIR");
@@ -1466,6 +1548,7 @@ fn revision_does_not_resume_provider_removed_from_current_stage_definition() {
         "review-task",
         "in progress",
         "Use the current provider definition.",
+        None,
     )
     .unwrap();
 

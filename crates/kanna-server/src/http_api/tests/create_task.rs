@@ -734,8 +734,11 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
                         .write_all(
                             format!(
                                 "{}\n",
-                                serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
-                                    .unwrap()
+                                serde_json::to_string(&DaemonEvent::SessionCreated {
+                                    session_id,
+                                    run_id: None
+                                })
+                                .unwrap()
                             )
                             .as_bytes(),
                         )
@@ -2080,23 +2083,14 @@ async fn create_task_route_preserves_failed_recovery_seed_diagnostics_without_sp
     let body = String::from_utf8_lossy(&body);
     assert!(body.contains("task "));
     assert!(body.contains("recovery seed"));
-    let task_id = daemon_server.await.unwrap();
+    let daemon_session_id = daemon_server.await.unwrap();
     assert!(body.contains("failed to spawn"));
-    let (daemon_session_id, worktree_path) = daemon_server.await.unwrap();
     let db = Db::open(&config.db_path).unwrap();
-    let worktree_path = db
-        .get_task_worktree_path(&task_id)
-        .unwrap()
-        .expect("failed seed preserves prepared worktree row");
     assert_eq!(db.count_test_pipeline_items_for_repo("repo-1").unwrap(), 1);
     assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 1);
     assert_eq!(
         db.count_test_terminal_sessions_for_repo("repo-1").unwrap(),
         1
-    );
-    assert!(
-        std::path::Path::new(&worktree_path).exists(),
-        "failed spawn should preserve prepared worktree {worktree_path}"
     );
     let created_item = db
         .list_pipeline_items("repo-1")
@@ -2105,6 +2099,14 @@ async fn create_task_route_preserves_failed_recovery_seed_diagnostics_without_sp
         .next()
         .expect("failed task remains durable");
     let task_id = created_item.id.clone();
+    let worktree_path = db
+        .get_task_worktree_path(&task_id)
+        .unwrap()
+        .expect("failed seed preserves prepared worktree row");
+    assert!(
+        std::path::Path::new(&worktree_path).exists(),
+        "failed spawn should preserve prepared worktree {worktree_path}"
+    );
     assert_eq!(created_item.activity.as_deref(), Some("unread"));
     let runs = db.list_stage_runs_for_task(&task_id).unwrap();
     assert_eq!(runs.len(), 1);

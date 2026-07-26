@@ -145,4 +145,51 @@ describe("advanceStage durable selection", () => {
     expect(persistSelection).toHaveBeenCalledOnce();
     expect(persistedSlotIds).toEqual([null]);
   });
+
+  it("does not restore a captured final-stage fallback after the user switches tasks", async () => {
+    const source = makeItem("task-source", "pr");
+    const fallback = makeItem("task-fallback", "in progress");
+    const chosen = makeItem("task-chosen", "in progress");
+    const state = createStoreState();
+    state.repos.value = [{ id: "repo-1", path: "/tmp/repo" } as Repo];
+    state.items.value = [source, fallback, chosen];
+    state.selectedRepoId.value = "repo-1";
+    state.selectedItemId.value = source.id;
+    mockDefaultPipeline();
+
+    let releaseResponse!: () => void;
+    const responseGate = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+    const selectItem = vi.fn(async (taskId: string) => {
+      state.selectedItemId.value = taskId;
+    });
+    const reloadSnapshot = vi.fn(async () => {
+      source.closed_at = "2026-07-11T00:00:00Z";
+    });
+    const context = createStoreContext(state, {
+      warning: vi.fn(),
+      error: vi.fn(),
+    } as never, {
+      selectedTaskId: computed(() => state.selectedItemId.value),
+      sortedItemsForCurrentRepo: computed(() => [source, fallback, chosen]),
+      isItemHidden: (item) => item.closed_at != null,
+      selectItem,
+      reloadSnapshot,
+    });
+    const fetchMock = vi.fn(async () => {
+      await responseGate;
+      return new Response(JSON.stringify({ taskId: source.id }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const advance = createPipelineApi(context).advanceStage(source.id);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    state.selectedItemId.value = chosen.id;
+    releaseResponse();
+    await advance;
+
+    expect(selectItem).not.toHaveBeenCalled();
+    expect(state.selectedItemId.value).toBe(chosen.id);
+  });
 });

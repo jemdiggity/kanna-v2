@@ -48,6 +48,10 @@ pub(crate) enum Commands {
         #[arg(long)]
         run_id: Option<String>,
 
+        /// Completion capability for an injected post
+        #[arg(long)]
+        completion_attempt: Option<String>,
+
         /// Override the local Kanna server base URL
         #[arg(long)]
         server_url: Option<String>,
@@ -434,6 +438,7 @@ async fn main() {
             summary,
             metadata,
             run_id,
+            completion_attempt,
             server_url,
         } => {
             commands::stage_complete::run(
@@ -442,6 +447,7 @@ async fn main() {
                 summary,
                 metadata,
                 run_id,
+                completion_attempt,
                 server_url.as_deref(),
             )
             .await;

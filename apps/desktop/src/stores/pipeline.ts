@@ -102,7 +102,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
         if (
           options.retryPending === true
           && response.status === 409
-          && response.headers.get("Idempotency-Status") === "pending"
+          && response.headers?.get?.("Idempotency-Status") === "pending"
         ) {
           lastError = new Error("idempotent request is still pending");
           await sleep(LOCAL_SERVER_ACTION_RETRY_DELAY_MS);
@@ -306,6 +306,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       const sourceTaskIsSelected = requireService(context.services.selectedTaskId, "selectedTaskId").value === item.id;
       const fallbackSelectionId = computeNextVisibleItemId(item.id);
       const { nextStageName, pendingPostName, closesOnSuccess } = await resolveStageAdvanceProjection(item);
+      const idempotencyKey = globalThis.crypto.randomUUID();
       debugLog("[pipeline:advanceStage] selection policy", {
         taskId,
         currentStage: item.stage,
@@ -318,7 +319,10 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
         selectedBefore: context.state.selectedItemId.value,
       });
       await withOptimisticStageAdvance(taskId, nextStageName, pendingPostName, async () => {
-        const response = await postTaskAction(taskId, "advance-stage");
+        const response = await postTaskAction(taskId, "advance-stage", undefined, {
+          idempotencyKey,
+          retryPending: true,
+        });
         if (!response.ok) {
           const message = await response.text();
           if (response.status === 409) {
@@ -338,7 +342,9 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
         // visible item — analogous to closing a task.
         const advancedItem = context.state.items.value.find((candidate) => candidate.id === result.taskId);
         const taskClosed = !advancedItem || advancedItem.closed_at != null;
-        if (taskClosed && sourceTaskIsSelected) {
+        const sourceTaskStillSelected =
+          requireService(context.services.selectedTaskId, "selectedTaskId").value === item.id;
+        if (taskClosed && sourceTaskIsSelected && sourceTaskStillSelected) {
           await restoreStageAdvanceSelection(fallbackSelectionId);
         }
       });
@@ -358,7 +364,11 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     if (!finishAction) return;
 
     try {
-      const response = await postTaskAction(taskId, "rerun-stage");
+      const idempotencyKey = globalThis.crypto.randomUUID();
+      const response = await postTaskAction(taskId, "rerun-stage", undefined, {
+        idempotencyKey,
+        retryPending: true,
+      });
       if (!response.ok) {
         throw new Error(await response.text());
       }

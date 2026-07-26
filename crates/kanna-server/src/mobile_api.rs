@@ -228,6 +228,8 @@ pub struct CompleteStageRequest {
     pub metadata: Option<serde_json::Value>,
     #[serde(default)]
     pub run_id: Option<String>,
+    #[serde(default)]
+    pub completion_attempt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

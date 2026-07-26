@@ -1,8 +1,8 @@
 use super::NewStageRun;
 use super::{
     add_column, database_open_flags, run_migration, Db, NewPipelineItem, NewTaskTransfer,
-    NewTaskTransferProvenance, PendingStageActionTarget, TaskActionRequestClaim,
-    TaskActionRequestError, CURRENT_SCHEMA_MIGRATIONS,
+    NewTaskTransferProvenance, PendingStageActionTarget, ReopenPipelineItemError,
+    TaskActionRequestClaim, TaskActionRequestError, CURRENT_SCHEMA_MIGRATIONS,
 };
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
@@ -165,7 +165,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "037_task_action_request");
+    assert_eq!(latest_migration, "038_task_action_hardening");
 
     let stage_run_sql: String = db
         .conn
@@ -178,6 +178,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
     assert!(stage_run_sql.contains("provider_session_id"));
     assert!(stage_run_sql.contains("resumed_from_run_id"));
     assert!(stage_run_sql.contains("completion_transition"));
+    assert!(stage_run_sql.contains("completion_attempt"));
     let mut transfer_columns_stmt = db
         .conn
         .prepare("PRAGMA table_info(task_transfer)")
@@ -685,16 +686,23 @@ fn open_migrates_origin_main_028_activity_revision() {
 
     let db = Db::open_migrated(path.to_str().expect("utf8 path"))
         .expect("reopen migrated origin/main fixture");
-    let migration_029_count: i64 = db
-        .conn
-        .query_row(
-            "SELECT COUNT(*) FROM schema_migrations
-             WHERE id = '029_pipeline_item_activity_revision'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("count activity revision migrations");
-    assert_eq!(migration_029_count, 1);
+    for migration_id in [
+        "029_pipeline_item_activity_revision",
+        "035_stage_run_ownership_version",
+        "036_pending_stage_action",
+        "037_task_action_request",
+        "038_task_action_hardening",
+    ] {
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE id = ?1",
+                [migration_id],
+                |row| row.get(0),
+            )
+            .expect("count migration records");
+        assert_eq!(count, 1, "{migration_id} must be applied exactly once");
+    }
 
     db.update_pipeline_item_activity("origin-main-task", "working")
         .expect("transition migrated activity");
@@ -825,102 +833,15 @@ fn activity_revision_migration_precedes_new_stage_run_migrations() {
         .iter()
         .position(|migration| *migration == "037_task_action_request")
         .expect("task action request migration");
+    let hardening = CURRENT_SCHEMA_MIGRATIONS
+        .iter()
+        .position(|migration| *migration == "038_task_action_hardening")
+        .expect("task action hardening migration");
 
     assert!(activity_revision < ownership);
     assert!(ownership < pending_action);
     assert!(pending_action < action_request);
-}
-
-#[test]
-fn open_migrates_origin_main_028_activity_revision() {
-    let path = temp_db_path();
-    let conn = Connection::open(&path).expect("open origin/main fixture db");
-    conn.execute_batch(include_str!("fixtures/origin_main_028.sql"))
-        .expect("load origin/main schema fixture");
-    let migration_029_index = CURRENT_SCHEMA_MIGRATIONS
-        .iter()
-        .position(|id| *id == "029_pipeline_item_activity_revision")
-        .expect("029 activity revision migration exists");
-    for migration_id in &CURRENT_SCHEMA_MIGRATIONS[..migration_029_index] {
-        conn.execute(
-            "INSERT INTO schema_migrations (id) VALUES (?1)",
-            [migration_id],
-        )
-        .expect("record migration through 028");
-    }
-    drop(conn);
-
-    let db =
-        Db::open_migrated(path.to_str().expect("utf8 path")).expect("migrate origin/main fixture");
-
-    let activity_revision_metadata: (String, i64, Option<String>) = db
-        .conn
-        .query_row(
-            "SELECT type, \"notnull\", dflt_value
-             FROM pragma_table_info('pipeline_item')
-             WHERE name = 'activity_revision'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .expect("activity revision metadata");
-    assert_eq!(
-        activity_revision_metadata,
-        ("INTEGER".to_string(), 1, Some("0".to_string()))
-    );
-
-    let stored_revision: i64 = db
-        .conn
-        .query_row(
-            "SELECT activity_revision FROM pipeline_item WHERE id = 'origin-main-task'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("backfilled activity revision");
-    assert_eq!(stored_revision, 0);
-
-    let item = db
-        .get_pipeline_item("origin-main-task")
-        .expect("load migrated pipeline item")
-        .expect("migrated pipeline item exists");
-    assert_eq!(item.activity_revision, 0);
-
-    let snapshot = db.ui_snapshot().expect("load migrated ui snapshot");
-    assert_eq!(snapshot.entries.len(), 1);
-    assert_eq!(snapshot.entries[0].items.len(), 1);
-    assert_eq!(snapshot.entries[0].items[0].id, "origin-main-task");
-    assert_eq!(snapshot.entries[0].items[0].activity_revision, 0);
-    drop(db);
-
-    let db = Db::open_migrated(path.to_str().expect("utf8 path"))
-        .expect("reopen migrated origin/main fixture");
-    for migration_id in [
-        "029_pipeline_item_activity_revision",
-        "035_stage_run_ownership_version",
-        "036_pending_stage_action",
-        "037_task_action_request",
-    ] {
-        let count: i64 = db
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE id = ?1",
-                [migration_id],
-                |row| row.get(0),
-            )
-            .expect("count migration records");
-        assert_eq!(count, 1, "{migration_id} must be applied exactly once");
-    }
-
-    db.update_pipeline_item_activity("origin-main-task", "working")
-        .expect("transition migrated activity");
-    let item = db
-        .get_pipeline_item("origin-main-task")
-        .expect("reload transitioned pipeline item")
-        .expect("transitioned pipeline item exists");
-    assert_eq!(item.activity.as_deref(), Some("working"));
-    assert_eq!(item.activity_revision, 1);
-
-    drop(db);
-    let _ = std::fs::remove_file(path);
+    assert!(action_request < hardening);
 }
 
 #[test]
@@ -1348,7 +1269,10 @@ fn reopen_pipeline_item_rejects_task_that_has_not_finished_closing() {
         .reopen_pipeline_item("task-1")
         .expect_err("an open task cannot be reopened over an in-flight close");
 
-    assert!(matches!(error, rusqlite::Error::QueryReturnedNoRows));
+    assert!(matches!(
+        error,
+        ReopenPipelineItemError::Database(rusqlite::Error::QueryReturnedNoRows)
+    ));
     assert!(db
         .get_pipeline_item("task-1")
         .unwrap()
@@ -1375,7 +1299,9 @@ fn reopen_pipeline_item_waits_for_close_teardown_generation_to_finish() {
     db.close_pipeline_item_tearing_down("task-1").unwrap();
     assert!(matches!(
         db.reopen_pipeline_item("task-1"),
-        Err(rusqlite::Error::QueryReturnedNoRows)
+        Err(ReopenPipelineItemError::Database(
+            rusqlite::Error::QueryReturnedNoRows
+        ))
     ));
 
     db.finish_pipeline_item_teardown("task-1").unwrap();
@@ -2753,7 +2679,7 @@ fn migrated_running_stage_completion_allows_old_agent_without_run_id() {
 }
 
 #[test]
-fn live_main_process_can_complete_its_injected_post_run() {
+fn injected_post_completion_requires_its_scoped_attempt_from_the_live_main_process() {
     let path = Db::test_db_path("stage-completion-injected-post-owner");
     let db = Db::open_for_tests(&path).expect("open test db");
     db.insert_test_repo("repo-1", "Repo One").unwrap();
@@ -2766,38 +2692,73 @@ fn live_main_process_can_complete_its_injected_post_run() {
         "2026-07-25 00:00:00",
     )
     .unwrap();
-    for (id, kind, status) in [
-        ("main-run", "main", "succeeded"),
-        ("post-run", "post", "running"),
-    ] {
-        db.insert_stage_run(NewStageRun {
-            id,
+    db.insert_stage_run(NewStageRun {
+        id: "main-run",
+        task_id: "task-1",
+        stage: "pr",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("antigravity"),
+        model: None,
+        status: "succeeded",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    db.insert_stage_run_with_completion_attempt(
+        NewStageRun {
+            id: "post-run",
             task_id: "task-1",
             stage: "pr",
-            kind,
+            kind: "post",
             agent: None,
             agent_provider: Some("antigravity"),
             model: None,
-            status,
+            status: "running",
             result: None,
             feedback: None,
             session_id: Some("task-1"),
             provider_session_id: None,
             cwd: Some("/tmp/task-1"),
-            resumed_from_run_id: (kind == "post").then_some("main-run"),
-        })
-        .unwrap();
+            resumed_from_run_id: Some("main-run"),
+        },
+        None,
+        Some("post-attempt-1"),
+    )
+    .unwrap();
+
+    for attempt in [None, Some("wrong-attempt")] {
+        assert!(matches!(
+            db.finish_active_stage_run_with_completion_attempt(
+                "task-1",
+                Some("main-run"),
+                attempt,
+                "succeeded",
+                Some("{}"),
+                Some("delayed main-run completion"),
+            ),
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        ));
+        assert_eq!(
+            db.latest_stage_run("task-1").unwrap().unwrap().status,
+            "running"
+        );
     }
 
     let finished = db
-        .finish_active_stage_run(
+        .finish_active_stage_run_with_completion_attempt(
             "task-1",
             Some("main-run"),
+            Some("post-attempt-1"),
             "succeeded",
             Some("{}"),
             Some("post completed from inherited CLI environment"),
         )
-        .expect("main process ownership should authorize its injected post")
+        .expect("post-scoped attempt should authorize its injected post")
         .expect("post run");
     assert_eq!(finished.kind, "post");
     assert_eq!(
@@ -3064,48 +3025,6 @@ fn every_server_activity_write_advances_the_activity_revision() {
         6,
         "reserving another successor while already working is a no-op activity write"
     );
-}
-
-#[test]
-fn every_server_activity_write_advances_the_activity_revision() {
-    let path = Db::test_db_path("activity-revision-writes");
-    let db = Db::open_for_tests(&path).expect("open test db");
-    db.insert_test_repo("repo-1", "Repo One").unwrap();
-    db.insert_test_pipeline_item(
-        "task-1",
-        "repo-1",
-        "task prompt",
-        Some("Task"),
-        "in progress",
-        "2026-07-25 01:00:00",
-    )
-    .unwrap();
-
-    db.update_pipeline_item_activity("task-1", "working")
-        .unwrap();
-    assert_eq!(
-        db.get_pipeline_item("task-1")
-            .unwrap()
-            .unwrap()
-            .activity_revision,
-        1
-    );
-
-    db.update_pipeline_item_base_ref_and_activity("task-1", Some("origin/main"), "unread")
-        .unwrap();
-    assert_eq!(
-        db.get_pipeline_item("task-1")
-            .unwrap()
-            .unwrap()
-            .activity_revision,
-        2
-    );
-
-    db.delete_dormant_task_start_artifacts("task-1", Some("origin/main"))
-        .unwrap();
-    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
-    assert_eq!(item.activity.as_deref(), Some("idle"));
-    assert_eq!(item.activity_revision, 3);
 }
 
 #[test]
@@ -3458,6 +3377,113 @@ fn task_action_request_claims_once_replays_results_and_rejects_key_reuse() {
             body: r#"{"taskId":"task-1"}"#.to_string(),
         }
     );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn task_action_request_gc_preserves_pending_and_recent_replay_while_bounding_growth() {
+    let path = Db::test_db_path("task-action-request-gc");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Bound action history",
+        Some("Bound action history"),
+        "review",
+        "2026-07-26T00:00:00Z",
+    )
+    .expect("task");
+
+    for index in 0..140 {
+        db.conn
+            .execute(
+                "INSERT INTO task_action_request
+                 (idempotency_key, task_id, action, request_json, state, http_status,
+                  response_body, created_at, updated_at)
+                 VALUES (?1, 'task-1', 'advance-stage', ?2, 'succeeded', 200, ?3,
+                         datetime('now'), datetime('now', ?4))",
+                rusqlite::params![
+                    format!("completed-{index:03}"),
+                    format!(r#"{{"index":{index}}}"#),
+                    format!(r#"{{"taskId":"task-1","index":{index}}}"#),
+                    format!("-{} seconds", 140 - index),
+                ],
+            )
+            .expect("completed action");
+    }
+    db.conn
+        .execute(
+            "INSERT INTO task_action_request
+             (idempotency_key, task_id, action, request_json, state, created_at, updated_at)
+             VALUES ('pending-old', 'task-1', 'rerun-stage', '{}', 'pending',
+                     datetime('now', '-30 days'), datetime('now', '-30 days'))",
+            [],
+        )
+        .expect("old pending action");
+    db.conn
+        .execute(
+            "INSERT INTO task_action_request
+             (idempotency_key, task_id, action, request_json, state, created_at, updated_at)
+             VALUES ('pending-new', 'task-1', 'request-revision', '{}', 'pending',
+                     datetime('now'), datetime('now'))",
+            [],
+        )
+        .expect("new pending action");
+    db.conn
+        .execute(
+            "UPDATE task_action_request
+             SET updated_at = datetime('now', '-30 days')
+             WHERE idempotency_key = 'completed-000'",
+            [],
+        )
+        .expect("age oldest completed action");
+
+    let removed = db
+        .prune_task_action_requests()
+        .expect("prune completed actions");
+
+    assert!(removed >= 12);
+    let completed: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_action_request WHERE state != 'pending'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("completed count");
+    assert!(
+        completed <= 128,
+        "completed replay rows must have a hard cap"
+    );
+    let pending: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_action_request WHERE state = 'pending'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("pending count");
+    assert_eq!(pending, 2);
+    let old_completed: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_action_request WHERE idempotency_key = 'completed-000'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("old completed replay");
+    assert_eq!(old_completed, 0);
+    let newest_completed: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_action_request WHERE idempotency_key = 'completed-139'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("new completed replay");
+    assert_eq!(newest_completed, 1);
 
     let _ = std::fs::remove_file(path);
 }

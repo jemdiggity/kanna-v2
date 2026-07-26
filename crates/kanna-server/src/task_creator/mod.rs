@@ -449,6 +449,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         recovery_snapshot: None,
         session,
         expected_source,
+        action_request_key: None,
     })
 }
 
@@ -483,6 +484,9 @@ pub(crate) fn prepare_create_task_repair_for_api(
     if source_task.closed_at.is_some() {
         return Err(format!("task is closed: {task_id}"));
     }
+    let expected_source = db
+        .task_action_state(task_id)
+        .map_err(|error| format!("db error: {error}"))?;
     let repo = db
         .get_repo(&source_task.repo_id)
         .map_err(|error| format!("db error: {error}"))?
@@ -565,13 +569,13 @@ pub(crate) fn prepare_create_task_repair_for_api(
                 *rows = initial_rows;
             }
         }
-        let session_id = db
+        let source_session_id = db
             .resolve_task_terminal_session_id(task_id)
             .map_err(|error| format!("db error: {error}"))?
             .unwrap_or_else(|| task_id.to_string());
         return Ok(Some(PreparedStageRerun {
             task_id: task_id.to_string(),
-            session_id,
+            source_session_id,
             stage: resolved.stage_name,
             run_kind: "main",
             stage_agent: resolved.stage_agent,
@@ -588,6 +592,8 @@ pub(crate) fn prepare_create_task_repair_for_api(
             },
             recovery_snapshot: resolved.recovery_snapshot,
             session,
+            expected_source,
+            action_request_key: None,
         }));
     }
 
@@ -674,14 +680,14 @@ pub(crate) fn prepare_create_task_repair_for_api(
             *rows = initial_rows;
         }
     }
-    let session_id = db
+    let source_session_id = db
         .resolve_task_terminal_session_id(task_id)
         .map_err(|error| format!("db error: {error}"))?
         .unwrap_or_else(|| task_id.to_string());
 
     Ok(Some(PreparedStageRerun {
         task_id: task_id.to_string(),
-        session_id,
+        source_session_id,
         stage: resolved.stage_name,
         run_kind: "main",
         stage_agent: resolved.stage_agent,
@@ -698,6 +704,8 @@ pub(crate) fn prepare_create_task_repair_for_api(
         },
         recovery_snapshot: resolved.recovery_snapshot,
         session,
+        expected_source,
+        action_request_key: None,
     }))
 }
 
@@ -1228,27 +1236,34 @@ fn build_prepared_session(
             // may create the executable or export state needed by it, so
             // defer PATH lookup until the shell reaches the final command.
             let mut shell_path = spawn_env.get("PATH").cloned();
+            let resolved_executable = resolve_provider_executable(
+                provider,
+                spawn_env.get("PATH").map(String::as_str),
+                worktree_path,
+            );
             let executable = if setup.is_empty() {
-                resolve_provider_executable(
-                    provider,
-                    spawn_env.get("PATH").map(String::as_str),
-                    worktree_path,
-                )?
+                resolved_executable.clone()?
             } else {
                 // Provider selection can succeed through a cached login-shell
                 // PATH or a packaged sidecar even when that directory is not
                 // in the process-derived spawn PATH. Keep it as a lower
                 // priority fallback: setup-created workspace binaries still
                 // lead PATH and win after the command-table refresh.
-                if let Ok(resolved) = resolve_provider_executable(
-                    provider,
-                    spawn_env.get("PATH").map(String::as_str),
-                    worktree_path,
-                ) {
+                if let Ok(resolved) = resolved_executable.as_deref() {
                     shell_path = append_executable_parent_to_path(shell_path.as_deref(), &resolved);
                 }
                 provider.executable().to_string()
             };
+            if resume_session_id.is_some() {
+                let probe_executable = resolved_executable.as_deref().map_err(|error| {
+                    format!(
+                        "{} could not resolve installed {} CLI before setup: {error}",
+                        commands::RESUME_PROBE_UNAVAILABLE_PREFIX,
+                        provider.as_str()
+                    )
+                })?;
+                commands::require_provider_cli_resume_feature(&provider, probe_executable)?;
+            }
             let provider_session = match (provider, resume_session_id) {
                 (_, Some(session_id)) => Some(commands::ProviderSessionBinding::Resume(
                     session_id.to_string(),
@@ -1322,6 +1337,31 @@ fn build_prepared_session(
                     worktree_path,
                 )?
             };
+            if resume_session_id.is_some() {
+                let probe_executable = match headless_executable.as_deref() {
+                    Some(executable) => executable.to_string(),
+                    None => resolve_headless_agent_executable(
+                        provider,
+                        spawn_env.get("PATH").map(String::as_str),
+                        worktree_path,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "{} could not resolve installed {} CLI before deferred setup: {error}",
+                            commands::RESUME_PROBE_UNAVAILABLE_PREFIX,
+                            provider.as_str()
+                        )
+                    })?
+                    .ok_or_else(|| {
+                        format!(
+                            "{} installed {} CLI was not found before deferred setup",
+                            commands::RESUME_PROBE_UNAVAILABLE_PREFIX,
+                            provider.as_str()
+                        )
+                    })?,
+                };
+                commands::require_provider_cli_resume_feature(&provider, &probe_executable)?;
+            }
             let system_prompt = build_kanna_preamble(
                 &provider,
                 task_id,

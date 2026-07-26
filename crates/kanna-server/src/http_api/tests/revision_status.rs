@@ -114,6 +114,7 @@ async fn legacy_daemon_revision_rejection_preserves_active_run_through_http() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-legacy-resume-{unique}.json"),
     };
     let (repo_root, db) = crate::task_creator::tests::revision::init_resume_revision_fixture(
@@ -231,6 +232,7 @@ async fn request_revision_reports_failure_after_preflight_acceptance() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-revision-landing-{unique}.json"),
     };
     let (repo_root, db) = crate::task_creator::tests::revision::init_resume_revision_fixture(
@@ -1398,9 +1400,10 @@ fn spawn_fixture_daemon(
                         message: "session not found".to_string(),
                     },
                     DaemonCommand::SpawnAgent { session_id, .. }
-                    | DaemonCommand::Spawn { session_id, .. } => {
-                        DaemonEvent::SessionCreated { session_id }
-                    }
+                    | DaemonCommand::Spawn { session_id, .. } => DaemonEvent::SessionCreated {
+                        session_id,
+                        run_id: None,
+                    },
                     _ => DaemonEvent::Ok,
                 };
                 if write_half
@@ -1558,7 +1561,11 @@ async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
                 .write_all(
                     format!(
                         "{}\n",
-                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                        serde_json::to_string(&DaemonEvent::SessionCreated {
+                            session_id,
+                            run_id: None
+                        })
+                        .unwrap()
                     )
                     .as_bytes(),
                 )
@@ -1727,13 +1734,19 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
                         },
                         DaemonCommand::SpawnAgent { session_id, params } => {
                             recorder.lock().unwrap().push(params.prompt.clone());
-                            DaemonEvent::SessionCreated { session_id }
+                            DaemonEvent::SessionCreated {
+                                session_id,
+                                run_id: None,
+                            }
                         }
                         DaemonCommand::Spawn {
                             session_id, args, ..
                         } => {
                             recorder.lock().unwrap().push(args.join(" "));
-                            DaemonEvent::SessionCreated { session_id }
+                            DaemonEvent::SessionCreated {
+                                session_id,
+                                run_id: None,
+                            }
                         }
                         DaemonCommand::Input { .. } => DaemonEvent::Ok,
                         _ => DaemonEvent::Ok,

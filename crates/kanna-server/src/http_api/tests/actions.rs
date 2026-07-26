@@ -1068,11 +1068,12 @@ async fn reopen_task_route_rejects_while_close_owns_the_task_action_flight() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-reopen-flight-{unique}.json"),
     };
     let state = Arc::new(super::AppState::new(config));
     let _close_flight = state
-        .begin_task_action("task-closed")
+        .begin_requested_task_revision("task-closed")
         .expect("close owns the task action flight");
     let app = super::router(Arc::clone(&state));
 
@@ -1129,6 +1130,7 @@ async fn reopen_task_route_rejects_until_detached_close_cleanup_finishes() {
         environment: "development".to_string(),
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
+        transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-reopen-cleanup-{unique}.json"),
     };
     let app = super::router(Arc::new(super::AppState::new(config)));
@@ -3528,6 +3530,88 @@ async fn rerun_stage_route_uses_stage_rerunner() {
         .unwrap();
     let rerun: TaskActionResponse = from_slice(&body).unwrap();
     assert_eq!(rerun.task_id, "task-1");
+}
+
+#[tokio::test]
+async fn advance_stage_replays_one_durable_result_for_a_retried_request_key() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_handler = Arc::clone(&calls);
+    let app = super::test_router_with_stage_advancer(
+        "desktop-1",
+        "Studio Mac",
+        Arc::new(move |task_id| {
+            calls_for_handler.fetch_add(1, Ordering::SeqCst);
+            Ok(TaskActionResponse {
+                task_id,
+                follow_task: None,
+                revision_budget: None,
+            })
+        }),
+    );
+
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/tasks/task-1/actions/advance-stage")
+                    .header("idempotency-key", "advance-response-loss")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let action: TaskActionResponse = from_slice(&body).unwrap();
+        assert_eq!(action.task_id, "task-1");
+    }
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn rerun_stage_replays_one_durable_result_for_a_retried_request_key() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_handler = Arc::clone(&calls);
+    let app = super::test_router_with_stage_rerunner(
+        "desktop-1",
+        "Studio Mac",
+        Arc::new(move |task_id| {
+            calls_for_handler.fetch_add(1, Ordering::SeqCst);
+            Ok(TaskActionResponse {
+                task_id,
+                follow_task: None,
+                revision_budget: None,
+            })
+        }),
+    );
+
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/tasks/task-1/actions/rerun-stage")
+                    .header("idempotency-key", "rerun-response-loss")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let action: TaskActionResponse = from_slice(&body).unwrap();
+        assert_eq!(action.task_id, "task-1");
+    }
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

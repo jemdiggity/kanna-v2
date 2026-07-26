@@ -18,6 +18,7 @@ pub(crate) fn build_complete_stage_request(
         summary,
         metadata,
         run_id: None,
+        completion_attempt: None,
     }
 }
 
@@ -41,6 +42,7 @@ pub(crate) async fn run(
     summary: String,
     metadata: Option<String>,
     run_id: Option<String>,
+    completion_attempt: Option<String>,
     server_url: Option<&str>,
 ) {
     // Validate status
@@ -71,6 +73,7 @@ pub(crate) async fn run(
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| run_id.filter(|value| !value.trim().is_empty()));
+    request.completion_attempt = completion_attempt.filter(|value| !value.trim().is_empty());
     let response = complete_stage_via_api(&base_url, &task_id, &request)
         .await
         .unwrap_or_else(|e| {

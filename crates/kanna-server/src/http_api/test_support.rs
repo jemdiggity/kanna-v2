@@ -332,7 +332,18 @@ pub(super) fn test_router_with_stage_advancer(
         transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
-    let _ = Db::open_for_tests(&config.db_path).expect("open test db");
+    let db = Db::open_for_tests(&config.db_path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One")
+        .expect("seed repo");
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "task prompt",
+        Some("Task One"),
+        "in progress",
+        "2026-07-26 00:00:00",
+    )
+    .expect("seed task");
     router(Arc::new(AppState::with_stage_advancer(
         config,
         stage_advancer,
@@ -367,7 +378,18 @@ pub(super) fn test_router_with_stage_rerunner(
         transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-rerun-{desktop_id}-{test_db_id}.json"),
     };
-    let _ = Db::open_for_tests(&config.db_path).expect("open test db");
+    let db = Db::open_for_tests(&config.db_path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One")
+        .expect("seed repo");
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "task prompt",
+        Some("Task One"),
+        "in progress",
+        "2026-07-26 00:00:00",
+    )
+    .expect("seed task");
     router(Arc::new(AppState::with_stage_rerunner(
         config,
         stage_rerunner,

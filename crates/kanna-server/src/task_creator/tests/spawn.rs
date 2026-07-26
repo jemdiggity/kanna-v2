@@ -293,6 +293,7 @@ async fn initial_spawn_closed_after_session_created_is_guarded_killed_and_rolled
         model: None,
         completion_transition: PipelineStageTransition::Manual,
         provider_session_id: None,
+        recovery_snapshot: None,
         session: PreparedSessionSpawn::Agent {
             agent_provider: DaemonAgentProvider::Claude,
             prompt: "Do work".to_string(),
@@ -350,6 +351,7 @@ async fn create_resume_rejects_old_daemon_before_recording_task_or_run() {
             setup_cmds: None,
             task_template: None,
             resume_session_id: Some("364643cc-5e6d-48fc-86ca-ca7764380900".to_string()),
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,

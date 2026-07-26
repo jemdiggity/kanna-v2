@@ -145,13 +145,13 @@ async fn main() {
 
     log::info!("Database opened: {}", config.db_path);
 
-    match tokio::time::timeout(
+    let startup_lifecycle_handoff = match tokio::time::timeout(
         std::time::Duration::from_secs(15),
         task_creator::reconcile_pending_stage_actions_on_startup(&config),
     )
     .await
     {
-        Ok(Ok(())) => {}
+        Ok(Ok(handoff)) => handoff,
         Ok(Err(error)) => {
             eprintln!(
                 "Startup task action reconciliation failed: {error}; \
@@ -166,7 +166,7 @@ async fn main() {
             );
             std::process::exit(1);
         }
-    }
+    };
 
     let _mobile_bonjour = bonjour::MobileBonjourAdvertisement::start(
         &config.desktop_name,
@@ -210,7 +210,12 @@ async fn main() {
     });
     let terminal_state = Arc::clone(&http_state);
     tokio::spawn(async move {
-        terminal_watcher::terminal_state_watcher_loop(terminal_state, session_replacements).await;
+        terminal_watcher::terminal_state_watcher_loop(
+            terminal_state,
+            session_replacements,
+            startup_lifecycle_handoff,
+        )
+        .await;
     });
     runtime::run_server_services(config, db, http_state).await;
 }
