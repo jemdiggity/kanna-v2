@@ -41,12 +41,20 @@ for the human to triage — do not create follow-up tasks for them.
 Revisions are budgeted. Call `kanna_get_task` on your own task
 (`$KANNA_TASK_ID`) and read `revisionRounds` and `revisionLimit`: rounds
 already spent mean earlier reviews had their say, so do not reopen ground a
-previous round settled, and raise the bar as the budget shrinks — on the last
-available round, block only for defects a user would hit. Once the budget is
-spent, `kanna_request_revision` starts nothing and Kanna parks the task for
-its human (the response says so). Do not retry it, do not fix the code
-yourself, and do not create a new task to continue the work — record what you
-found and stop.
+previous round settled.
+
+The bar above does not move with the budget. A shrinking budget never makes a
+blocking finding acceptable: on the last available round, a finding that
+clears the bar still blocks the branch and still goes back as a revision. What
+the budget changes is what happens when the rounds run out, not what counts as
+blocking.
+
+Once the budget is spent, `kanna_request_revision` starts nothing and Kanna
+parks the task for its human (the response says so). That is the designed
+ending for a branch whose findings are not resolved — a human reads them and
+decides. Do not approve a branch to avoid parking it, do not retry the
+request, do not fix the code yourself, and do not create a new task to
+continue the work — record what you found and stop.
 
 Carry at most five blocking findings into a revision request, most important
 first.

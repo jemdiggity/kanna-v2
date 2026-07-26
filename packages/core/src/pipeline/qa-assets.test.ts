@@ -163,7 +163,17 @@ describe("QA pipeline assets", () => {
       expect(agent, name).toContain("revisionRounds");
       expect(agent, name).toContain("revisionLimit");
       expect(agent, name).toContain("parks the task for its human");
-      expect(agent, name).toContain("Do not retry");
+      expect(agent, name).toMatch(/do not retry the request/i);
+
+      // The blocking bar must not move with the budget. Relaxing it on the
+      // last round would approve a branch that still has blocking findings —
+      // the designed ending for those is the park, where a human decides.
+      expect(agent, name).toContain("The bar above does not move with the budget");
+      expect(agent, name).toContain("a finding that clears the bar still");
+      expect(agent, name).toContain("Do not approve a branch to avoid parking it");
+      expect(agent, name).not.toMatch(/raise the bar as the budget shrinks/i);
+      expect(agent, name).not.toMatch(/only for defects a user would hit/i);
+      expect(agent, name).not.toMatch(/last (available )?round,? (fail|block) only/i);
       // A revision request must be a closed list, not an open invitation.
       expect(agent, name).toContain("closed list");
       expect(agent, name).toContain('No "also consider"');

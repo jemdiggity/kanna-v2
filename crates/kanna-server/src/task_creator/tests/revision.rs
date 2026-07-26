@@ -805,6 +805,46 @@ fn pipeline_revision_limit_defaults_and_can_be_overridden() {
 }
 
 #[test]
+fn negative_pipeline_revision_limit_is_a_definition_error() {
+    // Both parser entry points (repo pipeline files and pinned pipeline_def
+    // snapshots) funnel through normalize_pipeline_definition, so validating
+    // there covers both. A negative value must not be read as "unlimited":
+    // silently clamping a typo to 0 would disable the very bound the field
+    // configures, which is the runaway this cap exists to prevent.
+    let stored_negative = serde_json::json!({
+        "name": "stored",
+        "revision_limit": -1,
+        "stages": [{ "name": "in progress", "transition": "manual" }]
+    })
+    .to_string();
+
+    let error = super::super::definitions::parse_stored_pipeline_definition(&stored_negative)
+        .expect_err("a negative revision_limit must be rejected");
+    assert!(
+        error.contains("revision_limit must be zero or greater"),
+        "the error must name the field and the rule: {error}"
+    );
+    assert!(
+        error.contains("-1"),
+        "the error must report the offending value: {error}"
+    );
+
+    // The neighbouring valid values still parse, so the check rejects only
+    // what it should.
+    for limit in [0, 1] {
+        let stored = serde_json::json!({
+            "name": "stored",
+            "revision_limit": limit,
+            "stages": [{ "name": "in progress", "transition": "manual" }]
+        })
+        .to_string();
+        let pipeline = super::super::definitions::parse_stored_pipeline_definition(&stored)
+            .unwrap_or_else(|error| panic!("revision_limit {limit} must parse: {error}"));
+        assert_eq!(pipeline.revision_limit(), limit);
+    }
+}
+
+#[test]
 fn revision_budget_is_exhausted_only_at_a_positive_limit() {
     use super::super::RevisionBudget;
 

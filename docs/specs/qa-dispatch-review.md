@@ -108,7 +108,12 @@ one; prompts alone cannot hold a limit.
 ### Revision-round budget (engine)
 
 A pipeline declares `revision_limit` (top level, default
-`DEFAULT_REVISION_LIMIT` = 3; `0` opts out). `pipeline_item.revision_rounds`
+`DEFAULT_REVISION_LIMIT` = 3; `0` opts out). A negative value is a definition
+error in every parser — the Rust source of truth
+(`normalize_pipeline_definition`, covering both repo pipeline files and pinned
+`pipeline_def` snapshots), the JSON schema, and the TypeScript loader — rather
+than being clamped to `0`, since silently reading a typo as "unlimited" would
+disable the bound the field exists to set. `pipeline_item.revision_rounds`
 counts agent-requested revisions on the task, and `kanna_request_revision`
 resolves the pair before doing anything:
 
@@ -144,6 +149,15 @@ stage run. The desktop does not render stage-run summaries anywhere today, so
 there is deliberately no new UI badge for "parked because the budget is spent";
 adding one means first giving the UI a place to show run results, which is its
 own change.
+
+The bar does not move with the budget. A shrinking budget never makes a
+blocking finding acceptable: on the last available round, a finding that
+clears the bar still fails the review and still goes back as a revision, and
+if that spends the budget the task parks. Parking a branch whose findings are
+unresolved is the designed ending — a human reads them and decides — so a
+deciding agent must never approve to avoid it. What the budget changes is what
+happens when the rounds run out, not what counts as blocking; the shipped
+agent assets are held to that by `qa-assets.test.ts`.
 
 The budget bounds revising, not verdicts. A review agent that records
 `kanna_complete_stage success` instead of requesting a revision still advances

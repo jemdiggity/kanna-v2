@@ -74,9 +74,12 @@ pub(super) struct PipelineDefinition {
 pub(crate) const DEFAULT_REVISION_LIMIT: i64 = 3;
 
 impl PipelineDefinition {
-    /// Effective revision-round cap: `0` means unlimited.
+    /// Effective revision-round cap: `0` means unlimited. Negative values are
+    /// rejected when the definition is parsed, so there is nothing to clamp
+    /// here — silently clamping would turn a typo into an unbounded loop,
+    /// which is the failure this cap exists to prevent.
     pub(super) fn revision_limit(&self) -> i64 {
-        self.revision_limit.unwrap_or(DEFAULT_REVISION_LIMIT).max(0)
+        self.revision_limit.unwrap_or(DEFAULT_REVISION_LIMIT)
     }
 }
 
@@ -1018,6 +1021,18 @@ fn normalize_pipeline_definition(raw: RawPipelineDefinition) -> Result<PipelineD
             },
             post,
         });
+    }
+
+    // A negative cap is a definition error, not "unlimited": accepting it
+    // would silently disable the very bound the field configures.
+    if let Some(revision_limit) = raw.revision_limit {
+        if revision_limit < 0 {
+            return Err(format!(
+                "revision_limit must be zero or greater, got {revision_limit} \
+                 (0 disables the cap; omit the field for the default of \
+                 {DEFAULT_REVISION_LIMIT})"
+            ));
+        }
     }
 
     Ok(PipelineDefinition {
