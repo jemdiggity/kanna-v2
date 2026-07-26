@@ -1,6 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -23,18 +22,17 @@ pub struct CloudTransferProxyEndpoint {
 pub struct CloudTransferProxyHandle {
     desktop_id: String,
     relay_url: String,
-    auth_generation: [u8; 32],
+    id_token: watch::Sender<String>,
     endpoint: CloudTransferProxyEndpoint,
     cancel: watch::Sender<bool>,
     listener_task: JoinHandle<()>,
 }
 
 impl CloudTransferProxyHandle {
-    fn matches(&self, desktop_id: &str, relay_url: &str, auth_generation: &[u8; 32]) -> bool {
+    fn matches_route(&self, desktop_id: &str, relay_url: &str) -> bool {
         !self.listener_task.is_finished()
             && self.desktop_id == desktop_id
             && self.relay_url == relay_url
-            && &self.auth_generation == auth_generation
     }
 
     fn request_stop(&self) {
@@ -62,7 +60,7 @@ struct ProxyConfig {
     peer_id: String,
     desktop_id: String,
     relay_url: String,
-    id_token: String,
+    id_token: watch::Receiver<String>,
 }
 
 #[derive(Debug)]
@@ -110,10 +108,10 @@ pub async fn ensure_cloud_transfer_proxy_in_state(
     validate_nonblank("ID token", &id_token)?;
     validate_relay_url(&relay_url)?;
 
-    let auth_generation: [u8; 32] = Sha256::digest(id_token.as_bytes()).into();
     let mut proxies = state.lock().await;
     if let Some(existing) = proxies.get(&peer_id) {
-        if existing.matches(&desktop_id, &relay_url, &auth_generation) {
+        if existing.matches_route(&desktop_id, &relay_url) {
+            existing.id_token.send_replace(id_token);
             return Ok(existing.endpoint.clone());
         }
     }
@@ -136,11 +134,12 @@ pub async fn ensure_cloud_transfer_proxy_in_state(
         existing.stop().await?;
     }
 
+    let (id_token, id_token_receiver) = watch::channel(id_token);
     let config = ProxyConfig {
         peer_id: peer_id.clone(),
         desktop_id: desktop_id.clone(),
         relay_url: relay_url.clone(),
-        id_token,
+        id_token: id_token_receiver,
     };
     let (cancel, cancel_receiver) = watch::channel(false);
     let listener_task = tokio::spawn(run_proxy_listener(listener, config, cancel_receiver));
@@ -150,7 +149,7 @@ pub async fn ensure_cloud_transfer_proxy_in_state(
         CloudTransferProxyHandle {
             desktop_id,
             relay_url,
-            auth_generation,
+            id_token,
             endpoint: endpoint.clone(),
             cancel,
             listener_task,
@@ -293,11 +292,12 @@ async fn connect_and_bridge(
     cancel: watch::Receiver<bool>,
 ) -> Result<(), ProxyError> {
     let (mut relay, _) = tokio_tungstenite::connect_async(&config.relay_url).await?;
+    let id_token = config.id_token.borrow().clone();
     relay
         .send(Message::Text(
             serde_json::json!({
                 "type": "auth",
-                "id_token": config.id_token,
+                "id_token": id_token,
             })
             .to_string()
             .into(),
@@ -519,6 +519,7 @@ mod tests {
         expected_token: &str,
         expected_peer: &str,
         expected_desktop: &str,
+        expected_connection_id: u64,
     ) where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
@@ -545,7 +546,7 @@ mod tests {
             request,
             json!({
                 "type": "tunnel_request",
-                "id": format!("cloud-transfer-{expected_peer}-1"),
+                "id": format!("cloud-transfer-{expected_peer}-{expected_connection_id}"),
                 "desktopId": expected_desktop,
                 "service": "task-transfer",
             })
@@ -589,7 +590,7 @@ mod tests {
             .expect("accept relay connection");
         let mut relay = accept_async(relay_tcp).await.expect("accept websocket");
 
-        authenticate_and_ready(&mut relay, "id-token-a", "peer-b", "desktop-b").await;
+        authenticate_and_ready(&mut relay, "id-token-a", "peer-b", "desktop-b", 1).await;
 
         sidecar
             .write_all(b"sidecar-to-relay")
@@ -777,8 +778,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn matching_configuration_reuses_but_changed_auth_generation_replaces_proxy() {
-        let (relay_url, _relay_listener) = test_relay().await;
+    async fn refreshed_auth_keeps_the_endpoint_and_the_next_connection_uses_the_new_token() {
+        let (relay_url, relay_listener) = test_relay().await;
         let state = state();
         let first = ensure_cloud_transfer_proxy_in_state(
             &state,
@@ -789,28 +790,45 @@ mod tests {
         )
         .await
         .expect("first proxy");
-        let reused = ensure_cloud_transfer_proxy_in_state(
+        let mut first_sidecar = TcpStream::connect(&first.endpoint)
+            .await
+            .expect("connect first sidecar");
+        let (first_relay_tcp, _) = relay_listener.accept().await.expect("accept first relay");
+        let mut first_relay = accept_async(first_relay_tcp)
+            .await
+            .expect("accept first websocket");
+        authenticate_and_ready(&mut first_relay, "token-a", "peer-b", "desktop-b", 1).await;
+
+        let refreshed = ensure_cloud_transfer_proxy_in_state(
             &state,
             "peer-b".into(),
             "desktop-b".into(),
             relay_url.clone(),
-            "token-a".into(),
-        )
-        .await
-        .expect("reused proxy");
-        assert_eq!(reused, first);
-
-        let replaced = ensure_cloud_transfer_proxy_in_state(
-            &state,
-            "peer-b".into(),
-            "desktop-b".into(),
-            relay_url,
             "token-b".into(),
         )
         .await
-        .expect("replacement proxy");
-        assert_ne!(replaced.endpoint, first.endpoint);
-        wait_for_endpoint_release(&first.endpoint).await;
+        .expect("refresh proxy authentication");
+        assert_eq!(refreshed, first);
+
+        let _second_sidecar = TcpStream::connect(&refreshed.endpoint)
+            .await
+            .expect("connect second sidecar");
+        let (second_relay_tcp, _) = relay_listener.accept().await.expect("accept second relay");
+        let mut second_relay = accept_async(second_relay_tcp)
+            .await
+            .expect("accept second websocket");
+        authenticate_and_ready(&mut second_relay, "token-b", "peer-b", "desktop-b", 2).await;
+
+        first_relay
+            .send(Message::Binary(b"still-open".to_vec().into()))
+            .await
+            .expect("write through original tunnel");
+        let mut original_bytes = [0_u8; 10];
+        first_sidecar
+            .read_exact(&mut original_bytes)
+            .await
+            .expect("read original tunnel after refresh");
+        assert_eq!(&original_bytes, b"still-open");
 
         clear_cloud_transfer_proxies_in_state(&state)
             .await
@@ -875,7 +893,7 @@ mod tests {
             .expect("connect peer b");
         let (relay_tcp_b, _) = relay_listener_b.accept().await.expect("accept peer b");
         let mut relay_b = accept_async(relay_tcp_b).await.expect("websocket peer b");
-        authenticate_and_ready(&mut relay_b, "token", "peer-b", "desktop-b").await;
+        authenticate_and_ready(&mut relay_b, "token", "peer-b", "desktop-b", 1).await;
 
         remove_cloud_transfer_proxy_in_state(&state, "peer-b")
             .await
@@ -911,7 +929,7 @@ mod tests {
                 .expect("connect sidecar");
             let (relay_tcp, _) = relay_listener.accept().await.expect("accept relay");
             let mut relay = accept_async(relay_tcp).await.expect("accept websocket");
-            authenticate_and_ready(&mut relay, "token", peer, desktop).await;
+            authenticate_and_ready(&mut relay, "token", peer, desktop, 1).await;
             active.push((endpoint, sidecar, relay));
         }
 

@@ -226,6 +226,7 @@ async fn register_emits_a_startable_development_config_with_build_identity() {
     let expected_version = include_str!("../../../VERSION").trim();
     assert!(registered_config.contains(&format!("version = \"{expected_version}\"")));
     assert!(registered_config.contains("environment = \"development\""));
+    assert!(registered_config.contains("transfer_port = 4455"));
 
     let port = free_loopback_port();
     writeln!(
@@ -233,7 +234,7 @@ async fn register_emits_a_startable_development_config_with_build_identity() {
             .append(true)
             .open(&config_path)
             .expect("open registered config"),
-        "lan_host = \"127.0.0.1\"\nlan_port = {port}\ntransfer_port = 4455"
+        "lan_host = \"127.0.0.1\"\nlan_port = {port}"
     )
     .expect("configure registered server loopback port");
 

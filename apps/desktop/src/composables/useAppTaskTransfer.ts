@@ -30,6 +30,7 @@ interface UseAppTaskTransferOptions {
   toast: ReturnType<typeof useToast>;
   showPeerPicker: Ref<boolean>;
   transferMachines?: Readonly<Ref<TransferMachine[]>>;
+  refreshCloudTransferRoute?: (peerId: string) => Promise<void>;
   onLanTransferPeersChanged?: (peers: unknown) => void;
 }
 
@@ -42,6 +43,7 @@ export function useAppTaskTransfer({
   toast,
   showPeerPicker,
   transferMachines,
+  refreshCloudTransferRoute,
   onLanTransferPeersChanged,
 }: UseAppTaskTransferOptions) {
   const peerPickerMode = ref<"push" | "pair">("push");
@@ -172,6 +174,9 @@ export function useAppTaskTransfer({
     const selectedMachine = transferMachines?.value?.find((machine) => machine.peerId === peerId);
     try {
       transferPeerActionPending.value = true;
+      if (selectedMachine?.relayDesktopId && refreshCloudTransferRoute) {
+        await refreshCloudTransferRoute(peerId);
+      }
       if (selectedMachine) {
         await store.pushTaskToPeer(taskId, peerId, {
           transport: selectedMachine.preferredTransport,
@@ -203,6 +208,12 @@ export function useAppTaskTransfer({
     }
     transferPeerActionPending.value = true;
     try {
+      if (
+        owner.preferredTransferTransport === "cloud"
+        && refreshCloudTransferRoute
+      ) {
+        await refreshCloudTransferRoute(owner.transferPeerId);
+      }
       await invoke("request_task_pull", {
         targetPeerId: owner.transferPeerId,
         sourceTaskId: owner.ownerLocalTaskId,

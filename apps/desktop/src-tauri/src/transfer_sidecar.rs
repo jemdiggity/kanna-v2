@@ -964,7 +964,8 @@ fn build_transfer_sidecar_env_from_resolved(
     let mut env = HashMap::new();
     env.insert(
         "KANNA_TRANSFER_PORT".to_string(),
-        std::env::var("KANNA_TRANSFER_PORT").unwrap_or_else(|_| "4455".to_string()),
+        std::env::var("KANNA_TRANSFER_PORT")
+            .unwrap_or_else(|_| kanna_runtime_defaults::DEFAULT_TRANSFER_PORT.to_string()),
     );
     env.insert(
         "KANNA_TRANSFER_ROOT".to_string(),

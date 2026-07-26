@@ -209,6 +209,23 @@ async function waitForTransferMachine(
   throw new Error(`timed out waiting for transfer machine ${machineName}: ${JSON.stringify(last)}`);
 }
 
+async function waitForInvoke(
+  client: typeof primary,
+  command: string,
+  timeoutMs = 10_000,
+): Promise<Array<{ cmd: string; args?: unknown }>> {
+  const deadline = Date.now() + timeoutMs;
+  let calls: Array<{ cmd: string; args?: unknown }> = [];
+  while (Date.now() < deadline) {
+    calls = await client.executeSync<Array<{ cmd: string; args?: unknown }>>(
+      `return window.__KANNA_E2E__.invokes?.getAll() || [];`,
+    );
+    if (calls.some((call) => call.cmd === command)) return calls;
+    await sleep(100);
+  }
+  throw new Error(`timed out waiting for ${command}: ${JSON.stringify(calls)}`);
+}
+
 async function waitForBidirectionalCloudReadiness(): Promise<void> {
   await Promise.all([
     waitForTransferMachine(primary, "Secondary"),
@@ -304,9 +321,7 @@ describe("cloud task ownership transfer", () => {
       window.__KANNA_E2E__.events?.clear();
     `);
     await pullSelectedTaskToThisMachineThroughUi(primary);
-    const pullInvokes = await primary.executeSync<Array<{ cmd: string; args?: unknown }>>(
-      `return window.__KANNA_E2E__.invokes?.getAll() || [];`,
-    );
+    const pullInvokes = await waitForInvoke(primary, "request_task_pull");
     const secondaryMachine = await waitForTransferMachine(primary, "Secondary");
     expect(pullInvokes).toContainEqual(expect.objectContaining({
       cmd: "request_task_pull",

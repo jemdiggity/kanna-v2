@@ -63,6 +63,7 @@ const {
   initializeDesktopCloudAuth,
   initializeDesktopLanTaskSync,
   markTransferSidecarReady,
+  refreshCloudTransferRoute,
   updateLanTransferPeers,
   closeSelectedWorkspaceTask,
   advanceSelectedRemoteWorkspaceTask,
@@ -210,6 +211,7 @@ const appTaskTransfer = useAppTaskTransfer({
   toast,
   showPeerPicker,
   transferMachines,
+  refreshCloudTransferRoute,
   onLanTransferPeersChanged: updateLanTransferPeers,
 });
 const {

@@ -62,6 +62,7 @@ export interface DesktopTransferMachineSyncDeps {
 export interface DesktopTransferMachineSync {
   getTransferMachines(): TransferMachine[];
   markSidecarReady(): Promise<void>;
+  refreshCloudRoute(peerId: string): Promise<void>;
   setCloudMachines(machines: DesktopCloudTransferMachine[]): Promise<boolean>;
   setLanPeers(peers: LanTransferPeer[]): void;
   setSignedInSession(
@@ -97,6 +98,57 @@ export function createDesktopTransferMachineSync(
     && capturedSession === authSessionGeneration
     && sidecarReady
     && authSession !== null;
+
+  const registerCloudMachine = async (
+    machine: TransferMachine,
+    session: DesktopAuthSession,
+    relayUrl: string,
+    captured: number,
+    capturedSession: number,
+  ): Promise<void> => {
+    const idToken = await session.getIdToken();
+    if (!isCurrent(captured, capturedSession) || !idToken) {
+      throw new Error("Sign in before transferring through the cloud.");
+    }
+    const proxy = await deps.ensureProxy({
+      peerId: machine.peerId,
+      desktopId: machine.relayDesktopId!,
+      relayUrl,
+      idToken,
+    });
+    provisionedCloudPeerIds.add(machine.peerId);
+    if (!isCurrent(captured, capturedSession)) {
+      await deps.removeProxy({ peerId: machine.peerId }).catch(() => undefined);
+      provisionedCloudPeerIds.delete(machine.peerId);
+      activeCloudPeerGenerations.delete(machine.peerId);
+      throw new Error("Cloud transfer route changed while refreshing credentials.");
+    }
+    try {
+      await deps.upsertExternalPeer({
+        peer: {
+          peerId: machine.peerId,
+          displayName: machine.name,
+          endpoint: proxy.endpoint,
+          publicKey: machine.publicKey,
+          protocolVersion: 1,
+          acceptingTransfers: true,
+        },
+      });
+    } catch (error) {
+      activeCloudPeerGenerations.delete(machine.peerId);
+      throw error;
+    }
+    if (!isCurrent(captured, capturedSession)) {
+      await Promise.all([
+        deps.removeExternalPeer({ peerId: machine.peerId }).catch(() => undefined),
+        deps.removeProxy({ peerId: machine.peerId }).catch(() => undefined),
+      ]);
+      provisionedCloudPeerIds.delete(machine.peerId);
+      activeCloudPeerGenerations.delete(machine.peerId);
+      throw new Error("Cloud transfer route changed while refreshing credentials.");
+    }
+    activeCloudPeerGenerations.set(machine.peerId, captured);
+  };
 
   const reconcile = async (captured: number): Promise<void> => {
     const session = authSession;
@@ -148,46 +200,18 @@ export function createDesktopTransferMachineSync(
     if (!isCurrent(captured, capturedSession) || !relayUrl) return;
 
     for (const machine of eligible) {
-      const idToken = await session.getIdToken();
-      if (!isCurrent(captured, capturedSession) || !idToken) return;
-      const proxy = await deps.ensureProxy({
-        peerId: machine.peerId,
-        desktopId: machine.relayDesktopId!,
-        relayUrl,
-        idToken,
-      });
-      provisionedCloudPeerIds.add(machine.peerId);
-      if (!isCurrent(captured, capturedSession)) {
-        await deps.removeProxy({ peerId: machine.peerId }).catch(() => undefined);
-        provisionedCloudPeerIds.delete(machine.peerId);
-        activeCloudPeerGenerations.delete(machine.peerId);
-        return;
-      }
       try {
-        await deps.upsertExternalPeer({
-          peer: {
-            peerId: machine.peerId,
-            displayName: machine.name,
-            endpoint: proxy.endpoint,
-            publicKey: machine.publicKey,
-            protocolVersion: 1,
-            acceptingTransfers: true,
-          },
-        });
+        await registerCloudMachine(
+          machine,
+          session,
+          relayUrl,
+          captured,
+          capturedSession,
+        );
       } catch (error) {
-        activeCloudPeerGenerations.delete(machine.peerId);
+        if (!isCurrent(captured, capturedSession)) return;
         throw error;
       }
-      if (!isCurrent(captured, capturedSession)) {
-        await Promise.all([
-          deps.removeExternalPeer({ peerId: machine.peerId }).catch(() => undefined),
-          deps.removeProxy({ peerId: machine.peerId }).catch(() => undefined),
-        ]);
-        provisionedCloudPeerIds.delete(machine.peerId);
-        activeCloudPeerGenerations.delete(machine.peerId);
-        return;
-      }
-      activeCloudPeerGenerations.set(machine.peerId, captured);
     }
   };
 
@@ -234,6 +258,40 @@ export function createDesktopTransferMachineSync(
       sidecarReady = true;
       const captured = ++generation;
       await enqueueReconciliation(captured);
+    },
+    async refreshCloudRoute(peerId) {
+      const captured = generation;
+      const capturedSession = authSessionGeneration;
+      const session = authSession;
+      const result = reconciliationTail.then(async () => {
+        if (!session || !isCurrent(captured, capturedSession)) {
+          throw new Error("Sign in before transferring through the cloud.");
+        }
+        const machine = mergeTransferMachines({
+          currentDesktopId,
+          lanPeers: [],
+          cloudMachines,
+        }).find((candidate) => candidate.peerId === peerId);
+        if (!machine?.relayDesktopId) {
+          throw new Error("Cloud transfer machine is no longer available.");
+        }
+        const relayUrl = await deps.resolveRelayUrl();
+        if (!isCurrent(captured, capturedSession)) {
+          throw new Error("Cloud transfer route changed while refreshing credentials.");
+        }
+        if (!relayUrl) {
+          throw new Error("Cloud transfer relay is unavailable.");
+        }
+        await registerCloudMachine(
+          machine,
+          session,
+          relayUrl,
+          captured,
+          capturedSession,
+        );
+      });
+      reconciliationTail = result.catch(() => undefined);
+      await result;
     },
     async setCloudMachines(machines) {
       const nextSnapshotKey = cloudTransferMachineSnapshotKey(machines ?? []);

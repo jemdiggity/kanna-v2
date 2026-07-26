@@ -129,7 +129,7 @@ impl RuntimeConfig {
             .map(|value| value.parse::<u16>())
             .transpose()
             .map_err(|error| RuntimeError::InvalidConfig(error.to_string()))?
-            .unwrap_or(4455);
+            .unwrap_or(kanna_runtime_defaults::DEFAULT_TRANSFER_PORT);
 
         let transfer_root = std::env::var("KANNA_TRANSFER_ROOT")
             .ok()

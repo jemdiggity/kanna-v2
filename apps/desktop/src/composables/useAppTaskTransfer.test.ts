@@ -53,7 +53,10 @@ function remoteTask(): WorkspaceTask {
   };
 }
 
-function createController(machines: TransferMachine[] = []) {
+function createController(
+  machines: TransferMachine[] = [],
+  refreshCloudTransferRoute = vi.fn(async (_peerId: string) => {}),
+) {
   const store = {
     pushTaskToPeer: vi.fn(async () => {}),
     approveIncomingTransfer: vi.fn(async () => ""),
@@ -68,8 +71,9 @@ function createController(machines: TransferMachine[] = []) {
     toast: toast as never,
     showPeerPicker: ref(false),
     transferMachines: computed(() => machines),
+    refreshCloudTransferRoute,
   });
-  return { controller, store, toast };
+  return { controller, refreshCloudTransferRoute, store, toast };
 }
 
 describe("useAppTaskTransfer", () => {
@@ -133,6 +137,7 @@ describe("useAppTaskTransfer", () => {
     const first = controller.handlePeerSelected("peer-cloud");
     const duplicate = controller.handlePeerSelected("peer-cloud");
 
+    await vi.waitFor(() => expect(store.pushTaskToPeer).toHaveBeenCalledTimes(1));
     expect(store.pushTaskToPeer).toHaveBeenCalledTimes(1);
     expect(store.pushTaskToPeer).toHaveBeenCalledWith("task-local", "peer-cloud", {
       transport: "lan",
@@ -141,6 +146,27 @@ describe("useAppTaskTransfer", () => {
     });
     release();
     await Promise.all([first, duplicate]);
+  });
+
+  it("refreshes cloud authentication before starting a cloud-capable push", async () => {
+    const order: string[] = [];
+    const refreshCloudTransferRoute = vi.fn(async () => {
+      order.push("refresh");
+    });
+    const { controller, store } = createController(
+      [cloudMachine()],
+      refreshCloudTransferRoute,
+    );
+    store.pushTaskToPeer.mockImplementation(async () => {
+      order.push("push");
+    });
+
+    controller.openPeerPicker("task-local");
+    await vi.waitFor(() => expect(controller.transferPeersLoading.value).toBe(false));
+    await controller.handlePeerSelected("peer-cloud");
+
+    expect(refreshCloudTransferRoute).toHaveBeenCalledWith("peer-cloud");
+    expect(order).toEqual(["refresh", "push"]);
   });
 
   it("requests one pull from the exact remote owner route while pending", async () => {
@@ -154,6 +180,7 @@ describe("useAppTaskTransfer", () => {
     const first = controller.pullSelectedWorkspaceTask(task);
     const duplicate = controller.pullSelectedWorkspaceTask(task);
 
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
     expect(invokeMock).toHaveBeenCalledTimes(1);
     expect(invokeMock).toHaveBeenCalledWith("request_task_pull", {
       targetPeerId: "peer-source",
@@ -162,5 +189,22 @@ describe("useAppTaskTransfer", () => {
     });
     release();
     await Promise.all([first, duplicate]);
+  });
+
+  it("refreshes cloud authentication before requesting a cloud pull", async () => {
+    const order: string[] = [];
+    const refreshCloudTransferRoute = vi.fn(async () => {
+      order.push("refresh");
+    });
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "request_task_pull") order.push("pull");
+      return [];
+    });
+    const { controller } = createController([], refreshCloudTransferRoute);
+
+    await controller.pullSelectedWorkspaceTask(remoteTask());
+
+    expect(refreshCloudTransferRoute).toHaveBeenCalledWith("peer-source");
+    expect(order).toEqual(["refresh", "pull"]);
   });
 });

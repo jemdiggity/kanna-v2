@@ -168,7 +168,7 @@ pub(super) fn build_server_config(state: &MobileServerState) -> Result<String, S
         .map(|line| format!("{line}\n"))
         .unwrap_or_default();
     let transfer_port = std::env::var("KANNA_TRANSFER_PORT")
-        .unwrap_or_else(|_| "4455".to_string())
+        .unwrap_or_else(|_| kanna_runtime_defaults::DEFAULT_TRANSFER_PORT.to_string())
         .parse::<u16>()
         .map_err(|_| "KANNA_TRANSFER_PORT must be a valid nonzero port".to_string())?;
     if transfer_port == 0 {
@@ -261,7 +261,7 @@ pub(super) fn server_config_matches_runtime(
         format!("lan_port = {}", local_server_port_for_cloud_env(cloud_env)),
     ];
     let expected_transfer_port = std::env::var("KANNA_TRANSFER_PORT")
-        .unwrap_or_else(|_| "4455".to_string())
+        .unwrap_or_else(|_| kanna_runtime_defaults::DEFAULT_TRANSFER_PORT.to_string())
         .parse::<u16>()
         .ok()
         .filter(|port| *port != 0);

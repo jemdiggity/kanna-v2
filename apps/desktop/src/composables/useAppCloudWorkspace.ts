@@ -542,6 +542,11 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     }
   }
 
+  async function refreshCloudTransferRoute(peerId: string): Promise<void> {
+    await transferMachineSync.refreshCloudRoute(peerId);
+    transferMachineRevision.value += 1;
+  }
+
   function updateLanTransferPeers(rawPeers: unknown): void {
     transferMachineSync.setLanPeers(parseLanTransferPeers(rawPeers));
     transferMachineRevision.value += 1;
@@ -835,6 +840,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     initializeDesktopCloudAuth,
     initializeDesktopLanTaskSync,
     markTransferSidecarReady,
+    refreshCloudTransferRoute,
     updateLanTransferPeers,
     closeSelectedWorkspaceTask,
     advanceSelectedRemoteWorkspaceTask,

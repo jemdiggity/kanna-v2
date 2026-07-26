@@ -163,6 +163,26 @@ describe("cloud transfer machine auth lifecycle", () => {
     ]);
   });
 
+  it("refreshes the next cloud transfer route after the token rotates without a machine change", async () => {
+    const calls: string[] = [];
+    let token = "token-1";
+    const authSession = session();
+    vi.mocked(authSession.getIdToken).mockImplementation(async () => token);
+    const dependencies = deps(calls);
+    const sync = createDesktopTransferMachineSync(dependencies);
+    sync.setCloudMachines([machine()]);
+    sync.setSignedInSession(authSession, "desktop-a");
+    await sync.markSidecarReady();
+
+    expect(await sync.setCloudMachines([machine()])).toBe(false);
+    token = "token-2";
+    await sync.refreshCloudRoute("peer-b");
+
+    expect(vi.mocked(dependencies.ensureProxy).mock.calls.map(([input]) => input.idToken))
+      .toEqual(["token-1", "token-2"]);
+    expect(calls.filter((call) => call === "upsert_peer:peer-b")).toHaveLength(2);
+  });
+
   it("retries an identical cloud snapshot after reconciliation fails", async () => {
     const calls: string[] = [];
     let upsertCount = 0;

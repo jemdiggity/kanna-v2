@@ -332,6 +332,33 @@ relay:
 The existing LAN transfer E2E suite remains green to prove the transport
 extension did not regress direct transfers.
 
+### Credential-rotation E2E boundary
+
+The Firebase Auth emulator does not expose a controllable token-expiration
+clock in this desktop E2E harness. Forcing an SDK refresh can produce a second
+token, but the first token remains valid, and the local relay has no test probe
+that reveals which token authenticated an individual transfer tunnel.
+Consequently, a successful transfer after a forced refresh would also pass
+with the stale-token bug and would not be a meaningful regression test.
+
+An end-to-end expiration test becomes possible when the harness can either
+issue short-lived emulator tokens and advance their clock, or configure the
+local relay to reject one token generation while recording the generation used
+by the next tunnel. Until then, the lifecycle boundary is covered by:
+
+- `useAppCloudWorkspace.test.ts`, which rotates the auth session's available
+  token without changing the machine snapshot and proves the next route
+  refresh sends the new token;
+- `useAppTaskTransfer.test.ts`, which proves cloud-capable Push and cloud Pull
+  await that refresh before invoking the transfer sidecar; and
+- `cloud_transfer_proxy.rs`, which proves an in-place credential update keeps
+  the registered loopback endpoint and authenticates the next relay connection
+  with the refreshed token while an existing tunnel remains open.
+
+The two-instance `cloud-task-transfer.test.ts` suite still covers the complete
+Firebase-emulator, desktop, Tauri proxy, relay, sidecar, and import/acknowledgment
+path for real Push and Pull operations.
+
 ## Success Criteria
 
 - Signed-in desktops automatically become eligible transfer machines without
