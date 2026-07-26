@@ -4,8 +4,8 @@ use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub(crate) const MAX_WORKSPACE_COMMANDS: usize = 4;
@@ -13,6 +13,8 @@ const SOFT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const HARD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const FINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
+const BACKGROUND_REAP_GIVE_UP_AFTER: Duration = Duration::from_secs(60);
+const BACKGROUND_REAP_MAX_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy)]
@@ -134,8 +136,7 @@ impl WorkspaceCommandSupervisor {
             .values()
             .filter(|started| now.saturating_duration_since(**started) >= self.policy.soft_timeout)
             .count();
-        let capacity_exhausted = state.active.len() >= self.policy.max_concurrent;
-        let healthy = long_running == 0 && !capacity_exhausted;
+        let healthy = long_running == 0;
         let status = if healthy && state.active.is_empty() {
             "healthy"
         } else if healthy {
@@ -195,13 +196,194 @@ pub(crate) fn run_workspace_command_with_hard_timeout_for_test(
     supervisor.run(label, command, cwd, env)
 }
 
-fn run_process(
+struct SupervisedChild {
+    child: Option<Child>,
+    process_group: i32,
+    termination_sent: bool,
+    direct_child_reaped: bool,
+}
+
+impl SupervisedChild {
+    fn child_mut(&mut self) -> &mut Child {
+        self.child
+            .as_mut()
+            .expect("supervised child ownership must remain local until cleanup")
+    }
+
+    fn try_wait(&mut self, label: &str) -> Result<Option<ExitStatus>, String> {
+        let status = self
+            .child_mut()
+            .try_wait()
+            .map_err(|error| format!("failed to wait for {label}: {error}"))?;
+        self.direct_child_reaped |= status.is_some();
+        Ok(status)
+    }
+
+    fn terminate_once(&mut self) {
+        if self.termination_sent {
+            return;
+        }
+        self.termination_sent = true;
+        kill_process_group(self.process_group);
+        if let Err(error) = self.child_mut().kill() {
+            if error.kind() != io::ErrorKind::InvalidInput {
+                log::debug!(
+                    "direct workspace child {} could not be killed during cleanup: {error}",
+                    self.process_group
+                );
+            }
+        }
+    }
+
+    fn terminate_and_reap(
+        &mut self,
+        label: &str,
+        deadline: Instant,
+        poll_interval: Duration,
+    ) -> Result<(), String> {
+        if self.child.is_none() {
+            return Ok(());
+        }
+        self.terminate_once();
+        if self.direct_child_reaped {
+            self.child.take();
+            return Ok(());
+        }
+        while Instant::now() < deadline {
+            match self.child_mut().try_wait() {
+                Ok(Some(_)) => {
+                    self.direct_child_reaped = true;
+                    self.child.take();
+                    return Ok(());
+                }
+                Ok(None) => std::thread::sleep(poll_interval),
+                Err(error) => {
+                    hand_off_to_background_reaper(self.child.take().unwrap());
+                    return Err(format!("failed to reap {label}: {error}"));
+                }
+            }
+        }
+        log::error!(
+            "{label} direct child {} did not become reapable after process-group kill; \
+             continuing reap in the background",
+            self.process_group
+        );
+        hand_off_to_background_reaper(self.child.take().unwrap());
+        Ok(())
+    }
+}
+
+impl Drop for SupervisedChild {
+    fn drop(&mut self) {
+        if self.child.is_some() {
+            if let Err(error) = self.terminate_and_reap(
+                "workspace command",
+                Instant::now() + FINAL_DRAIN_TIMEOUT,
+                POLL_INTERVAL,
+            ) {
+                log::warn!("{error}");
+            }
+        }
+    }
+}
+
+fn background_reaper() -> &'static mpsc::Sender<Child> {
+    struct ReapEntry {
+        child: Child,
+        deadline: Instant,
+        next_poll: Instant,
+        delay: Duration,
+    }
+
+    impl ReapEntry {
+        fn new(child: Child) -> Self {
+            let now = Instant::now();
+            Self {
+                child,
+                deadline: now + BACKGROUND_REAP_GIVE_UP_AFTER,
+                next_poll: now,
+                delay: POLL_INTERVAL,
+            }
+        }
+    }
+
+    static REAPER: OnceLock<mpsc::Sender<Child>> = OnceLock::new();
+    REAPER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<Child>();
+        if let Err(error) = std::thread::Builder::new()
+            .name("workspace-child-reaper".to_string())
+            .spawn(move || {
+                let mut children = Vec::<ReapEntry>::new();
+                loop {
+                    if children.is_empty() {
+                        let Ok(child) = receiver.recv() else {
+                            return;
+                        };
+                        children.push(ReapEntry::new(child));
+                    } else {
+                        let now = Instant::now();
+                        let wait = children
+                            .iter()
+                            .map(|entry| entry.next_poll.saturating_duration_since(now))
+                            .min()
+                            .unwrap_or(POLL_INTERVAL);
+                        match receiver.recv_timeout(wait) {
+                            Ok(child) => children.push(ReapEntry::new(child)),
+                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                        }
+                    }
+                    while let Ok(child) = receiver.try_recv() {
+                        children.push(ReapEntry::new(child));
+                    }
+                    let now = Instant::now();
+                    children.retain_mut(|entry| {
+                        if now < entry.next_poll {
+                            return true;
+                        }
+                        match entry.child.try_wait() {
+                            Ok(Some(_)) => false,
+                            Ok(None) if now >= entry.deadline => {
+                                log::warn!(
+                                    "workspace child still not reapable after {:?}; abandoning reap",
+                                    BACKGROUND_REAP_GIVE_UP_AFTER
+                                );
+                                false
+                            }
+                            Ok(None) => {
+                                entry.delay =
+                                    (entry.delay * 2).min(BACKGROUND_REAP_MAX_INTERVAL);
+                                entry.next_poll = now + entry.delay;
+                                true
+                            }
+                            Err(error) => {
+                                log::warn!("background workspace child reap failed: {error}");
+                                false
+                            }
+                        }
+                    });
+                }
+            })
+        {
+            log::warn!("failed to start workspace child reaper: {error}");
+        }
+        sender
+    })
+}
+
+fn hand_off_to_background_reaper(child: Child) {
+    if let Err(error) = background_reaper().send(child) {
+        log::warn!("failed to hand workspace child to background reaper");
+        drop(error.0);
+    }
+}
+
+fn spawn_workspace_process(
     label: &str,
     shell_command: &str,
     cwd: &Path,
     env: &HashMap<String, String>,
-    policy: WorkspaceCommandPolicy,
-) -> Result<(), String> {
+) -> Result<SupervisedChild, String> {
     let mut command = Command::new("/bin/zsh");
     command
         .args(["--login", "-c", shell_command])
@@ -217,20 +399,46 @@ fn run_process(
             Ok(())
         });
     }
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| format!("failed to run {label}: {error}"))?;
-    let process_group = child.id() as i32;
-    let mut stdout = child
+    Ok(SupervisedChild {
+        process_group: child.id() as i32,
+        child: Some(child),
+        termination_sent: false,
+        direct_child_reaped: false,
+    })
+}
+
+fn take_nonblocking_output(
+    child: &mut SupervisedChild,
+    label: &str,
+) -> Result<(ChildStdout, ChildStderr), String> {
+    let stdout = child
+        .child_mut()
         .stdout
         .take()
         .ok_or_else(|| format!("failed to capture {label} stdout"))?;
-    let mut stderr = child
+    let stderr = child
+        .child_mut()
         .stderr
         .take()
         .ok_or_else(|| format!("failed to capture {label} stderr"))?;
     set_nonblocking(&stdout).map_err(|error| format!("failed to read {label} stdout: {error}"))?;
     set_nonblocking(&stderr).map_err(|error| format!("failed to read {label} stderr: {error}"))?;
+    Ok((stdout, stderr))
+}
+
+fn run_process(
+    label: &str,
+    shell_command: &str,
+    cwd: &Path,
+    env: &HashMap<String, String>,
+    policy: WorkspaceCommandPolicy,
+) -> Result<(), String> {
+    let mut child = spawn_workspace_process(label, shell_command, cwd, env)?;
+    let process_group = child.process_group;
+    let (mut stdout, mut stderr) = take_nonblocking_output(&mut child, label)?;
 
     let started = Instant::now();
     let mut soft_logged = false;
@@ -251,10 +459,7 @@ fn run_process(
             policy.max_output_bytes.saturating_sub(stdout_buffer.len()),
             &mut truncated,
         );
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("failed to wait for {label}: {error}"))?
-        {
+        if let Some(status) = child.try_wait(label)? {
             break Some(status);
         }
         let elapsed = started.elapsed();
@@ -267,9 +472,7 @@ fn run_process(
         }
         if elapsed >= policy.hard_timeout {
             timed_out = true;
-            kill_process_group(process_group);
-            reap_until(
-                &mut child,
+            child.terminate_and_reap(
                 label,
                 Instant::now() + policy.final_drain_timeout,
                 policy.poll_interval,
@@ -281,7 +484,11 @@ fn run_process(
 
     // The direct child is the completion signal. Its descendants may still
     // own inherited pipes, so terminate the group and drain only briefly.
-    kill_process_group(process_group);
+    child.terminate_and_reap(
+        label,
+        Instant::now() + policy.final_drain_timeout,
+        policy.poll_interval,
+    )?;
     drain_final(
         stdout,
         stderr,
@@ -329,26 +536,6 @@ fn kill_process_group(process_group: i32) {
             log::warn!("failed to kill workspace process group {process_group}: {error}");
         }
     }
-}
-
-fn reap_until(
-    child: &mut Child,
-    label: &str,
-    deadline: Instant,
-    poll_interval: Duration,
-) -> Result<(), String> {
-    while Instant::now() < deadline {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("failed to reap timed-out {label}: {error}"))?
-        {
-            let _ = status;
-            return Ok(());
-        }
-        std::thread::sleep(poll_interval);
-    }
-    log::error!("{label} direct child did not become reapable after process-group kill");
-    Ok(())
 }
 
 fn drain_final(
@@ -484,6 +671,44 @@ mod tests {
     }
 
     #[test]
+    fn dropping_spawned_command_guard_kills_and_reaps_its_process_group() {
+        let root = tempfile::tempdir().unwrap();
+        let pid_file = root.path().join("grandchild.pid");
+        let command = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+        let child =
+            spawn_workspace_process("workspace setup", &command, root.path(), &HashMap::new())
+                .unwrap();
+        let direct_child_pid = child.process_group;
+        let grandchild_pid = wait_for_pid_file(&pid_file);
+
+        drop(child);
+
+        assert_process_exits(direct_child_pid);
+        assert_process_exits(grandchild_pid);
+    }
+
+    #[test]
+    fn post_spawn_output_initialization_error_still_cleans_up_process_group() {
+        let root = tempfile::tempdir().unwrap();
+        let pid_file = root.path().join("grandchild.pid");
+        let command = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+        let mut child =
+            spawn_workspace_process("workspace setup", &command, root.path(), &HashMap::new())
+                .unwrap();
+        let direct_child_pid = child.process_group;
+        let grandchild_pid = wait_for_pid_file(&pid_file);
+        let captured_stdout = child.child_mut().stdout.take().unwrap();
+
+        let error = take_nonblocking_output(&mut child, "workspace setup").unwrap_err();
+        assert!(error.contains("failed to capture workspace setup stdout"));
+        drop(captured_stdout);
+        drop(child);
+
+        assert_process_exits(direct_child_pid);
+        assert_process_exits(grandchild_pid);
+    }
+
+    #[test]
     fn exited_parent_is_not_held_by_grandchild_pipe() {
         let root = tempfile::tempdir().unwrap();
         let started = Instant::now();
@@ -562,6 +787,27 @@ mod tests {
         assert!(health.healthy);
         assert_eq!(health.status, "busy");
         assert_eq!(health.active_workspace_commands, 1);
+        assert_eq!(health.long_running_workspace_commands, 0);
+
+        drop(active);
+        assert_eq!(supervisor.snapshot().status, "healthy");
+    }
+
+    #[test]
+    fn full_capacity_is_busy_and_healthy_before_its_soft_threshold() {
+        let supervisor = Arc::new(WorkspaceCommandSupervisor::new(WorkspaceCommandPolicy {
+            soft_timeout: Duration::from_secs(5),
+            ..test_policy(Duration::from_secs(10), 4)
+        }));
+        let active = (0..4)
+            .map(|_| supervisor.acquire("workspace setup").unwrap())
+            .collect::<Vec<_>>();
+
+        let health = supervisor.snapshot();
+        assert!(health.healthy);
+        assert_eq!(health.status, "busy");
+        assert_eq!(health.active_workspace_commands, 4);
+        assert_eq!(health.max_workspace_commands, 4);
         assert_eq!(health.long_running_workspace_commands, 0);
 
         drop(active);

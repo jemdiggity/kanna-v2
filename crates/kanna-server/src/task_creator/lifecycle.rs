@@ -433,55 +433,96 @@ async fn supervise_teardown_session(
     hard_timeout: std::time::Duration,
 ) {
     tokio::time::sleep(soft_timeout).await;
-    if !daemon_session_exists(&daemon_dir, &session_id).await {
-        return;
+    match daemon_session_presence(&daemon_dir, &session_id).await {
+        DaemonSessionPresence::Absent => return,
+        DaemonSessionPresence::Present => {
+            log::warn!(
+                "workspace teardown session {session_id} exceeded soft threshold of {}s",
+                soft_timeout.as_secs()
+            );
+        }
+        DaemonSessionPresence::Unknown => {
+            log::warn!(
+                "could not determine whether workspace teardown session {session_id} exceeded its \
+                 soft threshold; preserving hard-deadline supervision"
+            );
+        }
     }
-    log::warn!(
-        "workspace teardown session {session_id} exceeded soft threshold of {}s",
-        soft_timeout.as_secs()
-    );
     tokio::time::sleep(hard_timeout.saturating_sub(soft_timeout)).await;
-    if !daemon_session_exists(&daemon_dir, &session_id).await {
-        return;
-    }
-    log::error!(
-        "workspace teardown session {session_id} timed out after {}s; killing process group",
-        hard_timeout.as_secs()
-    );
-    let mut daemon = match DaemonClient::connect(&daemon_dir).await {
-        Ok(daemon) => daemon,
-        Err(error) => {
-            log::warn!("failed to reconnect for teardown kill {session_id}: {error}");
+    let retry_interval = std::time::Duration::from_secs(1);
+    let mut timeout_logged = false;
+    loop {
+        if daemon_session_presence(&daemon_dir, &session_id).await == DaemonSessionPresence::Absent
+        {
             return;
         }
-    };
-    if let Err(error) = daemon
-        .send_command(&DaemonCommand::Kill {
-            session_id: session_id.clone(),
-        })
-        .await
-    {
-        log::warn!("failed to kill timed-out teardown session {session_id}: {error}");
+        if !timeout_logged {
+            timeout_logged = true;
+            log::error!(
+                "workspace teardown session {session_id} timed out after {}s; killing process group",
+                hard_timeout.as_secs()
+            );
+        }
+        match DaemonClient::connect(&daemon_dir)
+            .await
+            .map_err(|error| error.to_string())
+        {
+            Ok(mut daemon) => match daemon
+                .send_command(&DaemonCommand::Kill {
+                    session_id: session_id.clone(),
+                })
+                .await
+            {
+                Ok(DaemonEvent::Ok) => return,
+                Ok(other) => {
+                    log::warn!(
+                        "unexpected daemon response while killing timed-out teardown session \
+                         {session_id}: {other:?}"
+                    );
+                }
+                Err(error) => {
+                    log::warn!("failed to kill timed-out teardown session {session_id}: {error}");
+                }
+            },
+            Err(error) => {
+                log::warn!("failed to reconnect for teardown kill {session_id}: {error}");
+            }
+        }
+        tokio::time::sleep(retry_interval).await;
     }
 }
 
-async fn daemon_session_exists(daemon_dir: &str, session_id: &str) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DaemonSessionPresence {
+    Present,
+    Absent,
+    Unknown,
+}
+
+async fn daemon_session_presence(daemon_dir: &str, session_id: &str) -> DaemonSessionPresence {
     let Ok(mut daemon) = DaemonClient::connect(daemon_dir).await else {
-        return false;
+        return DaemonSessionPresence::Unknown;
     };
     match daemon.send_command(&DaemonCommand::List).await {
-        Ok(DaemonEvent::SessionList { sessions }) => sessions
-            .iter()
-            .any(|session| session.session_id == session_id),
+        Ok(DaemonEvent::SessionList { sessions }) => {
+            if sessions
+                .iter()
+                .any(|session| session.session_id == session_id)
+            {
+                DaemonSessionPresence::Present
+            } else {
+                DaemonSessionPresence::Absent
+            }
+        }
         Ok(other) => {
             log::warn!(
                 "unexpected daemon response while checking teardown session {session_id}: {other:?}"
             );
-            false
+            DaemonSessionPresence::Unknown
         }
         Err(error) => {
             log::warn!("failed to check teardown session {session_id}: {error}");
-            false
+            DaemonSessionPresence::Unknown
         }
     }
 }
@@ -1152,17 +1193,94 @@ mod teardown_deadline_tests {
             }
         });
 
-        supervise_teardown_session(
-            daemon_dir.to_string_lossy().to_string(),
-            "td-task-1".to_string(),
-            std::time::Duration::from_millis(20),
-            std::time::Duration::from_millis(50),
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            supervise_teardown_session(
+                daemon_dir.to_string_lossy().to_string(),
+                "td-task-1".to_string(),
+                std::time::Duration::from_millis(20),
+                std::time::Duration::from_millis(50),
+            ),
         )
-        .await;
+        .await
+        .expect("teardown supervision should finish after issuing Kill");
 
         tokio::time::timeout(std::time::Duration::from_secs(1), server)
             .await
             .expect("deadline monitor should issue Kill")
+            .unwrap();
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn transient_soft_probe_failure_preserves_teardown_hard_deadline() {
+        let daemon_dir = std::env::temp_dir().join(format!(
+            "kanna-teardown-transient-probe-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(&daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(async move {
+            for expected in ["ListError", "List", "Kill"] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                match (&command, expected) {
+                    (DaemonCommand::List, "ListError") => {
+                        // Simulate a daemon handoff/socket failure after the
+                        // request is accepted but before a response arrives.
+                    }
+                    (DaemonCommand::List, "List") => {
+                        let response = DaemonEvent::SessionList {
+                            sessions: vec![SessionInfo {
+                                session_id: "td-task-transient".to_string(),
+                                pid: 42,
+                                cwd: "/tmp".to_string(),
+                                state: SessionState::Active,
+                                idle_seconds: 0,
+                                status: SessionStatus::Busy,
+                                kind: SessionKind::Pty,
+                            }],
+                        };
+                        write
+                            .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                            .await
+                            .unwrap();
+                        write.write_all(b"\n").await.unwrap();
+                    }
+                    (DaemonCommand::Kill { session_id }, "Kill") => {
+                        assert_eq!(session_id, "td-task-transient");
+                        write
+                            .write_all(serde_json::to_string(&DaemonEvent::Ok).unwrap().as_bytes())
+                            .await
+                            .unwrap();
+                        write.write_all(b"\n").await.unwrap();
+                    }
+                    _ => panic!("unexpected command {command:?}, expected {expected}"),
+                }
+            }
+        });
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            supervise_teardown_session(
+                daemon_dir.to_string_lossy().to_string(),
+                "td-task-transient".to_string(),
+                std::time::Duration::from_millis(20),
+                std::time::Duration::from_millis(50),
+            ),
+        )
+        .await
+        .expect("teardown supervision should finish after issuing Kill");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), server)
+            .await
+            .expect("transient soft probe failure must not cancel the hard-deadline kill")
             .unwrap();
         let _ = std::fs::remove_dir_all(daemon_dir);
     }

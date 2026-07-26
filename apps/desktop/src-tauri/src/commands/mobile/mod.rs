@@ -1009,6 +1009,23 @@ mod tests {
             status.server_version.as_deref(),
             Some(current_server_version())
         );
+        let full_capacity_busy = MobileServerStatus {
+            write_path_health: Some(WritePathHealth {
+                healthy: true,
+                status: "busy".to_string(),
+                active_workspace_commands: 4,
+                max_workspace_commands: 4,
+                long_running_workspace_commands: 0,
+                oldest_workspace_command_seconds: Some(30),
+            }),
+            ..status.clone()
+        };
+        assert!(is_current_server_status(
+            &full_capacity_busy,
+            "desktop-1",
+            current_server_version(),
+            "production",
+        ));
         let unhealthy = MobileServerStatus {
             write_path_health: Some(WritePathHealth {
                 healthy: false,
