@@ -18,12 +18,18 @@ import {
   markIncomingTransferSidecarCleanupCompleted,
   type PendingIncomingTransfer,
 } from "../services/desktopServerClient";
+import {
+  filterPairableTransferPeerPayload,
+  type TransferMachine,
+} from "../services/desktopTransferMachines";
 
 interface UseAppTaskTransferOptions {
   db: DbHandle;
   store: ReturnType<typeof useKannaStore>;
   toast: ReturnType<typeof useToast>;
   showPeerPicker: Ref<boolean>;
+  transferMachines?: Readonly<Ref<TransferMachine[]>>;
+  onLanTransferPeersChanged?: (peers: unknown) => void;
 }
 
 const TRANSFER_PEER_DISCOVERY_RETRY_MS = 250;
@@ -34,7 +40,10 @@ export function useAppTaskTransfer({
   store,
   toast,
   showPeerPicker,
+  transferMachines,
+  onLanTransferPeersChanged,
 }: UseAppTaskTransferOptions) {
+  void transferMachines;
   const peerPickerMode = ref<"push" | "pair">("push");
   const selectedTransferTaskId = ref<string | null>(null);
   const transferPeers = ref<TransferPeerOption[]>([]);
@@ -62,13 +71,17 @@ export function useAppTaskTransfer({
 
   async function loadTransferPeers() {
     const requestId = ++transferPeerLoadRequestId;
+    const pickerMode = peerPickerMode.value;
     transferPeersLoading.value = true;
     try {
       const maxAttempts =
         Math.floor(TRANSFER_PEER_DISCOVERY_TIMEOUT_MS / TRANSFER_PEER_DISCOVERY_RETRY_MS) + 1;
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         const raw = await invoke<unknown>("list_transfer_peers");
-        const peers = parseTransferPeers(raw);
+        onLanTransferPeersChanged?.(raw);
+        const peers = parseTransferPeers(
+          pickerMode === "pair" ? filterPairableTransferPeerPayload(raw) : raw,
+        );
         if (requestId !== transferPeerLoadRequestId) {
           return;
         }
@@ -96,7 +109,8 @@ export function useAppTaskTransfer({
   async function warmTransferSidecar() {
     if (!isTauri) return;
     try {
-      await invoke("list_transfer_peers");
+      const peers = await invoke<unknown>("list_transfer_peers");
+      onLanTransferPeersChanged?.(peers);
     } catch (e: unknown) {
       console.error(
         "[App] transfer sidecar warmup failed:",
