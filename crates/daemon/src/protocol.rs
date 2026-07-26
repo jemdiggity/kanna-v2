@@ -17,6 +17,7 @@ pub enum ErrorCode {
     SessionNotFound,
     SessionAlreadyExists,
     HandoffLost,
+    HandoffUnauthorized,
     HandoffVersionMismatch,
     PtySpawnFailed,
     PtyCloneFailed,
