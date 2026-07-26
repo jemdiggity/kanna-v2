@@ -1123,6 +1123,19 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
   const lanHost = getStringField(response, "lanHost");
   const lanPort = getNumberField(response, "lanPort");
   const pairingCode = getNullableStringField(response, "pairingCode");
+  const writePathHealthValue = response.writePathHealth;
+  const writePathHealth = isRecord(writePathHealthValue)
+    ? {
+        healthy: writePathHealthValue.healthy,
+        status: writePathHealthValue.status,
+        activeWorkspaceCommands: writePathHealthValue.activeWorkspaceCommands,
+        maxWorkspaceCommands: writePathHealthValue.maxWorkspaceCommands,
+        longRunningWorkspaceCommands:
+          writePathHealthValue.longRunningWorkspaceCommands,
+        oldestWorkspaceCommandSeconds:
+          writePathHealthValue.oldestWorkspaceCommandSeconds
+      }
+    : null;
 
   if (
     state === null ||
@@ -1131,7 +1144,15 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
     version === null ||
     environment === null ||
     lanHost === null ||
-    lanPort === null
+    lanPort === null ||
+    writePathHealth === null ||
+    typeof writePathHealth.healthy !== "boolean" ||
+    typeof writePathHealth.status !== "string" ||
+    typeof writePathHealth.activeWorkspaceCommands !== "number" ||
+    typeof writePathHealth.maxWorkspaceCommands !== "number" ||
+    typeof writePathHealth.longRunningWorkspaceCommands !== "number" ||
+    (writePathHealth.oldestWorkspaceCommandSeconds !== null &&
+      typeof writePathHealth.oldestWorkspaceCommandSeconds !== "number")
   ) {
     throw new RemoteTransportError(
       "invalid_status_response",
@@ -1148,7 +1169,16 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
     serverVersion,
     lanHost,
     lanPort,
-    pairingCode
+    pairingCode,
+    writePathHealth: {
+      healthy: writePathHealth.healthy,
+      status: writePathHealth.status,
+      activeWorkspaceCommands: writePathHealth.activeWorkspaceCommands,
+      maxWorkspaceCommands: writePathHealth.maxWorkspaceCommands,
+      longRunningWorkspaceCommands: writePathHealth.longRunningWorkspaceCommands,
+      oldestWorkspaceCommandSeconds:
+        writePathHealth.oldestWorkspaceCommandSeconds
+    }
   };
 }
 

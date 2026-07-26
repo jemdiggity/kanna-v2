@@ -13,6 +13,16 @@ export interface MobileServerStatus {
   /** Optional direct-stream epoch. Absence identifies desktops that expose
    * only the legacy `/v1/stream` endpoint. */
   kspStreamVersion?: number;
+  writePathHealth: WritePathHealth;
+}
+
+export interface WritePathHealth {
+  healthy: boolean;
+  status: string;
+  activeWorkspaceCommands: number;
+  maxWorkspaceCommands: number;
+  longRunningWorkspaceCommands: number;
+  oldestWorkspaceCommandSeconds: number | null;
 }
 
 export interface DesktopDescriptor {

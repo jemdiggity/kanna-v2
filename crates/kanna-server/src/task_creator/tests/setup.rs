@@ -498,7 +498,7 @@ async fn stage_fork_runs_repo_setup_before_resolving_pty_provider() {
     let db = Db::open_for_tests(&config.db_path).unwrap();
     seed_source_task(&config, &db, &repo_root, "pty");
 
-    let run = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+    let mut run = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
         PreparedStageTransition::Run(run) => run,
         PreparedStageTransition::Post(_) => panic!("expected stage fork, got post dispatch"),
         PreparedStageTransition::Close { .. } => panic!("expected stage fork, got close"),
@@ -513,9 +513,13 @@ async fn stage_fork_runs_repo_setup_before_resolving_pty_provider() {
         "workspace-local provider directory must lead PATH"
     );
     assert!(
-        expected.exists(),
-        "provider setup must complete in the fork before provider selection"
+        !expected.exists(),
+        "request-path preparation must not run repository setup"
     );
+    assert!(run.has_deferred_setup());
+    super::super::finish_deferred_stage_setup(&mut run).unwrap();
+    assert!(expected.exists(), "detached finalization must run setup");
+    assert!(!run.has_deferred_setup());
     let (pty_executable, pty_args) = match &run.session {
         PreparedSessionSpawn::Pty {
             executable,
@@ -668,14 +672,22 @@ fn headless_post_preparation_does_not_run_fallback_environment_setup() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
-#[test]
-fn failed_stage_fork_setup_removes_new_worktree_and_branch() {
+#[tokio::test]
+async fn timed_out_stage_fork_setup_kills_group_records_failure_and_removes_fork() {
     let _sidecar_guard = crate::test_sidecar_guard();
     let kanna_cli = ensure_test_sidecar("kanna-cli");
     let _kanna_mcp = ensure_test_sidecar("kanna-mcp");
+    let grandchild_pid_file = std::env::temp_dir().join(format!(
+        "kanna-stage-setup-grandchild-{}.pid",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&grandchild_pid_file);
     let repo_root = write_setup_repo(
         "setup-provider-stage-failure",
-        "mkdir -p setup-started && exit 23",
+        &format!(
+            "printf 'setup-started\\n'; (trap '' HUP TERM; while :; do sleep 1; done) & echo $! > '{}'; wait",
+            grandchild_pid_file.display()
+        ),
         true,
     );
     let mut config = test_config("setup-provider-stage-failure");
@@ -686,24 +698,71 @@ fn failed_stage_fork_setup_removes_new_worktree_and_branch() {
         super::super::worktree::next_fork_branch(&repo_root.to_string_lossy(), "task-1").unwrap();
     let fork_path = repo_root.join(".kanna-worktrees").join(&fork_branch);
 
-    let error = match prepare_advance_stage_for_api(&db, &config, "task-1") {
-        Ok(_) => panic!("failing setup should reject stage preparation"),
-        Err(error) => error,
+    let mut run = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Run(run) => run,
+        _ => panic!("expected stage run"),
     };
-
-    assert!(error.contains("workspace setup failed"), "error: {error}");
+    run.set_setup_hard_timeout(std::time::Duration::from_millis(150));
     assert!(
-        error.contains("23"),
-        "error should include exit status: {error}"
+        fork_path.exists(),
+        "preparation should leave the fork for detached setup"
+    );
+    let fake_daemon = spawn_fake_daemon_read_then_stall(config.daemon_dir.clone()).await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error = spawn_prepared_stage_run_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *run,
+    )
+    .await
+    .unwrap_err();
+    fake_daemon.abort();
+
+    assert!(
+        error.contains("workspace setup timed out"),
+        "error: {error}"
     );
     assert!(
-        error.contains("mkdir -p setup-started && exit 23"),
-        "error should identify the failing setup command: {error}"
+        error.contains("setup-started"),
+        "error should preserve captured setup output: {error}"
     );
     assert!(
         !fork_path.exists(),
         "failed fork should remove {fork_path:?}"
     );
+    let failed = db.latest_stage_run("task-1").unwrap().unwrap();
+    assert_eq!(failed.stage, "review");
+    assert_eq!(failed.status, "failed");
+    assert!(
+        failed.result.unwrap().contains("workspace setup timed out"),
+        "failed run should preserve setup diagnostics"
+    );
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .stage
+            .as_deref(),
+        Some("in progress")
+    );
+    let grandchild: i32 = std::fs::read_to_string(&grandchild_pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let alive = unsafe { libc::kill(grandchild, 0) == 0 };
+        if !alive && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "setup grandchild {grandchild} survived timeout"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert!(!Command::new("git")
         .args([
             "show-ref",
@@ -722,5 +781,6 @@ fn failed_stage_fork_setup_removes_new_worktree_and_branch() {
         .unwrap();
     assert!(!String::from_utf8_lossy(&worktrees.stdout).contains(&fork_branch));
 
+    let _ = std::fs::remove_file(grandchild_pid_file);
     let _ = std::fs::remove_dir_all(&repo_root);
 }

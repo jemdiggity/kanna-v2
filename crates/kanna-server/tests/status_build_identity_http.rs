@@ -197,7 +197,15 @@ async fn production_and_staging_processes_report_exact_build_identity_over_http(
             "kspStreamVersion": 2,
             "lanHost": "127.0.0.1",
             "lanPort": production.port,
-            "pairingCode": null
+            "pairingCode": null,
+            "writePathHealth": {
+                "healthy": true,
+                "status": "healthy",
+                "activeWorkspaceCommands": 0,
+                "maxWorkspaceCommands": 4,
+                "longRunningWorkspaceCommands": 0,
+                "oldestWorkspaceCommandSeconds": null
+            }
         })
     );
     assert_eq!(
@@ -212,7 +220,15 @@ async fn production_and_staging_processes_report_exact_build_identity_over_http(
             "kspStreamVersion": 2,
             "lanHost": "127.0.0.1",
             "lanPort": staging.port,
-            "pairingCode": null
+            "pairingCode": null,
+            "writePathHealth": {
+                "healthy": true,
+                "status": "healthy",
+                "activeWorkspaceCommands": 0,
+                "maxWorkspaceCommands": 4,
+                "longRunningWorkspaceCommands": 0,
+                "oldestWorkspaceCommandSeconds": null
+            }
         })
     );
 }

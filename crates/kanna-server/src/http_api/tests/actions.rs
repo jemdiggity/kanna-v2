@@ -3793,6 +3793,22 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         "---\nname: Reviewer\ndescription: Test review agent\nagent_provider: claude\n---\nReview task $TASK_PROMPT",
     )
     .unwrap();
+    let setup_started = repo_root.join("setup-started");
+    let setup_finished = repo_root.join("setup-finished");
+    let release_setup = repo_root.join("release-setup");
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        serde_json::json!({
+            "setup": [format!(
+                "touch '{}'; while [ ! -e '{}' ]; do sleep 0.05; done; touch '{}'",
+                setup_started.display(),
+                release_setup.display(),
+                setup_finished.display()
+            )]
+        })
+        .to_string(),
+    )
+    .unwrap();
     assert!(Command::new("git")
         .args(["add", ".kanna"])
         .current_dir(&repo_root)
@@ -3916,14 +3932,17 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
     drop(db);
 
     let app = super::router(Arc::new(super::AppState::new(config.clone())));
-    let response = app
-        .oneshot(
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        app.oneshot(
             Request::post("/v1/tasks/source-1/actions/advance-stage")
                 .body(Body::empty())
                 .unwrap(),
-        )
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .expect("advance-stage must return while repository setup is running")
+    .unwrap();
 
     if response.status() != StatusCode::OK {
         daemon_server.abort();
@@ -3941,6 +3960,16 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         .unwrap();
     let created: TaskActionResponse = from_slice(&body).unwrap();
     assert_eq!(created.task_id, "source-1");
+    let setup_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !setup_started.exists() && tokio::time::Instant::now() < setup_deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(setup_started.exists(), "detached setup never started");
+    assert!(
+        !setup_finished.exists(),
+        "setup should still be waiting after the HTTP response"
+    );
+    std::fs::write(&release_setup, "").unwrap();
 
     // The transition executes on a detached task (the request's caller may
     // be the session being replaced); wait for it to land.

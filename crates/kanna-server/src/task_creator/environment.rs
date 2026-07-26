@@ -270,35 +270,34 @@ pub(super) fn run_workspace_setup_commands(
         env.get("KANNA_CLI_PATH").map(String::as_str),
         env.get("PATH").map(String::as_str),
     );
-    let output = Command::new("/bin/zsh")
-        // Headless setup has no terminal to satisfy interactive shell
-        // startup hooks. Login mode still loads the user's base environment;
-        // the generated command then restores Kanna's explicit PATH.
-        .args(["--login", "-c", &command])
-        .current_dir(worktree_path)
-        .envs(env)
-        .output()
-        .map_err(|error| format!("failed to run workspace setup: {error}"))?;
-    if output.status.success() {
-        return Ok(());
-    }
+    crate::workspace_commands::run_workspace_command(
+        "workspace setup",
+        &command,
+        Path::new(worktree_path),
+        env,
+    )
+}
 
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let details = [stdout, stderr]
-        .into_iter()
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let suffix = if details.is_empty() {
-        String::new()
-    } else {
-        format!(": {details}")
-    };
-    Err(format!(
-        "workspace setup failed with {}{suffix}",
-        output.status
-    ))
+#[cfg(test)]
+pub(super) fn run_workspace_setup_commands_with_timeout(
+    setup_cmds: &[String],
+    worktree_path: &str,
+    env: &HashMap<String, String>,
+    hard_timeout: std::time::Duration,
+) -> Result<(), String> {
+    let command = build_task_shell_command(
+        "true",
+        setup_cmds,
+        env.get("KANNA_CLI_PATH").map(String::as_str),
+        env.get("PATH").map(String::as_str),
+    );
+    crate::workspace_commands::run_workspace_command_with_hard_timeout_for_test(
+        "workspace setup",
+        &command,
+        Path::new(worktree_path),
+        env,
+        hard_timeout,
+    )
 }
 
 pub(super) fn append_executable_parent_to_path(
@@ -411,9 +410,11 @@ fn resolve_binary_from_candidates(
 ) -> Result<String, String> {
     resolve_binary_from_candidates_with_path_lookup(name, candidates, |name| {
         #[cfg(test)]
-        if let Ok(test_path) = std::env::var("KANNA_TEST_PROVIDER_LOOKUP_PATH") {
-            return resolve_binary_from_path(name, &test_path)
-                .ok_or_else(|| format!("binary '{name}' not found in test provider PATH"));
+        if !matches!(name, "kanna-cli" | "kanna-mcp") {
+            if let Ok(test_path) = std::env::var("KANNA_TEST_PROVIDER_LOOKUP_PATH") {
+                return resolve_binary_from_path(name, &test_path)
+                    .ok_or_else(|| format!("binary '{name}' not found in test provider PATH"));
+            }
         }
 
         if let Some(path) = path {

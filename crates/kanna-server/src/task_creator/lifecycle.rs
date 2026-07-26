@@ -159,7 +159,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     db_path: &str,
     daemon: &mut DaemonClient,
     replacements: &SessionReplacements,
-    prepared: PreparedStageRunSpawn,
+    mut prepared: PreparedStageRunSpawn,
 ) -> Result<crate::mobile_api::TaskActionResponse, String> {
     let task_id = prepared.task_id.clone();
     let session_id = prepared.session_id.clone();
@@ -167,6 +167,11 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         .workspace_teardown
         .as_ref()
         .map(|teardown| teardown.session_id.clone());
+
+    if let Err(error) = super::finish_deferred_stage_setup(&mut prepared) {
+        let error = rollback_prepared_stage_fork(&prepared, error);
+        return Err(record_stage_transition_failure(db_path, &prepared, error));
+    }
 
     // A manual advance can leave the previous stage's run open (no explicit
     // agent verdict); moving forward treats that work as accepted. Revision
@@ -334,6 +339,45 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     })
 }
 
+fn record_stage_transition_failure(
+    db_path: &str,
+    prepared: &PreparedStageRunSpawn,
+    error: String,
+) -> String {
+    let record = (|| -> Result<(), String> {
+        let db = Db::open(db_path).map_err(|db_error| format!("db error: {db_error}"))?;
+        db.update_pipeline_item_activity(&prepared.task_id, "unread")
+            .map_err(|db_error| format!("db error: {db_error}"))?;
+        let run_id = generate_stage_run_id(&prepared.task_id);
+        let result = format!("failed to start stage {}: {error}", prepared.run_stage);
+        db.insert_stage_run_with_completion_transition(
+            NewStageRun {
+                id: &run_id,
+                task_id: &prepared.task_id,
+                stage: &prepared.run_stage,
+                kind: prepared.run_kind,
+                agent: prepared.stage_agent.as_deref(),
+                agent_provider: Some(prepared.agent_provider.as_str()),
+                model: prepared.model.as_deref(),
+                status: "failed",
+                result: Some(&result),
+                feedback: prepared.feedback.as_deref(),
+                session_id: Some(&prepared.session_id),
+                provider_session_id: prepared.provider_session_id.as_deref(),
+                cwd: None,
+                resumed_from_run_id: prepared.resumed_from_run_id.as_deref(),
+            },
+            Some(prepared.completion_transition.as_str()),
+        )
+        .map_err(|db_error| format!("db error: {db_error}"))?;
+        Ok(())
+    })();
+    match record {
+        Ok(()) => error,
+        Err(record_error) => format!("{error}; failed to record stage failure: {record_error}"),
+    }
+}
+
 fn rollback_prepared_stage_fork(prepared: &PreparedStageRunSpawn, error: String) -> String {
     if let PreparedRunWorkspace::Forked(fork) = &prepared.workspace {
         if let Err(rollback_err) = remove_prepared_worktree(&fork.worktree_path, &fork.branch) {
@@ -351,6 +395,7 @@ pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
         return;
     };
     let session_id = prepared.session_id.clone();
+    let daemon_dir = prepared.daemon_dir.clone();
     let command = spawn_session_command(
         prepared.session_id,
         prepared.cwd,
@@ -359,7 +404,14 @@ pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
         prepared.session,
     );
     match daemon.send_command_retrying_successor(&command).await {
-        Ok(DaemonEvent::SessionCreated { .. }) => {}
+        Ok(DaemonEvent::SessionCreated { .. }) => {
+            tokio::spawn(supervise_teardown_session(
+                daemon_dir,
+                session_id,
+                std::time::Duration::from_secs(10 * 60),
+                std::time::Duration::from_secs(30 * 60),
+            ));
+        }
         Ok(DaemonEvent::Error { message, .. }) => {
             log::warn!("workspace teardown session {session_id} failed to start: {message}");
         }
@@ -370,6 +422,66 @@ pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
         }
         Err(error) => {
             log::warn!("workspace teardown session {session_id} daemon error: {error}");
+        }
+    }
+}
+
+async fn supervise_teardown_session(
+    daemon_dir: String,
+    session_id: String,
+    soft_timeout: std::time::Duration,
+    hard_timeout: std::time::Duration,
+) {
+    tokio::time::sleep(soft_timeout).await;
+    if !daemon_session_exists(&daemon_dir, &session_id).await {
+        return;
+    }
+    log::warn!(
+        "workspace teardown session {session_id} exceeded soft threshold of {}s",
+        soft_timeout.as_secs()
+    );
+    tokio::time::sleep(hard_timeout.saturating_sub(soft_timeout)).await;
+    if !daemon_session_exists(&daemon_dir, &session_id).await {
+        return;
+    }
+    log::error!(
+        "workspace teardown session {session_id} timed out after {}s; killing process group",
+        hard_timeout.as_secs()
+    );
+    let mut daemon = match DaemonClient::connect(&daemon_dir).await {
+        Ok(daemon) => daemon,
+        Err(error) => {
+            log::warn!("failed to reconnect for teardown kill {session_id}: {error}");
+            return;
+        }
+    };
+    if let Err(error) = daemon
+        .send_command(&DaemonCommand::Kill {
+            session_id: session_id.clone(),
+        })
+        .await
+    {
+        log::warn!("failed to kill timed-out teardown session {session_id}: {error}");
+    }
+}
+
+async fn daemon_session_exists(daemon_dir: &str, session_id: &str) -> bool {
+    let Ok(mut daemon) = DaemonClient::connect(daemon_dir).await else {
+        return false;
+    };
+    match daemon.send_command(&DaemonCommand::List).await {
+        Ok(DaemonEvent::SessionList { sessions }) => sessions
+            .iter()
+            .any(|session| session.session_id == session_id),
+        Ok(other) => {
+            log::warn!(
+                "unexpected daemon response while checking teardown session {session_id}: {other:?}"
+            );
+            false
+        }
+        Err(error) => {
+            log::warn!("failed to check teardown session {session_id}: {error}");
+            false
         }
     }
 }
@@ -982,5 +1094,76 @@ mod successor_retry_tests {
         assert_eq!(first, second, "the one replay must stay byte-for-byte");
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(Path::new(&daemon_dir));
+    }
+}
+
+#[cfg(test)]
+mod teardown_deadline_tests {
+    use super::*;
+    use kanna_daemon::protocol::{SessionInfo, SessionKind, SessionState, SessionStatus};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    #[tokio::test]
+    async fn teardown_session_is_killed_at_its_deadline() {
+        let daemon_dir =
+            std::env::temp_dir().join(format!("kanna-teardown-deadline-{}", std::process::id()));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(&daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(async move {
+            for expected in ["List", "List", "Kill"] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                match (&command, expected) {
+                    (DaemonCommand::List, "List") => {
+                        let response = DaemonEvent::SessionList {
+                            sessions: vec![SessionInfo {
+                                session_id: "td-task-1".to_string(),
+                                pid: 42,
+                                cwd: "/tmp".to_string(),
+                                state: SessionState::Active,
+                                idle_seconds: 0,
+                                status: SessionStatus::Busy,
+                                kind: SessionKind::Pty,
+                            }],
+                        };
+                        write
+                            .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                            .await
+                            .unwrap();
+                        write.write_all(b"\n").await.unwrap();
+                    }
+                    (DaemonCommand::Kill { session_id }, "Kill") => {
+                        assert_eq!(session_id, "td-task-1");
+                        write
+                            .write_all(serde_json::to_string(&DaemonEvent::Ok).unwrap().as_bytes())
+                            .await
+                            .unwrap();
+                        write.write_all(b"\n").await.unwrap();
+                    }
+                    _ => panic!("unexpected command {command:?}, expected {expected}"),
+                }
+            }
+        });
+
+        supervise_teardown_session(
+            daemon_dir.to_string_lossy().to_string(),
+            "td-task-1".to_string(),
+            std::time::Duration::from_millis(20),
+            std::time::Duration::from_millis(50),
+        )
+        .await;
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), server)
+            .await
+            .expect("deadline monitor should issue Kill")
+            .unwrap();
+        let _ = std::fs::remove_dir_all(daemon_dir);
     }
 }

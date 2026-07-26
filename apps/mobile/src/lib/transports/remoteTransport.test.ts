@@ -445,6 +445,14 @@ describe("remote transport", () => {
       version: "0.0.69-staging.1",
       environment: "staging",
       serverVersion: "0.0.69-staging.1",
+      writePathHealth: {
+        healthy: true,
+        status: "healthy",
+        activeWorkspaceCommands: 0,
+        maxWorkspaceCommands: 4,
+        longRunningWorkspaceCommands: 0,
+        oldestWorkspaceCommandSeconds: null
+      },
       lanHost: "10.0.0.2",
       lanPort: 48120,
       pairingCode: null
@@ -462,6 +470,14 @@ describe("remote transport", () => {
       version: "0.0.69-staging.1",
       environment: "staging",
       serverVersion: "0.0.69-staging.1",
+      writePathHealth: {
+        healthy: true,
+        status: "healthy",
+        activeWorkspaceCommands: 0,
+        maxWorkspaceCommands: 4,
+        longRunningWorkspaceCommands: 0,
+        oldestWorkspaceCommandSeconds: null
+      },
       lanHost: "10.0.0.2",
       lanPort: 48120,
       pairingCode: null

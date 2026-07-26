@@ -42,6 +42,21 @@ pub struct MobileServerStatus {
     pub lan_host: String,
     pub lan_port: u16,
     pub pairing_code: Option<String>,
+    /// Absent on legacy servers. Legacy identity-only status is intentionally
+    /// not adoptable because it cannot prove the write path is live.
+    #[serde(default)]
+    pub write_path_health: Option<WritePathHealth>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WritePathHealth {
+    pub healthy: bool,
+    pub status: String,
+    pub active_workspace_commands: usize,
+    pub max_workspace_commands: usize,
+    pub long_running_workspace_commands: usize,
+    pub oldest_workspace_command_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -476,6 +491,14 @@ fn stopped_snapshot(state: &MobileServerState) -> Result<MobileServerStatus, Str
         lan_host: "0.0.0.0".to_string(),
         lan_port: local_server_port_for_cloud_env(state.cloud_env),
         pairing_code: None,
+        write_path_health: Some(WritePathHealth {
+            healthy: true,
+            status: "healthy".to_string(),
+            active_workspace_commands: 0,
+            max_workspace_commands: 4,
+            long_running_workspace_commands: 0,
+            oldest_workspace_command_seconds: None,
+        }),
     })
 }
 
@@ -498,6 +521,10 @@ fn is_current_server_status(
     status.desktop_id == expected_desktop_id
         && status.version == expected_version
         && status.environment == expected_environment
+        && status
+            .write_path_health
+            .as_ref()
+            .is_some_and(|health| health.healthy)
 }
 
 fn ensure_server_belongs_to_desktop(
@@ -845,7 +872,7 @@ mod tests {
         desktop_id, escape_toml_string, generate_uuid_v4_from_reader, is_current_server_status,
         resolved_db_path, server_base_url, server_stderr_log, stop_server_on_port,
         stopped_snapshot, MobilePairingSession, MobileServerManager, MobileServerState,
-        MobileServerStatus,
+        MobileServerStatus, WritePathHealth,
     };
     use std::ffi::CString;
     use std::os::unix::fs::PermissionsExt;
@@ -962,6 +989,14 @@ mod tests {
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
             pairing_code: None,
+            write_path_health: Some(WritePathHealth {
+                healthy: true,
+                status: "healthy".to_string(),
+                active_workspace_commands: 0,
+                max_workspace_commands: 4,
+                long_running_workspace_commands: 0,
+                oldest_workspace_command_seconds: None,
+            }),
         };
 
         assert!(is_current_server_status(
@@ -974,6 +1009,23 @@ mod tests {
             status.server_version.as_deref(),
             Some(current_server_version())
         );
+        let unhealthy = MobileServerStatus {
+            write_path_health: Some(WritePathHealth {
+                healthy: false,
+                status: "degraded".to_string(),
+                active_workspace_commands: 4,
+                max_workspace_commands: 4,
+                long_running_workspace_commands: 1,
+                oldest_workspace_command_seconds: Some(601),
+            }),
+            ..status.clone()
+        };
+        assert!(!is_current_server_status(
+            &unhealthy,
+            "desktop-1",
+            current_server_version(),
+            "production",
+        ));
 
         let stale_wrong_version = MobileServerStatus {
             version: "__stale__".to_string(),

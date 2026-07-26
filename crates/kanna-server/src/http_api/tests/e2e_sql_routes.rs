@@ -218,7 +218,15 @@ async fn e2e_mobile_controls_gate_direct_lan_but_preserve_tunneled_transport() {
             "kspStreamVersion": 2,
             "lanHost": "0.0.0.0",
             "lanPort": 48120,
-            "pairingCode": null
+            "pairingCode": null,
+            "writePathHealth": {
+                "healthy": true,
+                "status": "healthy",
+                "activeWorkspaceCommands": 0,
+                "maxWorkspaceCommands": 4,
+                "longRunningWorkspaceCommands": 0,
+                "oldestWorkspaceCommandSeconds": null
+            }
         }))
     );
 }

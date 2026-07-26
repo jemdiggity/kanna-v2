@@ -52,6 +52,7 @@ pub struct MobileServerStatus {
     pub pairing_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ksp_stream_version: Option<u8>,
+    pub write_path_health: crate::workspace_commands::WritePathHealth,
 }
 
 pub struct MobileApi {
@@ -848,6 +849,7 @@ pub fn build_mobile_server_status(
         lan_port: config.lan_port,
         pairing_code,
         ksp_stream_version: Some(2),
+        write_path_health: crate::workspace_commands::write_path_health(),
     }
 }
 
@@ -1534,6 +1536,8 @@ mod tests {
         assert_eq!(status_json["environment"], "production");
         assert_eq!(status_json["serverVersion"], "0.0.69");
         assert_eq!(status_json["kspStreamVersion"], 2);
+        assert_eq!(status_json["writePathHealth"]["status"], "healthy");
+        assert_eq!(status_json["writePathHealth"]["maxWorkspaceCommands"], 4);
         assert_eq!(status.pairing_code.as_deref(), Some("ABC123"));
     }
 
