@@ -425,13 +425,13 @@ pub(crate) fn prepare_rerun_stage_for_api(
         defer_headless_setup,
         None,
     )?;
-    let session_id = db
+    let source_session_id = db
         .resolve_task_terminal_session_id(task_id)
         .map_err(|e| format!("db error: {}", e))?
         .unwrap_or_else(|| task_id.to_string());
     Ok(PreparedStageRerun {
         task_id: task_id.to_string(),
-        session_id,
+        source_session_id,
         stage: current_stage.name.clone(),
         run_kind,
         stage_agent: current_stage.agent.clone(),
@@ -898,7 +898,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             defer_resumed_headless_setup,
             resume_session_id.as_deref(),
         )?;
-        let session_id = db
+        let source_session_id = db
             .resolve_task_terminal_session_id(task_id)
             .map_err(|e| format!("db error: {}", e))?
             .unwrap_or_else(|| task_id.to_string());
@@ -906,7 +906,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             spawn_env,
             session,
             provider_session_id,
-            session_id,
+            source_session_id,
             provider,
             stage_run_model,
             if defer_resumed_headless_setup {
@@ -920,7 +920,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         spawn_env,
         session,
         provider_session_id,
-        session_id,
+        source_session_id,
         provider,
         stage_run_model,
         deferred_setup,
@@ -946,7 +946,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     };
     Ok(PreparedStageRunSpawn {
         task_id: task_id.to_string(),
-        session_id,
+        source_session_id,
         next_stage: item_stage.to_string(),
         run_stage: target_stage.name.clone(),
         run_kind,

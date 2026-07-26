@@ -120,7 +120,7 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
         PipelineStageTransition::Auto
     );
     let task_id = prepared.task_id.clone();
-    let expected_session_id = prepared.session_id.clone();
+    let source_session_id = prepared.source_session_id.clone();
     let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone(), 1).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
 
@@ -141,7 +141,8 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
     ));
     match commands.into_iter().last().expect("respawn command") {
         kanna_daemon::protocol::Command::SpawnAgent { session_id, params } => {
-            assert_eq!(session_id, expected_session_id);
+            assert_ne!(session_id, source_session_id);
+            assert_eq!(params.env.get("KANNA_STAGE_RUN_ID"), Some(&session_id));
             assert_eq!(params.agent_provider, DaemonAgentProvider::Claude);
             assert!(params.cwd.contains(".kanna-worktrees/task-"));
             let system_prompt = params
@@ -562,9 +563,20 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
     let commands = fake_daemon.await.unwrap();
 
     assert_eq!(response.task_id, "review-task");
-    match commands.into_iter().last().expect("respawn command") {
-        kanna_daemon::protocol::Command::Spawn { args, cwd, .. } => {
+    let spawned_session_id = match commands.into_iter().last().expect("respawn command") {
+        kanna_daemon::protocol::Command::Spawn {
+            session_id,
+            args,
+            cwd,
+            env,
+            ..
+        } => {
             assert_eq!(cwd, impl_worktree.to_string_lossy());
+            let run_id = env
+                .get("KANNA_STAGE_RUN_ID")
+                .expect("resumed spawn carries immutable run ownership");
+            assert_eq!(&session_id, run_id);
+            assert_ne!(session_id, "review-task");
             let command_line = args.last().expect("shell command").clone();
             // The resumed session reopens the recorded conversation and gets
             // the composed revision message as its next user prompt.
@@ -579,9 +591,10 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
             assert!(command_line.contains("kanna_complete_stage"));
             assert!(command_line.contains("--status success"));
             assert!(!command_line.contains("do not record stage completion"));
+            session_id
         }
         other => panic!("expected PTY spawn command, got {:?}", other),
-    }
+    };
 
     // The task's branch moves back to the adopted workspace, and the run
     // records how it resumed.
@@ -593,6 +606,10 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
     assert_eq!(revision_run.stage, "in progress");
     assert_eq!(revision_run.kind, "main");
     assert_eq!(revision_run.status, "running");
+    assert_eq!(
+        revision_run.session_id.as_deref(),
+        Some(spawned_session_id.as_str())
+    );
     assert_eq!(revision_run.completion_transition.as_deref(), Some("auto"));
     assert_eq!(
         revision_run.provider_session_id.as_deref(),
@@ -790,8 +807,11 @@ async fn resumed_revision_waits_for_target_teardown_before_setup_and_provider_sp
     };
     assert!(matches!(
         provider_spawn,
-        kanna_daemon::protocol::Command::SpawnAgent { ref session_id, .. }
-            if session_id == "review-task"
+        kanna_daemon::protocol::Command::SpawnAgent {
+            ref session_id,
+            ref params,
+        } if params.env.get("KANNA_STAGE_RUN_ID") == Some(session_id)
+            && session_id != "review-task"
     ));
     transition.await.unwrap();
     let departed_teardown =

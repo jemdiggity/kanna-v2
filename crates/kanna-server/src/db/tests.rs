@@ -1304,7 +1304,6 @@ fn close_pipeline_item_accepts_task_branch_name() {
         "claude",
     )
     .unwrap();
-
     db.close_pipeline_item("task-710917fb")
         .expect("close task by branch name");
 
@@ -1543,6 +1542,14 @@ fn resolves_task_terminal_session_id_from_latest_running_stage_run() {
         "claude",
     )
     .unwrap();
+    db.conn
+        .execute(
+            "INSERT INTO terminal_session
+             (id, repo_id, pipeline_item_id, label, cwd, daemon_session_id)
+             VALUES ('legacy-agent', 'repo-1', '710917fb', 'agent', '/tmp/old', 'daemon-legacy')",
+            [],
+        )
+        .unwrap();
     db.insert_stage_run(NewStageRun {
         id: "run-old",
         task_id: "710917fb",

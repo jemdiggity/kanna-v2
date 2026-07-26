@@ -395,10 +395,15 @@ async fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
     let run_id = match commands.get(1) {
         Some(kanna_daemon::protocol::Command::Spawn {
             session_id, env, ..
-        }) if session_id == "task-1" => env
-            .get("KANNA_STAGE_RUN_ID")
-            .cloned()
-            .expect("rerun spawn carries immutable run ownership"),
+        }) => {
+            let run_id = env
+                .get("KANNA_STAGE_RUN_ID")
+                .cloned()
+                .expect("rerun spawn carries immutable run ownership");
+            assert_eq!(session_id, &run_id);
+            assert_ne!(session_id, "task-1");
+            run_id
+        }
         other => panic!("expected rerun spawn command, got {other:?}"),
     };
     let latest = db.latest_stage_run("task-1").unwrap().unwrap();
@@ -1058,7 +1063,7 @@ async fn accepted_stage_spawn_is_reconciled_after_pre_ack_disconnect() {
 
     assert_eq!(run.task_id, "task-1");
     assert_eq!(run.next_stage, "review");
-    assert_eq!(run.session_id, "task-1");
+    assert_eq!(run.source_session_id, "task-1");
     assert_eq!(
         run.terminal_prelude,
         Some(
@@ -1108,10 +1113,12 @@ async fn accepted_stage_spawn_is_reconciled_after_pre_ack_disconnect() {
         Some(kanna_daemon::protocol::Command::Spawn {
             session_id,
             cwd,
+            env,
             terminal_prelude,
             ..
         }) => {
-            assert_eq!(session_id, "task-1");
+            assert_eq!(env.get("KANNA_STAGE_RUN_ID"), Some(session_id));
+            assert_ne!(session_id, "task-1");
             assert_eq!(cwd, &fork_worktree);
             assert_eq!(
                 terminal_prelude.as_deref(),
@@ -1125,7 +1132,8 @@ async fn accepted_stage_spawn_is_reconciled_after_pre_ack_disconnect() {
             );
         }
         Some(kanna_daemon::protocol::Command::SpawnAgent { session_id, params }) => {
-            assert_eq!(session_id, "task-1");
+            assert_eq!(params.env.get("KANNA_STAGE_RUN_ID"), Some(session_id));
+            assert_ne!(session_id, "task-1");
             assert_eq!(params.cwd, fork_worktree);
         }
         other => panic!("expected daemon spawn command, got {:?}", other),
@@ -1156,7 +1164,7 @@ async fn accepted_stage_spawn_is_reconciled_after_pre_ack_disconnect() {
     assert!(runs[0].finished_at.is_some());
     assert_eq!(runs[1].stage, "review");
     assert_eq!(runs[1].status, "running");
-    assert_eq!(runs[1].session_id.as_deref(), Some("task-1"));
+    assert_eq!(runs[1].session_id.as_deref(), Some(runs[1].id.as_str()));
 
     // The counter skips workspaces that still exist: with `-2` live, the
     // next fork for this task is `-3`.
@@ -1668,13 +1676,17 @@ async fn stage_transition_tears_down_departed_stage_environment_before_repo_tear
     ));
     match commands.get(3) {
         Some(kanna_daemon::protocol::Command::Spawn {
-            session_id, cwd, ..
+            session_id,
+            cwd,
+            env,
+            ..
         })
         | Some(kanna_daemon::protocol::Command::SpawnAgent {
             session_id,
-            params: kanna_daemon::protocol::AgentSpawnParams { cwd, .. },
+            params: kanna_daemon::protocol::AgentSpawnParams { cwd, env, .. },
         }) => {
-            assert_eq!(session_id, "task-1");
+            assert_eq!(env.get("KANNA_STAGE_RUN_ID"), Some(session_id));
+            assert_ne!(session_id, "task-1");
             assert_eq!(cwd, &fork_worktree);
         }
         other => panic!("expected next stage spawn, got {other:?}"),
@@ -2834,9 +2846,13 @@ async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
         .expect("fallback spawn");
     match spawn {
         kanna_daemon::protocol::Command::Spawn {
-            session_id, args, ..
+            session_id,
+            args,
+            env,
+            ..
         } => {
-            assert_eq!(session_id, "task-1");
+            assert_eq!(env.get("KANNA_STAGE_RUN_ID"), Some(session_id));
+            assert_ne!(session_id, "task-1");
             let command_line = args.join(" ");
             assert!(
                 command_line.contains("Commit agent."),

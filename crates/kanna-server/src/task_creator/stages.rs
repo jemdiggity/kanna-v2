@@ -294,7 +294,7 @@ fn prepare_post_dispatch(
     Ok(PreparedStageTransition::Post(Box::new(
         PreparedPostDispatch {
             task_id: context.source_task_id.to_string(),
-            session_id: fallback.session_id.clone(),
+            session_id: fallback.source_session_id.clone(),
             message,
             run_stage,
             fallback,

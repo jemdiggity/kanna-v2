@@ -236,6 +236,7 @@ pub(crate) async fn spawn_prepared_task_for_api_recording_stage_run(
     }
 
     let run_id = generate_stage_run_id(&prepared.created_task.task_id);
+    prepared.session_id = run_id.clone();
     prepared
         .env
         .insert("KANNA_STAGE_RUN_ID".to_string(), run_id.clone());
@@ -354,7 +355,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     mut prepared: PreparedStageRunSpawn,
 ) -> Result<crate::mobile_api::TaskActionResponse, String> {
     let task_id = prepared.task_id.clone();
-    let session_id = prepared.session_id.clone();
+    let source_session_id = prepared.source_session_id.clone();
     let blocking_teardown_session_id =
         prepared.blocking_teardown_session_id.clone().or_else(|| {
             matches!(prepared.workspace, PreparedRunWorkspace::Forked(_))
@@ -390,6 +391,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     // events. The same token is inherited by the child process and echoed by
     // the daemon on SessionCreated, ProviderSessionChanged, and Exit.
     let run_id = generate_stage_run_id(&task_id);
+    let session_id = run_id.clone();
     prepared
         .env
         .insert("KANNA_STAGE_RUN_ID".to_string(), run_id.clone());
@@ -464,7 +466,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     if let Err(error) = kill_session_replacing_if_owned(
         daemon,
         replacements,
-        &session_id,
+        &source_session_id,
         prepared.expected_source.process_run_id.as_deref(),
     )
     .await
@@ -844,7 +846,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     mut prepared: PreparedStageRerun,
 ) -> Result<crate::mobile_api::TaskActionResponse, String> {
     let task_id = prepared.task_id.clone();
-    let session_id = prepared.session_id.clone();
+    let source_session_id = prepared.source_session_id.clone();
     let stage = prepared.stage.clone();
     let run_kind = prepared.run_kind;
     let stage_agent = prepared.stage_agent.clone();
@@ -864,6 +866,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     kill_session_replacing(daemon, replacements, &session_id).await?;
 
     let run_id = generate_stage_run_id(&task_id);
+    let session_id = run_id.clone();
     prepared
         .env
         .insert("KANNA_STAGE_RUN_ID".to_string(), run_id.clone());
@@ -918,7 +921,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     if let Err(error) = kill_session_replacing_if_owned(
         daemon,
         replacements,
-        &session_id,
+        &source_session_id,
         prepared.expected_source.process_run_id.as_deref(),
     )
     .await

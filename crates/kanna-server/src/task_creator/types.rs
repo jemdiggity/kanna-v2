@@ -151,7 +151,9 @@ pub(crate) struct PreparedPostDispatch {
 
 pub(crate) struct PreparedStageRerun {
     pub(super) task_id: String,
-    pub(super) session_id: String,
+    /// Daemon session currently attached to the task. It is stopped before
+    /// the rerun gets its own run-scoped daemon session.
+    pub(super) source_session_id: String,
     /// Run-history label: the stage name, or the post name when rerunning a
     /// legacy task parked at a folded post stage.
     pub(super) stage: String,
@@ -222,7 +224,9 @@ pub(crate) enum PreparedRunWorkspace {
 /// workspace, and a post fallback or rerun keeps the task's current one.
 pub(crate) struct PreparedStageRunSpawn {
     pub(super) task_id: String,
-    pub(super) session_id: String,
+    /// Daemon session currently attached to the task. It is stopped before
+    /// the successor gets its own run-scoped daemon session.
+    pub(super) source_session_id: String,
     /// Value written to `pipeline_item.stage`. For a post fallback spawn this
     /// is the owning stage (a post never moves the task's stage).
     pub(super) next_stage: String,

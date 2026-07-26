@@ -298,6 +298,34 @@ impl Db {
             return Ok(None);
         };
 
+        let stage_run_session_id = self
+            .conn
+            .query_row(
+                "SELECT session_id
+                 FROM stage_run
+                 WHERE task_id = ?
+                   AND status = 'running'
+                   AND session_id IS NOT NULL
+                   AND session_id != ''
+                   AND (
+                     provider_session_id IS NULL
+                     OR provider_session_id = ''
+                     OR session_id != provider_session_id
+                   )
+                 ORDER BY datetime(started_at) DESC, rowid DESC
+                 LIMIT 1",
+                [&pipeline_item_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if stage_run_session_id.is_some() {
+            return Ok(stage_run_session_id);
+        }
+
+        // Compatibility fallback for tasks created before stage-run session
+        // ownership was recorded. Current runs always win over these durable
+        // terminal mappings so a stage transition can move task-facing
+        // control to its new run-scoped daemon session.
         let terminal_session_id = self
             .conn
             .query_row(
@@ -314,25 +342,6 @@ impl Db {
             .optional()?;
         if terminal_session_id.is_some() {
             return Ok(terminal_session_id);
-        }
-
-        let stage_run_session_id = self
-            .conn
-            .query_row(
-                "SELECT session_id
-                 FROM stage_run
-                 WHERE task_id = ?
-                   AND status = 'running'
-                   AND session_id IS NOT NULL
-                   AND session_id != ''
-                 ORDER BY datetime(started_at) DESC, rowid DESC
-                 LIMIT 1",
-                [&pipeline_item_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if stage_run_session_id.is_some() {
-            return Ok(stage_run_session_id);
         }
 
         Ok(Some(pipeline_item_id))

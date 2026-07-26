@@ -36,6 +36,8 @@ async fn spawn_fake_daemon_asserting_pending_run(
             .unwrap();
         assert_eq!(runs.len(), 1, "run must exist before daemon spawn");
         assert_eq!(runs[0].id, run_id);
+        assert_eq!(session_id, run_id);
+        assert_eq!(runs[0].session_id.as_deref(), Some(session_id.as_str()));
         assert_eq!(runs[0].status, "pending");
 
         let response = serde_json::to_string(&kanna_daemon::protocol::Event::SessionCreated {
@@ -201,7 +203,7 @@ async fn spawn_records_pending_stage_run_before_daemon_can_emit_events() {
     assert_eq!(runs[0].agent_provider.as_deref(), Some("claude"));
     assert_eq!(runs[0].model.as_deref(), Some("sonnet"));
     assert_eq!(runs[0].status, "running");
-    assert_eq!(runs[0].session_id.as_deref(), Some("task-1"));
+    assert_eq!(runs[0].session_id.as_deref(), Some(runs[0].id.as_str()));
 }
 
 #[tokio::test]
