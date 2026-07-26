@@ -1,3 +1,4 @@
+use super::lan_trust::PrivilegedTaskAccess;
 use super::state::AppState;
 use crate::db::Db;
 use axum::extract::State;
@@ -109,6 +110,7 @@ pub(crate) async fn submit_task_input(
 }
 
 pub(super) async fn send_task_input(
+    _access: PrivilegedTaskAccess,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
     Json(payload): Json<TaskInputRequest>,

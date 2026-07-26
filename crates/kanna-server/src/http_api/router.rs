@@ -7,7 +7,7 @@ use super::e2e_mobile_controls::{gate_direct_lan_http, update_e2e_mobile_machine
 #[cfg(debug_assertions)]
 use super::e2e_sql::{execute_e2e_server_work, execute_e2e_sql};
 use super::ksp::ksp_stream;
-use super::lan_trust::attach_trusted_lan_device;
+use super::lan_trust::{attach_trusted_lan_device, require_privileged_task_access};
 use super::operator_events::post_operator_events;
 use super::pairing::{claim_pairing_session, create_pairing_session};
 use super::repo_commands::{list_repo_commands, run_repo_command};
@@ -19,7 +19,7 @@ use super::repos::{
 use super::settings::{delete_setting, get_setting, put_cloud_transfer_identity, put_setting};
 use super::signal_agent::signal_agent;
 use super::snapshot::get_snapshot;
-use super::state::{AppState, HttpInvokeResponse, TunneledHttpInvoke};
+use super::state::{AppState, AuthenticatedHttpInvoke, HttpInvokeResponse, TunneledHttpInvoke};
 use super::status::status;
 use super::task_actions::{
     abort_task_creation, advance_stage, close_task, complete_stage, pin_task, reopen_task,
@@ -259,6 +259,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     router
         .layer(CorsLayer::permissive())
         .layer(axum::middleware::from_fn(log_error_responses))
+        .layer(axum::middleware::from_fn(require_privileged_task_access))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
             attach_trusted_lan_device,
@@ -385,6 +386,7 @@ async fn dispatch_http_invoke_with_access(
         .insert(axum::extract::ConnectInfo(invoke_peer));
     request.extensions_mut().insert(TunneledHttpInvoke);
     if authenticated_file_access {
+        request.extensions_mut().insert(AuthenticatedHttpInvoke);
         request
             .extensions_mut()
             .insert(super::task_files::AuthenticatedTaskFileAccess);

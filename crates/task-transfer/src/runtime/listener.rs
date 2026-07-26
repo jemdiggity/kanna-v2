@@ -14,8 +14,9 @@ use super::external_peers::{
 use super::pull::{prune_task_pull_requests, validate_source_task_id};
 use super::replay_store::unix_ms;
 use super::state::{
-    ImportCommitReceipt, IncomingTransferReservation, ListenerContext, OutgoingTransferReservation,
-    PairingDecision, PendingPairingRequest, PendingTaskPullRequest,
+    AuthenticatedPeerRequestReplay, ImportCommitReceipt, IncomingTransferReservation,
+    ListenerContext, OutgoingTransferReservation, PairingDecision, PendingPairingRequest,
+    PendingTaskPullRequest,
 };
 use super::utils::{
     extract_request_id, load_or_create_identity, local_capabilities_json,
@@ -1117,28 +1118,80 @@ async fn authenticate_peer_request(
     }
 
     let replay_key = format!("{requester_peer_id}\n{expected_action}\n{expected_request_id}");
-    let mut authenticated_requests = context.authenticated_peer_requests.lock().await;
-    let expired = authenticated_requests
-        .iter()
-        .filter(|(_, expires_at)| **expires_at < now_ms)
-        .map(|(replay_key, _)| replay_key.clone())
-        .collect::<Vec<_>>();
-    for replay_key in expired {
-        authenticated_requests.remove(&replay_key);
-        context
-            .replay_store
-            .remove_authenticated_peer_request(&replay_key);
-    }
-    if authenticated_requests.contains_key(&replay_key) {
-        return Err(RuntimeError::Protocol(format!(
-            "replayed authenticated {expected_action} request"
-        )));
-    }
     let expires_at = now_ms.max(issued_at_unix_ms).saturating_add(freshness_ms);
-    context
-        .replay_store
-        .save_authenticated_peer_request(&replay_key, expires_at)?;
-    authenticated_requests.insert(replay_key, expires_at);
+    let durable = matches!(expected_action, "close_task" | "advance_task_stage");
+    let expired_durable = {
+        let mut authenticated_requests = context.authenticated_peer_requests.lock().await;
+        let expired = authenticated_requests
+            .iter()
+            .filter(|(_, replay)| replay.expires_at_unix_ms < now_ms)
+            .map(|(replay_key, replay)| (replay_key.clone(), replay.durable))
+            .collect::<Vec<_>>();
+        for (replay_key, _) in &expired {
+            authenticated_requests.remove(replay_key);
+        }
+        if authenticated_requests.contains_key(&replay_key) {
+            return Err(RuntimeError::Protocol(format!(
+                "replayed authenticated {expected_action} request"
+            )));
+        }
+        if authenticated_requests.len() >= context.max_authenticated_request_replays {
+            return Err(RuntimeError::Backpressure(format!(
+                "authenticated request replay window is full (maximum {})",
+                context.max_authenticated_request_replays,
+            )));
+        }
+        authenticated_requests.insert(
+            replay_key.clone(),
+            AuthenticatedPeerRequestReplay {
+                expires_at_unix_ms: expires_at,
+                durable,
+            },
+        );
+        expired
+            .into_iter()
+            .filter_map(|(replay_key, durable)| durable.then_some(replay_key))
+            .collect::<Vec<_>>()
+    };
+
+    if !expired_durable.is_empty() {
+        let replay_store = Arc::clone(&context.replay_store);
+        tokio::task::spawn_blocking(move || {
+            for replay_key in expired_durable {
+                replay_store.remove_authenticated_peer_request(&replay_key);
+            }
+        });
+    }
+
+    if durable {
+        let replay_store = Arc::clone(&context.replay_store);
+        let persisted_key = replay_key.clone();
+        let persist_result = tokio::task::spawn_blocking(move || {
+            replay_store.save_authenticated_peer_request(&persisted_key, expires_at)
+        })
+        .await;
+        match persist_result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                context
+                    .authenticated_peer_requests
+                    .lock()
+                    .await
+                    .remove(&replay_key);
+                return Err(error);
+            }
+            Err(error) => {
+                context
+                    .authenticated_peer_requests
+                    .lock()
+                    .await
+                    .remove(&replay_key);
+                return Err(RuntimeError::Protocol(format!(
+                    "authenticated replay persistence task failed: {error}"
+                )));
+            }
+        }
+    }
     Ok(payload)
 }
 

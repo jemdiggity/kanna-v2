@@ -1062,4 +1062,34 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&snapshot_dir);
     }
+
+    #[test]
+    fn disconnected_manager_loads_v0_0_30_snapshot_with_unknown_cursor() {
+        let snapshot_dir = unique_test_snapshot_dir();
+        std::fs::create_dir_all(&snapshot_dir).unwrap();
+        std::fs::write(
+            snapshot_dir.join("v0.0.30-session.json"),
+            include_bytes!(
+                "../../../packages/terminal-recovery/tests/fixtures/v0.0.30-snapshot.json"
+            ),
+        )
+        .unwrap();
+        let manager = RecoveryManager::new(snapshot_dir.clone(), None);
+
+        let snapshot = manager
+            .read_persisted_snapshot("v0.0.30-session")
+            .expect("v0.0.30 fixture should parse")
+            .expect("fixture should exist");
+
+        // A v0.0.30 file must PARSE rather than be dropped — a parse failure is
+        // read as "no snapshot" and silently discards the whole scrollback. The
+        // client-facing snapshot cannot express "cursor unknown", so it reports
+        // the documented fallback here; the authoritative resume path keeps the
+        // unknown and skips repositioning (see `SnapshotStore` legacy tests).
+        assert_eq!(snapshot.serialized, "legacy prompt> ");
+        assert_eq!(snapshot.cursor_row, 0);
+        assert_eq!(snapshot.cursor_col, 0);
+        assert!(snapshot.cursor_visible);
+        let _ = std::fs::remove_dir_all(snapshot_dir);
+    }
 }

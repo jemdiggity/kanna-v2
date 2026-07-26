@@ -92,6 +92,12 @@ pub(super) struct TerminalObserverSlot {
     pub(super) handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct AuthenticatedPeerRequestReplay {
+    pub(super) expires_at_unix_ms: u64,
+    pub(super) durable: bool,
+}
+
 pub(super) type PendingOutgoingTransferFinalizations =
     Arc<Mutex<HashMap<String, oneshot::Sender<Result<FinalizedOutgoingTransfer, RuntimeError>>>>>;
 
@@ -135,7 +141,9 @@ pub(super) struct ListenerContext {
     pub(super) incoming_reservations: Arc<Mutex<HashMap<String, IncomingTransferReservation>>>,
     pub(super) transfer_artifacts:
         Arc<Mutex<HashMap<String, HashMap<String, TransferArtifactRecord>>>>,
-    pub(super) authenticated_peer_requests: Arc<Mutex<HashMap<String, u64>>>,
+    pub(super) authenticated_peer_requests:
+        Arc<Mutex<HashMap<String, AuthenticatedPeerRequestReplay>>>,
+    pub(super) max_authenticated_request_replays: usize,
     pub(super) task_snapshot: Arc<Mutex<Value>>,
     pub(super) daemon_dir: Option<PathBuf>,
     pub(super) db_path: Option<PathBuf>,
@@ -166,6 +174,7 @@ pub struct TransferRuntime {
     pub(super) incoming_events: Mutex<mpsc::UnboundedReceiver<RuntimeEvent>>,
     pub(super) receipt_events: Mutex<mpsc::Receiver<OutgoingTransferCommittedEvent>>,
     pub(super) request_counter: Arc<AtomicU64>,
+    pub(super) request_namespace: String,
     pub(super) listener_task: JoinHandle<()>,
     pub(super) receipt_retry_task: JoinHandle<()>,
     pub(super) registry_entry_path: Option<PathBuf>,

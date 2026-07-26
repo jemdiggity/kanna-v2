@@ -64,6 +64,9 @@ export function createLanTransport(
   options: { deviceCredentials?: LanDeviceCredentials | null } = {}
 ): KannaTransport {
   const deviceCredentials = options.deviceCredentials ?? null;
+  const streamCredential = deviceCredentials
+    ? JSON.stringify(deviceCredentials)
+    : undefined;
   const credentialHeaders = (): Record<string, string> =>
     deviceCredentials
       ? {
@@ -202,6 +205,7 @@ export function createLanTransport(
     observeTaskTerminal(taskId, listener) {
       const client = new StreamClient({
         url: buildKspWebSocketUrl(baseUrl),
+        credential: streamCredential,
         webSocketFactory: (url) => createSocket(url) as unknown as StreamWebSocketLike,
         reconnectDelaysMs: [250, 500, 1000, 2000]
       });
@@ -235,6 +239,7 @@ export function createLanTransport(
     observeTaskAgent(taskId, listener) {
       const client = new StreamClient({
         url: buildKspWebSocketUrl(baseUrl),
+        credential: streamCredential,
         webSocketFactory: (url) => createSocket(url) as unknown as StreamWebSocketLike,
         reconnectDelaysMs: [250, 500, 1000, 2000]
       });
@@ -275,6 +280,7 @@ export function createLanTransport(
     observeTaskCompanion(taskId, listener) {
       const client = new StreamClient({
         url: buildKspWebSocketUrl(baseUrl),
+        credential: streamCredential,
         webSocketFactory: (url) => createSocket(url) as unknown as StreamWebSocketLike,
         reconnectDelaysMs: [250, 500, 1000, 2000]
       });

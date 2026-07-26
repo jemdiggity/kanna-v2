@@ -73,7 +73,7 @@ async fn http_invoke_dispatches_shared_mobile_post_routes_with_json_body() {
         }),
     );
 
-    let response = super::dispatch_http_invoke(
+    let response = crate::http_api::dispatch_authenticated_http_invoke(
         state,
         "POST",
         "/v1/tasks/task-1/input",
@@ -3364,6 +3364,7 @@ async fn stale_advance_transition_revision_is_rejected_after_owner_transition() 
                 Ok(TaskActionResponse {
                     task_id,
                     follow_task: None,
+                    revision_budget: None,
                 })
             }
         }),
@@ -3412,6 +3413,7 @@ async fn two_immediate_advance_requests_share_one_owner_transition() {
                 Ok(TaskActionResponse {
                     task_id,
                     follow_task: None,
+                    revision_budget: None,
                 })
             }
         }),
@@ -3482,6 +3484,7 @@ async fn complete_stage_waits_for_competing_advance_stage_mutation() {
                 Ok(TaskActionResponse {
                     task_id,
                     follow_task: None,
+                    revision_budget: None,
                 })
             }
         }),
@@ -3490,6 +3493,7 @@ async fn complete_stage_waits_for_competing_advance_stage_mutation() {
         Ok(TaskActionResponse {
             task_id,
             follow_task: None,
+            revision_budget: None,
         })
     }));
     let app = super::router(Arc::new(state));
@@ -3568,6 +3572,7 @@ async fn blocker_replacement_waits_for_competing_advance_stage_mutation() {
                 Ok(TaskActionResponse {
                     task_id,
                     follow_task: None,
+                    revision_budget: None,
                 })
             }
         }),

@@ -1,10 +1,10 @@
-use super::state::{AppState, TunneledHttpInvoke};
+use super::state::{AppState, AuthenticatedHttpInvoke, TunneledHttpInvoke};
 use crate::pairing::PairingStore;
 use axum::body::Body;
-use axum::extract::State;
-use axum::http::Request;
+use axum::extract::{ConnectInfo, FromRequestParts, State};
+use axum::http::{request::Parts, Request, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -15,6 +15,33 @@ pub(super) const DEVICE_SECRET_HEADER: &str = "x-kanna-device-secret";
 /// id + secret and the secret verified against the pairing store.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TrustedLanDeviceAccess;
+
+/// Authorization extractor for privileged task controls.
+///
+/// Production listener requests always carry `ConnectInfo`. A missing peer is
+/// accepted only for in-process router tests and callers; tunneled requests
+/// must still carry the explicit authenticated marker, so a synthesized
+/// loopback address can never elevate an unauthenticated tunnel.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct PrivilegedTaskAccess;
+
+impl FromRequestParts<Arc<AppState>> for PrivilegedTaskAccess {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        privileged_task_access(&parts.extensions)
+    }
+}
+
+fn unauthorized_privileged_task() -> (StatusCode, String) {
+    (
+        StatusCode::UNAUTHORIZED,
+        "privileged task control requires desktop loopback, a paired LAN device, or an authenticated relay".into(),
+    )
+}
 
 pub(super) async fn attach_trusted_lan_device(
     State(state): State<Arc<AppState>>,
@@ -36,6 +63,43 @@ pub(super) async fn attach_trusted_lan_device(
         }
     }
     next.run(request).await
+}
+
+pub(super) async fn require_privileged_task_access(request: Request<Body>, next: Next) -> Response {
+    if is_privileged_task_route(request.method(), request.uri().path())
+        && privileged_task_access(request.extensions()).is_err()
+    {
+        return unauthorized_privileged_task().into_response();
+    }
+    next.run(request).await
+}
+
+fn is_privileged_task_route(method: &axum::http::Method, path: &str) -> bool {
+    if path != "/v1/tasks" && !path.starts_with("/v1/tasks/") {
+        return false;
+    }
+    method != axum::http::Method::GET
+        && method != axum::http::Method::HEAD
+        && method != axum::http::Method::OPTIONS
+}
+
+fn privileged_task_access(
+    extensions: &axum::http::Extensions,
+) -> Result<PrivilegedTaskAccess, (StatusCode, String)> {
+    if extensions.get::<TunneledHttpInvoke>().is_some() {
+        return extensions
+            .get::<AuthenticatedHttpInvoke>()
+            .map(|_| PrivilegedTaskAccess)
+            .ok_or_else(unauthorized_privileged_task);
+    }
+    if extensions.get::<TrustedLanDeviceAccess>().is_some()
+        || extensions
+            .get::<ConnectInfo<std::net::SocketAddr>>()
+            .is_none_or(|ConnectInfo(peer)| peer.ip().is_loopback())
+    {
+        return Ok(PrivilegedTaskAccess);
+    }
+    Err(unauthorized_privileged_task())
 }
 
 fn header_value(request: &Request<Body>, name: &str) -> Option<String> {

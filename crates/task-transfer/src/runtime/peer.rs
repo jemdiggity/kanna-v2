@@ -300,9 +300,10 @@ impl TransferRuntime {
 
     pub(super) fn next_request_id(&self, prefix: &str) -> String {
         format!(
-            "{}-{}-{}",
+            "{}-{}-{}-{}",
             prefix,
             self.config.peer_id,
+            self.request_namespace,
             self.request_counter.fetch_add(1, Ordering::Relaxed)
         )
     }

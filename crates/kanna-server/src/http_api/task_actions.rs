@@ -1,3 +1,4 @@
+use super::lan_trust::PrivilegedTaskAccess;
 use super::state::{db_write_error, AppState};
 use super::task_blockers::{
     resolve_existing_task_id, start_dependents_unblocked_by_close_with_daemon,
@@ -353,6 +354,7 @@ fn collect_blocker_resolution_instructions(
 }
 
 pub(super) async fn close_task(
+    _access: PrivilegedTaskAccess,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
@@ -547,7 +549,12 @@ pub(super) async fn abort_task_creation(
         return Ok(axum::http::StatusCode::NO_CONTENT);
     }
 
-    close_task(State(state), axum::extract::Path(task_id)).await
+    close_task(
+        PrivilegedTaskAccess,
+        State(state),
+        axum::extract::Path(task_id),
+    )
+    .await
 }
 
 pub(super) async fn reopen_task(
@@ -669,6 +676,7 @@ async fn close_task_after_final_stage(
 }
 
 pub(super) async fn advance_stage(
+    _access: PrivilegedTaskAccess,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
     payload: Option<Json<AdvanceStageRequest>>,

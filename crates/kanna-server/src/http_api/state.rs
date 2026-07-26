@@ -12,6 +12,13 @@ use tokio::sync::{broadcast, Mutex, Notify};
 #[derive(Clone, Copy)]
 pub(super) struct TunneledHttpInvoke;
 
+/// Marker for an in-process HTTP invoke whose caller was authenticated before
+/// the request entered the Axum router (for example, an authenticated relay
+/// tunnel). This is deliberately distinct from `TunneledHttpInvoke`: the
+/// latter records transport provenance but grants no authority by itself.
+#[derive(Clone, Copy)]
+pub(super) struct AuthenticatedHttpInvoke;
+
 #[derive(Clone)]
 pub struct AppState {
     pub(super) config: Config,

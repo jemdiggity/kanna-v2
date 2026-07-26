@@ -659,7 +659,7 @@ fn relay_error_event(session_id: &str, message: String) -> RelayMessage {
 }
 
 fn relay_tunnel_ksp_auth_mode() -> crate::ksp::AuthMode {
-    crate::ksp::AuthMode::AllowEmpty
+    crate::ksp::AuthMode::AlreadyAuthenticated
 }
 
 async fn send_relay_event(sink: &Arc<Mutex<relay_client::WsSink>>, event: RelayMessage) -> bool {
@@ -1082,7 +1082,7 @@ mod tests {
     fn relay_tunnel_ksp_auth_is_already_satisfied_by_relay() {
         assert_eq!(
             relay_tunnel_ksp_auth_mode(),
-            crate::ksp::AuthMode::AllowEmpty
+            crate::ksp::AuthMode::AlreadyAuthenticated
         );
     }
 

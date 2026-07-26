@@ -1,5 +1,8 @@
 use super::events::{IncomingTransferEvent, RuntimeError};
-use super::state::{ImportCommitReceipt, IncomingTransferReservation, OutgoingTransferReservation};
+use super::state::{
+    AuthenticatedPeerRequestReplay, ImportCommitReceipt, IncomingTransferReservation,
+    OutgoingTransferReservation,
+};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -198,7 +201,7 @@ impl TransferReplayStore {
 
     pub(super) fn load_authenticated_peer_requests(
         &self,
-    ) -> Result<HashMap<String, u64>, RuntimeError> {
+    ) -> Result<HashMap<String, AuthenticatedPeerRequestReplay>, RuntimeError> {
         let now_ms = unix_ms();
         let mut loaded = HashMap::new();
         for (path, stored) in self.load_records::<StoredAuthenticatedPeerRequest>(
@@ -210,7 +213,13 @@ impl TransferReplayStore {
                 self.remove_record(&path);
                 continue;
             }
-            loaded.insert(stored.replay_key, stored.expires_at_unix_ms);
+            loaded.insert(
+                stored.replay_key,
+                AuthenticatedPeerRequestReplay {
+                    expires_at_unix_ms: stored.expires_at_unix_ms,
+                    durable: true,
+                },
+            );
         }
         Ok(loaded)
     }

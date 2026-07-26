@@ -16,6 +16,94 @@ fn pairing_create_request(peer: [u8; 4]) -> Request<Body> {
     request
 }
 
+fn direct_lan_request(method: axum::http::Method, path: &str) -> Request<Body> {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [192, 168, 1, 42],
+            49152,
+        ))));
+    request
+}
+
+#[tokio::test]
+async fn privileged_task_routes_reject_unauthenticated_non_loopback_clients() {
+    let app = super::test_router("desktop-private-actions", "Private Actions Mac");
+
+    for path in [
+        "/v1/tasks/task-private/input",
+        "/v1/tasks/task-private/actions/advance-stage",
+        "/v1/tasks/task-private/actions/close",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(direct_lan_request(axum::http::Method::POST, path))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated direct-LAN request reached {path}",
+        );
+    }
+}
+
+#[tokio::test]
+async fn privileged_task_access_preserves_paired_loopback_and_authenticated_tunnel_dispatch() {
+    let state =
+        super::test_state_with_seed("desktop-private-positive", "Private Positive Mac", |_| {});
+    let pairing_path = std::path::PathBuf::from(&state.config().pairing_store_path);
+    let mut pairing_store = crate::pairing::PairingStore::default();
+    pairing_store.add_trusted_device(
+        &state.config().desktop_id,
+        "phone-1",
+        "Kanna Mobile",
+        &crate::pairing::hash_device_secret("lan-secret"),
+    );
+    pairing_store.save(&pairing_path).unwrap();
+    let app = crate::http_api::router(Arc::clone(&state));
+
+    let mut paired = direct_lan_request(axum::http::Method::POST, "/v1/tasks/task-private/input");
+    paired.headers_mut().insert(
+        "x-kanna-device-id",
+        axum::http::HeaderValue::from_static("phone-1"),
+    );
+    paired.headers_mut().insert(
+        "x-kanna-device-secret",
+        axum::http::HeaderValue::from_static("lan-secret"),
+    );
+    let paired_status = app.clone().oneshot(paired).await.unwrap().status();
+    assert_ne!(paired_status, StatusCode::UNAUTHORIZED);
+
+    let mut loopback = Request::post("/v1/tasks/task-private/actions/close")
+        .body(Body::empty())
+        .unwrap();
+    loopback
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            49152,
+        ))));
+    let loopback_status = app.oneshot(loopback).await.unwrap().status();
+    assert_ne!(loopback_status, StatusCode::UNAUTHORIZED);
+
+    let tunneled = crate::http_api::dispatch_authenticated_http_invoke(
+        state,
+        "POST",
+        "/v1/tasks/task-private/actions/advance-stage",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_ne!(tunneled.status, StatusCode::UNAUTHORIZED.as_u16());
+    let _ = std::fs::remove_file(pairing_path);
+}
+
 #[tokio::test]
 async fn list_desktops_route_returns_configured_desktop() {
     let app = super::test_router("desktop-1", "Studio Mac");

@@ -19,6 +19,7 @@ const DEFAULT_MAX_APPLIED_RECEIPTS: usize = 4096;
 const DEFAULT_MAX_INCOMING_RESERVATIONS: usize = 256;
 const DEFAULT_MAX_PEER_REQUESTS: usize = 32;
 const DEFAULT_MAX_MARK_READ_PEER_REQUESTS: usize = 4;
+const DEFAULT_MAX_AUTHENTICATED_REQUEST_REPLAYS: usize = 8_192;
 const DEFAULT_TERMINAL_OBSERVER_TOMBSTONE_TTL: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_MAX_TERMINAL_OBSERVER_TOMBSTONES: usize = 1024;
 
@@ -48,6 +49,7 @@ pub struct RuntimeConfig {
     pub(super) mark_read_timeout: Duration,
     pub(super) max_peer_requests: usize,
     pub(super) max_mark_read_peer_requests: usize,
+    pub(super) max_authenticated_request_replays: usize,
     pub(super) terminal_observer_tombstone_ttl: Duration,
     pub(super) max_terminal_observer_tombstones: usize,
     pub(super) peer_discovery_delays: Arc<Mutex<VecDeque<Duration>>>,
@@ -79,6 +81,7 @@ impl RuntimeConfig {
             mark_read_timeout: Duration::from_secs(2),
             max_peer_requests: DEFAULT_MAX_PEER_REQUESTS,
             max_mark_read_peer_requests: DEFAULT_MAX_MARK_READ_PEER_REQUESTS,
+            max_authenticated_request_replays: DEFAULT_MAX_AUTHENTICATED_REQUEST_REPLAYS,
             terminal_observer_tombstone_ttl: DEFAULT_TERMINAL_OBSERVER_TOMBSTONE_TTL,
             max_terminal_observer_tombstones: DEFAULT_MAX_TERMINAL_OBSERVER_TOMBSTONES,
             peer_discovery_delays: Arc::new(Mutex::new(VecDeque::new())),
@@ -137,6 +140,11 @@ impl RuntimeConfig {
     ) -> Self {
         self.max_peer_requests = max_peer_requests.max(1);
         self.max_mark_read_peer_requests = max_mark_read_peer_requests.max(1);
+        self
+    }
+
+    pub fn with_authenticated_request_replay_limit(mut self, maximum: usize) -> Self {
+        self.max_authenticated_request_replays = maximum.max(1);
         self
     }
 
@@ -253,6 +261,7 @@ impl RuntimeConfig {
             mark_read_timeout: Duration::from_secs(2),
             max_peer_requests: DEFAULT_MAX_PEER_REQUESTS,
             max_mark_read_peer_requests: DEFAULT_MAX_MARK_READ_PEER_REQUESTS,
+            max_authenticated_request_replays: DEFAULT_MAX_AUTHENTICATED_REQUEST_REPLAYS,
             terminal_observer_tombstone_ttl: DEFAULT_TERMINAL_OBSERVER_TOMBSTONE_TTL,
             max_terminal_observer_tombstones: DEFAULT_MAX_TERMINAL_OBSERVER_TOMBSTONES,
             peer_discovery_delays: Arc::new(Mutex::new(VecDeque::new())),

@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -28,7 +29,7 @@ use kanna_daemon::terminal_perf::{self, TerminalPerfContext, TerminalPerfMonitor
 
 use crate::daemon_client::DaemonClient;
 use crate::db::Db;
-use crate::http_api::{dispatch_http_invoke, AppState};
+use crate::http_api::{dispatch_authenticated_http_invoke, AppState};
 
 mod auth;
 
@@ -37,8 +38,17 @@ use auth::verify_firebase_id_token;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
     AllowEmpty,
+    AlreadyAuthenticated,
+    RequirePairedDevice,
     #[allow(dead_code)]
     RequireCredential,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PairedDeviceCredential {
+    device_id: String,
+    device_secret: String,
 }
 
 fn b64(data: &[u8]) -> String {
@@ -299,7 +309,7 @@ impl OutboundFrameReceiver {
     }
 }
 
-pub async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
+pub async fn handle_stream(socket: WebSocket, state: Arc<AppState>, auth_mode: AuthMode) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (incoming_tx, incoming_rx) = mpsc::channel::<String>(256);
     let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(256);
@@ -343,14 +353,7 @@ pub async fn handle_stream(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
-    handle_stream_channels(
-        incoming_rx,
-        frame_tx,
-        companion_tx,
-        state,
-        AuthMode::AllowEmpty,
-    )
-    .await;
+    handle_stream_channels(incoming_rx, frame_tx, companion_tx, state, auth_mode).await;
     reader_task.abort();
     let _ = writer_task.await;
 }
@@ -856,7 +859,7 @@ async fn dispatch_ksp_request(
     } = request;
     let runtime = tokio::runtime::Handle::current();
     let result = tokio::task::spawn_blocking(move || {
-        runtime.block_on(dispatch_http_invoke(
+        runtime.block_on(dispatch_authenticated_http_invoke(
             state,
             &method,
             &path,
@@ -1341,7 +1344,11 @@ impl StreamConn {
 
     async fn handle_auth(&mut self, credential: Option<String>) -> bool {
         let valid = match self.auth_mode {
-            AuthMode::AllowEmpty => true,
+            AuthMode::AllowEmpty | AuthMode::AlreadyAuthenticated => true,
+            AuthMode::RequirePairedDevice => match credential.as_deref() {
+                Some(value) => self.paired_device_credential_matches(value),
+                None => false,
+            },
             AuthMode::RequireCredential => match credential.as_deref() {
                 Some(value) => self.credential_matches(value).await,
                 None => false,
@@ -1357,6 +1364,22 @@ impl StreamConn {
         self.authed = true;
         self.send(auth_ok_frame()).await;
         true
+    }
+
+    fn paired_device_credential_matches(&self, credential: &str) -> bool {
+        let Ok(credential) = serde_json::from_str::<PairedDeviceCredential>(credential) else {
+            return false;
+        };
+        let config = self.state.config();
+        crate::pairing::PairingStore::load(Path::new(&config.pairing_store_path)).is_ok_and(
+            |store| {
+                store.verify_device_secret(
+                    &config.desktop_id,
+                    &credential.device_id,
+                    &credential.device_secret,
+                )
+            },
+        )
     }
 
     async fn credential_matches(&self, credential: &str) -> bool {
@@ -4972,6 +4995,155 @@ mod tests {
         }
         drop(incoming_tx);
         let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn direct_lan_stream_rejects_empty_paired_device_credential() {
+        let state = Arc::new(crate::http_api::AppState::new(test_config(
+            "ksp-lan-auth-test",
+            "KSP LAN Auth Test",
+        )));
+        let (incoming_tx, incoming_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(8);
+        let task = tokio::spawn(handle_stream_channels(
+            incoming_rx,
+            frame_tx,
+            companion_tx,
+            state,
+            AuthMode::RequirePairedDevice,
+        ));
+
+        incoming_tx
+            .send(serde_json::to_string(&ClientFrame::Auth { credential: None }).unwrap())
+            .await
+            .unwrap();
+        let frame = outbound_rx.recv().await.expect("error frame");
+        match frame {
+            ServerFrame::Error { code, .. } => assert_eq!(code, "unauthorized"),
+            other => panic!("expected unauthorized error, got {other:?}"),
+        }
+        drop(incoming_tx);
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn empty_auth_lan_stream_cannot_input_advance_or_close_tasks() {
+        for (index, path) in [
+            "/v1/tasks/task-1/input",
+            "/v1/tasks/task-1/actions/advance-stage",
+            "/v1/tasks/task-1/actions/close",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let state = Arc::new(crate::http_api::AppState::new(test_config(
+                &format!("ksp-lan-privileged-{index}"),
+                "KSP LAN Privileged",
+            )));
+            let (incoming_tx, incoming_rx) = mpsc::channel(8);
+            let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(8);
+            let task = tokio::spawn(handle_stream_channels(
+                incoming_rx,
+                frame_tx,
+                companion_tx,
+                state,
+                AuthMode::RequirePairedDevice,
+            ));
+
+            incoming_tx
+                .send(serde_json::to_string(&ClientFrame::Auth { credential: None }).unwrap())
+                .await
+                .unwrap();
+            incoming_tx
+                .send(
+                    serde_json::to_string(&ClientFrame::Request {
+                        id: index as u64,
+                        method: "POST".into(),
+                        path: path.into(),
+                        body: Some(serde_json::json!({ "message": "must not dispatch" })),
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            match outbound_rx.recv().await.expect("unauthorized frame") {
+                ServerFrame::Error { code, .. } => assert_eq!(code, "unauthorized"),
+                other => panic!("expected unauthorized error, got {other:?}"),
+            }
+            drop(incoming_tx);
+            task.await.unwrap();
+            assert!(
+                outbound_rx.recv().await.is_none(),
+                "unauthenticated request was dispatched for {path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_lan_stream_accepts_paired_device_credential() {
+        let config = test_config("ksp-lan-auth-ok", "KSP LAN Auth OK");
+        let pairing_path = std::path::PathBuf::from(&config.pairing_store_path);
+        let mut pairing_store = crate::pairing::PairingStore::default();
+        pairing_store.add_trusted_device(
+            &config.desktop_id,
+            "phone-1",
+            "Kanna Mobile",
+            &crate::pairing::hash_device_secret("lan-secret"),
+        );
+        pairing_store.save(&pairing_path).unwrap();
+        let state = Arc::new(crate::http_api::AppState::new(config));
+        let (incoming_tx, incoming_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(8);
+        let task = tokio::spawn(handle_stream_channels(
+            incoming_rx,
+            frame_tx,
+            companion_tx,
+            state,
+            AuthMode::RequirePairedDevice,
+        ));
+
+        incoming_tx
+            .send(
+                serde_json::to_string(&ClientFrame::Auth {
+                    credential: Some(
+                        serde_json::json!({
+                            "deviceId": "phone-1",
+                            "deviceSecret": "lan-secret",
+                        })
+                        .to_string(),
+                    ),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outbound_rx.recv().await.expect("auth ok frame"),
+            auth_ok_frame(),
+        );
+        incoming_tx
+            .send(
+                serde_json::to_string(&ClientFrame::Request {
+                    id: 7,
+                    method: "POST".into(),
+                    path: "/v1/tasks/missing-task/input".into(),
+                    body: Some(serde_json::json!({ "message": "authenticated" })),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        match outbound_rx.recv().await.expect("authenticated response") {
+            ServerFrame::Response { id, status, .. } => {
+                assert_eq!(id, 7);
+                assert_ne!(status, 401);
+            }
+            other => panic!("expected authenticated response, got {other:?}"),
+        }
+        drop(incoming_tx);
+        let _ = task.await;
+        let _ = std::fs::remove_file(pairing_path);
     }
 
     #[tokio::test]

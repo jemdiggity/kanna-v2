@@ -480,7 +480,13 @@ describe("createLanTransport", () => {
     const transport = createLanTransport(
       "http://127.0.0.1:48120",
       fetchImpl,
-      socketFactory
+      socketFactory,
+      {
+        deviceCredentials: {
+          deviceId: "phone-1",
+          deviceSecret: "lan-secret"
+        }
+      }
     );
     const events: unknown[] = [];
 
@@ -526,7 +532,13 @@ describe("createLanTransport", () => {
       "ws://127.0.0.1:48120/v1/stream"
     );
     expect(sent).toEqual([
-      { type: "auth" },
+      {
+        type: "auth",
+        credential: JSON.stringify({
+          deviceId: "phone-1",
+          deviceSecret: "lan-secret"
+        })
+      },
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 }
     ]);
     expect(events).toEqual([

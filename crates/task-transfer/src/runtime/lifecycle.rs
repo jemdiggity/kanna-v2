@@ -18,6 +18,9 @@ use crate::protocol::{
 };
 use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalEvent};
 use crate::registry::PeerRegistry;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use rand_core::{OsRng, RngCore};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process;
@@ -120,14 +123,22 @@ impl TransferRuntime {
         }
         let incoming_reservations = Arc::new(Mutex::new(loaded_incoming_reservations));
         let transfer_artifacts = Arc::new(Mutex::new(HashMap::new()));
-        let authenticated_peer_requests =
-            Arc::new(Mutex::new(replay_store.load_authenticated_peer_requests()?));
+        let loaded_authenticated_peer_requests = replay_store.load_authenticated_peer_requests()?;
+        if loaded_authenticated_peer_requests.len() > config.max_authenticated_request_replays {
+            return Err(RuntimeError::InvalidConfig(format!(
+                "replay store contains {} authenticated requests, exceeding configured maximum {}",
+                loaded_authenticated_peer_requests.len(),
+                config.max_authenticated_request_replays,
+            )));
+        }
+        let authenticated_peer_requests = Arc::new(Mutex::new(loaded_authenticated_peer_requests));
         let task_snapshot = Arc::new(Mutex::new(Value::Null));
         let terminal_observers = Arc::new(Mutex::new(HashMap::new()));
         let peer_request_permits = Arc::new(Semaphore::new(config.max_peer_requests));
         let mark_read_peer_request_permits =
             Arc::new(Semaphore::new(config.max_mark_read_peer_requests));
         let request_counter = Arc::new(AtomicU64::new(1));
+        let request_namespace = random_request_namespace();
         let listener_context = ListenerContext {
             self_peer_id: config.peer_id.clone(),
             self_display_name: config.display_name.clone(),
@@ -148,6 +159,7 @@ impl TransferRuntime {
             incoming_reservations: Arc::clone(&incoming_reservations),
             transfer_artifacts: Arc::clone(&transfer_artifacts),
             authenticated_peer_requests,
+            max_authenticated_request_replays: config.max_authenticated_request_replays,
             task_snapshot: Arc::clone(&task_snapshot),
             daemon_dir: config.daemon_dir.clone(),
             db_path: config.db_path.clone(),
@@ -196,6 +208,7 @@ impl TransferRuntime {
             incoming_events: Mutex::new(incoming_receiver),
             receipt_events: Mutex::new(receipt_receiver),
             request_counter,
+            request_namespace,
             listener_task,
             receipt_retry_task,
             registry_entry_path,
@@ -760,6 +773,12 @@ impl TransferRuntime {
         seal_json(&self.identity, &target_public_key, &Value::Object(payload))
             .map_err(RuntimeError::from)
     }
+}
+
+fn random_request_namespace() -> String {
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 fn prune_terminal_observer_tombstones(

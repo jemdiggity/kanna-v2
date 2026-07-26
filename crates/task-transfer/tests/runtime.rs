@@ -2909,7 +2909,7 @@ async fn privileged_lan_read_rejects_replay_before_a_second_owner_action() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn privileged_lan_replay_is_rejected_after_owner_restart() {
+async fn privileged_advance_replay_is_rejected_after_owner_restart() {
     let temp = tempfile::tempdir().unwrap();
     let kanna_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let kanna_port = kanna_listener.local_addr().unwrap().port();
@@ -2948,28 +2948,29 @@ async fn privileged_lan_replay_is_rejected_after_owner_restart() {
         &secondary_identity,
         &parse_public_key(&owner_peer.public_key).unwrap(),
         &json!({
-            "action": "read_task_file",
-            "request_id": "restart-replay-read",
+            "action": "advance_task_stage",
+            "request_id": "restart-replay-advance",
             "issued_at_unix_ms": current_unix_ms(),
             "task_id": "owner-task-1",
-            "path": "src/private.rs",
+            "expected_transition_revision": "run-1",
         }),
     )
     .unwrap();
     let request = json!({
-        "type": "read_task_file",
-        "request_id": "restart-replay-read",
+        "type": "advance_task_stage",
+        "request_id": "restart-replay-advance",
         "requester_peer_id": "peer-secondary",
         "task_id": "owner-task-1",
-        "path": "src/private.rs",
+        "expected_transition_revision": "run-1",
         "sealed_payload": sealed_payload,
     });
     let server = tokio::spawn(serve_task_file_reads(kanna_listener, 2));
 
-    assert!(matches!(
-        send_raw_peer_value(&owner_peer.endpoint, &request).await,
-        PeerResponse::ReadTaskFile { .. }
-    ));
+    let initial = send_raw_peer_value(&owner_peer.endpoint, &request).await;
+    assert!(
+        matches!(initial, PeerResponse::AdvanceTaskStage { .. }),
+        "initial authenticated advance failed: {initial:?}",
+    );
     drop(owner);
     let restarted_owner = TransferRuntime::spawn(
         RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
@@ -2982,7 +2983,7 @@ async fn privileged_lan_replay_is_rejected_after_owner_restart() {
         matches!(
             replay,
             PeerResponse::Error { ref message, .. }
-                if message.contains("replayed authenticated read_task_file request")
+                if message.contains("replayed authenticated advance_task_stage request")
         ),
         "owner restart forgot the authenticated replay: {replay:?}",
     );
@@ -2992,6 +2993,161 @@ async fn privileged_lan_replay_is_rejected_after_owner_restart() {
         "restart replay reached the owner Kanna server",
     );
     drop(restarted_owner);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requester_restart_does_not_reuse_ids_for_authenticated_task_operations() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-owner",
+        "Owner",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    owner
+        .set_task_snapshot(json!({ "tasks": [{ "id": "owner-task-1" }] }))
+        .await
+        .unwrap();
+    let requester_config = RuntimeConfig::for_tests("peer-requester", "Requester", temp.path(), 0);
+    let requester = TransferRuntime::spawn(requester_config.clone())
+        .await
+        .unwrap();
+    pair_peers(&requester, &owner, "peer-owner").await;
+
+    async fn exercise(runtime: &TransferRuntime) {
+        let listing = runtime.list_peer_task_snapshots().await.unwrap();
+        assert_eq!(listing.snapshots.len(), 1, "{:?}", listing.issues);
+
+        runtime
+            .observe_peer_session("peer-owner", "owner-task-1", "restart-lease")
+            .await
+            .unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(1), runtime.next_event())
+            .await
+            .unwrap()
+            .unwrap();
+        let RuntimeEvent::TerminalEvent { event, .. } = event else {
+            panic!("expected terminal error event, got {event:?}");
+        };
+        let kanna_task_transfer::protocol::PeerTerminalEvent::Error { message, .. } = event else {
+            panic!("expected terminal error");
+        };
+        assert!(!message.contains("replayed authenticated"), "{message}");
+
+        for result in [
+            runtime
+                .send_peer_session_input("peer-owner", "owner-task-1", b"x".to_vec())
+                .await,
+            runtime
+                .resize_peer_session("peer-owner", "owner-task-1", 100, 40)
+                .await,
+            runtime.close_peer_task("peer-owner", "owner-task-1").await,
+            runtime
+                .advance_peer_task_stage("peer-owner", "owner-task-1", Some("run-1"))
+                .await,
+            runtime
+                .read_peer_task_file("peer-owner", "owner-task-1", "README.md")
+                .await
+                .map(|_| ()),
+            runtime
+                .mark_peer_task_read("peer-owner", "owner-task-1", 1)
+                .await,
+        ] {
+            let message = result
+                .expect_err("owner adapters are intentionally absent")
+                .to_string();
+            assert!(!message.contains("replayed authenticated"), "{message}");
+        }
+    }
+
+    exercise(&requester).await;
+    drop(requester);
+    let restarted_requester = TransferRuntime::spawn(requester_config).await.unwrap();
+    exercise(&restarted_requester).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn snapshot_replay_window_is_memory_only_and_hard_bounded() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_authenticated_request_replay_limit(2),
+    )
+    .await
+    .unwrap();
+    let requester = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-requester",
+        "Requester",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&requester, &owner, "peer-owner").await;
+
+    assert_eq!(
+        requester
+            .list_peer_task_snapshots()
+            .await
+            .unwrap()
+            .snapshots
+            .len(),
+        1,
+    );
+    assert_eq!(
+        requester
+            .list_peer_task_snapshots()
+            .await
+            .unwrap()
+            .snapshots
+            .len(),
+        1,
+    );
+    let full = requester.list_peer_task_snapshots().await.unwrap();
+    assert!(full.snapshots.is_empty());
+    assert!(full.issues[0].message.contains("replay window is full"));
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-owner", "authenticated-peer-requests",),
+        0,
+        "snapshot polling must not create crash-durable replay records",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_terminal_input_replay_records_stay_memory_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-owner",
+        "Owner",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let requester = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-requester",
+        "Requester",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&requester, &owner, "peer-owner").await;
+
+    for _ in 0..32 {
+        let error = requester
+            .send_peer_session_input("peer-owner", "owner-task-1", b"x".to_vec())
+            .await
+            .expect_err("owner daemon is intentionally absent");
+        assert!(!error.to_string().contains("replayed authenticated"));
+    }
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-owner", "authenticated-peer-requests",),
+        0,
+        "terminal input must not fsync one replay record per keystroke",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

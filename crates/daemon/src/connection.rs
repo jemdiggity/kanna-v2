@@ -1016,7 +1016,7 @@ pub(crate) async fn handle_command(
                 None => match recovery_manager.get_snapshot(&session_id).await {
                     Ok(Some(snapshot)) => {
                         log::info!(
-                            "[snapshot] session={} served from recovery rows={} cols={} cursor=({}, {}) visible={} vt_len={}",
+                            "[snapshot] session={} served from recovery rows={} cols={} cursor=({:?}, {:?}) visible={:?} vt_len={}",
                             session_id,
                             snapshot.rows,
                             snapshot.cols,
