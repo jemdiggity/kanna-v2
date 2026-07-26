@@ -15,6 +15,7 @@ mod repos;
 mod settings;
 mod snapshot;
 mod stage_runs;
+mod task_action_requests;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
@@ -28,9 +29,10 @@ pub use analytics::RepoAnalytics;
 pub use operator_events::NewOperatorEvent;
 #[allow(unused_imports)]
 pub use stage_runs::{
-    FinishedStageRun, PendingStageAction, PendingStageActionTarget, ReplacedStageRunSource,
-    TaskActionState,
+    FinishedStageRun, PendingStageAction, PendingStageActionTarget, PendingTaskActionRequest,
+    ReplacedStageRunSource, TaskActionState,
 };
+pub use task_action_requests::{TaskActionRequestClaim, TaskActionRequestError};
 #[allow(unused_imports)]
 pub use transfers::{
     NewTaskTransfer, NewTaskTransferProvenance, PendingIncomingTransfer, TaskTransfer,
@@ -78,6 +80,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "034_pipeline_item_revision_rounds",
     "035_stage_run_ownership_version",
     "036_pending_stage_action",
+    "037_task_action_request",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1381,6 +1384,25 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
               source_feedback TEXT,
               source_finished_at TEXT,
               created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            "#,
+        )
+    })?;
+
+    run_migration(conn, "037_task_action_request", |conn| {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS task_action_request (
+              idempotency_key TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+              action TEXT NOT NULL,
+              request_json TEXT NOT NULL,
+              successor_run_id TEXT UNIQUE REFERENCES stage_run(id) ON DELETE SET NULL,
+              state TEXT NOT NULL CHECK (state IN ('pending', 'succeeded', 'failed')),
+              http_status INTEGER,
+              response_body TEXT,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
             "#,
         )

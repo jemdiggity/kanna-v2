@@ -1,7 +1,8 @@
 use super::NewStageRun;
 use super::{
     add_column, database_open_flags, run_migration, Db, NewPipelineItem, NewTaskTransfer,
-    NewTaskTransferProvenance, PendingStageActionTarget, CURRENT_SCHEMA_MIGRATIONS,
+    NewTaskTransferProvenance, PendingStageActionTarget, TaskActionRequestClaim,
+    TaskActionRequestError, CURRENT_SCHEMA_MIGRATIONS,
 };
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
@@ -164,7 +165,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "036_pending_stage_action");
+    assert_eq!(latest_migration, "037_task_action_request");
 
     let stage_run_sql: String = db
         .conn
@@ -200,6 +201,16 @@ fn open_creates_and_migrates_fresh_profile_database() {
         )
         .expect("pending stage action schema");
     assert_eq!(pending_action_table, 1);
+    let action_request_table: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name = 'task_action_request'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("task action request schema");
+    assert_eq!(action_request_table, 1);
 
     let _ = std::fs::remove_file(path);
 }
@@ -804,15 +815,20 @@ fn activity_revision_migration_precedes_new_stage_run_migrations() {
         .expect("shipped activity revision migration");
     let ownership = CURRENT_SCHEMA_MIGRATIONS
         .iter()
-        .position(|migration| *migration == "030_stage_run_ownership_version")
+        .position(|migration| *migration == "035_stage_run_ownership_version")
         .expect("stage run ownership migration");
     let pending_action = CURRENT_SCHEMA_MIGRATIONS
         .iter()
         .position(|migration| *migration == "036_pending_stage_action")
         .expect("pending stage action migration");
+    let action_request = CURRENT_SCHEMA_MIGRATIONS
+        .iter()
+        .position(|migration| *migration == "037_task_action_request")
+        .expect("task action request migration");
 
     assert!(activity_revision < ownership);
     assert!(ownership < pending_action);
+    assert!(pending_action < action_request);
 }
 
 #[test]
@@ -879,8 +895,9 @@ fn open_migrates_origin_main_028_activity_revision() {
         .expect("reopen migrated origin/main fixture");
     for migration_id in [
         "029_pipeline_item_activity_revision",
-        "030_stage_run_ownership_version",
+        "035_stage_run_ownership_version",
         "036_pending_stage_action",
+        "037_task_action_request",
     ] {
         let count: i64 = db
             .conn
@@ -1046,12 +1063,12 @@ fn ownership_migration_rolls_back_non_duplicate_alter_errors_and_repairs_on_reop
     super::inject_add_column_failure_once("stage_run", "run_ownership_version");
     assert!(
         Db::open_migrated(&path_string).is_err(),
-        "ALTER TABLE failures other than an existing column must abort migration 030"
+        "ALTER TABLE failures other than an existing column must abort migration 035"
     );
     let repair = Connection::open(&path).expect("reopen failed migration db");
     let migration_recorded: i64 = repair
         .query_row(
-            "SELECT COUNT(*) FROM schema_migrations WHERE id = '030_stage_run_ownership_version'",
+            "SELECT COUNT(*) FROM schema_migrations WHERE id = '035_stage_run_ownership_version'",
             [],
             |row| row.get(0),
         )
@@ -2055,6 +2072,17 @@ fn pending_stage_action_persists_source_snapshot_and_can_restore_it() {
         resumed_from_run_id: None,
     })
     .unwrap();
+    let request_json = r#"{"targetStage":"in progress","summary":"changes","prompt":"fix"}"#;
+    assert_eq!(
+        db.claim_task_action_request(
+            "rollback-revision-key",
+            "task-1",
+            "request-revision",
+            request_json,
+        )
+        .unwrap(),
+        TaskActionRequestClaim::Claimed
+    );
     let expected = db.task_action_state("task-1").unwrap();
     db.replace_current_run_with_pending_action(
         NewStageRun {
@@ -2084,6 +2112,11 @@ fn pending_stage_action_persists_source_snapshot_and_can_restore_it() {
             branch: Some("task-task-1-2"),
             worktree: Some(("wt-task-1", "/tmp/task-1-2", "task-task-1-2")),
             remove_worktree_on_rollback: true,
+            action_request: Some(super::PendingTaskActionRequest {
+                idempotency_key: "rollback-revision-key",
+                success_status: 200,
+                success_response_body: r#"{"taskId":"task-1"}"#,
+            }),
         },
     )
     .unwrap();
@@ -2107,6 +2140,11 @@ fn pending_stage_action_persists_source_snapshot_and_can_restore_it() {
     assert_eq!(source.status, "running");
     assert_eq!(source.result.as_deref(), Some("old result"));
     assert_eq!(source.feedback.as_deref(), Some("old feedback"));
+    assert!(matches!(
+        db.reconcile_task_action_request("rollback-revision-key")
+            .unwrap(),
+        TaskActionRequestClaim::Completed { status: 500, .. }
+    ));
 }
 
 #[test]
@@ -2140,6 +2178,17 @@ fn pending_stage_action_can_land_reserved_successor_atomically() {
         resumed_from_run_id: None,
     })
     .unwrap();
+    let request_json = r#"{"targetStage":"in progress","summary":"changes","prompt":"fix"}"#;
+    assert_eq!(
+        db.claim_task_action_request(
+            "land-revision-key",
+            "task-1",
+            "request-revision",
+            request_json,
+        )
+        .unwrap(),
+        TaskActionRequestClaim::Claimed
+    );
     let expected = db.task_action_state("task-1").unwrap();
     db.replace_current_run_with_pending_action(
         NewStageRun {
@@ -2169,6 +2218,11 @@ fn pending_stage_action_can_land_reserved_successor_atomically() {
             branch: Some("task-task-1-2"),
             worktree: Some(("wt-task-1", "/tmp/task-1-2", "task-task-1-2")),
             remove_worktree_on_rollback: true,
+            action_request: Some(super::PendingTaskActionRequest {
+                idempotency_key: "land-revision-key",
+                success_status: 200,
+                success_response_body: r#"{"taskId":"task-1"}"#,
+            }),
         },
     )
     .unwrap();
@@ -2186,6 +2240,19 @@ fn pending_stage_action_can_land_reserved_successor_atomically() {
     assert_eq!(
         db.get_task_worktree_path("task-1").unwrap().as_deref(),
         Some("/tmp/task-1-2")
+    );
+    assert_eq!(
+        db.claim_task_action_request(
+            "land-revision-key",
+            "task-1",
+            "request-revision",
+            request_json,
+        )
+        .unwrap(),
+        TaskActionRequestClaim::Completed {
+            status: 200,
+            body: r#"{"taskId":"task-1"}"#.to_string(),
+        }
     );
 }
 
@@ -3036,4 +3103,54 @@ fn revision_rounds_count_agent_rounds_until_reset() {
         .try_claim_agent_revision_round("missing-task", 3)
         .is_err());
     assert!(db.reset_task_revision_rounds("missing-task").is_err());
+}
+
+#[test]
+fn task_action_request_claims_once_replays_results_and_rejects_key_reuse() {
+    let path = Db::test_db_path("task-action-request-claim");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Revise task",
+        Some("Revise Task"),
+        "review",
+        "2026-07-26T00:00:00Z",
+    )
+    .expect("task");
+    let request = r#"{"targetStage":"in progress","summary":"changes","prompt":"fix"}"#;
+
+    assert_eq!(
+        db.claim_task_action_request("revision-key-1", "task-1", "request-revision", request)
+            .expect("claim request"),
+        TaskActionRequestClaim::Claimed
+    );
+    assert_eq!(
+        db.claim_task_action_request("revision-key-1", "task-1", "request-revision", request)
+            .expect("repeat pending request"),
+        TaskActionRequestClaim::Pending
+    );
+    assert!(matches!(
+        db.claim_task_action_request(
+            "revision-key-1",
+            "task-1",
+            "request-revision",
+            r#"{"targetStage":"review","summary":"different","prompt":"different"}"#,
+        ),
+        Err(TaskActionRequestError::Conflict)
+    ));
+
+    db.finish_task_action_request("revision-key-1", "succeeded", 200, r#"{"taskId":"task-1"}"#)
+        .expect("finish request");
+    assert_eq!(
+        db.claim_task_action_request("revision-key-1", "task-1", "request-revision", request)
+            .expect("replay request"),
+        TaskActionRequestClaim::Completed {
+            status: 200,
+            body: r#"{"taskId":"task-1"}"#.to_string(),
+        }
+    );
+
+    let _ = std::fs::remove_file(path);
 }

@@ -1089,30 +1089,26 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
     .unwrap();
     drop(db);
 
+    let request_body = serde_json::json!({
+        "targetStage": "in progress",
+        "summary": "missing title coverage",
+        "prompt": "Add E2E coverage for title preservation."
+    })
+    .to_string();
     let app = super::router(Arc::new(super::AppState::new(config.clone())));
     let response = app
         .oneshot(
             Request::post("/v1/tasks/review-task/actions/request-revision")
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "targetStage": "in progress",
-                        "summary": "missing title coverage",
-                        "prompt": "Add E2E coverage for title preservation."
-                    })
-                    .to_string(),
-                ))
+                .header("idempotency-key", "revision-response-loss")
+                .body(Body::from(request_body.clone()))
                 .unwrap(),
         )
         .await
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let created: TaskActionResponse = from_slice(&body).unwrap();
-    assert_eq!(created.task_id, "review-task");
+    drop(response); // Simulate a client losing the accepted response.
 
     // Durable revision: the SAME task keeps its identity and title; only the
     // stage moves back and a new run carries the revision feedback. The
@@ -1132,6 +1128,59 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
     );
 
     daemon_server.await.unwrap();
+    let run_count_after_accept = db.list_stage_runs_for_task("review-task").unwrap().len();
+    drop(db);
+
+    // A new AppState simulates a server restart. Replaying the same key
+    // returns the durable result without touching the daemon or creating a
+    // second revision run/workspace.
+    let restarted = super::router(Arc::new(super::AppState::new(config.clone())));
+    let replay = restarted
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/review-task/actions/request-revision")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "revision-response-loss")
+                .body(Body::from(request_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay_body = axum::body::to_bytes(replay.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let created: TaskActionResponse = from_slice(&replay_body).unwrap();
+    assert_eq!(created.task_id, "review-task");
+    let db = Db::open(&config.db_path).unwrap();
+    assert_eq!(
+        db.list_stage_runs_for_task("review-task").unwrap().len(),
+        run_count_after_accept,
+        "response replay must not create a second revision"
+    );
+    let key_reuse = restarted
+        .oneshot(
+            Request::post("/v1/tasks/review-task/actions/request-revision")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "revision-response-loss")
+                .body(Body::from(
+                    serde_json::json!({
+                        "targetStage": "review",
+                        "summary": "different request",
+                        "prompt": "This must not reuse the accepted key."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(key_reuse.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        db.list_stage_runs_for_task("review-task").unwrap().len(),
+        run_count_after_accept
+    );
+
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir_all(&daemon_dir);
     let _ = std::fs::remove_dir_all(&repo_root);

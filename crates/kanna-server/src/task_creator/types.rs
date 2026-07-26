@@ -267,6 +267,7 @@ pub(crate) struct PreparedStageRunSpawn {
     pub(super) source_completion_status: &'static str,
     pub(super) source_completion_result: Option<String>,
     pub(super) source_completion_feedback: Option<String>,
+    pub(super) action_request_key: Option<String>,
 }
 
 /// Detached best-effort cleanup for a workspace that the task is leaving.
@@ -293,6 +294,10 @@ impl PreparedStageRunSpawn {
         self.source_completion_status = status;
         self.source_completion_result = result;
         self.source_completion_feedback = feedback;
+    }
+
+    pub(crate) fn set_action_request_key(&mut self, key: String) {
+        self.action_request_key = Some(key);
     }
 
     /// The freshly created workspace, when this run forked one.

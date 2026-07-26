@@ -1378,6 +1378,7 @@ fn seed_pending_startup_action(config: &Config) {
             branch: Some("task-task-1-2"),
             worktree: Some(("wt-task-1", "/tmp/task-1-2", "task-task-1-2")),
             remove_worktree_on_rollback: false,
+            action_request: None,
         },
     )
     .unwrap();

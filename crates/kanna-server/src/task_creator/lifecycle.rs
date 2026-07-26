@@ -5,7 +5,9 @@ use super::types::{
 };
 use super::worktree::remove_prepared_worktree;
 use crate::daemon_client::DaemonClient;
-use crate::db::{Db, NewStageRun, PendingStageActionTarget, ReplacedStageRunSource};
+use crate::db::{
+    Db, NewStageRun, PendingStageActionTarget, PendingTaskActionRequest, ReplacedStageRunSource,
+};
 use crate::http_api::{try_submit_task_input, TaskInputError};
 use crate::session_replacements::SessionReplacements;
 use kanna_daemon::protocol::{
@@ -412,6 +414,17 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         ),
         PreparedRunWorkspace::Current => (None, None),
     };
+    let action_success_body = prepared
+        .action_request_key
+        .as_ref()
+        .map(|_| {
+            serde_json::to_string(&crate::mobile_api::TaskActionResponse {
+                task_id: task_id.clone(),
+                follow_task: None,
+            })
+        })
+        .transpose()
+        .map_err(|error| format!("failed to serialize task action result: {error}"))?;
     let replaced_source = {
         let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
         match db.replace_current_run_with_pending_action(
@@ -447,6 +460,16 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                     &prepared.workspace,
                     PreparedRunWorkspace::Forked(_)
                 ),
+                action_request: prepared
+                    .action_request_key
+                    .as_deref()
+                    .map(|idempotency_key| PendingTaskActionRequest {
+                        idempotency_key,
+                        success_status: 200,
+                        success_response_body: action_success_body
+                            .as_deref()
+                            .expect("action request response was serialized"),
+                    }),
             },
         ) {
             Ok(source) => source,
@@ -900,6 +923,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
                 branch: None,
                 worktree: None,
                 remove_worktree_on_rollback: false,
+                action_request: None,
             },
         )
         .map_err(|error| {

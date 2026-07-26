@@ -77,6 +77,10 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     taskId: string,
     action: "advance-stage" | "rerun-stage" | "request-revision",
     body?: unknown,
+    options: {
+      idempotencyKey?: string;
+      retryPending?: boolean;
+    } = {},
   ): Promise<Response> {
     const serverBaseUrl = await resolveLocalServerBaseUrl();
     const url = `${serverBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/${action}`;
@@ -85,15 +89,26 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
 
     while (Date.now() < deadline) {
       try {
-        return await fetch(url, {
+        const headers: Record<string, string> = {};
+        if (body != null) headers["Content-Type"] = "application/json";
+        if (options.idempotencyKey != null) {
+          headers["Idempotency-Key"] = options.idempotencyKey;
+        }
+        const response = await fetch(url, {
           method: "POST",
-          ...(body == null
-            ? {}
-            : {
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
-              }),
+          ...(Object.keys(headers).length === 0 ? {} : { headers }),
+          ...(body == null ? {} : { body: JSON.stringify(body) }),
         });
+        if (
+          options.retryPending === true
+          && response.status === 409
+          && response.headers.get("Idempotency-Status") === "pending"
+        ) {
+          lastError = new Error("idempotent request is still pending");
+          await sleep(LOCAL_SERVER_ACTION_RETRY_DELAY_MS);
+          continue;
+        }
+        return response;
       } catch (error) {
         lastError = error;
         await sleep(LOCAL_SERVER_ACTION_RETRY_DELAY_MS);
@@ -364,15 +379,24 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     if (!finishAction) return false;
 
     try {
-      const response = await postTaskAction(taskId, "request-revision", {
-        targetStage: options.targetStage,
-        summary: options.summary,
-        prompt: options.prompt,
-        metadata: options.metadata,
-        // A revision the user asked for is never refused by the agent
-        // revision-round budget, and it hands the budget back.
-        origin: "human",
-      });
+      const idempotencyKey = globalThis.crypto.randomUUID();
+      const response = await postTaskAction(
+        taskId,
+        "request-revision",
+        {
+          targetStage: options.targetStage,
+          summary: options.summary,
+          prompt: options.prompt,
+          metadata: options.metadata,
+          // A revision the user asked for is never refused by the agent
+          // revision-round budget, and it hands the budget back.
+          origin: "human",
+        },
+        {
+          idempotencyKey,
+          retryPending: true,
+        },
+      );
       if (!response.ok) {
         throw new Error(await response.text());
       }

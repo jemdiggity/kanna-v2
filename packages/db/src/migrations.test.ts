@@ -6,6 +6,7 @@ describe("database package migrations", () => {
     const initialSchema = await readFile("src/migrations/001_initial.sql", "utf8");
 
     expect(initialSchema).toMatch(/CREATE TABLE IF NOT EXISTS repo \([\s\S]*sort_order INTEGER NOT NULL DEFAULT 0/);
+    expect(initialSchema).toMatch(/CREATE TABLE IF NOT EXISTS task_action_request \(/);
   });
 
   it("includes the durable pipeline item activity revision", async () => {

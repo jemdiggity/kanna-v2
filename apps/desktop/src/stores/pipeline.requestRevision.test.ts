@@ -61,6 +61,9 @@ describe("requestRevision", () => {
   beforeEach(() => {
     invokeMock.mockResolvedValue(null);
     resolveBaseUrlMock.mockResolvedValue("http://127.0.0.1:48120");
+    vi.stubGlobal("crypto", {
+      randomUUID: vi.fn(() => "revision-key-1"),
+    });
   });
 
   afterEach(() => {
@@ -83,7 +86,10 @@ describe("requestRevision", () => {
     expect(result).toBe(false);
     expect(fetchMock).toHaveBeenCalledWith("http://127.0.0.1:48120/v1/tasks/task-1/actions/request-revision", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": "revision-key-1",
+      },
       body: JSON.stringify({
         targetStage: "in progress",
         summary: "needs changes",
@@ -113,6 +119,52 @@ describe("requestRevision", () => {
     expect(result).toBe(true);
     expect(reloadSnapshot).toHaveBeenCalledTimes(1);
     expect(toastError).not.toHaveBeenCalled();
+  });
+
+  it("reuses one idempotency key after an accepted response is lost", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("connection closed after acceptance"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ taskId: "task-1" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { api, reloadSnapshot } = makeApi();
+
+    await expect(api.requestRevision("task-1", {
+      targetStage: "in progress",
+      summary: "needs changes",
+      prompt: "Please revise.",
+    })).resolves.toBe(true);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const call of fetchMock.mock.calls) {
+      expect(call[1]).toEqual(expect.objectContaining({
+        headers: expect.objectContaining({
+          "Idempotency-Key": "revision-key-1",
+        }),
+      }));
+    }
+    expect(reloadSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries only an explicitly pending idempotent revision response", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("idempotent request is still pending", {
+        status: 409,
+        headers: { "Idempotency-Status": "pending" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ taskId: "task-1" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { api, reloadSnapshot } = makeApi();
+
+    await expect(api.requestRevision("task-1", {
+      targetStage: "in progress",
+      summary: "needs changes",
+      prompt: "Please revise.",
+    })).resolves.toBe(true);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(reloadSnapshot).toHaveBeenCalledTimes(1);
   });
 
   it("returns false without posting when the task is missing or closed", async () => {

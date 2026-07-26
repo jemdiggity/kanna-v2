@@ -82,3 +82,16 @@ CREATE TABLE IF NOT EXISTS settings (
 INSERT OR IGNORE INTO settings (key, value) VALUES ('suspendAfterMinutes', '5');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('killAfterMinutes', '30');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('ideCommand', 'code');
+
+CREATE TABLE IF NOT EXISTS task_action_request (
+    idempotency_key TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    successor_run_id TEXT UNIQUE REFERENCES stage_run(id) ON DELETE SET NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'succeeded', 'failed')),
+    http_status INTEGER,
+    response_body TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

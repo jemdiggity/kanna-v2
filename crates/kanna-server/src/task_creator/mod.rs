@@ -969,6 +969,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         source_completion_status: "succeeded",
         source_completion_result: None,
         source_completion_feedback: None,
+        action_request_key: None,
     })
 }
 

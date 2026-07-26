@@ -40,6 +40,13 @@ pub struct PendingStageActionTarget<'a> {
     pub branch: Option<&'a str>,
     pub worktree: Option<(&'a str, &'a str, &'a str)>,
     pub remove_worktree_on_rollback: bool,
+    pub action_request: Option<PendingTaskActionRequest<'a>>,
+}
+
+pub struct PendingTaskActionRequest<'a> {
+    pub idempotency_key: &'a str,
+    pub success_status: u16,
+    pub success_response_body: &'a str,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -457,6 +464,29 @@ impl Db {
                         .and_then(|source| source.finished_at.as_deref()),
                 ],
             )?;
+            if let Some(request) = target.action_request {
+                let linked = transaction.execute(
+                    "UPDATE task_action_request
+                     SET successor_run_id = ?2,
+                         http_status = ?3,
+                         response_body = ?4,
+                         updated_at = datetime('now')
+                     WHERE idempotency_key = ?1
+                       AND task_id = ?5
+                       AND state = 'pending'
+                       AND successor_run_id IS NULL",
+                    params![
+                        request.idempotency_key,
+                        run.id,
+                        request.success_status,
+                        request.success_response_body,
+                        run.task_id,
+                    ],
+                )?;
+                if linked == 0 {
+                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                }
+            }
         }
         transaction.commit()?;
         Ok(replaced_source)
@@ -1009,6 +1039,12 @@ impl Db {
         if run_changed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
+        transaction.execute(
+            "UPDATE task_action_request
+             SET state = 'succeeded', updated_at = datetime('now')
+             WHERE successor_run_id = ?1 AND state = 'pending'",
+            [run_id],
+        )?;
         transaction.execute(
             "DELETE FROM pending_stage_action WHERE successor_run_id = ?1",
             [run_id],

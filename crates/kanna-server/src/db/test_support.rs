@@ -165,7 +165,19 @@ impl Db {
                 source_result TEXT,
                 source_feedback TEXT,
                 source_finished_at TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+              created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE task_action_request (
+              idempotency_key TEXT PRIMARY KEY,
+              task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+              action TEXT NOT NULL,
+              request_json TEXT NOT NULL,
+              successor_run_id TEXT UNIQUE REFERENCES stage_run(id) ON DELETE SET NULL,
+              state TEXT NOT NULL CHECK (state IN ('pending', 'succeeded', 'failed')),
+              http_status INTEGER,
+              response_body TEXT,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE INDEX idx_stage_run_task_started ON stage_run(task_id, started_at);
 
