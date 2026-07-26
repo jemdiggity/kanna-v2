@@ -89,6 +89,108 @@ async fn authenticated_request_epoch(endpoint: &str) -> String {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unauthenticated_peer_connection_has_a_read_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_millis(50)),
+    )
+    .await
+    .unwrap();
+    let mut slow = TcpStream::connect(runtime_endpoint(temp.path(), "peer-primary"))
+        .await
+        .unwrap();
+    let mut byte = [0u8; 1];
+
+    let read = tokio::time::timeout(Duration::from_millis(250), slow.read(&mut byte))
+        .await
+        .expect("slow unauthenticated peer retained a listener task")
+        .unwrap();
+
+    assert_eq!(read, 0, "listener should close a pre-auth slowloris socket");
+    drop(runtime);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_peer_request_is_closed_without_a_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let mut stream = TcpStream::connect(runtime_endpoint(temp.path(), "peer-primary"))
+        .await
+        .unwrap();
+
+    stream.write_all(&vec![b'a'; 64 * 1024 + 1]).await.unwrap();
+    stream.shutdown().await.unwrap();
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        stream.read_to_end(&mut response),
+    )
+    .await
+    .expect("oversized unauthenticated request retained a listener task")
+    .unwrap();
+
+    assert!(
+        response.is_empty(),
+        "oversized input reached JSON dispatch: {}",
+        String::from_utf8_lossy(&response),
+    );
+    drop(runtime);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peer_listener_rejects_connections_beyond_its_hard_cap() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_secs(2)),
+    )
+    .await
+    .unwrap();
+    let endpoint = runtime_endpoint(temp.path(), "peer-primary");
+    let mut held = Vec::new();
+    for _ in 0..32 {
+        held.push(TcpStream::connect(&endpoint).await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut rejected = TcpStream::connect(&endpoint).await.unwrap();
+    rejected
+        .write_all(b"{\"type\":\"get_authenticated_request_epoch\",\"request_id\":\"over-cap\"}\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    let read_result = tokio::time::timeout(
+        Duration::from_millis(250),
+        rejected.read_to_end(&mut response),
+    )
+    .await
+    .expect("over-cap peer connection was not rejected promptly");
+    if let Err(error) = read_result {
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionReset,
+            "unexpected over-cap read error: {error}",
+        );
+    }
+
+    assert!(
+        response.is_empty(),
+        "over-cap connection reached request dispatch: {}",
+        String::from_utf8_lossy(&response),
+    );
+    drop(held);
+    drop(runtime);
+}
+
 async fn accept_authenticated_request(
     listener: &TcpListener,
     epoch: &str,
@@ -955,6 +1057,67 @@ async fn copied_cloud_peer_identity_does_not_authorize_plaintext_lan_snapshot_ac
     assert!(
         !spoof_contact.await.unwrap(),
         "plaintext task snapshot was sent using external cloud trust"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lan_snapshot_polling_never_opens_a_cloud_only_external_route() {
+    let temp = tempfile::tempdir().unwrap();
+    let cloud_identity = TransferIdentity::generate();
+    let cloud_public_key = public_key_to_string(&cloud_identity.public_key);
+    let cloud_proxy = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let cloud_endpoint = cloud_proxy.local_addr().unwrap().to_string();
+    let contacts = std::sync::Arc::new(AtomicU64::new(0));
+    let observed_contacts = std::sync::Arc::clone(&contacts);
+    let proxy = tokio::spawn(async move {
+        while let Ok(Ok((_stream, _))) =
+            tokio::time::timeout(Duration::from_millis(250), cloud_proxy.accept()).await
+        {
+            observed_contacts.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let runtime = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_millis(50)),
+    )
+    .await
+    .unwrap();
+    PeerStore::new(trusted_peer_store_path(temp.path(), "peer-primary"))
+        .upsert(PeerRecord {
+            peer_id: "peer-cloud".into(),
+            display_name: "Cloud Mac".into(),
+            public_key: cloud_public_key.clone(),
+            capabilities_json:
+                "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                    .into(),
+            paired_at: "2026-07-27T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+    runtime
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-cloud".into(),
+            display_name: "Cloud Mac".into(),
+            endpoint: cloud_endpoint,
+            public_key: cloud_public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    for _ in 0..2 {
+        let listing = runtime.list_peer_task_snapshots().await.unwrap();
+        assert!(listing.snapshots.is_empty());
+        assert!(listing.issues.is_empty());
+    }
+    proxy.await.unwrap();
+
+    assert_eq!(
+        contacts.load(Ordering::Relaxed),
+        0,
+        "one-second LAN polling must not amplify into relay proxy connections",
     );
 }
 
@@ -5215,6 +5378,103 @@ async fn destination_can_finalize_outgoing_transfer_after_approval() {
         json!("019d-final")
     );
     assert!(finalized.finalized_cleanly);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_outgoing_finalization_retry_joins_one_desktop_operation() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = std::sync::Arc::new(
+        TransferRuntime::spawn(
+            RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0)
+                .with_peer_request_timeout(Duration::from_millis(250)),
+        )
+        .await
+        .unwrap(),
+    );
+    let primary = std::sync::Arc::new(
+        TransferRuntime::spawn(RuntimeConfig::for_tests(
+            "peer-primary",
+            "Primary",
+            temp.path(),
+            0,
+        ))
+        .await
+        .unwrap(),
+    );
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source")
+        .await
+        .unwrap();
+    primary
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-secondary",
+                "task": { "source_task_id": "task-source" }
+            }),
+        )
+        .await
+        .unwrap();
+    let _incoming = next_incoming_transfer_request(&secondary).await;
+
+    let first_error = secondary
+        .finalize_outgoing_transfer(&preflight.transfer_id)
+        .await
+        .expect_err("first request should time out while desktop finalization is slow");
+    assert!(
+        first_error.to_string().contains("timed out"),
+        "unexpected first finalization error: {first_error}",
+    );
+    let first_event = primary.next_event().await.unwrap();
+    let RuntimeEvent::OutgoingTransferFinalizationRequested(first_event) = first_event else {
+        panic!("expected one outgoing finalization event");
+    };
+    assert_eq!(first_event.transfer_id, preflight.transfer_id);
+
+    let retry_runtime = std::sync::Arc::clone(&secondary);
+    let retry_transfer_id = preflight.transfer_id.clone();
+    let retry = tokio::spawn(async move {
+        retry_runtime
+            .finalize_outgoing_transfer(&retry_transfer_id)
+            .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), primary.next_event())
+            .await
+            .is_err(),
+        "retry emitted a second destructive desktop finalization event",
+    );
+
+    let expected = kanna_task_transfer::runtime::FinalizedOutgoingTransfer {
+        payload: json!({
+            "task": {
+                "source_task_id": "task-source",
+                "resume_session_id": "019d-final-single-flight",
+            }
+        }),
+        finalized_cleanly: true,
+    };
+    primary
+        .complete_outgoing_transfer_finalization(&preflight.transfer_id, Ok(expected.clone()))
+        .await
+        .unwrap();
+
+    assert_eq!(retry.await.unwrap().unwrap(), expected);
+    assert_eq!(
+        secondary
+            .finalize_outgoing_transfer(&preflight.transfer_id)
+            .await
+            .unwrap(),
+        expected,
+        "post-completion retry should use the cached finalization result",
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), primary.next_event())
+            .await
+            .is_err(),
+        "cached retry emitted another desktop finalization event",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

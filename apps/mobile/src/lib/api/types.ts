@@ -10,6 +10,9 @@ export interface MobileServerStatus {
   lanHost: string;
   lanPort: number;
   pairingCode: string | null;
+  /** Optional direct-stream epoch. Absence identifies desktops that expose
+   * only the legacy `/v1/stream` endpoint. */
+  kspStreamVersion?: number;
 }
 
 export interface DesktopDescriptor {

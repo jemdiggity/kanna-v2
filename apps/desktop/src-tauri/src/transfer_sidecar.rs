@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, EventTarget, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{oneshot, Mutex};
@@ -879,7 +879,26 @@ fn spawn_reader(
             };
 
             if let Some(event_name) = forwarded_event_name(&value) {
-                let _ = app.emit(event_name, &value);
+                if is_single_consumer_lifecycle_event(event_name) {
+                    let labels = app.webview_windows().into_keys().collect();
+                    if let Some(label) = authoritative_lifecycle_window_label(labels) {
+                        if let Err(error) =
+                            app.emit_to(EventTarget::webview_window(&label), event_name, &value)
+                        {
+                            eprintln!(
+                                "[transfer-sidecar] failed emitting {} to {}: {}",
+                                event_name, label, error
+                            );
+                        }
+                    } else {
+                        eprintln!(
+                            "[transfer-sidecar] dropped {} because no webview window is available",
+                            event_name
+                        );
+                    }
+                } else {
+                    let _ = app.emit(event_name, &value);
+                }
                 continue;
             }
 
@@ -949,6 +968,22 @@ fn forwarded_event_name(value: &Value) -> Option<&'static str> {
         Some("terminal_event") => Some("transfer-terminal-event"),
         _ => None,
     }
+}
+
+fn is_single_consumer_lifecycle_event(event_name: &str) -> bool {
+    matches!(
+        event_name,
+        "outgoing-transfer-committed" | "outgoing-transfer-finalization-requested"
+    )
+}
+
+fn authoritative_lifecycle_window_label(mut labels: Vec<String>) -> Option<String> {
+    labels.sort();
+    labels
+        .iter()
+        .position(|label| label == "main")
+        .map(|index| labels.remove(index))
+        .or_else(|| labels.into_iter().next())
 }
 
 #[cfg(test)]
@@ -1383,6 +1418,33 @@ mod tests {
             forwarded_event_name(&value),
             Some("outgoing-transfer-finalization-requested")
         );
+    }
+
+    #[test]
+    fn lifecycle_events_select_exactly_one_authoritative_window() {
+        assert_eq!(
+            authoritative_lifecycle_window_label(vec![
+                "window-z".to_string(),
+                "main".to_string(),
+                "window-a".to_string(),
+            ]),
+            Some("main".to_string()),
+        );
+        assert_eq!(
+            authoritative_lifecycle_window_label(vec![
+                "window-z".to_string(),
+                "window-a".to_string(),
+            ]),
+            Some("window-a".to_string()),
+        );
+        assert_eq!(authoritative_lifecycle_window_label(Vec::new()), None);
+        assert!(is_single_consumer_lifecycle_event(
+            "outgoing-transfer-committed"
+        ));
+        assert!(is_single_consumer_lifecycle_event(
+            "outgoing-transfer-finalization-requested"
+        ));
+        assert!(!is_single_consumer_lifecycle_event("pairing-completed"));
     }
 
     #[test]

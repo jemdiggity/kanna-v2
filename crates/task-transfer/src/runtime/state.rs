@@ -99,8 +99,17 @@ pub(super) struct AuthenticatedPeerRequestReplay {
     pub(super) durable: bool,
 }
 
+pub(super) type CachedOutgoingTransferFinalization = Result<FinalizedOutgoingTransfer, String>;
+
+pub(super) enum OutgoingTransferFinalizationState {
+    Pending {
+        waiters: Vec<oneshot::Sender<CachedOutgoingTransferFinalization>>,
+    },
+    Completed(CachedOutgoingTransferFinalization),
+}
+
 pub(super) type PendingOutgoingTransferFinalizations =
-    Arc<Mutex<HashMap<String, oneshot::Sender<Result<FinalizedOutgoingTransfer, RuntimeError>>>>>;
+    Arc<Mutex<HashMap<String, OutgoingTransferFinalizationState>>>;
 
 pub(super) type PendingPairingRequests = Arc<Mutex<HashMap<String, PendingPairingRequest>>>;
 
@@ -134,6 +143,8 @@ pub(super) struct ListenerContext {
     pub(super) external_peers: ExternalPeerRegistry,
     pub(super) pending_transfer_ttl: Duration,
     pub(super) peer_request_timeout: Duration,
+    pub(super) incoming_connection_permits: Arc<Semaphore>,
+    pub(super) max_peer_request_bytes: usize,
     pub(super) pending_pairing_requests: PendingPairingRequests,
     pub(super) pending_task_pull_requests: PendingTaskPullRequests,
     pub(super) outgoing_transfers: Arc<Mutex<HashMap<String, OutgoingTransferReservation>>>,

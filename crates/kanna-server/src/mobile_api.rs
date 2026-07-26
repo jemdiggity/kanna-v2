@@ -50,6 +50,8 @@ pub struct MobileServerStatus {
     pub lan_host: String,
     pub lan_port: u16,
     pub pairing_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ksp_stream_version: Option<u8>,
 }
 
 pub struct MobileApi {
@@ -845,6 +847,7 @@ pub fn build_mobile_server_status(
         lan_host: config.lan_host.clone(),
         lan_port: config.lan_port,
         pairing_code,
+        ksp_stream_version: Some(2),
     }
 }
 
@@ -1530,6 +1533,7 @@ mod tests {
         assert_eq!(status_json["version"], "0.0.69");
         assert_eq!(status_json["environment"], "production");
         assert_eq!(status_json["serverVersion"], "0.0.69");
+        assert_eq!(status_json["kspStreamVersion"], 2);
         assert_eq!(status.pairing_code.as_deref(), Some("ABC123"));
     }
 

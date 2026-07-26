@@ -336,23 +336,29 @@ impl TransferRuntime {
         transfer_id: &str,
         result: Result<FinalizedOutgoingTransfer, RuntimeError>,
     ) -> Result<(), RuntimeError> {
-        let sender = self
-            .pending_outgoing_transfer_finalizations
-            .lock()
-            .await
-            .remove(transfer_id)
-            .ok_or_else(|| {
+        let cached = result.map_err(|error| error.to_string());
+        let waiters = {
+            let mut finalizations = self.pending_outgoing_transfer_finalizations.lock().await;
+            let state = finalizations.get_mut(transfer_id).ok_or_else(|| {
                 RuntimeError::Protocol(format!(
                     "missing pending outgoing transfer finalization {}",
                     transfer_id
                 ))
             })?;
-        sender.send(result).map_err(|_| {
-            RuntimeError::Protocol(format!(
-                "finalization receiver dropped for transfer {}",
-                transfer_id
-            ))
-        })
+            match state {
+                super::state::OutgoingTransferFinalizationState::Pending { waiters } => {
+                    let waiters = std::mem::take(waiters);
+                    *state =
+                        super::state::OutgoingTransferFinalizationState::Completed(cached.clone());
+                    waiters
+                }
+                super::state::OutgoingTransferFinalizationState::Completed(_) => return Ok(()),
+            }
+        };
+        for waiter in waiters {
+            let _ = waiter.send(cached.clone());
+        }
+        Ok(())
     }
 
     pub async fn next_event(&self) -> Result<RuntimeEvent, RuntimeError> {

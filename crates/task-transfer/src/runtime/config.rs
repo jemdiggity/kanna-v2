@@ -17,6 +17,8 @@ const DEFAULT_MAX_APPLIED_RECEIPTS: usize = 4096;
 // Incoming reservations are active work until destination acknowledgment
 // completes. Bound admission rather than evicting committed user-pending work.
 const DEFAULT_MAX_INCOMING_RESERVATIONS: usize = 256;
+const DEFAULT_MAX_INCOMING_CONNECTIONS: usize = 32;
+const DEFAULT_MAX_PEER_REQUEST_BYTES: usize = 64 * 1024;
 const DEFAULT_MAX_PEER_REQUESTS: usize = 32;
 const DEFAULT_MAX_MARK_READ_PEER_REQUESTS: usize = 4;
 const DEFAULT_MAX_AUTHENTICATED_REQUEST_REPLAYS: usize = 8_192;
@@ -46,6 +48,8 @@ pub struct RuntimeConfig {
     pub(super) max_unapplied_receipts: usize,
     pub(super) max_applied_receipts: usize,
     pub(super) max_incoming_reservations: usize,
+    pub(super) max_incoming_connections: usize,
+    pub(super) max_peer_request_bytes: usize,
     pub(super) mark_read_timeout: Duration,
     pub(super) max_peer_requests: usize,
     pub(super) max_mark_read_peer_requests: usize,
@@ -78,6 +82,8 @@ impl RuntimeConfig {
             max_unapplied_receipts: DEFAULT_MAX_UNAPPLIED_RECEIPTS,
             max_applied_receipts: DEFAULT_MAX_APPLIED_RECEIPTS,
             max_incoming_reservations: DEFAULT_MAX_INCOMING_RESERVATIONS,
+            max_incoming_connections: DEFAULT_MAX_INCOMING_CONNECTIONS,
+            max_peer_request_bytes: DEFAULT_MAX_PEER_REQUEST_BYTES,
             mark_read_timeout: Duration::from_secs(2),
             max_peer_requests: DEFAULT_MAX_PEER_REQUESTS,
             max_mark_read_peer_requests: DEFAULT_MAX_MARK_READ_PEER_REQUESTS,
@@ -258,6 +264,8 @@ impl RuntimeConfig {
             max_unapplied_receipts: DEFAULT_MAX_UNAPPLIED_RECEIPTS,
             max_applied_receipts: DEFAULT_MAX_APPLIED_RECEIPTS,
             max_incoming_reservations: DEFAULT_MAX_INCOMING_RESERVATIONS,
+            max_incoming_connections: DEFAULT_MAX_INCOMING_CONNECTIONS,
+            max_peer_request_bytes: DEFAULT_MAX_PEER_REQUEST_BYTES,
             mark_read_timeout: Duration::from_secs(2),
             max_peer_requests: DEFAULT_MAX_PEER_REQUESTS,
             max_mark_read_peer_requests: DEFAULT_MAX_MARK_READ_PEER_REQUESTS,

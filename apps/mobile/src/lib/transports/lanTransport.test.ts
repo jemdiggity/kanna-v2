@@ -463,8 +463,23 @@ describe("createLanTransport", () => {
     );
   });
 
-  it("observes task terminal output over the LAN KSP websocket route without decoding bytes", () => {
-    const fetchImpl = vi.fn<FetchLike>();
+  it("uses the advertised current KSP stream epoch for terminal output", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        state: "running",
+        desktopId: "desktop-1",
+        desktopName: "Studio Mac",
+        version: "1.2.3",
+        environment: "production",
+        serverVersion: "1.2.3",
+        lanHost: "0.0.0.0",
+        lanPort: 48120,
+        pairingCode: null,
+        kspStreamVersion: 2
+      })
+    });
     const sent: ClientFrame[] = [];
     const socket: WebSocketLike = {
       send: vi.fn((payload: string) => {
@@ -490,6 +505,7 @@ describe("createLanTransport", () => {
     );
     const events: unknown[] = [];
 
+    await transport.getStatus();
     const subscription = transport.observeTaskTerminal("task-1", (event) => {
       events.push(event);
     });
@@ -557,6 +573,52 @@ describe("createLanTransport", () => {
       expect.objectContaining({ text: expect.any(String) })
     );
     expect(socket.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the legacy v1 stream when a previous server omits the KSP epoch", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        state: "running",
+        desktopId: "desktop-legacy",
+        desktopName: "Previous Studio Mac",
+        version: "1.1.0",
+        environment: "production",
+        serverVersion: "1.1.0",
+        lanHost: "0.0.0.0",
+        lanPort: 48120,
+        pairingCode: null
+      })
+    });
+    const socket: WebSocketLike = {
+      send: vi.fn(),
+      close: vi.fn(),
+      onopen: null,
+      onclose: null,
+      onerror: null,
+      onmessage: null
+    };
+    const socketFactory = vi.fn(() => socket);
+    const transport = createLanTransport(
+      "http://127.0.0.1:48120",
+      fetchImpl,
+      socketFactory,
+      {
+        deviceCredentials: {
+          deviceId: "phone-1",
+          deviceSecret: "lan-secret"
+        }
+      }
+    );
+
+    await transport.getStatus();
+    const subscription = transport.observeTaskTerminal("task-1", () => {});
+
+    expect(socketFactory).toHaveBeenCalledWith(
+      "ws://127.0.0.1:48120/v1/stream"
+    );
+    subscription.close();
   });
 
   it("sends alt-screen scroll bytes as term_input frames over the LAN KSP route", () => {
@@ -646,7 +708,7 @@ describe("createLanTransport", () => {
     subscription.interrupt();
     subscription.close();
 
-    expect(socketFactory).toHaveBeenCalledWith("ws://127.0.0.1:48120/v2/stream");
+    expect(socketFactory).toHaveBeenCalledWith("ws://127.0.0.1:48120/v1/stream");
     expect(sent).toEqual([
       { type: "auth" },
       { type: "attach", task_id: "task-1", kind: "agent", from_seq: 0 },

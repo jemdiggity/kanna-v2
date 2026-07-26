@@ -5027,7 +5027,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn previous_mobile_empty_auth_remains_valid_on_legacy_stream_epoch() {
+    async fn non_loopback_legacy_stream_endpoint_rejects_empty_auth() {
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+            .await
+            .expect("bind non-loopback KSP listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                crate::http_api::test_router("ksp-v1-network-auth", "KSP v1 Network Auth")
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await;
+        });
+        let lan_ip = if_addrs::get_if_addrs()
+            .expect("enumerate network interfaces")
+            .into_iter()
+            .map(|interface| interface.ip())
+            .find(|ip| ip.is_ipv4() && !ip.is_loopback())
+            .expect("test host must expose a non-loopback IPv4 address");
+        let mut socket = ws_connect(&format!("ws://{lan_ip}:{port}/v1/stream")).await;
+
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+
+        assert!(matches!(
+            recv_frame(&mut socket).await,
+            ServerFrame::Error { code, .. } if code == "unauthorized"
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn loopback_empty_auth_remains_valid_for_local_stream_clients() {
         let state = Arc::new(crate::http_api::AppState::new(test_config(
             "ksp-legacy-mobile-auth-test",
             "KSP Legacy Mobile Auth Test",

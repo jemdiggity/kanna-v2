@@ -899,6 +899,7 @@ async fn status_route_does_not_expose_pairing_secret() {
     assert_eq!(status_json["version"], "test-version");
     assert_eq!(status_json["environment"], "development");
     assert_eq!(status_json["serverVersion"], "test-version");
+    assert_eq!(status_json["kspStreamVersion"], 2);
     assert!(status.pairing_code.is_none());
 }
 

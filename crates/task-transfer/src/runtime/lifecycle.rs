@@ -134,6 +134,7 @@ impl TransferRuntime {
         let authenticated_peer_requests = Arc::new(Mutex::new(loaded_authenticated_peer_requests));
         let task_snapshot = Arc::new(Mutex::new(Value::Null));
         let terminal_observers = Arc::new(Mutex::new(HashMap::new()));
+        let incoming_connection_permits = Arc::new(Semaphore::new(config.max_incoming_connections));
         let peer_request_permits = Arc::new(Semaphore::new(config.max_peer_requests));
         let mark_read_peer_request_permits =
             Arc::new(Semaphore::new(config.max_mark_read_peer_requests));
@@ -149,6 +150,8 @@ impl TransferRuntime {
             external_peers: Arc::clone(&external_peers),
             pending_transfer_ttl: config.pending_transfer_ttl,
             peer_request_timeout: config.peer_request_timeout,
+            incoming_connection_permits,
+            max_peer_request_bytes: config.max_peer_request_bytes,
             pending_pairing_requests: Arc::clone(&pending_pairing_requests),
             pending_task_pull_requests: Arc::clone(&pending_task_pull_requests),
             outgoing_transfers: Arc::clone(&outgoing_transfers),
@@ -240,7 +243,16 @@ impl TransferRuntime {
     }
 
     pub async fn list_peer_task_snapshots(&self) -> Result<PeerTaskSnapshotListing, RuntimeError> {
-        let peers = self.list_peers().await?;
+        // Remote cloud tasks arrive through the Firestore subscription. Keep
+        // the one-second LAN refresh on discovery routes only so a registered
+        // external peer cannot turn polling into repeated relay tunnels.
+        let peers = self
+            .discovery
+            .list_peers(&self.config.peer_id)
+            .await?
+            .into_iter()
+            .map(|peer| self.discovered_peer(peer))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut snapshots = Vec::new();
         let mut issues = Vec::new();
         for peer in peers.into_iter().filter(|peer| {

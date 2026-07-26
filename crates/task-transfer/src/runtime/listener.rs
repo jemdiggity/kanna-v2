@@ -15,8 +15,8 @@ use super::pull::{prune_task_pull_requests, validate_source_task_id};
 use super::replay_store::unix_ms;
 use super::state::{
     AuthenticatedPeerRequestReplay, ImportCommitReceipt, IncomingTransferReservation,
-    ListenerContext, OutgoingTransferReservation, PairingDecision, PendingPairingRequest,
-    PendingTaskPullRequest,
+    ListenerContext, OutgoingTransferFinalizationState, OutgoingTransferReservation,
+    PairingDecision, PendingPairingRequest, PendingTaskPullRequest,
 };
 use super::utils::{
     extract_request_id, load_or_create_identity, local_capabilities_json,
@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex};
 
@@ -47,10 +47,15 @@ pub(super) async fn run_listener(listener: TcpListener, context: ListenerContext
             Ok(accepted) => accepted,
             Err(_) => break,
         };
+        let Ok(permit) = Arc::clone(&context.incoming_connection_permits).try_acquire_owned()
+        else {
+            continue;
+        };
 
         let connection_context = context.clone();
 
         tokio::spawn(async move {
+            let _permit = permit;
             let _ = handle_connection(stream, connection_context).await;
         });
     }
@@ -128,13 +133,27 @@ async fn handle_connection(
     context: ListenerContext,
 ) -> Result<(), RuntimeError> {
     let mut line = String::new();
-    let read = {
-        let mut reader = BufReader::new(&mut stream);
-        reader.read_line(&mut line).await?
-    };
+    let read = tokio::time::timeout(context.peer_request_timeout, async {
+        let reader = BufReader::new(&mut stream);
+        let mut bounded = reader.take(context.max_peer_request_bytes as u64 + 1);
+        bounded.read_line(&mut line).await
+    })
+    .await
+    .map_err(|_| {
+        RuntimeError::Protocol(format!(
+            "peer request read timed out after {}ms",
+            context.peer_request_timeout.as_millis(),
+        ))
+    })??;
 
     if read == 0 {
         return Ok(());
+    }
+    if read > context.max_peer_request_bytes || !line.ends_with('\n') {
+        return Err(RuntimeError::Protocol(format!(
+            "peer request exceeds maximum frame size of {} bytes",
+            context.max_peer_request_bytes,
+        )));
     }
 
     let request_id = extract_request_id(&line);
@@ -449,18 +468,24 @@ async fn handle_connection(
             transfer_id,
             requester_peer_id,
         }) => {
-            let transfer_id_for_cleanup = transfer_id.clone();
             match async {
-                let reservation = {
+                let (reservation, expired) = {
                     let mut transfers = context.outgoing_transfers.lock().await;
-                    for expired in
-                        prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl)
-                    {
-                        context.replay_store.remove_reservation(&expired);
+                    let expired =
+                        prune_outgoing_transfers(&mut transfers, context.pending_transfer_ttl);
+                    for expired_transfer_id in &expired {
+                        context.replay_store.remove_reservation(expired_transfer_id);
                     }
-                    transfers.get(&transfer_id).cloned()
+                    (transfers.get(&transfer_id).cloned(), expired)
+                };
+                if !expired.is_empty() {
+                    let mut finalizations =
+                        context.pending_outgoing_transfer_finalizations.lock().await;
+                    for expired_transfer_id in expired {
+                        finalizations.remove(&expired_transfer_id);
+                    }
                 }
-                .ok_or_else(|| {
+                let reservation = reservation.ok_or_else(|| {
                     RuntimeError::Protocol(format!(
                         "missing target peer for outgoing transfer finalization {}",
                         transfer_id
@@ -477,26 +502,55 @@ async fn handle_connection(
                 let requester_peer = trusted_reserved_target(&context, &reservation).await?;
 
                 let (tx, rx) = oneshot::channel();
-                context
-                    .pending_outgoing_transfer_finalizations
-                    .lock()
-                    .await
-                    .insert(transfer_id.clone(), tx);
-                context
-                    .incoming_sender
-                    .send(RuntimeEvent::OutgoingTransferFinalizationRequested(
-                        OutgoingTransferFinalizationRequestedEvent {
-                            transfer_id: transfer_id.clone(),
-                        },
-                    ))
-                    .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
+                let (emit_event, cached) = {
+                    let mut finalizations =
+                        context.pending_outgoing_transfer_finalizations.lock().await;
+                    match finalizations.entry(transfer_id.clone()) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(OutgoingTransferFinalizationState::Pending {
+                                waiters: vec![tx],
+                            });
+                            (true, None)
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            match entry.get_mut() {
+                                OutgoingTransferFinalizationState::Pending { waiters } => {
+                                    waiters.push(tx);
+                                    (false, None)
+                                }
+                                OutgoingTransferFinalizationState::Completed(result) => {
+                                    (false, Some(result.clone()))
+                                }
+                            }
+                        }
+                    }
+                };
+                if emit_event
+                    && context
+                        .incoming_sender
+                        .send(RuntimeEvent::OutgoingTransferFinalizationRequested(
+                            OutgoingTransferFinalizationRequestedEvent {
+                                transfer_id: transfer_id.clone(),
+                            },
+                        ))
+                        .is_err()
+                {
+                    context
+                        .pending_outgoing_transfer_finalizations
+                        .lock()
+                        .await
+                        .remove(&transfer_id);
+                    return Err(RuntimeError::IncomingEventChannelClosed);
+                }
 
-                let result = match rx.await {
-                    Ok(result) => result,
-                    Err(_) => Err(RuntimeError::Protocol(format!(
-                        "desktop finalization receiver dropped for transfer {}",
-                        transfer_id
-                    ))),
+                let result = match cached {
+                    Some(result) => result,
+                    None => rx.await.map_err(|_| {
+                        RuntimeError::Protocol(format!(
+                            "desktop finalization receiver dropped for transfer {}",
+                            transfer_id
+                        ))
+                    })?,
                 };
                 let identity =
                     load_or_create_identity(&context.registry_root, &context.self_peer_id)?;
@@ -517,23 +571,16 @@ async fn handle_connection(
                             sealed_payload,
                         })
                     }
-                    Err(error) => Err(error),
+                    Err(error) => Err(RuntimeError::Protocol(error)),
                 }
             }
             .await
             {
                 Ok(response) => response,
-                Err(error) => {
-                    context
-                        .pending_outgoing_transfer_finalizations
-                        .lock()
-                        .await
-                        .remove(&transfer_id_for_cleanup);
-                    PeerResponse::Error {
-                        request_id,
-                        message: error.to_string(),
-                    }
-                }
+                Err(error) => PeerResponse::Error {
+                    request_id,
+                    message: error.to_string(),
+                },
             }
         }
         Ok(PeerRequest::FetchTransferArtifact {
@@ -755,6 +802,11 @@ async fn handle_connection(
                 context.replay_store.save_receipt(&transfer_id, &receipt)?;
                 context.outgoing_transfers.lock().await.remove(&transfer_id);
                 context.replay_store.remove_reservation(&transfer_id);
+                context
+                    .pending_outgoing_transfer_finalizations
+                    .lock()
+                    .await
+                    .remove(&transfer_id);
                 receipts.insert(transfer_id.clone(), receipt);
                 receipts
                     .get_mut(&transfer_id)
