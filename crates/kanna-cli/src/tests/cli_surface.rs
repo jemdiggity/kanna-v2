@@ -323,18 +323,54 @@ fn tool_call_args_merge_json_and_repeated_args() {
 }
 
 #[test]
-fn generic_complete_stage_tool_call_preserves_explicit_run_id() {
-    let args = bind_stage_run_id(
-        json!({
+fn generic_complete_stage_tool_call_binds_process_owned_run_id_after_resolution() {
+    let request = resolve_tool_request(
+        &kanna_tool_catalog::bundled_catalog(),
+        "kanna_complete_stage",
+        &json!({
             "task_id": "task-current",
             "status": "success",
+            "summary": "done",
             "run_id": "run-explicit"
         }),
         Some("run-from-environment"),
     )
     .unwrap();
 
-    assert_eq!(args["run_id"], json!("run-explicit"));
+    assert_eq!(request.body["runId"], json!("run-from-environment"));
+}
+
+#[test]
+fn generic_complete_stage_tool_call_resolves_old_override_before_binding_run_id() {
+    let mut catalog = kanna_tool_catalog::bundled_catalog();
+    catalog
+        .tools
+        .iter_mut()
+        .find(|tool| tool.name == "kanna_complete_stage")
+        .unwrap()
+        .params
+        .retain(|param| param.name != "run_id");
+
+    let request = resolve_tool_request(
+        &catalog,
+        "kanna_complete_stage",
+        &json!({
+            "task_id": "task-current",
+            "status": "success",
+            "summary": "old override"
+        }),
+        Some("run-from-environment"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        request.body,
+        json!({
+            "status": "success",
+            "summary": "old override",
+            "runId": "run-from-environment"
+        })
+    );
 }
 
 #[test]

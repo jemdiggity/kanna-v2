@@ -48,17 +48,26 @@ pub(crate) fn build_tool_call_args(
     Ok(args)
 }
 
-pub(crate) fn bind_stage_run_id(mut args: Value, run_id: Option<&str>) -> Result<Value, String> {
-    let Some(run_id) = run_id.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(args);
-    };
-    let object = args
-        .as_object_mut()
-        .ok_or_else(|| "tool arguments must be a JSON object".to_string())?;
-    object
-        .entry("run_id".to_string())
-        .or_insert_with(|| Value::String(run_id.to_string()));
-    Ok(args)
+pub(crate) fn resolve_tool_request(
+    catalog: &Catalog,
+    name: &str,
+    args: &Value,
+    stage_run_id: Option<&str>,
+) -> Result<ResolvedRequest, String> {
+    let mut request = resolve_request(catalog, name, args)?;
+    if name == "kanna_complete_stage" {
+        if let Some(run_id) = stage_run_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let body = request
+                .body
+                .as_object_mut()
+                .ok_or_else(|| "resolved tool request body must be a JSON object".to_string())?;
+            body.insert("runId".to_string(), Value::String(run_id.to_string()));
+        }
+    }
+    Ok(request)
 }
 
 pub(crate) async fn execute_catalog_request(
@@ -102,13 +111,8 @@ pub(crate) async fn call_catalog_tool(
     name: &str,
     args: &Value,
 ) -> Result<(ResponseKind, Value), String> {
-    let bound_args = if name == "kanna_complete_stage" {
-        let run_id = env::var("KANNA_STAGE_RUN_ID").ok();
-        bind_stage_run_id(args.clone(), run_id.as_deref())?
-    } else {
-        args.clone()
-    };
-    let request = resolve_request(catalog, name, &bound_args)?;
+    let stage_run_id = env::var("KANNA_STAGE_RUN_ID").ok();
+    let request = resolve_tool_request(catalog, name, args, stage_run_id.as_deref())?;
     let kind = request.kind;
     let value = execute_catalog_request(base_url, request).await?;
     Ok((kind, value))
