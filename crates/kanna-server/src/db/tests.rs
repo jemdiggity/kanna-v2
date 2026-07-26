@@ -917,6 +917,57 @@ fn open_migrates_legacy_frontend_schema_with_backfills() {
 }
 
 #[test]
+fn ownership_migration_rolls_back_non_duplicate_alter_errors_and_repairs_on_reopen() {
+    let path = temp_db_path();
+    let path_string = path.to_string_lossy().to_string();
+    drop(Db::open_migrated(&path_string).expect("seed current schema"));
+    let conn = Connection::open(&path).expect("open migration fault db");
+    conn.execute_batch(
+        r#"
+        DELETE FROM schema_migrations
+        WHERE id IN ('029_stage_run_ownership_version', '030_pending_stage_action');
+        DROP TABLE pending_stage_action;
+        ALTER TABLE stage_run DROP COLUMN run_ownership_version;
+        "#,
+    )
+    .expect("seed migration fault");
+    drop(conn);
+
+    super::inject_add_column_failure_once("stage_run", "run_ownership_version");
+    assert!(
+        Db::open_migrated(&path_string).is_err(),
+        "ALTER TABLE failures other than an existing column must abort migration 029"
+    );
+    let repair = Connection::open(&path).expect("reopen failed migration db");
+    let migration_recorded: i64 = repair
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE id = '029_stage_run_ownership_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        migration_recorded, 0,
+        "failed migration must not commit its schema version"
+    );
+    drop(repair);
+
+    let db = Db::open_migrated(&path_string).expect("reopen should retry and finish migration 029");
+    let repaired_column: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('stage_run')
+             WHERE name = 'run_ownership_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(repaired_column, 1);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn server_connection_opens_with_desktop_like_wal_client_active() {
     let path = temp_db_path();
     let desktop_conn = Connection::open(&path).expect("open desktop-like db");

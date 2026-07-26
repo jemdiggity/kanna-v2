@@ -1,7 +1,87 @@
 use crate::{daemon_client, http_api, session_replacements};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+fn merge_negotiation_events(
+    legacy: VecDeque<kanna_daemon::protocol::Event>,
+    versioned: VecDeque<kanna_daemon::protocol::Event>,
+) -> VecDeque<kanna_daemon::protocol::Event> {
+    fn fingerprints(events: &[kanna_daemon::protocol::Event]) -> Vec<String> {
+        events
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap_or_else(|_| format!("{event:?}")))
+            .collect()
+    }
+
+    fn lcs_lengths(left: &[String], right: &[String]) -> Vec<Vec<usize>> {
+        let mut lengths = vec![vec![0; right.len() + 1]; left.len() + 1];
+        for left_index in (0..left.len()).rev() {
+            for right_index in (0..right.len()).rev() {
+                lengths[left_index][right_index] = if left[left_index] == right[right_index] {
+                    1 + lengths[left_index + 1][right_index + 1]
+                } else {
+                    lengths[left_index + 1][right_index].max(lengths[left_index][right_index + 1])
+                };
+            }
+        }
+        lengths
+    }
+
+    let legacy = legacy.into_iter().collect::<Vec<_>>();
+    let versioned = versioned.into_iter().collect::<Vec<_>>();
+    let legacy_keys = fingerprints(&legacy);
+    let versioned_keys = fingerprints(&versioned);
+    let lengths = lcs_lengths(&versioned_keys, &legacy_keys);
+
+    // Events seen only by a legacy receiver that registered first are a
+    // prefix of the overlap. Keep that prefix ahead of the versioned
+    // chronology rather than guessing that newer version-only events came
+    // first.
+    let mut versioned_index = 0;
+    let mut legacy_index = 0;
+    while versioned_index < versioned.len() && legacy_index < legacy.len() {
+        if versioned_keys[versioned_index] == legacy_keys[legacy_index] {
+            break;
+        }
+        if lengths[versioned_index + 1][legacy_index] >= lengths[versioned_index][legacy_index + 1]
+        {
+            versioned_index += 1;
+        } else {
+            legacy_index += 1;
+        }
+    }
+    if versioned_index == versioned.len() || legacy_index == legacy.len() {
+        return legacy.into_iter().chain(versioned).collect();
+    }
+
+    let mut merged = legacy[..legacy_index].iter().cloned().collect::<Vec<_>>();
+    let remaining_legacy = &legacy[legacy_index..];
+    let remaining_legacy_keys = &legacy_keys[legacy_index..];
+    let lengths = lcs_lengths(&versioned_keys, remaining_legacy_keys);
+    versioned_index = 0;
+    legacy_index = 0;
+    while versioned_index < versioned.len() && legacy_index < remaining_legacy.len() {
+        if versioned_keys[versioned_index] == remaining_legacy_keys[legacy_index] {
+            merged.push(versioned[versioned_index].clone());
+            versioned_index += 1;
+            legacy_index += 1;
+        } else if lengths[versioned_index + 1][legacy_index]
+            >= lengths[versioned_index][legacy_index + 1]
+        {
+            // Ties favor the versioned stream, whose extra provider events
+            // carry the authoritative chronology omitted from legacy.
+            merged.push(versioned[versioned_index].clone());
+            versioned_index += 1;
+        } else {
+            merged.push(remaining_legacy[legacy_index].clone());
+            legacy_index += 1;
+        }
+    }
+    merged.extend(versioned[versioned_index..].iter().cloned());
+    merged.extend(remaining_legacy[legacy_index..].iter().cloned());
+    merged.into()
+}
 
 fn persist_provider_session_id(
     state: &http_api::AppState,
@@ -215,71 +295,103 @@ async fn terminal_state_watcher_once(
 ) -> Result<(), String> {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 
-    let config = state.config();
-    // Register the versioned stream before doing any reconciliation. The
-    // daemon registers its broadcast receiver before acknowledging, so no
-    // provider identity event can fall into a List-then-Subscribe gap.
-    // Legacy daemons reject/close on the unknown command; they never emit the
-    // new provider event variant, so reconnecting with Subscribe is safe.
-    let mut daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
-        .await
-        .map_err(|e| format!("daemon connection failed: {}", e))?;
-    let versioned = daemon
-        .send_command(&DaemonCommand::SubscribeEvents {
-            version: kanna_daemon::protocol::CURRENT_EVENT_STREAM_VERSION,
-        })
-        .await
-        .map_err(|error| error.to_string());
-    match versioned {
-        Ok(DaemonEvent::Ok) => {}
-        Ok(DaemonEvent::Error { message, .. }) => {
-            log::info!("daemon rejected versioned event stream ({message}); using legacy stream");
-            daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
-                .await
-                .map_err(|e| format!("legacy daemon connection failed: {}", e))?;
+    struct SubscriptionAttempt {
+        daemon: daemon_client::DaemonClient,
+        accepted: bool,
+        rejection: Option<String>,
+        buffered: VecDeque<DaemonEvent>,
+    }
+
+    async fn subscribe(
+        mut daemon: daemon_client::DaemonClient,
+        command: DaemonCommand,
+    ) -> Result<SubscriptionAttempt, String> {
+        daemon
+            .send_one_way(&command)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut buffered = VecDeque::new();
+        loop {
             match daemon
-                .send_command(&DaemonCommand::Subscribe)
+                .read_event()
                 .await
-                .map_err(|e| format!("legacy daemon subscribe failed: {}", e))?
+                .map_err(|error| error.to_string())?
             {
-                DaemonEvent::Ok => {}
+                DaemonEvent::Ok => {
+                    return Ok(SubscriptionAttempt {
+                        daemon,
+                        accepted: true,
+                        rejection: None,
+                        buffered,
+                    });
+                }
                 DaemonEvent::Error { message, .. } => {
-                    return Err(format!("legacy daemon subscribe error: {message}"));
+                    return Ok(SubscriptionAttempt {
+                        daemon,
+                        accepted: false,
+                        rejection: Some(message),
+                        buffered,
+                    });
                 }
-                other => {
-                    return Err(format!(
-                        "unexpected legacy daemon subscribe response: {other:?}"
-                    ));
-                }
-            }
-        }
-        Ok(other) => {
-            return Err(format!(
-                "unexpected versioned daemon subscribe response: {other:?}"
-            ));
-        }
-        Err(error) => {
-            log::info!("versioned event stream unavailable ({error}); using legacy stream");
-            daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
-                .await
-                .map_err(|e| format!("legacy daemon connection failed: {}", e))?;
-            match daemon
-                .send_command(&DaemonCommand::Subscribe)
-                .await
-                .map_err(|e| format!("legacy daemon subscribe failed: {}", e))?
-            {
-                DaemonEvent::Ok => {}
-                DaemonEvent::Error { message, .. } => {
-                    return Err(format!("legacy daemon subscribe error: {message}"));
-                }
-                other => {
-                    return Err(format!(
-                        "unexpected legacy daemon subscribe response: {other:?}"
-                    ));
-                }
+                event => buffered.push_back(event),
             }
         }
     }
+
+    let config = state.config();
+    // Start a legacy overlap before awaiting the versioned acknowledgement.
+    // Current daemons accept both and the versioned stream wins; old daemons
+    // can close the unknown versioned connection while the legacy receiver is
+    // already registered and buffering events.
+    let versioned_daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
+        .await
+        .map_err(|e| format!("daemon connection failed: {}", e))?;
+    let legacy_daemon = daemon_client::DaemonClient::connect(&config.daemon_dir)
+        .await
+        .map_err(|e| format!("legacy daemon connection failed: {}", e))?;
+    let (versioned, legacy) = tokio::join!(
+        subscribe(
+            versioned_daemon,
+            DaemonCommand::SubscribeEvents {
+                version: kanna_daemon::protocol::CURRENT_EVENT_STREAM_VERSION,
+            },
+        ),
+        subscribe(legacy_daemon, DaemonCommand::Subscribe),
+    );
+    let legacy = legacy.map_err(|error| format!("legacy daemon subscribe failed: {error}"))?;
+    if !legacy.accepted {
+        return Err(format!(
+            "legacy daemon subscribe error: {}",
+            legacy.rejection.unwrap_or_else(|| "rejected".to_string())
+        ));
+    }
+    let SubscriptionAttempt {
+        daemon: legacy_daemon,
+        buffered: legacy_buffered,
+        ..
+    } = legacy;
+    let (mut daemon, mut buffered_events) = match versioned {
+        Ok(versioned) if versioned.accepted => (
+            versioned.daemon,
+            // The legacy overlap may have registered first. Preserve events
+            // received only there before the versioned acknowledgement, and
+            // collapse broadcasts observed by both negotiation streams.
+            merge_negotiation_events(legacy_buffered, versioned.buffered),
+        ),
+        Ok(versioned) => {
+            log::info!(
+                "daemon rejected versioned event stream ({}); using legacy stream",
+                versioned
+                    .rejection
+                    .unwrap_or_else(|| "rejected".to_string())
+            );
+            (legacy_daemon, legacy_buffered)
+        }
+        Err(error) => {
+            log::info!("versioned event stream unavailable ({error}); using legacy stream");
+            (legacy_daemon, legacy_buffered)
+        }
+    };
 
     let mut control = daemon_client::DaemonClient::connect(&config.daemon_dir)
         .await
@@ -315,11 +427,17 @@ async fn terminal_state_watcher_once(
         }
     }
     loop {
-        match daemon
-            .read_event()
-            .await
-            .map_err(|e| format!("daemon read failed: {}", e))?
-        {
+        let (event, buffered_before_list) = match buffered_events.pop_front() {
+            Some(event) => (event, true),
+            None => (
+                daemon
+                    .read_event()
+                    .await
+                    .map_err(|e| format!("daemon read failed: {}", e))?,
+                false,
+            ),
+        };
+        match event {
             DaemonEvent::StatusChanged {
                 session_id,
                 status,
@@ -383,7 +501,26 @@ async fn terminal_state_watcher_once(
             } => {
                 let ownershipless =
                     !strict_run_ownership || ownershipless_sessions.contains_key(&session_id);
-                let ownershipless_run_id = ownershipless_sessions.remove(&session_id).flatten();
+                let ownershipless_run_id = ownershipless_sessions
+                    .remove(&session_id)
+                    .flatten()
+                    .or_else(|| {
+                        if ownershipless && buffered_before_list {
+                            match capture_ownershipless_run_id(state, &session_id) {
+                                Ok(run_id) => run_id,
+                                Err(error) => {
+                                    log::warn!(
+                                        "failed to capture buffered legacy exit ownership for {}: {}",
+                                        session_id,
+                                        error
+                                    );
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        }
+                    });
                 // Consume the replacement entry even when the event is
                 // self-describing — a leftover entry would swallow a future
                 // legitimate Exit for the same session id.
@@ -621,6 +758,17 @@ mod tests {
         }
         write_event(&mut write_half, &DaemonEvent::Ok).await;
 
+        let (legacy_stream, _) = listener.accept().await.unwrap();
+        let (legacy_read, mut legacy_write) = legacy_stream.into_split();
+        let mut legacy_reader = BufReader::new(legacy_read);
+        let mut legacy_line = String::new();
+        legacy_reader.read_line(&mut legacy_line).await.unwrap();
+        match serde_json::from_str::<DaemonCommand>(legacy_line.trim()).unwrap() {
+            DaemonCommand::Subscribe => {}
+            other => panic!("expected overlapping Subscribe command, got {other:?}"),
+        }
+        write_event(&mut legacy_write, &DaemonEvent::Ok).await;
+
         let (control_stream, _) = listener.accept().await.unwrap();
         let (control_read, mut control_write) = control_stream.into_split();
         let mut control_reader = BufReader::new(control_read);
@@ -703,6 +851,162 @@ mod tests {
         .await
         .unwrap();
         server.await.unwrap();
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_keeps_and_deduplicates_overlap_events_when_versioned_stream_wins() {
+        let unique = unique_name("terminal-watcher-versioned-overlap-exit");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        Db::open(&config.db_path)
+            .unwrap()
+            .insert_stage_run(NewStageRun {
+                id: "run-current",
+                task_id: "task-child",
+                stage: "in progress",
+                kind: "main",
+                agent: None,
+                agent_provider: Some("codex"),
+                model: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some("task-child"),
+                provider_session_id: None,
+                cwd: Some("/tmp/task-child"),
+                resumed_from_run_id: None,
+            })
+            .unwrap();
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let exit = DaemonEvent::Exit {
+            session_id: "task-child".to_string(),
+            run_id: None,
+            code: 0,
+            resume_session_id: None,
+            killed: false,
+        };
+        let created = DaemonEvent::SessionCreated {
+            session_id: "task-child".to_string(),
+            run_id: None,
+        };
+
+        let server = tokio::spawn(async move {
+            let (versioned_stream, _) = listener.accept().await.unwrap();
+            let (versioned_read, mut versioned_write) = versioned_stream.into_split();
+            let mut versioned_reader = BufReader::new(versioned_read);
+            let mut line = String::new();
+            versioned_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::SubscribeEvents { .. }
+            ));
+
+            let (legacy_stream, _) = listener.accept().await.unwrap();
+            let (legacy_read, mut legacy_write) = legacy_stream.into_split();
+            let mut legacy_reader = BufReader::new(legacy_read);
+            line.clear();
+            legacy_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::Subscribe
+            ));
+
+            // ProviderSessionChanged is filtered from legacy. It must stay
+            // ahead of the shared Exit/SessionCreated pair when the buffers
+            // are merged, and the shared pair must not be replayed.
+            write_event(
+                &mut versioned_write,
+                &DaemonEvent::ProviderSessionChanged {
+                    session_id: "task-child".to_string(),
+                    run_id: None,
+                    provider_session_id: "provider-before-exit".to_string(),
+                },
+            )
+            .await;
+            write_event(&mut legacy_write, &exit).await;
+            write_event(&mut versioned_write, &exit).await;
+            write_event(&mut legacy_write, &created).await;
+            write_event(&mut versioned_write, &created).await;
+            write_event(&mut legacy_write, &DaemonEvent::Ok).await;
+            write_event(&mut versioned_write, &DaemonEvent::Ok).await;
+
+            let (control_stream, _) = listener.accept().await.unwrap();
+            let (control_read, mut control_write) = control_stream.into_split();
+            let mut control_reader = BufReader::new(control_read);
+            line.clear();
+            control_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            write_event(
+                &mut control_write,
+                &DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        session_id: "task-child".to_string(),
+                        pid: 42,
+                        cwd: "/tmp".to_string(),
+                        state: SessionState::Active,
+                        idle_seconds: 0,
+                        status: kanna_daemon::protocol::SessionStatus::Idle,
+                        kind: Default::default(),
+                        run_id: None,
+                    }],
+                    capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
+                },
+            )
+            .await;
+            write_event(&mut versioned_write, &DaemonEvent::ShuttingDown).await;
+        });
+
+        let state = http_api::AppState::new(config.clone());
+        let mut state_changes = state.subscribe_state_changes();
+        terminal_state_watcher_once(
+            &state,
+            &session_replacements::SessionReplacements::default(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let item = Db::open(&config.db_path)
+            .unwrap()
+            .get_pipeline_item("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.activity.as_deref(), Some("unread"));
+        let provider_session_id: Option<String> = rusqlite::Connection::open(&config.db_path)
+            .unwrap()
+            .query_row(
+                "SELECT provider_session_id FROM stage_run WHERE id = 'run-current'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            provider_session_id.as_deref(),
+            Some("provider-before-exit"),
+            "the version-only provider event must remain ahead of shared lifecycle events"
+        );
+        assert!(matches!(
+            state_changes.try_recv(),
+            Ok(kanna_agent_protocol::ServerFrame::StateChanged {
+                scope: kanna_agent_protocol::StateChangeScope::Tasks
+            })
+        ));
+        assert!(matches!(
+            state_changes.try_recv(),
+            Ok(kanna_agent_protocol::ServerFrame::StateChanged {
+                scope: kanna_agent_protocol::StateChangeScope::Tasks
+            })
+        ));
+        assert!(
+            state_changes.try_recv().is_err(),
+            "shared overlap events must be applied exactly once"
+        );
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
@@ -1946,6 +2250,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn watcher_buffers_legacy_exit_between_versioned_close_and_subscribe_ack() {
+        let unique = unique_name("terminal-watcher-legacy-negotiation-exit");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        Db::open(&config.db_path)
+            .unwrap()
+            .insert_stage_run(NewStageRun {
+                id: "run-current",
+                task_id: "task-child",
+                stage: "in progress",
+                kind: "main",
+                agent: None,
+                agent_provider: Some("codex"),
+                model: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some("task-child"),
+                provider_session_id: None,
+                cwd: Some("/tmp/task-child"),
+                resumed_from_run_id: None,
+            })
+            .unwrap();
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let (versioned_stream, _) = listener.accept().await.unwrap();
+            let (versioned_read, mut versioned_write) = versioned_stream.into_split();
+            let mut versioned_reader = BufReader::new(versioned_read);
+            let mut line = String::new();
+            versioned_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::SubscribeEvents { .. }
+            ));
+            write_event(
+                &mut versioned_write,
+                &DaemonEvent::Error {
+                    code: None,
+                    message: "unknown command".to_string(),
+                },
+            )
+            .await;
+            drop(versioned_write);
+
+            let (legacy_stream, _) = listener.accept().await.unwrap();
+            let (legacy_read, mut legacy_write) = legacy_stream.into_split();
+            let mut legacy_reader = BufReader::new(legacy_read);
+            line.clear();
+            legacy_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::Subscribe
+            ));
+            write_event(
+                &mut legacy_write,
+                &DaemonEvent::Exit {
+                    session_id: "task-child".to_string(),
+                    run_id: None,
+                    code: 0,
+                    resume_session_id: None,
+                    killed: false,
+                },
+            )
+            .await;
+            write_event(&mut legacy_write, &DaemonEvent::Ok).await;
+
+            let Ok(Ok((control_stream, _))) =
+                timeout(Duration::from_secs(2), listener.accept()).await
+            else {
+                return;
+            };
+            let (control_read, mut control_write) = control_stream.into_split();
+            let mut control_reader = BufReader::new(control_read);
+            line.clear();
+            control_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            write_event(
+                &mut control_write,
+                &DaemonEvent::SessionList {
+                    sessions: Vec::new(),
+                    capabilities: None,
+                },
+            )
+            .await;
+            write_event(&mut legacy_write, &DaemonEvent::ShuttingDown).await;
+        });
+
+        terminal_state_watcher_once(
+            &http_api::AppState::new(config.clone()),
+            &session_replacements::SessionReplacements::default(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let db = Db::open(&config.db_path).unwrap();
+        let item = db.get_pipeline_item("task-child").unwrap().unwrap();
+        assert_eq!(item.activity.as_deref(), Some("unread"));
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
     async fn watcher_applies_unattached_idle_from_working_as_unread() {
         let unique = unique_name("terminal-watcher-unattached-idle");
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
@@ -2273,6 +2685,18 @@ mod tests {
                 }
             ));
             write_event(&mut subscriber_write, &DaemonEvent::Ok).await;
+
+            let (legacy_stream, _) = listener.accept().await.unwrap();
+            let (legacy_read, mut legacy_write) = legacy_stream.into_split();
+            let mut legacy_reader = BufReader::new(legacy_read);
+            line.clear();
+            legacy_reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::Subscribe
+            ));
+            write_event(&mut legacy_write, &DaemonEvent::Ok).await;
+
             write_event(
                 &mut subscriber_write,
                 &DaemonEvent::ProviderSessionChanged {

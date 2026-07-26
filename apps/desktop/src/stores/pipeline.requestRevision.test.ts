@@ -133,4 +133,44 @@ describe("requestRevision", () => {
     })).resolves.toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("keeps revision and advance actions single-flight for the same task", async () => {
+    let releaseRequest!: () => void;
+    const responseGate = new Promise<void>((resolve) => {
+      releaseRequest = resolve;
+    });
+    const fetchMock = vi.fn(async () => {
+      await responseGate;
+      return new Response(JSON.stringify({ taskId: "task-1" }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { api, toastError } = makeApi();
+
+    const first = api.requestRevision("task-1", {
+      targetStage: "in progress",
+      summary: "needs changes",
+      prompt: "Please revise.",
+    });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const duplicate = api.requestRevision("task-1", {
+      targetStage: "in progress",
+      summary: "duplicate",
+      prompt: "Do not post this.",
+    });
+    await api.advanceStage("task-1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(duplicate).resolves.toBe(false);
+    expect(toastError).not.toHaveBeenCalled();
+
+    releaseRequest();
+    await expect(first).resolves.toBe(true);
+
+    await expect(api.requestRevision("task-1", {
+      targetStage: "in progress",
+      summary: "retry after completion",
+      prompt: "This action should be accepted.",
+    })).resolves.toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });

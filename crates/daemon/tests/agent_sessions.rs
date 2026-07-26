@@ -299,6 +299,14 @@ echo '{"type":"assistant","message":{"content":[{"type":"text","text":"counted t
 echo '{"type":"result","subtype":"success","duration_ms":5,"num_turns":1,"total_cost_usd":0.01,"usage":{},"session_id":"fake-sess-counted"}'
 "#;
 
+const COUNTED_CODEX_ONE_SHOT_AGENT: &str = r#"#!/bin/sh
+printf '%s\n' "$$" >> "$SPAWN_LOG"
+echo '{"type":"thread.started","thread_id":"fake-thread-counted"}'
+echo '{"type":"turn.started"}'
+echo '{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"counted turn done"}}'
+echo '{"type":"turn.completed","usage":{}}'
+"#;
+
 /// Fake agent for resume persistence. The initial run emits provider session id
 /// `fake-sess-persisted`; a resume run only succeeds if the daemon passes that
 /// id in the provider command line.
@@ -725,6 +733,133 @@ fn input_after_exit_resumes_via_respawn() {
     assert!(resumed
         .iter()
         .any(|e| matches!(e, AgentEvent::AssistantText { text, .. } if text == "turn done")));
+}
+
+#[test]
+fn input_arriving_while_eof_is_reaping_reaches_one_successor_and_is_journaled_once() {
+    let dir = temp_dir("input-during-reap");
+    let script = write_script(
+        &dir,
+        "counted-codex-one-shot.sh",
+        COUNTED_CODEX_ONE_SHOT_AGENT,
+    );
+    let spawn_log = dir.join("spawn.log");
+    let reap_barrier = dir.join("child-reaping-barrier");
+    let exit_state_barrier = dir.join("child-exit-state-barrier");
+    let input_plan_barrier = dir.join("agent-input-plan-barrier");
+    let daemon = DaemonHandle::start_in(&dir);
+
+    let mut conn = daemon.connect();
+    conn.reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    let mut params = spawn_params(&dir, &script, "first prompt");
+    params.agent_provider = AgentProvider::Codex;
+    params.env.insert(
+        "SPAWN_LOG".to_string(),
+        spawn_log.to_string_lossy().into_owned(),
+    );
+    params.env.insert(
+        "KANNA_TEST_CHILD_REAPING_BARRIER".to_string(),
+        reap_barrier.to_string_lossy().into_owned(),
+    );
+    params.env.insert(
+        "KANNA_TEST_CHILD_EXIT_STATE_BARRIER".to_string(),
+        exit_state_barrier.to_string_lossy().into_owned(),
+    );
+    params.env.insert(
+        "KANNA_TEST_AGENT_INPUT_PLAN_BARRIER".to_string(),
+        input_plan_barrier.to_string_lossy().into_owned(),
+    );
+    conn.send(&Command::SpawnAgent {
+        session_id: "agent-reaping".to_string(),
+        params,
+    });
+    conn.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+    conn.send(&Command::AttachAgent {
+        session_id: "agent-reaping".to_string(),
+        from_seq: 0,
+    });
+    conn.recv_until(|event| matches!(event, Event::AgentSnapshot { .. }));
+    conn.collect_agent_events_until(is_turn_completed);
+
+    let barrier_deadline = Instant::now() + Duration::from_secs(5);
+    while !exit_state_barrier.join("before-reaping").exists() {
+        assert!(
+            Instant::now() < barrier_deadline,
+            "EOF handler did not pause before publishing reaping state"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    conn.send(&Command::AgentInput {
+        session_id: "agent-reaping".to_string(),
+        text: "revision during reap".to_string(),
+    });
+    while !input_plan_barrier.join("captured").exists() {
+        assert!(
+            Instant::now() < barrier_deadline,
+            "input did not pause before deriving its delivery plan"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Let input planning win the registry race while the per-turn child is
+    // still live. It must wait for exited=true rather than reserving a
+    // successor that cannot pass the install guard.
+    std::fs::write(input_plan_barrier.join("release"), b"").unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        std::fs::read_to_string(&spawn_log).unwrap().lines().count(),
+        1,
+        "input must not respawn before EOF publishes the old child as exited"
+    );
+
+    std::fs::write(exit_state_barrier.join("release"), b"").unwrap();
+    while !reap_barrier.join("reaping").exists() {
+        assert!(
+            Instant::now() < barrier_deadline,
+            "EOF reaping barrier was never reached"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        std::fs::read_to_string(&spawn_log).unwrap().lines().count(),
+        1,
+        "input must wait for the exiting child to finish reaping"
+    );
+    std::fs::write(reap_barrier.join("release"), b"").unwrap();
+
+    let mut saw_ok = false;
+    let mut saw_turn_completed = false;
+    while !saw_ok || !saw_turn_completed {
+        match conn.recv() {
+            Event::Ok => saw_ok = true,
+            Event::AgentEvent { event, .. } if is_turn_completed(&event) => {
+                saw_turn_completed = true;
+            }
+            _ => {}
+        }
+    }
+
+    let journal = std::fs::read_to_string(daemon.journal_path("agent-reaping")).unwrap();
+    let accepted_inputs = journal
+        .lines()
+        .map(|line| serde_json::from_str::<SeqAgentEvent>(line).unwrap())
+        .filter(|entry| {
+            matches!(
+                &entry.event,
+                AgentEvent::UserMessage { text } if text == "revision during reap"
+            )
+        })
+        .count();
+    assert_eq!(accepted_inputs, 1, "accepted input must be journaled once");
+    assert_eq!(
+        std::fs::read_to_string(spawn_log).unwrap().lines().count(),
+        2,
+        "initial child plus exactly one successor should run"
+    );
 }
 
 #[test]

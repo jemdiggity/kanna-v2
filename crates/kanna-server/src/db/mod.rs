@@ -758,6 +758,19 @@ fn run_migration(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static ADD_COLUMN_FAILURE: std::cell::RefCell<Option<(String, String)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn inject_add_column_failure_once(table: &str, column: &str) {
+    ADD_COLUMN_FAILURE.with(|fault| {
+        *fault.borrow_mut() = Some((table.to_string(), column.to_string()));
+    });
+}
+
 fn add_column(
     conn: &Connection,
     table: &str,
@@ -775,6 +788,26 @@ fn add_column(
     )?;
     if column_exists != 0 {
         return Ok(());
+    }
+
+    #[cfg(test)]
+    {
+        let injected = ADD_COLUMN_FAILURE.with(|fault| {
+            let matches = fault
+                .borrow()
+                .as_ref()
+                .is_some_and(|target| target.0 == table && target.1 == column);
+            if matches {
+                fault.borrow_mut().take();
+            }
+            matches
+        });
+        if injected {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                Some(format!("injected ALTER TABLE failure for {table}.{column}")),
+            ));
+        }
     }
 
     let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");

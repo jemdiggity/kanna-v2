@@ -29,6 +29,8 @@ export interface RequestRevisionOptions {
 }
 
 export function createPipelineApi(context: StoreContext): PipelineApi {
+  const pendingTaskActions = new Set<string>();
+
   interface TaskActionResponse {
     taskId: string;
     followTask?: boolean;
@@ -42,6 +44,14 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
 
   function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function beginTaskAction(taskId: string): (() => void) | null {
+    if (pendingTaskActions.has(taskId)) return null;
+    pendingTaskActions.add(taskId);
+    return () => {
+      pendingTaskActions.delete(taskId);
+    };
   }
 
   async function resolveLocalServerBaseUrl(): Promise<string> {
@@ -275,29 +285,32 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       context.toast.warning(context.tt("toasts.stagePostRunning"));
       return;
     }
-    const sourceTaskIsSelected = requireService(context.services.selectedTaskId, "selectedTaskId").value === item.id;
-    const fallbackSelectionId = computeNextVisibleItemId(item.id);
-    const { nextStageName, pendingPostName, closesOnSuccess } = await resolveStageAdvanceProjection(item);
-    debugLog("[pipeline:advanceStage] selection policy", {
-      taskId,
-      currentStage: item.stage,
-      optimisticNextStage: nextStageName,
-      optimisticPendingPost: pendingPostName,
-      closesOnSuccess,
-      initiatedBy: options.initiatedBy ?? "manual",
-      sourceTaskIsSelected,
-      fallbackSelectionId,
-      selectedBefore: context.state.selectedItemId.value,
-    });
-
+    const finishAction = beginTaskAction(taskId);
+    if (!finishAction) return;
     try {
+      const sourceTaskIsSelected = requireService(context.services.selectedTaskId, "selectedTaskId").value === item.id;
+      const fallbackSelectionId = computeNextVisibleItemId(item.id);
+      const { nextStageName, pendingPostName, closesOnSuccess } = await resolveStageAdvanceProjection(item);
+      debugLog("[pipeline:advanceStage] selection policy", {
+        taskId,
+        currentStage: item.stage,
+        optimisticNextStage: nextStageName,
+        optimisticPendingPost: pendingPostName,
+        closesOnSuccess,
+        initiatedBy: options.initiatedBy ?? "manual",
+        sourceTaskIsSelected,
+        fallbackSelectionId,
+        selectedBefore: context.state.selectedItemId.value,
+      });
       await withOptimisticStageAdvance(taskId, nextStageName, pendingPostName, async () => {
         const response = await postTaskAction(taskId, "advance-stage");
         if (!response.ok) {
           const message = await response.text();
           if (response.status === 409) {
-            context.toast.warning(context.tt("mainPanel.taskBlocked"));
-            return;
+            if (message.startsWith("task is blocked:")) {
+              context.toast.warning(context.tt("mainPanel.taskBlocked"));
+              return;
+            }
           }
           throw new Error(message);
         }
@@ -317,6 +330,8 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     } catch (error) {
       console.error("[store] advanceStage: server action failed:", error);
       context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      finishAction();
     }
   }
 
@@ -324,6 +339,8 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     const item = context.state.items.value.find((candidate) => candidate.id === taskId);
     if (!item) return;
     if (item.closed_at != null) return;
+    const finishAction = beginTaskAction(taskId);
+    if (!finishAction) return;
 
     try {
       const response = await postTaskAction(taskId, "rerun-stage");
@@ -334,6 +351,8 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     } catch (error) {
       console.error("[store] rerunStage: server action failed:", error);
       context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      finishAction();
     }
   }
 
@@ -341,6 +360,8 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     const item = context.state.items.value.find((candidate) => candidate.id === taskId);
     if (!item) return false;
     if (item.closed_at != null) return false;
+    const finishAction = beginTaskAction(taskId);
+    if (!finishAction) return false;
 
     try {
       const response = await postTaskAction(taskId, "request-revision", {
@@ -361,6 +382,8 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       console.error("[store] requestRevision: server action failed:", error);
       context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
       return false;
+    } finally {
+      finishAction();
     }
   }
 

@@ -206,6 +206,7 @@ interface StageActionRecorderOptions {
   requestRevisionStatus?: number;
   requestRevisionBody?: string;
   requestRevisionDelayMs?: number;
+  advanceStageDelayMs?: number;
 }
 
 interface DiffLineViewportSnapshot {
@@ -231,6 +232,12 @@ async function installStageActionRecorder(
   await client.executeSync(
     `window.__KANNA_NATIVE_REVIEW_ACTIONS__ = [];
      window.__KANNA_NATIVE_REVIEW_OPTIONS__ = ${JSON.stringify(options)};
+     {
+       const selected = window.__KANNA_E2E__.setupState.selectedItem();
+       window.__KANNA_NATIVE_REVIEW_ITEM__ = selected
+         ? { id: selected.id, stage: selected.stage, pipeline_def: selected.pipeline_def }
+         : null;
+     }
      if (!window.__KANNA_NATIVE_REVIEW_ORIGINAL_FETCH__) {
        window.__KANNA_NATIVE_REVIEW_ORIGINAL_FETCH__ = window.fetch.bind(window);
      }
@@ -244,7 +251,11 @@ async function installStageActionRecorder(
            body,
          });
          const ctx = window.__KANNA_E2E__.setupState;
-         const item = ctx.selectedItem();
+         // Capture the authoritative stage when the recorder is installed.
+         // advanceStage applies its optimistic projection before posting, so
+         // reading selectedItem() here would mistake review -> pr for an
+         // advance originating at pr and model the wrong server transition.
+         const item = window.__KANNA_NATIVE_REVIEW_ITEM__;
          const db = ctx.db.value || ctx.db;
          const recorderOptions = window.__KANNA_NATIVE_REVIEW_OPTIONS__ || {};
          if (item && url.endsWith("/actions/request-revision")) {
@@ -260,6 +271,9 @@ async function installStageActionRecorder(
            }
            await db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["in progress", item.id]);
          } else if (item && url.endsWith("/actions/advance-stage")) {
+           if (recorderOptions.advanceStageDelayMs) {
+             await new Promise((resolve) => setTimeout(resolve, recorderOptions.advanceStageDelayMs));
+           }
            // Model the production engine: a current stage with a post parks
            // the task (stage and closed_at unchanged) behind a running post
            // stage_run; the post's own completion performs the transition.
@@ -1651,7 +1665,11 @@ describe("diff view", () => {
     // budget and resets it, so the UI must mark its origin.
     expect(requestPayload.origin).toBe("human");
     expect(requestPayload.summary).toBe("Please apply both review notes.");
-    expect(requestPayload.prompt).toContain(`Revision requested from review of task-${taskId} @ ${headCommit.slice(0, 8)} (branch diff vs main).`);
+    expect(requestPayload.prompt).toMatch(
+      new RegExp(
+        `Revision requested from review of task-${taskId} @ ${headCommit.slice(0, 8)} \\(branch diff vs (?:origin/)?main\\)\\.`,
+      ),
+    );
     expect(requestPayload.prompt).toContain("native-review-e2e/review.ts:2");
     expect(requestPayload.prompt).toContain("> export const marker002 = 'before-002';");
     expect(requestPayload.prompt).toContain("Change the second marker.");
@@ -1677,6 +1695,25 @@ describe("diff view", () => {
     const callsAfterApprove = await waitForRecordedStageActions(client, 2);
     expect(callsAfterApprove[1].url).toContain(`/v1/tasks/${encodeURIComponent(taskId)}/actions/advance-stage`);
     expect(callsAfterApprove[1].method).toBe("POST");
+    const advanceSettled = await client.executeAsync<boolean>(
+      `const cb = arguments[arguments.length - 1];
+       const read = () => document.querySelector(".verdict-bar .approve");
+       const deadline = Date.now() + 10000;
+       const check = () => {
+         const button = read();
+         if (!button || !button.disabled) {
+           cb(true);
+           return;
+         }
+         if (Date.now() >= deadline) {
+           cb(false);
+           return;
+         }
+         setTimeout(check, 50);
+       };
+       check();`
+    );
+    expect(advanceSettled).toBe(true);
   });
 
   const E2E_PR_APPROVE_PIPELINE_DEF = JSON.stringify({
@@ -1737,7 +1774,7 @@ describe("diff view", () => {
 
   it("parks a pr-stage approve behind the running approve post and keeps approval single-flight", async () => {
     const task = await parkSelectedTaskAtPr(E2E_PR_APPROVE_PIPELINE_DEF);
-    await installStageActionRecorder(client);
+    await installStageActionRecorder(client, { advanceStageDelayMs: 1_500 });
 
     await openDiffModal(client);
     await client.waitForElement(".verdict-bar .approve", 2_000);
@@ -1745,11 +1782,38 @@ describe("diff view", () => {
       `return document.querySelector(".verdict-bar .approve").textContent.trim();`
     );
     expect(approveLabel).toBe("Approve & Merge");
+    const blockedToastsBeforeApprove = await client.executeSync<number>(
+      `return Array.from(document.querySelectorAll(".toast.warning .toast-message"))
+        .filter((element) => (element.textContent || "").includes("Task Blocked"))
+        .length;`
+    );
     await client.click(await client.findElement(".verdict-bar .approve"));
 
     const calls = await waitForRecordedStageActions(client, 1);
     expect(calls[0].url).toContain(`/v1/tasks/${encodeURIComponent(task.id)}/actions/advance-stage`);
     expect(calls[0].method).toBe("POST");
+
+    // The client-side action flight starts before the server responds. Both
+    // the local approve control and the global shortcut stay single-flight.
+    const approveDisabledDuringRequest = await client.executeSync<boolean>(
+      `return document.querySelector(".verdict-bar .approve").disabled;`
+    );
+    expect(approveDisabledDuringRequest).toBe(true);
+    await client.executeSync(
+      `document.querySelector(".verdict-bar .approve").click();`
+    );
+    await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true }));
+    await sleep(100);
+    const callsDuringRequest = await client.executeSync<Array<{ url: string }>>(
+      `return window.__KANNA_NATIVE_REVIEW_ACTIONS__ || [];`
+    );
+    expect(callsDuringRequest).toHaveLength(1);
+    const blockedToastsDuringRequest = await client.executeSync<number>(
+      `return Array.from(document.querySelectorAll(".toast.warning .toast-message"))
+        .filter((element) => (element.textContent || "").includes("Task Blocked"))
+        .length;`
+    );
+    expect(blockedToastsDuringRequest).toBe(blockedToastsBeforeApprove);
 
     // Production: the task stays open at pr while the approve post runs.
     const parkedState = await client.executeAsync<string>(
@@ -1931,6 +1995,99 @@ describe("diff view", () => {
     );
     expect(retainedCommentText).toContain("native-review-e2e/failing-request.ts:12");
     expect(retainedCommentText).toContain("Keep this note after the failed request.");
+  });
+
+  it("keeps request changes single-flight while the revision action is pending", async () => {
+    const taskId = await client.executeSync<string>(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       return ctx.selectedItem().id;`
+    );
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+    await tauriInvoke(client, "run_script", {
+      script: [
+        "mkdir -p native-review-e2e",
+        "printf 'export const singleFlightMarker = true;\\n' > native-review-e2e/single-flight.ts",
+        "git add native-review-e2e/single-flight.ts",
+        "git commit -m 'e2e native review single flight content'",
+      ].join("\n"),
+      cwd: worktreePath,
+      env: {},
+    });
+    await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       const db = ctx.db.value || ctx.db;
+       const item = ctx.selectedItem();
+       db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["review", item.id])
+         .then(function() { return ctx.refreshAllItems(); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + e); });`
+    );
+    await installStageActionRecorder(client, { requestRevisionDelayMs: 1_500 });
+
+    await openDiffModal(client);
+    await setDiffScope(client, "Branch");
+    await waitForDiffText(client, `return text.includes("native-review-e2e/single-flight.ts");`);
+    await addReviewCommentThroughDiffUi(
+      client,
+      "native-review-e2e/single-flight.ts",
+      1,
+      "Send this exactly once.",
+    );
+    await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true, shift: true }));
+    await client.waitForElement(".summary-composer", 2_000);
+    const summaryTextarea = await client.findElement(".summary-composer textarea");
+    const composerFocused = await client.executeSync<boolean>(
+      `return document.activeElement === document.querySelector(".summary-composer textarea");`
+    );
+    expect(composerFocused).toBe(true);
+    await client.sendKeys(summaryTextarea, "Single-flight revision.");
+    const blockedToastsBeforeRevision = await client.executeSync<number>(
+      `return Array.from(document.querySelectorAll(".toast.warning .toast-message"))
+        .filter((element) => (element.textContent || "").includes("Task Blocked"))
+        .length;`
+    );
+    await client.click(await client.findElement(".summary-actions .primary"));
+
+    const disabledWhilePending = await client.executeSync<boolean>(
+      `const button = document.querySelector(".summary-actions .primary");
+       return button instanceof HTMLButtonElement && button.disabled;`
+    );
+    expect(disabledWhilePending).toBe(true);
+    await client.executeSync(
+      `document.querySelector(".summary-actions .primary")?.click();
+       ${buildGlobalKeydownScript({ key: "s", meta: true })}`
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const pendingCalls = await client.executeSync<Array<{ url: string }>>(
+      `return window.__KANNA_NATIVE_REVIEW_ACTIONS__ || [];`
+    );
+    expect(pendingCalls).toHaveLength(1);
+    expect(pendingCalls[0]?.url).toContain(
+      `/v1/tasks/${encodeURIComponent(taskId)}/actions/request-revision`,
+    );
+    const pendingUi = await client.executeSync<{
+      composerOpen: boolean;
+      draft: string;
+      blockedToasts: number;
+    }>(
+      `const textarea = document.querySelector(".summary-composer textarea");
+       return {
+         composerOpen: Boolean(document.querySelector(".summary-composer")),
+         draft: textarea instanceof HTMLTextAreaElement ? textarea.value : "",
+         blockedToasts: Array.from(document.querySelectorAll(".toast.warning .toast-message"))
+           .filter((element) => (element.textContent || "").includes("Task Blocked"))
+           .length,
+       };`
+    );
+    expect(pendingUi).toEqual({
+      composerOpen: true,
+      draft: "Single-flight revision.",
+      blockedToasts: blockedToastsBeforeRevision,
+    });
+
+    await client.waitForNoElement(".summary-composer", 5_000);
+    await waitForReviewCommentCount(client, 0);
   });
 
   it("jumps, edits, and deletes pending review comments from the drawer", async () => {

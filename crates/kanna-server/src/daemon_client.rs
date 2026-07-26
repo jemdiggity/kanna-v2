@@ -139,6 +139,31 @@ impl DaemonClient {
         }
     }
 
+    pub async fn send_one_way(&mut self, cmd: &Command) -> Result<(), Box<dyn std::error::Error>> {
+        if self.poisoned {
+            return Err(
+                "daemon connection unusable after an earlier command timeout; reconnect".into(),
+            );
+        }
+        let json = serde_json::to_string(cmd)?;
+        let write = async {
+            self.writer.write_all(json.as_bytes()).await?;
+            self.writer.write_all(b"\n").await?;
+            self.writer.flush().await
+        };
+        match tokio::time::timeout(self.command_timeout, write).await {
+            Ok(result) => result.map_err(Into::into),
+            Err(_) => {
+                self.poisoned = true;
+                Err(format!(
+                    "daemon command write timed out after {}s (daemon wedged or overloaded)",
+                    self.command_timeout.as_secs()
+                )
+                .into())
+            }
+        }
+    }
+
     pub async fn read_event(&mut self) -> Result<Event, Box<dyn std::error::Error>> {
         let mut line = String::new();
         self.reader.read_line(&mut line).await?;
