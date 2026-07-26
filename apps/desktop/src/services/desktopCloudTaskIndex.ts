@@ -29,6 +29,7 @@ export interface DesktopCloudTaskSnapshot {
   activityRevision?: number;
   status: string;
   hasRunningPost?: boolean;
+  blockedByTaskIds?: string[];
   repo: {
     cloudRepoId: string;
     name: string;
@@ -53,6 +54,7 @@ export interface DesktopCloudSnapshot {
   repos: DesktopCloudRepo[];
   items: PipelineItem[];
   terminalRefs: Record<string, DesktopCloudTerminalRef>;
+  blockedByTaskIds: Record<string, string[]>;
 }
 
 export type DesktopCloudRepo = Repo & {
@@ -113,7 +115,7 @@ export async function listDesktopCloudTasks(
   options: DesktopCloudTaskIndexOptions = {},
 ): Promise<DesktopCloudSnapshot> {
   const firestore = db === undefined ? await getConfiguredDesktopFirestore() : db;
-  if (!firestore) return { repos: [], items: [], terminalRefs: {} };
+  if (!firestore) return { repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} };
 
   const desktopsRef = collection(firestore, "users", uid, "desktops");
   const [desktopSnapshot, activeDesktopIds, currentDesktopId] = await Promise.all([
@@ -175,7 +177,7 @@ export function subscribeDesktopCloudTasks(
     const firestore = await getConfiguredDesktopFirestore();
     if (cancelled) return;
     if (!firestore) {
-      onUpdate({ repos: [], items: [], terminalRefs: {} });
+      onUpdate({ repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} });
       return;
     }
     const desktopsRef = collection(firestore, "users", uid, "desktops");
@@ -223,6 +225,7 @@ export function mapDesktopCloudTasks(
   const reposById = new Map<string, DesktopCloudRepo>();
   const items: PipelineItem[] = [];
   const terminalRefs: Record<string, DesktopCloudTerminalRef> = {};
+  const blockedByTaskIds: Record<string, string[]> = {};
   const localRepoById = new Map(
     (options.localRepos ?? []).map((entry) => [entry.repo.id, entry.repo]),
   );
@@ -270,6 +273,12 @@ export function mapDesktopCloudTasks(
     const itemId = snapshot.cloudTaskId
       ? cloudTaskId(snapshot.cloudTaskId)
       : cloudTaskId(`${snapshot.ownerDesktopId}:${snapshotLocalRepoId}:${snapshot.ownerLocalTaskId}`);
+    const uniqueBlockerIds = [...new Set(
+      (snapshot.blockedByTaskIds ?? []).filter((id) => id.trim().length > 0),
+    )];
+    if (uniqueBlockerIds.length > 0) {
+      blockedByTaskIds[itemId] = uniqueBlockerIds;
+    }
     if (ownerDesktopIsReachable(snapshot.ownerDesktopId, options.activeDesktopIds)) {
       terminalRefs[itemId] = {
         ownerDesktopId: snapshot.ownerDesktopId,
@@ -324,6 +333,7 @@ export function mapDesktopCloudTasks(
     repos: [...reposById.values()],
     items,
     terminalRefs,
+    blockedByTaskIds,
   };
 }
 

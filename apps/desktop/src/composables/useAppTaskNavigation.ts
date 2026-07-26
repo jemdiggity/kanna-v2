@@ -1,6 +1,10 @@
 import { computed, watch, type ComputedRef, type Ref } from "vue";
 import { computedAsync } from "@vueuse/core";
-import type { PipelineItem } from "../types/kanna";
+import type {
+  BlockerTaskStates,
+  PipelineItem,
+  TaskBlocker,
+} from "../types/kanna";
 import {
   fetchDesktopRepoCommands,
   runDesktopRepoCommand,
@@ -81,6 +85,8 @@ interface UseAppTaskNavigationOptions {
   sidebarRef: Ref<InstanceType<typeof Sidebar> | null>;
   sidebarRepos: ComputedRef<SidebarRepoProjection[]>;
   sidebarItems: ComputedRef<SidebarTaskItem[]>;
+  taskBlockers?: ComputedRef<readonly TaskBlocker[]>;
+  blockerTaskStates?: ComputedRef<Readonly<BlockerTaskStates>>;
   workspaceTasksByItemId: ComputedRef<Map<string, WorkspaceTask>>;
   selectedCloudRepoId: Ref<string | null>;
   selectedCloudItemId: Ref<string | null>;
@@ -108,6 +114,8 @@ export function useAppTaskNavigation({
   sidebarRef,
   sidebarRepos,
   sidebarItems,
+  taskBlockers,
+  blockerTaskStates,
   workspaceTasksByItemId,
   selectedCloudRepoId,
   selectedCloudItemId,
@@ -117,6 +125,10 @@ export function useAppTaskNavigation({
   openPeerPicker,
   openPairPeerPicker,
 }: UseAppTaskNavigationOptions) {
+  const effectiveTaskBlockers = taskBlockers
+    ?? computed(() => store.taskBlockers ?? []);
+  const effectiveBlockerTaskStates = blockerTaskStates
+    ?? computed(() => store.blockerTaskStates ?? {});
   let selectionIntentVersion = 0;
 
   function beginSelectionIntent(): number {
@@ -133,8 +145,8 @@ export function useAppTaskNavigation({
     const searchQuery = sidebarRef.value?.searchQuery ?? "";
     const sortOptions = {
       repoId,
-      blockers: store.taskBlockers,
-      blockerTaskStates: store.blockerTaskStates,
+      blockers: effectiveTaskBlockers.value,
+      blockerTaskStates: effectiveBlockerTaskStates.value,
       getStageOrder: store.getStageOrder,
       searchQuery,
     };
@@ -312,9 +324,9 @@ export function useAppTaskNavigation({
     if (itemId === null) return false;
     // Blocker lifecycle state remains available even when closed or hidden
     // blockers are absent from the visible task list.
-    return (store.taskBlockers ?? []).some((blocker) => {
+    return effectiveTaskBlockers.value.some((blocker) => {
       if (blocker.blocked_item_id !== itemId) return false;
-      const blockerState = (store.blockerTaskStates ?? {})[blocker.blocker_item_id]
+      const blockerState = effectiveBlockerTaskStates.value[blocker.blocker_item_id]
         ?? store.items.find((item) => item.id === blocker.blocker_item_id);
       return !blockerState || !isBlockerResolved(blockerState);
     });

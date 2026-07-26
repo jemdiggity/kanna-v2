@@ -30,6 +30,7 @@ import {
 import { remoteTaskClosureAliases, remoteTaskIsLocallyClosed } from "../utils/remoteTaskIdentity";
 import { buildWorkspace, workspaceTaskOwnerTaskId } from "../workspace/buildWorkspace";
 import { createWorkspaceSidebarProjector } from "../workspace/projectWorkspaceTasksForSidebar";
+import { projectWorkspaceBlockers } from "../workspace/projectWorkspaceBlockers";
 import type { WorkspaceTask } from "../workspace/types";
 import type { useKannaStore } from "../stores/kanna";
 import type { WindowWorkspaceController } from "../windowWorkspace";
@@ -59,8 +60,18 @@ const REMOTE_MARK_READ_TIMEOUT_MS = 10_000;
 export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseAppCloudWorkspaceOptions) {
   const desktopAuthSession = ref<DesktopAuthSession | null>(null);
   const desktopAuthState = ref<DesktopAuthState>({ status: "signedOut" });
-  const cloudSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminalRefs: {} });
-  const lanSnapshot = ref<DesktopCloudSnapshot>({ repos: [], items: [], terminalRefs: {} });
+  const cloudSnapshot = ref<DesktopCloudSnapshot>({
+    repos: [],
+    items: [],
+    terminalRefs: {},
+    blockedByTaskIds: {},
+  });
+  const lanSnapshot = ref<DesktopCloudSnapshot>({
+    repos: [],
+    items: [],
+    terminalRefs: {},
+    blockedByTaskIds: {},
+  });
   const locallyClosedRemoteTaskIds = ref<Set<string>>(new Set());
   let unsubscribeDesktopAuth: (() => void) | null = null;
   let cloudTasksUnsubscribe: (() => void) | null = null;
@@ -138,6 +149,10 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
           !remoteTaskIsLocallyClosed({ id: taskId }, ref, locallyClosedRemoteTaskIds.value),
         ),
     ),
+    blockedByTaskIds: {
+      ...cloudSnapshot.value.blockedByTaskIds,
+      ...lanSnapshot.value.blockedByTaskIds,
+    },
   }));
 
   const remoteTaskPins = computed(() => parseRemoteTaskPins(store.snapshotSettings));
@@ -163,6 +178,11 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   const workspaceTasksByItemId = computed(
     () => workspaceSidebarProjection.value.workspaceTasksByItemId,
   );
+  const workspaceBlockers = computed(() => projectWorkspaceBlockers({
+    workspaceTasks: workspace.value.tasks,
+    sidebarItems: workspaceSidebarProjection.value.sidebarItems,
+    workspaceTasksByItemId: workspaceSidebarProjection.value.workspaceTasksByItemId,
+  }));
   const sidebarRepos = computed(() => workspace.value.repos.map((repo) => ({
     id: repo.key,
     path: repo.path ?? "cloud",
@@ -209,6 +229,14 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     workspaceTasksByItemId,
     markTaskRead: markRemoteWorkspaceTaskRead,
   });
+  const selectedRemoteBlockers = computed(() => {
+    const task = selectedWorkspaceTask.value;
+    if (!task || task.owner.kind === "local") return [];
+    return workspaceBlockers.value.blockersByLogicalTaskKey[task.logicalTaskKey] ?? [];
+  });
+  const selectedRemoteTaskIsBlocked = computed(
+    () => selectedRemoteBlockers.value.length > 0,
+  );
   const mainPanelCloudTerminalRef = computed(() => {
     const selectedItemId = selectedCloudItemId.value ?? store.selectedItemId;
     if (!selectedItemId) return null;
@@ -229,14 +257,21 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   function filterClosedRemoteSnapshot(snapshot: DesktopCloudSnapshot): DesktopCloudSnapshot {
     const closedIds = locallyClosedRemoteTaskIds.value;
     if (closedIds.size === 0) return snapshot;
+    const items = snapshot.items.filter((item) =>
+      !remoteTaskIsLocallyClosed(item, snapshot.terminalRefs[item.id], closedIds),
+    );
+    const retainedTaskIds = new Set(items.map((item) => item.id));
     return {
       repos: snapshot.repos,
-      items: snapshot.items.filter((item) =>
-        !remoteTaskIsLocallyClosed(item, snapshot.terminalRefs[item.id], closedIds),
-      ),
+      items,
       terminalRefs: Object.fromEntries(
         Object.entries(snapshot.terminalRefs).filter(([taskId, ref]) =>
           !remoteTaskIsLocallyClosed({ id: taskId }, ref, closedIds),
+        ),
+      ),
+      blockedByTaskIds: Object.fromEntries(
+        Object.entries(snapshot.blockedByTaskIds).filter(([taskId]) =>
+          retainedTaskIds.has(taskId),
         ),
       ),
     };
@@ -313,6 +348,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       repos: snapshot.repos,
       items: snapshot.items,
       terminalRefs: snapshot.terminalRefs ?? {},
+      blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
     };
   }
 
@@ -335,6 +371,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
           repos: snapshot.repos,
           items: snapshot.items,
           terminalRefs: snapshot.terminalRefs ?? {},
+          blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
         };
       },
       {
@@ -365,6 +402,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       repos: snapshot.repos,
       items: snapshot.items,
       terminalRefs: snapshot.terminalRefs ?? {},
+      blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
     };
   }
 
@@ -400,7 +438,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         associatedCloudUsers.clear();
         stopCloudTaskSubscription();
         cloudSnapshotRevision += 1;
-        cloudSnapshot.value = { repos: [], items: [], terminalRefs: {} };
+        cloudSnapshot.value = { repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} };
       }
     });
     void runDesktopAutoSignIn({
@@ -676,6 +714,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     workspace,
     remoteTaskDiagnostics,
     workspaceTasksByItemId,
+    workspaceBlockers,
     sidebarRepos,
     sidebarItems,
     selectedCloudRepo,
@@ -684,6 +723,8 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     mainPanelItem,
     mainPanelIsCloudTask,
     selectedWorkspaceTask,
+    selectedRemoteBlockers,
+    selectedRemoteTaskIsBlocked,
     mainPanelCloudTerminalRef,
     isCloudOnlyRepoId,
     cloudRepoRemoteUrl,

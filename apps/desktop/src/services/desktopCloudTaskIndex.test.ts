@@ -52,6 +52,20 @@ beforeEach(() => {
 });
 
 describe("mapDesktopCloudTasks", () => {
+  it("preserves blocker task ids for workspace projection", () => {
+    const snapshot = mapDesktopCloudTasks([
+      remoteTaskSnapshot({
+        cloudTaskId: "remote-repo-id:task-blocked",
+        ownerLocalTaskId: "task-blocked",
+        blockedByTaskIds: ["task-one", "task-two", "task-one"],
+      }),
+    ]);
+
+    expect(snapshot.blockedByTaskIds).toEqual({
+      "cloud:remote-repo-id:task-blocked": ["task-one", "task-two"],
+    });
+  });
+
   it("maps cloud snapshots into sidebar-compatible repos and tasks", () => {
     const snapshot = mapDesktopCloudTasks([
       {

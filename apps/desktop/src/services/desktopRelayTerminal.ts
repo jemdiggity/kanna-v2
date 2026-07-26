@@ -81,6 +81,26 @@ export interface DesktopRelayTerminalClient {
   markTaskRead(options: MarkRemoteTaskReadOptions): Promise<void>;
 }
 
+function assertSuccessfulTaskAction(
+  response: { status: number; body: unknown },
+  action: string,
+): void {
+  if (response.status >= 200 && response.status < 300) return;
+  const body = response.body;
+  let message: string | null = null;
+  if (typeof body === "string" && body.trim()) {
+    message = body.trim();
+  } else if (body && typeof body === "object") {
+    const candidate = body as { error?: unknown; message?: unknown };
+    if (typeof candidate.error === "string" && candidate.error.trim()) {
+      message = candidate.error.trim();
+    } else if (typeof candidate.message === "string" && candidate.message.trim()) {
+      message = candidate.message.trim();
+    }
+  }
+  throw new Error(message ?? `Remote ${action} failed with HTTP ${response.status}`);
+}
+
 export async function createConfiguredDesktopRelayTerminalClient(): Promise<DesktopRelayTerminalClient | null> {
   const relayUrl = await resolveDesktopRelayUrl();
   if (!relayUrl) return null;
@@ -175,18 +195,20 @@ export function createDesktopRelayTerminalClient({
       clientForDesktop(options.desktopId).sendTermResize(options.taskId, options.cols, options.rows);
     },
     async closeTask(options) {
-      await clientForDesktop(options.desktopId).request(
+      const response = await clientForDesktop(options.desktopId).request(
         "POST",
         `/v1/tasks/${encodeURIComponent(options.taskId)}/actions/close`,
         null,
       );
+      assertSuccessfulTaskAction(response, "task close");
     },
     async advanceStage(options) {
-      await clientForDesktop(options.desktopId).request(
+      const response = await clientForDesktop(options.desktopId).request(
         "POST",
         `/v1/tasks/${encodeURIComponent(options.taskId)}/actions/advance-stage`,
         null,
       );
+      assertSuccessfulTaskAction(response, "stage advance");
     },
     async readTaskFile(options) {
       const response = await clientForDesktop(options.desktopId).request(

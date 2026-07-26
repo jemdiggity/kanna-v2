@@ -56,11 +56,14 @@ function createHarness(options: {
   selectedTaskId?: string | null;
   currentItem?: PipelineItem | null;
   workspaceTask?: WorkspaceTask | null;
+  workspaceTaskBlocked?: boolean;
 } = {}) {
   const openWindow = vi.fn(async () => {});
   const advanceStage = vi.fn(async () => {});
   const navigateBack = vi.fn(async () => {});
   const navigateForward = vi.fn(async () => {});
+  const advanceSelectedRemoteWorkspaceTask = vi.fn(async () => {});
+  const toast = { warning: vi.fn() };
   const store = {
     selectedRepoId: "repo-1",
     selectedItemId: options.selectedSlotId ?? "create:stable",
@@ -71,13 +74,25 @@ function createHarness(options: {
   const { keyboardActions } = useAppKeyboardActions({
     store,
     windowWorkspace: { openWindow },
+    toast,
+    t: (key: string) => key,
     selectedWorkspaceTask: computed(() => options.workspaceTask ?? null),
+    selectedWorkspaceTaskBlocked: computed(() => options.workspaceTaskBlocked ?? false),
+    advanceSelectedRemoteWorkspaceTask,
     currentShortcutContext: computed(() => "main"),
     showShortcutsModal: ref(false),
     navigateBack,
     navigateForward,
   } as unknown as Parameters<typeof useAppKeyboardActions>[0]);
-  return { keyboardActions, openWindow, advanceStage, navigateBack, navigateForward };
+  return {
+    keyboardActions,
+    openWindow,
+    advanceStage,
+    advanceSelectedRemoteWorkspaceTask,
+    navigateBack,
+    navigateForward,
+    toast,
+  };
 }
 
 describe("useAppKeyboardActions durable selection", () => {
@@ -122,6 +137,26 @@ describe("useAppKeyboardActions durable selection", () => {
     keyboardActions.advanceStage();
 
     expect(advanceStage).toHaveBeenCalledWith("task-durable");
+  });
+
+  it("does not advance a selected remote task while its blocker is unresolved", () => {
+    const workspaceTask = remoteWorkspaceTask("cloud:repo:task-remote");
+    workspaceTask.capabilities = {
+      canAdvanceStage: true,
+    } as WorkspaceTask["capabilities"];
+    const {
+      keyboardActions,
+      advanceSelectedRemoteWorkspaceTask,
+      toast,
+    } = createHarness({
+      workspaceTask,
+      workspaceTaskBlocked: true,
+    });
+
+    keyboardActions.advanceStage();
+
+    expect(advanceSelectedRemoteWorkspaceTask).not.toHaveBeenCalled();
+    expect(toast.warning).toHaveBeenCalledWith("mainPanel.taskBlocked");
   });
 
   it("routes history shortcuts through workspace-aware navigation", async () => {

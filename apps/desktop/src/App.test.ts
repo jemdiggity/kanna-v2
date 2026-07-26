@@ -12,6 +12,7 @@ import {
   WINDOW_WORKSPACE_NATIVE_NAVIGATE_TASK_DOWN_EVENT,
   WINDOW_WORKSPACE_NATIVE_NEW_WINDOW_EVENT,
 } from "./windowWorkspace";
+import type { DesktopCloudSnapshot } from "./services/desktopCloudTaskIndex";
 import { updateDesktopServerClientHandlersForTests } from "./services/desktopServerClient";
 import type { DesktopCloudSnapshot } from "./services/desktopCloudTaskIndex";
 
@@ -100,7 +101,7 @@ const desktopCloudTaskSnapshotListeners = vi.hoisted(
 const subscribeDesktopCloudTasksMock = vi.hoisted(() =>
   vi.fn((_uid: string, onSnapshot: (snapshot: DesktopCloudSnapshot) => void) => {
     desktopCloudTaskSnapshotListeners.add(onSnapshot);
-    onSnapshot({ repos: [], items: [], terminalRefs: {} });
+    onSnapshot({ repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} });
     return () => desktopCloudTaskSnapshotListeners.delete(onSnapshot);
   }),
 );
@@ -421,7 +422,12 @@ vi.mock("./services/desktopAuthSdk", () => ({
 
 vi.mock("./services/desktopCloudTaskIndex", () => ({
   listDesktopCloudTasks: cloudTasksMock,
-  mapDesktopCloudTasks: vi.fn((tasks: unknown[]) => ({ repos: [], items: tasks, terminalRefs: {} })),
+  mapDesktopCloudTasks: vi.fn((tasks: unknown[]) => ({
+    repos: [],
+    items: tasks,
+    terminalRefs: {},
+    blockedByTaskIds: {},
+  })),
   subscribeDesktopCloudTasks: subscribeDesktopCloudTasksMock,
 }));
 
@@ -694,6 +700,106 @@ function buildOutgoingTransferFinalizationRequestedEvent() {
     },
   };
 }
+
+function emitDesktopCloudSnapshot(snapshot: DesktopCloudSnapshot): void {
+  for (const listener of desktopCloudTaskSnapshotListeners) {
+    listener(snapshot);
+  }
+}
+
+function buildRemoteBlockedWorkflowSnapshot({
+  blocked,
+  updatedAt,
+}: {
+  blocked: boolean;
+  updatedAt: string;
+}): DesktopCloudSnapshot {
+  const repoId = "cloud:repo-remote";
+  const blockedTaskId = "cloud:repo-remote:task-blocked";
+  const blockerTaskId = "cloud:repo-remote:task-blocker";
+  const taskDefaults = {
+    repo_id: repoId,
+    issue_number: null,
+    issue_title: null,
+    pipeline: "cloud",
+    pipeline_def: null,
+    stage: "in progress",
+    stage_result: null,
+    active_post_action: null,
+    tags: JSON.stringify(["in progress"]),
+    pr_number: null,
+    pr_url: null,
+    closed_at: null,
+    agent_type: "pty",
+    agent_provider: "codex",
+    activity: "idle",
+    activity_changed_at: updatedAt,
+    unread_at: null,
+    port_offset: null,
+    last_output_preview: null,
+    port_env: null,
+    pinned: 0,
+    pin_order: null,
+    base_ref: "origin/main",
+    agent_session_id: null,
+    previous_stage: null,
+    teardown_started_at: null,
+    parent_task_id: null,
+    notify_task_id: null,
+    notified_at: null,
+    created_at: "2026-07-25T00:00:00.000Z",
+    updated_at: updatedAt,
+  } satisfies Partial<PipelineItem>;
+
+  return {
+    repos: [{
+      id: repoId,
+      path: "cloud",
+      name: "Remote Repo",
+      remote_url: "git@github.com:owner/remote-repo.git",
+      remoteUrlHash: "remote-repo-hash",
+      default_branch: "main",
+      hidden: 0,
+      sort_order: 0,
+      created_at: "2026-07-25T00:00:00.000Z",
+      last_opened_at: "2026-07-25T00:00:00.000Z",
+    }],
+    items: [
+      {
+        ...taskDefaults,
+        id: blockedTaskId,
+        prompt: "Advance the remote task",
+        display_name: "Blocked remote task",
+        branch: "task-blocked",
+      } as PipelineItem,
+      {
+        ...taskDefaults,
+        id: blockerTaskId,
+        prompt: "Resolve the remote blocker",
+        display_name: "Remote blocker",
+        branch: "task-blocker",
+      } as PipelineItem,
+    ],
+    terminalRefs: {
+      [blockedTaskId]: {
+        ownerDesktopId: "desktop-owner",
+        ownerLocalRepoId: "repo-owner",
+        ownerLocalTaskId: "task-blocked",
+        transport: "cloud",
+      },
+      [blockerTaskId]: {
+        ownerDesktopId: "desktop-owner",
+        ownerLocalRepoId: "repo-owner",
+        ownerLocalTaskId: "task-blocker",
+        transport: "cloud",
+      },
+    },
+    blockedByTaskIds: blocked
+      ? { [blockedTaskId]: ["task-blocker"] }
+      : {},
+  };
+}
+
 async function mountApp(sidebarStub: typeof SidebarWithRepoStub | typeof SidebarWithoutRepoStub) {
   vi.stubGlobal("__KANNA_MOBILE__", false);
   const { default: App } = await import("./App.vue");
@@ -2985,6 +3091,151 @@ describe("App", () => {
       taskId: "task-owner",
     });
     expect(relayCloseMock).toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("integrates remote blocker snapshots with presentation and owner stage actions", async () => {
+    const SidebarRemoteBlockerStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        taskSlots: { type: Array, default: () => [] },
+        taskBlockers: { type: Array, default: () => [] },
+        blockerNames: { type: Object, default: () => ({}) },
+      },
+      emits: ["select-item"],
+      methods: {
+        isBlocked(taskId: string) {
+          return (this.taskBlockers as Array<{ blocked_item_id: string }>)
+            .some((blocker) => blocker.blocked_item_id === taskId);
+        },
+      },
+      template: `
+        <div data-testid="remote-blocker-sidebar">
+          <button
+            v-for="item in taskSlots"
+            :key="item.slot_id"
+            :data-testid="\`remote-blocker-task-\${item.task_id}\`"
+            :data-blocked="String(isBlocked(item.task_id))"
+            :data-blocker-name="blockerNames[item.task_id] || ''"
+            type="button"
+            @click="$emit('select-item', item.slot_id)"
+          >
+            {{ item.display_name }}
+          </button>
+        </div>
+      `,
+    });
+    const MainPanelRemoteBlockerStub = defineComponent({
+      name: "MainPanel",
+      props: {
+        uiSlot: Object,
+        blocked: Boolean,
+        blockers: { type: Array, default: () => [] },
+        cloudTask: Boolean,
+        cloudTerminalRef: Object,
+      },
+      template: `
+        <div data-testid="remote-blocker-main-panel">
+          <span data-testid="remote-main-blocked">{{ String(blocked) }}</span>
+          <span data-testid="remote-main-blockers">
+            {{ blockers.map((blocker) => blocker.display_name).join("|") }}
+          </span>
+          <span data-testid="remote-main-cloud-task">{{ String(cloudTask) }}</span>
+          <span data-testid="remote-main-stage">{{ uiSlot?.task?.stage || "" }}</span>
+          <span data-testid="remote-main-updated-at">{{ uiSlot?.task?.updated_at || "" }}</span>
+          <span data-testid="remote-main-terminal-task-id">
+            {{ cloudTerminalRef?.ownerLocalTaskId || "" }}
+          </span>
+        </div>
+      `,
+    });
+
+    const wrapper = await mountAppWithOverrides(SidebarRemoteBlockerStub, {
+      MainPanel: MainPanelRemoteBlockerStub,
+    });
+    emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+      blocked: true,
+      updatedAt: "2026-07-25T01:00:00.000Z",
+    }));
+    await flushPromises();
+    await flushPromises();
+
+    const blockedTask = wrapper.get(
+      '[data-testid="remote-blocker-task-cloud:repo-remote:task-blocked"]',
+    );
+    expect(blockedTask.attributes("data-blocked")).toBe("true");
+    expect(blockedTask.attributes("data-blocker-name")).toBe("Remote blocker");
+
+    await blockedTask.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="remote-main-blocked"]').text()).toBe("true");
+    expect(wrapper.get('[data-testid="remote-main-blockers"]').text()).toBe("Remote blocker");
+    expect(wrapper.get('[data-testid="remote-main-cloud-task"]').text()).toBe("true");
+    expect(wrapper.get('[data-testid="remote-main-stage"]').text()).toBe("in progress");
+    expect(wrapper.get('[data-testid="remote-main-terminal-task-id"]').text()).toBe("task-blocked");
+
+    capturedKeyboardActions?.advanceStage();
+    await flushPromises();
+
+    expect(toastWarningMock).toHaveBeenCalledWith("mainPanel.taskBlocked");
+    expect(relayAdvanceStageMock).not.toHaveBeenCalled();
+    expect(relayCloseMock).not.toHaveBeenCalled();
+    expect(store.advanceStage).not.toHaveBeenCalled();
+
+    emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
+      updatedAt: "2026-07-25T01:01:00.000Z",
+    }));
+    await flushPromises();
+    expect(blockedTask.attributes("data-blocked")).toBe("false");
+    expect(wrapper.get('[data-testid="remote-main-blocked"]').text()).toBe("false");
+    relayAdvanceStageMock.mockRejectedValueOnce(
+      Object.assign(new Error("task is blocked: task-blocked"), { status: 409 }),
+    );
+    toastErrorMock.mockClear();
+
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => relayCloseMock.mock.calls.length === 1);
+
+    expect(relayAdvanceStageMock).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-blocked",
+    });
+    expect(toastErrorMock).toHaveBeenCalledWith("task is blocked: task-blocked");
+    expect(relayCloseMock).toHaveBeenCalledTimes(1);
+
+    relayAdvanceStageMock.mockClear();
+    relayCloseMock.mockClear();
+    toastErrorMock.mockClear();
+    emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
+      updatedAt: "2026-07-25T01:02:00.000Z",
+    }));
+    await flushPromises();
+    await flushPromises();
+
+    expect(blockedTask.attributes("data-blocked")).toBe("false");
+    expect(blockedTask.attributes("data-blocker-name")).toBe("");
+    expect(wrapper.get('[data-testid="remote-main-blocked"]').text()).toBe("false");
+    expect(wrapper.get('[data-testid="remote-main-blockers"]').text()).toBe("");
+    expect(wrapper.get('[data-testid="remote-main-stage"]').text()).toBe("in progress");
+    expect(wrapper.get('[data-testid="remote-main-updated-at"]').text()).toBe(
+      "2026-07-25T01:02:00.000Z",
+    );
+    expect(wrapper.get('[data-testid="remote-main-terminal-task-id"]').text()).toBe("task-blocked");
+
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => relayCloseMock.mock.calls.length === 1);
+
+    expect(relayAdvanceStageMock).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-blocked",
+    });
+    expect(toastErrorMock).not.toHaveBeenCalled();
+    expect(relayCloseMock).toHaveBeenCalledTimes(1);
+    expect(store.advanceStage).not.toHaveBeenCalled();
 
     wrapper.unmount();
   });
