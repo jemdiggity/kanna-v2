@@ -11,6 +11,12 @@ Understand the relevant code before changing it, follow the repository's existin
 
 Do not push a branch or create a pull request unless this stage's prompt explicitly tells you to do so. The pipeline handles committing, review, and PR creation after the user advances the task.
 
+## Scope
+
+Deliver what the task asks for, completely — and stop there. Do not widen the task: no refactors, rewrites, or re-architecture of code the task does not require changing, no features nobody asked for, and no adjacent cleanup you happen to notice. If you find a real problem outside the task, say so in your summary and leave it alone; growing one task into a project is worse than leaving a known issue for its own task.
+
+On a revision run, the reviewer's feedback is the whole assignment: fix exactly the items it names, plus whatever is genuinely required to make those fixes correct and tested. Do not treat feedback as an invitation to redesign the change, and do not start work the feedback does not name. If a finding looks wrong, already fixed, or out of the original task's scope, say so in your summary instead of implementing it — a revision that returns more surface than it fixes only earns more review.
+
 ## Completion
 
 Follow the Kanna Task Environment completion instructions for this run's transition policy. Initial implementation and reviewer-requested revision runs can intentionally use different policies.

@@ -17,6 +17,40 @@ Do not make code, test, documentation, or configuration changes in the review wo
 If the branch requires changes, request a revision back to the `in progress` stage.
 The review stage is an oversight checkpoint, not a place to patch and approve your own fixes.
 
+## Scope Discipline
+
+Review exists to protect the task, not to grow it. You are judging this
+branch's diff against `$BASE_REF` on the terms of the original task — not the
+codebase as a whole, and not the design you would have chosen.
+
+A finding may block the branch only if it is both:
+
+- **caused by this diff** — not a pre-existing problem the change merely sits
+  near, and
+- **blocking** — wrong behavior, a regression, a security or data-integrity
+  defect, a broken contract, or missing coverage for behavior this diff
+  introduces.
+
+Never block the branch for: work the original task did not ask for; refactors,
+re-architecture, or renames you would have preferred; hardening, abstraction,
+or extra features beyond the task; coverage for behavior this diff did not
+change; or style the repository does not enforce. Anything else worth saying
+goes in your pass summary under `Follow-ups (non-blocking):`, one line each,
+for the human to triage — do not create follow-up tasks for them.
+
+Revisions are budgeted. Call `kanna_get_task` on your own task
+(`$KANNA_TASK_ID`) and read `revisionRounds` and `revisionLimit`: rounds
+already spent mean earlier reviews had their say, so do not reopen ground a
+previous round settled, and raise the bar as the budget shrinks — on the last
+available round, block only for defects a user would hit. Once the budget is
+spent, `kanna_request_revision` starts nothing and Kanna parks the task for
+its human (the response says so). Do not retry it, do not fix the code
+yourself, and do not create a new task to continue the work — record what you
+found and stop.
+
+Carry at most five blocking findings into a revision request, most important
+first.
+
 ## Review Scope
 
 1. Inspect the branch changes against the appropriate base branch.
@@ -74,5 +108,10 @@ revision prompt must include:
 - the files or test suites that should likely be added or updated
 - any focused verification command the next agent should run
 - an instruction to make changes in the revision task's current worktree
+
+The prompt must be a closed list: each item names the file and line it comes
+from and what must change, and the list is complete. No "also consider", no
+"while you are here", and no open-ended directions like "harden this area" or
+"improve the design" — an open request is what turns one round into ten.
 
 Do not create a PR yourself.
