@@ -305,6 +305,13 @@ while IFS= read -r line; do
 done
 "#;
 
+/// Fake persistent agent that accepts stdin but emits no provider events.
+/// This keeps the first post-attach fan-out deterministic for stall tests.
+const QUIET_STDIN_AGENT: &str = r#"#!/bin/sh
+read -r first
+while IFS= read -r line; do :; done
+"#;
+
 /// Fake codex agent: starts a turn, then blocks until signaled. Codex has no
 /// stdin protocol, so the daemon interrupts it with SIGINT (the path that used
 /// to be misreported as a crash). Keep the blocker in shell builtins because
@@ -760,6 +767,65 @@ fn persistent_input_captured_before_kill_cannot_reach_or_journal_successor() {
         !journal.contains("must stay with old run"),
         "stale input was journaled after replacement: {journal}"
     );
+}
+
+#[test]
+fn stalled_agent_client_does_not_block_unrelated_agent_operations() {
+    let dir = temp_dir("stalled-agent-client");
+    let script = write_script(&dir, "quiet-stdin-agent.sh", QUIET_STDIN_AGENT);
+    let barrier = dir.join("agent-writer-barrier");
+    let daemon = DaemonHandle::start_in_with_env(
+        &dir,
+        &[("KANNA_TEST_AGENT_WRITER_BARRIER", barrier.to_str().unwrap())],
+    );
+
+    let mut stalled = daemon.connect();
+    stalled.send(&Command::SpawnAgent {
+        session_id: "agent-stalled".to_string(),
+        params: spawn_params(&dir, &script, "stalled initial prompt"),
+    });
+    stalled.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+    stalled.send(&Command::AttachAgent {
+        session_id: "agent-stalled".to_string(),
+        from_seq: 0,
+    });
+    stalled.recv_until(|event| matches!(event, Event::AgentSnapshot { .. }));
+
+    let mut independent = daemon.connect();
+    independent.send(&Command::SpawnAgent {
+        session_id: "agent-independent".to_string(),
+        params: spawn_params(&dir, &script, "independent initial prompt"),
+    });
+    independent.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
+
+    stalled.send(&Command::AgentInput {
+        session_id: "agent-stalled".to_string(),
+        text: "block this client writer".to_string(),
+    });
+    let barrier_deadline = Instant::now() + Duration::from_secs(5);
+    while !barrier.join("blocked").exists() {
+        assert!(
+            Instant::now() < barrier_deadline,
+            "agent client writer never reached the stall barrier"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    independent
+        .reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(750)))
+        .unwrap();
+    independent.send(&Command::AgentSetModel {
+        session_id: "agent-independent".to_string(),
+        model: "independent-model".to_string(),
+    });
+    assert!(
+        matches!(independent.recv(), Event::Ok),
+        "an unrelated agent operation waited behind the stalled client"
+    );
+
+    std::fs::write(barrier.join("release"), b"").unwrap();
 }
 
 #[test]

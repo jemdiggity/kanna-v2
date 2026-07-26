@@ -6,12 +6,16 @@ mod commands;
 mod lifecycle;
 pub(crate) mod readers;
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, Mutex};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 
 use kanna_agent_protocol::AgentEvent;
-use kanna_daemon::agent::{AgentClientWriter, AgentSessionRecord, AgentShared};
+use kanna_daemon::agent::{
+    AgentClientWriter, AgentEventLine, AgentSessionRecord, AgentShared, AgentSubscriber,
+};
 use kanna_daemon::protocol::{self, Event, SessionStatus};
 
 pub use adoption::adopt_agent_session;
@@ -87,6 +91,8 @@ impl Drop for AgentHandoffSealGuard {
     }
 }
 
+const AGENT_SUBSCRIBER_MAILBOX_MAX_BYTES: usize = 8 * 1024 * 1024;
+
 fn agent_error(code: protocol::ErrorCode, message: impl Into<String>) -> Event {
     Event::Error {
         code: Some(code),
@@ -116,16 +122,174 @@ fn log_warn(message: std::fmt::Arguments<'_>) {
     log::warn!("{message}");
 }
 
-/// Write an event to every attached writer, dropping writers that fail.
-async fn fan_out(writers: &mut Vec<AgentClientWriter>, event: &Event) {
-    let mut alive = Vec::with_capacity(writers.len());
-    for writer in writers.drain(..) {
-        let ok = write_event(&mut *writer.lock().await, event).await.is_ok();
-        if ok {
-            alive.push(writer);
+#[cfg(debug_assertions)]
+async fn wait_at_agent_writer_test_barrier() {
+    let Some(root) = std::env::var_os("KANNA_TEST_AGENT_WRITER_BARRIER") else {
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let _ = std::fs::create_dir_all(root);
+    let _ = std::fs::write(root.join("blocked"), b"");
+    while !root.join("release").exists() {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+fn serialize_agent_event(event: &Event) -> Option<Arc<str>> {
+    match serde_json::to_string(event) {
+        Ok(mut json) => {
+            json.push('\n');
+            Some(Arc::from(json))
+        }
+        Err(error) => {
+            log_error(format_args!(
+                "[agent] failed to serialize client event: {error}"
+            ));
+            None
         }
     }
-    *writers = alive;
+}
+
+fn disconnect_agent_subscriber(subscriber: AgentSubscriber) {
+    subscriber.cancelled.store(true, Ordering::Release);
+    subscriber.writer_task.abort();
+    let writer = subscriber.writer;
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            let _ = writer.lock().await.shutdown().await;
+        })
+        .await;
+    });
+}
+
+fn cancel_agent_subscriber(subscriber: &AgentSubscriber) {
+    subscriber.cancelled.store(true, Ordering::Release);
+}
+
+fn enqueue_agent_event(writers: &mut Vec<AgentSubscriber>, event: &Event) {
+    let Some(line) = serialize_agent_event(event) else {
+        return;
+    };
+    let mut index = 0;
+    while index < writers.len() {
+        let subscriber = &writers[index];
+        let line_bytes = line.len();
+        let pending = subscriber.pending_bytes.load(Ordering::Relaxed);
+        if subscriber.tx.is_closed()
+            || pending.saturating_add(line_bytes) > AGENT_SUBSCRIBER_MAILBOX_MAX_BYTES
+        {
+            disconnect_agent_subscriber(writers.remove(index));
+            continue;
+        }
+        subscriber
+            .pending_bytes
+            .fetch_add(line_bytes, Ordering::Relaxed);
+        if let Err(dropped) = subscriber.tx.send(AgentEventLine {
+            line: Arc::clone(&line),
+            initial_delivery: false,
+            delivered: None,
+        }) {
+            subscriber
+                .pending_bytes
+                .fetch_sub(dropped.0.line.len(), Ordering::Relaxed);
+            disconnect_agent_subscriber(writers.remove(index));
+            continue;
+        }
+        index += 1;
+    }
+}
+
+fn spawn_agent_writer_task(
+    writer: AgentClientWriter,
+    mut rx: mpsc::UnboundedReceiver<AgentEventLine>,
+    pending_bytes: Arc<AtomicUsize>,
+    cancelled: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(mut item) = rx.recv().await {
+            #[cfg(debug_assertions)]
+            if !item.initial_delivery {
+                wait_at_agent_writer_test_barrier().await;
+            }
+            let result = {
+                let mut guard = writer.lock().await;
+                if cancelled.load(Ordering::Acquire) {
+                    Err(std::io::Error::other("agent subscriber cancelled"))
+                } else {
+                    match guard.write_all(item.line.as_bytes()).await {
+                        Ok(()) => guard.flush().await,
+                        Err(error) => Err(error),
+                    }
+                }
+            };
+            pending_bytes.fetch_sub(item.line.len(), Ordering::Relaxed);
+            if let Some(delivered) = item.delivered.take() {
+                let _ = delivered.send(result.is_ok());
+            }
+            if result.is_err() {
+                return;
+            }
+        }
+    })
+}
+
+fn register_agent_subscriber(
+    writers: &mut Vec<AgentSubscriber>,
+    writer: AgentClientWriter,
+    snapshot: &Event,
+) -> Option<oneshot::Receiver<bool>> {
+    let writer_id = Arc::as_ptr(&writer) as usize;
+    writers.retain(|subscriber| {
+        if subscriber.writer_id == writer_id {
+            cancel_agent_subscriber(subscriber);
+            false
+        } else {
+            true
+        }
+    });
+
+    let line = serialize_agent_event(snapshot)?;
+    let (tx, rx) = mpsc::unbounded_channel();
+    let pending_bytes = Arc::new(AtomicUsize::new(line.len()));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let writer_task = spawn_agent_writer_task(
+        writer.clone(),
+        rx,
+        Arc::clone(&pending_bytes),
+        Arc::clone(&cancelled),
+    );
+    let (delivered_tx, delivered_rx) = oneshot::channel();
+    if tx
+        .send(AgentEventLine {
+            line,
+            initial_delivery: true,
+            delivered: Some(delivered_tx),
+        })
+        .is_err()
+    {
+        writer_task.abort();
+        return None;
+    }
+    writers.push(AgentSubscriber {
+        writer_id,
+        tx,
+        pending_bytes,
+        cancelled,
+        writer,
+        writer_task,
+    });
+    Some(delivered_rx)
+}
+
+fn remove_agent_subscriber(writers: &mut Vec<AgentSubscriber>, writer_id: usize) {
+    writers.retain(|subscriber| {
+        if subscriber.writer_id == writer_id {
+            cancel_agent_subscriber(subscriber);
+            false
+        } else {
+            true
+        }
+    });
 }
 
 /// Append an event to the session's journal and stream it to attached
@@ -142,7 +306,7 @@ async fn journal_and_fan_out(
         seq: entry.seq,
         event: entry.event,
     };
-    fan_out(&mut sh.writers, &wire).await;
+    enqueue_agent_event(&mut sh.writers, &wire);
     entry.seq
 }
 
@@ -163,7 +327,7 @@ async fn journal_and_fan_out_for_generation(
         seq: entry.seq,
         event: entry.event,
     };
-    fan_out(&mut sh.writers, &wire).await;
+    enqueue_agent_event(&mut sh.writers, &wire);
     true
 }
 

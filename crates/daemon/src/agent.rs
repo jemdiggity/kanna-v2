@@ -12,10 +12,10 @@ use std::io::Write as IoWrite;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 use kanna_agent_protocol::{
     AgentEvent, ClaudeAdapter, CodexAdapter, OpencodeAdapter, ProviderAdapter, SpawnCtx, SpawnSpec,
@@ -26,6 +26,23 @@ use crate::protocol::{AgentProvider, AgentSpawnParams, SeqAgentEvent, SessionSta
 
 /// A single attached client's writer handle (same shape as PTY writers).
 pub type AgentClientWriter = Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>;
+
+/// One pre-serialized agent event queued to a single attached client.
+pub struct AgentEventLine {
+    pub line: Arc<str>,
+    pub initial_delivery: bool,
+    pub delivered: Option<oneshot::Sender<bool>>,
+}
+
+/// One attached agent client's bounded mailbox and independent socket writer.
+pub struct AgentSubscriber {
+    pub writer_id: usize,
+    pub tx: mpsc::UnboundedSender<AgentEventLine>,
+    pub pending_bytes: Arc<AtomicUsize>,
+    pub cancelled: Arc<AtomicBool>,
+    pub writer: AgentClientWriter,
+    pub writer_task: tokio::task::JoinHandle<()>,
+}
 
 /// Registry of agent sessions, separate from the PTY `SessionManager`.
 pub type AgentSessions = Arc<Mutex<HashMap<String, AgentSessionRecord>>>;
@@ -379,7 +396,7 @@ impl AgentJournal {
 /// the live stream) is atomic against concurrent appends.
 pub struct AgentShared {
     pub journal: AgentJournal,
-    pub writers: Vec<AgentClientWriter>,
+    pub writers: Vec<AgentSubscriber>,
     /// Mirrors the registry owner's generation so a reader that passed an
     /// earlier registry check cannot append after a replacement lands.
     pub spawn_generation: u64,

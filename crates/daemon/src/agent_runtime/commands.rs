@@ -12,7 +12,6 @@ use kanna_daemon::protocol::{self, AgentSpawnParams, Event, SessionStatus};
 
 use super::readers::start_agent_readers;
 use super::{agent_error, broadcast_event, journal_and_fan_out, log_info, reply, set_status};
-use crate::socket::write_event;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_spawn_agent(
@@ -391,20 +390,7 @@ pub async fn handle_attach_agent(
         next_seq: sh.journal.next_seq(),
         events: sh.journal.events_from(from_seq),
     };
-    if write_event(&mut *writer.lock().await, &snapshot)
-        .await
-        .is_err()
-    {
-        return;
-    }
-    let writer_ptr = Arc::as_ptr(&writer) as usize;
-    if !sh
-        .writers
-        .iter()
-        .any(|w| Arc::as_ptr(w) as usize == writer_ptr)
-    {
-        sh.writers.push(writer);
-    }
+    super::register_agent_subscriber(&mut sh.writers, writer, &snapshot);
 }
 
 pub async fn handle_agent_input(

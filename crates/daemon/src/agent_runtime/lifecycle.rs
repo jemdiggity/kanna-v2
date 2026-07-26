@@ -6,7 +6,7 @@ use kanna_agent_protocol::{AgentEvent, SessionEndReason, TurnModel};
 use kanna_daemon::agent::{self, AgentClientWriter, AgentSessions, AgentShared};
 use kanna_daemon::protocol::{self, Event, SessionState, SessionStatus};
 
-use super::{broadcast_event, fan_out};
+use super::{broadcast_event, enqueue_agent_event, remove_agent_subscriber};
 
 /// Outcome of a Kill against the agent registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +53,9 @@ pub async fn kill_agent_session(
                 if record.run_id.as_deref() != Some(expected) {
                     return AgentKillOutcome::OwnershipMismatch;
                 }
+            }
+            if let Some(record) = registry.get(session_id) {
+                record.shared.lock().await.spawn_generation = agent::next_agent_spawn_generation();
             }
             Ok(registry.remove(session_id))
         }
@@ -126,7 +129,7 @@ pub async fn kill_agent_session(
         seq: entry.seq,
         event: entry.event,
     };
-    fan_out(&mut sh.writers, &wire).await;
+    enqueue_agent_event(&mut sh.writers, &wire);
     // Deliver the final event, then detach every writer: the session is gone,
     // so retaining client sockets here would hold them (and the shared state)
     // alive across session churn.
@@ -183,7 +186,7 @@ pub async fn cleanup_agent_writer(agents: &AgentSessions, writer: &AgentClientWr
     let writer_ptr = Arc::as_ptr(writer) as usize;
     for shared in shareds {
         let mut sh = shared.lock().await;
-        sh.writers.retain(|w| Arc::as_ptr(w) as usize != writer_ptr);
+        remove_agent_subscriber(&mut sh.writers, writer_ptr);
     }
 }
 
@@ -202,6 +205,6 @@ pub async fn detach_agent_writer(
     };
     let writer_ptr = Arc::as_ptr(writer) as usize;
     let mut sh = shared.lock().await;
-    sh.writers.retain(|w| Arc::as_ptr(w) as usize != writer_ptr);
+    remove_agent_subscriber(&mut sh.writers, writer_ptr);
     true
 }
