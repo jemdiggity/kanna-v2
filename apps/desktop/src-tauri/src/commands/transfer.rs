@@ -1,5 +1,38 @@
 use serde_json::Value;
 
+#[tauri::command]
+pub async fn ensure_cloud_transfer_proxy(
+    state: tauri::State<'_, crate::CloudTransferProxyState>,
+    peer_id: String,
+    desktop_id: String,
+    relay_url: String,
+    id_token: String,
+) -> Result<crate::cloud_transfer_proxy::CloudTransferProxyEndpoint, String> {
+    crate::cloud_transfer_proxy::ensure_cloud_transfer_proxy_in_state(
+        state.inner(),
+        peer_id,
+        desktop_id,
+        relay_url,
+        id_token,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn remove_cloud_transfer_proxy(
+    state: tauri::State<'_, crate::CloudTransferProxyState>,
+    peer_id: String,
+) -> Result<(), String> {
+    crate::cloud_transfer_proxy::remove_cloud_transfer_proxy_in_state(state.inner(), &peer_id).await
+}
+
+#[tauri::command]
+pub async fn clear_cloud_transfer_proxies(
+    state: tauri::State<'_, crate::CloudTransferProxyState>,
+) -> Result<(), String> {
+    crate::cloud_transfer_proxy::clear_cloud_transfer_proxies_in_state(state.inner()).await
+}
+
 async fn ensure_client(
     app: &tauri::AppHandle,
     guard: &mut Option<crate::transfer_sidecar::TransferSidecarClient>,

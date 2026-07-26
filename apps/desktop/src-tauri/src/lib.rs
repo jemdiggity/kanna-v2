@@ -1,3 +1,4 @@
+mod cloud_transfer_proxy;
 mod commands;
 mod daemon_client;
 mod daemon_lifecycle;
@@ -33,6 +34,7 @@ pub(crate) const KANNA_BUILD_TASK_ID: &str = env!("KANNA_BUILD_TASK_ID");
 pub(crate) const KANNA_BUILD_WORKTREE: &str = env!("KANNA_BUILD_WORKTREE");
 pub(crate) const KANNA_BUILD_INFO: &str = env!("KANNA_BUILD_INFO");
 pub type TransferServiceState = Arc<Mutex<Option<transfer_sidecar::TransferSidecarClient>>>;
+pub type CloudTransferProxyState = cloud_transfer_proxy::CloudTransferProxyState;
 static RUNTIME_BUNDLE_IDENTIFIER: OnceLock<String> = OnceLock::new();
 
 /// Process-wide lock serializing tests that read or mutate process env vars.
@@ -109,6 +111,7 @@ pub fn run() {
         >::new())) as WindowSessionSizes)
         .manage(Arc::new(Mutex::new(None)) as PipelineSocketState)
         .manage(Arc::new(Mutex::new(None)) as TransferServiceState)
+        .manage(Arc::new(Mutex::new(std::collections::HashMap::new())) as CloudTransferProxyState)
         .setup(|app| {
             #[cfg(target_os = "macos")]
             {
@@ -323,6 +326,9 @@ pub fn run() {
             commands::transfer::mark_incoming_transfer_event_recorded,
             commands::transfer::mark_incoming_transfer_ack_completed,
             commands::transfer::mark_outgoing_transfer_commit_applied,
+            commands::transfer::ensure_cloud_transfer_proxy,
+            commands::transfer::remove_cloud_transfer_proxy,
+            commands::transfer::clear_cloud_transfer_proxies,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

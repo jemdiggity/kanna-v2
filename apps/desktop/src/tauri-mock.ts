@@ -81,6 +81,12 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
   }),
   git_push: () => ({}),
   list_transfer_peers: () => [],
+  ensure_cloud_transfer_proxy: (args: { peerId?: string }) => ({
+    peerId: args.peerId ?? "mock-cloud-peer",
+    endpoint: "127.0.0.1:44550",
+  }),
+  remove_cloud_transfer_proxy: () => ({}),
+  clear_cloud_transfer_proxies: () => ({}),
   set_transfer_task_snapshot: () => ({ ok: true }),
   list_transfer_task_snapshots: () => [],
   observe_transfer_peer_session: () => ({ ok: true }),
