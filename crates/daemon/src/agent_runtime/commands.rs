@@ -235,7 +235,11 @@ pub(crate) async fn install_respawned_child(
                 // by their older incarnation).
                 let previous_start = record.child_start;
                 if let Some(previous) = record.child.take() {
-                    kanna_daemon::reaper::reap_detached(previous, previous_start);
+                    if let Err(error) =
+                        kanna_daemon::reaper::try_reap_child(previous, previous_start)
+                    {
+                        tokio::spawn(kanna_daemon::reaper::reap(error.into_ownership()));
+                    }
                 }
                 record.child = Some(child);
                 record.stdin = stdin;
@@ -302,7 +306,9 @@ pub(crate) async fn install_respawned_child(
                 orphan.id()
             ));
             let _ = agent::kill_agent_group_verified(orphan.id(), child_start);
-            kanna_daemon::reaper::reap_detached(orphan, child_start);
+            if let Err(error) = kanna_daemon::reaper::try_reap_child(orphan, child_start) {
+                kanna_daemon::reaper::reap(error.into_ownership()).await;
+            }
             if let Some(fds) = orphan_fds {
                 fds.close();
             }

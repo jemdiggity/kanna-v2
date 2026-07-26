@@ -280,7 +280,9 @@ fn reap_exited_child(
     ));
     // The central reaper retains ownership and retries until the child is
     // actually reaped — never a forever-detached per-child thread.
-    kanna_daemon::reaper::reap_detached(child, child_start);
+    if let Err(error) = kanna_daemon::reaper::try_reap_child(child, child_start) {
+        tokio::spawn(kanna_daemon::reaper::reap(error.into_ownership()));
+    }
     -1
 }
 

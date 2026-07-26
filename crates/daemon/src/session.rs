@@ -340,7 +340,7 @@ impl SessionHandle {
         }
         // Phase 1 under the lock: freeze the leader and consume the
         // one-shot reap token. No process-table scan or SIGKILL happens here.
-        let (plan, pid) = {
+        let (plan, reap) = {
             let mut pty = self.pty.lock().await;
             let plan = pty.begin_kill();
             (plan, pty.take_reap_token())
@@ -352,12 +352,19 @@ impl SessionHandle {
                 plan.execute(None)
             })
             .await
-            .unwrap_or(Ok(()));
+            .unwrap_or_else(|| Err(std::io::Error::other("PTY teardown worker stopped")));
         // Only an owned, unreaped child may be waited on: waitpid on an
         // adopted or unproven pid would either fail or reap an unrelated
         // process-group child.
-        if let Some(pid) = pid {
-            reap_child_in_background(pid);
+        if let Some((pid, start)) = reap {
+            let ownership =
+                kanna_daemon::reaper::ReapOwnership::Pid(kanna_daemon::reaper::ReapIdentity {
+                    pid,
+                    start,
+                });
+            if let Err(error) = kanna_daemon::reaper::try_reap(ownership) {
+                kanna_daemon::reaper::reap(error.into_ownership()).await;
+            }
         }
         result
     }
@@ -707,8 +714,15 @@ impl SessionManager {
                 }
             }
             // Only now may the children be reaped.
-            for pid in reap_pids.into_iter().flatten() {
-                kanna_daemon::reaper::reap_pid(pid);
+            for (pid, start) in reap_pids.into_iter().flatten() {
+                let ownership =
+                    kanna_daemon::reaper::ReapOwnership::Pid(kanna_daemon::reaper::ReapIdentity {
+                        pid,
+                        start,
+                    });
+                if let Err(error) = kanna_daemon::reaper::try_reap(ownership) {
+                    kanna_daemon::reaper::reap(error.into_ownership()).await;
+                }
             }
         }
         handles
@@ -773,15 +787,6 @@ pub mod test_support {
 
 fn status_detection_throttle() -> Duration {
     Duration::from_millis(STATUS_DETECTION_THROTTLE_MS)
-}
-
-/// Hand a SIGKILLed PTY child to the central reaper. Never blocks the async
-/// runtime, and — unlike the old 60-second give-up — never abandons the
-/// child: an abandoned zombie keeps its pty slot allocated for the daemon's
-/// remaining life, which is precisely the exhaustion this branch fixes.
-/// Ownership is one-shot; the caller has already consumed the reap token.
-fn reap_child_in_background(pid: libc::pid_t) {
-    kanna_daemon::reaper::reap_pid(pid);
 }
 
 fn detect_headless_terminal_status_if_due(

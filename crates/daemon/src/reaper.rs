@@ -1,466 +1,734 @@
-//! Central bounded child reaper.
+//! Central bounded ownership for child reaping and expensive teardown work.
 //!
-//! Every child this daemon forks must eventually be waited on, but no code
-//! path may block a Tokio worker (or hold a registry/PTY lock) waiting for a
-//! child that is stuck exiting inside the kernel. Previously each such child
-//! got its own detached thread (or an uncancellable `spawn_blocking` task),
-//! and the PTY reaper abandoned the child entirely after 60 seconds —
-//! dropping its handle, which leaks the zombie for the daemon's remaining
-//! life and, for a PTY child, keeps its pty slot allocated.
-//!
-//! This module owns exactly one background thread that polls a queue of
-//! pending children with `WNOHANG` and never gives up: a child that cannot
-//! be reaped now is retried on the next tick for as long as the daemon
-//! lives. Ownership is one-shot — a child is handed over once and the queue
-//! holds the only remaining handle.
+//! Admission is nonblocking and ownership is returned on saturation. A single
+//! worker owns accepted children until they are reaped; per-entry deadlines
+//! ensure new work cannot postpone escalation of an older survivor.
 
-use std::collections::VecDeque;
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, TryLockError};
+use std::time::{Duration, Instant};
 
 use crate::proc_info::StartTime;
 
-/// A child awaiting reaping. `Owned` for our own forks (whose `Child` handle
-/// reaps on `try_wait`); `Pid` for PTY session children, which the daemon
-/// tracks by pid rather than as a `Child`.
-enum Pending {
-    Owned {
+const REAP_CAPACITY: usize = 4096;
+const POLL_MIN: Duration = Duration::from_millis(20);
+const POLL_MAX: Duration = Duration::from_millis(200);
+const ESCALATE_AFTER: Duration = Duration::from_millis(400);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ReapIdentity {
+    pub pid: libc::pid_t,
+    pub start: Option<StartTime>,
+}
+
+#[derive(Debug)]
+pub enum ReapOwnership {
+    Child {
         child: std::process::Child,
-        /// Lets the reaper escalate to an identity-verified group kill.
-        start: Option<StartTime>,
-        /// When this child was handed over; the escalation deadline is
-        /// measured from here so it is independent of poll cadence.
-        admitted: std::time::Instant,
-        escalated: bool,
+        identity: ReapIdentity,
     },
-    Pid {
-        pid: libc::pid_t,
-    },
+    Pid(ReapIdentity),
+}
+
+impl ReapOwnership {
+    fn identity(&self) -> ReapIdentity {
+        match self {
+            Self::Child { child, identity } => ReapIdentity {
+                pid: child.id() as libc::pid_t,
+                start: identity.start,
+            },
+            Self::Pid(identity) => *identity,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum AdmissionError {
+    Duplicate(ReapOwnership),
+    Full(ReapOwnership),
+}
+
+impl AdmissionError {
+    pub fn into_ownership(self) -> ReapOwnership {
+        match self {
+            Self::Duplicate(ownership) | Self::Full(ownership) => ownership,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ReaperStats {
+    pub accepted: u64,
+    pub reaped: u64,
+    pub queued: usize,
+    pub in_flight: usize,
+    pub capacity: usize,
+}
+
+impl ReaperStats {
+    pub fn outstanding(self) -> usize {
+        self.queued + self.in_flight
+    }
+}
+
+struct Pending {
+    ownership: ReapOwnership,
+    admitted_at: Instant,
+    next_check: Instant,
+    poll_delay: Duration,
+    escalated: bool,
+    schedule_id: u64,
 }
 
 #[derive(Default)]
-struct Queue {
-    pending: VecDeque<Pending>,
-    /// Pids currently owned by the reaper, for one-shot deduplicated
-    /// admission.
-    tracked: std::collections::HashSet<libc::pid_t>,
-    /// Handed over since start; observable for diagnostics and tests.
+struct ReaperState {
+    entries: HashMap<ReapIdentity, Pending>,
+    schedule: BinaryHeap<Reverse<(Instant, u64, ReapIdentity)>>,
+    tracked: HashSet<ReapIdentity>,
     accepted: u64,
-    /// Successfully reaped (or confirmed not ours).
     reaped: u64,
+    in_flight: usize,
+    next_schedule_id: u64,
 }
 
-struct Reaper {
-    queue: Mutex<Queue>,
+struct ReaperCore {
+    state: Mutex<ReaperState>,
     wake: Condvar,
+    capacity_ready: tokio::sync::Notify,
+    capacity: usize,
 }
 
-/// How long a child may linger before the reaper escalates to an
-/// identity-verified group SIGKILL. Its caller already asked it to die; this
-/// is the backstop for a child that ignored that request.
-///
-/// This is deliberately an ELAPSED-TIME deadline, not a poll-tick count. The
-/// poll cadence below is adaptive (TICK_MIN -> TICK_MAX), so counting ticks
-/// made the effective threshold depend on how often the queue happened to be
-/// polled: with one lingering child the backoff stretched 20 ticks from the
-/// intended ~400ms out to ~26s, and the escalation regression only passed when
-/// unrelated admissions happened to reset the backoff.
-const ESCALATE_AFTER: std::time::Duration = std::time::Duration::from_millis(400);
-/// Fast first poll: the overwhelming majority of children are already dead
-/// when handed over, so the first check should be immediate-ish.
-const TICK_MIN: std::time::Duration = std::time::Duration::from_millis(20);
-/// Ceiling for the adaptive backoff. A child stuck exiting in the kernel is
-/// polled at this rate forever rather than at a fixed 100ms — ownership is
-/// retained either way, but an idle-ish stuck child costs far fewer wakeups.
-const TICK_MAX: std::time::Duration = std::time::Duration::from_millis(200);
-
-fn reaper() -> &'static Reaper {
-    static REAPER: OnceLock<&'static Reaper> = OnceLock::new();
-    REAPER.get_or_init(|| {
-        let reaper: &'static Reaper = Box::leak(Box::new(Reaper {
-            queue: Mutex::new(Queue::default()),
-            wake: Condvar::new(),
-        }));
-        std::thread::Builder::new()
-            .name("kanna-reaper".to_string())
-            .spawn(move || reaper_loop(reaper))
-            .expect("failed to start the child reaper thread");
-        reaper
-    })
+#[derive(Clone)]
+struct ReaperHandle {
+    core: Arc<ReaperCore>,
 }
 
-fn lock(reaper: &'static Reaper) -> std::sync::MutexGuard<'static, Queue> {
-    reaper
-        .queue
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+impl ReaperHandle {
+    fn new(capacity: usize, running: bool) -> Self {
+        let handle = Self {
+            core: Arc::new(ReaperCore {
+                state: Mutex::new(ReaperState::default()),
+                wake: Condvar::new(),
+                capacity_ready: tokio::sync::Notify::new(),
+                capacity,
+            }),
+        };
+        if running {
+            let core = Arc::clone(&handle.core);
+            std::thread::Builder::new()
+                .name("kanna-reaper".to_string())
+                .spawn(move || reaper_loop(core))
+                .expect("failed to start the child reaper");
+        }
+        handle
+    }
+
+    #[cfg(test)]
+    fn new_for_test(capacity: usize) -> Self {
+        Self::new(capacity, false)
+    }
+
+    #[cfg(test)]
+    fn new_running_for_test(capacity: usize) -> Self {
+        Self::new(capacity, true)
+    }
+
+    fn try_reap(&self, ownership: ReapOwnership) -> Result<(), AdmissionError> {
+        let identity = ownership.identity();
+        if identity.pid <= 1 {
+            return Err(AdmissionError::Duplicate(ownership));
+        }
+        let mut state = match self.core.state.try_lock() {
+            Ok(state) => state,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return Err(AdmissionError::Full(ownership)),
+        };
+        if state.tracked.contains(&identity) {
+            return Err(AdmissionError::Duplicate(ownership));
+        }
+        if state.tracked.len() >= self.core.capacity {
+            return Err(AdmissionError::Full(ownership));
+        }
+
+        let now = Instant::now();
+        let schedule_id = state.next_schedule_id;
+        state.next_schedule_id = state.next_schedule_id.wrapping_add(1);
+        state.tracked.insert(identity);
+        state.entries.insert(
+            identity,
+            Pending {
+                ownership,
+                admitted_at: now,
+                next_check: now,
+                poll_delay: POLL_MIN,
+                escalated: false,
+                schedule_id,
+            },
+        );
+        state.schedule.push(Reverse((now, schedule_id, identity)));
+        state.accepted += 1;
+        drop(state);
+        self.core.wake.notify_one();
+        Ok(())
+    }
+
+    fn stats(&self) -> ReaperStats {
+        let state = self
+            .core
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ReaperStats {
+            accepted: state.accepted,
+            reaped: state.reaped,
+            queued: state.entries.len(),
+            in_flight: state.in_flight,
+            capacity: self.core.capacity,
+        }
+    }
+
+    #[cfg(test)]
+    fn mark_in_flight_for_test(&self, identity: ReapIdentity) {
+        let mut state = self
+            .core
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(state.tracked.insert(identity));
+        state.in_flight += 1;
+    }
+
+    #[cfg(test)]
+    fn next_check_for_test(&self, identity: ReapIdentity) -> Option<Instant> {
+        let state = self
+            .core
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.entries.get(&identity).map(|entry| entry.next_check)
+    }
+
+    #[cfg(test)]
+    fn defer_for_test(&self, identity: ReapIdentity, duration: Duration) {
+        let mut state = self
+            .core
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let next_check = Instant::now() + duration;
+        let schedule_id = state.next_schedule_id;
+        state.next_schedule_id = state.next_schedule_id.wrapping_add(1);
+        let entry = state.entries.get_mut(&identity).expect("identity tracked");
+        entry.next_check = next_check;
+        entry.schedule_id = schedule_id;
+        state
+            .schedule
+            .push(Reverse((next_check, schedule_id, identity)));
+    }
 }
 
-fn reaper_loop(reaper: &'static Reaper) {
-    let mut backoff = TICK_MIN;
-    let mut last_seen_accepted = 0u64;
+fn reaper_loop(core: Arc<ReaperCore>) {
     loop {
-        // Sleep until there is something to do, then poll on a fixed tick.
-        let mut queue = lock(reaper);
-        while queue.pending.is_empty() {
-            // Nothing pending: sleep until a hand-over wakes us. No polling.
-            let (guard, _) = reaper
-                .wake
-                .wait_timeout(queue, TICK_MAX)
+        let mut pending = {
+            let mut state = core
+                .state
+                .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            queue = guard;
-        }
+            loop {
+                let Some(Reverse((next_check, schedule_id, identity))) =
+                    state.schedule.peek().copied()
+                else {
+                    state = core
+                        .wake
+                        .wait(state)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    continue;
+                };
+                let now = Instant::now();
+                if next_check > now {
+                    let (next_state, _) = core
+                        .wake
+                        .wait_timeout(state, next_check.saturating_duration_since(now))
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state = next_state;
+                    continue;
+                }
+                state.schedule.pop();
+                if state
+                    .entries
+                    .get(&identity)
+                    .is_none_or(|pending| pending.schedule_id != schedule_id)
+                {
+                    continue;
+                }
+                let pending = state
+                    .entries
+                    .remove(&identity)
+                    .expect("schedule and entry checked together");
+                state.in_flight += 1;
+                break pending;
+            }
+        };
 
-        // Fresh admissions deserve a fast first check.
-        if queue.accepted != last_seen_accepted {
-            last_seen_accepted = queue.accepted;
-            backoff = TICK_MIN;
+        let completed = poll_pending(&mut pending);
+
+        let mut state = core
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.in_flight -= 1;
+        let identity = pending.ownership.identity();
+        if completed {
+            state.tracked.remove(&identity);
+            state.reaped += 1;
+            drop(state);
+            core.capacity_ready.notify_waiters();
+        } else {
+            let schedule_id = state.next_schedule_id;
+            state.next_schedule_id = state.next_schedule_id.wrapping_add(1);
+            pending.schedule_id = schedule_id;
+            state
+                .schedule
+                .push(Reverse((pending.next_check, schedule_id, identity)));
+            state.entries.insert(identity, pending);
         }
-        let mut still_pending = VecDeque::with_capacity(queue.pending.len());
-        let mut reaped = 0u64;
-        while let Some(entry) = queue.pending.pop_front() {
-            match entry {
-                Pending::Owned {
-                    mut child,
-                    start,
-                    admitted,
-                    escalated,
-                } => match child.try_wait() {
-                    Ok(Some(_)) => reaped += 1,
-                    // The child is not ours / already reaped elsewhere.
-                    Err(_) => reaped += 1,
-                    Ok(None) => {
-                        let escalated = if !escalated && admitted.elapsed() >= ESCALATE_AFTER {
-                            log::warn!(
-                                "[reaper] child {} still alive after {:?}; escalating to SIGKILL",
-                                child.id(),
-                                admitted.elapsed()
-                            );
-                            let _ = crate::agent::kill_agent_group_verified(child.id(), start);
-                            let _ = child.kill();
-                            true
-                        } else {
-                            escalated
-                        };
-                        still_pending.push_back(Pending::Owned {
-                            child,
-                            start,
-                            admitted,
-                            escalated,
-                        });
-                    }
-                },
-                Pending::Pid { pid } => {
-                    let ret = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
-                    if ret == 0 {
-                        // Still exiting — retry forever rather than abandon.
-                        still_pending.push_back(Pending::Pid { pid });
-                    } else {
-                        reaped += 1;
-                    }
+    }
+}
+
+fn poll_pending(pending: &mut Pending) -> bool {
+    match &mut pending.ownership {
+        ReapOwnership::Child { child, identity } => match child.try_wait() {
+            Ok(Some(_)) | Err(_) => true,
+            Ok(None) => {
+                if !pending.escalated && pending.admitted_at.elapsed() >= ESCALATE_AFTER {
+                    let _ =
+                        kanna_daemon::agent::kill_agent_group_verified(child.id(), identity.start);
+                    let _ = child.kill();
+                    pending.escalated = true;
+                }
+                pending.next_check = Instant::now() + pending.poll_delay;
+                pending.poll_delay = (pending.poll_delay * 2).min(POLL_MAX);
+                false
+            }
+        },
+        ReapOwnership::Pid(identity) => {
+            let result =
+                unsafe { libc::waitpid(identity.pid, std::ptr::null_mut(), libc::WNOHANG) };
+            if result == 0 {
+                pending.next_check = Instant::now() + pending.poll_delay;
+                pending.poll_delay = (pending.poll_delay * 2).min(POLL_MAX);
+                false
+            } else {
+                true
+            }
+        }
+    }
+}
+
+fn global_reaper() -> &'static ReaperHandle {
+    static REAPER: OnceLock<ReaperHandle> = OnceLock::new();
+    REAPER.get_or_init(|| ReaperHandle::new(REAP_CAPACITY, true))
+}
+
+pub fn try_reap(ownership: ReapOwnership) -> Result<(), AdmissionError> {
+    global_reaper().try_reap(ownership)
+}
+
+pub async fn reap(mut ownership: ReapOwnership) {
+    loop {
+        let notified = global_reaper().core.capacity_ready.notified();
+        match try_reap(ownership) {
+            Ok(()) => return,
+            Err(error) => {
+                ownership = error.into_ownership();
+                tokio::select! {
+                    _ = notified => {}
+                    _ = tokio::time::sleep(Duration::from_millis(1)) => {}
                 }
             }
         }
-        // Release ownership of everything reaped this pass so a future
-        // hand-over of a (necessarily different) child with the same pid is
-        // admitted again.
-        let surviving: std::collections::HashSet<libc::pid_t> = still_pending
-            .iter()
-            .map(|entry| match entry {
-                Pending::Owned { child, .. } => child.id() as libc::pid_t,
-                Pending::Pid { pid } => *pid,
-            })
-            .collect();
-        queue.tracked.retain(|pid| surviving.contains(pid));
-        queue.pending = still_pending;
-        queue.reaped += reaped;
-        let outstanding = queue.pending.len();
-        drop(queue);
-
-        if outstanding > 0 {
-            // Adaptive: poll fast while a child is likely about to be reapable,
-            // then back off geometrically toward TICK_MAX so a genuinely stuck
-            // child costs a couple of wakeups per second instead of ten.
-            std::thread::sleep(backoff);
-            backoff = (backoff * 2).min(TICK_MAX);
-        } else {
-            backoff = TICK_MIN;
-        }
     }
 }
 
-/// Admission cap. Reap ownership is one-shot per child, so the steady-state
-/// depth is bounded by live children; this is the backstop against a runaway
-/// caller. On saturation the child is reaped inline (blocking briefly) rather
-/// than dropped — losing a child handle would leak the zombie permanently.
-const REAP_QUEUE_CAP: usize = 4096;
-
-fn enqueue(entry: Pending) {
-    let reaper = reaper();
-    let mut queue = lock(reaper);
-    // Deduplicate: the same pid must never be admitted twice. A second entry
-    // would let one waiter observe the exit status and leave the other polling
-    // a pid that may later be recycled.
-    let pid = match &entry {
-        Pending::Owned { child, .. } => child.id() as libc::pid_t,
-        Pending::Pid { pid } => *pid,
-    };
-    if queue.tracked.contains(&pid) {
-        log::debug!("[reaper] pid {pid} is already owned by the reaper; ignoring re-admission");
-        return;
-    }
-    if queue.pending.len() >= REAP_QUEUE_CAP {
-        drop(queue);
-        log::warn!("[reaper] queue saturated; reaping pid {pid} inline");
-        match entry {
-            Pending::Owned { mut child, .. } => {
-                let _ = child.wait();
-            }
-            Pending::Pid { pid } => {
-                unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
-            }
-        }
-        return;
-    }
-    queue.tracked.insert(pid);
-    queue.pending.push_back(entry);
-    queue.accepted += 1;
-    drop(queue);
-    reaper.wake.notify_all();
-}
-
-/// Hand over a child we own. One-shot: the queue holds the only remaining
-/// handle and retries until the child is actually reaped. `start` lets the
-/// reaper escalate to an identity-verified group kill.
-pub fn reap_detached(child: std::process::Child, start: Option<StartTime>) {
-    enqueue(Pending::Owned {
-        child,
+pub fn try_reap_child(
+    child: std::process::Child,
+    start: Option<StartTime>,
+) -> Result<(), AdmissionError> {
+    let identity = ReapIdentity {
+        pid: child.id() as libc::pid_t,
         start,
-        admitted: std::time::Instant::now(),
-        escalated: false,
-    });
+    };
+    try_reap(ReapOwnership::Child { child, identity })
 }
 
-/// Hand over a bare pid (a PTY session child the daemon never held as a
-/// `Child`). Retried until reaped; never abandoned.
-pub fn reap_pid(pid: libc::pid_t) {
-    if pid > 1 {
-        enqueue(Pending::Pid { pid });
-    }
+pub fn try_reap_pid(identity: ReapIdentity) -> Result<(), AdmissionError> {
+    try_reap(ReapOwnership::Pid(identity))
 }
 
-/// `(accepted, reaped, outstanding)` counters for diagnostics and tests.
-pub fn stats() -> (u64, u64, usize) {
-    let queue = lock(reaper());
-    (queue.accepted, queue.reaped, queue.pending.len())
+pub fn stats() -> ReaperStats {
+    global_reaper().stats()
 }
 
 // ---- Bounded lifecycle executor ----
 
-type TeardownJob = Box<dyn FnOnce() + Send + 'static>;
+pub type TeardownJob = Box<dyn FnOnce() + Send + 'static>;
 
-struct Lifecycle {
-    jobs: Mutex<VecDeque<TeardownJob>>,
-    wake: Condvar,
+pub enum TeardownAdmission {
+    Accepted,
+    Full(TeardownJob),
 }
 
-/// Serialized, bounded executor for teardown work that scans or signals the
-/// whole process table. Such work must never run on a Tokio worker (it is
-/// syscall-heavy and unbounded in duration) nor under a session lock.
-/// Serializing it also coalesces naturally during many-session teardown.
-fn lifecycle() -> &'static Lifecycle {
-    static LIFECYCLE: OnceLock<&'static Lifecycle> = OnceLock::new();
-    LIFECYCLE.get_or_init(|| {
-        let lifecycle: &'static Lifecycle = Box::leak(Box::new(Lifecycle {
-            jobs: Mutex::new(VecDeque::new()),
-            wake: Condvar::new(),
-        }));
+struct LifecycleState {
+    jobs: VecDeque<TeardownJob>,
+    in_flight: usize,
+}
+
+struct LifecycleCore {
+    state: Mutex<LifecycleState>,
+    wake: Condvar,
+    capacity_ready: tokio::sync::Notify,
+    capacity: usize,
+}
+
+fn lifecycle() -> &'static Arc<LifecycleCore> {
+    const CAPACITY: usize = 512;
+    static LIFECYCLE: OnceLock<Arc<LifecycleCore>> = OnceLock::new();
+    LIFECYCLE.get_or_init(|| new_lifecycle(CAPACITY, true))
+}
+
+fn new_lifecycle(capacity: usize, running: bool) -> Arc<LifecycleCore> {
+    let core = Arc::new(LifecycleCore {
+        state: Mutex::new(LifecycleState {
+            jobs: VecDeque::new(),
+            in_flight: 0,
+        }),
+        wake: Condvar::new(),
+        capacity_ready: tokio::sync::Notify::new(),
+        capacity,
+    });
+    if running {
+        let worker = Arc::clone(&core);
         std::thread::Builder::new()
             .name("kanna-lifecycle".to_string())
-            .spawn(move || loop {
-                let job = {
-                    let mut jobs = lifecycle
-                        .jobs
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    loop {
-                        if let Some(job) = jobs.pop_front() {
-                            break job;
-                        }
-                        jobs = lifecycle
-                            .wake
-                            .wait(jobs)
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    }
-                };
-                job();
-            })
-            .expect("failed to start the lifecycle executor thread");
-        lifecycle
-    })
-}
-
-/// Depth cap for the lifecycle queue. Teardown is single-flight per session,
-/// so the steady-state depth is bounded by the session count; this is the
-/// backstop that keeps a pathological caller from growing the queue without
-/// limit.
-const LIFECYCLE_QUEUE_CAP: usize = 512;
-
-/// Try to queue teardown work. On saturation the job is handed back so the
-/// caller can apply backpressure instead of growing memory without bound.
-fn try_enqueue_teardown(job: TeardownJob) -> Option<TeardownJob> {
-    let lifecycle = lifecycle();
-    let mut jobs = lifecycle
-        .jobs
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if jobs.len() >= LIFECYCLE_QUEUE_CAP {
-        log::warn!(
-            "[lifecycle] teardown queue saturated at {} jobs; applying backpressure",
-            jobs.len()
-        );
-        return Some(job);
+            .spawn(move || lifecycle_loop(worker))
+            .expect("failed to start lifecycle executor");
     }
-    jobs.push_back(job);
-    drop(jobs);
-    lifecycle.wake.notify_one();
-    None
+    core
 }
 
-/// Queue teardown work on the bounded lifecycle executor, running it inline
-/// if the queue is saturated (backpressure rather than unbounded growth).
-pub fn run_teardown(job: impl FnOnce() + Send + 'static) {
-    if let Some(rejected) = try_enqueue_teardown(Box::new(job)) {
-        rejected();
+fn lifecycle_loop(core: Arc<LifecycleCore>) {
+    loop {
+        let job = {
+            let mut state = core
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            while state.jobs.is_empty() {
+                state = core
+                    .wake
+                    .wait(state)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            let job = state.jobs.pop_front().expect("queue checked nonempty");
+            state.in_flight += 1;
+            job
+        };
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+            log::error!("lifecycle teardown job panicked; continuing with the next job");
+        }
+        let mut state = core
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.in_flight -= 1;
+        drop(state);
+        core.capacity_ready.notify_waiters();
     }
 }
 
-/// Current lifecycle queue depth (diagnostics/tests).
-pub fn lifecycle_depth() -> usize {
-    let lifecycle = lifecycle();
-    let jobs = lifecycle
-        .jobs
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    jobs.len()
+pub fn try_run_teardown(job: TeardownJob) -> TeardownAdmission {
+    try_run_teardown_on(lifecycle(), job)
 }
 
-/// Queue teardown work and wait for it to finish (used where the caller must
-/// observe completion, e.g. a synchronous kill reply).
+fn try_run_teardown_on(core: &Arc<LifecycleCore>, job: TeardownJob) -> TeardownAdmission {
+    let mut state = match core.state.try_lock() {
+        Ok(state) => state,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return TeardownAdmission::Full(job),
+    };
+    if state.jobs.len() + state.in_flight >= core.capacity {
+        return TeardownAdmission::Full(job);
+    }
+    state.jobs.push_back(job);
+    drop(state);
+    core.wake.notify_one();
+    TeardownAdmission::Accepted
+}
+
+pub async fn run_teardown(job: TeardownJob) {
+    run_teardown_on(lifecycle(), job).await;
+}
+
+async fn run_teardown_on(core: &Arc<LifecycleCore>, mut job: TeardownJob) {
+    loop {
+        let notified = core.capacity_ready.notified();
+        match try_run_teardown_on(core, job) {
+            TeardownAdmission::Accepted => return,
+            TeardownAdmission::Full(rejected) => {
+                job = rejected;
+                tokio::select! {
+                    _ = notified => {}
+                    _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+                }
+            }
+        }
+    }
+}
+
 pub async fn run_teardown_and_wait<T: Send + 'static>(
     job: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    run_teardown(move || {
+    run_teardown(Box::new(move || {
         let _ = tx.send(job());
-    });
+    }))
+    .await;
     rx.await.ok()
+}
+
+pub fn lifecycle_stats() -> (usize, usize) {
+    lifecycle_stats_on(lifecycle())
+}
+
+fn lifecycle_stats_on(core: &Arc<LifecycleCore>) -> (usize, usize) {
+    let state = core
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    (state.jobs.len(), state.in_flight)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn wait_until(mut predicate: impl FnMut() -> bool, timeout: std::time::Duration) -> bool {
-        let deadline = std::time::Instant::now() + timeout;
-        while std::time::Instant::now() < deadline {
+    fn wait_until(mut predicate: impl FnMut() -> bool, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
             if predicate() {
                 return true;
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(10));
         }
         predicate()
     }
 
-    fn is_unwaitable(pid: libc::pid_t) -> bool {
-        (unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) }) == -1
+    #[test]
+    fn admission_never_blocks_and_total_depth_never_exceeds_cap() {
+        let reaper = ReaperHandle::new_for_test(2);
+        let first = ReapOwnership::Pid(ReapIdentity {
+            pid: 42,
+            start: Some((1, 1)),
+        });
+        let second = ReapOwnership::Pid(ReapIdentity {
+            pid: 43,
+            start: Some((1, 1)),
+        });
+        reaper.try_reap(first).expect("first admission");
+        reaper.try_reap(second).expect("second admission");
+
+        let began = std::time::Instant::now();
+        let rejected = reaper.try_reap(ReapOwnership::Pid(ReapIdentity {
+            pid: 44,
+            start: Some((1, 1)),
+        }));
+        assert!(began.elapsed() < std::time::Duration::from_millis(50));
+        assert!(matches!(rejected, Err(AdmissionError::Full(_))));
+        assert_eq!(reaper.stats().outstanding(), 2);
     }
 
     #[test]
-    fn reaps_an_exited_child_without_a_dedicated_thread() {
-        let child = std::process::Command::new("/usr/bin/true")
-            .spawn()
-            .expect("spawn true");
-        let pid = child.id() as libc::pid_t;
-        reap_detached(child, None);
-        assert!(
-            wait_until(|| is_unwaitable(pid), std::time::Duration::from_secs(5)),
-            "the reaper must reap an exited child"
+    fn a_recycled_pid_is_admitted_as_its_own_reap_identity() {
+        let reaper = ReaperHandle::new_for_test(4);
+        reaper
+            .try_reap(ReapOwnership::Pid(ReapIdentity {
+                pid: 42,
+                start: Some((1, 1)),
+            }))
+            .expect("first incarnation admitted");
+        reaper
+            .try_reap(ReapOwnership::Pid(ReapIdentity {
+                pid: 42,
+                start: Some((1, 2)),
+            }))
+            .expect("recycled pid is a distinct identity");
+    }
+
+    #[test]
+    fn admission_never_waits_for_the_owner_thread_mutex() {
+        let reaper = ReaperHandle::new_for_test(2);
+        let core = Arc::clone(&reaper.core);
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = core
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            locked_tx.send(()).expect("announce held lock");
+            std::thread::sleep(Duration::from_millis(200));
+        });
+        locked_rx.recv().expect("owner thread holds lock");
+
+        let began = Instant::now();
+        let result = reaper.try_reap(ReapOwnership::Pid(ReapIdentity {
+            pid: 42,
+            start: Some((1, 1)),
+        }));
+        assert!(began.elapsed() < Duration::from_millis(50));
+        assert!(matches!(result, Err(AdmissionError::Full(_))));
+        holder.join().expect("owner thread exits");
+    }
+
+    #[test]
+    fn in_flight_ownership_counts_against_the_admission_cap() {
+        let reaper = ReaperHandle::new_for_test(1);
+        reaper.mark_in_flight_for_test(ReapIdentity {
+            pid: 42,
+            start: Some((1, 1)),
+        });
+        let result = reaper.try_reap(ReapOwnership::Pid(ReapIdentity {
+            pid: 43,
+            start: Some((1, 1)),
+        }));
+        assert!(matches!(result, Err(AdmissionError::Full(_))));
+        assert_eq!(reaper.stats().in_flight, 1);
+        assert_eq!(reaper.stats().outstanding(), 1);
+    }
+
+    #[test]
+    fn a_fresh_admission_does_not_reset_a_survivors_deadline() {
+        let reaper = ReaperHandle::new_for_test(4);
+        let survivor = ReapIdentity {
+            pid: 42,
+            start: Some((1, 1)),
+        };
+        reaper
+            .try_reap(ReapOwnership::Pid(survivor))
+            .expect("survivor admitted");
+        reaper.defer_for_test(survivor, Duration::from_secs(30));
+        let deadline = reaper
+            .next_check_for_test(survivor)
+            .expect("survivor deadline");
+
+        reaper
+            .try_reap(ReapOwnership::Pid(ReapIdentity {
+                pid: 43,
+                start: Some((1, 1)),
+            }))
+            .expect("fresh admission");
+        assert_eq!(
+            reaper.next_check_for_test(survivor),
+            Some(deadline),
+            "fresh work must not rewrite an older entry's schedule"
         );
     }
 
-    /// Stuck/unreapable-child coverage: a child that ignores its caller's
-    /// termination request must still be reaped. The reaper escalates to a
-    /// verified SIGKILL and keeps retrying instead of abandoning the handle
-    /// (which previously leaked the zombie for the daemon's whole life).
     #[test]
-    fn escalates_and_reaps_a_stubborn_child() {
-        // Ignores SIGTERM; only SIGKILL ends it.
-        let child = std::process::Command::new("/bin/sh")
-            .args(["-c", "trap '' TERM; sleep 300"])
-            .spawn()
-            .expect("spawn stubborn child");
+    fn running_reaper_escalates_and_reaps_a_stubborn_child() {
+        use std::os::unix::process::CommandExt;
+
+        let reaper = ReaperHandle::new_running_for_test(8);
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "trap '' TERM; sleep 300"]);
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().expect("spawn stubborn child");
         let pid = child.id() as libc::pid_t;
         let start = crate::proc_info::process_info(pid).map(|info| info.start);
+        reaper
+            .try_reap(ReapOwnership::Child {
+                child,
+                identity: ReapIdentity { pid, start },
+            })
+            .expect("admit stubborn child");
 
-        reap_detached(child, start);
+        assert!(
+            wait_until(|| reaper.stats().reaped == 1, Duration::from_secs(5)),
+            "elapsed-time escalation must reap the stubborn child"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_backpressure_is_bounded_async_and_counts_in_flight_work() {
+        let lifecycle = new_lifecycle(1, true);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        run_teardown_on(
+            &lifecycle,
+            Box::new(move || {
+                release_rx.recv().expect("test releases worker");
+            }),
+        )
+        .await;
+        assert!(wait_until(
+            || lifecycle_stats_on(&lifecycle).1 == 1,
+            Duration::from_secs(2)
+        ));
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran_in_job = Arc::clone(&ran);
+        let began = Instant::now();
+        let rejected = try_run_teardown_on(
+            &lifecycle,
+            Box::new(move || ran_in_job.store(true, std::sync::atomic::Ordering::SeqCst)),
+        );
+        assert!(began.elapsed() < Duration::from_millis(50));
+        let TeardownAdmission::Full(job) = rejected else {
+            panic!("in-flight work must consume the only permit");
+        };
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+
+        let waiting_lifecycle = Arc::clone(&lifecycle);
+        let waiter = tokio::spawn(async move {
+            run_teardown_on(&waiting_lifecycle, job).await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+        release_tx.send(()).expect("release first job");
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("backpressured admission should complete")
+            .expect("waiter task should succeed");
+        assert!(wait_until(
+            || ran.load(std::sync::atomic::Ordering::SeqCst),
+            Duration::from_secs(2)
+        ));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_owner_survives_a_panicking_teardown() {
+        let lifecycle = new_lifecycle(2, true);
+        run_teardown_on(&lifecycle, Box::new(|| panic!("test panic"))).await;
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran_in_job = Arc::clone(&ran);
+        run_teardown_on(
+            &lifecycle,
+            Box::new(move || ran_in_job.store(true, std::sync::atomic::Ordering::SeqCst)),
+        )
+        .await;
         assert!(
             wait_until(
-                || unsafe { libc::kill(pid, 0) } != 0,
-                std::time::Duration::from_secs(15)
+                || ran.load(std::sync::atomic::Ordering::SeqCst),
+                Duration::from_secs(2)
             ),
-            "the reaper must escalate to SIGKILL and reap a stubborn child"
-        );
-    }
-
-    /// The PTY layer hands over a bare pid (it never owns a `Child`).
-    /// Admission is deduplicated: handing the same pid over twice must not
-    /// create two owners, or one waiter would consume the exit status and the
-    /// other would poll a pid that can later be recycled.
-    #[test]
-    fn admission_is_deduplicated_per_pid() {
-        let child = std::process::Command::new("/bin/sh")
-            .args(["-c", "sleep 5"])
-            .spawn()
-            .expect("spawn");
-        let pid = child.id() as libc::pid_t;
-        std::mem::forget(child);
-
-        let (accepted_before, _, _) = stats();
-        reap_pid(pid);
-        let (accepted_after_first, _, _) = stats();
-        reap_pid(pid);
-        let (accepted_after_second, _, _) = stats();
-        assert_eq!(
-            accepted_after_first,
-            accepted_before + 1,
-            "the first hand-over is admitted"
-        );
-        assert_eq!(
-            accepted_after_second, accepted_after_first,
-            "a duplicate hand-over of the same pid must be ignored"
-        );
-
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-        assert!(
-            wait_until(|| is_unwaitable(pid), std::time::Duration::from_secs(10)),
-            "the single owner still reaps the child"
-        );
-    }
-
-    #[test]
-    fn reaps_a_bare_pid_handed_over_by_the_pty_layer() {
-        let child = std::process::Command::new("/bin/sh")
-            .args(["-c", "exit 0"])
-            .spawn()
-            .expect("spawn pid child");
-        let pid = child.id() as libc::pid_t;
-        // Leak the handle so nothing else can reap it: exactly the PTY case,
-        // where the daemon knows only the pid.
-        std::mem::forget(child);
-        reap_pid(pid);
-        assert!(
-            wait_until(|| is_unwaitable(pid), std::time::Duration::from_secs(5)),
-            "the reaper must reap a bare pid"
+            "a panicking teardown must not kill the sole lifecycle owner"
         );
     }
 }

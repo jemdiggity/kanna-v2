@@ -674,18 +674,21 @@ impl PtySession {
     }
 
     /// Consume the one-shot right to reap the child after a kill. The first
-    /// caller gets the pid and the record is marked reaped in the same
+    /// caller gets the exact `(pid, start_time)` identity and the record is
+    /// marked reaped in the same
     /// mutation (callers hold the PTY lock), so exactly one background reaper
     /// can ever exist and every later kill/signal sees terminated ownership —
     /// a pid recycled after the real reap can never be targeted.
-    pub fn take_reap_token(&mut self) -> Option<libc::pid_t> {
+    pub fn take_reap_token(
+        &mut self,
+    ) -> Option<(libc::pid_t, Option<crate::proc_info::StartTime>)> {
         match &mut self.ownership {
             ChildOwnership::Owned {
                 reaped: reaped @ false,
-                ..
+                identity,
             } => {
                 *reaped = true;
-                Some(self.child_pid)
+                Some((self.child_pid, *identity))
             }
             _ => None,
         }
@@ -1850,7 +1853,11 @@ mod tests {
 
         session.kill().expect("kill should succeed");
         let token = session.take_reap_token();
-        let pid = token.expect("first take should yield the reap token");
+        let (pid, start) = token.expect("first take should yield the reap token");
+        assert!(
+            start.is_some(),
+            "owned PTY reap tokens must retain their start-time identity"
+        );
         assert!(
             session.take_reap_token().is_none(),
             "reap token must be one-shot"

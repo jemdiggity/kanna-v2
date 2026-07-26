@@ -68,9 +68,15 @@ pub async fn kill_agent_session(
     // reader must not publish a second one.
     let must_announce_exit = !record.exit_published;
     if !record.exited {
-        // Group-kill only through a verified identity; the direct
-        // `child.kill()` below is safe regardless (std tracks our own child).
-        if let Err(error) = agent::kill_agent_group_verified(record.pid, record.child_start) {
+        let pid = record.pid;
+        let child_start = record.child_start;
+        // Whole-process-table discovery and signalling run on the bounded
+        // lifecycle owner, never inline on this Tokio connection task.
+        if let Some(Err(error)) = kanna_daemon::reaper::run_teardown_and_wait(move || {
+            agent::kill_agent_group_verified(pid, child_start)
+        })
+        .await
+        {
             super::log_info(format_args!(
                 "[agent] kill {}: group signal refused: {}",
                 session_id, error
@@ -78,10 +84,9 @@ pub async fn kill_agent_session(
         }
         if let Some(mut child) = record.child.take() {
             let _ = child.kill();
-            // Hand the child to the central reaper instead of blocking this
-            // task on `wait()`: a child stuck exiting in the kernel must not
-            // wedge the caller (Kill is issued from a client connection).
-            kanna_daemon::reaper::reap_detached(child, record.child_start);
+            if let Err(error) = kanna_daemon::reaper::try_reap_child(child, record.child_start) {
+                kanna_daemon::reaper::reap(error.into_ownership()).await;
+            }
         }
     }
     if must_announce_exit {
