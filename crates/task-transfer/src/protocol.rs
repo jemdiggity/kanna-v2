@@ -103,6 +103,13 @@ pub enum ControlRequest {
         #[serde(default)]
         transport: crate::runtime::TransferTransport,
     },
+    RequestTaskPull {
+        request_id: String,
+        target_peer_id: String,
+        source_task_id: String,
+        #[serde(default)]
+        transport: crate::runtime::TransferTransport,
+    },
     PrepareTransferCommit {
         request_id: String,
         transfer_id: String,
@@ -226,6 +233,10 @@ pub enum ControlResponse {
         source_peer_id: String,
         target_has_repo: bool,
     },
+    RequestTaskPull {
+        request_id: String,
+        pull_request_id: String,
+    },
     PrepareTransferCommit {
         request_id: String,
         transfer_id: String,
@@ -284,6 +295,11 @@ pub enum PeerRequest {
     PrepareTransfer {
         request_id: String,
         source_peer_id: String,
+        sealed_payload: String,
+    },
+    RequestTaskPull {
+        request_id: String,
+        requester_peer_id: String,
         sealed_payload: String,
     },
     SubmitTransferPayload {
@@ -366,6 +382,9 @@ pub enum PeerResponse {
         transfer_id: String,
         source_peer_id: String,
         target_has_repo: bool,
+    },
+    RequestTaskPull {
+        request_id: String,
     },
     SubmitTransferPayload {
         request_id: String,
@@ -505,6 +524,11 @@ pub enum SidecarEvent {
         source_task_id: String,
         source_name: Option<String>,
         payload: serde_json::Value,
+    },
+    TaskPullRequested {
+        request_id: String,
+        requester_peer_id: String,
+        source_task_id: String,
     },
     OutgoingTransferCommitted {
         transfer_id: String,

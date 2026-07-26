@@ -428,6 +428,37 @@ impl TransferSidecarClient {
         }
     }
 
+    pub async fn request_task_pull(
+        &mut self,
+        peer_id: String,
+        source_task_id: String,
+        transport: String,
+    ) -> Result<Value, String> {
+        if !matches!(transport.as_str(), "auto" | "lan" | "cloud") {
+            return Err(format!("unsupported transfer transport {transport}"));
+        }
+        let request_id = self.next_request_id("task-pull");
+        let response = self
+            .send_request(
+                json!({
+                    "type": "request_task_pull",
+                    "request_id": request_id,
+                    "target_peer_id": peer_id,
+                    "source_task_id": source_task_id,
+                    "transport": transport,
+                }),
+                &request_id,
+            )
+            .await?;
+
+        Ok(json!({
+            "requestId": required_string(
+                &response,
+                &["pull_request_id", "pullRequestId"],
+            )?,
+        }))
+    }
+
     pub async fn stage_transfer_artifact(
         &mut self,
         transfer_id: String,
@@ -850,6 +881,7 @@ fn forwarded_event_name(value: &Value) -> Option<&'static str> {
         Some("pairing_started") => Some("pairing-started"),
         Some("pairing_requested") => Some("pairing-requested"),
         Some("incoming_transfer_request") => Some("transfer-request"),
+        Some("task_pull_requested") => Some("task-pull-requested"),
         Some("pairing_completed") => Some("pairing-completed"),
         Some("outgoing_transfer_committed") => Some("outgoing-transfer-committed"),
         Some("outgoing_transfer_finalization_requested") => {
@@ -1274,5 +1306,17 @@ mod tests {
             forwarded_event_name(&value),
             Some("outgoing-transfer-finalization-requested")
         );
+    }
+
+    #[test]
+    fn task_pull_request_events_emit_expected_tauri_topic() {
+        let value = json!({
+            "type": "task_pull_requested",
+            "request_id": "pull-1",
+            "requester_peer_id": "peer-destination",
+            "source_task_id": "task-source",
+        });
+
+        assert_eq!(forwarded_event_name(&value), Some("task-pull-requested"));
     }
 }

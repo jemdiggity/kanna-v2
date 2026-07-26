@@ -477,6 +477,35 @@ pub async fn prepare_outgoing_transfer(
 }
 
 #[tauri::command]
+pub async fn request_task_pull(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::TransferServiceState>,
+    peer_id: String,
+    source_task_id: String,
+    transport: Option<String>,
+) -> Result<Value, String> {
+    let mut guard = state.lock().await;
+    ensure_client(&app, &mut guard).await?;
+    let (result, dead) = {
+        let client = guard
+            .as_mut()
+            .ok_or_else(|| "transfer sidecar client unavailable".to_string())?;
+        let result = client
+            .request_task_pull(
+                peer_id,
+                source_task_id,
+                transport.unwrap_or_else(|| "auto".into()),
+            )
+            .await;
+        (result, client.is_dead())
+    };
+    if dead {
+        *guard = None;
+    }
+    result
+}
+
+#[tauri::command]
 pub async fn stage_transfer_artifact(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::TransferServiceState>,

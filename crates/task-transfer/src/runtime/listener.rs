@@ -5,16 +5,17 @@ use super::daemon::{
 use super::discovery::PeerDiscovery;
 use super::events::{
     IncomingTransferEvent, OutgoingTransferFinalizationRequestedEvent, PairingCompletedEvent,
-    PairingRequestedEvent, RuntimeError, RuntimeEvent,
+    PairingRequestedEvent, RuntimeError, RuntimeEvent, TaskPullRequestedEvent,
 };
 use super::external_peers::{
     ensure_peer_is_trusted, ensure_peer_is_trusted_for_transport, find_peer, ExternalPeerRegistry,
     TransferTransport,
 };
+use super::pull::{prune_task_pull_requests, validate_source_task_id};
 use super::replay_store::unix_ms;
 use super::state::{
     ImportCommitReceipt, IncomingTransferReservation, ListenerContext, OutgoingTransferReservation,
-    PairingDecision, PendingPairingRequest,
+    PairingDecision, PendingPairingRequest, PendingTaskPullRequest,
 };
 use super::utils::{
     ensure_peer_is_trusted_for, extract_request_id, load_or_create_identity,
@@ -285,6 +286,89 @@ async fn handle_connection(
                 transfer_id,
                 source_peer_id,
                 target_has_repo: false,
+            })
+        }
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => PeerResponse::Error {
+                request_id,
+                message: error.to_string(),
+            },
+        },
+        Ok(PeerRequest::RequestTaskPull {
+            request_id,
+            requester_peer_id,
+            sealed_payload,
+        }) => match async {
+            if requester_peer_id == context.self_peer_id {
+                return Err(RuntimeError::Protocol(
+                    "cannot request a task pull from this runtime".into(),
+                ));
+            }
+            let requester_peer = find_peer(
+                &context.discovery,
+                &context.external_peers,
+                &context.self_peer_id,
+                &requester_peer_id,
+                TransferTransport::Auto,
+            )
+            .await?;
+            ensure_peer_is_trusted(
+                &context.registry_root,
+                &context.self_peer_id,
+                &context.external_peers,
+                &requester_peer_id,
+                &requester_peer.public_key,
+            )?;
+            let requester_public_key = parse_public_key(&requester_peer.public_key)?;
+            let identity = load_or_create_identity(&context.registry_root, &context.self_peer_id)?;
+            let decrypted_payload = open_json(&identity, &requester_public_key, &sealed_payload)?;
+            let source_task_id = decrypted_payload
+                .get("source_task_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    RuntimeError::Protocol("task-pull payload missing source_task_id".into())
+                })?
+                .to_owned();
+            validate_source_task_id(&source_task_id)?;
+
+            let key = (requester_peer_id.clone(), source_task_id.clone());
+            let mut requests = context.pending_task_pull_requests.lock().await;
+            prune_task_pull_requests(&mut requests);
+            if let Some(existing) = requests.get(&key) {
+                return Ok::<PeerResponse, RuntimeError>(PeerResponse::RequestTaskPull {
+                    request_id: existing.request_id.clone(),
+                });
+            }
+
+            let pull_request_id = format!(
+                "pull-{}-{}",
+                context.self_peer_id,
+                context.request_counter.fetch_add(1, Ordering::Relaxed)
+            );
+            requests.insert(
+                key.clone(),
+                PendingTaskPullRequest {
+                    request_id: pull_request_id.clone(),
+                    created_at: std::time::Instant::now(),
+                },
+            );
+            if context
+                .incoming_sender
+                .send(RuntimeEvent::TaskPullRequested(TaskPullRequestedEvent {
+                    request_id: pull_request_id.clone(),
+                    requester_peer_id,
+                    source_task_id,
+                }))
+                .is_err()
+            {
+                requests.remove(&key);
+                return Err(RuntimeError::IncomingEventChannelClosed);
+            }
+
+            Ok(PeerResponse::RequestTaskPull {
+                request_id: pull_request_id,
             })
         }
         .await

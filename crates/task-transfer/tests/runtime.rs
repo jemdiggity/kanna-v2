@@ -21,6 +21,51 @@ use tokio::sync::oneshot;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+fn runtime_endpoint(registry_root: &Path, peer_id: &str) -> String {
+    PeerRegistry::new(registry_root.to_path_buf())
+        .list_peers("")
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == peer_id)
+        .unwrap()
+        .endpoint
+}
+
+async fn send_raw_task_pull(
+    registry_root: &Path,
+    source_peer_id: &str,
+    request_id: &str,
+    requester_peer_id: &str,
+    sealed_payload: String,
+) -> PeerResponse {
+    let request = PeerRequest::RequestTaskPull {
+        request_id: request_id.into(),
+        requester_peer_id: requester_peer_id.into(),
+        sealed_payload,
+    };
+    let mut stream = TcpStream::connect(runtime_endpoint(registry_root, source_peer_id))
+        .await
+        .unwrap();
+    stream
+        .write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    stream.flush().await.unwrap();
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .await
+        .unwrap();
+    serde_json::from_str(response.trim()).unwrap()
+}
+
+fn peer_error_message(response: PeerResponse) -> String {
+    let PeerResponse::Error { message, .. } = response else {
+        panic!("expected peer error response");
+    };
+    message
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn external_peer_is_session_trusted_and_never_persisted() {
     let temp = tempfile::tempdir().unwrap();
@@ -220,6 +265,337 @@ async fn external_peer_merges_lan_and_cloud_routes_and_selects_requested_transpo
         .await
         .unwrap();
     lan_server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_is_sealed_idempotent_and_emitted_once_for_paired_peers() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&destination, &source, "peer-source").await;
+    consume_pairing_completed(&source).await;
+
+    let first = destination
+        .request_task_pull("peer-source", "task-source", TransferTransport::Lan)
+        .await
+        .unwrap();
+    let RuntimeEvent::TaskPullRequested(event) = source.next_event().await.unwrap() else {
+        panic!("expected task pull request");
+    };
+    assert_eq!(event.request_id, first);
+    assert_eq!(event.source_task_id, "task-source");
+    assert_eq!(event.requester_peer_id, "peer-destination");
+
+    let repeated = destination
+        .request_task_pull("peer-source", "task-source", TransferTransport::Lan)
+        .await
+        .unwrap();
+    assert_eq!(repeated, first);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), source.next_event())
+            .await
+            .is_err(),
+        "duplicate pull request emitted a second event"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_uses_requested_cloud_route_for_externally_trusted_peers() {
+    let source_root = tempfile::tempdir().unwrap();
+    let destination_root = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        source_root.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        destination_root.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let source_identity = source.local_identity();
+    let destination_identity = destination.local_identity();
+
+    destination
+        .upsert_external_peer(ExternalPeer {
+            peer_id: source_identity.peer_id.clone(),
+            display_name: source_identity.display_name,
+            endpoint: runtime_endpoint(source_root.path(), "peer-source"),
+            public_key: source_identity.public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+    source
+        .upsert_external_peer(ExternalPeer {
+            peer_id: destination_identity.peer_id.clone(),
+            display_name: destination_identity.display_name,
+            endpoint: runtime_endpoint(destination_root.path(), "peer-destination"),
+            public_key: destination_identity.public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    destination
+        .request_task_pull("peer-source", "task-cloud", TransferTransport::Cloud)
+        .await
+        .unwrap();
+    let RuntimeEvent::TaskPullRequested(event) = source.next_event().await.unwrap() else {
+        panic!("expected task pull request");
+    };
+    assert_eq!(event.source_task_id, "task-cloud");
+    assert_eq!(event.requester_peer_id, "peer-destination");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_rejects_unknown_peer_self_request_and_unsafe_task_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        runtime
+            .request_task_pull("peer-missing", "task-source", TransferTransport::Auto)
+            .await,
+        Err(RuntimeError::PeerNotFound(_))
+    ));
+    for source_task_id in ["", "   ", "task\r\nsmuggled"] {
+        assert!(runtime
+            .request_task_pull("peer-missing", source_task_id, TransferTransport::Auto)
+            .await
+            .is_err());
+    }
+    assert!(runtime
+        .request_task_pull("peer-primary", "task-source", TransferTransport::Auto)
+        .await
+        .is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_rejects_mismatched_requester_key_without_emitting_event() {
+    let source_root = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        source_root.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let expected_requester = TransferIdentity::generate();
+    source
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-destination".into(),
+            display_name: "Destination".into(),
+            endpoint: "127.0.0.1:9".into(),
+            public_key: public_key_to_string(&expected_requester.public_key),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    let rogue_requester = TransferIdentity::generate();
+    let source_public_key = parse_public_key(&source.local_identity().public_key).unwrap();
+    let sealed_payload = seal_json(
+        &rogue_requester,
+        &source_public_key,
+        &json!({ "source_task_id": "task-source" }),
+    )
+    .unwrap();
+    assert!(matches!(
+        send_raw_task_pull(
+            source_root.path(),
+            "peer-source",
+            "rogue-pull",
+            "peer-destination",
+            sealed_payload,
+        )
+        .await,
+        PeerResponse::Error { .. }
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), source.next_event())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_listener_rejects_unknown_and_self_requesters_before_decryption() {
+    let source_root = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        source_root.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    let unknown_error = peer_error_message(
+        send_raw_task_pull(
+            source_root.path(),
+            "peer-source",
+            "unknown-pull",
+            "peer-unknown",
+            "deliberately-not-a-sealed-envelope".into(),
+        )
+        .await,
+    );
+    assert!(
+        unknown_error.contains("peer not found: peer-unknown"),
+        "unknown requester must be rejected before malformed ciphertext is parsed: {unknown_error}"
+    );
+
+    let self_error = peer_error_message(
+        send_raw_task_pull(
+            source_root.path(),
+            "peer-source",
+            "self-pull",
+            "peer-source",
+            "deliberately-not-a-sealed-envelope".into(),
+        )
+        .await,
+    );
+    assert!(self_error.contains("cannot request a task pull from this runtime"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), source.next_event())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_listener_rejects_malformed_ciphertext_before_emitting_event() {
+    let source_root = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        source_root.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let requester = TransferIdentity::generate();
+    source
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-destination".into(),
+            display_name: "Destination".into(),
+            endpoint: "127.0.0.1:9".into(),
+            public_key: public_key_to_string(&requester.public_key),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+
+    let error = peer_error_message(
+        send_raw_task_pull(
+            source_root.path(),
+            "peer-source",
+            "malformed-pull",
+            "peer-destination",
+            "deliberately-not-a-sealed-envelope".into(),
+        )
+        .await,
+    );
+    assert!(error.contains("crypto error"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), source.next_event())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_listener_rejects_blank_and_control_character_task_ids() {
+    let source_root = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        source_root.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let requester = TransferIdentity::generate();
+    source
+        .upsert_external_peer(ExternalPeer {
+            peer_id: "peer-destination".into(),
+            display_name: "Destination".into(),
+            endpoint: "127.0.0.1:9".into(),
+            public_key: public_key_to_string(&requester.public_key),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .await
+        .unwrap();
+    let source_public_key = parse_public_key(&source.local_identity().public_key).unwrap();
+
+    for (request_id, task_id, expected_error) in [
+        ("blank-pull", "   ", "must not be blank"),
+        (
+            "control-pull",
+            "task\r\nsmuggled",
+            "contains a control character",
+        ),
+    ] {
+        let sealed_payload = seal_json(
+            &requester,
+            &source_public_key,
+            &json!({ "source_task_id": task_id }),
+        )
+        .unwrap();
+        let error = peer_error_message(
+            send_raw_task_pull(
+                source_root.path(),
+                "peer-source",
+                request_id,
+                "peer-destination",
+                sealed_payload,
+            )
+            .await,
+        );
+        assert!(
+            error.contains(expected_error),
+            "unexpected task ID validation error: {error}"
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), source.next_event())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3462,6 +3838,9 @@ async fn next_incoming_transfer_request(
             RuntimeEvent::PairingStarted(_) => {}
             RuntimeEvent::PairingRequested(_) => {}
             RuntimeEvent::PairingCompleted(_) => {}
+            RuntimeEvent::TaskPullRequested(_) => {
+                panic!("expected incoming transfer event");
+            }
             RuntimeEvent::OutgoingTransferFinalizationRequested(_) => {
                 panic!("expected incoming transfer event");
             }
@@ -3482,6 +3861,9 @@ async fn next_outgoing_transfer_committed(
             RuntimeEvent::PairingStarted(_) => {}
             RuntimeEvent::PairingRequested(_) => {}
             RuntimeEvent::PairingCompleted(_) => {}
+            RuntimeEvent::TaskPullRequested(_) => {
+                panic!("expected outgoing transfer committed event");
+            }
             RuntimeEvent::OutgoingTransferFinalizationRequested(_) => {
                 panic!("expected outgoing transfer committed event");
             }
@@ -3627,6 +4009,7 @@ async fn consume_pairing_completed(runtime: &TransferRuntime) {
         RuntimeEvent::PairingCompleted(_) => {}
         RuntimeEvent::PairingStarted(_) => panic!("expected pairing completed event"),
         RuntimeEvent::PairingRequested(_) => panic!("expected pairing completed event"),
+        RuntimeEvent::TaskPullRequested(_) => panic!("expected pairing completed event"),
         RuntimeEvent::IncomingTransferRequest(_) => panic!("expected pairing completed event"),
         RuntimeEvent::OutgoingTransferCommitted(_) => panic!("expected pairing completed event"),
         RuntimeEvent::OutgoingTransferFinalizationRequested(_) => {
@@ -3661,6 +4044,9 @@ async fn pair_peers(
                         panic!("source should not receive its own pairing request event");
                     }
                     RuntimeEvent::PairingCompleted(_) => {}
+                    RuntimeEvent::TaskPullRequested(_) => {
+                        panic!("expected pairing started event");
+                    }
                     RuntimeEvent::IncomingTransferRequest(_) => {
                         panic!("expected pairing started event");
                     }
@@ -3682,6 +4068,9 @@ async fn pair_peers(
                         panic!("target should not receive pairing started event");
                     }
                     RuntimeEvent::PairingCompleted(_) => {}
+                    RuntimeEvent::TaskPullRequested(_) => {
+                        panic!("expected pairing request event");
+                    }
                     RuntimeEvent::IncomingTransferRequest(_) => {
                         panic!("expected pairing request event");
                     }

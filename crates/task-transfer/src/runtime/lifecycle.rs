@@ -76,6 +76,7 @@ impl TransferRuntime {
         let (receipt_sender, receipt_receiver) =
             mpsc::channel(config.max_unapplied_receipts.max(1));
         let pending_pairing_requests = Arc::new(Mutex::new(HashMap::new()));
+        let pending_task_pull_requests = Arc::new(Mutex::new(HashMap::new()));
         let external_peers = external_peers::registry();
         let replay_store = Arc::new(TransferReplayStore::new(
             &config.registry_dir,
@@ -122,6 +123,7 @@ impl TransferRuntime {
             pending_transfer_ttl: config.pending_transfer_ttl,
             peer_request_timeout: config.peer_request_timeout,
             pending_pairing_requests: Arc::clone(&pending_pairing_requests),
+            pending_task_pull_requests: Arc::clone(&pending_task_pull_requests),
             outgoing_transfers: Arc::clone(&outgoing_transfers),
             import_commit_receipts: Arc::clone(&import_commit_receipts),
             replay_store: Arc::clone(&replay_store),

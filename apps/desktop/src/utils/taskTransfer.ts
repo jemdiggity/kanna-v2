@@ -129,6 +129,12 @@ export interface PairingRequestedEvent {
   verificationCode: string;
 }
 
+export interface TaskPullRequestedEvent {
+  requestId: string;
+  requesterPeerId: string;
+  sourceTaskId: string;
+}
+
 function normalizeRemoteUrl(remoteUrl: string | null): string | null {
   if (!remoteUrl) return null;
   const trimmed = remoteUrl.trim();
@@ -406,6 +412,31 @@ export function parsePairingRequestedEvent(value: unknown): PairingRequestedEven
       record,
       ["verificationCode", "verification_code"],
       "pairing-requested event missing verification code",
+    ),
+  };
+}
+
+export function parseTaskPullRequestedEvent(value: unknown): TaskPullRequestedEvent {
+  const record = asRecord(value);
+  if (!record) {
+    throw new Error("task-pull-requested event payload is invalid");
+  }
+
+  return {
+    requestId: readRequiredString(
+      record,
+      ["requestId", "request_id"],
+      "task-pull-requested event missing request id",
+    ),
+    requesterPeerId: readRequiredString(
+      record,
+      ["requesterPeerId", "requester_peer_id"],
+      "task-pull-requested event missing requester peer id",
+    ),
+    sourceTaskId: readRequiredString(
+      record,
+      ["sourceTaskId", "source_task_id"],
+      "task-pull-requested event missing source task id",
     ),
   };
 }

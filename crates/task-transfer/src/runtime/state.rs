@@ -96,6 +96,15 @@ pub(super) struct PendingPairingRequest {
     pub(super) responder: oneshot::Sender<PairingDecision>,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct PendingTaskPullRequest {
+    pub(super) request_id: String,
+    pub(super) created_at: Instant,
+}
+
+pub(super) type PendingTaskPullRequests =
+    Arc<Mutex<HashMap<(String, String), PendingTaskPullRequest>>>;
+
 pub(super) enum PairingDecision {
     Accepted,
     Rejected,
@@ -112,6 +121,7 @@ pub(super) struct ListenerContext {
     pub(super) pending_transfer_ttl: Duration,
     pub(super) peer_request_timeout: Duration,
     pub(super) pending_pairing_requests: PendingPairingRequests,
+    pub(super) pending_task_pull_requests: PendingTaskPullRequests,
     pub(super) outgoing_transfers: Arc<Mutex<HashMap<String, OutgoingTransferReservation>>>,
     pub(super) import_commit_receipts: Arc<Mutex<HashMap<String, ImportCommitReceipt>>>,
     pub(super) replay_store: Arc<TransferReplayStore>,

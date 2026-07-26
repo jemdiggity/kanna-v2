@@ -69,10 +69,18 @@ pub struct PairingResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskPullRequestedEvent {
+    pub request_id: String,
+    pub requester_peer_id: String,
+    pub source_task_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeEvent {
     PairingStarted(PairingStartedEvent),
     PairingRequested(PairingRequestedEvent),
     PairingCompleted(PairingCompletedEvent),
+    TaskPullRequested(TaskPullRequestedEvent),
     IncomingTransferRequest(IncomingTransferEvent),
     OutgoingTransferCommitted(OutgoingTransferCommittedEvent),
     OutgoingTransferFinalizationRequested(OutgoingTransferFinalizationRequestedEvent),

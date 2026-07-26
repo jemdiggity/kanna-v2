@@ -65,6 +65,68 @@ fn control_messages_roundtrip_with_request_ids() {
 }
 
 #[test]
+fn task_pull_control_peer_and_event_messages_roundtrip() {
+    let control_request = ControlRequest::RequestTaskPull {
+        request_id: "control-pull-1".into(),
+        target_peer_id: "peer-source".into(),
+        source_task_id: "task-source".into(),
+        transport: TransferTransport::Cloud,
+    };
+    assert_eq!(
+        serde_json::to_value(&control_request).unwrap(),
+        json!({
+            "type": "request_task_pull",
+            "request_id": "control-pull-1",
+            "target_peer_id": "peer-source",
+            "source_task_id": "task-source",
+            "transport": "cloud",
+        })
+    );
+    assert_roundtrip(control_request);
+
+    assert_roundtrip(ControlResponse::RequestTaskPull {
+        request_id: "control-pull-1".into(),
+        pull_request_id: "pull-1".into(),
+    });
+
+    let peer_request = PeerRequest::RequestTaskPull {
+        request_id: "peer-pull-1".into(),
+        requester_peer_id: "peer-destination".into(),
+        sealed_payload: "sealed-task-id".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&peer_request).unwrap(),
+        json!({
+            "type": "request_task_pull",
+            "request_id": "peer-pull-1",
+            "requester_peer_id": "peer-destination",
+            "sealed_payload": "sealed-task-id",
+        })
+    );
+    assert_roundtrip(peer_request);
+
+    assert_roundtrip(PeerResponse::RequestTaskPull {
+        request_id: "pull-1".into(),
+    });
+
+    let event = SidecarEvent::TaskPullRequested {
+        request_id: "pull-1".into(),
+        requester_peer_id: "peer-destination".into(),
+        source_task_id: "task-source".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        json!({
+            "type": "task_pull_requested",
+            "request_id": "pull-1",
+            "requester_peer_id": "peer-destination",
+            "source_task_id": "task-source",
+        })
+    );
+    assert_roundtrip(event);
+}
+
+#[test]
 fn external_peer_control_messages_roundtrip() {
     let peer = ExternalPeer {
         peer_id: "peer-cloud".into(),

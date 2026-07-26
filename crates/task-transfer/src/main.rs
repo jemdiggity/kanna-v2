@@ -43,6 +43,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     display_name: event.display_name,
                     verification_code: event.verification_code,
                 },
+                RuntimeEvent::TaskPullRequested(event) => SidecarEvent::TaskPullRequested {
+                    request_id: event.request_id,
+                    requester_peer_id: event.requester_peer_id,
+                    source_task_id: event.source_task_id,
+                },
                 RuntimeEvent::IncomingTransferRequest(event) => {
                     SidecarEvent::IncomingTransferRequest {
                         transfer_id: event.transfer_id,
@@ -330,6 +335,21 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
                 transfer_id: result.transfer_id,
                 source_peer_id: result.source_peer_id,
                 target_has_repo: result.target_has_repo,
+            },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::RequestTaskPull {
+            request_id,
+            target_peer_id,
+            source_task_id,
+            transport,
+        } => match runtime
+            .request_task_pull(&target_peer_id, &source_task_id, transport)
+            .await
+        {
+            Ok(pull_request_id) => ControlResponse::RequestTaskPull {
+                request_id,
+                pull_request_id,
             },
             Err(error) => control_error(request_id, error),
         },

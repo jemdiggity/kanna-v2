@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { OutgoingTransferPayload } from "./taskTransfer";
-import { buildOutgoingTransferPayload, resolveIncomingTransferBaseBranch } from "./taskTransfer";
+import {
+  buildOutgoingTransferPayload,
+  parseTaskPullRequestedEvent,
+  resolveIncomingTransferBaseBranch,
+} from "./taskTransfer";
 
 function buildPayload(overrides: Partial<OutgoingTransferPayload> = {}): OutgoingTransferPayload {
   const {
@@ -157,5 +161,27 @@ describe("buildOutgoingTransferPayload", () => {
     expect(payload.task.cloud_task_id).toBe("local-a");
     expect(payload.task.source_desktop_id).toBeNull();
     expect(payload.target_desktop_id).toBeNull();
+  });
+});
+
+describe("parseTaskPullRequestedEvent", () => {
+  it("parses snake-case sidecar event payloads", () => {
+    expect(parseTaskPullRequestedEvent({
+      type: "task_pull_requested",
+      request_id: "pull-1",
+      requester_peer_id: "peer-destination",
+      source_task_id: "task-source",
+    })).toEqual({
+      requestId: "pull-1",
+      requesterPeerId: "peer-destination",
+      sourceTaskId: "task-source",
+    });
+  });
+
+  it("rejects incomplete event payloads", () => {
+    expect(() => parseTaskPullRequestedEvent({
+      request_id: "pull-1",
+      requester_peer_id: "peer-destination",
+    })).toThrow("source task id");
   });
 });

@@ -97,6 +97,9 @@ impl TransferRuntime {
             PeerResponse::StartPairing { .. } => Err(RuntimeError::Protocol(
                 "unexpected pairing response during preflight".into(),
             )),
+            PeerResponse::RequestTaskPull { .. } => Err(RuntimeError::Protocol(
+                "unexpected task-pull response during preflight".into(),
+            )),
             PeerResponse::SubmitTransferPayload { .. } => Err(RuntimeError::Protocol(
                 "unexpected submit-transfer response during preflight".into(),
             )),
@@ -201,6 +204,9 @@ impl TransferRuntime {
             PeerResponse::StartPairing { .. } => Err(RuntimeError::Protocol(
                 "unexpected pairing response during transfer commit".into(),
             )),
+            PeerResponse::RequestTaskPull { .. } => Err(RuntimeError::Protocol(
+                "unexpected task-pull response during transfer commit".into(),
+            )),
             PeerResponse::PrepareTransfer { .. } => Err(RuntimeError::Protocol(
                 "unexpected preflight response during transfer commit".into(),
             )),
@@ -300,6 +306,7 @@ impl TransferRuntime {
                 })
             }
             PeerResponse::StartPairing { .. }
+            | PeerResponse::RequestTaskPull { .. }
             | PeerResponse::PrepareTransfer { .. }
             | PeerResponse::SubmitTransferPayload { .. }
             | PeerResponse::FetchTransferArtifact { .. }
@@ -504,6 +511,7 @@ impl TransferRuntime {
                 Ok(StagedTransferArtifact { path })
             }
             PeerResponse::StartPairing { .. }
+            | PeerResponse::RequestTaskPull { .. }
             | PeerResponse::PrepareTransfer { .. }
             | PeerResponse::SubmitTransferPayload { .. }
             | PeerResponse::ImportCommitted { .. }
@@ -602,6 +610,7 @@ impl TransferRuntime {
                 Ok(())
             }
             PeerResponse::StartPairing { .. }
+            | PeerResponse::RequestTaskPull { .. }
             | PeerResponse::PrepareTransfer { .. }
             | PeerResponse::SubmitTransferPayload { .. }
             | PeerResponse::FetchTransferArtifact { .. }
