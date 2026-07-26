@@ -1140,17 +1140,19 @@ pub(super) async fn request_revision(
     }
 
     let origin = payload.origin.unwrap_or_default();
-    let outcome = {
+    // Resolve first, so the single-flight key below is the durable task id
+    // rather than whichever alias (id or branch name) the caller used.
+    let source_task_id = {
         let state = Arc::clone(&state);
-        super::blocking::run_handler_blocking("revision prepare", move || {
+        let task_id = task_id.clone();
+        super::blocking::run_handler_blocking("revision resolve", move || {
             let db = Db::open(&state.config.db_path).map_err(|e| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     format!("db error: {}", e),
                 )
             })?;
-            let source_task_id = db
-                .resolve_pipeline_item_id(&task_id)
+            db.resolve_pipeline_item_id(&task_id)
                 .map_err(|e| {
                     (
                         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -1162,7 +1164,34 @@ pub(super) async fn request_revision(
                         axum::http::StatusCode::NOT_FOUND,
                         format!("task not found: {}", task_id),
                     )
-                })?;
+                })
+        })
+        .await?
+    };
+
+    // One revision action per task at a time. Budget admission, workspace
+    // preparation, and the round accounting are one decision: overlapping
+    // requests would otherwise both see the last free slot, both start a
+    // revision, and spend the task past its cap — defeating the bound this
+    // endpoint exists to enforce. The guard releases on drop, including on
+    // every error path below.
+    let Some(_revision_in_flight) = state.begin_requested_task_revision(&source_task_id) else {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            format!("a revision is already in progress for task {source_task_id}"),
+        ));
+    };
+
+    let outcome = {
+        let state = Arc::clone(&state);
+        let source_task_id = source_task_id.clone();
+        super::blocking::run_handler_blocking("revision prepare", move || {
+            let db = Db::open(&state.config.db_path).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?;
             // A revision request always records the review verdict on the run
             // it closes, even when the request itself cannot proceed — so a
             // failure to resolve the budget still closes the run before it
@@ -1181,44 +1210,32 @@ pub(super) async fn request_revision(
                 }
             };
 
-            // Budget spent: record the review verdict, park the task where it
-            // is, and start nothing. This is the backstop against a review
-            // agent driving a scoped task through endless revise/review
-            // rounds — only the human can hand out more rounds.
-            if origin.is_agent() && budget.exhausted() {
-                let parked_summary = format!(
-                    "Parked for human review: this task's automatic revision budget \
-                     ({limit} round(s)) is spent, so Kanna did not start another revision. \
-                     Review verdict: {summary}",
-                    limit = budget.limit,
-                    summary = payload.summary,
-                );
-                let parked_result = revision_stage_result(&parked_summary, &payload.metadata)?;
-                let _ = db
-                    .finish_latest_running_stage_run(
-                        &source_task_id,
-                        "failed",
-                        Some(&parked_result),
-                        Some(&payload.prompt),
-                    )
+            // Claim a round atomically rather than checking and spending in
+            // two steps: `try_claim_agent_revision_round` reads and increments
+            // inside one immediate transaction, so concurrent requests cannot
+            // both be admitted on the last free slot. `None` means the budget
+            // is spent. A human request claims nothing — it is never refused.
+            let claimed_round = if origin.is_agent() {
+                let claimed = db
+                    .try_claim_agent_revision_round(&source_task_id, budget.limit)
                     .map_err(|e| {
                         (
                             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                             format!("db error: {}", e),
                         )
                     })?;
-                db.update_pipeline_item_activity(&source_task_id, "unread")
-                    .map_err(|e| {
-                        (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("db error: {}", e),
-                        )
-                    })?;
-                return Ok(RevisionOutcome::Parked {
-                    source_task_id,
-                    budget,
-                });
-            }
+                if claimed.is_none() {
+                    // Budget spent: record the review verdict, park the task
+                    // where it is, and start nothing. This is the backstop
+                    // against a review agent driving a scoped task through
+                    // endless revise/review rounds — only a human can hand out
+                    // more rounds.
+                    return park_exhausted_revision(&db, source_task_id, &payload, budget);
+                }
+                claimed
+            } else {
+                None
+            };
 
             let stage_result = revision_stage_result(&payload.summary, &payload.metadata)?;
             let _ = db
@@ -1238,38 +1255,49 @@ pub(super) async fn request_revision(
             // a round; a human-requested revision is the human's own call.
             let round = (origin.is_agent() && budget.limit > 0).then_some(
                 crate::task_creator::RevisionRound {
-                    number: budget.rounds + 1,
+                    number: claimed_round.unwrap_or(budget.rounds + 1),
                     limit: budget.limit,
                 },
             );
-            let prepared = crate::task_creator::prepare_revision_task_for_api(
+            let prepared = match crate::task_creator::prepare_revision_task_for_api(
                 &db,
                 &state.config,
                 &source_task_id,
                 &payload.target_stage,
                 &payload.prompt,
                 round,
-            )
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-            // Count the round only once the revision is real: a failed
-            // preparation never ran an agent, so it must not cost the task a
-            // round. A human request hands the budget back instead.
-            let rounds = if origin.is_agent() {
-                db.bump_task_revision_rounds(&source_task_id).map_err(|e| {
-                    (
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("db error: {}", e),
-                    )
-                })?
-            } else {
-                db.reset_task_revision_rounds(&source_task_id)
-                    .map_err(|e| {
-                        (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("db error: {}", e),
-                        )
-                    })?;
-                0
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    // The round was claimed before preparation so the check
+                    // and the spend could not be split; preparation failing
+                    // means no agent ran, so hand the round back.
+                    if claimed_round.is_some() {
+                        if let Err(release_error) =
+                            db.release_agent_revision_round(&source_task_id)
+                        {
+                            log::error!(
+                                "failed to release revision round for task {source_task_id}: {release_error}"
+                            );
+                        }
+                    }
+                    return Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error));
+                }
+            };
+            let rounds = match claimed_round {
+                Some(rounds) => rounds,
+                None => {
+                    // A human request spends no round and hands the budget
+                    // back, so the agents get a fresh set to satisfy it.
+                    db.reset_task_revision_rounds(&source_task_id)
+                        .map_err(|e| {
+                            (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("db error: {}", e),
+                            )
+                        })?;
+                    0
+                }
             };
             Ok(RevisionOutcome::Started {
                 source_task_id,
@@ -1359,6 +1387,50 @@ enum RevisionOutcome {
         prepared: Box<crate::task_creator::PreparedStageRunSpawn>,
         budget: crate::task_creator::RevisionBudget,
     },
+}
+
+/// Record the review verdict, park the task at its current stage for its
+/// human, and start nothing. Used when the revision-round budget is spent.
+fn park_exhausted_revision(
+    db: &Db,
+    source_task_id: String,
+    payload: &crate::mobile_api::RequestRevisionRequest,
+    budget: crate::task_creator::RevisionBudget,
+) -> Result<RevisionOutcome, (axum::http::StatusCode, String)> {
+    let parked_summary = format!(
+        "Parked for human review: this task's automatic revision budget \
+         ({limit} round(s)) is spent, so Kanna did not start another revision. \
+         Review verdict: {summary}",
+        limit = budget.limit,
+        summary = payload.summary,
+    );
+    let parked_result = revision_stage_result(&parked_summary, &payload.metadata)?;
+    // The requested changes stay on the run as feedback so nothing the
+    // reviewer found is lost when the loop stops.
+    let _ = db
+        .finish_latest_running_stage_run(
+            &source_task_id,
+            "failed",
+            Some(&parked_result),
+            Some(&payload.prompt),
+        )
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+    db.update_pipeline_item_activity(&source_task_id, "unread")
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+    Ok(RevisionOutcome::Parked {
+        source_task_id,
+        budget,
+    })
 }
 
 /// The `{status, summary, metadata}` verdict JSON a revision request records

@@ -1723,9 +1723,46 @@ fn revision_rounds_count_agent_rounds_until_reset() {
         0
     );
 
-    assert_eq!(db.bump_task_revision_rounds("task-1").unwrap(), 1);
-    assert_eq!(db.bump_task_revision_rounds("task-1").unwrap(), 2);
+    // Claiming reads and increments in one transaction, so the returned count
+    // is the round the caller owns.
+    assert_eq!(
+        db.try_claim_agent_revision_round("task-1", 3).unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        db.try_claim_agent_revision_round("task-1", 3).unwrap(),
+        Some(2)
+    );
     assert_eq!(db.task_revision_rounds("task-1").unwrap(), 2);
+
+    // At the limit the claim is refused rather than clamped, and refusing
+    // must not spend anything.
+    assert_eq!(
+        db.try_claim_agent_revision_round("task-1", 2).unwrap(),
+        None
+    );
+    assert_eq!(db.task_revision_rounds("task-1").unwrap(), 2);
+    // A pipeline that opted out of the cap always admits.
+    assert_eq!(
+        db.try_claim_agent_revision_round("task-1", 0).unwrap(),
+        Some(3)
+    );
+    // Releasing hands a claimed round back, and floors at zero rather than
+    // going negative.
+    db.release_agent_revision_round("task-1").unwrap();
+    assert_eq!(db.task_revision_rounds("task-1").unwrap(), 2);
+    for _ in 0..5 {
+        db.release_agent_revision_round("task-1").unwrap();
+    }
+    assert_eq!(db.task_revision_rounds("task-1").unwrap(), 0);
+    assert_eq!(
+        db.try_claim_agent_revision_round("task-1", 3).unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        db.try_claim_agent_revision_round("task-1", 3).unwrap(),
+        Some(2)
+    );
     assert_eq!(
         db.get_pipeline_item("task-1")
             .unwrap()
@@ -1740,6 +1777,8 @@ fn revision_rounds_count_agent_rounds_until_reset() {
 
     // An unknown task is an error, never a silent zero that would hand out an
     // unbounded budget.
-    assert!(db.bump_task_revision_rounds("missing-task").is_err());
+    assert!(db
+        .try_claim_agent_revision_round("missing-task", 3)
+        .is_err());
     assert!(db.reset_task_revision_rounds("missing-task").is_err());
 }

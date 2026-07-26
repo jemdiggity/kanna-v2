@@ -599,19 +599,45 @@ impl Db {
         )
     }
 
-    /// Count one more agent-requested revision round, returning the new
-    /// total.
-    pub fn bump_task_revision_rounds(&self, id: &str) -> Result<i64, rusqlite::Error> {
-        let rows_affected = self.conn.execute(
+    /// Claim one agent-requested revision round if the budget still allows
+    /// it, returning the new total — or `None` when the budget is spent.
+    ///
+    /// The read and the increment share one immediate transaction so that two
+    /// concurrent requests cannot both observe the last free slot and both
+    /// spend it. `limit` of `0` means the pipeline opted out of the cap.
+    pub fn try_claim_agent_revision_round(
+        &self,
+        id: &str,
+        limit: i64,
+    ) -> Result<Option<i64>, rusqlite::Error> {
+        self.with_immediate_transaction(|db| {
+            let rounds = db.task_revision_rounds(id)?;
+            if limit > 0 && rounds >= limit {
+                return Ok(None);
+            }
+            let rows_affected = db.conn.execute(
+                "UPDATE pipeline_item
+                 SET revision_rounds = revision_rounds + 1, updated_at = datetime('now')
+                 WHERE id = ?",
+                [id],
+            )?;
+            if rows_affected == 0 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            Ok(Some(rounds + 1))
+        })
+    }
+
+    /// Hand a claimed round back: preparation failed, so no agent ever ran and
+    /// the round must not be charged to the task. Floors at zero.
+    pub fn release_agent_revision_round(&self, id: &str) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
             "UPDATE pipeline_item
-             SET revision_rounds = revision_rounds + 1, updated_at = datetime('now')
+             SET revision_rounds = MAX(revision_rounds - 1, 0), updated_at = datetime('now')
              WHERE id = ?",
             [id],
         )?;
-        if rows_affected == 0 {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
-        }
-        self.task_revision_rounds(id)
+        Ok(())
     }
 
     /// Hand the round budget back: a human asked for this revision, so the

@@ -24,6 +24,30 @@ fn daemon_socket_path_for_dir(daemon_dir: &str) -> PathBuf {
     kanna_runtime_defaults::socket_path(Path::new(daemon_dir))
 }
 
+static TEST_UNIQUE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Process-unique suffix for a test's temp repo, database, and daemon
+/// directory. The wall clock alone is not enough: two tests that start within
+/// the same tick read the same nanoseconds and derive the same paths, and a
+/// daemon socket path is a hash of the daemon directory — so the loser
+/// unlinks the winner's socket, binds its own, and one test's spawn lands on
+/// the other's listener. The counter makes the suffix unique regardless of
+/// clock resolution or scheduling.
+fn unique_test_suffix() -> String {
+    use std::sync::atomic::Ordering;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos(),
+        TEST_UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 fn pipeline_socket_path_for_daemon_dir(daemon_dir: &str) -> String {
     let dir = PathBuf::from(daemon_dir).join("pipeline");
     kanna_runtime_defaults::socket_path(&dir)

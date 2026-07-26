@@ -221,6 +221,24 @@ impl AppState {
         &self,
         task_id: &str,
     ) -> Option<RequestedTaskOperation> {
+        self.begin_requested_task_operation(task_id)
+    }
+
+    /// Single-flight for one task's revision action. The budget check, the
+    /// workspace preparation, and the round accounting must not interleave
+    /// with another revision for the same task: two admitted requests would
+    /// both start a revision and spend rounds past the configured cap, and an
+    /// overlapping human reset would race an agent's claim. Shares the
+    /// per-task operation key space with creation and abort, since those
+    /// equally must not overlap a revision that replaces the task's session.
+    pub(super) fn begin_requested_task_revision(
+        &self,
+        task_id: &str,
+    ) -> Option<RequestedTaskOperation> {
+        self.begin_requested_task_operation(task_id)
+    }
+
+    fn begin_requested_task_operation(&self, task_id: &str) -> Option<RequestedTaskOperation> {
         let mut flights = self
             .requested_task_operations
             .active

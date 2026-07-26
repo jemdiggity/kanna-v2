@@ -127,6 +127,19 @@ resolves the pair before doing anything:
   current stage, and the response reports `exhausted: true`. The task's human
   decides what happens next; the loop cannot restart itself.
 
+Admission is atomic and single-flight, because a cap that request timing can
+step over is not a cap. `try_claim_agent_revision_round` reads the count and
+increments it inside one `BEGIN IMMEDIATE` transaction, so two requests cannot
+both be admitted on the last free slot; if preparation then fails, the round is
+released, preserving the rule that a revision which never ran costs nothing.
+On top of that, one revision action runs per task at a time (the same per-task
+operation flight that guards task creation and abort): a second concurrent
+request gets `409 Conflict` rather than waiting through a workspace fork, and a
+request arriving after the winner finishes sees the spent budget and parks.
+Without both, two admitted requests also raced on the *same* forked branch name
+— the regression test in `http_api::tests::revision_status` reproduces exactly
+that when either guard is removed.
+
 Origin is what separates a bounded agent loop from human judgment.
 `RequestRevisionRequest.origin` (`agent`, the default, or `human`) is
 deliberately **not** exposed in the tool catalog — an agent cannot claim human

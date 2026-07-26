@@ -81,18 +81,10 @@ async fn request_revision_error_body_survives_error_logging_middleware() {
 #[tokio::test]
 async fn request_revision_route_resolves_branch_style_task_id() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-branch-{unique}"));
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
@@ -304,19 +296,12 @@ async fn request_revision_route_resolves_branch_style_task_id() {
 #[tokio::test]
 async fn automatic_revision_completion_dispatches_commit_post_through_http_routes() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
     use tokio::sync::mpsc;
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-loop-{unique}"));
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
@@ -659,14 +644,7 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-title-{unique}"));
     init_test_git_repo(&repo_root);
     let kanna_dir = repo_root.join(".kanna");
@@ -935,16 +913,7 @@ struct RevisionBudgetFixture {
 }
 
 fn setup_revision_budget_fixture(label: &str, revision_limit: i64) -> RevisionBudgetFixture {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let unique = format!(
-        "{label}-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = format!("{label}-{}", super::unique_test_suffix());
     let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-budget-{unique}"));
     init_test_git_repo(&repo_root);
     std::fs::write(
@@ -1033,7 +1002,7 @@ fn setup_revision_budget_fixture(label: &str, revision_limit: i64) -> RevisionBu
     // Spend the whole budget, as a task that has already been round-tripped
     // through review this many times would have.
     for _ in 0..revision_limit {
-        db.bump_task_revision_rounds("budget-1").unwrap();
+        db.try_claim_agent_revision_round("budget-1", 0).unwrap();
     }
     db.insert_stage_run(crate::db::NewStageRun {
         id: "budget-review-run",
@@ -1258,21 +1227,14 @@ async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
 async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_the_post_result() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use std::sync::Mutex;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     const DECLINED_MARKER: &str = "DECLINED: the migration finding is out of scope for this task.";
     const COMMIT_SUMMARY: &str = "committed 2 files for review";
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-prev-main-{unique}"));
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
@@ -1558,4 +1520,189 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir_all(&daemon_dir);
     let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// The cap is the load-bearing behavior of the revision budget, so it must not
+/// be bypassable by request timing. Two agent requests arriving together at
+/// the task's last free slot must not both be admitted: reading the count and
+/// spending it are one atomic claim, and one revision action runs at a time
+/// per task. Drives the real router, DB, and stage preparation, because a unit
+/// test of `RevisionBudget::exhausted` cannot prove that wiring.
+#[tokio::test]
+async fn concurrent_agent_revision_requests_cannot_spend_past_the_budget() {
+    // Limit 2 with one round already spent: exactly one slot remains, so two
+    // concurrent requests contend for it.
+    let fixture = setup_revision_budget_fixture("race", 2);
+    {
+        let db = Db::open(&fixture.config.db_path).unwrap();
+        db.release_agent_revision_round("budget-1").unwrap();
+        assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 1);
+    }
+
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let request = || {
+        Request::post("/v1/tasks/budget-1/actions/request-revision")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "targetStage": "in progress",
+                    "summary": "QA failed: review-ui",
+                    "prompt": "Fix the finding."
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let (first, second) = tokio::join!(
+        app.clone().oneshot(request()),
+        app.clone().oneshot(request())
+    );
+
+    let mut started = 0;
+    let mut refused = 0;
+    for response in [first.unwrap(), second.unwrap()] {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        match status {
+            // Serialized behind the winner, then observed the spent budget.
+            StatusCode::OK => {
+                let action: TaskActionResponse = from_slice(&body).unwrap();
+                let budget = action.revision_budget.expect("revision budget reported");
+                if budget.exhausted {
+                    refused += 1;
+                } else {
+                    started += 1;
+                }
+                assert!(
+                    budget.rounds <= budget.limit,
+                    "a response must never report more rounds than the limit: {budget:?}"
+                );
+            }
+            // Rejected as a concurrent revision for the same task.
+            StatusCode::CONFLICT => {
+                let message = String::from_utf8_lossy(&body);
+                assert!(
+                    message.contains("already in progress"),
+                    "conflict must say why: {message}"
+                );
+                refused += 1;
+            }
+            other => panic!(
+                "unexpected status {other}: {}",
+                String::from_utf8_lossy(&body)
+            ),
+        }
+    }
+
+    assert_eq!(
+        (started, refused),
+        (1, 1),
+        "exactly one revision may start and the other must be refused"
+    );
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    // The invariant: the stored count never passes the configured cap.
+    assert_eq!(
+        db.task_revision_rounds("budget-1").unwrap(),
+        2,
+        "the last slot must be spent exactly once"
+    );
+    // And only one revision run was created for the target stage.
+    let revision_runs = db
+        .list_stage_runs_for_task("budget-1")
+        .unwrap()
+        .into_iter()
+        .filter(|run| run.stage == "in progress" && run.kind == "main")
+        .count();
+    assert!(
+        revision_runs <= 1,
+        "at most one revision run may be started, found {revision_runs}"
+    );
+
+    drop(db);
+    cleanup_revision_budget_fixture(&fixture);
+}
+
+/// A human request is never refused by the budget, but it must not race an
+/// agent's claim either: the two would otherwise both start a revision on one
+/// task, and the human's reset would collide with the agent's increment.
+#[tokio::test]
+async fn concurrent_human_and_agent_revision_requests_are_serialized() {
+    let fixture = setup_revision_budget_fixture("overlap", 1);
+    {
+        // Budget already spent, so the agent request is the one that must not
+        // start anything even if it wins the race.
+        let db = Db::open(&fixture.config.db_path).unwrap();
+        assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 1);
+    }
+
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let build = |origin: &str| {
+        Request::post("/v1/tasks/budget-1/actions/request-revision")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "targetStage": "in progress",
+                    "summary": "needs another pass",
+                    "prompt": "Fix the finding.",
+                    "origin": origin
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let (agent, human) = tokio::join!(
+        app.clone().oneshot(build("agent")),
+        app.clone().oneshot(build("human"))
+    );
+
+    let mut outcomes = Vec::new();
+    for response in [agent.unwrap(), human.unwrap()] {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        if status == StatusCode::OK {
+            let action: TaskActionResponse = from_slice(&body).unwrap();
+            let budget = action.revision_budget.expect("revision budget reported");
+            outcomes.push(if budget.exhausted {
+                "parked"
+            } else {
+                "started"
+            });
+            assert!(budget.rounds <= budget.limit, "{budget:?}");
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT);
+            outcomes.push("conflict");
+        }
+    }
+
+    // Whichever order they land in, at most one revision starts: the human's
+    // (never refused by the budget) or none, when the human lost the flight.
+    assert!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == "started")
+            .count()
+            <= 1,
+        "at most one revision may start: {outcomes:?}"
+    );
+    assert!(
+        outcomes.contains(&"conflict") || outcomes.contains(&"parked"),
+        "the losing or over-budget request must be refused: {outcomes:?}"
+    );
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    // The agent can never push the count past the cap, and a human revision
+    // that ran resets it to 0.
+    let rounds = db.task_revision_rounds("budget-1").unwrap();
+    assert!(
+        rounds <= 1,
+        "rounds must never exceed the limit, got {rounds}"
+    );
+
+    drop(db);
+    cleanup_revision_budget_fixture(&fixture);
 }
