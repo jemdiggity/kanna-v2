@@ -872,6 +872,131 @@ describe("pushTaskToPeer", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("signal_session", expect.anything());
   });
 
+  it("falls back from LAN connection failure to cloud before creating the transfer row", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const fakeDb = createTransferDb({});
+    await store.init(fakeDb);
+    store.repos = [buildRepo()];
+    store.items = [buildItem()];
+    loadSessionRecoveryStateMock.mockResolvedValue(null);
+    let preflightCount = 0;
+
+    invokeMock.mockImplementation(async (cmd, args) => {
+      if (cmd === "mobile_server_status") return { desktopId: "desktop-source" };
+      if (cmd === "prepare_outgoing_transfer") {
+        const payload = args?.payload as Record<string, unknown>;
+        if (payload.phase === "preflight") {
+          preflightCount += 1;
+          if (payload.transport === "lan") {
+            throw new Error("i/o error: Connection refused");
+          }
+          return {
+            transferId: "transfer-cloud",
+            sourcePeerId: "peer-source",
+            targetHasRepo: true,
+          };
+        }
+        return { ok: true };
+      }
+      return null;
+    });
+
+    await store.pushTaskToPeer("task-source", "peer-target", {
+      transport: "lan",
+      cloudFallback: true,
+      targetDesktopId: "desktop-target",
+    });
+
+    expect(preflightCount).toBe(2);
+    const prepareCalls = invokeMock.mock.calls.filter(
+      ([command]) => command === "prepare_outgoing_transfer",
+    );
+    expect(prepareCalls[0]).toEqual(["prepare_outgoing_transfer", {
+      payload: {
+        phase: "preflight",
+        sourceTaskId: "task-source",
+        targetPeerId: "peer-target",
+        transport: "lan",
+      },
+    }]);
+    expect(prepareCalls[1]).toEqual(["prepare_outgoing_transfer", {
+      payload: {
+        phase: "preflight",
+        sourceTaskId: "task-source",
+        targetPeerId: "peer-target",
+        transport: "cloud",
+      },
+    }]);
+    expect(fakeDb.tables.task_transfer).toHaveLength(1);
+    expect(fakeDb.tables.task_transfer[0]).toMatchObject({
+      source_desktop_id: "desktop-source",
+      target_desktop_id: "desktop-target",
+    });
+    const payload = JSON.parse(fakeDb.tables.task_transfer[0]!.payload_json!);
+    expect(payload.task.source_desktop_id).toBe("desktop-source");
+    expect(payload.target_desktop_id).toBe("desktop-target");
+  });
+
+  it("does not cloud-retry protocol failures or failures after preflight", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const fakeDb = createTransferDb({});
+    await store.init(fakeDb);
+    store.repos = [buildRepo()];
+    store.items = [buildItem()];
+    loadSessionRecoveryStateMock.mockResolvedValue(null);
+
+    invokeMock.mockImplementation(async (cmd) => {
+      if (cmd === "mobile_server_status") return { desktopId: "desktop-source" };
+      if (cmd === "prepare_outgoing_transfer") {
+        throw new Error("protocol error: peer key mismatch");
+      }
+      return null;
+    });
+    await expect(store.pushTaskToPeer("task-source", "peer-target", {
+      transport: "lan",
+      cloudFallback: true,
+      targetDesktopId: "desktop-target",
+    })).rejects.toThrow("key mismatch");
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer")).toHaveLength(1);
+    expect(fakeDb.tables.task_transfer).toHaveLength(0);
+
+    invokeMock.mockReset();
+    invokeMock.mockImplementation(async (cmd, args) => {
+      if (cmd === "mobile_server_status") return { desktopId: "desktop-source" };
+      if (cmd === "prepare_outgoing_transfer") {
+        const payload = args?.payload as Record<string, unknown>;
+        if (payload.phase === "preflight") {
+          return {
+            transferId: "transfer-commit",
+            sourcePeerId: "peer-source",
+            targetHasRepo: true,
+          };
+        }
+        throw new Error("i/o error: connection reset during commit");
+      }
+      return null;
+    });
+    await expect(store.pushTaskToPeer("task-source", "peer-target", {
+      transport: "lan",
+      cloudFallback: true,
+      targetDesktopId: "desktop-target",
+    })).rejects.toThrow("during commit");
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer")).toHaveLength(2);
+    expect(fakeDb.tables.task_transfer).toHaveLength(1);
+
+    await expect(store.pushTaskToPeer("task-source", "peer-target", {
+      transport: "lan",
+      cloudFallback: true,
+      targetDesktopId: "desktop-target",
+    })).rejects.toThrow("already transferring");
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer")).toHaveLength(2);
+    expect(fakeDb.tables.task_transfer).toHaveLength(1);
+  });
+
   it("uses preflight sourcePeerId and targetHasRepo to build the final payload", async () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");

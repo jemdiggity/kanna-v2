@@ -106,6 +106,8 @@ export async function listDesktopLanTasks(options: {
   const mapped = mapDesktopCloudTasks(tasks, { ...options, currentDesktopId });
   for (const ref of Object.values(mapped.terminalRefs)) {
     ref.transport = "lan";
+    ref.transferPeerId = ref.ownerDesktopId;
+    ref.preferredTransferTransport = "lan";
   }
   return mapped;
 }

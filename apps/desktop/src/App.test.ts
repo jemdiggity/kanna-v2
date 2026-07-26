@@ -5040,6 +5040,10 @@ describe("App", () => {
 
     const wrapper = await mountApp(SidebarWithRepoStub);
     await flushPromises();
+    await waitForCondition(() =>
+      store.approveIncomingTransfer.mock.calls.some(([transferId]) =>
+        transferId === "transfer-stale"),
+    );
 
     expect(store.approveIncomingTransfer).toHaveBeenCalledWith("transfer-stale");
     expect(dbMock.execute).toHaveBeenCalledWith(
@@ -5223,11 +5227,15 @@ describe("App", () => {
   it("adds Push to Machine to command palette commands for active tasks", async () => {
     store.currentItem = {
       id: "task-1",
+      repo_id: "repo-1",
+      closed_at: null,
       stage: "in progress",
       branch: "task-1",
       prompt: "Fix handoff",
       tags: "[]",
     };
+    store.items = [store.currentItem];
+    store.selectedItemId = "task-1";
 
     const CommandPaletteModalStub = defineComponent({
       name: "CommandPaletteModal",
@@ -5694,11 +5702,15 @@ describe("App", () => {
   it("keeps Push to Machine pending while transfer push is in flight and ignores duplicate selections", async () => {
     store.currentItem = {
       id: "task-1",
+      repo_id: "repo-1",
+      closed_at: null,
       stage: "in progress",
       branch: "task-1",
       prompt: "Fix handoff",
       tags: "[]",
     };
+    store.items = [store.currentItem];
+    store.selectedItemId = "task-1";
     const push = createDeferred<void>();
     store.pushTaskToPeer.mockImplementation(() => push.promise);
     invokeMock.mockImplementation(async (command: string, args?: { name?: string; repoPath?: string }) => {

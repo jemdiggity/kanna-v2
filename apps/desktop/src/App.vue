@@ -261,6 +261,7 @@ const appTaskNavigation = useAppTaskNavigation({
   repoCommandCatalog,
   openPeerPicker,
   openPairPeerPicker,
+  pullSelectedWorkspaceTask: appTaskTransfer.pullSelectedWorkspaceTask,
 });
 const {
   navigateItems,
@@ -341,6 +342,7 @@ const {
   stopSystemThemeListener,
   store,
   toast,
+  transferMachines,
   warmTransferSidecar: warmCloudTransferSidecar,
   windowWorkspace,
 });

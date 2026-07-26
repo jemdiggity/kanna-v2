@@ -19,6 +19,8 @@ import {
   parseOutgoingTransferFinalizationRequestEvent,
   parsePairingCompletedEvent,
   parsePairingRequestedEvent,
+  parseTaskPullRequestedEvent,
+  type TaskPullRequestedEvent,
 } from "../utils/taskTransfer";
 import {
   WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT,
@@ -38,6 +40,7 @@ import { parseRecentAgentChoices } from "../utils/agentChoiceUsage";
 import type { useAppUpdate } from "./useAppUpdate";
 import type { useToast } from "./useToast";
 import { showTerminalFileLinkHintOnce } from "./terminalFileLinkHint";
+import type { TransferMachine } from "../services/desktopTransferMachines";
 
 type AppPreferences = ReturnType<typeof useAppPreferences>["preferences"];
 type AppUpdateController = ReturnType<typeof useAppUpdate>;
@@ -80,12 +83,47 @@ interface UseAppLifecycleOptions {
   stopSystemThemeListener: () => void;
   store: ReturnType<typeof useKannaStore>;
   toast: ReturnType<typeof useToast>;
+  transferMachines: Readonly<Ref<TransferMachine[]>>;
   warmTransferSidecar: () => Promise<void>;
   windowWorkspace: WindowWorkspaceController;
 }
 
 function eventPayload(event: unknown): unknown {
   return (event as { payload?: unknown })?.payload ?? event;
+}
+
+export async function handleTaskPullRequested(
+  request: TaskPullRequestedEvent,
+  store: Pick<ReturnType<typeof useKannaStore>, "items" | "pushTaskToPeer">,
+  inFlightSourceTaskIds: Set<string>,
+  transferMachines: readonly TransferMachine[],
+): Promise<boolean> {
+  const source = store.items.find((item) => item.id === request.sourceTaskId);
+  const requester = transferMachines.find((machine) =>
+    machine.peerId === request.requesterPeerId);
+  if (
+    !source
+    || !requester
+    || source.closed_at != null
+    || ["pending", "streaming", "importing", "awaiting_acknowledgment"].includes(
+      source.transfer_status ?? "",
+    )
+    || inFlightSourceTaskIds.has(source.id)
+  ) {
+    return false;
+  }
+
+  inFlightSourceTaskIds.add(source.id);
+  try {
+    await store.pushTaskToPeer(source.id, request.requesterPeerId, {
+      transport: requester.preferredTransport,
+      cloudFallback: requester.cloudFallback,
+      targetDesktopId: requester.desktopId,
+    });
+    return true;
+  } finally {
+    inFlightSourceTaskIds.delete(source.id);
+  }
 }
 
 function focusAgentTerminal() {
@@ -118,11 +156,13 @@ export function useAppLifecycle({
   stopSystemThemeListener,
   store,
   toast,
+  transferMachines,
   warmTransferSidecar,
   windowWorkspace,
 }: UseAppLifecycleOptions) {
   const appUnlisteners: Array<() => void> = [];
   const fatalInitializationError = ref<string | null>(null);
+  const taskPullPushesInFlight = new Set<string>();
   let currentWindowClosePhase: "open" | "preparing" | "recovering" | "destroying" = "open";
   let resolveWindowMembershipInitialization: (() => void) | null = null;
   const windowMembershipInitialization = new Promise<void>((resolve) => {
@@ -313,6 +353,24 @@ export function useAppLifecycle({
       appUnlisteners.push(unlistenTransferRequest);
     } catch (e: unknown) {
       console.error("[App] transfer-request listener registration failed:", e);
+    }
+    try {
+      const unlistenTaskPullRequested = await listen("task-pull-requested", async (event: unknown) => {
+        try {
+          await handleTaskPullRequested(
+            parseTaskPullRequestedEvent(eventPayload(event)),
+            store,
+            taskPullPushesInFlight,
+            transferMachines.value,
+          );
+        } catch (e: unknown) {
+          console.error("[App] failed to handle task pull request:", e);
+          toast.error(e instanceof Error ? e.message : String(e));
+        }
+      });
+      appUnlisteners.push(unlistenTaskPullRequested);
+    } catch (e: unknown) {
+      console.error("[App] task-pull-requested listener registration failed:", e);
     }
     void initializeDesktopCloudAuth().catch((error) =>
       console.warn("[cloud] failed to initialize desktop auth:", error),

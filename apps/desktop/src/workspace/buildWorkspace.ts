@@ -316,13 +316,17 @@ function capabilitiesFor(candidate: Candidate): WorkspaceCapabilities {
   const isLocal = candidate.source.kind === "local";
   const hasTerminal = isLocal || Boolean(candidate.source.terminalRef);
   const isReachable = isLocal || Boolean(candidate.source.terminalRef);
-  return buildCapabilities({ isLocal, hasTerminal, isReachable });
+  const canPullFromMachine = !isLocal
+    && isReachable
+    && Boolean(candidate.source.terminalRef?.transferPeerId?.trim());
+  return buildCapabilities({ isLocal, hasTerminal, isReachable, canPullFromMachine });
 }
 
 function buildCapabilities(input: {
   isLocal: boolean;
   hasTerminal: boolean;
   isReachable: boolean;
+  canPullFromMachine: boolean;
 }): WorkspaceCapabilities {
   return {
     canOpenTerminal: input.hasTerminal,
@@ -331,7 +335,7 @@ function buildCapabilities(input: {
     canClose: input.isReachable,
     canCreateSiblingTask: true,
     canPushToMachine: input.isLocal,
-    canPullFromMachine: !input.isLocal,
+    canPullFromMachine: input.canPullFromMachine,
     canOpenDiff: input.isLocal,
     canOpenInIde: input.isLocal,
     canOpenShell: input.isLocal,

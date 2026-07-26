@@ -89,6 +89,8 @@ export interface DesktopCloudTerminalRef {
   ownerLocalRepoId?: string;
   ownerLocalTaskId: string;
   transport?: "cloud" | "lan";
+  transferPeerId?: string;
+  preferredTransferTransport?: "lan" | "cloud";
 }
 
 export interface DesktopCloudTaskIndexOptions {
@@ -284,6 +286,18 @@ export function mapDesktopCloudTasks(
   const items: PipelineItem[] = [];
   const terminalRefs: Record<string, DesktopCloudTerminalRef> = {};
   const blockedByTaskIds: Record<string, string[]> = {};
+  const transferMachines = mapDesktopCloudTransferMachines(
+    desktopSnapshots,
+    options.activeDesktopIds,
+  );
+  const transferMachineByDesktopId = new Map(
+    transferMachines
+      .filter((machine) =>
+        machine.online
+        && machine.protocolVersion === 1
+        && machine.acceptingTransfers)
+      .map((machine) => [machine.desktopId, machine]),
+  );
   const localRepoById = new Map(
     (options.localRepos ?? []).map((entry) => [entry.repo.id, entry.repo]),
   );
@@ -338,11 +352,18 @@ export function mapDesktopCloudTasks(
       blockedByTaskIds[itemId] = uniqueBlockerIds;
     }
     if (ownerDesktopIsReachable(snapshot.ownerDesktopId, options.activeDesktopIds)) {
+      const transferMachine = transferMachineByDesktopId.get(snapshot.ownerDesktopId);
       terminalRefs[itemId] = {
         ownerDesktopId: snapshot.ownerDesktopId,
         ownerLocalRepoId: snapshotLocalRepoId,
         ownerLocalTaskId: snapshot.ownerLocalTaskId,
         transport: "cloud",
+        ...(transferMachine
+          ? {
+              transferPeerId: transferMachine.peerId,
+              preferredTransferTransport: "cloud" as const,
+            }
+          : {}),
       };
     }
 
@@ -392,10 +413,7 @@ export function mapDesktopCloudTasks(
     items,
     terminalRefs,
     blockedByTaskIds,
-    transferMachines: mapDesktopCloudTransferMachines(
-      desktopSnapshots,
-      options.activeDesktopIds,
-    ),
+    transferMachines,
   };
 }
 

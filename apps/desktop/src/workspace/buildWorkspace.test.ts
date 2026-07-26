@@ -183,6 +183,36 @@ describe("buildWorkspace", () => {
     expect(result.tasks[0].blockedByTaskIds).toEqual([]);
   });
 
+  it("allows pull only when a reachable remote owner advertises a nonblank transfer peer", () => {
+    const remote = item({
+      id: "cloud:remote-repo:task-remote",
+      repo_id: "cloud:remote-repo",
+    });
+    const build = (transferPeerId?: string) => buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [repo({ id: "cloud:remote-repo", path: "cloud" })],
+        items: [remote],
+        terminalRefs: {
+          [remote.id]: {
+            ownerDesktopId: "desktop-owner",
+            ownerLocalTaskId: "task-remote",
+            transferPeerId,
+            preferredTransferTransport: "cloud",
+            transport: "cloud",
+          },
+        },
+        transferMachines: [],
+      },
+      lanSnapshot: emptySnapshot(),
+    });
+
+    expect(build(undefined).tasks[0]?.capabilities.canPullFromMachine).toBe(false);
+    expect(build("   ").tasks[0]?.capabilities.canPullFromMachine).toBe(false);
+    expect(build("peer-owner").tasks[0]?.capabilities.canPullFromMachine).toBe(true);
+  });
+
   it("keeps a local task as a single local-owned workspace task", () => {
     const result = buildWorkspace({
       localRepos: [{ repo: repo(), remoteUrlHash: "remote-hash", remoteUrl: "git@example.com:kanna.git" }],

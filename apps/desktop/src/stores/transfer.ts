@@ -54,8 +54,18 @@ interface TransferDependencies {
   sessions: Pick<SessionsApi, "waitForSessionExit">;
 }
 
+export interface PushTaskTransferOptions {
+  transport?: "lan" | "cloud";
+  cloudFallback?: boolean;
+  targetDesktopId?: string | null;
+}
+
 export interface TransferApi {
-  pushTaskToPeer: (taskId: string, peerId: string) => Promise<void>;
+  pushTaskToPeer: (
+    taskId: string,
+    peerId: string,
+    options?: PushTaskTransferOptions,
+  ) => Promise<void>;
   recordIncomingTransfer: (request: IncomingTransferRequest) => Promise<void>;
   finalizeOutgoingTransfer: (transferId: string) => Promise<FinalizedOutgoingTransferResult>;
   approveIncomingTransfer: (transferId: string) => Promise<string>;
@@ -65,6 +75,21 @@ export interface TransferApi {
 
 function isDuplicateTaskTransferError(error: unknown): boolean {
   return error instanceof Error && error.message.includes("UNIQUE constraint failed: task_transfer.id");
+}
+
+function isPreflightConnectionFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return [
+    "i/o error:",
+    "peer not found:",
+    "timed out after",
+    "connection refused",
+    "connection reset",
+    "connection closed",
+    "no route to host",
+    "network is unreachable",
+    "broken pipe",
+  ].some((fragment) => message.toLowerCase().includes(fragment));
 }
 
 function applyWorktreeProcessIsolation(env: Record<string, string>): Record<string, string> {
@@ -401,6 +426,8 @@ export function createTransferApi(
   context: StoreContext,
   { tasks, queries, sessions }: TransferDependencies,
 ): TransferApi {
+  const outgoingPushesInFlight = new Set<string>();
+  const outgoingPushesDurablyStarted = new Set<string>();
   async function allocateTransferredRepoPath(repoName: string): Promise<string> {
     const home = await invoke<string>("read_env_var", { name: "HOME" });
     const parentDir = defaultReposHome(home);
@@ -523,10 +550,24 @@ export function createTransferApi(
     throw new Error(`unsupported repo acquisition mode: ${payload.repo.mode satisfies never}`);
   }
 
-  async function pushTaskToPeer(taskId: string, peerId: string): Promise<void> {
+  async function pushTaskToPeer(
+    taskId: string,
+    peerId: string,
+    options: PushTaskTransferOptions = {},
+  ): Promise<void> {
     const item = context.state.items.value.find((candidate) => candidate.id === taskId);
     if (!item) {
       throw new Error(`task not found: ${taskId}`);
+    }
+    if (
+      item.closed_at != null
+      || ["pending", "streaming", "importing", "awaiting_acknowledgment"].includes(
+        item.transfer_status ?? "",
+      )
+      || outgoingPushesInFlight.has(taskId)
+      || outgoingPushesDurablyStarted.has(taskId)
+    ) {
+      throw new Error(`task is already transferring: ${taskId}`);
     }
 
     const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id);
@@ -534,91 +575,129 @@ export function createTransferApi(
       throw new Error(`repo not found for task: ${taskId}`);
     }
 
-    const preflightRaw = await invoke<unknown>("prepare_outgoing_transfer", {
-      payload: {
+    outgoingPushesInFlight.add(taskId);
+    try {
+      const sourceDesktopId = options.targetDesktopId
+        ? await invoke<{ desktopId?: string }>("mobile_server_status")
+          .then((status) => status.desktopId?.trim() || null)
+          .catch(() => null)
+        : null;
+      if (options.targetDesktopId && !sourceDesktopId) {
+        throw new Error("source desktop identity is unavailable for cloud transfer");
+      }
+      const preflightPayload = (transport?: "lan" | "cloud") => ({
         phase: "preflight",
         sourceTaskId: taskId,
         targetPeerId: peerId,
-      },
-    });
-    const preflight = parseOutgoingTransferPreflightResult(preflightRaw);
-
-    const recovery = await loadSessionRecoveryState(taskId);
-    const repoRemoteUrl = preflight.targetHasRepo
-      ? null
-      : await invoke<string | null>("git_remote_url", {
-          repoPath: repo.path,
-        }).catch((error) => {
-          console.debug("[store] failed to read repo remote URL while preparing transfer:", error);
-          return null;
+        ...(transport ? { transport } : {}),
+      });
+      let preflightRaw: unknown;
+      try {
+        preflightRaw = await invoke<unknown>("prepare_outgoing_transfer", {
+          payload: preflightPayload(options.transport),
         });
-    let bundle: {
-      artifactId: string;
-      filename: string;
-      refName: string | null;
-    } | null = null;
-    if (!preflight.targetHasRepo && !repoRemoteUrl) {
-      const bundlePath = buildTransferBundlePath(preflight.transferId);
-      const artifactId = buildTransferBundleArtifactId(preflight.transferId);
-      const refName = normalizeTransferRefName(item.branch) ?? normalizeTransferRefName(item.base_ref);
-      const refs = buildTransferBundleRefs(item);
-      const bundleTargets = refs.length > 0 ? refs.map((ref) => shellQuote(ref)).join(" ") : "--all";
+      } catch (error: unknown) {
+        if (
+          options.transport !== "lan"
+          || !options.cloudFallback
+          || !isPreflightConnectionFailure(error)
+        ) {
+          throw error;
+        }
+        preflightRaw = await invoke<unknown>("prepare_outgoing_transfer", {
+          payload: preflightPayload("cloud"),
+        });
+      }
+      const preflight = parseOutgoingTransferPreflightResult(preflightRaw);
 
-      await invoke("run_script", {
-        script: `git bundle create ${shellQuote(bundlePath)} ${bundleTargets}`,
-        cwd: repo.path,
-        env: applyWorktreeProcessIsolation({ KANNA_WORKTREE: "1" }),
+      const recovery = await loadSessionRecoveryState(taskId);
+      const repoRemoteUrl = preflight.targetHasRepo
+        ? null
+        : await invoke<string | null>("git_remote_url", {
+            repoPath: repo.path,
+          }).catch((error) => {
+            console.debug("[store] failed to read repo remote URL while preparing transfer:", error);
+            return null;
+          });
+      let bundle: {
+        artifactId: string;
+        filename: string;
+        refName: string | null;
+      } | null = null;
+      if (!preflight.targetHasRepo && !repoRemoteUrl) {
+        const bundlePath = buildTransferBundlePath(preflight.transferId);
+        const artifactId = buildTransferBundleArtifactId(preflight.transferId);
+        const refName =
+          normalizeTransferRefName(item.branch) ?? normalizeTransferRefName(item.base_ref);
+        const refs = buildTransferBundleRefs(item);
+        const bundleTargets =
+          refs.length > 0 ? refs.map((ref) => shellQuote(ref)).join(" ") : "--all";
+
+        await invoke("run_script", {
+          script: `git bundle create ${shellQuote(bundlePath)} ${bundleTargets}`,
+          cwd: repo.path,
+          env: applyWorktreeProcessIsolation({ KANNA_WORKTREE: "1" }),
+        });
+        await invoke("stage_transfer_artifact", {
+          transferId: preflight.transferId,
+          artifactId,
+          path: bundlePath,
+        });
+        bundle = {
+          artifactId,
+          filename: `${preflight.transferId}.bundle`,
+          refName,
+        };
+      }
+
+      const artifacts = await stageTransferredSessionArtifacts(
+        preflight.transferId,
+        item,
+        repo.path,
+      );
+      const payload = buildOutgoingTransferPayload({
+        sourcePeerId: preflight.sourcePeerId,
+        sourceDesktopId,
+        sourceTaskId: taskId,
+        targetPeerId: peerId,
+        targetDesktopId: options.targetDesktopId,
+        item,
+        repoPath: repo.path,
+        repoName: repo.name,
+        repoDefaultBranch: repo.default_branch,
+        repoRemoteUrl,
+        recovery,
+        artifacts,
+        targetHasRepo: preflight.targetHasRepo,
+        bundle,
       });
-      await invoke("stage_transfer_artifact", {
-        transferId: preflight.transferId,
-        artifactId,
-        path: bundlePath,
+
+      await insertDesktopTaskTransfer({
+        id: preflight.transferId,
+        direction: "outgoing",
+        status: "pending",
+        source_peer_id: preflight.sourcePeerId,
+        target_peer_id: peerId,
+        source_desktop_id: payload.task.source_desktop_id,
+        target_desktop_id: payload.target_desktop_id,
+        source_task_id: taskId,
+        local_task_id: taskId,
+        error: null,
+        payload_json: JSON.stringify(payload),
       });
-      bundle = {
-        artifactId,
-        filename: `${preflight.transferId}.bundle`,
-        refName,
-      };
+      outgoingPushesDurablyStarted.add(taskId);
+
+      await invoke("prepare_outgoing_transfer", {
+        payload: {
+          phase: "commit",
+          transferId: preflight.transferId,
+          payload,
+        },
+      });
+      await queries.reloadSnapshot();
+    } finally {
+      outgoingPushesInFlight.delete(taskId);
     }
-
-    const artifacts = await stageTransferredSessionArtifacts(preflight.transferId, item, repo.path);
-    const payload = buildOutgoingTransferPayload({
-      sourcePeerId: preflight.sourcePeerId,
-      sourceTaskId: taskId,
-      targetPeerId: peerId,
-      item,
-      repoPath: repo.path,
-      repoName: repo.name,
-      repoDefaultBranch: repo.default_branch,
-      repoRemoteUrl,
-      recovery,
-      artifacts,
-      targetHasRepo: preflight.targetHasRepo,
-      bundle,
-    });
-
-    await insertDesktopTaskTransfer({
-      id: preflight.transferId,
-      direction: "outgoing",
-      status: "pending",
-      source_peer_id: preflight.sourcePeerId,
-      target_peer_id: peerId,
-      source_desktop_id: payload.task.source_desktop_id,
-      target_desktop_id: payload.target_desktop_id,
-      source_task_id: taskId,
-      local_task_id: taskId,
-      error: null,
-      payload_json: JSON.stringify(payload),
-    });
-
-    await invoke("prepare_outgoing_transfer", {
-      payload: {
-        phase: "commit",
-        transferId: preflight.transferId,
-        payload,
-      },
-    });
-    await queries.reloadSnapshot();
   }
 
   async function recordIncomingTransfer(request: IncomingTransferRequest): Promise<void> {

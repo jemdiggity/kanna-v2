@@ -480,7 +480,7 @@ pub async fn prepare_outgoing_transfer(
 pub async fn request_task_pull(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::TransferServiceState>,
-    peer_id: String,
+    target_peer_id: String,
     source_task_id: String,
     transport: Option<String>,
 ) -> Result<Value, String> {
@@ -492,7 +492,7 @@ pub async fn request_task_pull(
             .ok_or_else(|| "transfer sidecar client unavailable".to_string())?;
         let result = client
             .request_task_pull(
-                peer_id,
+                target_peer_id,
                 source_task_id,
                 transport.unwrap_or_else(|| "auto".into()),
             )

@@ -22,6 +22,7 @@ import {
   filterPairableTransferPeerPayload,
   type TransferMachine,
 } from "../services/desktopTransferMachines";
+import type { WorkspaceTask } from "../workspace/types";
 
 interface UseAppTaskTransferOptions {
   db: DbHandle;
@@ -43,13 +44,27 @@ export function useAppTaskTransfer({
   transferMachines,
   onLanTransferPeersChanged,
 }: UseAppTaskTransferOptions) {
-  void transferMachines;
   const peerPickerMode = ref<"push" | "pair">("push");
   const selectedTransferTaskId = ref<string | null>(null);
   const transferPeers = ref<TransferPeerOption[]>([]);
   const transferPeersLoading = ref(false);
   const transferPeerActionPending = ref(false);
   let transferPeerLoadRequestId = 0;
+
+  function transferMachineOption(machine: TransferMachine): TransferPeerOption {
+    const subtitle = machine.trustSource === "same-account-cloud"
+      ? machine.preferredTransport === "lan"
+        ? "Nearby · Cloud"
+        : "Cloud"
+      : "Nearby";
+    return {
+      id: machine.peerId,
+      name: machine.name,
+      subtitle,
+      trusted: true,
+      acceptingTransfers: true,
+    };
+  }
 
   function validatePendingIncomingTransferRow(row: PendingIncomingTransfer): string | null {
     if (!row.source_peer_id) return "missing source_peer_id";
@@ -79,9 +94,10 @@ export function useAppTaskTransfer({
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         const raw = await invoke<unknown>("list_transfer_peers");
         onLanTransferPeersChanged?.(raw);
-        const peers = parseTransferPeers(
-          pickerMode === "pair" ? filterPairableTransferPeerPayload(raw) : raw,
-        );
+        const peers = pickerMode === "pair"
+          ? parseTransferPeers(filterPairableTransferPeerPayload(raw))
+          : transferMachines?.value?.map(transferMachineOption)
+            ?? parseTransferPeers(raw).filter((peer) => peer.trusted);
         if (requestId !== transferPeerLoadRequestId) {
           return;
         }
@@ -153,12 +169,47 @@ export function useAppTaskTransfer({
       toast.error("Pair this peer before transferring a task.");
       return;
     }
+    const selectedMachine = transferMachines?.value?.find((machine) => machine.peerId === peerId);
     try {
       transferPeerActionPending.value = true;
-      await store.pushTaskToPeer(taskId, peerId);
+      if (selectedMachine) {
+        await store.pushTaskToPeer(taskId, peerId, {
+          transport: selectedMachine.preferredTransport,
+          cloudFallback: selectedMachine.cloudFallback,
+          targetDesktopId: selectedMachine.desktopId,
+        });
+      } else {
+        await store.pushTaskToPeer(taskId, peerId);
+      }
       closePeerPicker();
     } catch (e: unknown) {
       console.error("[App] task transfer push failed:", e);
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      transferPeerActionPending.value = false;
+    }
+  }
+
+  async function pullSelectedWorkspaceTask(task: WorkspaceTask): Promise<void> {
+    if (transferPeerActionPending.value) return;
+    const owner = task.terminal.remoteRef;
+    if (
+      !owner
+      || !task.capabilities.canPullFromMachine
+      || !owner.transferPeerId?.trim()
+    ) {
+      toast.error("Remote task owner is offline.");
+      return;
+    }
+    transferPeerActionPending.value = true;
+    try {
+      await invoke("request_task_pull", {
+        targetPeerId: owner.transferPeerId,
+        sourceTaskId: owner.ownerLocalTaskId,
+        transport: owner.preferredTransferTransport,
+      });
+    } catch (e: unknown) {
+      console.error("[App] task transfer pull failed:", e);
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       transferPeerActionPending.value = false;
@@ -269,6 +320,7 @@ export function useAppTaskTransfer({
     closePeerPicker,
     handlePeerSelected,
     handlePairPeer,
+    pullSelectedWorkspaceTask,
     importPendingIncomingTransfers,
   };
 }

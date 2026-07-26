@@ -379,8 +379,9 @@
   },
   "taskTransfer": {
     "pushToMachine": "머신으로 보내기",
+    "pullToThisMachine": "이 머신으로 가져오기",
     "pairPeer": "머신 페어링",
-    "noPeersFound": "네트워크에서 아직 사용할 수 있는 머신을 찾지 못했습니다.",
+    "noPeersFound": "사용 가능한 머신을 찾지 못했습니다.",
     "incomingTitle": "수신 작업 전송",
     "approve": "승인",
     "reject": "거절"

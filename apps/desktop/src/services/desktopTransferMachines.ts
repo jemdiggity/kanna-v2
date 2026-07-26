@@ -206,7 +206,7 @@ export function createDesktopTransferMachineSync(
       await enqueueReconciliation(captured);
     },
     async setCloudMachines(machines) {
-      cloudMachines = machines;
+      cloudMachines = machines ?? [];
       const captured = ++generation;
       await enqueueReconciliation(captured);
     },

@@ -296,6 +296,8 @@ describe("desktop LAN task index reader", () => {
         ownerDesktopId: "peer-owner",
         ownerLocalRepoId: expected?.ownerLocalRepoId,
         ownerLocalTaskId: expected?.ownerLocalTaskId,
+        transferPeerId: "peer-owner",
+        preferredTransferTransport: "lan",
       });
     }
   });
