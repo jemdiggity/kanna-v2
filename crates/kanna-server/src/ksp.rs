@@ -876,16 +876,21 @@ async fn run_agent_commands(
                 let permit = match permits.clone().try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {
-                        let frame_tx = frame_tx.clone();
-                        in_flight.spawn(async move {
-                            send_task_error(
-                                &frame_tx,
-                                &queued.task_id,
-                                "agent_busy",
-                                "too many agent commands are in progress".to_string(),
-                            )
-                            .await;
-                        });
+                        send_task_error(
+                            &frame_tx,
+                            &queued.task_id,
+                            "agent_busy",
+                            "too many agent commands are in progress".to_string(),
+                        )
+                        .await;
+                        // Do not keep draining the bounded input queue while all
+                        // execution slots are occupied. In particular, never
+                        // add rejection sends to this JoinSet: a stalled frame
+                        // consumer could otherwise turn an overload burst into
+                        // an unbounded set of pending tasks.
+                        if let Some(Err(error)) = in_flight.join_next().await {
+                            log::warn!("[ksp] agent command task failed: {error}");
+                        }
                         continue;
                     }
                 };
@@ -3675,6 +3680,128 @@ mod tests {
 
         daemon.await.expect("saturation daemon failed");
         drop(socket);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_command_saturation_stops_draining_after_one_rejection() {
+        let unique = format!(
+            "ksp-agent-command-saturation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config(
+            "ksp-agent-command-saturation",
+            "KSP Agent Command Saturation",
+        );
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let db = Db::open_for_tests(&config.db_path).expect("open test db");
+        db.insert_test_repo("repo-1", "Repo One")
+            .expect("insert repo");
+        db.insert_test_pipeline_item(
+            "task-agent-saturation",
+            "repo-1",
+            "Saturate agent commands",
+            None,
+            "in progress",
+            "2026-07-26T00:00:00Z",
+        )
+        .expect("insert task");
+        db.insert_test_terminal_session(
+            "terminal-agent-saturation",
+            "repo-1",
+            "task-agent-saturation",
+            "agent",
+            "daemon-agent-saturation",
+        )
+        .expect("insert terminal session");
+        drop(db);
+
+        let socket_path = daemon_socket_path_for_dir(&config.daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind saturation daemon socket");
+        let (seen_tx, mut seen_rx) = mpsc::channel(MAX_AGENT_COMMAND_CONCURRENCY);
+        let release = Arc::new(tokio::sync::Notify::new());
+        let daemon_release = Arc::clone(&release);
+        let daemon = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            for _ in 0..MAX_AGENT_COMMAND_CONCURRENCY {
+                let (stream, _) = listener.accept().await.expect("accept daemon connection");
+                let seen_tx = seen_tx.clone();
+                let release = Arc::clone(&daemon_release);
+                handlers.spawn(async move {
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
+                    let mut line = String::new();
+                    reader
+                        .read_line(&mut line)
+                        .await
+                        .expect("read daemon command");
+                    seen_tx.send(()).await.expect("record daemon command");
+                    release.notified().await;
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                .as_bytes(),
+                        )
+                        .await
+                        .expect("write daemon response");
+                });
+            }
+            while handlers.join_next().await.is_some() {}
+        });
+
+        let state = Arc::new(AppState::new(config));
+        let (command_tx, command_rx) = mpsc::channel(32);
+        let (frame_tx, mut frame_rx) = mpsc::channel(8);
+        let worker = tokio::spawn(run_agent_commands(state, command_rx, frame_tx));
+        for _ in 0..=MAX_AGENT_COMMAND_CONCURRENCY {
+            command_tx
+                .send(TaskAgentCommand {
+                    task_id: "task-agent-saturation".into(),
+                    command: AgentControlCommand::Interrupt,
+                })
+                .await
+                .expect("queue agent command");
+        }
+        for _ in 0..MAX_AGENT_COMMAND_CONCURRENCY {
+            tokio::time::timeout(Duration::from_secs(2), seen_rx.recv())
+                .await
+                .expect("active agent command did not reach daemon")
+                .expect("daemon command channel closed");
+        }
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), frame_rx.recv())
+                .await
+                .expect("overflow response timed out"),
+            Some(ServerFrame::Error { ref code, .. }) if code == "agent_busy"
+        ));
+
+        command_tx
+            .send(TaskAgentCommand {
+                task_id: "task-agent-saturation".into(),
+                command: AgentControlCommand::Interrupt,
+            })
+            .await
+            .expect("queue command behind saturation");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), frame_rx.recv())
+                .await
+                .is_err(),
+            "worker kept draining and rejecting commands while all active slots were occupied"
+        );
+
+        worker.abort();
+        daemon.abort();
+        let _ = worker.await;
+        let _ = daemon.await;
         let _ = std::fs::remove_dir_all(&daemon_dir);
     }
 

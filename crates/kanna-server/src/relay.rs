@@ -179,7 +179,7 @@ pub(crate) async fn run_relay_loop(
 
                                 // Special-case: observe_session needs a long-lived daemon connection
                                 if command == "observe_session" {
-                                    let session_id =
+                                    let caller_alias =
                                         match args.get("session_id").and_then(|v| v.as_str()) {
                                             Some(s) => s.to_string(),
                                             None => {
@@ -193,13 +193,24 @@ pub(crate) async fn run_relay_loop(
                                                 continue;
                                             }
                                         };
+                                    let daemon_session_id =
+                                        match commands::resolve_legacy_terminal_session_id(
+                                            &db,
+                                            &caller_alias,
+                                        ) {
+                                            Ok(session_id) => session_id,
+                                            Err(error) => {
+                                                send_response(&sink, id, Err(error)).await;
+                                                continue;
+                                            }
+                                        };
 
                                     // Cancel existing observer for this session
-                                    if let Some(handle) = observe_tasks.remove(&session_id) {
+                                    if let Some(handle) = observe_tasks.remove(&caller_alias) {
                                         handle.abort();
                                         log::info!(
                                             "Aborted existing observer for session {}",
-                                            session_id
+                                            caller_alias
                                         );
                                     }
 
@@ -236,7 +247,7 @@ pub(crate) async fn run_relay_loop(
                                     };
                                     match obs_daemon
                                         .send_command(&DaemonCommand::ObserveSnapshot {
-                                            session_id: session_id.clone(),
+                                            session_id: daemon_session_id,
                                         })
                                         .await
                                     {
@@ -248,14 +259,14 @@ pub(crate) async fn run_relay_loop(
                                             // Spawn background task to forward the cutover
                                             // snapshot and then every later daemon event.
                                             let sink_clone = Arc::clone(&sink);
-                                            let sid = session_id.clone();
+                                            let alias = caller_alias.clone();
                                             let handle = tokio::spawn(async move {
                                                 observer_loop(
-                                                    obs_daemon, &sid, sink_clone, snapshot,
+                                                    obs_daemon, &alias, sink_clone, snapshot,
                                                 )
                                                 .await;
                                             });
-                                            observe_tasks.insert(session_id, handle);
+                                            observe_tasks.insert(caller_alias, handle);
                                         }
                                         Ok(DaemonEvent::Error { message, .. }) => {
                                             send_response(
@@ -820,25 +831,18 @@ async fn observer_loop(
 
     loop {
         let action = match daemon.read_event().await {
-            Ok(DaemonEvent::Output { session_id, data }) => Action::Send {
-                event: relay_output_event(&session_id, data),
+            Ok(DaemonEvent::Output { data, .. }) => Action::Send {
+                event: relay_output_event(session_id, data),
             },
             // The daemon resynchronizes a subscriber that lagged behind live
             // output by sending a fresh authoritative snapshot mid-stream.
-            Ok(DaemonEvent::Snapshot {
-                session_id: sid,
-                snapshot,
-            }) => Action::Send {
-                event: relay_snapshot_event(&sid, snapshot),
+            Ok(DaemonEvent::Snapshot { snapshot, .. }) => Action::Send {
+                event: relay_snapshot_event(session_id, snapshot),
             },
-            Ok(DaemonEvent::Exit {
-                session_id: sid,
-                code,
-                ..
-            }) => {
-                log::info!("Session {} exited with code {}", sid, code);
+            Ok(DaemonEvent::Exit { code, .. }) => {
+                log::info!("Session {} exited with code {}", session_id, code);
                 Action::SendAndStop {
-                    event: relay_exit_event(&sid, code),
+                    event: relay_exit_event(session_id, code),
                 }
             }
             Err(e) => {
@@ -968,23 +972,23 @@ mod tests {
 
             let events = [
                 DaemonEvent::Snapshot {
-                    session_id: "sess-observer".to_string(),
+                    session_id: "run-observer".to_string(),
                     snapshot: terminal_snapshot("INITIAL"),
                 },
                 DaemonEvent::Output {
-                    session_id: "sess-observer".to_string(),
+                    session_id: "run-observer".to_string(),
                     data: b"live-before".to_vec(),
                 },
                 DaemonEvent::Snapshot {
-                    session_id: "sess-observer".to_string(),
+                    session_id: "run-observer".to_string(),
                     snapshot: terminal_snapshot("RESYNCED"),
                 },
                 DaemonEvent::Output {
-                    session_id: "sess-observer".to_string(),
+                    session_id: "run-observer".to_string(),
                     data: b"live-after".to_vec(),
                 },
                 DaemonEvent::Exit {
-                    session_id: "sess-observer".to_string(),
+                    session_id: "run-observer".to_string(),
                     run_id: Some("run-owned".to_string()),
                     code: 0,
                     resume_session_id: None,
@@ -1031,7 +1035,7 @@ mod tests {
         // reply is the cutover snapshot, handed to the forwarding loop.
         let initial_snapshot = match daemon
             .send_command(&kanna_daemon::protocol::Command::ObserveSnapshot {
-                session_id: "sess-observer".to_string(),
+                session_id: "run-observer".to_string(),
             })
             .await
             .expect("observe snapshot")
@@ -1039,7 +1043,7 @@ mod tests {
             DaemonEvent::Snapshot { snapshot, .. } => snapshot,
             other => panic!("expected Snapshot reply, got {other:?}"),
         };
-        observer_loop(daemon, "sess-observer", sink.clone(), initial_snapshot).await;
+        observer_loop(daemon, "task-observer", sink.clone(), initial_snapshot).await;
         fake_daemon.await.expect("fake daemon");
         sink.lock().await.close().await.expect("close ws");
         let messages = relay_server.await.expect("relay server");
@@ -1065,6 +1069,12 @@ mod tests {
         );
         assert_eq!(events[0]["payload"]["snapshot"]["vt"], "INITIAL");
         assert_eq!(events[2]["payload"]["snapshot"]["vt"], "RESYNCED");
+        assert!(
+            events
+                .iter()
+                .all(|event| event["payload"]["session_id"] == "task-observer"),
+            "observer payloads must retain the caller-facing task alias: {events:?}"
+        );
 
         let _ = std::fs::remove_file(&socket_path);
         let _ = std::fs::remove_dir_all(&daemon_dir);

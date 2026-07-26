@@ -547,7 +547,7 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
             let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
             match command {
                 DaemonCommand::Input { session_id, data } => {
-                    assert_eq!(session_id, "task-parent");
+                    assert_eq!(session_id, "run-parent-current");
                     inputs.push(data);
                 }
                 other => panic!("expected Input command, got {other:?}"),
@@ -592,14 +592,45 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
         "2026-04-18 10:00:00",
     )
     .unwrap();
+    db.insert_test_pipeline_item(
+        "task-parent",
+        "repo-1",
+        "Parent prompt",
+        Some("Parent Display"),
+        "in progress",
+        "2026-04-18 09:00:00",
+    )
+    .unwrap();
     db.update_test_pipeline_item_notify_task("task-child", "task-parent")
         .unwrap();
+    for (run_id, task_id, session_id) in [
+        ("run-child", "task-child", "run-child-current"),
+        ("run-parent", "task-parent", "run-parent-current"),
+    ] {
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: run_id,
+            task_id,
+            stage: "in progress",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some(session_id),
+            provider_session_id: None,
+            cwd: Some("/tmp"),
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    }
     drop(db);
 
     let state = Arc::new(super::AppState::new(config.clone()));
     let mut state_changes = state.subscribe_state_changes();
 
-    super::handle_task_terminal_state(state.as_ref(), "task-child", true)
+    super::handle_task_terminal_state(state.as_ref(), "run-child-current", true)
         .await
         .unwrap();
     expect_task_state_changed(&mut state_changes).await;
@@ -613,7 +644,7 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
         ]
     );
 
-    super::handle_task_terminal_state(state.as_ref(), "task-child", true)
+    super::handle_task_terminal_state(state.as_ref(), "run-child-current", true)
         .await
         .unwrap();
     expect_task_state_changed(&mut state_changes).await;

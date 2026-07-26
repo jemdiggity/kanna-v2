@@ -158,14 +158,20 @@ pub(super) async fn notify_task_completion(
     child_id: &str,
     success: bool,
 ) -> Result<(), String> {
-    let notification = {
+    let (notification, notify_session_id) = {
         let config = state.config();
         let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
-        db.claim_task_notification(child_id)
+        let notification = db
+            .claim_task_notification(child_id)
+            .map_err(|e| format!("db error: {}", e))?;
+        let Some(notification) = notification else {
+            return Ok(());
+        };
+        let notify_session_id = db
+            .resolve_task_terminal_session_id(&notification.notify_task_id)
             .map_err(|e| format!("db error: {}", e))?
-    };
-    let Some(notification) = notification else {
-        return Ok(());
+            .unwrap_or_else(|| notification.notify_task_id.clone());
+        (notification, notify_session_id)
     };
     state.publish_state_changed(StateChangeScope::Tasks);
     let config = state.config();
@@ -177,7 +183,7 @@ pub(super) async fn notify_task_completion(
     let mut daemon = crate::daemon_client::DaemonClient::connect(&config.daemon_dir)
         .await
         .map_err(|e| format!("daemon error: {}", e))?;
-    submit_task_input(&mut daemon, &notification.notify_task_id, &message)
+    submit_task_input(&mut daemon, &notify_session_id, &message)
         .await
         .map_err(|(_, message)| message)
 }

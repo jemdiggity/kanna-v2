@@ -1384,30 +1384,51 @@ fn seed_pending_startup_action(config: &Config) {
     .unwrap();
 }
 
+async fn write_startup_event(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    event: &kanna_daemon::protocol::Event,
+) {
+    writer
+        .write_all(format!("{}\n", serde_json::to_string(event).unwrap()).as_bytes())
+        .await
+        .unwrap();
+}
+
 async fn spawn_startup_list_daemon(
     config: &Config,
-    successor_live: bool,
+    successor_state: Option<kanna_daemon::protocol::SessionState>,
 ) -> tokio::task::JoinHandle<()> {
     std::fs::create_dir_all(&config.daemon_dir).unwrap();
     let socket_path = test_daemon_socket_path(&config.daemon_dir);
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).unwrap();
     tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
+        let (subscription, _) = listener.accept().await.unwrap();
+        let (subscription_read, mut subscription_write) = subscription.into_split();
+        let mut subscription_reader = BufReader::new(subscription_read);
         let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
+        subscription_reader.read_line(&mut line).await.unwrap();
         assert!(matches!(
             serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::SubscribeEvents { .. }
+        ));
+        write_startup_event(&mut subscription_write, &kanna_daemon::protocol::Event::Ok).await;
+
+        let (control, _) = listener.accept().await.unwrap();
+        let (control_read, mut control_write) = control.into_split();
+        let mut control_reader = BufReader::new(control_read);
+        let mut control_line = String::new();
+        control_reader.read_line(&mut control_line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(control_line.trim()).unwrap(),
             kanna_daemon::protocol::Command::List
         ));
-        let sessions = if successor_live {
+        let sessions = if let Some(state) = successor_state {
             vec![kanna_daemon::protocol::SessionInfo {
                 session_id: "task-1".to_string(),
                 pid: 42,
                 cwd: "/tmp/task-1-2".to_string(),
-                state: kanna_daemon::protocol::SessionState::Active,
+                state,
                 idle_seconds: 0,
                 status: kanna_daemon::protocol::SessionStatus::Busy,
                 kind: Default::default(),
@@ -1416,14 +1437,84 @@ async fn spawn_startup_list_daemon(
         } else {
             Vec::new()
         };
-        let response = kanna_daemon::protocol::Event::SessionList {
-            sessions,
+        write_startup_event(
+            &mut control_write,
+            &kanna_daemon::protocol::Event::SessionList {
+                sessions,
+                capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
+            },
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+    })
+}
+
+async fn spawn_startup_exit_between_list_and_land_daemon(
+    config: &Config,
+) -> tokio::task::JoinHandle<()> {
+    std::fs::create_dir_all(&config.daemon_dir).unwrap();
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let active_list = || kanna_daemon::protocol::Event::SessionList {
+            sessions: vec![kanna_daemon::protocol::SessionInfo {
+                session_id: "task-1".to_string(),
+                pid: 42,
+                cwd: "/tmp/task-1-2".to_string(),
+                state: kanna_daemon::protocol::SessionState::Active,
+                idle_seconds: 0,
+                status: kanna_daemon::protocol::SessionStatus::Busy,
+                kind: Default::default(),
+                run_id: Some("run-successor".to_string()),
+            }],
             capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
         };
-        write_half
-            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
-            .await
-            .unwrap();
+
+        let (first, _) = listener.accept().await.unwrap();
+        let (first_read, mut first_write) = first.into_split();
+        let mut first_reader = BufReader::new(first_read);
+        let mut line = String::new();
+        first_reader.read_line(&mut line).await.unwrap();
+        match serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap() {
+            // The pre-fix path lists without subscribing and therefore cannot
+            // observe the exit before it lands the successor.
+            kanna_daemon::protocol::Command::List => {
+                write_startup_event(&mut first_write, &active_list()).await;
+            }
+            kanna_daemon::protocol::Command::SubscribeEvents { version } => {
+                assert_eq!(
+                    version,
+                    kanna_daemon::protocol::CURRENT_EVENT_STREAM_VERSION
+                );
+                write_startup_event(&mut first_write, &kanna_daemon::protocol::Event::Ok).await;
+
+                let (control, _) = listener.accept().await.unwrap();
+                let (control_read, mut control_write) = control.into_split();
+                let mut control_reader = BufReader::new(control_read);
+                let mut control_line = String::new();
+                control_reader.read_line(&mut control_line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<kanna_daemon::protocol::Command>(control_line.trim())
+                        .unwrap(),
+                    kanna_daemon::protocol::Command::List
+                ));
+                write_startup_event(&mut control_write, &active_list()).await;
+                write_startup_event(
+                    &mut first_write,
+                    &kanna_daemon::protocol::Event::Exit {
+                        session_id: "task-1".to_string(),
+                        run_id: Some("run-successor".to_string()),
+                        code: 0,
+                        resume_session_id: None,
+                        killed: false,
+                    },
+                )
+                .await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            other => panic!("unexpected startup recovery command: {other:?}"),
+        }
     })
 }
 
@@ -1431,7 +1522,9 @@ async fn spawn_startup_list_daemon(
 async fn startup_reconciliation_lands_daemon_owned_successor() {
     let config = test_config("startup-reconcile-land");
     seed_pending_startup_action(&config);
-    let daemon = spawn_startup_list_daemon(&config, true).await;
+    let daemon =
+        spawn_startup_list_daemon(&config, Some(kanna_daemon::protocol::SessionState::Active))
+            .await;
 
     crate::task_creator::reconcile_pending_stage_actions_on_startup(&config)
         .await
@@ -1453,7 +1546,7 @@ async fn startup_reconciliation_lands_daemon_owned_successor() {
 async fn startup_reconciliation_restores_source_when_successor_was_not_accepted() {
     let config = test_config("startup-reconcile-restore");
     seed_pending_startup_action(&config);
-    let daemon = spawn_startup_list_daemon(&config, false).await;
+    let daemon = spawn_startup_list_daemon(&config, None).await;
 
     crate::task_creator::reconcile_pending_stage_actions_on_startup(&config)
         .await
@@ -1470,6 +1563,61 @@ async fn startup_reconciliation_restores_source_when_successor_was_not_accepted(
     assert_eq!(source.status, "running");
     assert_eq!(source.result.as_deref(), Some("source result"));
     assert_eq!(source.feedback.as_deref(), Some("source feedback"));
+}
+
+#[tokio::test]
+async fn startup_reconciliation_restores_source_when_list_retains_exited_successor() {
+    let config = test_config("startup-reconcile-exited-record");
+    seed_pending_startup_action(&config);
+    let daemon = spawn_startup_list_daemon(
+        &config,
+        Some(kanna_daemon::protocol::SessionState::Exited(0)),
+    )
+    .await;
+
+    crate::task_creator::reconcile_pending_stage_actions_on_startup(&config)
+        .await
+        .unwrap();
+    daemon.await.unwrap();
+
+    let db = Db::open(&config.db_path).unwrap();
+    assert!(db.pending_stage_actions().unwrap().is_empty());
+    let task = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(task.stage.as_deref(), Some("review"));
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert!(runs.iter().all(|run| run.id != "run-successor"));
+    assert_eq!(
+        runs.iter()
+            .find(|run| run.id == "run-source")
+            .unwrap()
+            .status,
+        "running"
+    );
+}
+
+#[tokio::test]
+async fn startup_reconciliation_restores_source_when_successor_exits_after_list() {
+    let config = test_config("startup-reconcile-exit-after-list");
+    seed_pending_startup_action(&config);
+    let daemon = spawn_startup_exit_between_list_and_land_daemon(&config).await;
+
+    crate::task_creator::reconcile_pending_stage_actions_on_startup(&config)
+        .await
+        .unwrap();
+    daemon.await.unwrap();
+
+    let db = Db::open(&config.db_path).unwrap();
+    assert!(db.pending_stage_actions().unwrap().is_empty());
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .stage
+            .as_deref(),
+        Some("review")
+    );
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert!(runs.iter().all(|run| run.id != "run-successor"));
 }
 
 #[tokio::test]

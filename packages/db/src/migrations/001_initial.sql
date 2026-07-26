@@ -83,6 +83,29 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('suspendAfterMinutes', '5');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('killAfterMinutes', '30');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('ideCommand', 'code');
 
+CREATE TABLE IF NOT EXISTS stage_run (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+    stage TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'main' CHECK (kind IN ('main', 'post')),
+    agent TEXT,
+    agent_provider TEXT,
+    model TEXT,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
+    result TEXT,
+    feedback TEXT,
+    session_id TEXT,
+    provider_session_id TEXT,
+    cwd TEXT,
+    resumed_from_run_id TEXT,
+    completion_transition TEXT CHECK (completion_transition IN ('manual', 'auto')),
+    run_ownership_version INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_stage_run_task_started ON stage_run(task_id, started_at);
+
 CREATE TABLE IF NOT EXISTS task_action_request (
     idempotency_key TEXT PRIMARY KEY,
     task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,

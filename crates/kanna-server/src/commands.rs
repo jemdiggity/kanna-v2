@@ -35,6 +35,15 @@ pub(crate) fn legacy_task_action_request(
     }))
 }
 
+pub(crate) fn resolve_legacy_terminal_session_id(
+    db: &Db,
+    caller_alias: &str,
+) -> Result<String, String> {
+    db.resolve_task_terminal_session_id(caller_alias)
+        .map_err(|error| format!("db error: {error}"))
+        .map(|resolved| resolved.unwrap_or_else(|| caller_alias.to_string()))
+}
+
 pub async fn handle_invoke(
     command: &str,
     args: &Value,
@@ -106,17 +115,18 @@ pub async fn handle_invoke(
             }
         }
         "send_input" => {
-            let session_id = args
+            let caller_alias = args
                 .get("session_id")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing required arg: session_id".to_string())?;
+            let session_id = resolve_legacy_terminal_session_id(db, caller_alias)?;
             let data = args
                 .get("data")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing required arg: data".to_string())?;
             let event = daemon
                 .send_command(&DaemonCommand::Input {
-                    session_id: session_id.to_string(),
+                    session_id,
                     data: data.as_bytes().to_vec(),
                 })
                 .await
@@ -128,10 +138,11 @@ pub async fn handle_invoke(
             }
         }
         "resize_session" => {
-            let session_id = args
+            let caller_alias = args
                 .get("session_id")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "missing required arg: session_id".to_string())?;
+            let session_id = resolve_legacy_terminal_session_id(db, caller_alias)?;
             let cols = args
                 .get("cols")
                 .and_then(|v| v.as_u64())
@@ -142,7 +153,7 @@ pub async fn handle_invoke(
                 .ok_or_else(|| "missing required arg: rows".to_string())?;
             let event = daemon
                 .send_command(&DaemonCommand::Resize {
-                    session_id: session_id.to_string(),
+                    session_id,
                     cols: cols.min(u16::MAX as u64) as u16,
                     rows: rows.min(u16::MAX as u64) as u16,
                 })
@@ -209,5 +220,142 @@ mod tests {
         assert!(legacy_task_action_request("list_sessions", &Value::Null)
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_terminal_alias_resolves_the_current_run_session() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let unique = format!(
+            "legacy-terminal-alias-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(&daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut commands = Vec::new();
+            for _ in 0..2 {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                commands.push(
+                    serde_json::from_str::<DaemonCommand>(line.trim())
+                        .expect("parse daemon command"),
+                );
+                write_half
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            commands
+        });
+
+        let db_path = Db::test_db_path(&unique);
+        let db = Db::open_for_tests(&db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-legacy",
+            "repo-1",
+            "Legacy terminal alias",
+            None,
+            "in progress",
+            "2026-07-26 00:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "task-legacy",
+            "task-task-legacy-1",
+            "default",
+            None,
+            "codex",
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-legacy",
+            task_id: "task-legacy",
+            stage: "in progress",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("run-legacy-current"),
+            provider_session_id: Some("provider-legacy"),
+            cwd: Some("/tmp/task-legacy"),
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+        let config = Config {
+            relay_url: String::new(),
+            device_token: String::new(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: daemon_dir.to_string_lossy().to_string(),
+            db_path,
+            kanna_cli_path: None,
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: None,
+            desktop_name: "Test Desktop".to_string(),
+            version: "test".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+        };
+        let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+
+        handle_invoke(
+            "send_input",
+            &serde_json::json!({
+                "session_id": "task-legacy",
+                "data": "hello"
+            }),
+            &db,
+            &mut daemon,
+            &config,
+        )
+        .await
+        .unwrap();
+        handle_invoke(
+            "resize_session",
+            &serde_json::json!({
+                "session_id": "task-task-legacy-1",
+                "cols": 100,
+                "rows": 40
+            }),
+            &db,
+            &mut daemon,
+            &config,
+        )
+        .await
+        .unwrap();
+
+        let commands = server.await.unwrap();
+        assert!(matches!(
+            &commands[0],
+            DaemonCommand::Input { session_id, .. } if session_id == "run-legacy-current"
+        ));
+        assert!(matches!(
+            &commands[1],
+            DaemonCommand::Resize { session_id, .. } if session_id == "run-legacy-current"
+        ));
+
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
     }
 }

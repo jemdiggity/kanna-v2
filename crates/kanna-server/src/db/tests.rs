@@ -1425,6 +1425,46 @@ fn resolves_pipeline_item_id_from_task_branch_name() {
 }
 
 #[test]
+fn resolves_run_scoped_session_to_its_durable_pipeline_item() {
+    let path = Db::test_db_path("resolve-run-scoped-session");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-child",
+        "repo-1",
+        "Run-scoped child",
+        Some("Run-scoped child"),
+        "in progress",
+        "2026-07-26 10:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-child-current",
+        task_id: "task-child",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("codex"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("daemon-run-child-current"),
+        provider_session_id: Some("provider-child"),
+        cwd: Some("/tmp/task-child"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+
+    assert_eq!(
+        db.resolve_pipeline_item_id("daemon-run-child-current")
+            .unwrap()
+            .as_deref(),
+        Some("task-child")
+    );
+}
+
+#[test]
 fn waiting_prompt_update_is_change_aware() {
     let path = temp_db_path();
     let db = Db::open_for_tests(path.to_str().unwrap()).unwrap();

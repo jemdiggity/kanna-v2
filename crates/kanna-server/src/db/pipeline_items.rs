@@ -281,6 +281,23 @@ impl Db {
             return Ok(exact);
         }
 
+        let stage_run_task = self
+            .conn
+            .query_row(
+                "SELECT task_id
+                 FROM stage_run
+                 WHERE session_id = ?
+                   AND status IN ('pending', 'running')
+                 ORDER BY datetime(started_at) DESC, rowid DESC
+                 LIMIT 1",
+                [task_or_branch_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if stage_run_task.is_some() {
+            return Ok(stage_run_task);
+        }
+
         self.conn
             .query_row(
                 "SELECT id FROM pipeline_item WHERE branch = ?",

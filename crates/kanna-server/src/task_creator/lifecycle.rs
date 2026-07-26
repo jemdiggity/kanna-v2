@@ -13,6 +13,9 @@ use crate::session_replacements::SessionReplacements;
 use kanna_daemon::protocol::{
     AgentSpawnParams, Command as DaemonCommand, Event as DaemonEvent, TerminalSnapshot,
 };
+use std::collections::HashSet;
+
+const STARTUP_LIFECYCLE_BUFFER_PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
 
 pub(crate) fn prepared_task_id(prepared: &PreparedTaskSpawn) -> &str {
     &prepared.created_task.task_id
@@ -32,6 +35,33 @@ pub(crate) async fn reconcile_pending_stage_actions_on_startup(
         return Ok(());
     }
 
+    let mut lifecycle = DaemonClient::connect(&config.daemon_dir)
+        .await
+        .map_err(|error| format!("startup action lifecycle subscription failed: {error}"))?;
+    lifecycle
+        .send_one_way(&DaemonCommand::SubscribeEvents {
+            version: kanna_daemon::protocol::CURRENT_EVENT_STREAM_VERSION,
+        })
+        .await
+        .map_err(|error| format!("startup action lifecycle subscribe failed: {error}"))?;
+    match lifecycle
+        .read_event()
+        .await
+        .map_err(|error| format!("startup action lifecycle acknowledgement failed: {error}"))?
+    {
+        DaemonEvent::Ok => {}
+        DaemonEvent::Error { message, .. } => {
+            return Err(format!(
+                "startup action lifecycle subscription rejected: {message}"
+            ));
+        }
+        other => {
+            return Err(format!(
+                "unexpected startup action lifecycle acknowledgement: {other:?}"
+            ));
+        }
+    }
+
     let mut daemon = DaemonClient::connect(&config.daemon_dir)
         .await
         .map_err(|error| format!("startup action reconciliation daemon error: {error}"))?;
@@ -44,11 +74,54 @@ pub(crate) async fn reconcile_pending_stage_actions_on_startup(
             "startup action reconciliation requires immutable daemon run ownership".to_string(),
         );
     }
+    let expected_successors = actions
+        .iter()
+        .map(|action| {
+            (
+                action.session_id.clone(),
+                Some(action.successor_run_id.clone()),
+            )
+        })
+        .collect::<HashSet<_>>();
+    let mut exited_successors = HashSet::new();
+    let lifecycle_deadline = tokio::time::Instant::now() + STARTUP_LIFECYCLE_BUFFER_PERIOD;
+    loop {
+        match tokio::time::timeout_at(lifecycle_deadline, lifecycle.read_event()).await {
+            Err(_) => break,
+            Ok(Ok(DaemonEvent::Exit {
+                session_id,
+                run_id,
+                killed: false,
+                ..
+            })) => {
+                let owner = (session_id, run_id);
+                if expected_successors.contains(&owner) {
+                    exited_successors.insert(owner);
+                }
+            }
+            Ok(Ok(DaemonEvent::ShuttingDown)) => {
+                return Err(
+                    "daemon shut down during startup action lifecycle reconciliation".to_string(),
+                );
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                return Err(format!(
+                    "startup action lifecycle subscription failed: {error}"
+                ));
+            }
+        }
+    }
 
     for action in actions {
         let successor_is_live = listed.sessions.iter().any(|session| {
             session.session_id == action.session_id
                 && session.run_id.as_deref() == Some(action.successor_run_id.as_str())
+                && matches!(session.state, kanna_daemon::protocol::SessionState::Active)
+                && !exited_successors.contains(&(
+                    session.session_id.clone(),
+                    Some(action.successor_run_id.clone()),
+                ))
         });
         let db = Db::open(&config.db_path)
             .map_err(|error| format!("startup action reconciliation db error: {error}"))?;

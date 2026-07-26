@@ -3,6 +3,10 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+const SUBSCRIPTION_EVENT_CAPACITY: usize = 256;
+const SUBSCRIPTION_NEGOTIATION_CAPACITY: usize = 256;
+const SUBSCRIPTION_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[derive(Clone, Copy)]
 enum SubscriptionStream {
     Legacy,
@@ -361,7 +365,7 @@ async fn terminal_state_watcher_once(
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 
     struct SubscriptionAttempt {
-        events: mpsc::UnboundedReceiver<Result<DaemonEvent, String>>,
+        events: mpsc::Receiver<Result<DaemonEvent, String>>,
         writer: daemon_client::DaemonClientWriter,
         accepted: bool,
         rejection: Option<String>,
@@ -377,7 +381,7 @@ async fn terminal_state_watcher_once(
             .await
             .map_err(|error| error.to_string())?;
         let (mut reader, writer) = daemon.into_split();
-        let (event_tx, mut events) = mpsc::unbounded_channel();
+        let (event_tx, mut events) = mpsc::channel(SUBSCRIPTION_EVENT_CAPACITY);
         tokio::spawn(async move {
             loop {
                 let event = match reader.read_event().await {
@@ -385,16 +389,17 @@ async fn terminal_state_watcher_once(
                     Err(error) => Err(error.to_string()),
                 };
                 let stop = event.is_err();
-                if event_tx.send(event).is_err() || stop {
+                if event_tx.send(event).await.is_err() || stop {
                     break;
                 }
             }
         });
         let mut buffered = VecDeque::new();
+        let acknowledgement_deadline = tokio::time::Instant::now() + SUBSCRIPTION_ACK_TIMEOUT;
         loop {
-            match events
-                .recv()
+            match tokio::time::timeout_at(acknowledgement_deadline, events.recv())
                 .await
+                .map_err(|_| "daemon subscription acknowledgement timed out".to_string())?
                 .ok_or_else(|| "daemon subscription reader stopped".to_string())??
             {
                 DaemonEvent::Ok => {
@@ -415,7 +420,15 @@ async fn terminal_state_watcher_once(
                         buffered,
                     });
                 }
-                event => buffered.push_back(event),
+                event => {
+                    if buffered.len() >= SUBSCRIPTION_NEGOTIATION_CAPACITY {
+                        return Err(format!(
+                            "daemon subscription negotiation buffer exceeded {} events",
+                            SUBSCRIPTION_NEGOTIATION_CAPACITY
+                        ));
+                    }
+                    buffered.push_back(event);
+                }
             }
         }
     }
@@ -887,6 +900,28 @@ mod tests {
         .unwrap();
     }
 
+    fn bind_run_scoped_stage(config: &Config, run_id: &str, session_id: &str) {
+        Db::open(&config.db_path)
+            .unwrap()
+            .insert_stage_run(NewStageRun {
+                id: run_id,
+                task_id: "task-child",
+                stage: "in progress",
+                kind: "main",
+                agent: None,
+                agent_provider: Some("codex"),
+                model: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some(session_id),
+                provider_session_id: None,
+                cwd: Some("/tmp/task-child"),
+                resumed_from_run_id: None,
+            })
+            .unwrap();
+    }
+
     fn bind_daemon_listener(daemon_dir: &Path) -> (UnixListener, PathBuf) {
         std::fs::create_dir_all(daemon_dir).unwrap();
         let socket_path = daemon_socket_path_for_dir(daemon_dir);
@@ -1024,6 +1059,69 @@ mod tests {
         .await
         .unwrap();
         server.await.unwrap();
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_rejects_an_unacknowledged_subscription_event_flood() {
+        let unique = unique_name("terminal-watcher-negotiation-buffer-limit");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let mut writers = Vec::new();
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read_half, write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                    DaemonCommand::Subscribe | DaemonCommand::SubscribeEvents { .. }
+                ));
+                writers.push(write_half);
+            }
+
+            let mut floods = tokio::task::JoinSet::new();
+            for mut writer in writers {
+                floods.spawn(async move {
+                    for sequence in 0..1_025 {
+                        write_event(
+                            &mut writer,
+                            &DaemonEvent::StatusChanged {
+                                session_id: format!("flood-{sequence}"),
+                                status: kanna_daemon::protocol::SessionStatus::Busy,
+                                waiting_prompt_snippet: None,
+                            },
+                        )
+                        .await;
+                    }
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                });
+            }
+            while floods.join_next().await.is_some() {}
+        });
+
+        let error = timeout(
+            Duration::from_millis(750),
+            terminal_state_watcher_once(
+                &http_api::AppState::new(config),
+                &session_replacements::SessionReplacements::default(),
+            ),
+        )
+        .await
+        .expect("unacknowledged subscription flood was not bounded")
+        .expect_err("unacknowledged subscription flood was accepted");
+        assert!(
+            error.contains("buffer"),
+            "unexpected negotiation error: {error}"
+        );
+
+        server.abort();
+        let _ = server.await;
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
@@ -1336,7 +1434,7 @@ mod tests {
                 status: "running",
                 result: None,
                 feedback: None,
-                session_id: Some("task-child"),
+                session_id: Some("run-current-session"),
                 provider_session_id: None,
                 cwd: Some("/tmp/task-child"),
                 resumed_from_run_id: None,
@@ -1349,7 +1447,7 @@ mod tests {
             write_event(
                 &mut subscriber,
                 &DaemonEvent::Exit {
-                    session_id: "task-child".to_string(),
+                    session_id: "run-current-session".to_string(),
                     run_id: Some("run-current".to_string()),
                     code: 0,
                     resume_session_id: Some("019d99a5-aa94-7c73-b786-644cc095c037".to_string()),
@@ -1374,6 +1472,16 @@ mod tests {
         server.await.unwrap();
 
         assert_task_agent_session_id(&config, "019d99a5-aa94-7c73-b786-644cc095c037");
+        assert_eq!(
+            Db::open(&config.db_path)
+                .unwrap()
+                .get_pipeline_item("task-child")
+                .unwrap()
+                .unwrap()
+                .activity
+                .as_deref(),
+            Some("unread")
+        );
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
@@ -2129,6 +2237,7 @@ mod tests {
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
         seed_plain_task(&config);
+        bind_run_scoped_stage(&config, "run-waiting", "run-waiting-session");
         let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
         let state = http_api::AppState::new(config.clone());
         let mut state_changes = state.subscribe_state_changes();
@@ -2139,7 +2248,7 @@ mod tests {
                 write_event(
                     &mut subscriber,
                     &DaemonEvent::StatusChanged {
-                        session_id: "task-child".to_string(),
+                        session_id: "run-waiting-session".to_string(),
                         status: kanna_daemon::protocol::SessionStatus::Idle,
                         waiting_prompt_snippet: Some("Ready for review".to_string()),
                     },
@@ -2312,6 +2421,7 @@ mod tests {
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
         seed_plain_task(&config);
+        bind_run_scoped_stage(&config, "run-busy", "run-busy-session");
         let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
         let state = http_api::AppState::new(config.clone());
         let mut state_changes = state.subscribe_state_changes();
@@ -2321,7 +2431,7 @@ mod tests {
             write_event(
                 &mut subscriber,
                 &DaemonEvent::StatusChanged {
-                    session_id: "task-child".to_string(),
+                    session_id: "run-busy-session".to_string(),
                     status: kanna_daemon::protocol::SessionStatus::Busy,
                     waiting_prompt_snippet: None,
                 },
