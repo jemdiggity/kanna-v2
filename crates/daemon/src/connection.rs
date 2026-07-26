@@ -14,6 +14,7 @@ use crate::client::{
     unregister_terminal_emulator_client, LostHandoffSessions, SessionSizes,
     TerminalEmulatorClients,
 };
+use crate::daemon_lifecycle::{DaemonLifecycle, DaemonLifecycleState};
 use crate::fanout::{session_fanout, SessionFanouts, SubscriberKind};
 use crate::handoff::{blank_snapshot, handle_handoff};
 use crate::output::{handle_output_chunk, stream_output};
@@ -41,6 +42,7 @@ pub(crate) async fn handle_connection(
     lost_handoff_sessions: LostHandoffSessions,
     recovery_manager: RecoveryManager,
     agent_sessions: kanna_daemon::agent::AgentSessions,
+    daemon_lifecycle: DaemonLifecycle,
 ) {
     // Keep the raw fd for SCM_RIGHTS (used by Handoff)
     let raw_fd = stream.as_raw_fd();
@@ -66,6 +68,7 @@ pub(crate) async fn handle_connection(
                     broadcast_tx.clone(),
                     recovery_manager.clone(),
                     agent_sessions.clone(),
+                    daemon_lifecycle.clone(),
                 )
                 .await;
                 if should_close {
@@ -180,6 +183,7 @@ pub(crate) async fn handle_connection(
                     lost_handoff_sessions.clone(),
                     recovery_manager.clone(),
                     agent_sessions.clone(),
+                    daemon_lifecycle.clone(),
                 )
                 .await;
             }
@@ -225,6 +229,7 @@ pub(crate) async fn handle_command(
     lost_handoff_sessions: LostHandoffSessions,
     recovery_manager: RecoveryManager,
     agent_sessions: kanna_daemon::agent::AgentSessions,
+    daemon_lifecycle: DaemonLifecycle,
 ) {
     match command {
         Command::Spawn {
@@ -238,6 +243,15 @@ pub(crate) async fn handle_command(
             agent_provider,
             terminal_prelude,
         } => {
+            let daemon_lifecycle_guard = daemon_lifecycle.read().await;
+            if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::HandoffInProgress),
+                    "daemon handoff already committed; retry against the adopting daemon",
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
             let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
             let _lifecycle_guard = lifecycle.lock().await;
             log::info!(
@@ -430,6 +444,7 @@ pub(crate) async fn handle_command(
                     let sizes_for_stream = session_sizes.clone();
                     let recovery_for_stream = recovery_manager.clone();
                     let broadcast_for_stream = broadcast_tx.clone();
+                    let daemon_lifecycle_for_stream = daemon_lifecycle.clone();
                     tokio::spawn(async move {
                         stream_output(
                             sid,
@@ -442,6 +457,7 @@ pub(crate) async fn handle_command(
                             sessions_exit,
                             sizes_for_stream,
                             recovery_for_stream,
+                            daemon_lifecycle_for_stream,
                             handle,
                         )
                         .await;
@@ -645,6 +661,7 @@ pub(crate) async fn handle_command(
                         sessions_for_stream,
                         sizes_for_stream,
                         recovery_for_stream,
+                        daemon_lifecycle.clone(),
                         handle_for_stream,
                     )
                     .await;
@@ -792,6 +809,15 @@ pub(crate) async fn handle_command(
         }
 
         Command::Kill { session_id } => {
+            let daemon_lifecycle_guard = daemon_lifecycle.read().await;
+            if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::HandoffInProgress),
+                    "daemon handoff already committed; retry against the adopting daemon",
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
             let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
             let _lifecycle_guard = lifecycle.lock().await;
             log::info!("[kill] session={}", session_id);
@@ -1055,6 +1081,15 @@ pub(crate) async fn handle_command(
         }
 
         Command::SpawnAgent { session_id, params } => {
+            let daemon_lifecycle_guard = daemon_lifecycle.read().await;
+            if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::HandoffInProgress),
+                    "daemon handoff already committed; retry against the adopting daemon",
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
             agent_runtime::handle_spawn_agent(
                 session_id,
                 params,
@@ -1062,6 +1097,7 @@ pub(crate) async fn handle_command(
                 broadcast_tx,
                 agent_sessions,
                 daemon_data_dir(),
+                daemon_lifecycle.clone(),
             )
             .await;
         }
@@ -1074,12 +1110,22 @@ pub(crate) async fn handle_command(
         }
 
         Command::AgentInput { session_id, text } => {
+            let daemon_lifecycle_guard = daemon_lifecycle.read().await;
+            if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::HandoffInProgress),
+                    "daemon handoff already committed; retry against the adopting daemon",
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
             agent_runtime::handle_agent_input(
                 session_id,
                 text,
                 writer,
                 broadcast_tx,
                 agent_sessions,
+                daemon_lifecycle.clone(),
             )
             .await;
         }

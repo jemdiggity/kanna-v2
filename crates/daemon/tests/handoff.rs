@@ -87,6 +87,7 @@ enum ErrorCode {
     SessionAlreadyExists,
     HandoffLost,
     HandoffVersionMismatch,
+    HandoffInProgress,
     PtySpawnFailed,
     PtyCloneFailed,
     HeadlessTerminalInitFailed,
@@ -297,6 +298,25 @@ impl ClientConn {
         }
     }
 
+    fn recv_with_timeout(&mut self, timeout: Duration) -> Result<Evt, String> {
+        self.reader
+            .get_mut()
+            .set_read_timeout(Some(timeout))
+            .map_err(|error| format!("set read timeout: {error}"))?;
+        let mut line = String::new();
+        let result = match self.reader.read_line(&mut line) {
+            Ok(0) => Err("connection closed".to_string()),
+            Ok(_) => serde_json::from_str(line.trim())
+                .map_err(|error| format!("failed to parse {line:?}: {error}")),
+            Err(error) => Err(format!("read failed: {error}")),
+        };
+        self.reader
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|error| format!("restore read timeout: {error}"))?;
+        result
+    }
+
     fn drain_output(&mut self, timeout: Duration) -> Vec<u8> {
         self.writer.set_read_timeout(Some(timeout)).unwrap();
         let mut collected = Vec::new();
@@ -333,6 +353,15 @@ fn spawn_echo(conn: &mut ClientConn, id: &str) {
     match conn.recv() {
         Evt::SessionCreated { .. } => {}
         other => panic!("expected SessionCreated, got: {:?}", other),
+    }
+}
+
+fn expect_session_created_with_timeout(conn: &mut ClientConn, session_id: &str, timeout: Duration) {
+    match conn.recv_with_timeout(timeout) {
+        Ok(Evt::SessionCreated {
+            session_id: created,
+        }) => assert_eq!(created, session_id),
+        other => panic!("expected SessionCreated for {session_id}, got: {other:?}"),
     }
 }
 
@@ -1014,6 +1043,148 @@ fn test_interrupted_handoff_leaves_old_daemon_session_usable() {
     );
 
     drop(daemon_a);
+    cleanup(&dir);
+}
+
+#[test]
+fn test_handoff_capture_serializes_spawn_and_kill_until_abort() {
+    let dir = test_dir("handoff-lifecycle-seal-abort");
+    let daemon = DaemonHandle::start_in(&dir);
+    let mut owner = daemon.connect();
+    spawn_echo(&mut owner, "sess-captured-before-abort");
+
+    let socket_path = compute_socket_path(&dir);
+    let mut handoff = UnixStream::connect(&socket_path).expect("connect handoff client");
+    writeln!(
+        handoff,
+        "{}",
+        serde_json::json!({ "type": "Handoff", "version": 2 })
+    )
+    .unwrap();
+    handoff.flush().unwrap();
+    let mut handoff_reader = BufReader::new(handoff.try_clone().unwrap());
+    let mut ready = String::new();
+    handoff_reader
+        .read_line(&mut ready)
+        .expect("read handoff metadata");
+    assert!(
+        ready.contains("HandoffReady") && ready.contains("sess-captured-before-abort"),
+        "handoff capture did not include the live session: {ready:?}",
+    );
+
+    let mut spawner = daemon.connect();
+    spawner.send(&Cmd::Spawn {
+        session_id: "sess-created-during-handoff".to_string(),
+        executable: "/bin/cat".to_string(),
+        args: vec![],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        agent_provider: None,
+    });
+    let mut killer = daemon.connect();
+    killer.send(&Cmd::Kill {
+        session_id: "sess-captured-before-abort".to_string(),
+    });
+
+    assert!(
+        spawner
+            .recv_with_timeout(Duration::from_millis(250))
+            .is_err(),
+        "Spawn mutated the PTY registry after handoff capture but before ACK resolution",
+    );
+    assert!(
+        killer
+            .recv_with_timeout(Duration::from_millis(250))
+            .is_err(),
+        "Kill mutated the PTY registry after handoff capture but before ACK resolution",
+    );
+
+    drop(handoff_reader);
+    drop(handoff);
+
+    expect_session_created_with_timeout(
+        &mut spawner,
+        "sess-created-during-handoff",
+        Duration::from_secs(2),
+    );
+    match killer.recv_with_timeout(Duration::from_secs(2)) {
+        Ok(Evt::Ok) => {}
+        other => panic!("Kill did not resume after handoff abort: {other:?}"),
+    }
+
+    let mut listing = daemon.connect();
+    listing.send(&Cmd::List);
+    let sessions = match listing.recv() {
+        Evt::SessionList { sessions } => sessions,
+        other => panic!("expected SessionList after handoff abort, got: {other:?}"),
+    };
+    assert!(sessions
+        .iter()
+        .any(|session| session["session_id"] == "sess-created-during-handoff"));
+    assert!(!sessions
+        .iter()
+        .any(|session| session["session_id"] == "sess-captured-before-abort"));
+
+    drop(daemon);
+    cleanup(&dir);
+}
+
+#[test]
+fn test_handoff_commit_refuses_mutation_for_retry_on_adopting_daemon() {
+    let dir = test_dir("handoff-lifecycle-seal-commit");
+    let mut daemon = DaemonHandle::start_in(&dir);
+    let socket_path = compute_socket_path(&dir);
+    let mut handoff = UnixStream::connect(&socket_path).expect("connect handoff client");
+    writeln!(
+        handoff,
+        "{}",
+        serde_json::json!({ "type": "Handoff", "version": 2 })
+    )
+    .unwrap();
+    handoff.flush().unwrap();
+    let mut handoff_reader = BufReader::new(handoff.try_clone().unwrap());
+    let mut ready = String::new();
+    handoff_reader
+        .read_line(&mut ready)
+        .expect("read empty handoff metadata");
+    assert!(ready.contains("HandoffReady"), "{ready:?}");
+
+    let mut spawner = daemon.connect();
+    spawner.send(&Cmd::Spawn {
+        session_id: "sess-must-retry-after-commit".to_string(),
+        executable: "/bin/cat".to_string(),
+        args: vec![],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        agent_provider: None,
+    });
+    assert!(
+        spawner
+            .recv_with_timeout(Duration::from_millis(250))
+            .is_err(),
+        "Spawn escaped before handoff ACK",
+    );
+
+    writeln!(
+        handoff,
+        "{}",
+        serde_json::json!({ "type": "HandoffAdopted", "version": 2 })
+    )
+    .unwrap();
+    handoff.flush().unwrap();
+    match spawner.recv_with_timeout(Duration::from_secs(2)) {
+        Ok(Evt::Error {
+            code: Some(ErrorCode::HandoffInProgress),
+            message,
+        }) => assert!(message.contains("retry against the adopting daemon")),
+        other => panic!("committed handoff mutation was not retryably refused: {other:?}"),
+    }
+
+    let _ = wait_for_child_exit(&mut daemon.child, Duration::from_secs(3));
     cleanup(&dir);
 }
 

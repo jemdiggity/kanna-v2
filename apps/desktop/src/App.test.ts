@@ -119,6 +119,7 @@ const relayAdvanceStageMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayCloseTaskMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayMarkTaskReadMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayCloseMock = vi.hoisted(() => vi.fn());
+const lanAdvanceStageMock = vi.hoisted(() => vi.fn(async () => {}));
 const lanMarkTaskReadMock = vi.hoisted(() => vi.fn(async () => {}));
 const lanCloseMock = vi.hoisted(() => vi.fn());
 const relayTerminalClientFactoryMock = vi.hoisted(() => vi.fn());
@@ -719,11 +720,13 @@ function emitDesktopCloudSnapshot(snapshot: DesktopCloudSnapshot): void {
 function buildRemoteBlockedWorkflowSnapshot({
   blocked,
   hasRunningPost = false,
+  transport = "cloud",
   transitionRevision = "run-blocked-1",
   updatedAt,
 }: {
   blocked: boolean;
   hasRunningPost?: boolean;
+  transport?: "cloud" | "lan";
   transitionRevision?: string | null;
   updatedAt: string;
 }): DesktopCloudSnapshot {
@@ -800,13 +803,13 @@ function buildRemoteBlockedWorkflowSnapshot({
         ownerDesktopId: "desktop-owner",
         ownerLocalRepoId: "repo-owner",
         ownerLocalTaskId: "task-blocked",
-        transport: "cloud",
+        transport,
       },
       [blockerTaskId]: {
         ownerDesktopId: "desktop-owner",
         ownerLocalRepoId: "repo-owner",
         ownerLocalTaskId: "task-blocker",
-        transport: "cloud",
+        transport,
       },
     },
     blockedByTaskIds: blocked
@@ -931,6 +934,8 @@ describe("App", () => {
     relayCloseMock.mockImplementation(() => {});
     lanMarkTaskReadMock.mockReset();
     lanMarkTaskReadMock.mockResolvedValue(undefined);
+    lanAdvanceStageMock.mockReset();
+    lanAdvanceStageMock.mockResolvedValue(undefined);
     lanCloseMock.mockReset();
     lanCloseMock.mockImplementation(() => {});
     relayTerminalClientFactoryMock.mockReset();
@@ -942,7 +947,7 @@ describe("App", () => {
     });
     lanTerminalClientFactoryMock.mockReset();
     lanTerminalClientFactoryMock.mockResolvedValue({
-      advanceStage: relayAdvanceStageMock,
+      advanceStage: lanAdvanceStageMock,
       closeTask: relayCloseTaskMock,
       markTaskRead: lanMarkTaskReadMock,
       close: lanCloseMock,
@@ -3307,6 +3312,98 @@ describe("App", () => {
       taskId: "task-blocked",
       expectedTransitionRevision: "run-blocked-2",
     });
+
+    wrapper.unmount();
+  });
+
+  it("integrates authoritative LAN blocker changes with Sidebar, MainPanel, and owner stage actions", async () => {
+    vi.useFakeTimers();
+    const blockedSnapshot = buildRemoteBlockedWorkflowSnapshot({
+      blocked: true,
+      transport: "lan",
+      updatedAt: "2026-07-26T03:00:00.000Z",
+    });
+    const unblockedSnapshot = buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
+      transport: "lan",
+      updatedAt: "2026-07-26T03:01:00.000Z",
+    });
+    lanTasksMock.mockResolvedValue(blockedSnapshot);
+
+    const LanTerminalStub = defineComponent({
+      name: "CloudTerminalView",
+      props: {
+        ownerDesktopId: String,
+        ownerTaskId: String,
+        transport: String,
+      },
+      template: `
+        <div
+          data-testid="remote-lan-terminal"
+          :data-owner-desktop-id="ownerDesktopId"
+          :data-owner-task-id="ownerTaskId"
+          :data-transport="transport"
+        />
+      `,
+    });
+    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      Sidebar: false,
+      MainPanel: false,
+      TaskHeader: true,
+      TerminalTabs: true,
+      CloudTerminalView: LanTerminalStub,
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("sidebar.sectionBlocked");
+    const blockedTask = wrapper.get(
+      '[data-task-id="cloud:repo-remote:task-blocked"]',
+    );
+    expect(blockedTask.get(".blocked-by-text").text()).toBe(
+      "sidebar.blockedBy Remote blocker",
+    );
+
+    await blockedTask.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get(".blocked-placeholder").text()).toContain("mainPanel.taskBlocked");
+    expect(wrapper.get(".blocker-name").text()).toBe("Remote blocker");
+    expect(wrapper.find('[data-testid="remote-lan-terminal"]').exists()).toBe(false);
+
+    capturedKeyboardActions?.advanceStage();
+    await flushPromises();
+
+    expect(toastWarningMock).toHaveBeenCalledWith("mainPanel.taskBlocked");
+    expect(lanAdvanceStageMock).not.toHaveBeenCalled();
+    expect(relayAdvanceStageMock).not.toHaveBeenCalled();
+    expect(store.advanceStage).not.toHaveBeenCalled();
+
+    lanTasksMock.mockResolvedValue(unblockedSnapshot);
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(wrapper.find(".blocked-placeholder").exists()).toBe(false);
+    const terminal = wrapper.get('[data-testid="remote-lan-terminal"]');
+    expect(terminal.attributes("data-owner-task-id")).toBe("task-blocked");
+    expect(terminal.attributes("data-transport")).toBe("lan");
+
+    lanAdvanceStageMock.mockRejectedValueOnce(
+      Object.assign(new Error("task is blocked again: task-blocked"), { status: 409 }),
+    );
+    toastErrorMock.mockClear();
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => lanCloseMock.mock.calls.length === 1);
+
+    expect(lanTerminalClientFactoryMock).toHaveBeenCalled();
+    expect(lanAdvanceStageMock).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-blocked",
+      expectedTransitionRevision: "run-blocked-1",
+    });
+    expect(toastErrorMock).toHaveBeenCalledWith("task is blocked again: task-blocked");
+    expect(relayTerminalClientFactoryMock).not.toHaveBeenCalled();
+    expect(relayAdvanceStageMock).not.toHaveBeenCalled();
+    expect(store.advanceStage).not.toHaveBeenCalled();
 
     wrapper.unmount();
   });

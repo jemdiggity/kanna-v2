@@ -1115,7 +1115,7 @@ async fn start_pairing_times_out_when_peer_accepts_without_replying() {
             endpoint: format!("127.0.0.1:{port}"),
             pid: std::process::id(),
             public_key: public_key_to_string(&target_identity.public_key),
-            protocol_version: 1,
+            protocol_version: 2,
             accepting_transfers: true,
         })
         .unwrap();
@@ -1166,7 +1166,7 @@ async fn list_peer_task_snapshots_rejects_spoofed_response_peer_id() {
             endpoint: format!("127.0.0.1:{spoofing_port}"),
             pid: std::process::id(),
             public_key: target_public_key.clone(),
-            protocol_version: 1,
+            protocol_version: 2,
             accepting_transfers: true,
         })
         .unwrap();
@@ -1177,7 +1177,7 @@ async fn list_peer_task_snapshots_rejects_spoofed_response_peer_id() {
             endpoint: format!("127.0.0.1:{honest_port}"),
             pid: std::process::id(),
             public_key: honest_public_key.clone(),
-            protocol_version: 1,
+            protocol_version: 2,
             accepting_transfers: true,
         })
         .unwrap();
@@ -1188,7 +1188,9 @@ async fn list_peer_task_snapshots_rejects_spoofed_response_peer_id() {
             peer_id: "peer-target".into(),
             display_name: "Target".into(),
             public_key: target_public_key,
-            capabilities_json: "{\"protocolVersion\":1}".into(),
+            capabilities_json:
+                "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                    .into(),
             paired_at: "2026-04-17T00:00:00Z".into(),
             last_seen_at: None,
             revoked_at: None,
@@ -1199,7 +1201,9 @@ async fn list_peer_task_snapshots_rejects_spoofed_response_peer_id() {
             peer_id: "peer-z-honest".into(),
             display_name: "Honest".into(),
             public_key: honest_public_key,
-            capabilities_json: "{\"protocolVersion\":1}".into(),
+            capabilities_json:
+                "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                    .into(),
             paired_at: "2026-04-17T00:00:00Z".into(),
             last_seen_at: None,
             revoked_at: None,
@@ -1299,7 +1303,7 @@ async fn observe_peer_session_reports_empty_peer_response_with_peer_context() {
             endpoint: format!("127.0.0.1:{port}"),
             pid: std::process::id(),
             public_key: public_key_to_string(&target_identity.public_key),
-            protocol_version: 1,
+            protocol_version: 2,
             accepting_transfers: true,
         })
         .unwrap();
@@ -1309,7 +1313,9 @@ async fn observe_peer_session_reports_empty_peer_response_with_peer_context() {
             peer_id: "peer-target".into(),
             display_name: "Target".into(),
             public_key: public_key_to_string(&target_identity.public_key),
-            capabilities_json: "{\"protocolVersion\":1}".into(),
+            capabilities_json:
+                "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                    .into(),
             paired_at: "2026-04-17T00:00:00Z".into(),
             last_seen_at: None,
             revoked_at: None,
@@ -1913,7 +1919,7 @@ async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snaps
             endpoint: format!("127.0.0.1:{port}"),
             pid: std::process::id(),
             public_key: target_public_key.clone(),
-            protocol_version: 1,
+            protocol_version: 2,
             accepting_transfers: true,
         })
         .unwrap();
@@ -1922,7 +1928,9 @@ async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snaps
             peer_id: "peer-target".into(),
             display_name: "Target".into(),
             public_key: target_public_key,
-            capabilities_json: "{\"protocolVersion\":1}".into(),
+            capabilities_json:
+                "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                    .into(),
             paired_at: "2026-07-26T00:00:00Z".into(),
             last_seen_at: None,
             revoked_at: None,
@@ -2392,6 +2400,170 @@ async fn forged_snapshot_payload_cannot_expose_owner_tasks() {
     assert!(
         message.contains("payload decryption failed"),
         "unexpected error: {message}"
+    );
+}
+
+async fn mark_peer_as_protocol_v1(
+    root: &Path,
+    owner_peer_id: &str,
+    legacy_peer: &kanna_task_transfer::protocol::DiscoveredPeer,
+) {
+    PeerRegistry::new(root.to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: legacy_peer.peer_id.clone(),
+            display_name: legacy_peer.display_name.clone(),
+            endpoint: legacy_peer.endpoint.clone(),
+            pid: legacy_peer.pid,
+            public_key: legacy_peer.public_key.clone(),
+            protocol_version: 1,
+            accepting_transfers: legacy_peer.accepting_transfers,
+        })
+        .unwrap();
+    PeerStore::new(trusted_peer_store_path(root, owner_peer_id))
+        .upsert(PeerRecord {
+            peer_id: legacy_peer.peer_id.clone(),
+            display_name: legacy_peer.display_name.clone(),
+            public_key: legacy_peer.public_key.clone(),
+            capabilities_json: json!({
+                "protocolVersion": 1,
+                "authenticatedTaskRequests": false,
+            })
+            .to_string(),
+            paired_at: "2026-07-26T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn protocol_v1_snapshot_request_gets_explicit_secure_upgrade_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-owner",
+        "Owner",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    owner
+        .set_task_snapshot(json!({ "tasks": [{ "id": "owner-secret-task" }] }))
+        .await
+        .unwrap();
+    let legacy = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-legacy",
+        "Legacy",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&legacy, &owner, "peer-owner").await;
+    let legacy_peer = owner
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-legacy")
+        .unwrap();
+    mark_peer_as_protocol_v1(temp.path(), "peer-owner", &legacy_peer).await;
+    let owner_peer = legacy
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap();
+
+    let mut stream = TcpStream::connect(&owner_peer.endpoint).await.unwrap();
+    stream
+        .write_all(
+            b"{\"type\":\"get_task_snapshot\",\"request_id\":\"legacy-snapshot\",\"requester_peer_id\":\"peer-legacy\"}\n",
+        )
+        .await
+        .unwrap();
+    let mut response_line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response_line)
+        .await
+        .unwrap();
+    let response: PeerResponse = serde_json::from_str(response_line.trim()).unwrap();
+    assert!(
+        matches!(
+            response,
+            PeerResponse::Error { ref message, .. }
+                if message.contains("protocol v1")
+                    && message.contains("authenticated task requests")
+                    && message.contains("upgrade")
+        ),
+        "unexpected legacy snapshot response: {response:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn protocol_v1_advance_request_gets_explicit_secure_upgrade_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let kanna_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(kanna_listener.local_addr().unwrap().port()),
+    )
+    .await
+    .unwrap();
+    let legacy = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-legacy",
+        "Legacy",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&legacy, &owner, "peer-owner").await;
+    let legacy_peer = owner
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-legacy")
+        .unwrap();
+    mark_peer_as_protocol_v1(temp.path(), "peer-owner", &legacy_peer).await;
+    let owner_peer = legacy
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap();
+
+    let mut stream = TcpStream::connect(&owner_peer.endpoint).await.unwrap();
+    stream
+        .write_all(
+            b"{\"type\":\"advance_task_stage\",\"request_id\":\"legacy-advance\",\"requester_peer_id\":\"peer-legacy\",\"task_id\":\"owner-task-1\"}\n",
+        )
+        .await
+        .unwrap();
+    let mut response_line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response_line)
+        .await
+        .unwrap();
+    let response: PeerResponse = serde_json::from_str(response_line.trim()).unwrap();
+    assert!(
+        matches!(
+            response,
+            PeerResponse::Error { ref message, .. }
+                if message.contains("protocol v1")
+                    && message.contains("authenticated task requests")
+                    && message.contains("upgrade")
+        ),
+        "unexpected legacy advance response: {response:?}",
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), kanna_listener.accept())
+            .await
+            .is_err(),
+        "legacy unauthenticated advance reached the owner Kanna server",
     );
 }
 

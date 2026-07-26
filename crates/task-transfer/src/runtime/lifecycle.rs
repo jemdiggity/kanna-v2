@@ -8,6 +8,7 @@ use super::replay_store::TransferReplayStore;
 use super::state::{ListenerContext, TerminalObserverSlot, TransferRuntime};
 use super::utils::{
     load_or_create_identity, registry_entry_path, terminal_observer_key, unexpected_peer_response,
+    CURRENT_PROTOCOL_VERSION,
 };
 use crate::crypto::{parse_public_key, public_key_to_string, seal_json};
 use crate::discovery::encode_txt_record;
@@ -38,8 +39,14 @@ impl TransferRuntime {
         config.listen_port = listener.local_addr()?.port();
         let identity = load_or_create_identity(&config.registry_dir, &config.peer_id)?;
         let public_key = public_key_to_string(&identity.public_key);
-        let _ = encode_txt_record(&config.peer_id, &config.display_name, &public_key, 1, true)
-            .map_err(|error| RuntimeError::InvalidConfig(error.to_string()))?;
+        let _ = encode_txt_record(
+            &config.peer_id,
+            &config.display_name,
+            &public_key,
+            CURRENT_PROTOCOL_VERSION,
+            true,
+        )
+        .map_err(|error| RuntimeError::InvalidConfig(error.to_string()))?;
 
         let (discovery, registry_entry_path) = match config.discovery_mode {
             DiscoveryMode::Registry => {
@@ -50,7 +57,7 @@ impl TransferRuntime {
                     endpoint: config.endpoint(),
                     pid: process::id(),
                     public_key: public_key.clone(),
-                    protocol_version: 1,
+                    protocol_version: CURRENT_PROTOCOL_VERSION,
                     accepting_transfers: true,
                 };
                 registry.write_entry(&registry_entry)?;
@@ -221,6 +228,11 @@ impl TransferRuntime {
                 .unwrap_or(false)
         }) {
             let request_id = self.next_request_id("task-snapshot");
+            self.require_authenticated_task_requests(
+                &peer.peer_id,
+                &peer.public_key,
+                peer.protocol_version,
+            )?;
             let target_public_key = parse_public_key(&peer.public_key)?;
             let sealed_payload = seal_json(
                 &self.identity,
@@ -494,6 +506,11 @@ impl TransferRuntime {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("advance-stage");
+        self.require_authenticated_task_requests(
+            &target_peer.peer_id,
+            &target_peer.public_key,
+            target_peer.protocol_version,
+        )?;
         let target_public_key = parse_public_key(&target_peer.public_key)?;
         let mut authenticated_payload = serde_json::json!({
             "action": "advance_task_stage",

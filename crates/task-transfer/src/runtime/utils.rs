@@ -13,6 +13,9 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
+pub(super) const CURRENT_PROTOCOL_VERSION: u32 = 2;
+pub(super) const AUTHENTICATED_TASK_REQUEST_VERSION: u32 = 1;
+
 pub(super) fn parse_peer_response_line(
     peer_id: &str,
     operation: &str,
@@ -132,10 +135,32 @@ pub(super) fn load_or_create_identity(
 
 pub(super) fn local_capabilities_json() -> String {
     serde_json::json!({
-        "protocolVersion": 1,
+        "protocolVersion": CURRENT_PROTOCOL_VERSION,
         "transferCapabilityVersion": 1,
+        "authenticatedTaskRequests": true,
+        "authenticatedTaskRequestVersion": AUTHENTICATED_TASK_REQUEST_VERSION,
     })
     .to_string()
+}
+
+pub(super) fn supports_authenticated_task_requests(
+    protocol_version: u32,
+    capabilities_json: &str,
+) -> bool {
+    if protocol_version < CURRENT_PROTOCOL_VERSION {
+        return false;
+    }
+    let Ok(capabilities) = serde_json::from_str::<Value>(capabilities_json) else {
+        return false;
+    };
+    capabilities
+        .get("authenticatedTaskRequests")
+        .and_then(Value::as_bool)
+        == Some(true)
+        && capabilities
+            .get("authenticatedTaskRequestVersion")
+            .and_then(Value::as_u64)
+            .is_some_and(|version| version >= AUTHENTICATED_TASK_REQUEST_VERSION as u64)
 }
 
 pub(super) fn ensure_peer_is_trusted_for(

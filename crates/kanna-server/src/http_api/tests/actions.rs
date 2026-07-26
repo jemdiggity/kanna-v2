@@ -3626,6 +3626,100 @@ async fn blocker_replacement_waits_for_competing_advance_stage_mutation() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dependent_start_waits_for_mutation_lease_and_rechecks_blockers() {
+    use tokio::net::UnixListener;
+
+    let seeded = super::test_state_with_seed(
+        "desktop-dependent-start-linearization",
+        "Studio Mac",
+        |db| {
+            db.insert_test_repo("repo-1", "Repo One").unwrap();
+            for (task_id, prompt) in [
+                ("dependent-1", "dependent"),
+                ("blocker-closed", "closed blocker"),
+                ("blocker-new", "new blocker"),
+            ] {
+                db.insert_test_pipeline_item(
+                    task_id,
+                    "repo-1",
+                    prompt,
+                    Some(prompt),
+                    "in progress",
+                    "2026-07-26 00:00:00",
+                )
+                .unwrap();
+            }
+            db.insert_task_blocker("dependent-1", "blocker-closed")
+                .unwrap();
+            db.close_pipeline_item("blocker-closed").unwrap();
+        },
+    );
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let daemon_dir =
+        std::env::temp_dir().join(format!("kanna-dependent-start-linearization-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.unwrap();
+        std::future::pending::<()>().await;
+    });
+
+    let mut config = seeded.config.clone();
+    config.daemon_dir = daemon_dir.to_string_lossy().into_owned();
+    let state = Arc::new(AppState::new(config.clone()));
+    let dependent_mutation = state.begin_requested_task_mutation("dependent-1").await;
+    let mut daemon = crate::daemon_client::DaemonClient::connect(&config.daemon_dir)
+        .await
+        .unwrap();
+    let start_state = Arc::clone(&state);
+    let mut start = Box::pin(tokio::spawn(async move {
+        super::super::task_blockers::start_dependents_unblocked_by_close_with_daemon(
+            &start_state,
+            &mut daemon,
+            "blocker-closed",
+        )
+        .await;
+    }));
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), &mut start)
+            .await
+            .is_err(),
+        "dependent start must wait for the dependent task's mutation lease",
+    );
+
+    Db::open(&config.db_path)
+        .unwrap()
+        .replace_task_blockers_atomically("dependent-1", &["blocker-new".to_string()])
+        .unwrap();
+    drop(dependent_mutation);
+    tokio::time::timeout(std::time::Duration::from_secs(2), &mut start)
+        .await
+        .expect("dependent start did not resume after mutation lease release")
+        .unwrap();
+
+    let db = Db::open(&config.db_path).unwrap();
+    assert_eq!(
+        db.list_open_task_blocker_ids("dependent-1").unwrap(),
+        vec!["blocker-new".to_string()],
+    );
+    assert!(db.get_task_worktree_path("dependent-1").unwrap().is_none());
+
+    daemon_server.abort();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+}
+
 #[tokio::test]
 async fn rerun_stage_route_uses_stage_rerunner() {
     let app = super::test_router_with_stage_rerunner(

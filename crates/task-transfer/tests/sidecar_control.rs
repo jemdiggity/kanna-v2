@@ -42,7 +42,7 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
             endpoint: format!("127.0.0.1:{port}"),
             pid: std::process::id(),
             public_key: target_public_key.clone(),
-            protocol_version: 1,
+            protocol_version: 2,
             accepting_transfers: true,
         })
         .unwrap();
@@ -55,7 +55,9 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
         peer_id: "peer-target".into(),
         display_name: "Target".into(),
         public_key: target_public_key,
-        capabilities_json: "{\"protocolVersion\":1}".into(),
+        capabilities_json:
+            "{\"protocolVersion\":2,\"authenticatedTaskRequests\":true,\"authenticatedTaskRequestVersion\":1}"
+                .into(),
         paired_at: "2026-07-26T00:00:00Z".into(),
         last_seen_at: None,
         revoked_at: None,

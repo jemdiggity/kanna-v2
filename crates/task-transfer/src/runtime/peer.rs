@@ -6,7 +6,7 @@ use super::external_peers::{
 use super::state::{TransferArtifactRecord, TransferRuntime};
 use super::utils::{
     ensure_peer_is_trusted_for, parse_peer_response_line, peer_store, prune_transfer_artifacts,
-    sanitize_artifact_filename, write_json_line,
+    sanitize_artifact_filename, supports_authenticated_task_requests, write_json_line,
 };
 use crate::peer_store::PeerRecord;
 use crate::protocol::DiscoveredPeer;
@@ -196,6 +196,25 @@ impl TransferRuntime {
             peer_id,
             observed_public_key,
         )
+    }
+
+    pub(super) fn require_authenticated_task_requests(
+        &self,
+        peer_id: &str,
+        public_key: &str,
+        protocol_version: u32,
+    ) -> Result<(), RuntimeError> {
+        let record = self
+            .trusted_peer_record(peer_id)?
+            .filter(|record| record.public_key == public_key)
+            .ok_or_else(|| RuntimeError::Protocol(format!("peer {peer_id} is not trusted")))?;
+        if supports_authenticated_task_requests(protocol_version, &record.capabilities_json) {
+            return Ok(());
+        }
+        Err(RuntimeError::Protocol(format!(
+            "peer {} uses protocol v{} without authenticated task requests; upgrade and re-pair the peer",
+            peer_id, protocol_version
+        )))
     }
 
     pub(super) async fn send_peer_request(

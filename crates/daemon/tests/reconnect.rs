@@ -1761,6 +1761,107 @@ fn same_id_reuse_waits_for_old_reader_exit_and_recovery_teardown() {
 }
 
 #[test]
+fn natural_exit_finalization_precedes_same_id_replacement_creation() {
+    let daemon = DaemonHandle::start_with_fake_recovery([(
+        "KANNA_DAEMON_TEST_NATURAL_EXIT_FINALIZE_PAUSE_MS",
+        "1200",
+    )]);
+    let session_id = "sess-natural-linearized-reuse";
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Cmd::Subscribe);
+    assert!(matches!(subscriber.recv(), Evt::Ok));
+
+    let mut creator = daemon.connect();
+    spawn_shell_session(
+        &mut creator,
+        session_id,
+        "printf 'OLD_NATURAL_INCARNATION\\r\\n'",
+    );
+    loop {
+        match subscriber.recv() {
+            Evt::SessionCreated {
+                session_id: created,
+            } => assert_eq!(created, session_id),
+            Evt::Exit {
+                session_id: exited,
+                killed,
+                ..
+            } => {
+                assert_eq!(exited, session_id);
+                assert!(!killed);
+                break;
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => {}
+            other => panic!("expected natural session lifecycle event, got: {other:?}"),
+        }
+    }
+
+    let mut replacement = daemon.connect();
+    replacement.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "printf 'NEW_NATURAL_INCARNATION\\r\\n'; while :; do sleep 1; done".to_string(),
+        ],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        terminal_prelude: None,
+    });
+    assert!(
+        replacement
+            .recv_with_timeout(Duration::from_millis(250))
+            .is_err(),
+        "same-id Spawn escaped while natural-exit recovery teardown was still in flight",
+    );
+    expect_session_created_with_timeout(&mut replacement, session_id, Duration::from_secs(4));
+
+    let commands = wait_for_recovery_log(
+        &daemon,
+        |commands| {
+            commands
+                .iter()
+                .filter(|command| command["type"] == "StartSession")
+                .count()
+                >= 2
+                && commands
+                    .iter()
+                    .any(|command| command["type"] == "EndSession")
+        },
+        Duration::from_secs(4),
+    );
+    let replacement_start = commands
+        .iter()
+        .enumerate()
+        .filter(|(_, command)| command["type"] == "StartSession")
+        .nth(1)
+        .map(|(index, _)| index)
+        .expect("replacement recovery session should start");
+    assert!(
+        commands[..replacement_start]
+            .iter()
+            .any(|command| command["type"] == "EndSession"),
+        "old natural-exit recovery teardown must precede replacement start: {commands:?}",
+    );
+    assert!(
+        !commands[replacement_start + 1..]
+            .iter()
+            .any(|command| command["type"] == "EndSession"),
+        "stale natural-exit teardown targeted the replacement incarnation: {commands:?}",
+    );
+
+    let mut attached = daemon.connect();
+    attach(&mut attached, session_id);
+    let output = attached.collect_output_until_contains("NEW_NATURAL_INCARNATION");
+    assert!(
+        String::from_utf8_lossy(&output).contains("NEW_NATURAL_INCARNATION"),
+        "replacement terminal lost its fanout during stale natural-exit cleanup",
+    );
+}
+
+#[test]
 fn test_attach_snapshot_replays_current_status() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();

@@ -592,10 +592,7 @@ impl TransferSidecarClient {
         }))
     }
 
-    pub async fn finalize_outgoing_transfer(
-        &self,
-        transfer_id: String,
-    ) -> Result<Value, String> {
+    pub async fn finalize_outgoing_transfer(&self, transfer_id: String) -> Result<Value, String> {
         let request_id = self.next_request_id("finalize");
         let response = self
             .send_request(

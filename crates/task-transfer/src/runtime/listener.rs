@@ -18,9 +18,9 @@ use super::state::{
     PairingDecision, PendingPairingRequest, PendingTaskPullRequest,
 };
 use super::utils::{
-    ensure_peer_is_trusted_for, extract_request_id, load_or_create_identity,
-    local_capabilities_json, pairing_verification_code, peer_store, prune_outgoing_transfers,
-    prune_transfer_artifacts, write_json_line,
+    extract_request_id, load_or_create_identity, local_capabilities_json,
+    pairing_verification_code, peer_store, prune_outgoing_transfers, prune_transfer_artifacts,
+    supports_authenticated_task_requests, write_json_line,
 };
 use crate::crypto::{open_json, parse_public_key, seal_json};
 use crate::peer_store::PeerRecord;
@@ -34,6 +34,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex};
@@ -990,11 +991,6 @@ async fn authenticate_peer_request(
     expected_action: &str,
     expected_request_id: &str,
 ) -> Result<Value, RuntimeError> {
-    let sealed_payload = sealed_payload.ok_or_else(|| {
-        RuntimeError::Protocol(format!(
-            "{expected_action} request is missing authenticated payload"
-        ))
-    })?;
     let requester_peer = find_peer(
         &context.discovery,
         &context.external_peers,
@@ -1010,6 +1006,30 @@ async fn authenticate_peer_request(
         requester_peer_id,
         &requester_peer.public_key,
     )?;
+    let trusted_peer = peer_store(&context.registry_root, &context.self_peer_id)?
+        .list_active()?
+        .into_iter()
+        .find(|peer| {
+            peer.peer_id == requester_peer_id && peer.public_key == requester_peer.public_key
+        })
+        .ok_or_else(|| {
+            RuntimeError::Protocol(format!("peer {requester_peer_id} is not trusted"))
+        })?;
+    let sealed_payload = sealed_payload.ok_or_else(|| {
+        if supports_authenticated_task_requests(
+            requester_peer.protocol_version,
+            &trusted_peer.capabilities_json,
+        ) {
+            RuntimeError::Protocol(format!(
+                "{expected_action} request is missing authenticated payload"
+            ))
+        } else {
+            RuntimeError::Protocol(format!(
+                "peer {requester_peer_id} uses protocol v{} without authenticated task requests; upgrade and re-pair the peer",
+                requester_peer.protocol_version
+            ))
+        }
+    })?;
     let requester_public_key = parse_public_key(&requester_peer.public_key)?;
     let identity = load_or_create_identity(&context.registry_root, &context.self_peer_id)?;
     let payload = open_json(&identity, &requester_public_key, sealed_payload)?;

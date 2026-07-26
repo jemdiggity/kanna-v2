@@ -12,6 +12,7 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::client::{SessionSizes, TerminalEmulatorClients};
+use crate::daemon_lifecycle::{DaemonLifecycle, DaemonLifecycleState};
 use crate::fanout::{
     existing_session_fanout, session_fanout, EnqueueReport, EventLine, SessionFanout,
     SessionFanouts,
@@ -107,6 +108,7 @@ pub(crate) async fn stream_output(
     sessions: Arc<Mutex<SessionManager>>,
     session_sizes: SessionSizes,
     recovery_manager: RecoveryManager,
+    daemon_lifecycle: DaemonLifecycle,
     session: Arc<SessionHandle>,
 ) {
     let async_fd = match AsyncFd::new(io_fd) {
@@ -369,6 +371,30 @@ pub(crate) async fn stream_output(
         return;
     }
 
+    // Natural EOF participates in the same per-id lifecycle serialization as
+    // Spawn and Kill. Without this guard, removing the old handle opened a
+    // window where a replacement could be inserted before the old reader's
+    // Exit, recovery teardown, and id-keyed fanout/client cleanup.
+    let daemon_lifecycle_guard = daemon_lifecycle.read().await;
+    if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+        stream_control.mark_stopped();
+        return;
+    }
+    let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+    let _lifecycle_guard = lifecycle.lock().await;
+    if stream_control.stop_requested()
+        || session.is_retired()
+        || !session.owns_stream_control(&stream_control).await
+    {
+        log::info!(
+            "[stream] reader retired before serialized exit cleanup session={} chunks={}",
+            session_id,
+            chunk_count
+        );
+        stream_control.mark_stopped();
+        return;
+    }
+
     let exit_code = session.try_wait().await.unwrap_or(0);
     let resume_session_id = match session.codex_resume_session_id().await {
         Ok(value) => value,
@@ -433,6 +459,12 @@ pub(crate) async fn stream_output(
     };
     if let Ok(json) = serde_json::to_string(&evt) {
         let _ = broadcast_tx.send(json);
+    }
+    if let Some(delay_ms) = std::env::var("KANNA_DAEMON_TEST_NATURAL_EXIT_FINALIZE_PAUSE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
     }
     recovery_manager.end_session(&session_id).await;
     // Deliver Exit through every subscriber mailbox, then drop the fanout so

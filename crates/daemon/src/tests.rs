@@ -1020,6 +1020,7 @@ async fn agent_input_rejects_resume_while_reservation_is_held() {
         writer,
         broadcast_tx,
         agents.clone(),
+        crate::daemon_lifecycle::new_daemon_lifecycle(),
     )
     .await;
 
@@ -1108,6 +1109,7 @@ async fn concurrent_spawn_agent_creates_exactly_one_session() {
             broadcast_tx.clone(),
             agents.clone(),
             dir.clone(),
+            crate::daemon_lifecycle::new_daemon_lifecycle(),
         )
     };
     tokio::join!(spawn(writer_a), spawn(writer_b));
@@ -1375,6 +1377,7 @@ async fn forged_agent_handoff_cannot_target_unrelated_processes() {
         agents.clone(),
         broadcast_tx.clone(),
         dir.clone(),
+        crate::daemon_lifecycle::new_daemon_lifecycle(),
     )
     .await;
 
@@ -1446,6 +1449,7 @@ async fn legacy_handoff_without_identity_keeps_live_agents_killable() {
         agents.clone(),
         broadcast_tx.clone(),
         dir.clone(),
+        crate::daemon_lifecycle::new_daemon_lifecycle(),
     )
     .await;
 
@@ -1909,6 +1913,7 @@ async fn rejected_duplicate_spawn_does_not_contaminate_the_winners_journal() {
             broadcast_tx.clone(),
             agents.clone(),
             dir.clone(),
+            crate::daemon_lifecycle::new_daemon_lifecycle(),
         )
     };
     tokio::join!(spawn(writer_a, "prompt-a"), spawn(writer_b, "prompt-b"));
@@ -2270,6 +2275,7 @@ async fn a_pty_exit_during_a_sealed_handoff_defers_to_the_transfer_outcome() {
         sessions.clone(),
         session_sizes.clone(),
         recovery_manager.clone(),
+        crate::daemon_lifecycle::new_daemon_lifecycle(),
         handle.clone(),
     ));
 

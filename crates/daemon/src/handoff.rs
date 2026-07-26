@@ -12,6 +12,7 @@ use tokio::io::BufReader;
 use tokio::sync::{broadcast, Mutex};
 
 use crate::client::SessionSizes;
+use crate::daemon_lifecycle::{DaemonLifecycle, DaemonLifecycleState};
 use crate::fanout::SessionFanouts;
 use crate::session::{SessionManager, StreamControl};
 use crate::socket::{read_command, write_event};
@@ -773,6 +774,7 @@ pub(crate) async fn handle_handoff(
     broadcast_tx: broadcast::Sender<String>,
     recovery_manager: RecoveryManager,
     agent_sessions: kanna_daemon::agent::AgentSessions,
+    daemon_lifecycle: DaemonLifecycle,
 ) -> bool {
     log::info!(
         "[handoff] received Handoff request (version={}, current_version={})",
@@ -799,6 +801,20 @@ pub(crate) async fn handle_handoff(
         mode.label(),
         mode.version()
     );
+
+    // Seal both live registries from snapshot capture through ACK resolution.
+    // Spawn/Kill/natural-exit hold read guards around their mutations, so an
+    // adopted snapshot cannot omit a new session or retain a killed/replaced
+    // incarnation.
+    let mut daemon_lifecycle_guard = daemon_lifecycle.write().await;
+    if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+        let evt = error_event(
+            Some(protocol::ErrorCode::HandoffInProgress),
+            "daemon handoff already committed",
+        );
+        let _ = write_event(&mut *writer.lock().await, &evt).await;
+        return false;
+    }
 
     // Snapshot and clone fds without removing ownership. The old daemon keeps
     // serving sessions unless the adopting daemon explicitly ACKs success.
@@ -1082,6 +1098,9 @@ pub(crate) async fn handle_handoff(
         }
     }
 
+    *daemon_lifecycle_guard = DaemonLifecycleState::HandoffCommitted;
+    drop(daemon_lifecycle_guard);
+
     // Fault-injection hook for the delayed-old-reader regression: simulate a
     // daemon that is slow to relinquish its PTY readers after acknowledging
     // adoption. The adopting daemon must not publish (pid file/socket) until
@@ -1098,7 +1117,6 @@ pub(crate) async fn handle_handoff(
         );
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
     }
-
     for control in &controls {
         control.request_stop();
     }

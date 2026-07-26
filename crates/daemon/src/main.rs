@@ -3,6 +3,7 @@ mod agent_runtime;
 mod bench;
 mod client;
 mod connection;
+mod daemon_lifecycle;
 mod fanout;
 mod fd;
 mod fd_transfer;

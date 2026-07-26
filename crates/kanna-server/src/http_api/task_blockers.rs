@@ -331,9 +331,10 @@ pub(super) async fn start_dependents_unblocked_by_close_with_daemon(
     daemon: &mut DaemonClient,
     blocker_task_id: &str,
 ) {
-    // Dependent discovery reads SQLite and resolves blocker worktree
-    // branches with git — synchronous work behind the blocking boundary.
-    let ready_dependents = {
+    // Discover durable dependent ids first. Readiness is deliberately not
+    // decided here: a concurrent re-block or another last-blocker close may
+    // commit before this dependent acquires its shared mutation lease.
+    let dependent_ids = {
         let state = Arc::clone(state);
         let gather_blocker_task_id = blocker_task_id.to_string();
         let gathered = tokio::task::spawn_blocking(move || {
@@ -347,38 +348,19 @@ pub(super) async fn start_dependents_unblocked_by_close_with_daemon(
                     return Vec::new();
                 }
             };
-            let blocked_ids = match db.list_tasks_blocked_by(&blocker_task_id) {
-                Ok(blocked_ids) => blocked_ids,
+            match db.list_tasks_blocked_by(&blocker_task_id) {
+                Ok(dependent_ids) => dependent_ids,
                 Err(error) => {
                     log::error!(
                         "cannot list dependents of closed blocker {blocker_task_id}: {error}"
                     );
-                    return Vec::new();
-                }
-            };
-            let mut ready = Vec::new();
-            for blocked_id in blocked_ids {
-                match db.count_open_task_blockers(&blocked_id) {
-                    Ok(0) => {}
-                    Ok(_) => continue,
-                    Err(error) => {
-                        log::error!("cannot count open blockers for {blocked_id}: {error}");
-                        continue;
-                    }
-                }
-                match blocker_branches_for_task(&db, &blocked_id) {
-                    Ok(blocker_branches) => ready.push((blocked_id, blocker_branches)),
-                    Err((_, error)) => {
-                        log::error!("cannot resolve blocker branches for {blocked_id}: {error}");
-                        ready.push((blocked_id, Vec::new()));
-                    }
+                    Vec::new()
                 }
             }
-            ready
         })
         .await;
         match gathered {
-            Ok(ready) => ready,
+            Ok(dependent_ids) => dependent_ids,
             Err(join_error) => {
                 log::error!(
                     "dependent discovery worker failed for closed blocker {blocker_task_id}: {join_error}"
@@ -388,7 +370,43 @@ pub(super) async fn start_dependents_unblocked_by_close_with_daemon(
         }
     };
 
-    for (blocked_id, blocker_branches) in ready_dependents {
+    for blocked_id in dependent_ids {
+        // The same durable-id lease is used by block/unblock, lifecycle
+        // actions, and every competing last-blocker close. Hold it through
+        // the authoritative blocker re-read, worktree preparation, spawn,
+        // and possible integration-task substitution.
+        let _dependent_mutation = state.begin_requested_task_mutation(&blocked_id).await;
+        let blocker_branches = {
+            let state = Arc::clone(state);
+            let ready_task_id = blocked_id.clone();
+            match tokio::task::spawn_blocking(move || {
+                let db = Db::open(&state.config.db_path).map_err(|error| {
+                    format!("cannot open db while starting {ready_task_id}: {error}")
+                })?;
+                match db.count_open_task_blockers(&ready_task_id) {
+                    Ok(0) => blocker_branches_for_task(&db, &ready_task_id)
+                        .map(Some)
+                        .map_err(|(_, error)| error),
+                    Ok(_) => Ok(None),
+                    Err(error) => Err(format!(
+                        "cannot count open blockers for {ready_task_id}: {error}"
+                    )),
+                }
+            })
+            .await
+            {
+                Ok(Ok(Some(blocker_branches))) => blocker_branches,
+                Ok(Ok(None)) => continue,
+                Ok(Err(error)) => {
+                    log::error!("{error}");
+                    continue;
+                }
+                Err(join_error) => {
+                    log::error!("dependent readiness worker failed for {blocked_id}: {join_error}");
+                    continue;
+                }
+            }
+        };
         match start_dormant_task_if_ready_with_daemon(state, daemon, &blocked_id, blocker_branches)
             .await
         {
