@@ -16,6 +16,7 @@ use crate::paths::{
 };
 use crate::session::{PendingInput, SessionHandle, SessionManager, SessionRecord, StreamControl};
 use crate::socket::bind_socket;
+use crate::successor_auth::SuccessorAuthorizer;
 use crate::{agent_runtime, headless_terminal};
 
 struct AdoptedPtyReader {
@@ -114,6 +115,22 @@ pub(crate) async fn run_daemon() {
         .duplicate_to_stderr(flexi_logger::Duplicate::Info)
         .start();
     kanna_daemon::terminal_perf::start_global_watchdog();
+
+    // Capture the app/test launcher executable while it is still our direct
+    // parent. The daemon can outlive and be reparented after that launcher
+    // exits, but future successors must have a live direct parent at the same
+    // trusted executable path.
+    let successor_authorizer = match SuccessorAuthorizer::capture() {
+        Ok(authorizer) => Arc::new(authorizer),
+        Err(error) => {
+            log::error!(
+                "[handoff] refusing to start without successor trust root: {}",
+                error
+            );
+            eprintln!("kanna-daemon: could not capture launcher trust root: {error}");
+            std::process::exit(1);
+        }
+    };
 
     let pid_path = dir.join("daemon.pid");
     let socket_path = kanna_runtime_defaults::socket_path(&dir);
@@ -418,6 +435,7 @@ pub(crate) async fn run_daemon() {
                 let recovery_clone = recovery_manager.clone();
                 let agent_sessions_clone = agent_sessions.clone();
                 let daemon_lifecycle_clone = daemon_lifecycle.clone();
+                let successor_authorizer_clone = successor_authorizer.clone();
                 tokio::spawn(async move {
                     handle_connection(
                         stream,
@@ -430,6 +448,7 @@ pub(crate) async fn run_daemon() {
                         recovery_clone,
                         agent_sessions_clone,
                         daemon_lifecycle_clone,
+                        successor_authorizer_clone,
                     )
                     .await;
                 });

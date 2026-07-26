@@ -414,9 +414,12 @@ fn spawn_echo(conn: &mut ClientConn, id: &str) {
         rows: 24,
         agent_provider: None,
     });
-    match conn.recv() {
-        Evt::SessionCreated { .. } => {}
-        other => panic!("expected SessionCreated, got: {:?}", other),
+    loop {
+        match conn.recv() {
+            Evt::SessionCreated { .. } => break,
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("expected SessionCreated, got: {:?}", other),
+        }
     }
 }
 

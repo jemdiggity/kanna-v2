@@ -23,6 +23,7 @@ use crate::output::{handle_output_chunk, stream_output};
 use crate::paths::daemon_data_dir;
 use crate::session::{SessionHandle, SessionManager, SessionRecord, StreamControl};
 use crate::socket::{read_command, write_event};
+use crate::successor_auth::SuccessorAuthorizer;
 use crate::util::{error_event, recovery_snapshot_to_terminal_snapshot};
 use crate::{agent_runtime, headless_terminal, pty};
 
@@ -72,6 +73,7 @@ pub(crate) async fn handle_connection(
     recovery_manager: RecoveryManager,
     agent_sessions: kanna_daemon::agent::AgentSessions,
     daemon_lifecycle: DaemonLifecycle,
+    successor_authorizer: Arc<SuccessorAuthorizer>,
 ) {
     // Keep the raw fd for SCM_RIGHTS (used by Handoff)
     let raw_fd = stream.as_raw_fd();
@@ -98,6 +100,7 @@ pub(crate) async fn handle_connection(
                     recovery_manager.clone(),
                     agent_sessions.clone(),
                     daemon_lifecycle.clone(),
+                    successor_authorizer.clone(),
                 )
                 .await;
                 if should_close {

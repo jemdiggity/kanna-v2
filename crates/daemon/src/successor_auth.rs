@@ -224,11 +224,21 @@ impl SuccessorAuthorizer {
         }
     }
 
-    pub(crate) fn authorize(
+    pub(crate) fn authorize_then<T>(
         &self,
         socket_fd: RawFd,
-    ) -> Result<AuthorizedSuccessor, AuthorizationError> {
-        self.authorize_with(socket_fd, &KernelProcessLookup)
+        continuation: impl FnOnce(AuthorizedSuccessor) -> T,
+    ) -> Result<T, AuthorizationError> {
+        self.authorize_then_with(socket_fd, &KernelProcessLookup, continuation)
+    }
+
+    fn authorize_then_with<T, L: ProcessLookup>(
+        &self,
+        socket_fd: RawFd,
+        lookup: &L,
+        continuation: impl FnOnce(AuthorizedSuccessor) -> T,
+    ) -> Result<T, AuthorizationError> {
+        self.authorize_with(socket_fd, lookup).map(continuation)
     }
 
     fn authorize_with<L: ProcessLookup>(
@@ -301,7 +311,7 @@ impl SuccessorAuthorizer {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, VecDeque};
     use std::path::{Path, PathBuf};
 
@@ -546,5 +556,22 @@ mod tests {
             policy.authorize_with(7, &parent_exec),
             Err(AuthorizationError::LauncherExecutableMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn denied_successor_never_runs_transaction_continuation() {
+        let policy = SuccessorAuthorizer::from_paths("/app/kanna-daemon", "/app/Kanna");
+        let lookup = matching_lookup().with_paths(200, [Some("/tmp/socket-client")]);
+        let transaction_entries = Cell::new(0);
+
+        let result = policy.authorize_then_with(7, &lookup, |_| {
+            transaction_entries.set(transaction_entries.get() + 1);
+        });
+
+        assert!(matches!(
+            result,
+            Err(AuthorizationError::PeerExecutableMismatch { .. })
+        ));
+        assert_eq!(transaction_entries.get(), 0);
     }
 }
