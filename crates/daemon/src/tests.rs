@@ -25,6 +25,30 @@ use crate::output::{
 use crate::paths::panic_log_path;
 
 #[test]
+fn process_executable_path_is_kernel_derived_for_live_processes() {
+    let current = crate::proc_info::process_executable_path(std::process::id() as libc::pid_t)
+        .expect("current process path");
+    assert_eq!(
+        std::fs::canonicalize(current).expect("canonical current process path"),
+        std::fs::canonicalize(std::env::current_exe().expect("current executable"))
+            .expect("canonical current executable")
+    );
+
+    let mut child = std::process::Command::new("/bin/cat")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("cat spawn");
+    let child_path =
+        crate::proc_info::process_executable_path(child.id() as libc::pid_t).expect("cat path");
+    assert_eq!(
+        std::fs::canonicalize(child_path).expect("canonical child process path"),
+        std::fs::canonicalize("/bin/cat").expect("canonical /bin/cat")
+    );
+    child.kill().expect("cat kill");
+    child.wait().expect("cat reap");
+}
+
+#[test]
 fn parse_handoff_response_accepts_v2_payload() {
     let line = serde_json::to_string(&Event::HandoffReady {
         sessions: vec![protocol::HandoffSession {
