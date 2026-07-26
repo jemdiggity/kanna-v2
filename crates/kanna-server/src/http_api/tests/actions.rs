@@ -1737,7 +1737,17 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
                         "prompt": "Build on task A",
                         "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
                         "agentProvider": "claude",
-                        "blockerTaskIds": ["task-a"]
+                        "blockerTaskIds": ["task-a"],
+                        "recoverySnapshot": {
+                            "serialized": "DORMANT-RECOVERY\u{001b}[32m",
+                            "cols": 111,
+                            "rows": 39,
+                            "cursorRow": 12,
+                            "cursorCol": 34,
+                            "cursorVisible": false,
+                            "savedAt": 1785000000555_u64,
+                            "sequence": 61
+                        }
                     })
                     .to_string(),
                 ))
@@ -1760,6 +1770,7 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut spawned = Vec::new();
+        let mut recovery_seeded = false;
         loop {
             let mut line = String::new();
             if reader.read_line(&mut line).await.unwrap() == 0 {
@@ -1776,12 +1787,34 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
                         .await
                         .unwrap();
                 }
+                DaemonCommand::SeedSnapshot {
+                    session_id,
+                    snapshot,
+                } => {
+                    assert_eq!(session_id, expected_task_id);
+                    assert_eq!(snapshot.version, 1);
+                    assert_eq!(snapshot.vt, "DORMANT-RECOVERY\u{1b}[32m");
+                    assert_eq!((snapshot.cols, snapshot.rows), (111, 39));
+                    assert_eq!((snapshot.cursor_row, snapshot.cursor_col), (12, 34));
+                    assert!(!snapshot.cursor_visible);
+                    assert_eq!(snapshot.saved_at, 1_785_000_000_555);
+                    assert_eq!(snapshot.sequence, 61);
+                    recovery_seeded = true;
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
                 DaemonCommand::Spawn {
                     session_id,
                     cwd,
                     agent_provider,
                     ..
                 } => {
+                    assert!(recovery_seeded, "Spawn preceded dormant recovery seed");
                     assert_eq!(session_id, expected_task_id);
                     assert!(cwd.contains(".kanna-worktrees/task-"));
                     assert_eq!(agent_provider, Some(AgentProvider::Claude));
@@ -1800,6 +1833,7 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
                     break;
                 }
                 DaemonCommand::SpawnAgent { session_id, params } => {
+                    assert!(recovery_seeded, "SpawnAgent preceded dormant recovery seed");
                     assert_eq!(session_id, expected_task_id);
                     assert!(params.cwd.contains(".kanna-worktrees/task-"));
                     assert_eq!(params.agent_provider, AgentProvider::Claude);

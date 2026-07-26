@@ -202,6 +202,11 @@ pub(super) async fn create_task_with_requested_id(
     if let Some(task_id) = requested_task_id.as_deref() {
         validate_requested_task_id(task_id)?;
     }
+    if let Some(snapshot) = payload.recovery_snapshot.as_ref() {
+        snapshot
+            .validate()
+            .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
+    }
 
     #[cfg(test)]
     if let Some(task_creator) = state.task_creator.clone() {

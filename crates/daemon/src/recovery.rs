@@ -33,6 +33,8 @@ pub struct SeededRecoverySnapshot {
     pub cursor_row: u16,
     pub cursor_col: u16,
     pub cursor_visible: bool,
+    pub saved_at: u64,
+    pub sequence: u64,
 }
 
 #[derive(Clone)]
@@ -208,8 +210,8 @@ impl RecoveryManager {
             cursor_row: snapshot.cursor_row,
             cursor_col: snapshot.cursor_col,
             cursor_visible: snapshot.cursor_visible,
-            saved_at: now_millis(),
-            sequence: 0,
+            saved_at: snapshot.saved_at,
+            sequence: snapshot.sequence,
         };
 
         let payload = serde_json::to_vec(&snapshot)
@@ -917,6 +919,23 @@ mod tests {
                     cursor_row: 23,
                     cursor_col: 0,
                     cursor_visible: true,
+                    saved_at: 1234,
+                    sequence: 56,
+                },
+            )
+            .unwrap();
+        manager
+            .seed_snapshot(
+                "seeded-session",
+                &SeededRecoverySnapshot {
+                    serialized: "RECOVERY_DONE\r\n".to_string(),
+                    cols: 80,
+                    rows: 24,
+                    cursor_row: 23,
+                    cursor_col: 0,
+                    cursor_visible: true,
+                    saved_at: 1234,
+                    sequence: 56,
                 },
             )
             .unwrap();
@@ -929,6 +948,11 @@ mod tests {
         assert_eq!(snapshot.serialized, "RECOVERY_DONE\r\n");
         assert_eq!(snapshot.cols, 80);
         assert_eq!(snapshot.rows, 24);
+        assert_eq!(snapshot.cursor_row, 23);
+        assert_eq!(snapshot.cursor_col, 0);
+        assert!(snapshot.cursor_visible);
+        assert_eq!(snapshot.saved_at, 1234);
+        assert_eq!(snapshot.sequence, 56);
 
         let _ = std::fs::remove_dir_all(&snapshot_dir);
     }

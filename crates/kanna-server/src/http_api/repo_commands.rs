@@ -96,6 +96,7 @@ pub(super) async fn run_repo_command(
             setup_cmds: launch.setup_cmds,
             task_template: launch.task_template,
             resume_session_id: None,
+            recovery_snapshot: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: None,

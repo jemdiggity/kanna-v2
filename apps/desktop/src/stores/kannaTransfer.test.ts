@@ -295,18 +295,6 @@ function createTransferDb(initial: {
       item.base_ref = request.baseRef ?? null;
       item.agent_session_id = request.resumeSessionId ?? null;
       tables.pipeline_item.push(item);
-      if (request.recoverySnapshot) {
-        const snapshot = request.recoverySnapshot;
-        await invokeMock("seed_session_recovery_state", {
-          sessionId: id,
-          serialized: snapshot.serialized,
-          cols: snapshot.cols,
-          rows: snapshot.rows,
-          cursorRow: snapshot.cursorRow,
-          cursorCol: snapshot.cursorCol,
-          cursorVisible: snapshot.cursorVisible,
-        }).catch(() => undefined);
-      }
       const resumeFlag = request.resumeSessionId
         ? item.agent_provider === "copilot"
           ? `--resume='${request.resumeSessionId}'`
@@ -2278,7 +2266,6 @@ describe("incoming transfer approval", () => {
         cmd === "ensure_directory" ||
         cmd === "copy_file" ||
         cmd === "git_worktree_add" ||
-        cmd === "seed_session_recovery_state" ||
         cmd === "acknowledge_incoming_transfer_commit"
       ) {
         return null;
@@ -2296,15 +2283,7 @@ describe("incoming transfer approval", () => {
       id: localTaskId,
       agent_session_id: "019d9a8c-9f39-7240-818f-88367a7c31df",
     });
-    expect(invokeMock).toHaveBeenCalledWith("seed_session_recovery_state", {
-      sessionId: localTaskId,
-      serialized: "prompt> ",
-      cols: 80,
-      rows: 24,
-      cursorRow: 0,
-      cursorCol: 8,
-      cursorVisible: true,
-    });
+    expect(invokeMock).not.toHaveBeenCalledWith("seed_session_recovery_state", expect.anything());
     expect(invokeMock).toHaveBeenCalledWith(
       "spawn_session",
       expect.objectContaining({
@@ -2398,7 +2377,6 @@ describe("incoming transfer approval", () => {
       if (
         cmd === "ensure_directory" ||
         cmd === "copy_file" ||
-        cmd === "seed_session_recovery_state" ||
         cmd === "acknowledge_incoming_transfer_commit"
       ) {
         return null;
@@ -2677,7 +2655,6 @@ describe("incoming transfer approval", () => {
       if (
         cmd === "ensure_directory" ||
         cmd === "git_worktree_add" ||
-        cmd === "seed_session_recovery_state" ||
         cmd === "acknowledge_incoming_transfer_commit"
       ) {
         return null;
@@ -2805,7 +2782,6 @@ describe("incoming transfer approval", () => {
       if (
         cmd === "ensure_directory" ||
         cmd === "git_worktree_add" ||
-        cmd === "seed_session_recovery_state" ||
         cmd === "acknowledge_incoming_transfer_commit"
       ) {
         return null;
@@ -2960,7 +2936,6 @@ describe("incoming transfer approval", () => {
       }
       if (
         cmd === "git_worktree_add" ||
-        cmd === "seed_session_recovery_state" ||
         cmd === "acknowledge_incoming_transfer_commit"
       ) {
         return null;

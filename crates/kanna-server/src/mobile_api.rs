@@ -133,6 +133,44 @@ pub struct TaskTemplateLaunch {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateTaskRecoverySnapshot {
+    pub serialized: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub cursor_row: u16,
+    pub cursor_col: u16,
+    pub cursor_visible: bool,
+    pub saved_at: u64,
+    pub sequence: u64,
+}
+
+impl CreateTaskRecoverySnapshot {
+    pub fn validate(&self) -> Result<(), String> {
+        const MAX_COLS: u16 = 320;
+        const MAX_ROWS: u16 = 256;
+        const MAX_SERIALIZED_BYTES: usize = 64 * 1024 * 1024;
+
+        if self.serialized.len() > MAX_SERIALIZED_BYTES {
+            return Err(format!(
+                "recoverySnapshot.serialized exceeds {MAX_SERIALIZED_BYTES} bytes"
+            ));
+        }
+        if self.cols == 0 || self.cols > MAX_COLS || self.rows == 0 || self.rows > MAX_ROWS {
+            return Err(format!(
+                "recoverySnapshot dimensions must be within 1..={MAX_COLS} columns and 1..={MAX_ROWS} rows"
+            ));
+        }
+        if self.cursor_row >= self.rows || self.cursor_col >= self.cols {
+            return Err(
+                "recoverySnapshot cursor must be inside its terminal dimensions".to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateTaskRequest {
     pub repo_id: String,
     pub prompt: String,
@@ -156,6 +194,7 @@ pub struct CreateTaskRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_template: Option<TaskTemplateLaunch>,
     pub resume_session_id: Option<String>,
+    pub recovery_snapshot: Option<CreateTaskRecoverySnapshot>,
     pub blocker_task_ids: Option<Vec<String>>,
     pub notify_task_id: Option<String>,
     pub parent_task_id: Option<String>,
@@ -787,7 +826,8 @@ mod tests {
                 "resumeSessionId": null,
                 "blockerTaskIds": null,
                 "notifyTaskId": null,
-                "parentTaskId": null
+                "parentTaskId": null,
+                "recoverySnapshot": null
             })
         );
     }

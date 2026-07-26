@@ -438,6 +438,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         } else {
             Vec::new()
         },
+        recovery_snapshot: None,
         session,
     })
 }
@@ -576,6 +577,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
             } else {
                 Vec::new()
             },
+            recovery_snapshot: resolved.recovery_snapshot,
             session,
         }));
     }
@@ -611,6 +613,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
             setup_cmds: request.setup_cmds.unwrap_or_default(),
             task_template: request.task_template,
             resume_session_id: request.resume_session_id,
+            recovery_snapshot: request.recovery_snapshot,
             notify_task_id: request.notify_task_id,
             parent_task_id: request.parent_task_id,
         },
@@ -684,6 +687,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
         } else {
             Vec::new()
         },
+        recovery_snapshot: resolved.recovery_snapshot,
         session,
     }))
 }
@@ -1373,6 +1377,7 @@ pub(crate) fn prepare_task_for_api_with_error(
             setup_cmds: request.setup_cmds.unwrap_or_default(),
             task_template: request.task_template,
             resume_session_id: request.resume_session_id,
+            recovery_snapshot: request.recovery_snapshot,
             notify_task_id: request.notify_task_id,
             parent_task_id,
         },
@@ -1446,6 +1451,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
             setup_cmds: Vec::new(),
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: None,
         },
@@ -1543,6 +1549,7 @@ completion with status success so Kanna can run the commit post and close this i
             setup_cmds: Vec::new(),
             task_template: None,
             resume_session_id: None,
+            recovery_snapshot: None,
             notify_task_id: None,
             parent_task_id: Some(dependent_task_id.to_string()),
         },
@@ -1554,6 +1561,8 @@ pub(crate) fn create_dormant_task_for_api_with_error(
     request: crate::mobile_api::CreateTaskRequest,
     requested_task_id: Option<String>,
 ) -> Result<crate::mobile_api::CreateTaskResponse, PrepareTaskError> {
+    let create_intent_json =
+        serde_json::to_string(&request).map_err(|e| format!("serialize error: {e}"))?;
     let repo = db
         .get_repo(&request.repo_id)
         .map_err(|e| format!("db error: {}", e))?
@@ -1630,26 +1639,31 @@ pub(crate) fn create_dormant_task_for_api_with_error(
     let branch = format!("task-{}", task_id);
     let stage_name = stage.name.clone();
 
-    db.insert_pipeline_item(NewPipelineItem {
-        id: &task_id,
-        repo_id: &repo.id,
-        prompt: &request.prompt,
-        display_name: request.display_name.as_deref(),
-        pipeline: &pipeline_name,
-        pipeline_def: Some(&pipeline_def_json),
-        stage: &stage_name,
-        branch: &branch,
-        agent_type: agent_type.as_str(),
-        agent_provider: provider.as_str(),
-        activity: "idle",
-        port_offset: None,
-        port_env_json: None,
-        agent_spawn_options_json: None,
-        base_ref: None,
-        notify_task_id: request.notify_task_id.as_deref(),
-        parent_task_id: parent_task_id.as_deref(),
-    })
-    .map_err(|error| classify_pipeline_item_insert_error(error, has_requested_task_id))?;
+    db.with_immediate_transaction(|db| {
+        db.insert_pipeline_item(NewPipelineItem {
+            id: &task_id,
+            repo_id: &repo.id,
+            prompt: &request.prompt,
+            display_name: request.display_name.as_deref(),
+            pipeline: &pipeline_name,
+            pipeline_def: Some(&pipeline_def_json),
+            stage: &stage_name,
+            branch: &branch,
+            agent_type: agent_type.as_str(),
+            agent_provider: provider.as_str(),
+            activity: "idle",
+            port_offset: None,
+            port_env_json: None,
+            agent_spawn_options_json: None,
+            base_ref: None,
+            notify_task_id: request.notify_task_id.as_deref(),
+            parent_task_id: parent_task_id.as_deref(),
+        })
+        .map_err(|error| classify_pipeline_item_insert_error(error, has_requested_task_id))?;
+        db.insert_create_task_intent(&task_id, &create_intent_json)
+            .map_err(|error| PrepareTaskError::Other(format!("db error: {error}")))?;
+        Ok::<(), PrepareTaskError>(())
+    })?;
 
     let prompt = request.prompt;
     let title = request.display_name.unwrap_or_else(|| prompt.clone());
@@ -1685,6 +1699,16 @@ pub(crate) fn prepare_start_dormant_task_for_api(
     if item.closed_at.is_some() {
         return Ok(None);
     }
+    let recovery_snapshot = db
+        .get_create_task_intent(task_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .map(|request_json| {
+            serde_json::from_str::<crate::mobile_api::CreateTaskRequest>(&request_json).map_err(
+                |error| format!("invalid stored create task intent for {task_id}: {error}"),
+            )
+        })
+        .transpose()?
+        .and_then(|request| request.recovery_snapshot);
     let repo = db
         .get_repo(&item.repo_id)
         .map_err(|e| format!("db error: {}", e))?
@@ -1891,6 +1915,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         model: stage_run_model,
         completion_transition: stage.policy.transition,
         provider_session_id,
+        recovery_snapshot,
         session,
     }))
 }
@@ -1947,6 +1972,7 @@ struct ResolvedTaskSpawn {
     setup_cmds: Vec<String>,
     task_template: Option<crate::mobile_api::TaskTemplateLaunch>,
     resume_session_id: Option<String>,
+    recovery_snapshot: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
     base_ref: Option<String>,
     stored_base_ref: Option<String>,
     notify_task_id: Option<String>,
@@ -1972,6 +1998,7 @@ struct ResolvedCreateTaskIntent {
     max_turns: Option<u32>,
     max_budget_usd: Option<f64>,
     resume_session_id: Option<String>,
+    recovery_snapshot: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
 }
 
 fn resolved_create_task_intent_json(
@@ -2005,6 +2032,7 @@ fn resolved_create_task_intent_json(
             max_turns: resolved.max_turns,
             max_budget_usd: resolved.max_budget_usd,
             resume_session_id: resolved.resume_session_id.clone(),
+            recovery_snapshot: resolved.recovery_snapshot.clone(),
         })
         .map_err(|error| format!("serialize error: {error}"))?,
     );
@@ -2151,6 +2179,7 @@ fn prepare_task_spawn_with_error(
         model: stage_run_model,
         completion_transition: resolved.stage_transition,
         provider_session_id,
+        recovery_snapshot: resolved.recovery_snapshot,
         session,
     })
 }
@@ -2331,6 +2360,7 @@ fn resolve_task_spawn(
         setup_cmds: request.setup_cmds,
         task_template: request.task_template,
         resume_session_id: request.resume_session_id,
+        recovery_snapshot: request.recovery_snapshot,
         base_ref: request.base_ref,
         stored_base_ref,
         notify_task_id: request.notify_task_id,

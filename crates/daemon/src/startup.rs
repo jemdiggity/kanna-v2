@@ -195,6 +195,8 @@ pub(crate) async fn run_daemon() {
                             cursor_row: snapshot.cursor_row,
                             cursor_col: snapshot.cursor_col,
                             cursor_visible: snapshot.cursor_visible,
+                            saved_at: snapshot.saved_at,
+                            sequence: snapshot.sequence,
                         },
                     ) {
                         log::warn!(

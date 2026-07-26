@@ -967,6 +967,8 @@ pub(crate) async fn handle_command(
                     cursor_row: snapshot.cursor_row,
                     cursor_col: snapshot.cursor_col,
                     cursor_visible: snapshot.cursor_visible,
+                    saved_at: snapshot.saved_at,
+                    sequence: snapshot.sequence,
                 },
             ) {
                 Ok(()) => Event::Ok,

@@ -104,6 +104,73 @@ async fn create_task_route_rejects_invalid_requested_task_ids_before_creation() 
 }
 
 #[tokio::test]
+async fn create_task_route_rejects_invalid_recovery_snapshot_geometry() {
+    let create_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let create_calls_for_creator = Arc::clone(&create_calls);
+    let app = super::test_router_with_task_creator(
+        "desktop-invalid-recovery",
+        "Studio Mac",
+        Arc::new(move |_| {
+            create_calls_for_creator.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("invalid recovery snapshot reached task creation")
+        }),
+    );
+
+    for recovery_snapshot in [
+        serde_json::json!({
+            "serialized": "snapshot",
+            "cols": 0,
+            "rows": 24,
+            "cursorRow": 0,
+            "cursorCol": 0,
+            "cursorVisible": true,
+            "savedAt": 1,
+            "sequence": 1
+        }),
+        serde_json::json!({
+            "serialized": "snapshot",
+            "cols": 80,
+            "rows": 24,
+            "cursorRow": 24,
+            "cursorCol": 0,
+            "cursorVisible": true,
+            "savedAt": 1,
+            "sequence": 1
+        }),
+        serde_json::json!({
+            "serialized": "snapshot",
+            "cols": 80,
+            "rows": 24,
+            "cursorRow": 0,
+            "cursorCol": 80,
+            "cursorVisible": true,
+            "savedAt": 1,
+            "sequence": 1
+        }),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "repoId": "repo-1",
+                            "prompt": "invalid recovery",
+                            "recoverySnapshot": recovery_snapshot
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(create_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn concurrent_requested_task_creation_is_rejected_until_owner_failure_releases_flight() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
@@ -267,6 +334,30 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
         let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        match command {
+            DaemonCommand::SeedSnapshot {
+                session_id,
+                snapshot,
+            } => {
+                assert_eq!(session_id, task_id);
+                assert_eq!(snapshot.version, 1);
+                assert_eq!(snapshot.vt, "RECOVERY\u{1b}[31m");
+                assert_eq!((snapshot.cols, snapshot.rows), (101, 37));
+                assert_eq!((snapshot.cursor_row, snapshot.cursor_col), (9, 17));
+                assert!(!snapshot.cursor_visible);
+                assert_eq!(snapshot.saved_at, 1_785_000_000_000);
+                assert_eq!(snapshot.sequence, 44);
+            }
+            other => panic!("expected seed snapshot command, got {other:?}"),
+        }
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes())
+            .await
+            .unwrap();
+
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
         let session_id = match command {
             DaemonCommand::Spawn {
                 session_id, cwd, ..
@@ -318,7 +409,17 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
         "prompt": "Ship idempotently",
         "displayName": "Idempotent task",
         "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
-        "agentProvider": "claude"
+        "agentProvider": "claude",
+        "recoverySnapshot": {
+            "serialized": "RECOVERY\u{001b}[31m",
+            "cols": 101,
+            "rows": 37,
+            "cursorRow": 9,
+            "cursorCol": 17,
+            "cursorVisible": false,
+            "savedAt": 1785000000000_u64,
+            "sequence": 44
+        }
     })
     .to_string();
     let first_response = app
@@ -437,7 +538,17 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
         "maxTurns": 17,
         "maxBudgetUsd": 4.25,
         "setupCmds": ["printf 'prepared-intent-setup\\n'"],
-        "resumeSessionId": resume_session_id
+        "resumeSessionId": resume_session_id,
+        "recoverySnapshot": {
+            "serialized": "REPAIRED-RECOVERY\u{001b}[2J",
+            "cols": 132,
+            "rows": 43,
+            "cursorRow": 21,
+            "cursorCol": 42,
+            "cursorVisible": true,
+            "savedAt": 1785000000123_u64,
+            "sequence": 87
+        }
     })
     .to_string();
     let first = app
@@ -484,6 +595,10 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
     assert_eq!(
         stored_intent["_kannaResolved"]["initialTerminalGeometry"],
         serde_json::json!([132, 43])
+    );
+    assert_eq!(
+        stored_intent["_kannaResolved"]["recoverySnapshot"]["serialized"],
+        serde_json::json!("REPAIRED-RECOVERY\u{1b}[2J")
     );
     let interrupted_worktree = db
         .get_task_worktree_path(task_id)
@@ -559,6 +674,26 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
                         .await
                         .unwrap();
                 }
+                DaemonCommand::SeedSnapshot {
+                    session_id,
+                    snapshot,
+                } => {
+                    assert_eq!(session_id, task_id);
+                    assert_eq!(snapshot.version, 1);
+                    assert_eq!(snapshot.vt, "REPAIRED-RECOVERY\u{1b}[2J");
+                    assert_eq!((snapshot.cols, snapshot.rows), (132, 43));
+                    assert_eq!((snapshot.cursor_row, snapshot.cursor_col), (21, 42));
+                    assert!(snapshot.cursor_visible);
+                    assert_eq!(snapshot.saved_at, 1_785_000_000_123);
+                    assert_eq!(snapshot.sequence, 87);
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
                 DaemonCommand::Spawn {
                     session_id,
                     args,
@@ -622,7 +757,7 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
         .unwrap();
     assert_eq!(retry.status(), StatusCode::OK);
     let command_count = daemon_server.await.unwrap();
-    assert_eq!(command_count, 2);
+    assert_eq!(command_count, 3);
 
     let db = Db::open(&config.db_path).unwrap();
     assert_eq!(db.count_test_pipeline_items_for_repo("repo-1").unwrap(), 1);
@@ -1789,8 +1924,8 @@ async fn create_task_route_with_only_closed_blockers_spawns_immediately() {
 }
 
 #[tokio::test]
-async fn create_task_route_preserves_failed_spawn_diagnostics() {
-    use kanna_daemon::protocol::{Command as DaemonCommand, ErrorCode, Event as DaemonEvent};
+async fn create_task_route_preserves_failed_recovery_seed_diagnostics_without_spawning() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
@@ -1818,21 +1953,23 @@ async fn create_task_route_preserves_failed_spawn_diagnostics() {
         let mut line = String::new();
         reader.read_line(&mut line).await.unwrap();
         let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
-        let (session_id, cwd) = match command {
-            DaemonCommand::SpawnAgent { session_id, params } => (session_id, params.cwd),
-            DaemonCommand::Spawn {
-                session_id, cwd, ..
-            } => (session_id, cwd),
-            other => panic!("expected spawn command, got {:?}", other),
+        let session_id = match command {
+            DaemonCommand::SeedSnapshot {
+                session_id,
+                snapshot,
+            } => {
+                assert_eq!(snapshot.vt, "SEED-MUST-ACK");
+                session_id
+            }
+            other => panic!("expected recovery seed command, got {other:?}"),
         };
         write_half
             .write_all(
                 format!(
                     "{}\n",
                     serde_json::to_string(&DaemonEvent::Error {
-                        code: Some(ErrorCode::AgentSpawnFailed),
-                        message: "failed to spawn agent: No such file or directory (os error 2)"
-                            .to_string(),
+                        code: None,
+                        message: "recovery store unavailable".to_string(),
                     })
                     .unwrap()
                 )
@@ -1840,7 +1977,13 @@ async fn create_task_route_preserves_failed_spawn_diagnostics() {
             )
             .await
             .unwrap();
-        (session_id, cwd)
+        let mut unexpected = String::new();
+        let bytes = reader.read_line(&mut unexpected).await.unwrap();
+        assert_eq!(
+            bytes, 0,
+            "Spawn followed a failed recovery seed: {unexpected}"
+        );
+        session_id
     });
 
     let config = Config {
@@ -1876,7 +2019,17 @@ async fn create_task_route_preserves_failed_spawn_diagnostics() {
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Rollback this failed create",
-                        "agentProvider": "codex"
+                        "agentProvider": "codex",
+                        "recoverySnapshot": {
+                            "serialized": "SEED-MUST-ACK",
+                            "cols": 80,
+                            "rows": 24,
+                            "cursorRow": 0,
+                            "cursorCol": 0,
+                            "cursorVisible": true,
+                            "savedAt": 1785000000999_u64,
+                            "sequence": 9
+                        }
                     })
                     .to_string(),
                 ))
@@ -1891,9 +2044,13 @@ async fn create_task_route_preserves_failed_spawn_diagnostics() {
         .unwrap();
     let body = String::from_utf8_lossy(&body);
     assert!(body.contains("task "));
-    assert!(body.contains("failed to spawn"));
-    let (task_id, worktree_path) = daemon_server.await.unwrap();
+    assert!(body.contains("recovery seed"));
+    let task_id = daemon_server.await.unwrap();
     let db = Db::open(&config.db_path).unwrap();
+    let worktree_path = db
+        .get_task_worktree_path(&task_id)
+        .unwrap()
+        .expect("failed seed preserves prepared worktree row");
     assert_eq!(db.count_test_pipeline_items_for_repo("repo-1").unwrap(), 1);
     assert_eq!(db.count_test_worktrees_for_repo("repo-1").unwrap(), 1);
     assert_eq!(
@@ -1930,7 +2087,7 @@ async fn create_task_route_preserves_failed_spawn_diagnostics() {
         .unwrap();
     let logs = String::from_utf8_lossy(&logs);
     assert!(logs.contains("failed to spawn task"));
-    assert!(logs.contains("No such file or directory"));
+    assert!(logs.contains("recovery store unavailable"));
 
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::process::Command::new("git")

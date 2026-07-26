@@ -48,6 +48,8 @@ async fn recovery_end_session_removes_snapshot_artifact() {
                 cursor_row: 0,
                 cursor_col: 0,
                 cursor_visible: true,
+                saved_at: 0,
+                sequence: 0,
             },
         )
         .expect("should seed persisted recovery snapshot");
@@ -114,6 +116,8 @@ async fn recovery_seeded_snapshot_can_resume_adopted_session() {
                 cursor_row: 1,
                 cursor_col: 2,
                 cursor_visible: true,
+                saved_at: 0,
+                sequence: 0,
             },
         )
         .expect("should seed adopted recovery snapshot");

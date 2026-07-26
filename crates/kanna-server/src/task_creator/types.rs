@@ -28,6 +28,7 @@ pub(super) struct TaskCreationRequest {
     pub(super) setup_cmds: Vec<String>,
     pub(super) task_template: Option<crate::mobile_api::TaskTemplateLaunch>,
     pub(super) resume_session_id: Option<String>,
+    pub(super) recovery_snapshot: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
     pub(super) notify_task_id: Option<String>,
     pub(super) parent_task_id: Option<String>,
 }
@@ -84,6 +85,7 @@ pub(crate) struct PreparedTaskSpawn {
     /// The agent CLI's own session id assigned at spawn (Claude PTY only);
     /// recorded on the stage run so a later revision can resume it.
     pub(super) provider_session_id: Option<String>,
+    pub(super) recovery_snapshot: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
     pub(super) session: PreparedSessionSpawn,
 }
 
@@ -163,6 +165,7 @@ pub(crate) struct PreparedStageRerun {
     /// Headless reruns execute setup only after the prior session is killed,
     /// then resolve their executable from the initialized workspace.
     pub(super) deferred_setup: Vec<String>,
+    pub(super) recovery_snapshot: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
     pub(super) session: PreparedSessionSpawn,
 }
 

@@ -8,7 +8,9 @@ use crate::daemon_client::DaemonClient;
 use crate::db::{Db, NewStageRun};
 use crate::http_api::{try_submit_task_input, TaskInputError};
 use crate::session_replacements::SessionReplacements;
-use kanna_daemon::protocol::{AgentSpawnParams, Command as DaemonCommand, Event as DaemonEvent};
+use kanna_daemon::protocol::{
+    AgentSpawnParams, Command as DaemonCommand, Event as DaemonEvent, TerminalSnapshot,
+};
 
 pub(crate) fn prepared_task_id(prepared: &PreparedTaskSpawn) -> &str {
     &prepared.created_task.task_id
@@ -36,6 +38,9 @@ pub(super) async fn spawn_prepared_task(
     daemon: &mut DaemonClient,
     prepared: PreparedTaskSpawn,
 ) -> Result<CreatedTask, String> {
+    if let Some(snapshot) = prepared.recovery_snapshot.as_ref() {
+        seed_recovery_snapshot(daemon, &prepared.session_id, snapshot).await?;
+    }
     let command = spawn_session_command(
         prepared.session_id,
         prepared.cwd,
@@ -53,6 +58,37 @@ pub(super) async fn spawn_prepared_task(
         DaemonEvent::SessionCreated { .. } => Ok(prepared.created_task),
         DaemonEvent::Error { message, .. } => Err(format!("daemon error: {}", message)),
         other => Err(format!("unexpected daemon response: {:?}", other)),
+    }
+}
+
+async fn seed_recovery_snapshot(
+    daemon: &mut DaemonClient,
+    session_id: &str,
+    snapshot: &crate::mobile_api::CreateTaskRecoverySnapshot,
+) -> Result<(), String> {
+    let event = daemon
+        .send_command(&DaemonCommand::SeedSnapshot {
+            session_id: session_id.to_string(),
+            snapshot: TerminalSnapshot {
+                version: 1,
+                rows: snapshot.rows,
+                cols: snapshot.cols,
+                cursor_row: snapshot.cursor_row,
+                cursor_col: snapshot.cursor_col,
+                cursor_visible: snapshot.cursor_visible,
+                saved_at: snapshot.saved_at,
+                sequence: snapshot.sequence,
+                vt: snapshot.serialized.clone(),
+            },
+        })
+        .await
+        .map_err(|error| format!("daemon recovery seed error: {error}"))?;
+    match event {
+        DaemonEvent::Ok => Ok(()),
+        DaemonEvent::Error { message, .. } => Err(format!("daemon recovery seed error: {message}")),
+        other => Err(format!(
+            "unexpected daemon recovery seed response: {other:?}"
+        )),
     }
 }
 
@@ -455,6 +491,11 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     kill_session_replacing(daemon, replacements, &session_id).await?;
     if let Err(error) = prepare_deferred_rerun_setup(&mut prepared) {
         return Err(record_failure(error));
+    }
+    if let Some(snapshot) = prepared.recovery_snapshot.as_ref() {
+        if let Err(error) = seed_recovery_snapshot(daemon, &session_id, snapshot).await {
+            return Err(record_failure(error));
+        }
     }
 
     let command = spawn_session_command(
