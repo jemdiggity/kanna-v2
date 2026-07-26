@@ -365,6 +365,12 @@ pub struct OpenAgentTask {
     pub session_id: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskProcessSession {
+    pub session_id: String,
+    pub expected_run_id: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct Db {
     conn: Connection,

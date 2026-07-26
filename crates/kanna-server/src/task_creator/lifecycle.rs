@@ -16,6 +16,10 @@ use kanna_daemon::protocol::{
 use std::collections::HashSet;
 
 const STARTUP_LIFECYCLE_BUFFER_PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
+#[cfg(not(test))]
+const STARTUP_DAEMON_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const STARTUP_DAEMON_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
 pub(crate) fn prepared_task_id(prepared: &PreparedTaskSpawn) -> &str {
     &prepared.created_task.task_id
@@ -44,9 +48,9 @@ pub(crate) async fn reconcile_pending_stage_actions_on_startup(
         })
         .await
         .map_err(|error| format!("startup action lifecycle subscribe failed: {error}"))?;
-    match lifecycle
-        .read_event()
+    match tokio::time::timeout(STARTUP_DAEMON_RESPONSE_TIMEOUT, lifecycle.read_event())
         .await
+        .map_err(|_| "startup action lifecycle acknowledgement timed out".to_string())?
         .map_err(|error| format!("startup action lifecycle acknowledgement failed: {error}"))?
     {
         DaemonEvent::Ok => {}
@@ -65,9 +69,9 @@ pub(crate) async fn reconcile_pending_stage_actions_on_startup(
     let mut daemon = DaemonClient::connect(&config.daemon_dir)
         .await
         .map_err(|error| format!("startup action reconciliation daemon error: {error}"))?;
-    let listed = daemon
-        .list()
+    let listed = tokio::time::timeout(STARTUP_DAEMON_RESPONSE_TIMEOUT, daemon.list())
         .await
+        .map_err(|_| "startup action reconciliation list timed out".to_string())?
         .map_err(|error| format!("startup action reconciliation list failed: {error}"))?;
     if !listed.capabilities.immutable_run_ownership {
         return Err(

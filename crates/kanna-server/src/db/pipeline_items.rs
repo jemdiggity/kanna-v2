@@ -1,6 +1,7 @@
+use super::stage_runs::CURRENT_RUN_OWNERSHIP_VERSION;
 use super::{
     CloudTaskIdentityWrite, Db, NewPipelineItem, OpenAgentTask, PipelineItem,
-    ReopenPipelineItemError, TaskStageSource,
+    ReopenPipelineItemError, TaskProcessSession, TaskStageSource,
 };
 use rusqlite::{params, OptionalExtension};
 
@@ -320,8 +321,9 @@ impl Db {
             .query_row(
                 "SELECT session_id
                  FROM stage_run
-                 WHERE task_id = ?
+                 WHERE task_id = ?1
                    AND status = 'running'
+                   AND run_ownership_version >= ?2
                    AND session_id IS NOT NULL
                    AND session_id != ''
                    AND (
@@ -331,7 +333,7 @@ impl Db {
                    )
                  ORDER BY datetime(started_at) DESC, rowid DESC
                  LIMIT 1",
-                [&pipeline_item_id],
+                (&pipeline_item_id, CURRENT_RUN_OWNERSHIP_VERSION),
                 |row| row.get(0),
             )
             .optional()?;
@@ -362,6 +364,57 @@ impl Db {
         }
 
         Ok(Some(pipeline_item_id))
+    }
+
+    pub fn resolve_task_process_session(
+        &self,
+        task_or_branch_id: &str,
+    ) -> Result<Option<TaskProcessSession>, rusqlite::Error> {
+        let Some(pipeline_item_id) = self.resolve_pipeline_item_id(task_or_branch_id)? else {
+            return Ok(None);
+        };
+
+        let process_session = self
+            .conn
+            .query_row(
+                "SELECT session_id,
+                        CASE
+                          WHEN kind = 'post'
+                            THEN COALESCE(NULLIF(resumed_from_run_id, ''), id)
+                          ELSE id
+                        END
+                 FROM stage_run
+                 WHERE task_id = ?1
+                   AND status IN ('running', 'succeeded', 'failed')
+                   AND run_ownership_version >= ?2
+                   AND session_id IS NOT NULL
+                   AND session_id != ''
+                   AND (
+                     provider_session_id IS NULL
+                     OR provider_session_id = ''
+                     OR session_id != provider_session_id
+                   )
+                 ORDER BY datetime(started_at) DESC, rowid DESC
+                 LIMIT 1",
+                (&pipeline_item_id, CURRENT_RUN_OWNERSHIP_VERSION),
+                |row| {
+                    Ok(TaskProcessSession {
+                        session_id: row.get(0)?,
+                        expected_run_id: Some(row.get(1)?),
+                    })
+                },
+            )
+            .optional()?;
+        if process_session.is_some() {
+            return Ok(process_session);
+        }
+
+        Ok(self
+            .resolve_task_terminal_session_id(&pipeline_item_id)?
+            .map(|session_id| TaskProcessSession {
+                session_id,
+                expected_run_id: None,
+            }))
     }
 
     pub fn find_open_agent_task(

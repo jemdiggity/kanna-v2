@@ -195,13 +195,21 @@ async fn close_task_route_releases_claimed_ports() {
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        for expected_session_id in ["task-1", "shell-wt-task-1", "td-task-1"] {
+        for (expected_session_id, expected_run_id) in [
+            ("run-close-current", Some("run-close-current")),
+            ("shell-wt-task-1", None),
+            ("td-task-1", None),
+        ] {
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
             let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
             match command {
-                DaemonCommand::Kill { session_id, .. } => {
-                    assert_eq!(session_id, expected_session_id)
+                DaemonCommand::Kill {
+                    session_id,
+                    expected_run_id: actual_run_id,
+                } => {
+                    assert_eq!(session_id, expected_session_id);
+                    assert_eq!(actual_run_id.as_deref(), expected_run_id);
                 }
                 other => panic!("expected kill command, got {other:?}"),
             }
@@ -225,6 +233,23 @@ async fn close_task_route_releases_claimed_ports() {
         "in progress",
         "2026-04-17 07:00:00",
     )
+    .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-close-current",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("codex"),
+        model: None,
+        status: "succeeded",
+        result: None,
+        feedback: None,
+        session_id: Some("run-close-current"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
     .unwrap();
     assert!(db
         .claim_task_port("task-1", "KANNA_DEV_PORT", 1421)
@@ -1379,15 +1404,23 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let expected_kills = ["task-1", "shell-wt-task-1", "td-task-source"];
+        let expected_kills = [
+            ("run-final-main", Some("run-final-main")),
+            ("shell-wt-task-1", None),
+            ("td-task-source", None),
+        ];
 
-        for expected_session_id in expected_kills {
+        for (expected_session_id, expected_run_id) in expected_kills {
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
             let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
             match command {
-                DaemonCommand::Kill { session_id, .. } => {
-                    assert_eq!(session_id, expected_session_id)
+                DaemonCommand::Kill {
+                    session_id,
+                    expected_run_id: actual_run_id,
+                } => {
+                    assert_eq!(session_id, expected_session_id);
+                    assert_eq!(actual_run_id.as_deref(), expected_run_id);
                 }
                 other => panic!("expected kill command, got {other:?}"),
             }
@@ -1461,6 +1494,23 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
     .unwrap();
     db.update_test_pipeline_item_stage_context("task-1", "task-source", "default", None, "claude")
         .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-final-main",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("claude"),
+        model: None,
+        status: "succeeded",
+        result: None,
+        feedback: None,
+        session_id: Some("run-final-main"),
+        provider_session_id: None,
+        cwd: Some(source_worktree.to_string_lossy().as_ref()),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
     db.upsert_worktree(
         "wt-task-1",
         "task-1",
@@ -3797,6 +3847,20 @@ async fn manual_close_is_barred_between_stage_kill_and_successor_land() {
                             .await
                             .unwrap();
                     }
+                    DaemonCommand::Kill {
+                        session_id,
+                        expected_run_id: Some(expected_run_id),
+                    } => {
+                        assert_run_scoped_session_id(&session_id, "source-1");
+                        assert_eq!(expected_run_id, session_id);
+                        write_half
+                            .write_all(
+                                format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                    .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                    }
                     DaemonCommand::Spawn {
                         session_id,
                         cwd,
@@ -4074,15 +4138,23 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let expected_kills = ["task-1", "shell-wt-task-1", "td-task-source"];
+        let expected_kills = [
+            ("run-final-stage", Some("run-final-stage")),
+            ("shell-wt-task-1", None),
+            ("td-task-source", None),
+        ];
 
-        for expected_session_id in expected_kills {
+        for (expected_session_id, expected_run_id) in expected_kills {
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
             let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
             match command {
-                DaemonCommand::Kill { session_id, .. } => {
-                    assert_eq!(session_id, expected_session_id)
+                DaemonCommand::Kill {
+                    session_id,
+                    expected_run_id: actual_run_id,
+                } => {
+                    assert_eq!(session_id, expected_session_id);
+                    assert_eq!(actual_run_id.as_deref(), expected_run_id);
                 }
                 other => panic!("expected kill command, got {other:?}"),
             }
@@ -4178,6 +4250,23 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
     .unwrap();
     db.update_test_pipeline_item_stage_context("task-1", "task-source", "default", None, "claude")
         .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-final-stage",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("claude"),
+        model: None,
+        status: "succeeded",
+        result: None,
+        feedback: None,
+        session_id: Some("run-final-stage"),
+        provider_session_id: None,
+        cwd: Some(source_worktree.to_string_lossy().as_ref()),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
     db.upsert_worktree(
         "wt-task-1",
         "task-1",

@@ -1651,6 +1651,98 @@ fn resolves_task_terminal_session_id_from_latest_running_stage_run() {
 }
 
 #[test]
+fn resolves_task_process_session_from_succeeded_main_run() {
+    let path = Db::test_db_path("resolve-task-process-succeeded-main");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Close final task",
+        None,
+        "pr",
+        "2026-07-26 00:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-final-main",
+        task_id: "task-1",
+        stage: "pr",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("codex"),
+        model: None,
+        status: "succeeded",
+        result: None,
+        feedback: None,
+        session_id: Some("run-final-main"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+
+    assert_eq!(
+        db.resolve_task_process_session("task-1").unwrap(),
+        Some(super::TaskProcessSession {
+            session_id: "run-final-main".to_string(),
+            expected_run_id: Some("run-final-main".to_string()),
+        })
+    );
+}
+
+#[test]
+fn resolves_task_process_session_from_succeeded_post_owner() {
+    let path = Db::test_db_path("resolve-task-process-succeeded-post");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Close after approve post",
+        None,
+        "pr",
+        "2026-07-26 00:00:00",
+    )
+    .unwrap();
+    for (id, kind, session_id, resumed_from_run_id) in [
+        ("run-main-owner", "main", "run-main-owner", None),
+        (
+            "run-approve-post",
+            "post",
+            "run-main-owner",
+            Some("run-main-owner"),
+        ),
+    ] {
+        db.insert_stage_run(NewStageRun {
+            id,
+            task_id: "task-1",
+            stage: "pr",
+            kind,
+            agent: None,
+            agent_provider: Some("claude"),
+            model: None,
+            status: "succeeded",
+            result: None,
+            feedback: None,
+            session_id: Some(session_id),
+            provider_session_id: None,
+            cwd: Some("/tmp/task-1"),
+            resumed_from_run_id,
+        })
+        .unwrap();
+    }
+
+    assert_eq!(
+        db.resolve_task_process_session("task-1").unwrap(),
+        Some(super::TaskProcessSession {
+            session_id: "run-main-owner".to_string(),
+            expected_run_id: Some("run-main-owner".to_string()),
+        })
+    );
+}
+
+#[test]
 fn resolves_task_terminal_session_id_prefers_daemon_mapping_over_provider_uuid_run_id() {
     let path = Db::test_db_path("resolve-task-terminal-provider-uuid");
     let db = Db::open_for_tests(&path).expect("open test db");
@@ -1691,6 +1783,62 @@ fn resolves_task_terminal_session_id_prefers_daemon_mapping_over_provider_uuid_r
             .unwrap()
             .as_deref(),
         Some("b5181132")
+    );
+}
+
+#[test]
+fn ownershipless_legacy_run_falls_back_to_terminal_session() {
+    let path = Db::test_db_path("resolve-task-terminal-ownershipless-provider-uuid");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "legacy-task",
+        "repo-1",
+        "Reconnect a migration-023 task",
+        None,
+        "in progress",
+        "2026-07-01 00:00:00",
+    )
+    .unwrap();
+    db.insert_test_terminal_session(
+        "legacy-agent-terminal",
+        "repo-1",
+        "legacy-task",
+        "agent",
+        "legacy-daemon-session",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "legacy-stage-run",
+        task_id: "legacy-task",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("claude"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("2f746d2e-5c0e-495c-b6ec-8946239d3800"),
+        provider_session_id: None,
+        cwd: Some("/tmp/legacy-task"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    db.conn
+        .execute(
+            "UPDATE stage_run
+             SET run_ownership_version = 0
+             WHERE id = 'legacy-stage-run'",
+            [],
+        )
+        .unwrap();
+
+    assert_eq!(
+        db.resolve_task_terminal_session_id("legacy-task")
+            .unwrap()
+            .as_deref(),
+        Some("legacy-daemon-session")
     );
 }
 
@@ -2797,6 +2945,125 @@ fn every_server_activity_write_advances_the_activity_revision() {
     let item = db.get_pipeline_item("task-1").unwrap().unwrap();
     assert_eq!(item.activity.as_deref(), Some("idle"));
     assert_eq!(item.activity_revision, 3);
+
+    db.insert_stage_run(NewStageRun {
+        id: "run-current",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("codex"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("run-current"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let expected = db.task_action_state("task-1").unwrap();
+    db.replace_current_run_with_pending(
+        NewStageRun {
+            id: "run-pending",
+            task_id: "task-1",
+            stage: "review",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status: "pending",
+            result: None,
+            feedback: None,
+            session_id: Some("run-pending"),
+            provider_session_id: None,
+            cwd: Some("/tmp/task-1-2"),
+            resumed_from_run_id: None,
+        },
+        Some("auto"),
+        &expected,
+        "succeeded",
+        None,
+        None,
+    )
+    .unwrap();
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(item.activity.as_deref(), Some("working"));
+    assert_eq!(item.activity_revision, 4);
+
+    db.update_pipeline_item_activity("task-1", "unread")
+        .unwrap();
+    let expected = db.task_action_state("task-1").unwrap();
+    db.replace_current_run_with_pending_action(
+        NewStageRun {
+            id: "run-pending-action",
+            task_id: "task-1",
+            stage: "pr",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status: "pending",
+            result: None,
+            feedback: None,
+            session_id: Some("run-pending-action"),
+            provider_session_id: None,
+            cwd: Some("/tmp/task-1-3"),
+            resumed_from_run_id: None,
+        },
+        Some("auto"),
+        &expected,
+        "cancelled",
+        None,
+        None,
+        PendingStageActionTarget {
+            session_id: "run-pending-action",
+            stage: "pr",
+            branch: Some("task-1-3"),
+            worktree: None,
+            remove_worktree_on_rollback: false,
+            action_request: None,
+        },
+    )
+    .unwrap();
+    let item = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(item.activity.as_deref(), Some("working"));
+    assert_eq!(item.activity_revision, 6);
+
+    let expected = db.task_action_state("task-1").unwrap();
+    db.replace_current_run_with_pending(
+        NewStageRun {
+            id: "run-pending-noop-activity",
+            task_id: "task-1",
+            stage: "merge",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status: "pending",
+            result: None,
+            feedback: None,
+            session_id: Some("run-pending-noop-activity"),
+            provider_session_id: None,
+            cwd: Some("/tmp/task-1-4"),
+            resumed_from_run_id: None,
+        },
+        Some("auto"),
+        &expected,
+        "cancelled",
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        db.get_pipeline_item("task-1")
+            .unwrap()
+            .unwrap()
+            .activity_revision,
+        6,
+        "reserving another successor while already working is a no-op activity write"
+    );
 }
 
 #[test]

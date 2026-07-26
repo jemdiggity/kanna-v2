@@ -118,6 +118,27 @@ pub(super) async fn send_task_input(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
     }
 
+    let session_id = Db::open(&state.config.db_path)
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?
+        .resolve_task_terminal_session_id(&task_id)
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("task not found: {}", task_id),
+            )
+        })?;
+
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
         .map_err(|e| {
@@ -127,7 +148,7 @@ pub(super) async fn send_task_input(
             )
         })?;
 
-    submit_task_input(&mut daemon, &task_id, &payload.input).await?;
+    submit_task_input(&mut daemon, &session_id, &payload.input).await?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

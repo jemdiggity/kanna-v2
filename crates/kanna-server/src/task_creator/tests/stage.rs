@@ -1449,6 +1449,43 @@ async fn spawn_startup_list_daemon(
     })
 }
 
+async fn spawn_stalled_startup_daemon(
+    config: &Config,
+    acknowledge_subscription: bool,
+) -> tokio::task::JoinHandle<()> {
+    std::fs::create_dir_all(&config.daemon_dir).unwrap();
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let (subscription, _) = listener.accept().await.unwrap();
+        let (subscription_read, mut subscription_write) = subscription.into_split();
+        let mut subscription_reader = BufReader::new(subscription_read);
+        let mut line = String::new();
+        subscription_reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::SubscribeEvents { .. }
+        ));
+        if !acknowledge_subscription {
+            std::future::pending::<()>().await;
+            return;
+        }
+        write_startup_event(&mut subscription_write, &kanna_daemon::protocol::Event::Ok).await;
+
+        let (control, _) = listener.accept().await.unwrap();
+        let (control_read, _control_write) = control.into_split();
+        let mut control_reader = BufReader::new(control_read);
+        let mut control_line = String::new();
+        control_reader.read_line(&mut control_line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(control_line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::List
+        ));
+        std::future::pending::<()>().await;
+    })
+}
+
 async fn spawn_startup_exit_between_list_and_land_daemon(
     config: &Config,
 ) -> tokio::task::JoinHandle<()> {
@@ -1516,6 +1553,58 @@ async fn spawn_startup_exit_between_list_and_land_daemon(
             other => panic!("unexpected startup recovery command: {other:?}"),
         }
     })
+}
+
+#[tokio::test]
+async fn startup_reconciliation_times_out_when_subscription_ack_stalls() {
+    let config = test_config("startup-reconcile-stalled-subscription");
+    seed_pending_startup_action(&config);
+    let daemon = spawn_stalled_startup_daemon(&config, false).await;
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        crate::task_creator::reconcile_pending_stage_actions_on_startup(&config),
+    )
+    .await
+    .expect("startup subscription acknowledgement must have a deadline")
+    .expect_err("stalled startup daemon must fail closed");
+    assert!(error.contains("acknowledgement timed out"), "{error}");
+    assert_eq!(
+        Db::open(&config.db_path)
+            .unwrap()
+            .pending_stage_actions()
+            .unwrap()
+            .len(),
+        1,
+        "timeout must leave the durable action available for a later startup retry"
+    );
+    daemon.abort();
+}
+
+#[tokio::test]
+async fn startup_reconciliation_times_out_when_list_stalls() {
+    let config = test_config("startup-reconcile-stalled-list");
+    seed_pending_startup_action(&config);
+    let daemon = spawn_stalled_startup_daemon(&config, true).await;
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        crate::task_creator::reconcile_pending_stage_actions_on_startup(&config),
+    )
+    .await
+    .expect("startup daemon List must have a deadline")
+    .expect_err("stalled startup daemon must fail closed");
+    assert!(error.contains("list timed out"), "{error}");
+    assert_eq!(
+        Db::open(&config.db_path)
+            .unwrap()
+            .pending_stage_actions()
+            .unwrap()
+            .len(),
+        1,
+        "timeout must leave the durable action available for a later startup retry"
+    );
+    daemon.abort();
 }
 
 #[tokio::test]

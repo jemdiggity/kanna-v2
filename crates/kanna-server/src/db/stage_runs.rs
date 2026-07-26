@@ -1,7 +1,7 @@
 use super::{Db, NewStageRun, StageRun};
 use rusqlite::{params, OptionalExtension};
 
-const CURRENT_RUN_OWNERSHIP_VERSION: i64 = 1;
+pub(super) const CURRENT_RUN_OWNERSHIP_VERSION: i64 = 1;
 
 /// Identity of a run closed by `finish_latest_running_stage_run`.
 pub struct FinishedStageRun {
@@ -384,6 +384,8 @@ impl Db {
         let task_changed = transaction.execute(
             "UPDATE pipeline_item
              SET activity = 'working',
+                 activity_revision = activity_revision
+                   + CASE WHEN activity = 'working' THEN 0 ELSE 1 END,
                  activity_changed_at = datetime('now'),
                  updated_at = datetime('now')
              WHERE id = ?1 AND closed_at IS NULL",

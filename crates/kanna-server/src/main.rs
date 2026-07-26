@@ -145,9 +145,27 @@ async fn main() {
 
     log::info!("Database opened: {}", config.db_path);
 
-    if let Err(error) = task_creator::reconcile_pending_stage_actions_on_startup(&config).await {
-        eprintln!("Startup task action reconciliation failed: {error}");
-        std::process::exit(1);
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        task_creator::reconcile_pending_stage_actions_on_startup(&config),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            eprintln!(
+                "Startup task action reconciliation failed: {error}; \
+                 pending actions remain durable for the next startup retry"
+            );
+            std::process::exit(1);
+        }
+        Err(_) => {
+            eprintln!(
+                "Startup task action reconciliation timed out; \
+                 pending actions remain durable for the next startup retry"
+            );
+            std::process::exit(1);
+        }
     }
 
     let _mobile_bonjour = bonjour::MobileBonjourAdvertisement::start(

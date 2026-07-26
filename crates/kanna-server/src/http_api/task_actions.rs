@@ -340,7 +340,7 @@ pub(super) async fn close_task(
     let task_id = resolve_task_action_id(&state, task_id).await?;
     let _action_flight = begin_task_action(&state, &task_id)?;
 
-    let (pipeline_item_id, blocker_close_instructions, workspace_teardown) = {
+    let (pipeline_item_id, process_session, blocker_close_instructions, workspace_teardown) = {
         let state = Arc::clone(&state);
         super::blocking::run_handler_blocking("task close prepare", move || {
             let db = Db::open(&state.config.db_path).map_err(|e| {
@@ -361,6 +361,20 @@ pub(super) async fn close_task(
                     (
                         axum::http::StatusCode::NOT_FOUND,
                         format!("task not found: {}", task_id),
+                    )
+                })?;
+            let process_session = db
+                .resolve_task_process_session(&pipeline_item_id)
+                .map_err(|e| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("db error: {}", e),
+                    )
+                })?
+                .ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("task process session not found: {}", pipeline_item_id),
                     )
                 })?;
 
@@ -388,6 +402,7 @@ pub(super) async fn close_task(
             );
             Ok((
                 pipeline_item_id,
+                process_session,
                 blocker_close_instructions,
                 workspace_teardown,
             ))
@@ -413,18 +428,22 @@ pub(super) async fn close_task(
         }
     }
 
-    for session_id in [
-        pipeline_item_id.to_string(),
-        format!("shell-wt-{pipeline_item_id}"),
-    ] {
-        crate::task_creator::kill_session_replacing(
-            &mut daemon,
-            &state.session_replacements,
-            session_id.as_str(),
-        )
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    }
+    crate::task_creator::kill_session_replacing_if_owned(
+        &mut daemon,
+        &state.session_replacements,
+        &process_session.session_id,
+        process_session.expected_run_id.as_deref(),
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let shell_session_id = format!("shell-wt-{pipeline_item_id}");
+    crate::task_creator::kill_session_replacing(
+        &mut daemon,
+        &state.session_replacements,
+        &shell_session_id,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let teardown_session_id = workspace_teardown
         .as_ref()
         .map(|teardown| teardown.session_id.clone())
@@ -579,14 +598,31 @@ async fn close_task_after_final_stage(
     workspace_teardown: Option<crate::task_creator::PreparedWorkspaceTeardown>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
     let has_workspace_teardown = workspace_teardown.is_some();
-    let blocker_close_instructions = {
+    let (process_session, blocker_close_instructions) = {
         let db = Db::open(&state.config.db_path).map_err(|e| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("db error: {}", e),
             )
         })?;
-        collect_blocker_resolution_instructions(&db, &task_id, BlockerResolution::Closed)?
+        let process_session = db
+            .resolve_task_process_session(&task_id)
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("task process session not found: {}", task_id),
+                )
+            })?;
+        (
+            process_session,
+            collect_blocker_resolution_instructions(&db, &task_id, BlockerResolution::Closed)?,
+        )
     };
     for (session_id, message) in blocker_close_instructions {
         if let Err((_, error)) = submit_task_input(daemon, &session_id, &message).await {
@@ -595,15 +631,22 @@ async fn close_task_after_final_stage(
             );
         }
     }
-    for session_id in [task_id.to_string(), format!("shell-wt-{task_id}")] {
-        crate::task_creator::kill_session_replacing(
-            daemon,
-            &state.session_replacements,
-            session_id.as_str(),
-        )
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    }
+    crate::task_creator::kill_session_replacing_if_owned(
+        daemon,
+        &state.session_replacements,
+        &process_session.session_id,
+        process_session.expected_run_id.as_deref(),
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let shell_session_id = format!("shell-wt-{task_id}");
+    crate::task_creator::kill_session_replacing(
+        daemon,
+        &state.session_replacements,
+        &shell_session_id,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let teardown_session_id = workspace_teardown
         .as_ref()
         .map(|teardown| teardown.session_id.clone())
