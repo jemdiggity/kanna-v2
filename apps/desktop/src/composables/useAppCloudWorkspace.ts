@@ -225,8 +225,8 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   watchEffect(() => {
     const machines = cloudSnapshot.value.transferMachines;
     void transferMachineSync.setCloudMachines(machines)
-      .then(() => {
-        transferMachineRevision.value += 1;
+      .then((changed) => {
+        if (changed) transferMachineRevision.value += 1;
       })
       .catch((error) => {
         console.warn("[cloud] failed to synchronize transfer machines:", error);

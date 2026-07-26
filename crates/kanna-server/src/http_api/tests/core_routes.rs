@@ -1698,6 +1698,47 @@ async fn add_repo_route_registers_existing_git_repo() {
 }
 
 #[tokio::test]
+async fn add_repo_route_honors_requested_default_branch() {
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-add-repo-branch-{unique}"));
+    init_test_git_repo(&repo_root);
+    let app = super::test_router("desktop-1", "Studio Mac");
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/repos")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "path": repo_root,
+                        "name": "Transferred Repo",
+                        "defaultBranch": "trunk"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let repo: crate::mobile_api::RepoDetail = from_slice(&body).unwrap();
+    assert_eq!(repo.default_branch.as_deref(), Some("trunk"));
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[tokio::test]
 async fn add_repo_route_rejects_duplicate_path() {
     let unique = format!(
         "{}-{}",

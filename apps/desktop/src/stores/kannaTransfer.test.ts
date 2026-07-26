@@ -324,7 +324,7 @@ function createTransferDb(initial: {
     },
     findRepoByPath: async (path: string) =>
       tables.repo.find((repo) => repo.path === path) as never ?? null,
-    addRepo: async ({ path, name }) => {
+    addRepo: async ({ path, name, defaultBranch }) => {
       const existing = tables.repo.find((repo) => repo.path === path);
       if (existing) return existing as never;
       const repo = {
@@ -332,6 +332,7 @@ function createTransferDb(initial: {
         id: `repo-${tables.repo.length + 1}`,
         path,
         name: name ?? path.split("/").pop() ?? "repo",
+        default_branch: defaultBranch ?? "",
       };
       tables.repo.push(repo);
       return repo as never;
@@ -2159,6 +2160,7 @@ describe("incoming transfer approval", () => {
       url: "git@github.com:jemdiggity/kanna.git",
       destination: "/Users/test/.kanna/repos/repo-1",
     });
+    expect(fakeDb.tables.repo[0]?.default_branch).toBe("main");
     expect(typeof localTaskId).toBe("string");
   });
 

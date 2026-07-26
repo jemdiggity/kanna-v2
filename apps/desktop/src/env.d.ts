@@ -89,11 +89,16 @@ interface KannaE2EHook {
   appMetrics: KannaAppMetricsE2EApi;
   terminalOutputPerf: KannaTerminalOutputPerfE2EApi;
   resetStreamClient?: () => void;
+  failNextInvoke?: string;
   serverWork?: KannaServerWorkE2EApi;
   terminalStreams?: KannaTerminalStreamsE2EApi;
   invokes?: {
     clear(): void;
     getAll(): Array<{ cmd: string; args?: unknown }>;
+  };
+  events?: {
+    clear(): void;
+    getAll(): Array<{ event: string; payload?: unknown }>;
   };
   terminalBuffers?: KannaTerminalBuffersE2EApi;
 }

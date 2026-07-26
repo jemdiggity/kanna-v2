@@ -13,6 +13,7 @@ import {
   fetchIncomingTransferCleanupCandidates,
   fetchPendingIncomingTransfers,
   getDesktopSetting,
+  addDesktopRepo,
   mutateDesktopWindowWorkspace,
   markIncomingTransferSidecarCleanupCompleted,
   putDesktopCloudTransferIdentity,
@@ -123,6 +124,39 @@ describe("desktopServerClient", () => {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(ordinaryRequest),
+      },
+    );
+  });
+
+  it("passes the requested default branch when registering a transferred repo", async () => {
+    const response = {
+      id: "repo-1",
+      path: "/tmp/transferred-repo",
+      name: "Transferred Repo",
+      defaultBranch: "trunk",
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(addDesktopRepo({
+      path: "/tmp/transferred-repo",
+      name: "Transferred Repo",
+      defaultBranch: "trunk",
+    })).resolves.toEqual(response);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/repos",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          path: "/tmp/transferred-repo",
+          name: "Transferred Repo",
+          defaultBranch: "trunk",
+        }),
       },
     );
   });

@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
@@ -21,6 +22,7 @@ interface TransferRow {
   source_task_id: string | null;
   local_task_id: string | null;
   payload_json?: string | null;
+  error?: string | null;
 }
 
 interface PipelineRow {
@@ -78,11 +80,12 @@ async function waitForLatestTransfer(
   timeoutMs = 20_000,
 ): Promise<TransferRow> {
   const deadline = Date.now() + timeoutMs;
+  let last: TransferRow | undefined;
 
   while (Date.now() < deadline) {
     const rows = (await queryDb(
       client,
-      `SELECT id, direction, status, source_peer_id, source_task_id, local_task_id, payload_json
+      `SELECT id, direction, status, source_peer_id, source_task_id, local_task_id, payload_json, error
          FROM task_transfer
         WHERE direction = ? AND source_task_id = ?
         ORDER BY started_at DESC
@@ -90,13 +93,16 @@ async function waitForLatestTransfer(
       [direction, sourceTaskId],
     )) as TransferRow[];
     const row = rows[0];
+    last = row;
     if (row?.status === expectedStatus) {
       return row;
     }
     await sleep(250);
   }
 
-  throw new Error(`timed out waiting for ${direction} transfer ${expectedStatus} for ${sourceTaskId}`);
+  throw new Error(
+    `timed out waiting for ${direction} transfer ${expectedStatus} for ${sourceTaskId}: ${JSON.stringify(last)}`,
+  );
 }
 
 async function waitForPrimaryTaskClosed(taskId: string, timeoutMs = 20_000): Promise<void> {
@@ -198,7 +204,7 @@ describe("local transfer repo acquisition", () => {
         WHERE pipeline_item.id = ?`,
       [incomingTransfer.local_task_id],
     )) as RepoRow[];
-    expect(repoRows[0]?.path).toBe(testRepoPath);
+    expect(await realpath(repoRows[0]!.path)).toBe(await realpath(testRepoPath));
 
     const outgoingTransfer = await waitForLatestTransfer(primary, "outgoing", sourceTaskId, "completed");
     expect(outgoingTransfer.status).toBe("completed");

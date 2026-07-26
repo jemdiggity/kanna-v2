@@ -701,6 +701,7 @@ export interface DesktopRepoResponse {
 export interface AddDesktopRepoInput {
   path: string;
   name?: string | null;
+  defaultBranch?: string | null;
 }
 
 export async function findDesktopRepoByPath(path: string): Promise<DesktopRepoResponse | null> {

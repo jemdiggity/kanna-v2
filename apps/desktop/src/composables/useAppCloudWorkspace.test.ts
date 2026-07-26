@@ -100,6 +100,91 @@ describe("cloud transfer machine auth lifecycle", () => {
     ]);
   });
 
+  it("keeps a cloud machine out of the selectable catalog until peer registration completes", async () => {
+    const calls: string[] = [];
+    const pendingUpsert = deferred<void>();
+    const dependencies = deps(calls);
+    dependencies.upsertExternalPeer = vi.fn(async ({ peer }) => {
+      calls.push(`upsert_peer:${peer.peerId}`);
+      await pendingUpsert.promise;
+    });
+    const sync = createDesktopTransferMachineSync(dependencies);
+    sync.setCloudMachines([machine()]);
+    sync.setSignedInSession(session(), "desktop-a");
+
+    const reconciliation = sync.markSidecarReady();
+    await vi.waitFor(() => expect(calls).toContain("upsert_peer:peer-b"));
+    expect(sync.getTransferMachines()).toEqual([]);
+
+    pendingUpsert.resolve();
+    await reconciliation;
+    expect(sync.getTransferMachines()).toEqual([
+      expect.objectContaining({ peerId: "peer-b", preferredTransport: "cloud" }),
+    ]);
+  });
+
+  it("does not publish a cloud machine whose peer registration fails", async () => {
+    const calls: string[] = [];
+    const dependencies = deps(calls);
+    dependencies.upsertExternalPeer = vi.fn(async ({ peer }) => {
+      calls.push(`upsert_peer:${peer.peerId}`);
+      throw new Error("sidecar registration failed");
+    });
+    const sync = createDesktopTransferMachineSync(dependencies);
+    sync.setCloudMachines([machine()]);
+    sync.setSignedInSession(session(), "desktop-a");
+
+    await expect(sync.markSidecarReady()).rejects.toThrow("sidecar registration failed");
+    expect(sync.getTransferMachines()).toEqual([]);
+  });
+
+  it("deduplicates identical cloud snapshots while reconciliation is pending", async () => {
+    const calls: string[] = [];
+    const pendingUpsert = deferred<void>();
+    const dependencies = deps(calls);
+    dependencies.upsertExternalPeer = vi.fn(async ({ peer }) => {
+      calls.push(`upsert_peer:${peer.peerId}`);
+      await pendingUpsert.promise;
+    });
+    const sync = createDesktopTransferMachineSync(dependencies);
+    sync.setCloudMachines([machine()]);
+    sync.setSignedInSession(session(), "desktop-a");
+
+    const first = sync.markSidecarReady();
+    await vi.waitFor(() => expect(calls).toContain("upsert_peer:peer-b"));
+    const duplicate = sync.setCloudMachines([machine()]);
+    pendingUpsert.resolve();
+    await Promise.all([first, duplicate]);
+
+    expect(calls.filter((call) => call === "ensure_proxy:peer-b")).toHaveLength(1);
+    expect(calls.filter((call) => call === "upsert_peer:peer-b")).toHaveLength(1);
+    expect(sync.getTransferMachines()).toEqual([
+      expect.objectContaining({ peerId: "peer-b", preferredTransport: "cloud" }),
+    ]);
+  });
+
+  it("retries an identical cloud snapshot after reconciliation fails", async () => {
+    const calls: string[] = [];
+    let upsertCount = 0;
+    const dependencies = deps(calls);
+    dependencies.upsertExternalPeer = vi.fn(async ({ peer }) => {
+      upsertCount += 1;
+      calls.push(`upsert_peer:${peer.peerId}:${upsertCount}`);
+      if (upsertCount === 1) throw new Error("temporary sidecar failure");
+    });
+    const sync = createDesktopTransferMachineSync(dependencies);
+    sync.setCloudMachines([machine()]);
+    sync.setSignedInSession(session(), "desktop-a");
+
+    await expect(sync.markSidecarReady()).rejects.toThrow("temporary sidecar failure");
+    await sync.setCloudMachines([machine()]);
+
+    expect(upsertCount).toBe(2);
+    expect(sync.getTransferMachines()).toEqual([
+      expect.objectContaining({ peerId: "peer-b", preferredTransport: "cloud" }),
+    ]);
+  });
+
   it("clears session-scoped peers and proxies on sign-out", async () => {
     const calls: string[] = [];
     const sync = createDesktopTransferMachineSync(deps(calls));

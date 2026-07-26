@@ -62,7 +62,7 @@ export interface DesktopTransferMachineSyncDeps {
 export interface DesktopTransferMachineSync {
   getTransferMachines(): TransferMachine[];
   markSidecarReady(): Promise<void>;
-  setCloudMachines(machines: DesktopCloudTransferMachine[]): Promise<void>;
+  setCloudMachines(machines: DesktopCloudTransferMachine[]): Promise<boolean>;
   setLanPeers(peers: LanTransferPeer[]): void;
   setSignedInSession(
     session: DesktopAuthSession,
@@ -85,8 +85,12 @@ export function createDesktopTransferMachineSync(
   let localIdentitySession = -1;
   let publishedIdentitySession = -1;
   let authSessionGeneration = 0;
-  let activeCloudPeerIds = new Set<string>();
+  let provisionedCloudPeerIds = new Set<string>();
+  let activeCloudPeerGenerations = new Map<string, number>();
   let reconciliationTail = Promise.resolve();
+  let currentReconciliation: Promise<void> | null = null;
+  let reconciliationFailed = false;
+  let cloudMachineSnapshotKey = cloudTransferMachineSnapshotKey([]);
 
   const isCurrent = (captured: number, capturedSession: number) =>
     captured === generation
@@ -129,13 +133,14 @@ export function createDesktopTransferMachineSync(
     });
     const desiredCloudPeerIds = new Set(eligible.map((machine) => machine.peerId));
 
-    for (const peerId of activeCloudPeerIds) {
+    for (const peerId of provisionedCloudPeerIds) {
       if (desiredCloudPeerIds.has(peerId)) continue;
       await Promise.all([
         deps.removeExternalPeer({ peerId }),
         deps.removeProxy({ peerId }),
       ]);
-      activeCloudPeerIds.delete(peerId);
+      provisionedCloudPeerIds.delete(peerId);
+      activeCloudPeerGenerations.delete(peerId);
       if (!isCurrent(captured, capturedSession)) return;
     }
 
@@ -151,35 +156,56 @@ export function createDesktopTransferMachineSync(
         relayUrl,
         idToken,
       });
-      activeCloudPeerIds.add(machine.peerId);
+      provisionedCloudPeerIds.add(machine.peerId);
       if (!isCurrent(captured, capturedSession)) {
         await deps.removeProxy({ peerId: machine.peerId }).catch(() => undefined);
-        activeCloudPeerIds.delete(machine.peerId);
+        provisionedCloudPeerIds.delete(machine.peerId);
+        activeCloudPeerGenerations.delete(machine.peerId);
         return;
       }
-      await deps.upsertExternalPeer({
-        peer: {
-          peerId: machine.peerId,
-          displayName: machine.name,
-          endpoint: proxy.endpoint,
-          publicKey: machine.publicKey,
-          protocolVersion: 1,
-          acceptingTransfers: true,
-        },
-      });
+      try {
+        await deps.upsertExternalPeer({
+          peer: {
+            peerId: machine.peerId,
+            displayName: machine.name,
+            endpoint: proxy.endpoint,
+            publicKey: machine.publicKey,
+            protocolVersion: 1,
+            acceptingTransfers: true,
+          },
+        });
+      } catch (error) {
+        activeCloudPeerGenerations.delete(machine.peerId);
+        throw error;
+      }
       if (!isCurrent(captured, capturedSession)) {
         await Promise.all([
           deps.removeExternalPeer({ peerId: machine.peerId }).catch(() => undefined),
           deps.removeProxy({ peerId: machine.peerId }).catch(() => undefined),
         ]);
-        activeCloudPeerIds.delete(machine.peerId);
+        provisionedCloudPeerIds.delete(machine.peerId);
+        activeCloudPeerGenerations.delete(machine.peerId);
         return;
       }
+      activeCloudPeerGenerations.set(machine.peerId, captured);
     }
   };
 
   const enqueueReconciliation = (captured: number): Promise<void> => {
     const result = reconciliationTail.then(() => reconcile(captured));
+    currentReconciliation = result;
+    result.then(
+      () => {
+        if (currentReconciliation === result && captured === generation) {
+          reconciliationFailed = false;
+        }
+      },
+      () => {
+        if (currentReconciliation === result && captured === generation) {
+          reconciliationFailed = true;
+        }
+      },
+    );
     reconciliationTail = result.catch(() => undefined);
     return result;
   };
@@ -190,7 +216,8 @@ export function createDesktopTransferMachineSync(
         deps.clearExternalPeers(),
         deps.clearProxies(),
       ]);
-      activeCloudPeerIds = new Set();
+      provisionedCloudPeerIds = new Set();
+      activeCloudPeerGenerations = new Map();
     });
     reconciliationTail = result.catch(() => undefined);
     return result;
@@ -198,7 +225,10 @@ export function createDesktopTransferMachineSync(
 
   return {
     getTransferMachines() {
-      return mergeTransferMachines({ currentDesktopId, lanPeers, cloudMachines });
+      return mergeTransferMachines({ currentDesktopId, lanPeers, cloudMachines })
+        .filter((machine) =>
+          machine.trustSource === "paired-lan"
+          || activeCloudPeerGenerations.get(machine.peerId) === generation);
     },
     async markSidecarReady() {
       sidecarReady = true;
@@ -206,9 +236,16 @@ export function createDesktopTransferMachineSync(
       await enqueueReconciliation(captured);
     },
     async setCloudMachines(machines) {
+      const nextSnapshotKey = cloudTransferMachineSnapshotKey(machines ?? []);
+      if (nextSnapshotKey === cloudMachineSnapshotKey && !reconciliationFailed) {
+        await (currentReconciliation ?? Promise.resolve());
+        return false;
+      }
       cloudMachines = machines ?? [];
+      cloudMachineSnapshotKey = nextSnapshotKey;
       const captured = ++generation;
       await enqueueReconciliation(captured);
+      return true;
     },
     setLanPeers(peers) {
       lanPeers = peers;
@@ -220,6 +257,7 @@ export function createDesktopTransferMachineSync(
       localIdentitySession = -1;
       publishedIdentitySession = -1;
       authSessionGeneration += 1;
+      reconciliationFailed = false;
       const captured = ++generation;
       const result = enqueueReconciliation(captured);
       void result.catch(() => undefined);
@@ -231,9 +269,12 @@ export function createDesktopTransferMachineSync(
       authSession = null;
       currentDesktopId = null;
       cloudMachines = [];
+      cloudMachineSnapshotKey = cloudTransferMachineSnapshotKey([]);
       localIdentity = null;
       localIdentitySession = -1;
       publishedIdentitySession = -1;
+      activeCloudPeerGenerations = new Map();
+      reconciliationFailed = false;
       await enqueueClear();
     },
     async dispose() {
@@ -243,9 +284,12 @@ export function createDesktopTransferMachineSync(
       authSession = null;
       currentDesktopId = null;
       cloudMachines = [];
+      cloudMachineSnapshotKey = cloudTransferMachineSnapshotKey([]);
       localIdentity = null;
       localIdentitySession = -1;
       publishedIdentitySession = -1;
+      activeCloudPeerGenerations = new Map();
+      reconciliationFailed = false;
       await enqueueClear();
     },
   };
@@ -348,6 +392,26 @@ export function filterPairableTransferPeerPayload(value: unknown): unknown {
 
 function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function cloudTransferMachineSnapshotKey(
+  machines: readonly DesktopCloudTransferMachine[],
+): string {
+  return JSON.stringify(
+    machines
+      .map((machine) => ({
+        desktopId: machine.desktopId,
+        displayName: machine.displayName,
+        online: machine.online,
+        peerId: machine.peerId,
+        publicKey: machine.publicKey,
+        protocolVersion: machine.protocolVersion,
+        acceptingTransfers: machine.acceptingTransfers,
+      }))
+      .sort((left, right) =>
+        left.peerId.localeCompare(right.peerId)
+        || left.desktopId.localeCompare(right.desktopId)),
+  );
 }
 
 export async function resolveCloudTransferRelayUrl(

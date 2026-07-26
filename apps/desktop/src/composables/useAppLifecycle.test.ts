@@ -64,6 +64,41 @@ describe("handleTaskPullRequested", () => {
     expect(pushTaskToPeer).not.toHaveBeenCalled();
   });
 
+  it("retains an event that arrives before the requester catalog and pushes exactly once", async () => {
+    const pushTaskToPeer = vi.fn(async () => {});
+    const inFlight = new Set<string>();
+    let machines: TransferMachine[] = [];
+    const waitForRetry = vi.fn(async () => {
+      machines = [machine()];
+    });
+    const event = {
+      requestId: "pull-before-catalog",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    };
+    const store = { items: [item()], pushTaskToPeer };
+
+    const pending = handleTaskPullRequested(
+      event,
+      store as never,
+      inFlight,
+      () => machines,
+      { maxAttempts: 2, waitForRetry },
+    );
+    const duplicate = handleTaskPullRequested(
+      event,
+      store as never,
+      inFlight,
+      () => machines,
+      { maxAttempts: 2, waitForRetry },
+    );
+
+    await expect(duplicate).resolves.toBe(false);
+    await expect(pending).resolves.toBe(true);
+    expect(waitForRetry).toHaveBeenCalledTimes(1);
+    expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ["missing", [], "task-missing"],
     ["closed", [item({ closed_at: "2026-07-26T00:00:00Z" })], "task-source"],

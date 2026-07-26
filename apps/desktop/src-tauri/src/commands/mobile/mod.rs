@@ -761,6 +761,12 @@ fn file_sha256_hex(path: &Path) -> Result<String, String> {
 const GENERIC_DESKTOP_NAME: &str = "Kanna Desktop";
 
 fn default_desktop_name() -> String {
+    if let Ok(configured_name) = std::env::var("KANNA_TRANSFER_DISPLAY_NAME") {
+        let trimmed = configured_name.trim();
+        if !trimmed.is_empty() && trimmed != GENERIC_DESKTOP_NAME {
+            return trimmed.to_string();
+        }
+    }
     default_desktop_name_from_sources(
         system_computer_name(),
         std::env::var("COMPUTERNAME")

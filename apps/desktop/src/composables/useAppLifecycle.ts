@@ -96,33 +96,61 @@ export async function handleTaskPullRequested(
   request: TaskPullRequestedEvent,
   store: Pick<ReturnType<typeof useKannaStore>, "items" | "pushTaskToPeer">,
   inFlightSourceTaskIds: Set<string>,
-  transferMachines: readonly TransferMachine[],
+  transferMachines: readonly TransferMachine[] | (() => readonly TransferMachine[]),
+  options: {
+    maxAttempts?: number;
+    retryDelayMs?: number;
+    signal?: AbortSignal;
+    waitForRetry?: (delayMs: number) => Promise<void>;
+  } = {},
 ): Promise<boolean> {
-  const source = store.items.find((item) => item.id === request.sourceTaskId);
-  const requester = transferMachines.find((machine) =>
-    machine.peerId === request.requesterPeerId);
-  if (
-    !source
-    || !requester
-    || source.closed_at != null
-    || ["pending", "streaming", "importing", "awaiting_acknowledgment"].includes(
-      source.transfer_status ?? "",
-    )
-    || inFlightSourceTaskIds.has(source.id)
-  ) {
-    return false;
-  }
+  const readMachines = typeof transferMachines === "function"
+    ? transferMachines
+    : () => transferMachines;
+  const maxAttempts = options.maxAttempts
+    ?? (typeof transferMachines === "function" ? 41 : 1);
+  const retryDelayMs = options.retryDelayMs ?? 250;
+  const waitForRetry = options.waitForRetry
+    ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+  const sourceIsEligible = () => {
+    const source = store.items.find((item) => item.id === request.sourceTaskId);
+    if (
+      !source
+      || source.closed_at != null
+      || ["pending", "streaming", "importing", "awaiting_acknowledgment"].includes(
+        source.transfer_status ?? "",
+      )
+    ) {
+      return null;
+    }
+    return source;
+  };
+  const initialSource = sourceIsEligible();
+  if (!initialSource || inFlightSourceTaskIds.has(initialSource.id)) return false;
 
-  inFlightSourceTaskIds.add(source.id);
+  inFlightSourceTaskIds.add(initialSource.id);
   try {
-    await store.pushTaskToPeer(source.id, request.requesterPeerId, {
-      transport: requester.preferredTransport,
-      cloudFallback: requester.cloudFallback,
-      targetDesktopId: requester.desktopId,
-    });
-    return true;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      if (options.signal?.aborted) return false;
+      const source = sourceIsEligible();
+      if (!source) return false;
+      const requester = readMachines().find((machine) =>
+        machine.peerId === request.requesterPeerId);
+      if (requester) {
+        await store.pushTaskToPeer(source.id, request.requesterPeerId, {
+          transport: requester.preferredTransport,
+          cloudFallback: requester.cloudFallback,
+          targetDesktopId: requester.desktopId,
+        });
+        return true;
+      }
+      if (attempt + 1 < maxAttempts) {
+        await waitForRetry(retryDelayMs);
+      }
+    }
+    return false;
   } finally {
-    inFlightSourceTaskIds.delete(source.id);
+    inFlightSourceTaskIds.delete(initialSource.id);
   }
 }
 
@@ -163,6 +191,7 @@ export function useAppLifecycle({
   const appUnlisteners: Array<() => void> = [];
   const fatalInitializationError = ref<string | null>(null);
   const taskPullPushesInFlight = new Set<string>();
+  const taskPullAbortController = new AbortController();
   let currentWindowClosePhase: "open" | "preparing" | "recovering" | "destroying" = "open";
   let resolveWindowMembershipInitialization: (() => void) | null = null;
   const windowMembershipInitialization = new Promise<void>((resolve) => {
@@ -361,7 +390,8 @@ export function useAppLifecycle({
             parseTaskPullRequestedEvent(eventPayload(event)),
             store,
             taskPullPushesInFlight,
-            transferMachines.value,
+            () => transferMachines.value,
+            { signal: taskPullAbortController.signal },
           );
         } catch (e: unknown) {
           console.error("[App] failed to handle task pull request:", e);
@@ -590,6 +620,7 @@ export function useAppLifecycle({
   });
 
   onBeforeUnmount(() => {
+    taskPullAbortController.abort();
     disposeDesktopCloudWorkspace();
     stopSidebarResize();
     window.removeEventListener("dragenter", suppressFileDropNavigation);

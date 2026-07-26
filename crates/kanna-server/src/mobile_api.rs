@@ -122,6 +122,7 @@ pub struct TaskLatestRun {
 pub struct AddRepoRequest {
     pub path: String,
     pub name: Option<String>,
+    pub default_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -292,14 +293,24 @@ impl MobileApi {
             .ok_or_else(|| {
                 AddRepoError::InvalidPath("repo name could not be derived".to_string())
             })?;
-        let default_branch = git_default_branch(&canonical_path).ok();
+        let default_branch = request
+            .default_branch
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                git_default_branch(&canonical_path)
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or_else(|| "main".to_string());
         let id = generate_repo_id()?;
         self._db
             .insert_repo(NewRepo {
                 id: &id,
                 path: &path_string,
                 name: &name,
-                default_branch: default_branch.as_deref(),
+                default_branch: Some(&default_branch),
             })
             .map_err(|e| AddRepoError::Internal(format!("db error: {}", e)))?;
         let repo = self
