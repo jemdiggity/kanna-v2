@@ -160,5 +160,4 @@ levels:
    proving the app/test-launcher direct-parent topology remains authorized and
    sessions survive upgrades.
 7. Compatibility coverage confirms the request wire shape remains unchanged;
-   no capability field or protocol-version bump is introduced.
-
+  no capability field or protocol-version bump is introduced.
