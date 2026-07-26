@@ -243,33 +243,39 @@ per-worktree rebuilds.
 
 ## Verification
 
-Launcher contract tests use isolated temporary repositories and cache roots.
-They cover:
+Focused cache unit tests and launcher contract tests use isolated temporary
+repositories and cache roots. The launcher suite covers:
 
-- a clean checkout installs a bundle and runs `kd`;
+- a clean checkout with no `tools/kd/node_modules` bootstraps dependencies,
+  installs a bundle, runs `kd`, and never writes `tools/kd/dist`;
 - `kd-mcp` reuses the bundle installed by `kd`;
 - a second worktree with byte-identical inputs performs no build;
-- a committed source change selects a new hash;
-- an uncommitted source edit selects a new hash;
-- lockfile and build-config changes select a new hash;
 - concurrent cold launches result in one build and both callers succeed;
-- a failed build leaves no usable entry and the next invocation retries;
-- dead, ownerless, and malformed locks are recovered while a live owner lock
-  is preserved;
-- an owner-record publication failure leaves no public lock or private
-  candidate;
-- malformed manifests and missing entrypoints are rebuilt safely;
 - the cached bundle runs without adjacent `node_modules`;
 - the cached command observes the invoking worktree's repository context;
 - the cached MCP launcher completes `initialize` and `tools/list` with clean
   JSON-RPC stdout; and
 - paths containing spaces are handled without shell interpolation.
 
-Existing `tools/kd` unit tests, type checking, and the repository setup
-contract remain part of verification. A manual canary creates two clean
-worktrees from the same commit, runs `./kd --help` concurrently, and confirms
-one installation message, one cache directory, and successful output from
-both worktrees.
+The focused cache suite covers:
+
+- source-byte, selected lockfile dependency, and build-config changes selecting
+  new identities while unrelated lockfile importers do not;
+- a failed build leaving no usable entry and the next invocation retrying;
+- dead, ownerless, and malformed locks being recovered while a live-owner lock
+  is preserved;
+- owner-record publication failure leaving no public lock or private
+  candidate;
+- malformed manifests and valid manifests with missing entrypoints being
+  rebuilt safely; and
+- install, wait, stale-lock-recovery, corrupt-entry-recovery, and failure
+  diagnostics, including full identity, cache path, failed phase, and
+  underlying error where applicable.
+
+Existing `tools/kd` tests, type checking, and the repository setup contract
+remain part of verification. A manual canary creates two clean worktrees from
+the same commit, runs `./kd --help` concurrently, and confirms one installation
+message, one cache directory, and successful output from both worktrees.
 
 ## Success criteria
 

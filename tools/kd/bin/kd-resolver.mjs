@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   computeKdIdentity,
   ensureKdInstallation,
+  formatKdCacheEvent,
   resolveKdCacheRoot,
   writeKdManifest
 } from "./kd-cache.mjs";
@@ -94,8 +95,10 @@ async function resolveEntrypoint(entrypoint) {
     identity,
     entrypoint,
     runtime,
+    onCacheEvent: (event) => {
+      process.stderr.write(`${formatKdCacheEvent(event)}\n`);
+    },
     build: async ({ outputDir }) => {
-      process.stderr.write(`Installing kd ${identity.slice(0, 12)}...\n`);
       runCaptured(
         "pnpm",
         ["--dir", kdDir, "exec", "tsup", "--out-dir", outputDir],

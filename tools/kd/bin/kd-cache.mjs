@@ -22,6 +22,57 @@ export const KD_ENTRYPOINTS = Object.freeze({
   "kd-mcp": "bin/kd-mcp.js"
 });
 
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function formatKdCacheEvent(event) {
+  const context = `identity=${event.identity} cache=${event.cachePath} phase=${event.phase}`;
+  switch (event.type) {
+    case "install":
+      return `Installing kd: ${context}`;
+    case "wait":
+      return `Waiting for kd installation: ${context}`;
+    case "stale-lock-recovery":
+      return `Recovering stale kd lock: ${context}`;
+    case "corrupt-entry-recovery":
+      return `Recovering corrupt kd installation: ${context}`;
+    case "failure":
+      return `kd installation failed: ${context}: ${event.error}`;
+    default:
+      throw new Error(`Unknown kd cache event: ${event.type}`);
+  }
+}
+
+function emitCacheEvent(onCacheEvent, event) {
+  if (typeof onCacheEvent !== "function") {
+    return;
+  }
+  try {
+    onCacheEvent(event);
+  } catch {
+    // Cache diagnostics must never change installation behavior.
+  }
+}
+
+function installationFailure({
+  identity,
+  cachePath,
+  phase,
+  error,
+  onCacheEvent
+}) {
+  const event = {
+    type: "failure",
+    identity,
+    cachePath,
+    phase,
+    error: errorMessage(error)
+  };
+  emitCacheEvent(onCacheEvent, event);
+  return new Error(formatKdCacheEvent(event), { cause: error });
+}
+
 const HASHED_KD_FILES = Object.freeze([
   "tools/kd/package.json",
   "tools/kd/tsconfig.json",
@@ -329,9 +380,11 @@ function quarantineLock(lockRoot) {
 
 async function acquireInstallationLock({
   cacheRoot,
+  entryRoot,
   identity,
   pid,
   isProcessAlive,
+  onCacheEvent,
   writeLockOwner,
   sleep,
   waitTimeoutMs,
@@ -340,6 +393,7 @@ async function acquireInstallationLock({
   const lockRoot = join(cacheRoot, `.${identity}.lock`);
   const startedAt = Date.now();
   let invalidFingerprint;
+  let reportedWait = false;
 
   while (true) {
     const token = randomUUID();
@@ -360,10 +414,26 @@ async function acquireInstallationLock({
       rmSync(candidateRoot, { force: true });
     }
 
+    if (!reportedWait) {
+      emitCacheEvent(onCacheEvent, {
+        type: "wait",
+        identity,
+        cachePath: entryRoot,
+        phase: "lock"
+      });
+      reportedWait = true;
+    }
+
     const owner = readLockOwner(lockRoot);
     if (owner) {
       invalidFingerprint = undefined;
       if (!isProcessAlive(owner.pid) && quarantineLock(lockRoot)) {
+        emitCacheEvent(onCacheEvent, {
+          type: "stale-lock-recovery",
+          identity,
+          cachePath: lockRoot,
+          phase: "lock-recovery"
+        });
         continue;
       }
     } else {
@@ -376,6 +446,12 @@ async function acquireInstallationLock({
         invalidFingerprint === currentFingerprint &&
         quarantineLock(lockRoot)
       ) {
+        emitCacheEvent(onCacheEvent, {
+          type: "stale-lock-recovery",
+          identity,
+          cachePath: lockRoot,
+          phase: "lock-recovery"
+        });
         invalidFingerprint = undefined;
         continue;
       }
@@ -402,7 +478,8 @@ export async function ensureKdInstallation({
   writeLockOwner = writeFileSync,
   sleep = delay,
   waitTimeoutMs = 180_000,
-  pollIntervalMs = 100
+  pollIntervalMs = 100,
+  onCacheEvent
 }) {
   const entrypointPath = KD_ENTRYPOINTS[entrypoint];
   if (!entrypointPath) {
@@ -414,59 +491,131 @@ export async function ensureKdInstallation({
     return join(entryRoot, entrypointPath);
   }
 
-  mkdirSync(cacheRoot, { recursive: true });
-  const lock = await acquireInstallationLock({
-    cacheRoot,
-    identity,
-    pid,
-    isProcessAlive,
-    writeLockOwner,
-    sleep,
-    waitTimeoutMs,
-    pollIntervalMs
-  });
+  try {
+    mkdirSync(cacheRoot, { recursive: true });
+  } catch (error) {
+    throw installationFailure({
+      identity,
+      cachePath: entryRoot,
+      phase: "cache-root",
+      error,
+      onCacheEvent
+    });
+  }
+
+  let lock;
+  try {
+    lock = await acquireInstallationLock({
+      cacheRoot,
+      entryRoot,
+      identity,
+      pid,
+      isProcessAlive,
+      onCacheEvent,
+      writeLockOwner,
+      sleep,
+      waitTimeoutMs,
+      pollIntervalMs
+    });
+  } catch (error) {
+    throw installationFailure({
+      identity,
+      cachePath: entryRoot,
+      phase: "lock",
+      error,
+      onCacheEvent
+    });
+  }
+
   let temporaryRoot;
   let corruptRoot;
+  let resolvedEntrypoint;
+  let failure;
+  let phase = "validation";
 
   try {
     if (validateKdInstallation(entryRoot, identity, runtime)) {
-      return join(entryRoot, entrypointPath);
-    }
+      resolvedEntrypoint = join(entryRoot, entrypointPath);
+    } else {
+      emitCacheEvent(onCacheEvent, {
+        type: "install",
+        identity,
+        cachePath: entryRoot,
+        phase: "install"
+      });
 
-    if (existsSync(entryRoot)) {
-      corruptRoot = join(cacheRoot, `.${identity}.corrupt-${randomUUID()}`);
-      renameSync(entryRoot, corruptRoot);
-    }
-
-    temporaryRoot = mkdtempSync(join(cacheRoot, `.${identity}.tmp-`));
-    await build({ outputDir: temporaryRoot, identity, runtime });
-    if (!validateKdInstallation(temporaryRoot, identity, runtime)) {
-      throw new Error(
-        `kd build ${identity} did not produce a valid cache installation`
-      );
-    }
-
-    try {
-      renameSync(temporaryRoot, entryRoot);
-      temporaryRoot = undefined;
-    } catch (error) {
-      if (
-        error?.code !== "EEXIST" ||
-        !validateKdInstallation(entryRoot, identity, runtime)
-      ) {
-        throw error;
+      if (existsSync(entryRoot)) {
+        phase = "corrupt-entry-recovery";
+        corruptRoot = join(cacheRoot, `.${identity}.corrupt-${randomUUID()}`);
+        renameSync(entryRoot, corruptRoot);
+        emitCacheEvent(onCacheEvent, {
+          type: "corrupt-entry-recovery",
+          identity,
+          cachePath: entryRoot,
+          phase: "recovery"
+        });
       }
-    }
 
-    if (corruptRoot) {
-      rmSync(corruptRoot, { recursive: true, force: true });
-      corruptRoot = undefined;
+      phase = "temporary-directory";
+      temporaryRoot = mkdtempSync(join(cacheRoot, `.${identity}.tmp-`));
+      phase = "build";
+      await build({ outputDir: temporaryRoot, identity, runtime });
+      phase = "build-validation";
+      if (!validateKdInstallation(temporaryRoot, identity, runtime)) {
+        throw new Error(
+          `kd build ${identity} did not produce a valid cache installation`
+        );
+      }
+
+      phase = "publication";
+      try {
+        renameSync(temporaryRoot, entryRoot);
+        temporaryRoot = undefined;
+      } catch (error) {
+        if (
+          error?.code !== "EEXIST" ||
+          !validateKdInstallation(entryRoot, identity, runtime)
+        ) {
+          throw error;
+        }
+      }
+
+      if (corruptRoot) {
+        phase = "corrupt-entry-cleanup";
+        rmSync(corruptRoot, { recursive: true, force: true });
+        corruptRoot = undefined;
+      }
+      resolvedEntrypoint = join(entryRoot, entrypointPath);
     }
-    return join(entryRoot, entrypointPath);
-  } finally {
+  } catch (error) {
+    failure = installationFailure({
+      identity,
+      cachePath: entryRoot,
+      phase,
+      error,
+      onCacheEvent
+    });
+  }
+
+  try {
     if (temporaryRoot) {
       rmSync(temporaryRoot, { recursive: true, force: true });
     }
     removeOwnedLock(lock.lockRoot, lock.token);
+  } catch (error) {
+    if (!failure) {
+      failure = installationFailure({
+        identity,
+        cachePath: entryRoot,
+        phase: "cleanup",
+        error,
+        onCacheEvent
+      });
+    }
   }
+
+  if (failure) {
+    throw failure;
+  }
+  return resolvedEntrypoint;
 }

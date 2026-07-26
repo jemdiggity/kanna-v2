@@ -6,6 +6,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  unlinkSync,
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +15,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   computeKdIdentity,
   ensureKdInstallation,
+  formatKdCacheEvent,
   kdDependencyProjection,
   resolveKdCacheRoot,
   validateKdInstallation,
@@ -139,6 +141,21 @@ describe("kd installation identity", () => {
     );
   });
 
+  it("changes when kd build configuration changes", async () => {
+    const repoRoot = createRepoFixture();
+    const lockfile = createLockfile();
+    const initial = await computeKdIdentity({ repoRoot, lockfile, runtime });
+
+    writeFileSync(
+      join(repoRoot, "tools/kd/tsup.config.ts"),
+      "export default { minify: true };\n"
+    );
+
+    expect(await computeKdIdentity({ repoRoot, lockfile, runtime })).not.toBe(
+      initial
+    );
+  });
+
   it("uses the Kanna tool cache convention", () => {
     expect(
       resolveKdCacheRoot({
@@ -168,6 +185,7 @@ describe("kd installation publication", () => {
   it("publishes one immutable entry for concurrent installers", async () => {
     const cacheRoot = join(createRepoFixture(), "cache");
     let builds = 0;
+    const events = [];
     const build = async (input) => {
       builds += 1;
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 40));
@@ -178,7 +196,8 @@ describe("kd installation publication", () => {
       identity: "abc123",
       entrypoint: "kd",
       runtime,
-      build
+      build,
+      onCacheEvent: (event) => events.push(event)
     };
 
     const [left, right] = await Promise.all([
@@ -191,6 +210,7 @@ describe("kd installation publication", () => {
     expect(
       validateKdInstallation(join(cacheRoot, "abc123"), "abc123", runtime)
     ).toBe(true);
+    expect(events.filter((event) => event.type === "wait")).toHaveLength(1);
   });
 
   it("does not publish a failed build and retries on the next call", async () => {
@@ -239,6 +259,55 @@ describe("kd installation publication", () => {
       .toMatchObject({ identity: "corrupt" });
   });
 
+  it("rebuilds a valid-manifest installation with a missing entrypoint", async () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    const entryRoot = join(cacheRoot, "missing-entrypoint");
+    await successfulFakeBuild({
+      outputDir: entryRoot,
+      identity: "missing-entrypoint"
+    });
+    unlinkSync(join(entryRoot, "bin/kd.js"));
+    let builds = 0;
+
+    const resolved = await ensureKdInstallation({
+      cacheRoot,
+      identity: "missing-entrypoint",
+      entrypoint: "kd",
+      runtime,
+      build: async (input) => {
+        builds += 1;
+        await successfulFakeBuild(input);
+      }
+    });
+
+    expect(resolved).toBe(join(entryRoot, "bin/kd.js"));
+    expect(builds).toBe(1);
+    expect(validateKdInstallation(entryRoot, "missing-entrypoint", runtime))
+      .toBe(true);
+  });
+
+  it("reports cache miss and corrupt-entry recovery with full context", async () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    const entryRoot = join(cacheRoot, "corrupt-events");
+    mkdirSync(entryRoot, { recursive: true });
+    writeFileSync(join(entryRoot, "manifest.json"), "{broken");
+    const events = [];
+
+    await ensureKdInstallation({
+      cacheRoot,
+      identity: "corrupt-events",
+      entrypoint: "kd",
+      runtime,
+      build: successfulFakeBuild,
+      onCacheEvent: (event) => events.push(formatKdCacheEvent(event))
+    });
+
+    expect(events).toEqual([
+      `Installing kd: identity=corrupt-events cache=${entryRoot} phase=install`,
+      `Recovering corrupt kd installation: identity=corrupt-events cache=${entryRoot} phase=recovery`
+    ]);
+  });
+
   it("recovers a lock whose recorded owner is dead", async () => {
     const cacheRoot = join(createRepoFixture(), "cache");
     const lockRoot = join(cacheRoot, ".dead.lock");
@@ -248,17 +317,22 @@ describe("kd installation publication", () => {
       JSON.stringify({ pid: 40404, token: "dead-owner", startedAt: 1 })
     );
 
+    const events = [];
     const resolved = await ensureKdInstallation({
       cacheRoot,
       identity: "dead",
       entrypoint: "kd",
       runtime,
       build: successfulFakeBuild,
-      isProcessAlive: () => false
+      isProcessAlive: () => false,
+      onCacheEvent: (event) => events.push(formatKdCacheEvent(event))
     });
 
     expect(resolved).toBe(join(cacheRoot, "dead/bin/kd.js"));
     expect(existsSync(lockRoot)).toBe(false);
+    expect(events).toContain(
+      `Recovering stale kd lock: identity=dead cache=${lockRoot} phase=lock-recovery`
+    );
   });
 
   it("recovers an ownerless lock after it remains unchanged for one poll", async () => {
@@ -332,6 +406,7 @@ describe("kd installation publication", () => {
       JSON.stringify({ pid: 50505, token: "live-owner", startedAt: Date.now() })
     );
 
+    const events = [];
     await expect(
       ensureKdInstallation({
         cacheRoot,
@@ -341,11 +416,54 @@ describe("kd installation publication", () => {
         build: successfulFakeBuild,
         isProcessAlive: () => true,
         waitTimeoutMs: 5,
-        pollIntervalMs: 1
+        pollIntervalMs: 1,
+        onCacheEvent: (event) => events.push(formatKdCacheEvent(event))
       })
-    ).rejects.toThrow("Timed out waiting for kd installation live");
+    ).rejects.toThrow(
+      `kd installation failed: identity=live cache=${join(
+        cacheRoot,
+        "live"
+      )} phase=lock: Timed out waiting for kd installation live`
+    );
 
     expect(existsSync(lockRoot)).toBe(true);
+    expect(events).toContain(
+      `Waiting for kd installation: identity=live cache=${join(
+        cacheRoot,
+        "live"
+      )} phase=lock`
+    );
+    expect(events.at(-1)).toContain(
+      `kd installation failed: identity=live cache=${join(
+        cacheRoot,
+        "live"
+      )} phase=lock: Timed out waiting for kd installation live`
+    );
+  });
+
+  it("reports build failures with cache path, full identity, and phase", async () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    const identity = "full-build-failure-identity";
+    const entryRoot = join(cacheRoot, identity);
+    const events = [];
+
+    await expect(
+      ensureKdInstallation({
+        cacheRoot,
+        identity,
+        entrypoint: "kd",
+        runtime,
+        build: async () => {
+          throw new Error("synthetic command failure");
+        },
+        onCacheEvent: (event) => events.push(formatKdCacheEvent(event))
+      })
+    ).rejects.toThrow(
+      `kd installation failed: identity=${identity} cache=${entryRoot} phase=build: synthetic command failure`
+    );
+    expect(events.at(-1)).toBe(
+      `kd installation failed: identity=${identity} cache=${entryRoot} phase=build: synthetic command failure`
+    );
   });
 });
 
@@ -368,7 +486,7 @@ describe("kd installation resolver", () => {
     });
 
     expect(first.status).toBe(0);
-    expect(first.stderr).toContain("Installing kd ");
+    expect(first.stderr).toContain("Installing kd:");
     const entrypoint = first.stdout.trim();
     expect(entrypoint.startsWith(`${cacheRoot}/`)).toBe(true);
     expect(entrypoint.endsWith("/bin/kd.js")).toBe(true);

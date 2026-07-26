@@ -86,7 +86,11 @@ function cleanLauncherEnv(home: string): NodeJS.ProcessEnv {
   };
 }
 
-function copyLauncherFixture(sourceRepoRoot: string, fixtureRepoRoot: string): void {
+function copyLauncherFixture(
+  sourceRepoRoot: string,
+  fixtureRepoRoot: string,
+  options: { installDependencies?: boolean } = {}
+): void {
   mkdirSync(join(fixtureRepoRoot, "tools"), { recursive: true });
   mkdirSync(join(fixtureRepoRoot, ".kanna"), { recursive: true });
   mkdirSync(join(fixtureRepoRoot, "apps/desktop/src-tauri"), {
@@ -114,28 +118,30 @@ function copyLauncherFixture(sourceRepoRoot: string, fixtureRepoRoot: string): v
     recursive: true,
     filter: (source) => !source.includes("/node_modules") && !source.includes("/dist")
   });
-  const sourceKdModules = resolve(sourceRepoRoot, "tools/kd/node_modules");
-  const fixtureKdModules = resolve(fixtureRepoRoot, "tools/kd/node_modules");
-  mkdirSync(join(fixtureKdModules, "@modelcontextprotocol"), {
-    recursive: true
-  });
-  mkdirSync(join(fixtureKdModules, ".bin"), { recursive: true });
-  for (const dependency of ["smol-toml", "yaml", "zod", "tsup"]) {
+  if (options.installDependencies !== false) {
+    const sourceKdModules = resolve(sourceRepoRoot, "tools/kd/node_modules");
+    const fixtureKdModules = resolve(fixtureRepoRoot, "tools/kd/node_modules");
+    mkdirSync(join(fixtureKdModules, "@modelcontextprotocol"), {
+      recursive: true
+    });
+    mkdirSync(join(fixtureKdModules, ".bin"), { recursive: true });
+    for (const dependency of ["smol-toml", "yaml", "zod", "tsup"]) {
+      symlinkSync(
+        realpathSync(join(sourceKdModules, dependency)),
+        join(fixtureKdModules, dependency),
+        "dir"
+      );
+    }
     symlinkSync(
-      realpathSync(join(sourceKdModules, dependency)),
-      join(fixtureKdModules, dependency),
+      realpathSync(join(sourceKdModules, "@modelcontextprotocol/sdk")),
+      join(fixtureKdModules, "@modelcontextprotocol/sdk"),
       "dir"
     );
+    cpSync(
+      join(sourceKdModules, ".bin/tsup"),
+      join(fixtureKdModules, ".bin/tsup")
+    );
   }
-  symlinkSync(
-    realpathSync(join(sourceKdModules, "@modelcontextprotocol/sdk")),
-    join(fixtureKdModules, "@modelcontextprotocol/sdk"),
-    "dir"
-  );
-  cpSync(
-    join(sourceKdModules, ".bin/tsup"),
-    join(fixtureKdModules, ".bin/tsup")
-  );
   symlinkSync("tools/kd/bin/kd", resolve(fixtureRepoRoot, "kd"));
 }
 
@@ -340,7 +346,7 @@ describe("kd CLI", () => {
         launches
           .map((launch) => launch.stderr)
           .join("")
-          .match(/Installing kd /g)
+          .match(/Installing kd:/g)
       ).toHaveLength(1);
 
       const installs = readdirSync(cacheRoot).filter((name) => !name.startsWith("."));
@@ -377,6 +383,54 @@ describe("kd CLI", () => {
           }
         ).tools.map((tool) => tool.name)
       ).toContain("dev_up");
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  }, 240_000);
+
+  it("bootstraps dependencies and installs kd from a clean clone", async () => {
+    const packageRoot = resolve(import.meta.dirname, "..");
+    const repoRoot = resolve(packageRoot, "..", "..");
+    const tempRoot = mkdtempSync(join(tmpdir(), "kd clean clone "));
+    const fixtureRepoRoot = join(tempRoot, "repo");
+    const home = join(tempRoot, "home");
+    mkdirSync(home, { recursive: true });
+
+    try {
+      copyLauncherFixture(repoRoot, fixtureRepoRoot, {
+        installDependencies: false
+      });
+      initializeGitFixture(fixtureRepoRoot);
+      const cacheRoot = join(tempRoot, "cache");
+      const launch = await spawnResult("./kd", ["env", "print"], {
+        cwd: fixtureRepoRoot,
+        env: {
+          ...cleanLauncherEnv(home),
+          KANNA_KD_CACHE_ROOT: cacheRoot
+        },
+        timeoutMs: 240_000
+      });
+
+      expect(
+        launch.status,
+        `stdout:\n${launch.stdout}\nstderr:\n${launch.stderr}`
+      ).toBe(0);
+      expect(
+        (JSON.parse(launch.stdout) as { repoRoot: string }).repoRoot
+      ).toBe(realpathSync(fixtureRepoRoot));
+      expect(launch.stderr).toContain(
+        "Bootstrapping tools/kd dependencies..."
+      );
+      expect(launch.stderr).toContain("Installing kd:");
+      expect(
+        existsSync(resolve(fixtureRepoRoot, "tools/kd/node_modules"))
+      ).toBe(true);
+      expect(existsSync(resolve(fixtureRepoRoot, "tools/kd/dist"))).toBe(
+        false
+      );
+      expect(
+        readdirSync(cacheRoot).filter((name) => !name.startsWith("."))
+      ).toHaveLength(1);
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }
