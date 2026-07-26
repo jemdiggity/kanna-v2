@@ -65,7 +65,7 @@ export async function buildCloudTaskSnapshot(input: CloudTaskSnapshotInput) {
       type: input.item.agent_type ?? "pty",
     },
     transfer: {
-      state: "none",
+      state: "none" as const,
       transferId: null,
       sourceDesktopId: null,
       destinationDesktopId: null,

@@ -908,8 +908,18 @@ export function createTransferApi(
     event: OutgoingTransferCommittedEvent,
   ): Promise<void> {
     const transfer = await getDesktopTaskTransfer(event.transferId);
-    if (!transfer || transfer.direction !== "outgoing") {
+    if (!transfer) {
+      // The durable transfer row may already have been compacted after a
+      // previously successful delivery whose sidecar response was lost.
+      // Tombstone the receipt so the explicit apply/nack protocol cannot leave
+      // it claimed forever or replay it after the next sidecar restart.
+      await invoke("mark_outgoing_transfer_commit_applied", {
+        transferId: event.transferId,
+      });
       return;
+    }
+    if (transfer.direction !== "outgoing") {
+      throw new Error(`transfer is not outgoing: ${event.transferId}`);
     }
     if (transfer.source_task_id !== event.sourceTaskId) {
       throw new Error(

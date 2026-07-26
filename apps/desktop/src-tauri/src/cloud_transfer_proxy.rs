@@ -370,6 +370,20 @@ where
             "auth_ok response omitted userId".to_string(),
         ));
     }
+    let supports_task_transfer = value
+        .get("capabilities")
+        .and_then(|capabilities| capabilities.get("tunnelServices"))
+        .and_then(|services| services.as_array())
+        .is_some_and(|services| {
+            services
+                .iter()
+                .any(|service| service.as_str() == Some("task-transfer"))
+        });
+    if !supports_task_transfer {
+        return Err(ProxyError::Relay(
+            "relay does not advertise task-transfer tunnel support".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -553,9 +567,13 @@ mod tests {
             .is_err());
         socket
             .send(Message::Text(
-                json!({"type": "auth_ok", "userId": "user-a"})
-                    .to_string()
-                    .into(),
+                json!({
+                    "type": "auth_ok",
+                    "userId": "user-a",
+                    "capabilities": { "tunnelServices": ["ksp", "task-transfer"] },
+                })
+                .to_string()
+                .into(),
             ))
             .await
             .expect("send auth_ok");
@@ -647,6 +665,11 @@ mod tests {
             json!({"type": "event", "name": "not-auth-ok"}),
             json!({"type": "auth_ok", "userId": ""}),
             json!({"type": "auth_ok", "userId": "user-a"}),
+            json!({
+                "type": "auth_ok",
+                "userId": "user-a",
+                "capabilities": { "tunnelServices": ["ksp", "task-transfer"] },
+            }),
         ] {
             let (relay_url, relay_listener) = test_relay().await;
             let state = state();
@@ -673,7 +696,10 @@ mod tests {
                 .await
                 .expect("send response");
 
-            if response["type"] == "auth_ok" && response["userId"] == "user-a" {
+            if response["capabilities"]["tunnelServices"]
+                .as_array()
+                .is_some_and(|services| services.iter().any(|service| service == "task-transfer"))
+            {
                 let _request = next_json(&mut relay).await;
                 relay
                     .send(Message::Text(
@@ -702,6 +728,51 @@ mod tests {
                 .await
                 .expect("clear proxy");
         }
+    }
+
+    #[tokio::test]
+    async fn current_client_does_not_send_task_transfer_request_to_previous_relay() {
+        let (relay_url, relay_listener) = test_relay().await;
+        let state = state();
+        let endpoint = ensure_cloud_transfer_proxy_in_state(
+            &state,
+            "peer-b".into(),
+            "desktop-b".into(),
+            relay_url,
+            "token".into(),
+        )
+        .await
+        .expect("ensure proxy");
+        let mut sidecar = TcpStream::connect(&endpoint.endpoint)
+            .await
+            .expect("connect sidecar");
+        let (relay_tcp, _) = relay_listener.accept().await.expect("accept relay");
+        let mut relay = accept_async(relay_tcp).await.expect("accept websocket");
+        let _auth = next_json(&mut relay).await;
+        relay
+            .send(Message::Text(
+                json!({"type": "auth_ok", "userId": "user-a"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("send previous-relay auth_ok");
+
+        let next = timeout(Duration::from_millis(250), relay.next()).await;
+        if let Ok(Some(Ok(Message::Text(text)))) = next {
+            panic!("sent task-transfer request to previous relay: {text}");
+        }
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            timeout(TEST_TIMEOUT, sidecar.read(&mut byte))
+                .await
+                .expect("proxy did not reject previous relay")
+                .expect("read local socket"),
+            0,
+        );
+        clear_cloud_transfer_proxies_in_state(&state)
+            .await
+            .expect("clear proxy");
     }
 
     #[tokio::test]
@@ -744,9 +815,13 @@ mod tests {
             let _auth = next_json(&mut relay).await;
             relay
                 .send(Message::Text(
-                    json!({"type": "auth_ok", "userId": "user-a"})
-                        .to_string()
-                        .into(),
+                    json!({
+                        "type": "auth_ok",
+                        "userId": "user-a",
+                        "capabilities": { "tunnelServices": ["ksp", "task-transfer"] },
+                    })
+                    .to_string()
+                    .into(),
                 ))
                 .await
                 .expect("send auth_ok");

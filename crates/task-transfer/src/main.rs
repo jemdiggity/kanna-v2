@@ -536,6 +536,16 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             },
             Err(error) => control_error(request_id, error),
         },
+        ControlRequest::NackImportCommit {
+            request_id,
+            transfer_id,
+        } => match runtime.nack_import_commit(&transfer_id).await {
+            Ok(()) => ControlResponse::NackImportCommit {
+                request_id,
+                transfer_id,
+            },
+            Err(error) => control_error(request_id, error),
+        },
         ControlRequest::MarkImportAckCompleted {
             request_id,
             transfer_id,

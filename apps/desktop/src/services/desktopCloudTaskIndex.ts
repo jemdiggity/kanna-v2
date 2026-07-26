@@ -50,6 +50,12 @@ export interface DesktopCloudTaskSnapshot {
   createdAt: string;
   updatedAt: string;
   closedAt?: string | null;
+  transfer?: {
+    state: "none" | "outgoing" | "incoming" | "finalization_pending";
+    transferId?: string | null;
+    sourceDesktopId?: string | null;
+    destinationDesktopId?: string | null;
+  };
 }
 
 export interface DesktopCloudDesktopSnapshot {
@@ -318,7 +324,7 @@ export function mapDesktopCloudTasks(
       ...(options.localClosedItems ?? []).map((item) => `${item.repo_id}:${item.id}`),
     ],
   );
-  for (const snapshot of sortByUpdatedAt(snapshots)) {
+  for (const snapshot of authoritativeTaskSnapshots(snapshots)) {
     const snapshotLocalRepoId = snapshot.localRepoId ?? snapshot.repo.cloudRepoId;
     const exactLocalRepo = localRepoById.get(snapshotLocalRepoId);
     const localRepo = exactLocalRepo ?? (snapshot.repo.remoteUrlHash
@@ -477,6 +483,46 @@ function ownerDesktopIsReachable(ownerDesktopId: string, activeDesktopIds: Set<s
 
 function sortByUpdatedAt<T extends { updatedAt: string }>(snapshots: T[]): T[] {
   return [...snapshots].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function authoritativeTaskSnapshots(
+  snapshots: DesktopCloudTaskSnapshot[],
+): DesktopCloudTaskSnapshot[] {
+  const winners = new Map<string, DesktopCloudTaskSnapshot>();
+  for (const snapshot of snapshots) {
+    const identity = snapshot.cloudTaskId
+      ?? `${snapshot.ownerDesktopId}:${snapshot.localRepoId ?? snapshot.repo.cloudRepoId}:${snapshot.ownerLocalTaskId}`;
+    const current = winners.get(identity);
+    if (!current || compareTaskAuthority(snapshot, current) > 0) {
+      winners.set(identity, snapshot);
+    }
+  }
+  return sortByUpdatedAt([...winners.values()]);
+}
+
+function compareTaskAuthority(
+  left: DesktopCloudTaskSnapshot,
+  right: DesktopCloudTaskSnapshot,
+): number {
+  const transferRank = (snapshot: DesktopCloudTaskSnapshot): number => {
+    switch (snapshot.transfer?.state ?? "none") {
+      case "finalization_pending":
+        return 4;
+      case "incoming":
+        return 3;
+      case "none":
+        return 2;
+      case "outgoing":
+        return 1;
+    }
+  };
+  return transferRank(left) - transferRank(right)
+    || left.updatedAt.localeCompare(right.updatedAt)
+    || (left.activityRevision ?? -1) - (right.activityRevision ?? -1)
+    || (left.blockerRevision ?? -1) - (right.blockerRevision ?? -1)
+    || (left.transitionRevision ?? "").localeCompare(right.transitionRevision ?? "")
+    || left.ownerDesktopId.localeCompare(right.ownerDesktopId)
+    || left.ownerLocalTaskId.localeCompare(right.ownerLocalTaskId);
 }
 
 function cloudRepoId(id: string): string {

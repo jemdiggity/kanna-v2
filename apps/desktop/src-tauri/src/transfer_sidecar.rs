@@ -564,6 +564,27 @@ impl TransferSidecarClient {
         }))
     }
 
+    pub async fn nack_outgoing_transfer_commit(
+        &self,
+        transfer_id: String,
+    ) -> Result<Value, String> {
+        let request_id = self.next_request_id("commit-nack");
+        let response = self
+            .send_request(
+                json!({
+                    "type": "nack_import_commit",
+                    "request_id": request_id,
+                    "transfer_id": transfer_id,
+                }),
+                &request_id,
+            )
+            .await?;
+
+        Ok(json!({
+            "transferId": required_string(&response, &["transfer_id", "transferId"])?,
+        }))
+    }
+
     pub async fn mark_incoming_transfer_event_recorded(
         &self,
         transfer_id: String,

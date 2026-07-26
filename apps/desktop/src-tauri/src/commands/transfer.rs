@@ -444,6 +444,20 @@ pub async fn mark_outgoing_transfer_commit_applied(
 }
 
 #[tauri::command]
+pub async fn nack_outgoing_transfer_commit(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::TransferServiceState>,
+    transfer_id: String,
+) -> Result<Value, String> {
+    with_transfer_client!(
+        app,
+        state,
+        client,
+        client.nack_outgoing_transfer_commit(transfer_id)
+    )
+}
+
+#[tauri::command]
 pub async fn finalize_outgoing_transfer(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::TransferServiceState>,

@@ -545,7 +545,7 @@ describe("Relay integration", () => {
     await closeAndWait(ws);
   });
 
-  it("does not lease a desktop publication generation to a legacy device token", async () => {
+  it("accepts previous-server device-token task publication with generation fencing", async () => {
     const desktopRef = testFirestore.doc(
       `users/${TEST_USER_ID}/desktops/${SECRET_DESKTOP_ID}`,
     );
@@ -556,9 +556,17 @@ describe("Relay integration", () => {
     });
 
     expect(userId).toBe(TEST_USER_ID);
-    await closeAndWait(ws);
+    const publicationAck = waitForMessage(ws, (message) =>
+      message.type === "task_snapshot_ack" && message.id === "legacy-publish");
+    ws.send(JSON.stringify({
+      type: "task_snapshot_publish",
+      id: "legacy-publish",
+      snapshot: publishedSnapshot("working"),
+    }));
+    await expect(publicationAck).resolves.toMatchObject({ ok: true });
     const after = (await desktopRef.get()).data()?.publicationSessionGeneration ?? null;
-    expect(after).toBe(before);
+    expect(after).toBeGreaterThan(before ?? 0);
+    await closeAndWait(ws);
   });
 
   it("authenticates a desktop and clears its transfer capability when the session disconnects", async () => {

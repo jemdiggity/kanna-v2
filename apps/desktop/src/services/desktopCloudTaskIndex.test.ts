@@ -53,6 +53,54 @@ beforeEach(() => {
 });
 
 describe("mapDesktopCloudTasks", () => {
+  it("selects one destination authority during overlapping transfer publications", () => {
+    const snapshot = mapDesktopCloudTasks([
+      remoteTaskSnapshot({
+        ownerDesktopId: "desktop-source",
+        ownerLocalTaskId: "task-source",
+        title: "Stale source title",
+        blockedByTaskIds: ["source-blocker"],
+        activityRevision: 99,
+        updatedAt: "2026-07-27T00:02:00.000Z",
+        transfer: {
+          state: "outgoing",
+          transferId: "transfer-1",
+          sourceDesktopId: "desktop-source",
+          destinationDesktopId: "desktop-destination",
+        },
+      }),
+      remoteTaskSnapshot({
+        ownerDesktopId: "desktop-destination",
+        ownerLocalTaskId: "task-destination",
+        title: "Destination title",
+        blockedByTaskIds: ["destination-blocker"],
+        activityRevision: 12,
+        transitionRevision: "destination-run",
+        updatedAt: "2026-07-27T00:01:00.000Z",
+        transfer: {
+          state: "finalization_pending",
+          transferId: "transfer-1",
+          sourceDesktopId: "desktop-source",
+          destinationDesktopId: "desktop-destination",
+        },
+      }),
+    ]);
+
+    expect(snapshot.items).toHaveLength(1);
+    expect(snapshot.items[0]).toMatchObject({
+      display_name: "Destination title (desktop-destination)",
+      activity_revision: 12,
+      transition_revision: "destination-run",
+    });
+    expect(snapshot.terminalRefs["cloud:remote-repo-id:task-1"]).toMatchObject({
+      ownerDesktopId: "desktop-destination",
+      ownerLocalTaskId: "task-destination",
+    });
+    expect(snapshot.blockedByTaskIds).toEqual({
+      "cloud:remote-repo-id:task-1": ["destination-blocker"],
+    });
+  });
+
   it("preserves blocker task ids for workspace projection", () => {
     const snapshot = mapDesktopCloudTasks([
       remoteTaskSnapshot({

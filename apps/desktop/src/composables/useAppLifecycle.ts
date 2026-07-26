@@ -532,11 +532,20 @@ export function useAppLifecycle({
 
     try {
       const unlistenOutgoingTransferCommitted = await listen("outgoing-transfer-committed", async (event: unknown) => {
+        let transferId: string | null = null;
         try {
           const committed = parseOutgoingTransferCommittedEvent(eventPayload(event));
+          transferId = committed.transferId;
           await store.handleOutgoingTransferCommitted(committed);
         } catch (e: unknown) {
           console.error("[App] failed to handle outgoing transfer commit acknowledgment:", e);
+          if (transferId) {
+            try {
+              await invoke("nack_outgoing_transfer_commit", { transferId });
+            } catch (nackError: unknown) {
+              console.error("[App] failed to nack outgoing transfer commit acknowledgment:", nackError);
+            }
+          }
         }
       });
       appUnlisteners.push(unlistenOutgoingTransferCommitted);

@@ -71,7 +71,10 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
     let peer_snapshot_release = std::sync::Arc::clone(&snapshot_release);
     let peer_server = tokio::spawn(async move {
         let mut handlers = tokio::task::JoinSet::new();
-        for _ in 0..4 {
+        // Each admitted privileged operation first fetches the restart-specific
+        // owner epoch, then opens its action connection. The two overloads are
+        // rejected by sidecar admission before either connection is opened.
+        for _ in 0..8 {
             let (stream, _) = listener.accept().await.unwrap();
             let peer_event_tx = peer_event_tx.clone();
             let first_input_release = std::sync::Arc::clone(&peer_first_input_release);
@@ -82,6 +85,20 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
                 reader.read_line(&mut line).await.unwrap();
                 let request: PeerRequest = serde_json::from_str(line.trim()).unwrap();
                 match request {
+                    PeerRequest::GetAuthenticatedRequestEpoch { request_id } => {
+                        let response = PeerResponse::AuthenticatedRequestEpoch {
+                            request_id,
+                            epoch: "sidecar-owner-epoch".into(),
+                        };
+                        reader
+                            .get_mut()
+                            .write_all(
+                                format!("{}\n", serde_json::to_string(&response).unwrap())
+                                    .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                    }
                     PeerRequest::MarkTaskRead { .. } => {
                         peer_event_tx.send("mark-started".into()).unwrap();
                         let mut remainder = Vec::new();
@@ -323,6 +340,7 @@ fn control_response_id(response: &ControlResponse) -> &str {
         | ControlResponse::AcknowledgeImportCommitted { request_id, .. }
         | ControlResponse::MarkIncomingEventRecorded { request_id, .. }
         | ControlResponse::MarkImportCommitApplied { request_id, .. }
+        | ControlResponse::NackImportCommit { request_id, .. }
         | ControlResponse::MarkImportAckCompleted { request_id, .. } => request_id,
     }
 }

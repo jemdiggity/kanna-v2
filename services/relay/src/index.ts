@@ -230,11 +230,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         return;
       }
 
-      if (
-        role === "server"
-        && desktopId
-        && serverAuthProof?.kind === "desktop"
-      ) {
+      if (role === "server" && desktopId && serverAuthProof) {
         try {
           if (!await revalidateServerAuth(serverAuthProof, userId, desktopId)) {
             clearTimeout(authTimer);
@@ -268,7 +264,17 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       }
 
       // Send auth success
-      ws.send(JSON.stringify({ type: "auth_ok", userId }));
+      ws.send(JSON.stringify({
+        type: "auth_ok",
+        userId,
+        capabilities: {
+          tunnelServices: ["ksp", "task-transfer"],
+          taskSnapshotPublication: {
+            version: 1,
+            authModes: ["desktop-secret", "device-token"],
+          },
+        },
+      }));
       console.log(
         `[ws] Authenticated ${role} for user ${userId} from ${remoteAddr}`
       );

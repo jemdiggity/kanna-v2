@@ -61,6 +61,7 @@ const {
   cloudRepoRemoteUrl,
   refreshLanTasks,
   __e2eInjectRemoteSnapshot,
+  __e2eFailNextRemoteAction,
   initializeDesktopCloudAuth,
   initializeDesktopLanTaskSync,
   markTransferSidecarReady,
@@ -78,6 +79,7 @@ if (import.meta.env.DEV) {
   void cloudSnapshot;
   void lanSnapshot;
   void __e2eInjectRemoteSnapshot;
+  void __e2eFailNextRemoteAction;
 }
 
 const mainPanelUiSlot = computed<TaskUiSlot | null>(() => {

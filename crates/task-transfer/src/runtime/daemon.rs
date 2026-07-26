@@ -178,15 +178,10 @@ pub(super) async fn close_owner_task(
     context: &ListenerContext,
     task_id: &str,
 ) -> Result<(), RuntimeError> {
-    for session_id in [
-        task_id.to_owned(),
-        format!("shell-wt-{task_id}"),
-        format!("td-{task_id}"),
-    ] {
-        kill_daemon_session_if_present(context, &session_id).await?;
-    }
-    close_pipeline_item_in_db(context, task_id)?;
-    Ok(())
+    let port = context
+        .kanna_server_port
+        .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
+    post_local_kanna_task_action(port, task_id, "close", &serde_json::json!({})).await
 }
 
 pub(super) async fn advance_owner_task_stage(
@@ -378,63 +373,6 @@ fn encode_task_id_path_segment(task_id: &str) -> Result<String, RuntimeError> {
         }
     }
     Ok(encoded)
-}
-
-async fn kill_daemon_session_if_present(
-    context: &ListenerContext,
-    session_id: &str,
-) -> Result<(), RuntimeError> {
-    let daemon_dir = context
-        .daemon_dir
-        .as_ref()
-        .ok_or_else(|| RuntimeError::Protocol("daemon directory is not configured".into()))?;
-    let mut daemon = connect_daemon(daemon_dir).await?;
-    send_daemon_command(
-        &mut daemon,
-        &DaemonCommand::Kill {
-            session_id: session_id.to_owned(),
-        },
-    )
-    .await?;
-    match read_daemon_event(&mut daemon).await? {
-        DaemonEvent::Ok => Ok(()),
-        DaemonEvent::Error {
-            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
-            ..
-        } => Ok(()),
-        DaemonEvent::Error { message, .. }
-            if message.to_ascii_lowercase().contains("session not found") =>
-        {
-            Ok(())
-        }
-        DaemonEvent::Error { message, .. } => Err(RuntimeError::Protocol(message)),
-        other => Err(RuntimeError::Protocol(format!(
-            "unexpected daemon kill response: {:?}",
-            other
-        ))),
-    }
-}
-
-fn close_pipeline_item_in_db(context: &ListenerContext, task_id: &str) -> Result<(), RuntimeError> {
-    let db_path = context
-        .db_path
-        .as_ref()
-        .ok_or_else(|| RuntimeError::Protocol("database path is not configured".into()))?;
-    let conn = rusqlite::Connection::open(db_path)
-        .map_err(|error| RuntimeError::Protocol(format!("db error: {error}")))?;
-    let rows = conn
-        .execute(
-            "UPDATE pipeline_item
-             SET closed_at = datetime('now'),
-                 updated_at = datetime('now')
-             WHERE id = ?",
-            [task_id],
-        )
-        .map_err(|error| RuntimeError::Protocol(format!("db error: {error}")))?;
-    if rows == 0 {
-        return Err(RuntimeError::Protocol(format!("task not found: {task_id}")));
-    }
-    Ok(())
 }
 
 pub(super) async fn stream_daemon_session(

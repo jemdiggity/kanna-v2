@@ -330,6 +330,7 @@ pub fn run() {
             commands::transfer::mark_incoming_transfer_event_recorded,
             commands::transfer::mark_incoming_transfer_ack_completed,
             commands::transfer::mark_outgoing_transfer_commit_applied,
+            commands::transfer::nack_outgoing_transfer_commit,
             commands::transfer::ensure_cloud_transfer_proxy,
             commands::transfer::remove_cloud_transfer_proxy,
             commands::transfer::clear_cloud_transfer_proxies,

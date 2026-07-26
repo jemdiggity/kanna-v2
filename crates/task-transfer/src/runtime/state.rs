@@ -46,6 +46,7 @@ pub(super) struct ImportCommitReceipt {
     pub(super) created_at_unix_ms: u64,
     pub(super) applied: bool,
     pub(super) event_queued: bool,
+    pub(super) delivery_in_flight: bool,
 }
 
 impl ImportCommitReceipt {
@@ -54,7 +55,7 @@ impl ImportCommitReceipt {
         transfer_id: &str,
         sender: &mpsc::Sender<OutgoingTransferCommittedEvent>,
     ) -> Result<(), RuntimeError> {
-        if self.applied || self.event_queued {
+        if self.applied || self.event_queued || self.delivery_in_flight {
             return Ok(());
         }
         let event = OutgoingTransferCommittedEvent {
@@ -127,6 +128,7 @@ pub(super) struct ListenerContext {
     pub(super) self_peer_id: String,
     pub(super) self_display_name: String,
     pub(super) self_public_key: String,
+    pub(super) authenticated_request_epoch: String,
     pub(super) registry_root: PathBuf,
     pub(super) discovery: PeerDiscovery,
     pub(super) external_peers: ExternalPeerRegistry,
@@ -146,7 +148,6 @@ pub(super) struct ListenerContext {
     pub(super) max_authenticated_request_replays: usize,
     pub(super) task_snapshot: Arc<Mutex<Value>>,
     pub(super) daemon_dir: Option<PathBuf>,
-    pub(super) db_path: Option<PathBuf>,
     pub(super) kanna_server_port: Option<u16>,
     pub(super) request_counter: Arc<AtomicU64>,
     pub(super) incoming_sender: mpsc::UnboundedSender<RuntimeEvent>,

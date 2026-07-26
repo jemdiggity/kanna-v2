@@ -529,7 +529,7 @@ describe("createLanTransport", () => {
     subscription.close();
 
     expect(socketFactory).toHaveBeenCalledWith(
-      "ws://127.0.0.1:48120/v1/stream"
+      "ws://127.0.0.1:48120/v2/stream"
     );
     expect(sent).toEqual([
       {
@@ -646,7 +646,7 @@ describe("createLanTransport", () => {
     subscription.interrupt();
     subscription.close();
 
-    expect(socketFactory).toHaveBeenCalledWith("ws://127.0.0.1:48120/v1/stream");
+    expect(socketFactory).toHaveBeenCalledWith("ws://127.0.0.1:48120/v2/stream");
     expect(sent).toEqual([
       { type: "auth" },
       { type: "attach", task_id: "task-1", kind: "agent", from_seq: 0 },

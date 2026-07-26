@@ -309,14 +309,14 @@ describe("relay auth", () => {
     )).resolves.toBe(false);
   });
 
-  it("does not authorize unbound legacy device tokens for task publication", async () => {
+  it("revalidates legacy device-token publication for its original account and desktop id", async () => {
     const { auth } = await importAuthWithFirebaseMock({ deviceUserId: "owner" });
 
     await expect(auth.revalidateServerAuth(
       { kind: "device", deviceToken: "token", desktopId: "desktop-1" },
       "owner",
       "desktop-1",
-    )).resolves.toBe(false);
+    )).resolves.toBe(true);
     await expect(auth.revalidateServerAuth(
       { kind: "device", deviceToken: "token", desktopId: "desktop-1" },
       "owner",

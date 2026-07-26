@@ -68,10 +68,12 @@ export async function revalidateServerAuth(
     const principal = await verifyDesktopCredentials(proof.desktopId, proof.desktopSecret);
     return principal?.userId === expectedUserId && principal.desktopId === expectedDesktopId;
   }
-  // Legacy device tokens identify an account, not a specific desktop. They
-  // remain valid for the older relay command path, but cannot safely authorize
-  // writes to a desktop-owned Firestore subtree.
-  return false;
+  // Migration compatibility: previous kanna-server releases authenticate with
+  // an account-scoped device token while still supplying a stable desktop ID.
+  // Generation fencing limits a live legacy publisher to its own leased
+  // session; revalidation also revokes publication as soon as the device token
+  // is removed or moved to another account.
+  return await verifyDeviceToken(proof.deviceToken) === expectedUserId;
 }
 
 export function hashDesktopSecret(desktopSecret: string): string {

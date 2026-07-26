@@ -8,10 +8,17 @@ import {
 import { resetDatabase } from "../helpers/reset";
 import { WebDriverClient } from "../helpers/webdriver";
 
-const BLOCKED_TASK_ID = "lan:remote-repo:task-blocked";
-const BLOCKER_TASK_ID = "lan:remote-repo:task-blocker";
+type RemoteSource = "lan" | "cloud";
 
-function remoteSnapshot(blocked: boolean, updatedAt: string) {
+function taskIds(source: RemoteSource) {
+  return {
+    blocked: `${source}:remote-repo:task-blocked`,
+    blocker: `${source}:remote-repo:task-blocker`,
+  };
+}
+
+function remoteSnapshot(source: RemoteSource, blocked: boolean, updatedAt: string) {
+  const ids = taskIds(source);
   const defaults = {
     repo_id: "lan:remote-repo",
     issue_number: null,
@@ -61,47 +68,49 @@ function remoteSnapshot(blocked: boolean, updatedAt: string) {
     items: [
       {
         ...defaults,
-        id: BLOCKED_TASK_ID,
+        id: ids.blocked,
         prompt: "Advance the remote task",
         display_name: "Blocked remote task",
         branch: "task-blocked",
       },
       {
         ...defaults,
-        id: BLOCKER_TASK_ID,
+        id: ids.blocker,
         prompt: "Resolve the remote blocker",
         display_name: "Remote blocker",
         branch: "task-blocker",
       },
     ],
     terminalRefs: {
-      [BLOCKED_TASK_ID]: {
+      [ids.blocked]: {
         ownerDesktopId: "peer-review-missing",
         ownerLocalRepoId: "remote-repo",
         ownerLocalTaskId: "task-blocked",
-        transport: "lan",
+        transport: source,
       },
-      [BLOCKER_TASK_ID]: {
+      [ids.blocker]: {
         ownerDesktopId: "peer-review-missing",
         ownerLocalRepoId: "remote-repo",
         ownerLocalTaskId: "task-blocker",
-        transport: "lan",
+        transport: source,
       },
     },
-    blockedByTaskIds: blocked ? { [BLOCKED_TASK_ID]: ["task-blocker"] } : {},
+    blockedByTaskIds: blocked ? { [ids.blocked]: ["task-blocker"] } : {},
+    transferMachines: [],
   };
 }
 
 async function injectSnapshot(
   client: WebDriverClient,
+  source: RemoteSource,
   blocked: boolean,
   updatedAt: string,
 ): Promise<void> {
   const result = await client.executeSync<string>(
     `const ctx = window.__KANNA_E2E__.setupState;
      ctx.__e2eInjectRemoteSnapshot(
-       "lan",
-       ${JSON.stringify(remoteSnapshot(blocked, updatedAt))},
+       ${JSON.stringify(source)},
+       ${JSON.stringify(remoteSnapshot(source, blocked, updatedAt))},
        { freezeLanRefresh: true },
      );
      return "ok";`,
@@ -123,56 +132,81 @@ describe("remote blocked task journey", () => {
     await client.deleteSession();
   });
 
-  it("guards Cmd+S while blocked and surfaces an unblocked owner action failure", async () => {
-    // App readiness precedes the first periodic LAN refresh; let that initial
-    // refresh settle before freezing the source with the injected snapshot.
-    await sleep(1_250);
-    await injectSnapshot(client, true, "2026-07-26T01:00:00.000Z");
+  for (const source of ["lan", "cloud"] as const) {
+    it(`guards Cmd+S and surfaces an owner action failure from ${source} snapshots`, async () => {
+      // App readiness precedes the first periodic LAN refresh; let that initial
+      // refresh settle before freezing the source with the injected snapshot.
+      await sleep(1_250);
+      await injectSnapshot(
+        client,
+        source,
+        true,
+        `2026-07-26T01:0${source === "lan" ? "0" : "2"}:00.000Z`,
+      );
 
-    const blockedRowSelector = `.sidebar .pipeline-item[data-task-id="${BLOCKED_TASK_ID}"]`;
-    await client.waitForElement(blockedRowSelector, 5_000);
-    const blockedRowText = await client.executeSync<string>(
-      `return document.querySelector(${JSON.stringify(blockedRowSelector)})?.textContent || "";`,
-    );
-    expect(blockedRowText).toContain("Blocked remote task");
-    expect(blockedRowText).toContain("Remote blocker");
-    expect(await client.executeSync<string>(
-      `const row = document.querySelector(${JSON.stringify(blockedRowSelector)});
-       return row?.parentElement?.previousElementSibling?.textContent || "";`,
-    )).toContain("Blocked");
+      const ids = taskIds(source);
+      const blockedRowSelector = `.sidebar .pipeline-item[data-task-id="${ids.blocked}"]`;
+      await client.waitForElement(blockedRowSelector, 5_000);
+      const blockedRowText = await client.executeSync<string>(
+        `return document.querySelector(${JSON.stringify(blockedRowSelector)})?.textContent || "";`,
+      );
+      expect(blockedRowText).toContain("Blocked remote task");
+      expect(blockedRowText).toContain("Remote blocker");
+      expect(await client.executeSync<string>(
+        `const row = document.querySelector(${JSON.stringify(blockedRowSelector)});
+         return row?.parentElement?.previousElementSibling?.textContent || "";`,
+      )).toContain("Blocked");
 
-    await client.executeSync(
-      `document.querySelector(${JSON.stringify(blockedRowSelector)})?.click();`,
-    );
-    await client.waitForText(".main-panel .blocked-placeholder", "Blocked", 5_000);
-    await client.waitForText(".main-panel .blocker-name", "Remote blocker", 5_000);
+      await client.executeSync(
+        `document.querySelector(${JSON.stringify(blockedRowSelector)})?.click();`,
+      );
+      await client.waitForText(".main-panel .blocked-placeholder", "Blocked", 5_000);
+      await client.waitForText(".main-panel .blocker-name", "Remote blocker", 5_000);
 
-    await client.executeSync("window.__KANNA_E2E__.invokes.clear();");
-    const blockedShortcutHandled = await client.executeSync<boolean>(
-      buildHandledGlobalKeydownScript({ key: "s", meta: true }),
-    );
-    expect(blockedShortcutHandled).toBe(true);
-    await client.waitForText(".toast.warning", "Task Blocked", 5_000);
-    expect(await client.executeSync<number>(
-      `return window.__KANNA_E2E__.invokes.getAll()
-        .filter((call) => call.cmd === "advance_transfer_peer_task_stage").length;`,
-    )).toBe(0);
+      await client.executeSync("window.__KANNA_E2E__.invokes.clear();");
+      const blockedShortcutHandled = await client.executeSync<boolean>(
+        buildHandledGlobalKeydownScript({ key: "s", meta: true }),
+      );
+      expect(blockedShortcutHandled).toBe(true);
+      await client.waitForText(".toast.warning", "Task Blocked", 5_000);
+      expect(await client.executeSync<number>(
+        `return window.__KANNA_E2E__.invokes.getAll()
+          .filter((call) => call.cmd === "advance_transfer_peer_task_stage").length;`,
+      )).toBe(0);
 
-    await injectSnapshot(client, false, "2026-07-26T01:01:00.000Z");
-    await client.waitForNoElement(".main-panel .blocked-placeholder", 5_000);
-    await client.executeSync(
-      `window.__KANNA_E2E__.invokes.failNext(
-        "advance_transfer_peer_task_stage",
-        "peer-review-missing rejected the lifecycle action",
-      );`,
-    );
-    await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true }));
-    await client.waitForText(".toast.error", "peer-review-missing", 10_000);
-    expect(await client.executeSync<number>(
-      `return window.__KANNA_E2E__.invokes.getAll()
-        .filter((call) => call.cmd === "advance_transfer_peer_task_stage").length;`,
-    )).toBe(1);
+      await injectSnapshot(
+        client,
+        source,
+        false,
+        `2026-07-26T01:0${source === "lan" ? "1" : "3"}:00.000Z`,
+      );
+      await client.waitForNoElement(".main-panel .blocked-placeholder", 5_000);
+      if (source === "lan") {
+        await client.executeSync(
+          `window.__KANNA_E2E__.invokes.failNext(
+            "advance_transfer_peer_task_stage",
+            "peer-review-missing rejected the lifecycle action",
+          );`,
+        );
+      } else {
+        await client.executeSync(
+          `window.__KANNA_E2E__.setupState.__e2eFailNextRemoteAction(
+            "relay rejected the cloud lifecycle action",
+          );`,
+        );
+      }
+      await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true }));
+      await client.waitForText(
+        ".toast.error",
+        source === "lan" ? "peer-review-missing" : "relay rejected",
+        10_000,
+      );
+      expect(await client.executeSync<number>(
+        `return window.__KANNA_E2E__.invokes.getAll()
+          .filter((call) => call.cmd === "advance_transfer_peer_task_stage").length;`,
+      )).toBe(source === "lan" ? 1 : 0);
 
-    await sleep(50);
-  });
+      await sleep(50);
+    });
+  }
 });

@@ -5027,6 +5027,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn previous_mobile_empty_auth_remains_valid_on_legacy_stream_epoch() {
+        let state = Arc::new(crate::http_api::AppState::new(test_config(
+            "ksp-legacy-mobile-auth-test",
+            "KSP Legacy Mobile Auth Test",
+        )));
+        let (incoming_tx, incoming_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(8);
+        let task = tokio::spawn(handle_stream_channels(
+            incoming_rx,
+            frame_tx,
+            companion_tx,
+            state,
+            AuthMode::AllowEmpty,
+        ));
+
+        incoming_tx
+            .send(serde_json::to_string(&ClientFrame::Auth { credential: None }).unwrap())
+            .await
+            .unwrap();
+        assert!(matches!(
+            outbound_rx.recv().await,
+            Some(ServerFrame::AuthOk { .. })
+        ));
+        drop(incoming_tx);
+        let _ = task.await;
+    }
+
+    #[tokio::test]
     async fn empty_auth_lan_stream_cannot_input_advance_or_close_tasks() {
         for (index, path) in [
             "/v1/tasks/task-1/input",

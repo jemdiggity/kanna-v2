@@ -115,7 +115,8 @@ impl TransferRuntime {
             PeerResponse::TaskSnapshot { .. } => Err(RuntimeError::Protocol(
                 "unexpected task-snapshot response during preflight".into(),
             )),
-            PeerResponse::ObserveSession { .. }
+            PeerResponse::AuthenticatedRequestEpoch { .. }
+            | PeerResponse::ObserveSession { .. }
             | PeerResponse::SendSessionInput { .. }
             | PeerResponse::ResizeSession { .. }
             | PeerResponse::CloseTask { .. }
@@ -222,7 +223,8 @@ impl TransferRuntime {
             PeerResponse::TaskSnapshot { .. } => Err(RuntimeError::Protocol(
                 "unexpected task-snapshot response during transfer commit".into(),
             )),
-            PeerResponse::ObserveSession { .. }
+            PeerResponse::AuthenticatedRequestEpoch { .. }
+            | PeerResponse::ObserveSession { .. }
             | PeerResponse::SendSessionInput { .. }
             | PeerResponse::ResizeSession { .. }
             | PeerResponse::CloseTask { .. }
@@ -305,7 +307,8 @@ impl TransferRuntime {
                     finalized_cleanly,
                 })
             }
-            PeerResponse::StartPairing { .. }
+            PeerResponse::AuthenticatedRequestEpoch { .. }
+            | PeerResponse::StartPairing { .. }
             | PeerResponse::RequestTaskPull { .. }
             | PeerResponse::PrepareTransfer { .. }
             | PeerResponse::SubmitTransferPayload { .. }
@@ -378,6 +381,7 @@ impl TransferRuntime {
                     if receipt.applied {
                         continue;
                     }
+                    receipt.delivery_in_flight = true;
                     return Ok(RuntimeEvent::OutgoingTransferCommitted(event));
                 }
                 NextEvent::General(None) | NextEvent::Receipt(None) => {
@@ -510,7 +514,8 @@ impl TransferRuntime {
                     .await?;
                 Ok(StagedTransferArtifact { path })
             }
-            PeerResponse::StartPairing { .. }
+            PeerResponse::AuthenticatedRequestEpoch { .. }
+            | PeerResponse::StartPairing { .. }
             | PeerResponse::RequestTaskPull { .. }
             | PeerResponse::PrepareTransfer { .. }
             | PeerResponse::SubmitTransferPayload { .. }
@@ -609,7 +614,8 @@ impl TransferRuntime {
 
                 Ok(())
             }
-            PeerResponse::StartPairing { .. }
+            PeerResponse::AuthenticatedRequestEpoch { .. }
+            | PeerResponse::StartPairing { .. }
             | PeerResponse::RequestTaskPull { .. }
             | PeerResponse::PrepareTransfer { .. }
             | PeerResponse::SubmitTransferPayload { .. }
@@ -670,9 +676,22 @@ impl TransferRuntime {
         }
         let mut applied = receipt.clone();
         applied.applied = true;
+        applied.delivery_in_flight = false;
         self.replay_store.save_receipt(transfer_id, &applied)?;
         *receipt = applied;
         self.replay_store.compact_receipts(&mut receipts);
+        Ok(())
+    }
+
+    pub async fn nack_import_commit(&self, transfer_id: &str) -> Result<(), RuntimeError> {
+        let mut receipts = self.import_commit_receipts.lock().await;
+        let receipt = receipts.get_mut(transfer_id).ok_or_else(|| {
+            RuntimeError::Protocol(format!("missing import commit receipt {}", transfer_id))
+        })?;
+        if receipt.applied {
+            return Ok(());
+        }
+        receipt.delivery_in_flight = false;
         Ok(())
     }
 }

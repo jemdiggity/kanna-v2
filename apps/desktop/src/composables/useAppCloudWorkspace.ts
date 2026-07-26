@@ -111,6 +111,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   const associatedCloudUsers = new Set<string>();
   const shownLanPeerIssues = new Set<string>();
   let e2eLanRefreshFrozen = false;
+  let e2eNextRemoteActionFailure: string | null = null;
   let lastCloudBackendErrorToastAt: number | null = null;
   let currentDesktopId: string | null = null;
   const transferMachineRevision = ref(0);
@@ -656,6 +657,13 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     lanSnapshot.value = snapshot;
   }
 
+  function __e2eFailNextRemoteAction(message: string): void {
+    if (!import.meta.env.DEV) {
+      throw new Error("remote action failure injection is available only in development builds");
+    }
+    e2eNextRemoteActionFailure = message;
+  }
+
   async function closeSelectedWorkspaceTask(): Promise<boolean> {
     const workspaceTask = selectedWorkspaceTask.value;
     const closingPresentationSlotId = selectedCloudItemId.value ?? store.selectedItemId;
@@ -765,6 +773,11 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     let client: DesktopRelayTerminalClient | null = null;
     let accepted = false;
     try {
+      if (e2eNextRemoteActionFailure) {
+        const message = e2eNextRemoteActionFailure;
+        e2eNextRemoteActionFailure = null;
+        throw new Error(message);
+      }
       client = workspaceTask.terminal.kind === "lan"
         ? await createConfiguredDesktopLanTerminalClient()
         : await createConfiguredDesktopRelayTerminalClient();
@@ -1014,6 +1027,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     markWorkspaceTaskLocallyClosed,
     refreshLanTasks,
     __e2eInjectRemoteSnapshot,
+    __e2eFailNextRemoteAction,
     initializeDesktopCloudAuth,
     initializeDesktopLanTaskSync,
     markTransferSidecarReady,

@@ -2218,7 +2218,7 @@ describe("App", () => {
     wrapper.unmount();
   });
 
-  it("removes unread presentation after coherent cloud and LAN owner snapshots publish idle", async () => {
+  it("selects the newer cloud activity authority before the older LAN duplicate refreshes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
     const cloudSnapshot = remoteTaskSnapshot("cloud", "duplicate-owner", "duplicate-owner-task");
@@ -2258,7 +2258,7 @@ describe("App", () => {
     }
     await nextTick();
 
-    expect(wrapper.get('[data-testid="remote-task-activity"]').text()).toBe("unread");
+    expect(wrapper.get('[data-testid="remote-task-activity"]').text()).toBe("idle");
 
     const lanReadSnapshot = remoteTaskSnapshot(
       "lan",
@@ -5370,6 +5370,23 @@ describe("App", () => {
       sourceTaskId: "task-source",
       destinationLocalTaskId: "task-imported",
     });
+  });
+
+  it("nacks an outgoing transfer commit when delayed desktop application fails", async () => {
+    store.handleOutgoingTransferCommitted.mockRejectedValueOnce(new Error("close still in flight"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+    await flushPromises();
+
+    const handler = listenHandlers.get("outgoing-transfer-committed");
+    await handler?.(buildOutgoingTransferCommittedEvent());
+    await flushPromises();
+
+    expect(invokeMock).toHaveBeenCalledWith("nack_outgoing_transfer_commit", {
+      transferId: "transfer-1",
+    });
+    errorSpy.mockRestore();
   });
 
   it("forwards outgoing transfer finalization requests to the store and completes them", async () => {

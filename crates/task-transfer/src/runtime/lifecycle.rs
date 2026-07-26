@@ -143,6 +143,7 @@ impl TransferRuntime {
             self_peer_id: config.peer_id.clone(),
             self_display_name: config.display_name.clone(),
             self_public_key: public_key,
+            authenticated_request_epoch: random_request_namespace(),
             registry_root: config.registry_dir.clone(),
             discovery: discovery.clone(),
             external_peers: Arc::clone(&external_peers),
@@ -162,7 +163,6 @@ impl TransferRuntime {
             max_authenticated_request_replays: config.max_authenticated_request_replays,
             task_snapshot: Arc::clone(&task_snapshot),
             daemon_dir: config.daemon_dir.clone(),
-            db_path: config.db_path.clone(),
             kanna_server_port: config.kanna_server_port,
             request_counter: Arc::clone(&request_counter),
             incoming_sender: incoming_sender.clone(),
@@ -274,25 +274,26 @@ impl TransferRuntime {
         peer: &DiscoveredPeer,
     ) -> Result<PeerTaskSnapshot, RuntimeError> {
         let request_id = self.next_request_id("task-snapshot");
-        let sealed_payload = self.seal_authenticated_peer_request(
-            &peer.peer_id,
-            &peer.public_key,
-            peer.protocol_version,
-            "get_task_snapshot",
-            &request_id,
-            serde_json::json!({}),
-        )?;
+        let target_peer = PeerRegistryEntry {
+            peer_id: peer.peer_id.clone(),
+            display_name: peer.display_name.clone(),
+            endpoint: peer.endpoint.clone(),
+            pid: peer.pid,
+            public_key: peer.public_key.clone(),
+            protocol_version: peer.protocol_version,
+            accepting_transfers: peer.accepting_transfers,
+        };
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &target_peer,
+                "get_task_snapshot",
+                &request_id,
+                serde_json::json!({}),
+            )
+            .await?;
         let response = self
             .send_peer_request(
-                &PeerRegistryEntry {
-                    peer_id: peer.peer_id.clone(),
-                    display_name: peer.display_name.clone(),
-                    endpoint: peer.endpoint.clone(),
-                    pid: peer.pid,
-                    public_key: peer.public_key.clone(),
-                    protocol_version: peer.protocol_version,
-                    accepting_transfers: peer.accepting_transfers,
-                },
+                &target_peer,
                 PeerRequest::GetTaskSnapshot {
                     request_id: request_id.clone(),
                     requester_peer_id: self.config.peer_id.clone(),
@@ -393,15 +394,29 @@ impl TransferRuntime {
             return Err(error);
         }
 
+        // Discovery can be delayed while an unobserve or replacement races this
+        // request. Recheck the lease before the owner-epoch network round trip so
+        // a displaced observer never reaches the peer at all.
+        if !self
+            .terminal_observers
+            .lock()
+            .await
+            .get(&observer_lease_key)
+            .is_some_and(|slot| !slot.closed)
+        {
+            return Ok(());
+        }
+
         let request_id = self.next_request_id("observe-session");
-        let sealed_payload = match self.seal_authenticated_peer_request(
-            &target_peer.peer_id,
-            &target_peer.public_key,
-            target_peer.protocol_version,
-            "observe_session",
-            &request_id,
-            serde_json::json!({ "session_id": session_id }),
-        ) {
+        let sealed_payload = match self
+            .seal_authenticated_peer_request(
+                &target_peer,
+                "observe_session",
+                &request_id,
+                serde_json::json!({ "session_id": session_id }),
+            )
+            .await
+        {
             Ok(sealed_payload) => sealed_payload,
             Err(error) => {
                 self.clear_terminal_observer_lease(&observer_key, &lease_id)
@@ -517,17 +532,17 @@ impl TransferRuntime {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("send-input");
-        let sealed_payload = self.seal_authenticated_peer_request(
-            &target_peer.peer_id,
-            &target_peer.public_key,
-            target_peer.protocol_version,
-            "send_session_input",
-            &request_id,
-            serde_json::json!({
-                "session_id": session_id,
-                "data": data,
-            }),
-        )?;
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &target_peer,
+                "send_session_input",
+                &request_id,
+                serde_json::json!({
+                    "session_id": session_id,
+                    "data": data,
+                }),
+            )
+            .await?;
         let response = self
             .send_peer_request(
                 &target_peer,
@@ -559,18 +574,18 @@ impl TransferRuntime {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("resize-session");
-        let sealed_payload = self.seal_authenticated_peer_request(
-            &target_peer.peer_id,
-            &target_peer.public_key,
-            target_peer.protocol_version,
-            "resize_session",
-            &request_id,
-            serde_json::json!({
-                "session_id": session_id,
-                "cols": cols,
-                "rows": rows,
-            }),
-        )?;
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &target_peer,
+                "resize_session",
+                &request_id,
+                serde_json::json!({
+                    "session_id": session_id,
+                    "cols": cols,
+                    "rows": rows,
+                }),
+            )
+            .await?;
         let response = self
             .send_peer_request(
                 &target_peer,
@@ -601,14 +616,14 @@ impl TransferRuntime {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("close-task");
-        let sealed_payload = self.seal_authenticated_peer_request(
-            &target_peer.peer_id,
-            &target_peer.public_key,
-            target_peer.protocol_version,
-            "close_task",
-            &request_id,
-            serde_json::json!({ "task_id": task_id }),
-        )?;
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &target_peer,
+                "close_task",
+                &request_id,
+                serde_json::json!({ "task_id": task_id }),
+            )
+            .await?;
         let response = self
             .send_peer_request(
                 &target_peer,
@@ -638,17 +653,17 @@ impl TransferRuntime {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("advance-stage");
-        let sealed_payload = self.seal_authenticated_peer_request(
-            &target_peer.peer_id,
-            &target_peer.public_key,
-            target_peer.protocol_version,
-            "advance_task_stage",
-            &request_id,
-            serde_json::json!({
-                "task_id": task_id,
-                "expected_transition_revision": expected_transition_revision,
-            }),
-        )?;
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &target_peer,
+                "advance_task_stage",
+                &request_id,
+                serde_json::json!({
+                    "task_id": task_id,
+                    "expected_transition_revision": expected_transition_revision,
+                }),
+            )
+            .await?;
         let response = self
             .send_peer_request(
                 &target_peer,
@@ -679,17 +694,17 @@ impl TransferRuntime {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("read-task-file");
-        let sealed_payload = self.seal_authenticated_peer_request(
-            &target_peer.peer_id,
-            &target_peer.public_key,
-            target_peer.protocol_version,
-            "read_task_file",
-            &request_id,
-            serde_json::json!({
-                "task_id": task_id,
-                "path": path,
-            }),
-        )?;
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &target_peer,
+                "read_task_file",
+                &request_id,
+                serde_json::json!({
+                    "task_id": task_id,
+                    "path": path,
+                }),
+            )
+            .await?;
         let response = self
             .send_peer_request(
                 &target_peer,
@@ -722,17 +737,17 @@ impl TransferRuntime {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("mark-read");
-        let sealed_payload = self.seal_authenticated_peer_request(
-            &target_peer.peer_id,
-            &target_peer.public_key,
-            target_peer.protocol_version,
-            "mark_task_read",
-            &request_id,
-            serde_json::json!({
-                "task_id": task_id,
-                "expected_activity_revision": expected_activity_revision,
-            }),
-        )?;
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &target_peer,
+                "mark_task_read",
+                &request_id,
+                serde_json::json!({
+                    "task_id": task_id,
+                    "expected_activity_revision": expected_activity_revision,
+                }),
+            )
+            .await?;
         let response = self
             .send_mark_read_peer_request_with_timeout(
                 &target_peer,
@@ -753,23 +768,43 @@ impl TransferRuntime {
         }
     }
 
-    fn seal_authenticated_peer_request(
+    async fn seal_authenticated_peer_request(
         &self,
-        peer_id: &str,
-        public_key: &str,
-        protocol_version: u32,
+        peer: &PeerRegistryEntry,
         action: &str,
         request_id: &str,
         arguments: Value,
     ) -> Result<String, RuntimeError> {
-        self.require_authenticated_task_requests(peer_id, public_key, protocol_version)?;
+        self.require_authenticated_task_requests(
+            &peer.peer_id,
+            &peer.public_key,
+            peer.protocol_version,
+        )?;
+        let epoch_request_id = self.next_request_id("owner-epoch");
+        let owner_epoch = match self
+            .send_peer_request(
+                peer,
+                PeerRequest::GetAuthenticatedRequestEpoch {
+                    request_id: epoch_request_id.clone(),
+                },
+            )
+            .await?
+        {
+            PeerResponse::AuthenticatedRequestEpoch {
+                request_id: response_request_id,
+                epoch,
+            } if response_request_id == epoch_request_id && !epoch.trim().is_empty() => epoch,
+            PeerResponse::Error { message, .. } => return Err(RuntimeError::Protocol(message)),
+            other => return Err(unexpected_peer_response("owner epoch", &other)),
+        };
         let mut payload = arguments.as_object().cloned().ok_or_else(|| {
             RuntimeError::Protocol("authenticated request arguments must be an object".into())
         })?;
         payload.insert("action".into(), Value::String(action.to_owned()));
         payload.insert("request_id".into(), Value::String(request_id.to_owned()));
+        payload.insert("owner_epoch".into(), Value::String(owner_epoch));
         payload.insert("issued_at_unix_ms".into(), Value::from(unix_ms()));
-        let target_public_key = parse_public_key(public_key)?;
+        let target_public_key = parse_public_key(&peer.public_key)?;
         seal_json(&self.identity, &target_public_key, &Value::Object(payload))
             .map_err(RuntimeError::from)
     }

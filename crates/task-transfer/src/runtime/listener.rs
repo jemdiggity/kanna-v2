@@ -139,6 +139,12 @@ async fn handle_connection(
 
     let request_id = extract_request_id(&line);
     let response = match serde_json::from_str::<PeerRequest>(line.trim()) {
+        Ok(PeerRequest::GetAuthenticatedRequestEpoch { request_id }) => {
+            PeerResponse::AuthenticatedRequestEpoch {
+                request_id,
+                epoch: context.authenticated_request_epoch.clone(),
+            }
+        }
         Ok(PeerRequest::StartPairing {
             request_id,
             source_peer_id,
@@ -744,6 +750,7 @@ async fn handle_connection(
                     created_at_unix_ms: unix_ms(),
                     applied: false,
                     event_queued: false,
+                    delivery_in_flight: false,
                 };
                 context.replay_store.save_receipt(&transfer_id, &receipt)?;
                 context.outgoing_transfers.lock().await.remove(&transfer_id);
@@ -1094,6 +1101,13 @@ async fn authenticate_peer_request(
         return Err(RuntimeError::Protocol(
             "authenticated payload request_id does not match outer request".into(),
         ));
+    }
+    if payload.get("owner_epoch").and_then(Value::as_str)
+        != Some(context.authenticated_request_epoch.as_str())
+    {
+        return Err(RuntimeError::Protocol(format!(
+            "authenticated {expected_action} request targets a stale owner epoch"
+        )));
     }
 
     let issued_at_unix_ms = payload

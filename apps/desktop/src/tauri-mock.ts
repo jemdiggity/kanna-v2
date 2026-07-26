@@ -147,6 +147,7 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
   mark_incoming_transfer_ack_completed: () => ({ ok: true }),
   mark_incoming_transfer_event_recorded: () => ({ ok: true }),
   mark_outgoing_transfer_commit_applied: () => ({ ok: true }),
+  nack_outgoing_transfer_commit: () => ({ ok: true }),
   file_exists: () => true,
   read_text_file: () => "",
   read_image_file_data_url: () => "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",

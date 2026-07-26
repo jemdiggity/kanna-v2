@@ -15,6 +15,7 @@ import type {
 interface Candidate {
   item: PipelineItem;
   source: WorkspaceTaskSource;
+  sources?: WorkspaceTaskSource[];
   repoKey: string;
   logicalKey: string;
 }
@@ -46,13 +47,15 @@ export function buildWorkspace(input: BuildWorkspaceInput): BuildWorkspaceResult
     input.localClosedItems ?? [],
     repoContext.localRepoKeyById,
   );
-  const candidates = [
-    ...input.localItems
-      .filter((item) => !item.closed_at)
-      .map((item) => localCandidate(item, repoContext.localRepoKeyById)),
+  const localCandidates = input.localItems
+    .filter((item) => !item.closed_at)
+    .map((item) => localCandidate(item, repoContext.localRepoKeyById))
+    .filter((candidate): candidate is Candidate => candidate !== null);
+  const remote = [
     ...remoteCandidates(input.cloudSnapshot, "cloud", repoContext, closedLocalKeys, input.remoteTaskPins),
     ...remoteCandidates(input.lanSnapshot, "lan", repoContext, closedLocalKeys, input.remoteTaskPins),
   ].filter((candidate): candidate is Candidate => candidate !== null);
+  const candidates = [...localCandidates, ...collapseRemoteAdvertisements(remote)];
 
   const tasksByKey = new Map<string, WorkspaceTask>();
   for (const candidate of candidates) {
@@ -218,8 +221,8 @@ function createWorkspaceTask(candidate: Candidate): WorkspaceTask {
     owner: isLocal
       ? { kind: "local", id: "local" }
       : { kind: "remote", id: remoteRef?.ownerDesktopId ?? "unknown" },
-    sources: [candidate.source],
-    blockedByTaskIds: blockedByTaskIdsForSources([candidate.source]),
+    sources: candidate.sources ?? [candidate.source],
+    blockedByTaskIds: candidate.source.blockedByTaskIds,
     reachability: isLocal ? "local" : remoteRef ? "reachable" : "unknown",
     capabilities: capabilitiesFor(candidate),
     terminal: terminalRouteFor(candidate),
@@ -227,7 +230,7 @@ function createWorkspaceTask(candidate: Candidate): WorkspaceTask {
 }
 
 function mergeWorkspaceTask(existing: WorkspaceTask, candidate: Candidate): WorkspaceTask {
-  const sources = [...existing.sources, candidate.source];
+  const sources = [...existing.sources, ...(candidate.sources ?? [candidate.source])];
   if (candidate.source.kind === "local") {
     return {
       ...existing,
@@ -249,13 +252,13 @@ function mergeWorkspaceTask(existing: WorkspaceTask, candidate: Candidate): Work
   const candidateRoute = terminalRouteFor(candidate);
   if (
     existing.localTaskId
-    || routePrecedence(candidateRoute) <= routePrecedence(existing.terminal)
+    || compareCandidateToWorkspace(candidate, candidateRoute, existing) <= 0
   ) {
     return {
       ...existing,
       remoteTaskIds,
       sources,
-      blockedByTaskIds: blockedByTaskIdsForSources(sources),
+      blockedByTaskIds: existing.blockedByTaskIds,
     };
   }
 
@@ -269,40 +272,88 @@ function mergeWorkspaceTask(existing: WorkspaceTask, candidate: Candidate): Work
     },
     remoteTaskIds,
     sources,
-    blockedByTaskIds: blockedByTaskIdsForSources(sources),
+    blockedByTaskIds: candidate.source.blockedByTaskIds,
     terminal: candidateRoute,
     reachability: candidateRoute.kind === "none" ? "unknown" : "reachable",
     capabilities: capabilitiesFor(candidate),
   };
 }
 
-function blockedByTaskIdsForSources(sources: readonly WorkspaceTaskSource[]): string[] {
-  if (sources.some((source) => source.kind === "local")) return [];
-  const revisionedSources = sources.filter(
-    (source): source is WorkspaceTaskSource & { blockerRevision: number } =>
-      typeof source.blockerRevision === "number"
-      && Number.isSafeInteger(source.blockerRevision)
-      && source.blockerRevision >= 0,
-  );
-  if (revisionedSources.length > 0) {
-    const newestRevision = Math.max(
-      ...revisionedSources.map((source) => source.blockerRevision),
-    );
-    return [...new Set(
-      revisionedSources
-        .filter((source) => source.blockerRevision === newestRevision)
-        .flatMap((source) => source.blockedByTaskIds),
-    )];
+function collapseRemoteAdvertisements(candidates: Candidate[]): Candidate[] {
+  const winners = new Map<string, Candidate>();
+  for (const candidate of candidates) {
+    const current = winners.get(candidate.item.id);
+    if (!current) {
+      winners.set(candidate.item.id, candidate);
+      continue;
+    }
+    const sources = [
+      ...(current.sources ?? [current.source]),
+      ...(candidate.sources ?? [candidate.source]),
+    ];
+    const winner = compareCandidateAuthority(candidate, current) > 0 ? candidate : current;
+    winners.set(candidate.item.id, { ...winner, sources });
   }
-  const newestUpdatedAt = sources.reduce(
-    (newest, source) => source.updatedAt > newest ? source.updatedAt : newest,
-    "",
+  return [...winners.values()];
+}
+
+function compareCandidateAuthority(left: Candidate, right: Candidate): number {
+  return compareAuthority(
+    left.item,
+    left.source,
+    terminalRouteFor(left),
+    right.item,
+    right.source,
+    terminalRouteFor(right),
   );
-  return [...new Set(
-    sources
-      .filter((source) => source.updatedAt === newestUpdatedAt)
-      .flatMap((source) => source.blockedByTaskIds),
-  )];
+}
+
+function compareCandidateToWorkspace(
+  candidate: Candidate,
+  candidateRoute: WorkspaceTerminalRoute,
+  existing: WorkspaceTask,
+): number {
+  const existingSource = existing.sources.find((source) =>
+    source.taskId === existing.item.id
+    && source.kind === existing.terminal.kind)
+    ?? existing.sources.find((source) => source.taskId === existing.item.id)
+    ?? existing.sources[0];
+  return compareAuthority(
+    candidate.item,
+    candidate.source,
+    candidateRoute,
+    existing.item,
+    existingSource,
+    existing.terminal,
+  );
+}
+
+function compareAuthority(
+  leftItem: PipelineItem,
+  leftSource: WorkspaceTaskSource,
+  leftRoute: WorkspaceTerminalRoute,
+  rightItem: PipelineItem,
+  rightSource: WorkspaceTaskSource,
+  rightRoute: WorkspaceTerminalRoute,
+): number {
+  const itemComparison = leftItem.updated_at.localeCompare(rightItem.updated_at)
+    || (leftItem.activity_revision ?? -1) - (rightItem.activity_revision ?? -1)
+    || (leftItem.blocker_revision ?? -1) - (rightItem.blocker_revision ?? -1)
+    || (leftItem.transition_revision ?? "").localeCompare(rightItem.transition_revision ?? "");
+  if (itemComparison !== 0) return itemComparison;
+
+  const leftOwner = leftSource.terminalRef?.ownerDesktopId ?? "";
+  const rightOwner = rightSource.terminalRef?.ownerDesktopId ?? "";
+  const leftOwnerTask = leftSource.terminalRef?.ownerLocalTaskId ?? "";
+  const rightOwnerTask = rightSource.terminalRef?.ownerLocalTaskId ?? "";
+  if (leftOwnerTask !== rightOwnerTask && leftSource.kind !== rightSource.kind) {
+    // Cloud publication is transfer-state aware; when equally fresh LAN and
+    // cloud advertisements disagree on ownership, cloud is the authority.
+    return leftSource.kind === "cloud" ? 1 : -1;
+  }
+  return routePrecedence(leftRoute) - routePrecedence(rightRoute)
+    || leftItem.id.localeCompare(rightItem.id)
+    || leftOwner.localeCompare(rightOwner);
 }
 
 function routePrecedence(route: WorkspaceTerminalRoute): number {

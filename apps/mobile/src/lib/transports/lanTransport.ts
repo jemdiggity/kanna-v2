@@ -324,7 +324,9 @@ export function buildTaskDiffQuery(request?: TaskDiffRequest): string {
 function buildKspWebSocketUrl(baseUrl: string): string {
   const url = new URL(baseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.pathname = "/v1/stream";
+  // v2 advertises paired-device authentication. The server retains v1 as a
+  // compatibility epoch for already-deployed mobile clients.
+  url.pathname = "/v2/stream";
   url.search = "";
   return url.toString();
 }

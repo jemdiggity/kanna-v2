@@ -457,6 +457,7 @@ impl From<StoredImportCommitReceipt> for ImportCommitReceipt {
             created_at_unix_ms: stored.created_at_unix_ms,
             applied: stored.applied,
             event_queued: false,
+            delivery_in_flight: false,
         }
     }
 }

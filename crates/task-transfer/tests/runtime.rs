@@ -74,6 +74,51 @@ async fn send_raw_peer_value(endpoint: &str, request: &serde_json::Value) -> Pee
     serde_json::from_str(response.trim()).unwrap()
 }
 
+async fn authenticated_request_epoch(endpoint: &str) -> String {
+    match send_raw_peer_value(
+        endpoint,
+        &json!({
+            "type": "get_authenticated_request_epoch",
+            "request_id": "epoch-probe",
+        }),
+    )
+    .await
+    {
+        PeerResponse::AuthenticatedRequestEpoch { epoch, .. } => epoch,
+        response => panic!("expected authenticated request epoch, got {response:?}"),
+    }
+}
+
+async fn accept_authenticated_request(
+    listener: &TcpListener,
+    epoch: &str,
+) -> (BufReader<TcpStream>, PeerRequest) {
+    let (epoch_stream, _) = listener.accept().await.unwrap();
+    let mut epoch_reader = BufReader::new(epoch_stream);
+    let mut epoch_line = String::new();
+    epoch_reader.read_line(&mut epoch_line).await.unwrap();
+    let epoch_request: PeerRequest = serde_json::from_str(epoch_line.trim()).unwrap();
+    let PeerRequest::GetAuthenticatedRequestEpoch { request_id } = epoch_request else {
+        panic!("expected authenticated request epoch probe");
+    };
+    let epoch_response = PeerResponse::AuthenticatedRequestEpoch {
+        request_id,
+        epoch: epoch.to_owned(),
+    };
+    epoch_reader
+        .get_mut()
+        .write_all(format!("{}\n", serde_json::to_string(&epoch_response).unwrap()).as_bytes())
+        .await
+        .unwrap();
+
+    let (request_stream, _) = listener.accept().await.unwrap();
+    let mut request_reader = BufReader::new(request_stream);
+    let mut request_line = String::new();
+    request_reader.read_line(&mut request_line).await.unwrap();
+    let request = serde_json::from_str(request_line.trim()).unwrap();
+    (request_reader, request)
+}
+
 async fn serve_task_file_reads(listener: TcpListener, maximum: usize) -> usize {
     let mut accepted = 0usize;
     while accepted < maximum {
@@ -1293,12 +1338,8 @@ async fn list_peer_task_snapshots_rejects_spoofed_response_peer_id() {
         .unwrap();
 
     let spoofing_server = tokio::spawn(async move {
-        let (stream, _) = spoofing_listener.accept().await.unwrap();
-        let (reader, mut writer) = stream.into_split();
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let request: PeerRequest = serde_json::from_str(line.trim()).unwrap();
+        let (mut reader, request) =
+            accept_authenticated_request(&spoofing_listener, "spoofing-owner-epoch").await;
         let PeerRequest::GetTaskSnapshot { request_id, .. } = request else {
             panic!("expected get task snapshot request");
         };
@@ -1312,19 +1353,16 @@ async fn list_peer_task_snapshots_rejects_spoofed_response_peer_id() {
                 }]
             }),
         };
-        writer
+        reader
+            .get_mut()
             .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
             .await
             .unwrap();
     });
 
     let honest_server = tokio::spawn(async move {
-        let (stream, _) = honest_listener.accept().await.unwrap();
-        let (reader, mut writer) = stream.into_split();
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let request: PeerRequest = serde_json::from_str(line.trim()).unwrap();
+        let (mut reader, request) =
+            accept_authenticated_request(&honest_listener, "honest-owner-epoch").await;
         let PeerRequest::GetTaskSnapshot { request_id, .. } = request else {
             panic!("expected get task snapshot request");
         };
@@ -1338,7 +1376,8 @@ async fn list_peer_task_snapshots_rejects_spoofed_response_peer_id() {
                 }]
             }),
         };
-        writer
+        reader
+            .get_mut()
             .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
             .await
             .unwrap();
@@ -1410,13 +1449,10 @@ async fn observe_peer_session_reports_empty_peer_response_with_peer_context() {
         .unwrap();
 
     let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (reader, mut writer) = stream.into_split();
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        assert!(line.contains("\"observe_session\""));
-        writer.write_all(b"\n").await.unwrap();
+        let (mut reader, request) =
+            accept_authenticated_request(&listener, "observe-owner-epoch").await;
+        assert!(matches!(request, PeerRequest::ObserveSession { .. }));
+        reader.get_mut().write_all(b"\n").await.unwrap();
     });
 
     let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
@@ -1557,15 +1593,18 @@ async fn closed_observer_tombstones_are_bounded_without_losing_recent_race_prote
             .unwrap();
     }
 
-    runtime
-        .observe_peer_session("peer-target", "task-1", "lease-1")
-        .await
-        .unwrap();
-    let (oldest_stream, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept())
-        .await
-        .expect("oldest reclaimed tombstone still suppressed observe")
-        .unwrap();
-    drop(oldest_stream);
+    let (observe_result, accepted) = tokio::join!(
+        runtime.observe_peer_session("peer-target", "task-1", "lease-1"),
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            accept_authenticated_request(&listener, "bounded-owner-epoch"),
+        ),
+    );
+    observe_result.unwrap();
+    let (oldest_reader, oldest_request) =
+        accepted.expect("oldest reclaimed tombstone still suppressed observe");
+    assert!(matches!(oldest_request, PeerRequest::ObserveSession { .. }));
+    drop(oldest_reader);
 
     runtime
         .observe_peer_session("peer-target", "task-3", "lease-3")
@@ -1633,14 +1672,13 @@ async fn concurrent_observe_replacement_aborts_displaced_generation() {
             .await
     });
 
-    let (first_stream, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept())
-        .await
-        .expect("newest observe never connected")
-        .unwrap();
-    let mut first_reader = BufReader::new(first_stream);
-    let mut first_line = String::new();
-    first_reader.read_line(&mut first_line).await.unwrap();
-    assert!(first_line.contains("\"observe_session\""));
+    let (_, first_request) = tokio::time::timeout(
+        Duration::from_secs(1),
+        accept_authenticated_request(&listener, "replacement-owner-epoch"),
+    )
+    .await
+    .expect("newest observe never connected");
+    assert!(matches!(first_request, PeerRequest::ObserveSession { .. }));
     first.await.unwrap().unwrap();
     second.await.unwrap().unwrap();
 
@@ -1692,21 +1730,25 @@ async fn old_unobserve_cannot_remove_replacement_observer_lease() {
     .await
     .unwrap();
 
-    runtime
-        .observe_peer_session("peer-target", "task-replaced", "lease-old")
-        .await
-        .unwrap();
-    let (old_stream, _) = listener.accept().await.unwrap();
-    runtime
-        .observe_peer_session("peer-target", "task-replaced", "lease-new")
-        .await
-        .unwrap();
-    let (new_stream, _) = listener.accept().await.unwrap();
+    let (old_observe, old_accepted) = tokio::join!(
+        runtime.observe_peer_session("peer-target", "task-replaced", "lease-old"),
+        accept_authenticated_request(&listener, "old-owner-epoch"),
+    );
+    old_observe.unwrap();
+    let (old_reader, old_request) = old_accepted;
+    assert!(matches!(old_request, PeerRequest::ObserveSession { .. }));
+    let (new_observe, new_accepted) = tokio::join!(
+        runtime.observe_peer_session("peer-target", "task-replaced", "lease-new"),
+        accept_authenticated_request(&listener, "new-owner-epoch"),
+    );
+    new_observe.unwrap();
+    let (mut new_reader, new_request) = new_accepted;
+    assert!(matches!(&new_request, PeerRequest::ObserveSession { .. }));
     runtime
         .unobserve_peer_session("peer-target", "task-replaced", "lease-old")
         .await
         .unwrap();
-    drop(old_stream);
+    drop(old_reader);
     runtime
         .observe_peer_session("peer-target", "task-replaced", "lease-old")
         .await
@@ -1718,15 +1760,7 @@ async fn old_unobserve_cannot_remove_replacement_observer_lease() {
         "delayed old observe displaced the replacement after its unobserve",
     );
 
-    let mut new_reader = BufReader::new(new_stream);
-    let mut request = String::new();
-    tokio::time::timeout(Duration::from_secs(1), new_reader.read_line(&mut request))
-        .await
-        .expect("replacement observer was removed by the old lease")
-        .unwrap();
-    assert!(request.contains("\"observe_session\""));
-    let request: PeerRequest = serde_json::from_str(request.trim()).unwrap();
-    let PeerRequest::ObserveSession { request_id, .. } = request else {
+    let PeerRequest::ObserveSession { request_id, .. } = new_request else {
         panic!("expected observe request");
     };
     let response = PeerResponse::ObserveSession {
@@ -2044,6 +2078,71 @@ async fn trusted_peer_legacy_advance_without_revision_posts_no_cas_body() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trusted_peer_close_routes_through_owner_kanna_server_action() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (request_tx, request_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+        let mut content_length = 0usize;
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).await.unwrap();
+            if header == "\r\n" {
+                break;
+            }
+            if let Some(value) = header.strip_prefix("Content-Length:") {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).await.unwrap();
+        request_tx
+            .send((request_line, String::from_utf8(body).unwrap()))
+            .unwrap();
+        reader
+            .get_mut()
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .await
+            .unwrap();
+    });
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_kanna_server_port(port),
+    )
+    .await
+    .unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&secondary, &owner, "peer-owner").await;
+
+    secondary
+        .close_peer_task("peer-owner", "owner-task-1")
+        .await
+        .unwrap();
+
+    let (request_line, body) = request_rx.await.unwrap();
+    assert_eq!(
+        request_line,
+        "POST /v1/tasks/owner-task-1/actions/close HTTP/1.1\r\n"
+    );
+    assert_eq!(body, "{}");
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn trusted_peer_read_task_file_fetches_from_owner_kanna_server() {
     let temp = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -2310,7 +2409,10 @@ async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snaps
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<&'static str>();
     let server = tokio::spawn(async move {
         let mut handlers = tokio::task::JoinSet::new();
-        for _ in 0..3 {
+        // Four operations fetch the live owner epoch first. The second mark-read
+        // is then rejected locally by its dedicated permit before opening its
+        // action connection, for seven bounded connections in total.
+        for _ in 0..7 {
             let (stream, _) = listener.accept().await.unwrap();
             let event_tx = event_tx.clone();
             handlers.spawn(async move {
@@ -2319,6 +2421,20 @@ async fn stalled_mark_read_is_bounded_without_blocking_terminal_control_or_snaps
                 reader.read_line(&mut line).await.unwrap();
                 let request: PeerRequest = serde_json::from_str(line.trim()).unwrap();
                 match request {
+                    PeerRequest::GetAuthenticatedRequestEpoch { request_id } => {
+                        let response = PeerResponse::AuthenticatedRequestEpoch {
+                            request_id,
+                            epoch: "stalled-owner-epoch".into(),
+                        };
+                        reader
+                            .get_mut()
+                            .write_all(
+                                format!("{}\n", serde_json::to_string(&response).unwrap())
+                                    .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                    }
                     PeerRequest::MarkTaskRead { .. } => {
                         event_tx.send("mark-started").unwrap();
                         let mut remainder = Vec::new();
@@ -2864,12 +2980,14 @@ async fn privileged_lan_read_rejects_replay_before_a_second_owner_action() {
     let secondary_identity =
         TransferIdentity::from_secret_string(stored_identity["secret_key"].as_str().unwrap())
             .unwrap();
+    let owner_epoch = authenticated_request_epoch(&owner_peer.endpoint).await;
     let sealed_payload = seal_json(
         &secondary_identity,
         &parse_public_key(&owner_peer.public_key).unwrap(),
         &json!({
             "action": "read_task_file",
             "request_id": "replayed-read",
+            "owner_epoch": owner_epoch,
             "issued_at_unix_ms": current_unix_ms(),
             "task_id": "owner-task-1",
             "path": "src/private.rs",
@@ -2944,12 +3062,14 @@ async fn privileged_advance_replay_is_rejected_after_owner_restart() {
     let secondary_identity =
         TransferIdentity::from_secret_string(stored_identity["secret_key"].as_str().unwrap())
             .unwrap();
+    let owner_epoch = authenticated_request_epoch(&owner_peer.endpoint).await;
     let sealed_payload = seal_json(
         &secondary_identity,
         &parse_public_key(&owner_peer.public_key).unwrap(),
         &json!({
             "action": "advance_task_stage",
             "request_id": "restart-replay-advance",
+            "owner_epoch": owner_epoch,
             "issued_at_unix_ms": current_unix_ms(),
             "task_id": "owner-task-1",
             "expected_transition_revision": "run-1",
@@ -2983,7 +3103,7 @@ async fn privileged_advance_replay_is_rejected_after_owner_restart() {
         matches!(
             replay,
             PeerResponse::Error { ref message, .. }
-                if message.contains("replayed authenticated advance_task_stage request")
+                if message.contains("stale owner epoch")
         ),
         "owner restart forgot the authenticated replay: {replay:?}",
     );
@@ -2992,6 +3112,164 @@ async fn privileged_advance_replay_is_rejected_after_owner_restart() {
         1,
         "restart replay reached the owner Kanna server",
     );
+    drop(restarted_owner);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_privileged_request_rejects_a_hostile_replay_after_owner_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner_config = RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0);
+    let owner = TransferRuntime::spawn(owner_config.clone()).await.unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&secondary, &owner, "peer-owner").await;
+    let owner_peer = secondary
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap();
+    let identity_path = temp
+        .path()
+        .join("transfer-identities")
+        .join(format!("{}.json", URL_SAFE_NO_PAD.encode("peer-secondary")));
+    let stored_identity: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(identity_path).unwrap()).unwrap();
+    let secondary_identity =
+        TransferIdentity::from_secret_string(stored_identity["secret_key"].as_str().unwrap())
+            .unwrap();
+    let owner_public_key = parse_public_key(&owner_peer.public_key).unwrap();
+    let owner_epoch = authenticated_request_epoch(&owner_peer.endpoint).await;
+
+    let cases = vec![
+        (
+            "get_task_snapshot",
+            json!({
+                "type": "get_task_snapshot",
+                "request_id": "restart-snapshot",
+                "requester_peer_id": "peer-secondary",
+            }),
+            json!({}),
+        ),
+        (
+            "observe_session",
+            json!({
+                "type": "observe_session",
+                "request_id": "restart-observe",
+                "requester_peer_id": "peer-secondary",
+                "session_id": "owner-task-1",
+            }),
+            json!({ "session_id": "owner-task-1" }),
+        ),
+        (
+            "send_session_input",
+            json!({
+                "type": "send_session_input",
+                "request_id": "restart-input",
+                "requester_peer_id": "peer-secondary",
+                "session_id": "owner-task-1",
+                "data": [120],
+            }),
+            json!({ "session_id": "owner-task-1", "data": [120] }),
+        ),
+        (
+            "resize_session",
+            json!({
+                "type": "resize_session",
+                "request_id": "restart-resize",
+                "requester_peer_id": "peer-secondary",
+                "session_id": "owner-task-1",
+                "cols": 100,
+                "rows": 40,
+            }),
+            json!({ "session_id": "owner-task-1", "cols": 100, "rows": 40 }),
+        ),
+        (
+            "close_task",
+            json!({
+                "type": "close_task",
+                "request_id": "restart-close",
+                "requester_peer_id": "peer-secondary",
+                "task_id": "owner-task-1",
+            }),
+            json!({ "task_id": "owner-task-1" }),
+        ),
+        (
+            "advance_task_stage",
+            json!({
+                "type": "advance_task_stage",
+                "request_id": "restart-advance",
+                "requester_peer_id": "peer-secondary",
+                "task_id": "owner-task-1",
+                "expected_transition_revision": "run-1",
+            }),
+            json!({
+                "task_id": "owner-task-1",
+                "expected_transition_revision": "run-1",
+            }),
+        ),
+        (
+            "read_task_file",
+            json!({
+                "type": "read_task_file",
+                "request_id": "restart-read",
+                "requester_peer_id": "peer-secondary",
+                "task_id": "owner-task-1",
+                "path": "README.md",
+            }),
+            json!({ "task_id": "owner-task-1", "path": "README.md" }),
+        ),
+        (
+            "mark_task_read",
+            json!({
+                "type": "mark_task_read",
+                "request_id": "restart-mark-read",
+                "requester_peer_id": "peer-secondary",
+            }),
+            json!({
+                "task_id": "owner-task-1",
+                "expected_activity_revision": 1,
+            }),
+        ),
+    ];
+    let mut captured = Vec::new();
+    for (action, mut request, arguments) in cases {
+        let request_id = request["request_id"].as_str().unwrap().to_owned();
+        let mut payload = arguments.as_object().unwrap().clone();
+        payload.insert("action".into(), json!(action));
+        payload.insert("request_id".into(), json!(request_id));
+        payload.insert("owner_epoch".into(), json!(owner_epoch));
+        payload.insert("issued_at_unix_ms".into(), json!(current_unix_ms()));
+        request["sealed_payload"] = json!(seal_json(
+            &secondary_identity,
+            &owner_public_key,
+            &serde_json::Value::Object(payload),
+        )
+        .unwrap());
+        captured.push((action, request));
+    }
+
+    drop(owner);
+    let restarted_owner = TransferRuntime::spawn(owner_config).await.unwrap();
+    let restarted_endpoint = runtime_endpoint(temp.path(), "peer-owner");
+    for (action, request) in captured {
+        let response = send_raw_peer_value(&restarted_endpoint, &request).await;
+        assert!(
+            matches!(
+                response,
+                PeerResponse::Error { ref message, .. }
+                    if message.contains("stale owner epoch")
+            ),
+            "captured {action} request crossed an owner restart: {response:?}",
+        );
+    }
     drop(restarted_owner);
 }
 
@@ -3186,6 +3464,7 @@ async fn privileged_lan_read_rejects_stale_and_tampered_arguments() {
         TransferIdentity::from_secret_string(stored_identity["secret_key"].as_str().unwrap())
             .unwrap();
     let owner_public_key = parse_public_key(&owner_peer.public_key).unwrap();
+    let owner_epoch = authenticated_request_epoch(&owner_peer.endpoint).await;
     let server = tokio::spawn(serve_task_file_reads(kanna_listener, 2));
 
     for (request_id, issued_at_unix_ms, outer_path, expected_error) in [
@@ -3203,6 +3482,7 @@ async fn privileged_lan_read_rejects_stale_and_tampered_arguments() {
             &json!({
                 "action": "read_task_file",
                 "request_id": request_id,
+                "owner_epoch": owner_epoch,
                 "issued_at_unix_ms": issued_at_unix_ms,
                 "task_id": "owner-task-1",
                 "path": "src/private.rs",
@@ -3516,12 +3796,14 @@ async fn replayed_advance_payload_cannot_apply_owner_action_twice() {
         TransferIdentity::from_secret_string(stored_identity["secret_key"].as_str().unwrap())
             .unwrap();
     let owner_public_key = parse_public_key(&owner_peer.public_key).unwrap();
+    let owner_epoch = authenticated_request_epoch(&owner_peer.endpoint).await;
     let sealed_payload = seal_json(
         &secondary_identity,
         &owner_public_key,
         &json!({
             "action": "advance_task_stage",
             "request_id": "replayed-advance",
+            "owner_epoch": owner_epoch,
             "issued_at_unix_ms": current_unix_ms(),
             "task_id": "owner-task-1",
             "expected_transition_revision": "run-1",
@@ -4181,12 +4463,23 @@ async fn unapplied_import_commit_receipt_retries_without_restart_or_duplicate() 
     let first = next_outgoing_transfer_committed(&primary).await;
     assert_eq!(first.transfer_id, preflight.transfer_id);
 
+    tokio::time::timeout(
+        Duration::from_millis(225),
+        next_outgoing_transfer_committed(&primary),
+    )
+    .await
+    .expect_err("an in-flight receipt was redelivered before apply or nack");
+
+    primary
+        .nack_import_commit(&preflight.transfer_id)
+        .await
+        .unwrap();
     let retry = tokio::time::timeout(
         Duration::from_secs(1),
         next_outgoing_transfer_committed(&primary),
     )
     .await
-    .expect("unapplied receipt was not retried while the runtime stayed alive");
+    .expect("nacked receipt was not retried while the runtime stayed alive");
     assert_eq!(retry.transfer_id, preflight.transfer_id);
 
     primary
@@ -4278,12 +4571,22 @@ async fn stalled_receipt_consumer_has_one_bounded_pending_event_per_receipt_then
         .unwrap();
     let initial = next_outgoing_transfer_committed(&primary).await;
     assert_eq!(initial.transfer_id, retry_transfer.transfer_id);
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        next_outgoing_transfer_committed(&primary),
+    )
+    .await
+    .expect_err("a claimed receipt was redelivered while its consumer was delayed");
+    primary
+        .nack_import_commit(&retry_transfer.transfer_id)
+        .await
+        .unwrap();
     let retry = tokio::time::timeout(
         Duration::from_millis(100),
         next_outgoing_transfer_committed(&primary),
     )
     .await
-    .expect("a dequeued but unapplied receipt was not retried");
+    .expect("a nacked receipt was not retried");
     assert_eq!(retry.transfer_id, retry_transfer.transfer_id);
 }
 

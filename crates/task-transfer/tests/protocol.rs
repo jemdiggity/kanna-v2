@@ -65,6 +65,17 @@ fn control_messages_roundtrip_with_request_ids() {
 }
 
 #[test]
+fn authenticated_request_epoch_handshake_roundtrips() {
+    assert_roundtrip(PeerRequest::GetAuthenticatedRequestEpoch {
+        request_id: "epoch-1".into(),
+    });
+    assert_roundtrip(PeerResponse::AuthenticatedRequestEpoch {
+        request_id: "epoch-1".into(),
+        epoch: "restart-random-owner-epoch".into(),
+    });
+}
+
+#[test]
 fn terminal_observer_control_messages_carry_subscription_leases() {
     assert_roundtrip(ControlRequest::ObservePeerSession {
         request_id: "observe-1".into(),
@@ -231,6 +242,14 @@ fn applied_import_commit_control_messages_roundtrip() {
     });
     assert_roundtrip(ControlResponse::MarkImportCommitApplied {
         request_id: "req-applied".into(),
+        transfer_id: "transfer-1".into(),
+    });
+    assert_roundtrip(ControlRequest::NackImportCommit {
+        request_id: "req-nack".into(),
+        transfer_id: "transfer-1".into(),
+    });
+    assert_roundtrip(ControlResponse::NackImportCommit {
+        request_id: "req-nack".into(),
         transfer_id: "transfer-1".into(),
     });
     assert_roundtrip(ControlRequest::MarkImportAckCompleted {

@@ -5,6 +5,18 @@ use axum::Extension;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+/// Compatibility endpoint for deployed mobile builds predating paired-device
+/// stream credentials. New clients use `/v2/stream`; keep this epoch stable
+/// until the minimum supported mobile version has crossed the migration.
+pub(super) async fn legacy_ksp_stream(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    ws.on_upgrade(move |socket| {
+        crate::ksp::handle_stream(socket, state, crate::ksp::AuthMode::AllowEmpty)
+    })
+}
+
 pub(super) async fn ksp_stream(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,

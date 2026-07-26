@@ -3326,6 +3326,24 @@ describe("outgoing transfer commit acknowledgment", () => {
     loadSessionRecoveryStateMock.mockReset();
   });
 
+  it("tombstones a replay whose completed transfer row was already compacted", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    await store.init(createTransferDb({}));
+    invokeMock.mockResolvedValue(null);
+
+    await store.handleOutgoingTransferCommitted({
+      transferId: "transfer-compacted",
+      sourceTaskId: "task-source",
+      destinationLocalTaskId: "task-imported",
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("mark_outgoing_transfer_commit_applied", {
+      transferId: "transfer-compacted",
+    });
+  });
+
   it("marks the outgoing transfer completed and closes the source task", async () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");

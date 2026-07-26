@@ -144,6 +144,10 @@ pub enum ControlRequest {
         request_id: String,
         transfer_id: String,
     },
+    NackImportCommit {
+        request_id: String,
+        transfer_id: String,
+    },
     MarkImportAckCompleted {
         request_id: String,
         transfer_id: String,
@@ -269,6 +273,10 @@ pub enum ControlResponse {
         request_id: String,
         transfer_id: String,
     },
+    NackImportCommit {
+        request_id: String,
+        transfer_id: String,
+    },
     MarkImportAckCompleted {
         request_id: String,
         transfer_id: String,
@@ -291,6 +299,9 @@ pub struct LocalTransferIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PeerRequest {
+    GetAuthenticatedRequestEpoch {
+        request_id: String,
+    },
     StartPairing {
         request_id: String,
         source_peer_id: String,
@@ -394,6 +405,10 @@ pub enum PeerRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PeerResponse {
+    AuthenticatedRequestEpoch {
+        request_id: String,
+        epoch: String,
+    },
     StartPairing {
         request_id: String,
         peer: PairingPeer,
