@@ -285,19 +285,24 @@ fn wait_for_daemon_fd_count_at_most(pid: u32, limit: usize, timeout: Duration) -
 
 fn write_fake_recovery_sidecar(dir: &Path) -> PathBuf {
     let path = dir.join("fake-terminal-recovery");
+    let log_path = dir.join("fake-terminal-recovery.log");
     std::fs::write(
         &path,
-        r#"#!/bin/sh
+        format!(
+            r#"#!/bin/sh
 while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{}'
   case "$line" in
-    *'"type":"StartSession"'*|*'"type":"ResizeSession"'*) printf '{"type":"Ok"}\n' ;;
-    *'"type":"GetSnapshot"'*) printf '{"type":"NotFound"}\n' ;;
-    *'"type":"FlushAndShutdown"'*) printf '{"type":"Ok"}\n'; exit 0 ;;
+    *'"type":"StartSession"'*|*'"type":"ResizeSession"'*) printf '{{"type":"Ok"}}\n' ;;
+    *'"type":"GetSnapshot"'*) printf '{{"type":"NotFound"}}\n' ;;
+    *'"type":"FlushAndShutdown"'*) printf '{{"type":"Ok"}}\n'; exit 0 ;;
     *'"type":"WriteOutput"'*|*'"type":"EndSession"'*) : ;;
-    *) printf '{"type":"Error","message":"unexpected fake recovery command"}\n' ;;
+    *) printf '{{"type":"Error","message":"unexpected fake recovery command"}}\n' ;;
   esac
 done
 "#,
+            log_path.display()
+        ),
     )
     .expect("should write fake recovery sidecar");
     let mut permissions = std::fs::metadata(&path)
@@ -306,6 +311,46 @@ done
     permissions.set_mode(0o755);
     std::fs::set_permissions(&path, permissions).expect("should chmod fake recovery sidecar");
     path
+}
+
+fn wait_for_recovery_log(
+    daemon: &DaemonHandle,
+    predicate: impl Fn(&[Value]) -> bool,
+    timeout: Duration,
+) -> Vec<Value> {
+    let path = daemon._dir.join("fake-terminal-recovery.log");
+    let deadline = Instant::now() + timeout;
+    loop {
+        let commands = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect::<Vec<_>>();
+        if predicate(&commands) {
+            return commands;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "recovery log {:?} never reached expected state; commands={commands:?}",
+            path
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn recovery_output_contains(command: &Value, marker: &[u8]) -> bool {
+    if command["type"] != "WriteOutput" {
+        return false;
+    }
+    let Some(data) = command["data"].as_array() else {
+        return false;
+    };
+    let bytes = data
+        .iter()
+        .filter_map(Value::as_u64)
+        .map(|value| value as u8)
+        .collect::<Vec<_>>();
+    bytes.windows(marker.len()).any(|window| window == marker)
 }
 
 impl Drop for DaemonHandle {
@@ -1356,6 +1401,187 @@ fn test_stale_reader_does_not_remove_respawned_session_with_same_id() {
         "respawned session should survive stale cleanup, got {:?}",
         snapshot.vt
     );
+}
+
+#[test]
+fn same_id_reuse_waits_for_old_reader_exit_and_recovery_teardown() {
+    let daemon = DaemonHandle::start_with_fake_recovery([(
+        "KANNA_DAEMON_TEST_SLOW_RECOVERY_WRITE_MS",
+        "1200",
+    )]);
+    let session_id = "sess-linearized-reuse";
+    let old_marker = b"OLD_INCARNATION";
+    let release_path = daemon._dir.join("release-old-output");
+
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Cmd::Subscribe);
+    match subscriber.recv() {
+        Evt::Ok => {}
+        other => panic!("expected Ok for Subscribe, got: {other:?}"),
+    }
+
+    let mut creator = daemon.connect();
+    spawn_shell_session(
+        &mut creator,
+        session_id,
+        &format!(
+            "while [ ! -f '{}' ]; do sleep 0.01; done; printf 'OLD_INCARNATION\\r\\n'; while :; do sleep 1; done",
+            release_path.display()
+        ),
+    );
+
+    match subscriber.recv() {
+        Evt::SessionCreated {
+            session_id: created,
+        } => {
+            assert_eq!(created, session_id);
+        }
+        other => panic!("expected initial SessionCreated, got: {other:?}"),
+    }
+
+    let mut observer = daemon.connect();
+    observer.send(&Cmd::Observe {
+        session_id: session_id.to_string(),
+    });
+    match observer.recv() {
+        Evt::Ok => {}
+        other => panic!("expected Ok for Observe, got: {other:?}"),
+    }
+    std::fs::write(&release_path, b"go").unwrap();
+    loop {
+        match observer.recv() {
+            Evt::Output {
+                session_id: output_session,
+                data,
+            } if data
+                .windows(old_marker.len())
+                .any(|window| window == old_marker) =>
+            {
+                assert_eq!(output_session, session_id);
+                break;
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => {}
+            other => panic!("expected old output before replacement, got: {other:?}"),
+        }
+    }
+
+    let mut killer = daemon.connect();
+    killer.send(&Cmd::Kill {
+        session_id: session_id.to_string(),
+    });
+    wait_for_daemon_log(
+        &daemon,
+        "[kill] session=sess-linearized-reuse",
+        Duration::from_secs(2),
+    );
+    thread::sleep(Duration::from_millis(50));
+
+    let mut replacement = daemon.connect();
+    replacement.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "printf 'NEW_INCARNATION\\r\\n'; while :; do sleep 1; done".to_string(),
+        ],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        terminal_prelude: None,
+    });
+    expect_session_created_with_timeout(&mut replacement, session_id, Duration::from_secs(4));
+    wait_for_ok_with_timeout(&mut killer, "kill old incarnation", Duration::from_secs(4));
+
+    let mut saw_old_exit = false;
+    loop {
+        match subscriber.recv() {
+            Evt::Exit {
+                session_id: exited,
+                killed,
+                ..
+            } => {
+                assert_eq!(exited, session_id);
+                assert!(killed, "old incarnation Exit must be marked killed");
+                saw_old_exit = true;
+            }
+            Evt::SessionCreated {
+                session_id: created,
+            } => {
+                assert_eq!(created, session_id);
+                assert!(
+                    saw_old_exit,
+                    "replacement SessionCreated preceded the old reader's Exit"
+                );
+                break;
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => {}
+            other => panic!("expected old Exit then replacement SessionCreated, got: {other:?}"),
+        }
+    }
+
+    let commands = wait_for_recovery_log(
+        &daemon,
+        |commands| {
+            commands
+                .iter()
+                .filter(|command| command["type"] == "StartSession")
+                .count()
+                >= 2
+                && commands
+                    .iter()
+                    .any(|command| recovery_output_contains(command, old_marker))
+                && commands
+                    .iter()
+                    .any(|command| command["type"] == "EndSession")
+        },
+        Duration::from_secs(4),
+    );
+    let replacement_start = commands
+        .iter()
+        .enumerate()
+        .filter(|(_, command)| command["type"] == "StartSession")
+        .nth(1)
+        .map(|(index, _)| index)
+        .expect("replacement recovery session should start");
+    assert!(
+        commands[..replacement_start]
+            .iter()
+            .any(|command| recovery_output_contains(command, old_marker)),
+        "old recovery output must finish before replacement start: {commands:?}"
+    );
+    assert!(
+        commands[..replacement_start]
+            .iter()
+            .any(|command| command["type"] == "EndSession"),
+        "old recovery teardown must finish before replacement start: {commands:?}"
+    );
+    assert!(
+        !commands[replacement_start + 1..]
+            .iter()
+            .any(|command| recovery_output_contains(command, old_marker)
+                || command["type"] == "EndSession"),
+        "old recovery work escaped after replacement start: {commands:?}"
+    );
+
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < deadline {
+        match subscriber.recv_with_timeout(Duration::from_millis(25)) {
+            Ok(Evt::Output { data, .. }) => assert!(
+                !data
+                    .windows(old_marker.len())
+                    .any(|window| window == old_marker),
+                "old output escaped after replacement SessionCreated"
+            ),
+            Ok(Evt::StatusChanged { .. }) => {
+                panic!("old status escaped after replacement SessionCreated")
+            }
+            Ok(Evt::Exit { .. }) => panic!("old Exit escaped after replacement SessionCreated"),
+            Ok(Evt::SessionCreated { .. } | Evt::Snapshot { .. } | Evt::Ok | Evt::Unknown) => {}
+            Ok(Evt::SessionList { .. } | Evt::Error { .. }) => {}
+            Err(_) => {}
+        }
+    }
 }
 
 #[test]

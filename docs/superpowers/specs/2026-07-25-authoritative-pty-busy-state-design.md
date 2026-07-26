@@ -100,18 +100,21 @@ attach.
 ### 3. A killed session stops before its id can be reused
 
 `Kill` requests the current `StreamControl` to stop before terminating and
-removing the PTY session. Each `SessionHandle` also has a monotonic retired
-flag. `SessionManager` retires a handle when it is removed or replaced, giving
-the hot output loop an O(1) incarnation fence without taking the global
-session-manager mutex for every PTY chunk. The reader checks both its stop token
-and retired flag before externally visible chunk/status work. The kill path
-waits for the reader to acknowledge the stop for a bounded interval before
-replying, so a successful same-id respawn cannot race an old reader that is
-still publishing events.
+removing the PTY session. Spawn and kill operations for the same session id
+share a per-id lifecycle lock, held without the session-manager mutex. Kill
+keeps the old handle current while it waits for the reader to stop, publishes
+the killed `Exit`, ends recovery, and only then removes the handle and releases
+the lifecycle lock. A same-id spawn therefore cannot publish
+`SessionCreated` until all externally visible work from the old incarnation is
+finished.
 
-The wait is bounded and never holds the session-manager lock. If a reader
-cannot acknowledge promptly, kill logs the timeout and continues after the
-manager identity guard has made the old reader stale.
+Each `SessionHandle` also has a monotonic retired flag. `SessionManager`
+retires a handle when it is removed or replaced, giving the hot output loop an
+O(1) incarnation fence without taking the global session-manager mutex for
+every PTY chunk. The reader rechecks both its stop token and retired flag after
+awaited fanout, terminal, status, and snapshot operations and before recovery
+writes. Lifecycle locks are retained weakly so unused session ids do not
+accumulate.
 
 ## Tests
 

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Weak,
 };
 use std::time::{Duration, Instant};
 
@@ -57,18 +57,14 @@ impl StreamControl {
             && Arc::ptr_eq(&self.stopped, &other.stopped)
     }
 
-    pub async fn wait_stopped(&self, timeout: Duration) -> bool {
-        tokio::time::timeout(timeout, async {
-            loop {
-                let notified = self.stopped_notify.notified();
-                if self.is_stopped() {
-                    return;
-                }
-                notified.await;
+    pub async fn wait_until_stopped(&self) {
+        loop {
+            let notified = self.stopped_notify.notified();
+            if self.is_stopped() {
+                return;
             }
-        })
-        .await
-        .is_ok()
+            notified.await;
+        }
     }
 }
 
@@ -389,6 +385,7 @@ pub struct SessionHandoffParts {
 
 pub struct SessionManager {
     pub sessions: HashMap<String, Arc<SessionHandle>>,
+    lifecycle_locks: HashMap<String, Weak<Mutex<()>>>,
 }
 
 impl Default for SessionManager {
@@ -424,6 +421,7 @@ impl SessionManager {
     pub fn new() -> Self {
         SessionManager {
             sessions: HashMap::new(),
+            lifecycle_locks: HashMap::new(),
         }
     }
 
@@ -460,6 +458,19 @@ impl SessionManager {
             .iter()
             .map(|(id, session)| (id.clone(), Arc::clone(session)))
             .collect()
+    }
+
+    pub fn lifecycle_lock(&mut self, session_id: &str) -> Arc<Mutex<()>> {
+        self.lifecycle_locks
+            .retain(|_, lifecycle| lifecycle.strong_count() > 0);
+        if let Some(lifecycle) = self.lifecycle_locks.get(session_id).and_then(Weak::upgrade) {
+            return lifecycle;
+        }
+
+        let lifecycle = Arc::new(Mutex::new(()));
+        self.lifecycle_locks
+            .insert(session_id.to_string(), Arc::downgrade(&lifecycle));
+        lifecycle
     }
 
     pub fn kill_all_handles(&mut self) -> Vec<(String, Arc<SessionHandle>)> {
@@ -715,7 +726,9 @@ mod tests {
         });
 
         assert!(
-            control.wait_stopped(Duration::from_millis(100)).await,
+            tokio::time::timeout(Duration::from_millis(100), control.wait_until_stopped())
+                .await
+                .is_ok(),
             "reader stop acknowledgement should wake the kill path"
         );
     }

@@ -297,11 +297,21 @@ pub(crate) async fn stream_output(
                         resync_drained_subscribers(&session_id, &session, &fanout).await;
                     }
                 }
+                if stream_control.stop_requested() || session.is_retired() {
+                    log::info!("[stream] stopped retired reader session={}", session_id);
+                    stream_control.mark_stopped();
+                    return;
+                }
                 match session
                     .refresh_quiet_status(std::time::Duration::from_millis(STATUS_IDLE_FLUSH_MS))
                     .await
                 {
                     Ok(Some(status)) => {
+                        if stream_control.stop_requested() || session.is_retired() {
+                            log::info!("[stream] stopped retired reader session={}", session_id);
+                            stream_control.mark_stopped();
+                            return;
+                        }
                         log_status_observation(&session, &session_id, "quiet_refresh").await;
                         emit_status_changed(
                             &session,
@@ -426,6 +436,9 @@ pub(crate) async fn handle_output_chunk(
             .get(session_id)
             .is_none_or(|client_ids| client_ids.is_empty())
     };
+    if session.is_retired() {
+        return None;
+    }
     let allow_terminal_replies = !has_live_terminal_client;
 
     // The fanout lock spans (mirror -> enqueue) so the AttachSnapshot cutover
@@ -436,6 +449,9 @@ pub(crate) async fn handle_output_chunk(
         Some(fanout) => Some(fanout.state.lock().await),
         None => None,
     };
+    if session.is_retired() {
+        return None;
+    }
 
     let mirror_started = Instant::now();
     let mirror_operation = terminal_perf::global_monitor().begin(perf_context(
@@ -491,6 +507,9 @@ pub(crate) async fn handle_output_chunk(
             ));
             if let Some(status) = status {
                 log_status_observation(session, session_id, "mirror_output").await;
+                if session.is_retired() {
+                    return slow_stage;
+                }
                 emit_status_changed(session, broadcast_tx, fanouts, session_id, status).await;
             } else {
                 log_status_observation(session, session_id, "mirror_output").await;
@@ -507,7 +526,7 @@ pub(crate) async fn handle_output_chunk(
         }
     }
 
-    if should_mirror_output_to_recovery(has_live_terminal_client) {
+    if !session.is_retired() && should_mirror_output_to_recovery(has_live_terminal_client) {
         let sequence = recovery_manager.next_sequence(session_id);
         let recovery_started = Instant::now();
         let recovery_operation = terminal_perf::global_monitor().begin(perf_context(
@@ -549,6 +568,9 @@ async fn resync_drained_subscribers(
             return;
         }
     };
+    if session.is_retired() {
+        return;
+    }
     let recovery_events = [
         Event::Snapshot {
             session_id: session_id.to_string(),
@@ -572,7 +594,13 @@ async fn emit_status_changed(
     session_id: &str,
     status: SessionStatus,
 ) {
+    if session.is_retired() {
+        return;
+    }
     if !session.update_status(status).await {
+        return;
+    }
+    if session.is_retired() {
         return;
     }
 
@@ -591,6 +619,9 @@ async fn emit_status_changed(
     } else {
         None
     };
+    if session.is_retired() {
+        return;
+    }
 
     let event = Event::StatusChanged {
         session_id: session_id.to_string(),
@@ -601,6 +632,9 @@ async fn emit_status_changed(
         let _ = broadcast_tx.send(json);
     }
 
+    if session.is_retired() {
+        return;
+    }
     if let Some(report) = fanout_status_changed(fanouts, session_id, &event).await {
         terminal_perf::emit_events(report.newly_lagged);
         if report.resync_ready {

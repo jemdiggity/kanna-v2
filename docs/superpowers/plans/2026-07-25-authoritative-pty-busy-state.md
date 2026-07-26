@@ -14,16 +14,17 @@
 
 - Modify `crates/kanna-server/src/terminal_watcher.rs`: split attached-session
   ownership by status and add focused activity regressions.
-- Modify `crates/daemon/src/session.rs`: expose bounded reader-stop lifecycle
-  helpers and current-handle identity.
+- Modify `crates/daemon/src/session.rs`: expose reader-stop lifecycle helpers
+  and weakly retained per-session-id lifecycle locks.
 - Modify `crates/daemon/src/connection.rs`: stop/fence the current reader in
   `Kill` before the session id becomes reusable.
 - Modify `crates/daemon/src/output.rs`: reject externally visible work from a
   reader whose handle is no longer current.
 - Modify `crates/daemon/src/startup.rs`: restart adopted PTY readers before
   publishing the replacement daemon socket.
-- Modify `crates/daemon/tests/handoff.rs` and daemon unit tests: prove
-  no-attach handoff status tracking and same-id fencing.
+- Modify `crates/daemon/tests/handoff.rs`,
+  `crates/daemon/tests/reconnect.rs`, and daemon unit tests: prove no-attach
+  handoff status tracking and same-id fencing.
 
 ### Task 1: Make attached Busy authoritative
 
@@ -90,27 +91,29 @@
   Expected: FAIL because `Kill` does not request or await reader stop and the
   reader only checks manager identity during final cleanup.
 
-- [ ] **Step 3: Add bounded stop acknowledgement**
+- [ ] **Step 3: Add stop acknowledgement and same-id serialization**
 
-  In `crates/daemon/src/session.rs`, add a helper that requests the active
-  stream control to stop and waits asynchronously, with a short bounded
-  timeout, for `is_stopped()`. Give each handle a monotonic retired flag that
-  `SessionManager` sets on removal/replacement. Do not hold the PTY, state, or
-  manager mutex while waiting.
+  In `crates/daemon/src/session.rs`, add a helper that waits asynchronously for
+  the active stream control to report `is_stopped()`. Give each handle a
+  monotonic retired flag that `SessionManager` sets on removal/replacement,
+  and give spawn/kill a weakly retained per-session-id lifecycle lock. Do not
+  hold the PTY, state, or manager mutex while waiting.
 
 - [ ] **Step 4: Fence externally visible reader work**
 
   In `crates/daemon/src/output.rs`, check the handle's O(1) retired flag
-  together with `StreamControl` before mirroring chunks and before quiet status
-  refresh/emission. A stale reader marks itself stopped and exits without
+  together with `StreamControl` before mirroring chunks, after awaited fanout
+  and terminal operations, before quiet status refresh/emission, and before
+  recovery writes. A stale reader marks itself stopped and exits without
   touching fanout, recovery, or task status.
 
 - [ ] **Step 5: Stop the reader before completing Kill**
 
   In `crates/daemon/src/connection.rs`, request reader stop before killing the
-  PTY, remove the handle only if it is still the current incarnation, and
-  await bounded acknowledgement before returning `Ok`. Preserve the existing
-  single killed `Exit` ordering before a later `SessionCreated`.
+  PTY, await acknowledgement, publish the single killed `Exit`, end recovery,
+  and remove the handle only if it is still the current incarnation. Hold the
+  same-id lifecycle lock through this sequence so a later `SessionCreated`
+  cannot overtake it.
 
 - [ ] **Step 6: Re-run focused daemon tests**
 
