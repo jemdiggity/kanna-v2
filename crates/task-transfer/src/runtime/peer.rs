@@ -30,6 +30,15 @@ impl TransferRuntime {
         target_peer_id: &str,
         transport: TransferTransport,
     ) -> Result<PeerRegistryEntry, RuntimeError> {
+        let discovery_delay = self
+            .config
+            .peer_discovery_delays
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_front();
+        if let Some(discovery_delay) = discovery_delay {
+            tokio::time::sleep(discovery_delay).await;
+        }
         find_peer(
             &self.discovery,
             &self.external_peers,

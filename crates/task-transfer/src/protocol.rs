@@ -54,7 +54,8 @@ pub enum ControlRequest {
         request_id: String,
         target_peer_id: String,
         task_id: String,
-        expected_transition_revision: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_transition_revision: Option<String>,
     },
     ReadPeerTaskFile {
         request_id: String,
@@ -328,6 +329,8 @@ pub enum PeerRequest {
     GetTaskSnapshot {
         request_id: String,
         requester_peer_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
     },
     ObserveSession {
         request_id: String,
@@ -356,7 +359,10 @@ pub enum PeerRequest {
         request_id: String,
         requester_peer_id: String,
         task_id: String,
-        expected_transition_revision: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_transition_revision: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
     },
     ReadTaskFile {
         request_id: String,

@@ -225,7 +225,11 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             task_id,
             expected_transition_revision,
         } => match runtime
-            .advance_peer_task_stage(&target_peer_id, &task_id, &expected_transition_revision)
+            .advance_peer_task_stage(
+                &target_peer_id,
+                &task_id,
+                expected_transition_revision.as_deref(),
+            )
             .await
         {
             Ok(()) => ControlResponse::AdvancePeerTaskStage { request_id },

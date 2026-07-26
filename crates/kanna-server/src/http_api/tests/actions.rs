@@ -3451,6 +3451,181 @@ async fn two_immediate_advance_requests_share_one_owner_transition() {
     assert_eq!(observed_calls, 1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn complete_stage_waits_for_competing_advance_stage_mutation() {
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let seeded =
+        super::test_state_with_seed("desktop-cross-action-linearization", "Studio Mac", |db| {
+            db.insert_test_repo("repo-1", "Repo One").unwrap();
+            db.insert_test_pipeline_item(
+                "task-1",
+                "repo-1",
+                "linearize actions",
+                Some("Linearize actions"),
+                "in progress",
+                "2026-07-26 00:00:00",
+            )
+            .unwrap();
+        });
+    let mut state = AppState::with_stage_advancer(
+        seeded.config.clone(),
+        Arc::new({
+            let gate = Arc::clone(&gate);
+            move |task_id| {
+                started_tx.send(()).unwrap();
+                let (lock, changed) = &*gate;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = changed.wait(released).unwrap();
+                }
+                Ok(TaskActionResponse {
+                    task_id,
+                    follow_task: None,
+                })
+            }
+        }),
+    );
+    state.stage_completer = Some(Arc::new(|task_id, _| {
+        Ok(TaskActionResponse {
+            task_id,
+            follow_task: None,
+        })
+    }));
+    let app = super::router(Arc::new(state));
+
+    let advance = tokio::spawn(
+        app.clone().oneshot(
+            Request::post("/v1/tasks/task-1/actions/advance-stage")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("advance mutation did not start");
+
+    let mut completion = Box::pin(
+        app.clone().oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "status": "success",
+                        "summary": "competing completion",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        ),
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), &mut completion)
+            .await
+            .is_err(),
+        "complete-stage interleaved with an active advance-stage mutation",
+    );
+
+    {
+        let (lock, changed) = &*gate;
+        *lock.lock().unwrap() = true;
+        changed.notify_all();
+    }
+    assert_eq!(advance.await.unwrap().unwrap().status(), StatusCode::OK);
+    assert_eq!(completion.await.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn blocker_replacement_waits_for_competing_advance_stage_mutation() {
+    let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let seeded = super::test_state_with_seed("desktop-blocker-linearization", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        for (task_id, prompt) in [("task-1", "linearize blockers"), ("blocker-1", "blocker")] {
+            db.insert_test_pipeline_item(
+                task_id,
+                "repo-1",
+                prompt,
+                Some(prompt),
+                "in progress",
+                "2026-07-26 00:00:00",
+            )
+            .unwrap();
+        }
+    });
+    let db_path = seeded.config.db_path.clone();
+    let state = AppState::with_stage_advancer(
+        seeded.config.clone(),
+        Arc::new({
+            let gate = Arc::clone(&gate);
+            move |task_id| {
+                started_tx.send(()).unwrap();
+                let (lock, changed) = &*gate;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = changed.wait(released).unwrap();
+                }
+                Ok(TaskActionResponse {
+                    task_id,
+                    follow_task: None,
+                })
+            }
+        }),
+    );
+    let app = super::router(Arc::new(state));
+
+    let advance = tokio::spawn(
+        app.clone().oneshot(
+            Request::post("/v1/tasks/task-1/actions/advance-stage")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("advance mutation did not start");
+
+    let mut block = Box::pin(
+        app.clone().oneshot(
+            Request::post("/v1/tasks/task-1/actions/block")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "blockerTaskIds": ["blocker-1"] }).to_string(),
+                ))
+                .unwrap(),
+        ),
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), &mut block)
+            .await
+            .is_err(),
+        "blocker replacement interleaved with an active advance-stage mutation",
+    );
+    assert!(
+        Db::open(&db_path)
+            .unwrap()
+            .list_task_blocker_ids("task-1")
+            .unwrap()
+            .is_empty(),
+        "blocker mutation committed before the lifecycle lease released",
+    );
+
+    {
+        let (lock, changed) = &*gate;
+        *lock.lock().unwrap() = true;
+        changed.notify_all();
+    }
+    assert_eq!(advance.await.unwrap().unwrap().status(), StatusCode::OK);
+    assert_eq!(block.await.unwrap().status(), StatusCode::OK);
+    assert_eq!(
+        Db::open(&db_path)
+            .unwrap()
+            .list_task_blocker_ids("task-1")
+            .unwrap(),
+        vec!["blocker-1".to_string()],
+    );
+}
+
 #[tokio::test]
 async fn rerun_stage_route_uses_stage_rerunner() {
     let app = super::test_router_with_stage_rerunner(

@@ -1,6 +1,8 @@
 use super::events::RuntimeError;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // Two seconds keeps crash recovery responsive without flooding the renderer when
@@ -22,7 +24,7 @@ pub enum DiscoveryMode {
     Mdns,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub peer_id: String,
     pub display_name: String,
@@ -40,6 +42,7 @@ pub struct RuntimeConfig {
     pub(super) max_applied_receipts: usize,
     pub(super) max_incoming_reservations: usize,
     pub(super) mark_read_timeout: Duration,
+    pub(super) peer_discovery_delays: Arc<Mutex<VecDeque<Duration>>>,
 }
 
 impl RuntimeConfig {
@@ -66,6 +69,7 @@ impl RuntimeConfig {
             max_applied_receipts: DEFAULT_MAX_APPLIED_RECEIPTS,
             max_incoming_reservations: DEFAULT_MAX_INCOMING_RESERVATIONS,
             mark_read_timeout: Duration::from_secs(2),
+            peer_discovery_delays: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -111,6 +115,14 @@ impl RuntimeConfig {
 
     pub fn with_mark_read_timeout(mut self, mark_read_timeout: Duration) -> Self {
         self.mark_read_timeout = mark_read_timeout;
+        self
+    }
+
+    pub fn with_peer_discovery_delays(self, delays: impl IntoIterator<Item = Duration>) -> Self {
+        *self
+            .peer_discovery_delays
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = delays.into_iter().collect();
         self
     }
 
@@ -207,6 +219,7 @@ impl RuntimeConfig {
             max_applied_receipts: DEFAULT_MAX_APPLIED_RECEIPTS,
             max_incoming_reservations: DEFAULT_MAX_INCOMING_RESERVATIONS,
             mark_read_timeout: Duration::from_secs(2),
+            peer_discovery_delays: Arc::new(Mutex::new(VecDeque::new())),
         })
     }
 

@@ -98,11 +98,14 @@ export function createDesktopLanTerminalClient(): DesktopRelayTerminalClient {
       });
     },
     async advanceStage(options) {
-      await invoke("advance_transfer_peer_task_stage", {
+      const args: Record<string, unknown> = {
         peerId: options.desktopId,
         taskId: options.taskId,
-        expectedTransitionRevision: options.expectedTransitionRevision,
-      });
+      };
+      if (options.expectedTransitionRevision) {
+        args.expectedTransitionRevision = options.expectedTransitionRevision;
+      }
+      await invoke("advance_transfer_peer_task_stage", args);
     },
     async readTaskFile(options) {
       const response = await invoke("read_transfer_peer_task_file", {

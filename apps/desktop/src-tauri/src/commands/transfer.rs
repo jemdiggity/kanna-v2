@@ -272,7 +272,7 @@ pub async fn advance_transfer_peer_task_stage(
     state: tauri::State<'_, crate::TransferServiceState>,
     peer_id: String,
     task_id: String,
-    expected_transition_revision: String,
+    expected_transition_revision: Option<String>,
 ) -> Result<Value, String> {
     with_transfer_client!(
         app,

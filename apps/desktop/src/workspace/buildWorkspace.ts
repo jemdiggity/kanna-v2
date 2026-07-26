@@ -179,6 +179,7 @@ function remoteCandidates(
         repoId: item.repo_id,
         updatedAt: item.updated_at,
         blockerRevision: item.blocker_revision,
+        transitionRevision: item.transition_revision,
         terminalRef,
         blockedByTaskIds: snapshot.blockedByTaskIds?.[item.id] ?? [],
       },

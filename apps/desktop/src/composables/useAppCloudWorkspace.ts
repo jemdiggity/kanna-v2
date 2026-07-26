@@ -64,6 +64,14 @@ interface ActiveMarkReadClient {
   closed: boolean;
 }
 
+interface RemoteStageAdvancePending {
+  expectedTransitionRevision: string | null;
+  sourceGeneration: number;
+  sourceKind: "cloud" | "lan";
+  ownerDesktopId: string;
+  ownerTaskId: string;
+}
+
 const CLOUD_BACKEND_ERROR_TOAST_INTERVAL_MS = 30_000;
 const REMOTE_MARK_READ_TIMEOUT_MS = 10_000;
 
@@ -84,6 +92,8 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     blockedByTaskIds: {},
     transferMachines: [],
   });
+  const cloudAuthoritativeGeneration = ref(0);
+  const lanAuthoritativeGeneration = ref(0);
   const locallyClosedRemoteTaskIds = ref<Set<string>>(new Set());
   let unsubscribeDesktopAuth: (() => void) | null = null;
   let cloudTasksUnsubscribe: (() => void) | null = null;
@@ -95,7 +105,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   let lanRefreshInFlight: Promise<void> | null = null;
   let desktopCloudWorkspaceDisposed = false;
   const activeMarkReadClients = new Set<ActiveMarkReadClient>();
-  const remoteStageAdvancesPending = new Map<string, string>();
+  const remoteStageAdvancesPending = new Map<string, RemoteStageAdvancePending>();
   const associatedCloudUsers = new Set<string>();
   let lastCloudBackendErrorToastAt: number | null = null;
   let currentDesktopId: string | null = null;
@@ -214,6 +224,40 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     lanSnapshot: filterClosedRemoteSnapshot(lanSnapshot.value),
     remoteTaskPins: remoteTaskPins.value,
   }));
+  watchEffect(() => {
+    const cloudGeneration = cloudAuthoritativeGeneration.value;
+    const lanGeneration = lanAuthoritativeGeneration.value;
+    const tasks = workspace.value.tasks;
+    for (const [requestKey, pending] of remoteStageAdvancesPending) {
+      const task = tasks.find((candidate) =>
+        candidate.owner.kind === "remote"
+        && candidate.sources.some((source) =>
+          source.terminalRef?.ownerDesktopId === pending.ownerDesktopId
+          && source.terminalRef.ownerLocalTaskId === pending.ownerTaskId
+        ),
+      );
+      const source = task?.sources.find((candidate) =>
+        candidate.kind === pending.sourceKind
+        && candidate.terminalRef?.ownerDesktopId === pending.ownerDesktopId
+        && candidate.terminalRef.ownerLocalTaskId === pending.ownerTaskId
+      );
+      const sourceGeneration = pending.sourceKind === "cloud"
+        ? cloudGeneration
+        : lanGeneration;
+      const transitionRevision =
+        typeof source?.transitionRevision === "string" && source.transitionRevision.trim()
+          ? source.transitionRevision.trim()
+          : null;
+      if (
+        !task
+        || !source
+        || transitionRevision !== pending.expectedTransitionRevision
+        || sourceGeneration > pending.sourceGeneration
+      ) {
+        remoteStageAdvancesPending.delete(requestKey);
+      }
+    }
+  }, { flush: "sync" });
   const remoteTaskDiagnostics = computed(() => workspace.value.diagnostics);
   const workspaceSidebarProjection = computed(() => workspaceSidebarProjector.project({
     taskUiSlots: store.taskUiSlots,
@@ -404,6 +448,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       return;
     }
     cloudSnapshotRevision += 1;
+    cloudAuthoritativeGeneration.value += 1;
     cloudSnapshot.value = {
       repos: snapshot.repos,
       items: snapshot.items,
@@ -428,6 +473,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
           return;
         }
         cloudSnapshotRevision += 1;
+        cloudAuthoritativeGeneration.value += 1;
         cloudSnapshot.value = {
           repos: snapshot.repos,
           items: snapshot.items,
@@ -463,6 +509,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         localClosedItems: closedLocalTaskIdentities.value,
       });
       if (desktopCloudWorkspaceDisposed) return;
+      lanAuthoritativeGeneration.value += 1;
       lanSnapshot.value = {
         repos: snapshot.repos,
         items: snapshot.items,
@@ -516,6 +563,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         associatedCloudUsers.clear();
         stopCloudTaskSubscription();
         cloudSnapshotRevision += 1;
+        cloudAuthoritativeGeneration.value += 1;
         cloudSnapshot.value = {
           repos: [],
           items: [],
@@ -641,21 +689,32 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       return;
     }
     if (workspaceTask.item.has_running_post) return;
-    const expectedTransitionRevision = workspaceTask.item.transition_revision;
-    if (
-      typeof expectedTransitionRevision !== "string"
-      || expectedTransitionRevision.trim().length === 0
-    ) {
-      toast.error("Remote task snapshot is missing its transition revision.");
-      return;
-    }
+    const expectedTransitionRevision =
+      typeof workspaceTask.item.transition_revision === "string"
+      && workspaceTask.item.transition_revision.trim().length > 0
+        ? workspaceTask.item.transition_revision.trim()
+        : null;
 
     const requestKey = JSON.stringify([
       remoteRef.ownerDesktopId,
       remoteRef.ownerLocalTaskId,
     ]);
-    if (remoteStageAdvancesPending.get(requestKey) === expectedTransitionRevision) return;
-    remoteStageAdvancesPending.set(requestKey, expectedTransitionRevision);
+    const sourceKind = workspaceTask.terminal.kind === "lan" ? "lan" : "cloud";
+    const pending: RemoteStageAdvancePending = {
+      expectedTransitionRevision,
+      sourceGeneration: sourceKind === "cloud"
+        ? cloudAuthoritativeGeneration.value
+        : lanAuthoritativeGeneration.value,
+      sourceKind,
+      ownerDesktopId: remoteRef.ownerDesktopId,
+      ownerTaskId: remoteRef.ownerLocalTaskId,
+    };
+    const existingPending = remoteStageAdvancesPending.get(requestKey);
+    if (
+      existingPending
+      && existingPending.expectedTransitionRevision === expectedTransitionRevision
+    ) return;
+    remoteStageAdvancesPending.set(requestKey, pending);
 
     let client: DesktopRelayTerminalClient | null = null;
     let accepted = false;
@@ -667,10 +726,13 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         toast.error("Remote task owner is unavailable.");
         return;
       }
+      if (desktopCloudWorkspaceDisposed) return;
       await client.advanceStage({
         desktopId: remoteRef.ownerDesktopId,
         taskId: remoteRef.ownerLocalTaskId,
-        expectedTransitionRevision,
+        ...(expectedTransitionRevision
+          ? { expectedTransitionRevision }
+          : {}),
       });
       accepted = true;
     } catch (error) {
@@ -679,7 +741,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       client?.close();
       if (
         !accepted
-        && remoteStageAdvancesPending.get(requestKey) === expectedTransitionRevision
+        && remoteStageAdvancesPending.get(requestKey) === pending
       ) {
         remoteStageAdvancesPending.delete(requestKey);
       }
@@ -829,6 +891,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
 
   function disposeDesktopCloudWorkspace(): void {
     desktopCloudWorkspaceDisposed = true;
+    remoteStageAdvancesPending.clear();
     for (const activeClient of [...activeMarkReadClients]) {
       closeMarkReadClient(activeClient);
     }

@@ -768,21 +768,16 @@ async fn handle_connection(
         Ok(PeerRequest::GetTaskSnapshot {
             request_id,
             requester_peer_id,
+            sealed_payload,
         }) => match async {
-            let requester_peer = find_peer(
-                &context.discovery,
-                &context.external_peers,
-                &context.self_peer_id,
+            authenticate_peer_request(
+                &context,
                 &requester_peer_id,
-                TransferTransport::Auto,
+                sealed_payload.as_deref(),
+                "get_task_snapshot",
+                &request_id,
             )
             .await?;
-            ensure_peer_is_trusted_for(
-                &context.registry_root,
-                &context.self_peer_id,
-                &requester_peer_id,
-                &requester_peer.public_key,
-            )?;
             Ok::<PeerResponse, RuntimeError>(PeerResponse::TaskSnapshot {
                 request_id: request_id.clone(),
                 peer_id: context.self_peer_id.clone(),
@@ -865,17 +860,41 @@ async fn handle_connection(
         Ok(PeerRequest::AdvanceTaskStage {
             request_id,
             requester_peer_id,
-            task_id,
-            expected_transition_revision,
-        }) => match advance_owner_task_stage(
-            &context,
-            &requester_peer_id,
-            &task_id,
-            &expected_transition_revision,
-        )
+            task_id: _,
+            expected_transition_revision: _,
+            sealed_payload,
+        }) => match async {
+            let payload = authenticate_peer_request(
+                &context,
+                &requester_peer_id,
+                sealed_payload.as_deref(),
+                "advance_task_stage",
+                &request_id,
+            )
+            .await?;
+            let task_id = payload
+                .get("task_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    RuntimeError::Protocol("advance-stage payload missing task_id".into())
+                })?;
+            let expected_transition_revision = payload
+                .get("expected_transition_revision")
+                .and_then(Value::as_str);
+            advance_owner_task_stage(
+                &context,
+                &requester_peer_id,
+                task_id,
+                expected_transition_revision,
+            )
+            .await?;
+            Ok::<PeerResponse, RuntimeError>(PeerResponse::AdvanceTaskStage {
+                request_id: request_id.clone(),
+            })
+        }
         .await
         {
-            Ok(()) => PeerResponse::AdvanceTaskStage { request_id },
+            Ok(response) => response,
             Err(error) => PeerResponse::Error {
                 request_id,
                 message: error.to_string(),
@@ -962,6 +981,60 @@ async fn handle_connection(
 
     write_json_line(&mut stream, &response).await?;
     Ok(())
+}
+
+async fn authenticate_peer_request(
+    context: &ListenerContext,
+    requester_peer_id: &str,
+    sealed_payload: Option<&str>,
+    expected_action: &str,
+    expected_request_id: &str,
+) -> Result<Value, RuntimeError> {
+    let sealed_payload = sealed_payload.ok_or_else(|| {
+        RuntimeError::Protocol(format!(
+            "{expected_action} request is missing authenticated payload"
+        ))
+    })?;
+    let requester_peer = find_peer(
+        &context.discovery,
+        &context.external_peers,
+        &context.self_peer_id,
+        requester_peer_id,
+        TransferTransport::Auto,
+    )
+    .await?;
+    ensure_peer_is_trusted(
+        &context.registry_root,
+        &context.self_peer_id,
+        &context.external_peers,
+        requester_peer_id,
+        &requester_peer.public_key,
+    )?;
+    let requester_public_key = parse_public_key(&requester_peer.public_key)?;
+    let identity = load_or_create_identity(&context.registry_root, &context.self_peer_id)?;
+    let payload = open_json(&identity, &requester_public_key, sealed_payload)?;
+    if payload.get("action").and_then(Value::as_str) != Some(expected_action) {
+        return Err(RuntimeError::Protocol(format!(
+            "authenticated payload action does not match {expected_action}"
+        )));
+    }
+    if payload.get("request_id").and_then(Value::as_str) != Some(expected_request_id) {
+        return Err(RuntimeError::Protocol(
+            "authenticated payload request_id does not match outer request".into(),
+        ));
+    }
+
+    let replay_key = format!("{requester_peer_id}\n{expected_action}\n{expected_request_id}");
+    let now = Instant::now();
+    let mut authenticated_requests = context.authenticated_peer_requests.lock().await;
+    authenticated_requests
+        .retain(|_, created_at| now.duration_since(*created_at) <= context.pending_transfer_ttl);
+    if authenticated_requests.insert(replay_key, now).is_some() {
+        return Err(RuntimeError::Protocol(format!(
+            "replayed authenticated {expected_action} request"
+        )));
+    }
+    Ok(payload)
 }
 
 async fn build_incoming_event(

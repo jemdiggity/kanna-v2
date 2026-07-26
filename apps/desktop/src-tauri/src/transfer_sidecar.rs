@@ -277,20 +277,19 @@ impl TransferSidecarClient {
         &self,
         peer_id: String,
         task_id: String,
-        expected_transition_revision: String,
+        expected_transition_revision: Option<String>,
     ) -> Result<Value, String> {
         let request_id = self.next_request_id("advance-stage");
-        self.send_request(
-            json!({
-                "type": "advance_peer_task_stage",
-                "request_id": request_id,
-                "target_peer_id": peer_id,
-                "task_id": task_id,
-                "expected_transition_revision": expected_transition_revision,
-            }),
-            &request_id,
-        )
-        .await
+        let mut request = json!({
+            "type": "advance_peer_task_stage",
+            "request_id": request_id,
+            "target_peer_id": peer_id,
+            "task_id": task_id,
+        });
+        if let Some(expected_transition_revision) = expected_transition_revision {
+            request["expected_transition_revision"] = Value::String(expected_transition_revision);
+        }
+        self.send_request(request, &request_id).await
     }
 
     pub async fn read_peer_task_file(

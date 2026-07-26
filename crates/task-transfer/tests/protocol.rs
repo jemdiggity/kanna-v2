@@ -287,7 +287,7 @@ fn remote_task_advance_messages_use_expected_wire_names() {
         request_id: "req-advance-control".into(),
         target_peer_id: "peer-owner".into(),
         task_id: "task-owner".into(),
-        expected_transition_revision: "run-1".into(),
+        expected_transition_revision: Some("run-1".into()),
     };
     assert_eq!(
         serde_json::to_value(&control_request).unwrap(),
@@ -309,7 +309,8 @@ fn remote_task_advance_messages_use_expected_wire_names() {
         request_id: "req-advance-peer".into(),
         requester_peer_id: "peer-secondary".into(),
         task_id: "task-owner".into(),
-        expected_transition_revision: "run-1".into(),
+        expected_transition_revision: Some("run-1".into()),
+        sealed_payload: None,
     };
     assert_eq!(
         serde_json::to_value(&peer_request).unwrap(),
@@ -326,6 +327,66 @@ fn remote_task_advance_messages_use_expected_wire_names() {
     assert_roundtrip(PeerResponse::AdvanceTaskStage {
         request_id: "req-advance-peer".into(),
     });
+}
+
+#[test]
+fn stage_advance_revision_field_is_backward_compatible() {
+    let legacy_control = serde_json::from_value::<ControlRequest>(json!({
+        "type": "advance_peer_task_stage",
+        "request_id": "req-legacy-control",
+        "target_peer_id": "peer-owner",
+        "task_id": "task-owner",
+    }));
+    assert!(
+        legacy_control.is_ok(),
+        "new sidecar must accept an older control request without a CAS revision: {legacy_control:?}",
+    );
+
+    let legacy_peer = serde_json::from_value::<PeerRequest>(json!({
+        "type": "advance_task_stage",
+        "request_id": "req-legacy-peer",
+        "requester_peer_id": "peer-secondary",
+        "task_id": "task-owner",
+    }));
+    assert!(
+        legacy_peer.is_ok(),
+        "new owner must accept an older peer message without a CAS revision: {legacy_peer:?}",
+    );
+
+    let new_control_without_cas = ControlRequest::AdvancePeerTaskStage {
+        request_id: "req-new-control".into(),
+        target_peer_id: "peer-owner".into(),
+        task_id: "task-owner".into(),
+        expected_transition_revision: None,
+    };
+    assert_eq!(
+        serde_json::to_value(new_control_without_cas).unwrap(),
+        json!({
+            "type": "advance_peer_task_stage",
+            "request_id": "req-new-control",
+            "target_peer_id": "peer-owner",
+            "task_id": "task-owner",
+        }),
+        "a no-CAS request must retain the legacy wire shape for older sidecars",
+    );
+
+    let new_peer_without_cas = PeerRequest::AdvanceTaskStage {
+        request_id: "req-new-peer".into(),
+        requester_peer_id: "peer-secondary".into(),
+        task_id: "task-owner".into(),
+        expected_transition_revision: None,
+        sealed_payload: None,
+    };
+    assert_eq!(
+        serde_json::to_value(new_peer_without_cas).unwrap(),
+        json!({
+            "type": "advance_task_stage",
+            "request_id": "req-new-peer",
+            "requester_peer_id": "peer-secondary",
+            "task_id": "task-owner",
+        }),
+        "a no-CAS peer request must retain the legacy revision shape",
+    );
 }
 
 #[test]

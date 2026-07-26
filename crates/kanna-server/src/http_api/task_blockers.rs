@@ -412,6 +412,8 @@ pub(super) async fn block_task(
     axum::extract::Path(task_id): axum::extract::Path<String>,
     Json(payload): Json<crate::mobile_api::BlockTaskRequest>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id).await?;
+    let _task_mutation = state.begin_requested_task_mutation(&task_id).await;
     let task_id = {
         let state = Arc::clone(&state);
         super::blocking::run_handler_blocking("task block", move || {
@@ -438,6 +440,8 @@ pub(super) async fn unblock_task(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id).await?;
+    let _task_mutation = state.begin_requested_task_mutation(&task_id).await;
     // Blocker-branch resolution shells out to git; the whole discovery and
     // removal section runs behind the blocking boundary.
     let (task_id, blocker_branches) = {

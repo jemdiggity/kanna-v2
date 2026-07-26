@@ -724,7 +724,7 @@ function buildRemoteBlockedWorkflowSnapshot({
 }: {
   blocked: boolean;
   hasRunningPost?: boolean;
-  transitionRevision?: string;
+  transitionRevision?: string | null;
   updatedAt: string;
 }): DesktopCloudSnapshot {
   const repoId = "cloud:repo-remote";
@@ -3308,6 +3308,100 @@ describe("App", () => {
       expectedTransitionRevision: "run-blocked-2",
     });
 
+    wrapper.unmount();
+  });
+
+  it("releases an accepted remote advance after a later authoritative snapshot keeps the same revision", async () => {
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
+      transitionRevision: "run-detached-failure",
+      updatedAt: "2026-07-26T02:00:00.000Z",
+    }));
+    await flushPromises();
+
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await flushPromises();
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => relayAdvanceStageMock.mock.calls.length === 1);
+
+    emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
+      transitionRevision: "run-detached-failure",
+      updatedAt: "2026-07-26T02:00:00.000Z",
+    }));
+    await flushPromises();
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => relayAdvanceStageMock.mock.calls.length === 2);
+
+    expect(relayAdvanceStageMock).toHaveBeenCalledTimes(2);
+    expect(relayAdvanceStageMock).toHaveBeenLastCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-blocked",
+      expectedTransitionRevision: "run-detached-failure",
+    });
+    wrapper.unmount();
+  });
+
+  it("releases remote advance state when a task disappears and reappears at the same revision", async () => {
+    const snapshot = buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
+      transitionRevision: "run-reappears",
+      updatedAt: "2026-07-26T03:00:00.000Z",
+    });
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    emitDesktopCloudSnapshot(snapshot);
+    await flushPromises();
+
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await flushPromises();
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => relayAdvanceStageMock.mock.calls.length === 1);
+
+    emitDesktopCloudSnapshot({
+      repos: [],
+      items: [],
+      terminalRefs: {},
+      blockedByTaskIds: {},
+    });
+    await flushPromises();
+    emitDesktopCloudSnapshot(snapshot);
+    await flushPromises();
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await flushPromises();
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => relayAdvanceStageMock.mock.calls.length === 2);
+
+    expect(relayAdvanceStageMock).toHaveBeenCalledTimes(2);
+    expect(relayAdvanceStageMock).toHaveBeenLastCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-blocked",
+      expectedTransitionRevision: "run-reappears",
+    });
+    wrapper.unmount();
+  });
+
+  it("advances an authenticated legacy remote snapshot without a CAS revision", async () => {
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
+      transitionRevision: null,
+      updatedAt: "2026-07-26T04:00:00.000Z",
+    }));
+    await flushPromises();
+
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await flushPromises();
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => relayAdvanceStageMock.mock.calls.length === 1);
+
+    expect(relayAdvanceStageMock).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-blocked",
+    });
+    expect(toastErrorMock).not.toHaveBeenCalledWith(
+      "Remote task snapshot is missing its transition revision.",
+    );
     wrapper.unmount();
   });
 

@@ -5,7 +5,7 @@ use super::events::{RuntimeError, RuntimeEvent};
 use super::external_peers;
 use super::listener::run_listener;
 use super::replay_store::TransferReplayStore;
-use super::state::{ListenerContext, TransferRuntime};
+use super::state::{ListenerContext, TerminalObserverSlot, TransferRuntime};
 use super::utils::{
     load_or_create_identity, registry_entry_path, terminal_observer_key, unexpected_peer_response,
 };
@@ -17,7 +17,7 @@ use crate::registry::PeerRegistry;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
@@ -110,6 +110,7 @@ impl TransferRuntime {
         }
         let incoming_reservations = Arc::new(Mutex::new(loaded_incoming_reservations));
         let transfer_artifacts = Arc::new(Mutex::new(HashMap::new()));
+        let authenticated_peer_requests = Arc::new(Mutex::new(HashMap::new()));
         let task_snapshot = Arc::new(Mutex::new(Value::Null));
         let terminal_observers = Arc::new(Mutex::new(HashMap::new()));
         let request_counter = Arc::new(AtomicU64::new(1));
@@ -132,6 +133,7 @@ impl TransferRuntime {
             ),
             incoming_reservations: Arc::clone(&incoming_reservations),
             transfer_artifacts: Arc::clone(&transfer_artifacts),
+            authenticated_peer_requests,
             task_snapshot: Arc::clone(&task_snapshot),
             daemon_dir: config.daemon_dir.clone(),
             db_path: config.db_path.clone(),
@@ -219,6 +221,15 @@ impl TransferRuntime {
                 .unwrap_or(false)
         }) {
             let request_id = self.next_request_id("task-snapshot");
+            let target_public_key = parse_public_key(&peer.public_key)?;
+            let sealed_payload = seal_json(
+                &self.identity,
+                &target_public_key,
+                &serde_json::json!({
+                    "action": "get_task_snapshot",
+                    "request_id": request_id,
+                }),
+            )?;
             let response = match self
                 .send_peer_request(
                     &PeerRegistryEntry {
@@ -233,6 +244,7 @@ impl TransferRuntime {
                     PeerRequest::GetTaskSnapshot {
                         request_id: request_id.clone(),
                         requester_peer_id: self.config.peer_id.clone(),
+                        sealed_payload: Some(sealed_payload),
                     },
                 )
                 .await
@@ -288,11 +300,34 @@ impl TransferRuntime {
         target_peer_id: &str,
         session_id: &str,
     ) -> Result<(), RuntimeError> {
-        let target_peer = self.find_peer(target_peer_id).await?;
-        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let observer_key = terminal_observer_key(target_peer_id, session_id);
-        if let Some(handle) = self.terminal_observers.lock().await.remove(&observer_key) {
-            handle.abort();
+        let generation = self.request_counter.fetch_add(1, Ordering::Relaxed);
+        if let Some(displaced) = self.terminal_observers.lock().await.insert(
+            observer_key.clone(),
+            TerminalObserverSlot {
+                generation,
+                handle: None,
+            },
+        ) {
+            if let Some(handle) = displaced.handle {
+                handle.abort();
+            }
+        }
+
+        let target_peer = match self.find_peer(target_peer_id).await {
+            Ok(target_peer) => target_peer,
+            Err(error) => {
+                self.clear_terminal_observer_generation(&observer_key, generation)
+                    .await;
+                return Err(error);
+            }
+        };
+        if let Err(error) =
+            self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)
+        {
+            self.clear_terminal_observer_generation(&observer_key, generation)
+                .await;
+            return Err(error);
         }
 
         let request_id = self.next_request_id("observe-session");
@@ -302,6 +337,13 @@ impl TransferRuntime {
         let peer_for_task = target_peer.clone();
         let peer_id_for_error = target_peer.peer_id.clone();
         let session_id_for_error = session_id.clone();
+        let mut observers = self.terminal_observers.lock().await;
+        let Some(slot) = observers
+            .get_mut(&observer_key)
+            .filter(|slot| slot.generation == generation)
+        else {
+            return Ok(());
+        };
         let handle = tokio::spawn(async move {
             if let Err(error) = stream_peer_session(
                 peer_for_task,
@@ -322,10 +364,9 @@ impl TransferRuntime {
                 });
             }
         });
-        self.terminal_observers
-            .lock()
-            .await
-            .insert(observer_key, handle);
+        if let Some(displaced) = slot.handle.replace(handle) {
+            displaced.abort();
+        }
         Ok(())
     }
 
@@ -335,10 +376,26 @@ impl TransferRuntime {
         session_id: &str,
     ) -> Result<(), RuntimeError> {
         let observer_key = terminal_observer_key(target_peer_id, session_id);
-        if let Some(handle) = self.terminal_observers.lock().await.remove(&observer_key) {
-            handle.abort();
+        if let Some(slot) = self.terminal_observers.lock().await.remove(&observer_key) {
+            if let Some(handle) = slot.handle {
+                handle.abort();
+            }
         }
         Ok(())
+    }
+
+    async fn clear_terminal_observer_generation(&self, observer_key: &str, generation: u64) {
+        let mut observers = self.terminal_observers.lock().await;
+        if observers
+            .get(observer_key)
+            .is_some_and(|slot| slot.generation == generation)
+        {
+            if let Some(slot) = observers.remove(observer_key) {
+                if let Some(handle) = slot.handle {
+                    handle.abort();
+                }
+            }
+        }
     }
 
     pub async fn send_peer_session_input(
@@ -432,11 +489,22 @@ impl TransferRuntime {
         &self,
         target_peer_id: &str,
         task_id: &str,
-        expected_transition_revision: &str,
+        expected_transition_revision: Option<&str>,
     ) -> Result<(), RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
         let request_id = self.next_request_id("advance-stage");
+        let target_public_key = parse_public_key(&target_peer.public_key)?;
+        let mut authenticated_payload = serde_json::json!({
+            "action": "advance_task_stage",
+            "request_id": request_id,
+            "task_id": task_id,
+        });
+        if let Some(expected_transition_revision) = expected_transition_revision {
+            authenticated_payload["expected_transition_revision"] =
+                serde_json::Value::String(expected_transition_revision.to_owned());
+        }
+        let sealed_payload = seal_json(&self.identity, &target_public_key, &authenticated_payload)?;
         let response = self
             .send_peer_request(
                 &target_peer,
@@ -444,7 +512,8 @@ impl TransferRuntime {
                     request_id: request_id.clone(),
                     requester_peer_id: self.config.peer_id.clone(),
                     task_id: task_id.to_owned(),
-                    expected_transition_revision: expected_transition_revision.to_owned(),
+                    expected_transition_revision: expected_transition_revision.map(str::to_owned),
+                    sealed_payload: Some(sealed_payload),
                 },
             )
             .await?;
@@ -551,8 +620,10 @@ impl Drop for TransferRuntime {
             *task_snapshot = Value::Null;
         }
         if let Ok(mut observers) = self.terminal_observers.try_lock() {
-            for (_, handle) in observers.drain() {
-                handle.abort();
+            for (_, slot) in observers.drain() {
+                if let Some(handle) = slot.handle {
+                    handle.abort();
+                }
             }
         }
     }
