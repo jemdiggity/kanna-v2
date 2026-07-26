@@ -442,12 +442,15 @@ async fn next_daemon_command(
         .expect("fake daemon command channel should remain open")
 }
 
-fn assert_claude_agent_spawn(command: DaemonCommand, expected_session_id: &str) {
+fn assert_claude_agent_spawn(command: DaemonCommand, task_id: &str) -> String {
     match command {
         DaemonCommand::SpawnAgent {
             session_id, params, ..
         } => {
-            assert_eq!(session_id, expected_session_id);
+            assert!(
+                session_id.starts_with(&format!("run-{task_id}-")),
+                "expected daemon session {session_id:?} to be scoped to task {task_id:?}'s stage run"
+            );
             assert_eq!(params.agent_provider, DaemonAgentProvider::Claude);
             let executable = params
                 .executable
@@ -456,6 +459,7 @@ fn assert_claude_agent_spawn(command: DaemonCommand, expected_session_id: &str) 
                 executable.ends_with("/.kanna/provider-bin/claude"),
                 "unexpected executable: {executable}"
             );
+            session_id
         }
         other => panic!("expected Claude headless spawn, got {other:?}"),
     }
@@ -604,7 +608,8 @@ async fn durable_pipeline_provider_lists_fall_back_for_reloaded_stages_and_posts
         .as_str()
         .expect("task response should include an id")
         .to_string();
-    assert_claude_agent_spawn(next_daemon_command(&mut commands).await, &task_id);
+    let implementation_session_id =
+        assert_claude_agent_spawn(next_daemon_command(&mut commands).await, &task_id);
 
     let pipeline_def: String =
         Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -643,7 +648,9 @@ async fn durable_pipeline_provider_lists_fall_back_for_reloaded_stages_and_posts
         .error_for_status()
         .expect("stage advance should reload the durable snapshot");
     match next_daemon_command(&mut commands).await {
-        DaemonCommand::Kill { session_id, .. } => assert_eq!(session_id, task_id),
+        DaemonCommand::Kill { session_id, .. } => {
+            assert_eq!(session_id, implementation_session_id)
+        }
         other => panic!("expected task-session kill, got {other:?}"),
     }
     match next_daemon_command(&mut commands).await {
@@ -652,7 +659,9 @@ async fn durable_pipeline_provider_lists_fall_back_for_reloaded_stages_and_posts
         }
         other => panic!("expected shell-session kill, got {other:?}"),
     }
-    assert_claude_agent_spawn(next_daemon_command(&mut commands).await, &task_id);
+    let review_session_id =
+        assert_claude_agent_spawn(next_daemon_command(&mut commands).await, &task_id);
+    assert_ne!(review_session_id, implementation_session_id);
     wait_for_task_stage(&client, port, &task_id, "review").await;
 
     client
@@ -665,14 +674,16 @@ async fn durable_pipeline_provider_lists_fall_back_for_reloaded_stages_and_posts
         .error_for_status()
         .expect("post advance should reload the durable snapshot");
     match next_daemon_command(&mut commands).await {
-        DaemonCommand::Input { session_id, .. } => assert_eq!(session_id, task_id),
+        DaemonCommand::Input { session_id, .. } => assert_eq!(session_id, review_session_id),
         other => panic!("expected post input, got {other:?}"),
     }
     match next_daemon_command(&mut commands).await {
-        DaemonCommand::Kill { session_id, .. } => assert_eq!(session_id, task_id),
+        DaemonCommand::Kill { session_id, .. } => assert_eq!(session_id, review_session_id),
         other => panic!("expected post fallback kill, got {other:?}"),
     }
-    assert_claude_agent_spawn(next_daemon_command(&mut commands).await, &task_id);
+    let post_session_id =
+        assert_claude_agent_spawn(next_daemon_command(&mut commands).await, &task_id);
+    assert_ne!(post_session_id, review_session_id);
 
     stop_server(&mut server).await;
     cleanup.stop_daemon().await;
