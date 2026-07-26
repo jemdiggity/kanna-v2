@@ -335,6 +335,7 @@ const {
   openFilePreview,
   openImageUrlPreview,
   preferences,
+  refreshCloudTransferRoute,
   remoteTaskDiagnostics,
   restoreSidebarWidth,
   shortcutsStartFull,

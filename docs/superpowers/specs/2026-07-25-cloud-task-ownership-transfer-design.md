@@ -350,7 +350,10 @@ by the next tunnel. Until then, the lifecycle boundary is covered by:
   token without changing the machine snapshot and proves the next route
   refresh sends the new token;
 - `useAppTaskTransfer.test.ts`, which proves cloud-capable Push and cloud Pull
-  await that refresh before invoking the transfer sidecar; and
+  await that refresh before invoking the transfer sidecar;
+- `useAppLifecycle.test.ts`, which proves the source desktop's automatic return
+  push refreshes the exact requester's cloud route first, including a
+  LAN-preferred route with cloud fallback; and
 - `cloud_transfer_proxy.rs`, which proves an in-place credential update keeps
   the registered loopback endpoint and authenticates the next relay connection
   with the refreshed token while an existing tunnel remains open.

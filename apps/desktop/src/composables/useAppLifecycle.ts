@@ -74,6 +74,7 @@ interface UseAppLifecycleOptions {
   ) => void;
   openImageUrlPreview: (imageUrl: string) => void;
   preferences: AppPreferences;
+  refreshCloudTransferRoute: (peerId: string) => Promise<void>;
   remoteTaskDiagnostics: Ref<unknown>;
   restoreSidebarWidth: () => Promise<void>;
   shortcutsStartFull: Ref<boolean>;
@@ -101,6 +102,7 @@ export async function handleTaskPullRequested(
     maxAttempts?: number;
     retryDelayMs?: number;
     signal?: AbortSignal;
+    refreshCloudTransferRoute?: (peerId: string) => Promise<void>;
     waitForRetry?: (delayMs: number) => Promise<void>;
   } = {},
 ): Promise<boolean> {
@@ -137,6 +139,10 @@ export async function handleTaskPullRequested(
       const requester = readMachines().find((machine) =>
         machine.peerId === request.requesterPeerId);
       if (requester) {
+        if (requester.relayDesktopId && options.refreshCloudTransferRoute) {
+          await options.refreshCloudTransferRoute(request.requesterPeerId);
+          if (options.signal?.aborted) return false;
+        }
         await store.pushTaskToPeer(source.id, request.requesterPeerId, {
           transport: requester.preferredTransport,
           cloudFallback: requester.cloudFallback,
@@ -175,6 +181,7 @@ export function useAppLifecycle({
   openFilePreview,
   openImageUrlPreview,
   preferences,
+  refreshCloudTransferRoute,
   remoteTaskDiagnostics,
   restoreSidebarWidth,
   shortcutsStartFull,
@@ -391,7 +398,10 @@ export function useAppLifecycle({
             store,
             taskPullPushesInFlight,
             () => transferMachines.value,
-            { signal: taskPullAbortController.signal },
+            {
+              refreshCloudTransferRoute,
+              signal: taskPullAbortController.signal,
+            },
           );
         } catch (e: unknown) {
           console.error("[App] failed to handle task pull request:", e);

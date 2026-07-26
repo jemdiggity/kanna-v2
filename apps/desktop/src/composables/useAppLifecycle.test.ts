@@ -28,8 +28,10 @@ function machine(overrides: Partial<TransferMachine> = {}): TransferMachine {
 
 describe("handleTaskPullRequested", () => {
   it("pushes an open locally owned task back to the requester exactly once", async () => {
-    let release!: () => void;
-    const pushTaskToPeer = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
+    let releaseRefresh!: () => void;
+    const refreshCloudTransferRoute = vi.fn(() =>
+      new Promise<void>((resolve) => { releaseRefresh = resolve; }));
+    const pushTaskToPeer = vi.fn(async () => {});
     const inFlight = new Set<string>();
     const store = { items: [item()], pushTaskToPeer };
     const event = {
@@ -38,18 +40,91 @@ describe("handleTaskPullRequested", () => {
       sourceTaskId: "task-source",
     };
 
-    const first = handleTaskPullRequested(event, store as never, inFlight, [machine()]);
-    const duplicate = handleTaskPullRequested(event, store as never, inFlight, [machine()]);
+    const first = handleTaskPullRequested(event, store as never, inFlight, [machine()], {
+      refreshCloudTransferRoute,
+    });
+    const duplicate = handleTaskPullRequested(event, store as never, inFlight, [machine()], {
+      refreshCloudTransferRoute,
+    });
 
+    expect(refreshCloudTransferRoute).toHaveBeenCalledTimes(1);
+    expect(pushTaskToPeer).not.toHaveBeenCalled();
+    expect(await duplicate).toBe(false);
+    releaseRefresh();
+    expect(await first).toBe(true);
     expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
     expect(pushTaskToPeer).toHaveBeenCalledWith("task-source", "peer-requester", {
       transport: "lan",
       cloudFallback: true,
       targetDesktopId: "desktop-requester",
     });
-    expect(await duplicate).toBe(false);
-    release();
-    expect(await first).toBe(true);
+  });
+
+  it.each([
+    ["cloud", {
+      preferredTransport: "cloud" as const,
+      cloudFallback: false,
+      lanEndpoint: null,
+    }],
+    ["LAN-preferred cloud fallback", {
+      preferredTransport: "lan" as const,
+      cloudFallback: true,
+      lanEndpoint: "127.0.0.1:43100",
+    }],
+  ])("refreshes the exact requester %s route before starting the return push", async (
+    _route,
+    requesterOverrides,
+  ) => {
+    const order: string[] = [];
+    const refreshCloudTransferRoute = vi.fn(async () => {
+      order.push("refresh");
+    });
+    const pushTaskToPeer = vi.fn(async () => {
+      order.push("push");
+    });
+
+    await expect(handleTaskPullRequested({
+      requestId: "pull-1",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, new Set(), [
+      machine({
+        peerId: "peer-other",
+        desktopId: "desktop-other",
+        relayDesktopId: "desktop-other",
+      }),
+      machine(requesterOverrides),
+    ], { refreshCloudTransferRoute })).resolves.toBe(true);
+
+    expect(refreshCloudTransferRoute).toHaveBeenCalledTimes(1);
+    expect(refreshCloudTransferRoute).toHaveBeenCalledWith("peer-requester");
+    expect(order).toEqual(["refresh", "push"]);
+  });
+
+  it("aborts after a pending route refresh without starting the return push", async () => {
+    let releaseRefresh!: () => void;
+    const refreshCloudTransferRoute = vi.fn(() =>
+      new Promise<void>((resolve) => { releaseRefresh = resolve; }));
+    const pushTaskToPeer = vi.fn(async () => {});
+    const abortController = new AbortController();
+    const inFlight = new Set<string>();
+
+    const pending = handleTaskPullRequested({
+      requestId: "pull-1",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, inFlight, [machine()], {
+      refreshCloudTransferRoute,
+      signal: abortController.signal,
+    });
+
+    await vi.waitFor(() => expect(refreshCloudTransferRoute).toHaveBeenCalledTimes(1));
+    abortController.abort();
+    releaseRefresh();
+
+    await expect(pending).resolves.toBe(false);
+    expect(pushTaskToPeer).not.toHaveBeenCalled();
+    expect(inFlight).toEqual(new Set());
   });
 
   it("rejects a requester that is absent from the current eligible machine catalog", async () => {
