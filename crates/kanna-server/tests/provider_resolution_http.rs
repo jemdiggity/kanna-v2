@@ -198,6 +198,7 @@ fn write_server_config(root: &Path, port: u16) -> (PathBuf, PathBuf, PathBuf) {
          environment = \"development\"\n\
          lan_host = \"127.0.0.1\"\n\
          lan_port = {port}\n\
+         transfer_port = 4455\n\
          pairing_store_path = \"{}\"\n",
         daemon_dir.display(),
         db_path.display(),

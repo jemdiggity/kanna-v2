@@ -94,6 +94,7 @@ fn launch_server(
              environment = \"{environment}\"\n\
              lan_host = \"127.0.0.1\"\n\
              lan_port = {port}\n\
+             transfer_port = 4455\n\
              pairing_store_path = \"{}\"\n",
             toml_string(&daemon_dir),
             toml_string(&db_path),
@@ -232,7 +233,7 @@ async fn register_emits_a_startable_development_config_with_build_identity() {
             .append(true)
             .open(&config_path)
             .expect("open registered config"),
-        "lan_host = \"127.0.0.1\"\nlan_port = {port}"
+        "lan_host = \"127.0.0.1\"\nlan_port = {port}\ntransfer_port = 4455"
     )
     .expect("configure registered server loopback port");
 
