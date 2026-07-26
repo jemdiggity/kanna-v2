@@ -861,6 +861,48 @@ fn open_migrates_legacy_frontend_schema_with_backfills() {
         .expect("pre-upgrade runs retain legacy completion capability");
     assert_eq!(legacy_ownership_versions, 2);
 
+    db.finish_latest_running_stage_run("task-merge", "succeeded", None, None)
+        .expect("finish migrated live owner")
+        .expect("migrated live owner exists");
+    db.insert_stage_run_with_completion_transition(
+        NewStageRun {
+            id: "post-injected-into-migrated-process",
+            task_id: "task-merge",
+            stage: "commit",
+            kind: "post",
+            agent: None,
+            agent_provider: Some("claude"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-merge"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: Some("migration-current-task-merge"),
+        },
+        Some("manual"),
+    )
+    .expect("inject post into migrated live process");
+    let finished = db
+        .finish_active_stage_run(
+            "task-merge",
+            None,
+            "succeeded",
+            Some(r#"{"status":"success"}"#),
+            Some("completed by pre-upgrade process"),
+        )
+        .expect("legacy completion remains authorized for injected post")
+        .expect("injected post run");
+    assert_eq!(finished.kind, "post");
+    assert_eq!(
+        db.latest_stage_run("task-merge")
+            .unwrap()
+            .unwrap()
+            .run_ownership_version,
+        0
+    );
+
     let _ = std::fs::remove_file(path);
 }
 

@@ -5,7 +5,7 @@ use super::types::{
 };
 use super::worktree::remove_prepared_worktree;
 use crate::daemon_client::DaemonClient;
-use crate::db::{Db, NewStageRun};
+use crate::db::{Db, NewStageRun, ReplacedStageRunSource};
 use crate::http_api::{try_submit_task_input, TaskInputError};
 use crate::session_replacements::SessionReplacements;
 use kanna_daemon::protocol::{
@@ -251,9 +251,9 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             provider_session_id.clone(),
         );
     }
-    {
+    let replaced_source = {
         let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
-        db.insert_stage_run_with_completion_transition(
+        match db.replace_current_run_with_pending(
             NewStageRun {
                 id: &run_id,
                 task_id: &task_id,
@@ -271,9 +271,22 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                 resumed_from_run_id: prepared.resumed_from_run_id.as_deref(),
             },
             Some(prepared.completion_transition.as_str()),
-        )
-        .map_err(|e| format!("db error: {}", e))?;
-    }
+            &prepared.expected_source,
+            prepared.source_completion_status,
+            prepared.source_completion_result.as_deref(),
+            prepared.source_completion_feedback.as_deref(),
+        ) {
+            Ok(source) => source,
+            Err(error) => {
+                let message = if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+                    format!("task {task_id} changed while the stage action was being prepared")
+                } else {
+                    format!("db error: {error}")
+                };
+                return Err(rollback_prepared_stage_fork(&prepared, message));
+            }
+        }
+    };
 
     // Only a freshly forked workspace is rolled back on failure; a resumed
     // workspace pre-exists this spawn and must survive it.
@@ -285,8 +298,12 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     )
     .await
     {
-        return Err(fail_prepared_stage_spawn(
-            db_path, &run_id, &prepared, error,
+        return Err(rollback_prepared_stage_reservation(
+            db_path,
+            &run_id,
+            &prepared,
+            replaced_source.as_ref(),
+            error,
         ));
     }
     if !matches!(prepared.workspace, PreparedRunWorkspace::Current) {
@@ -318,27 +335,34 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         prepared.session.clone(),
     );
     let event = match daemon.send_command(&command).await {
-        Ok(event) => event,
+        Ok(event) => Some(event),
         Err(e) => {
-            return Err(fail_prepared_stage_spawn(
-                db_path,
-                &run_id,
-                &prepared,
-                format!("daemon error: {}", e),
-            ))
+            let command_error = format!("daemon error: {e}");
+            if let Err(reconcile_error) =
+                reconcile_spawn_acceptance(daemon, &session_id, &run_id).await
+            {
+                return Err(fail_prepared_stage_spawn(
+                    db_path,
+                    &run_id,
+                    &prepared,
+                    format!("{command_error}; {reconcile_error}"),
+                ));
+            }
+            None
         }
     };
     match event {
-        DaemonEvent::SessionCreated {
+        None => {}
+        Some(DaemonEvent::SessionCreated {
             run_id: Some(created_run_id),
             ..
-        } if created_run_id == run_id => {}
-        DaemonEvent::SessionCreated { run_id: None, .. }
+        }) if created_run_id == run_id => {}
+        Some(DaemonEvent::SessionCreated { run_id: None, .. })
             if prepared.resumed_from_run_id.is_none() => {}
-        DaemonEvent::SessionCreated {
+        Some(DaemonEvent::SessionCreated {
             run_id: created_run_id,
             ..
-        } => {
+        }) => {
             let ownership_error = format!(
                 "daemon returned mismatched run ownership (expected {run_id}, got {created_run_id:?})"
             );
@@ -356,7 +380,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                 ownership_error,
             ));
         }
-        DaemonEvent::Error { message, .. } => {
+        Some(DaemonEvent::Error { message, .. }) => {
             return Err(fail_prepared_stage_spawn(
                 db_path,
                 &run_id,
@@ -364,7 +388,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                 format!("daemon error: {}", message),
             ))
         }
-        other => {
+        Some(other) => {
             return Err(fail_prepared_stage_spawn(
                 db_path,
                 &run_id,
@@ -424,6 +448,29 @@ fn fail_prepared_stage_spawn(
     rollback_prepared_stage_fork(prepared, recorded_error)
 }
 
+fn rollback_prepared_stage_reservation(
+    db_path: &str,
+    run_id: &str,
+    prepared: &PreparedStageRunSpawn,
+    replaced_source: Option<&ReplacedStageRunSource>,
+    error: String,
+) -> String {
+    let rollback_error = match Db::open(db_path).and_then(|db| {
+        db.rollback_pending_replacement_and_restore_source(
+            &prepared.task_id,
+            run_id,
+            &prepared.expected_source,
+            replaced_source,
+        )
+    }) {
+        Ok(()) => error,
+        Err(db_error) => {
+            format!("{error}; failed to restore source stage ownership: {db_error}")
+        }
+    };
+    rollback_prepared_stage_fork(prepared, rollback_error)
+}
+
 fn rollback_closed_stage_spawn(
     db_path: &str,
     run_id: &str,
@@ -446,6 +493,35 @@ fn rollback_prepared_stage_fork(prepared: &PreparedStageRunSpawn, error: String)
         }
     }
     error
+}
+
+async fn reconcile_spawn_acceptance(
+    daemon: &mut DaemonClient,
+    session_id: &str,
+    run_id: &str,
+) -> Result<(), String> {
+    daemon
+        .reconnect()
+        .await
+        .map_err(|error| format!("spawn reconciliation could not reconnect: {error}"))?;
+    let sessions = daemon
+        .list()
+        .await
+        .map_err(|error| format!("spawn reconciliation could not list sessions: {error}"))?;
+    match sessions
+        .sessions
+        .into_iter()
+        .find(|session| session.session_id == session_id)
+    {
+        Some(session) if session.run_id.as_deref() == Some(run_id) => Ok(()),
+        Some(session) => Err(format!(
+            "spawn reconciliation found session {session_id} owned by {:?}, expected {run_id}",
+            session.run_id
+        )),
+        None => Err(format!(
+            "spawn reconciliation did not find accepted session {session_id}"
+        )),
+    }
 }
 
 pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
@@ -595,21 +671,39 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     prepared
         .env
         .insert("KANNA_STAGE_RUN_ID".to_string(), run_id.clone());
-    record_rerun_stage_run(
-        db_path,
-        &run_id,
-        &task_id,
-        &stage,
-        run_kind,
-        stage_agent.as_deref(),
-        &agent_provider,
-        model.as_deref(),
-        completion_transition.as_str(),
-        &session_id,
-        provider_session_id.as_deref(),
-        &cwd,
-        "pending",
-    )?;
+    let replaced_source = {
+        let db = Db::open(db_path).map_err(|e| format!("db error: {e}"))?;
+        db.replace_current_run_with_pending(
+            NewStageRun {
+                id: &run_id,
+                task_id: &task_id,
+                stage: &stage,
+                kind: run_kind,
+                agent: stage_agent.as_deref(),
+                agent_provider: Some(&agent_provider),
+                model: model.as_deref(),
+                status: "pending",
+                result: None,
+                feedback: None,
+                session_id: Some(&session_id),
+                provider_session_id: provider_session_id.as_deref(),
+                cwd: Some(&cwd),
+                resumed_from_run_id: None,
+            },
+            Some(completion_transition.as_str()),
+            &prepared.expected_source,
+            "cancelled",
+            None,
+            None,
+        )
+        .map_err(|error| {
+            if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
+                format!("task {task_id} changed while the rerun was being prepared")
+            } else {
+                format!("db error: {error}")
+            }
+        })?
+    };
     let record_failure = |error: String| match record_rerun_stage_failure(
         db_path, &run_id, &task_id, &stage, &error,
     ) {
@@ -626,7 +720,14 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     )
     .await
     {
-        return Err(record_failure(error));
+        return Err(rollback_rerun_stage_reservation(
+            db_path,
+            &run_id,
+            &task_id,
+            &prepared.expected_source,
+            replaced_source.as_ref(),
+            error,
+        ));
     }
     if let Err(error) = prepare_deferred_rerun_setup(&mut prepared) {
         return Err(record_failure(error));
@@ -646,14 +747,31 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     );
 
     let event = match daemon.send_command(&command).await {
-        Ok(event) => event,
-        Err(error) => return Err(record_failure(format!("daemon error: {error}"))),
+        Ok(event) => Some(event),
+        Err(error) => {
+            let command_error = format!("daemon error: {error}");
+            if let Err(reconcile_error) =
+                reconcile_spawn_acceptance(daemon, &session_id, &run_id).await
+            {
+                return Err(record_failure(format!(
+                    "{command_error}; {reconcile_error}"
+                )));
+            }
+            None
+        }
     };
     match event {
-        DaemonEvent::SessionCreated {
+        None => {
+            start_rerun_stage_run(db_path, &run_id, &task_id, provider_session_id.as_deref())?;
+            Ok(crate::mobile_api::TaskActionResponse {
+                task_id,
+                follow_task: None,
+            })
+        }
+        Some(DaemonEvent::SessionCreated {
             run_id: Some(created_run_id),
             ..
-        } if created_run_id == run_id => {
+        }) if created_run_id == run_id => {
             start_rerun_stage_run(db_path, &run_id, &task_id, provider_session_id.as_deref())?;
             Ok(crate::mobile_api::TaskActionResponse {
                 task_id,
@@ -661,7 +779,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
                 revision_budget: None,
             })
         }
-        DaemonEvent::SessionCreated { run_id: None, .. } => {
+        Some(DaemonEvent::SessionCreated { run_id: None, .. }) => {
             start_rerun_stage_run(db_path, &run_id, &task_id, provider_session_id.as_deref())?;
             Ok(crate::mobile_api::TaskActionResponse {
                 task_id,
@@ -669,10 +787,10 @@ pub(crate) async fn rerun_prepared_stage_for_api(
                 revision_budget: None,
             })
         }
-        DaemonEvent::SessionCreated {
+        Some(DaemonEvent::SessionCreated {
             run_id: created_run_id,
             ..
-        } => {
+        }) => {
             let mut error = format!(
                 "daemon returned mismatched run ownership (expected {run_id}, got {created_run_id:?})"
             );
@@ -684,12 +802,35 @@ pub(crate) async fn rerun_prepared_stage_for_api(
             }
             Err(record_failure(error))
         }
-        DaemonEvent::Error { message, .. } => {
+        Some(DaemonEvent::Error { message, .. }) => {
             Err(record_failure(format!("daemon error: {message}")))
         }
-        other => Err(record_failure(format!(
+        Some(other) => Err(record_failure(format!(
             "unexpected daemon response: {other:?}"
         ))),
+    }
+}
+
+fn rollback_rerun_stage_reservation(
+    db_path: &str,
+    run_id: &str,
+    task_id: &str,
+    expected_source: &crate::db::TaskActionState,
+    replaced_source: Option<&ReplacedStageRunSource>,
+    error: String,
+) -> String {
+    match Db::open(db_path).and_then(|db| {
+        db.rollback_pending_replacement_and_restore_source(
+            task_id,
+            run_id,
+            expected_source,
+            replaced_source,
+        )
+    }) {
+        Ok(()) => error,
+        Err(db_error) => {
+            format!("{error}; failed to restore source stage ownership: {db_error}")
+        }
     }
 }
 

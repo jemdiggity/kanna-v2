@@ -622,6 +622,123 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
 }
 
 #[tokio::test]
+async fn failed_owned_kill_restores_source_run_so_revision_can_retry() {
+    let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+    let config = test_config("revision-owned-kill-retry");
+    let (repo_root, db) = init_resume_revision_fixture("revision-owned-kill-retry", &config);
+    let impl_worktree = repo_root.join(".kanna-worktrees/task-review-task");
+    let review_worktree = repo_root.join(".kanna-worktrees/task-review-task-2");
+    let claude_config_dir = repo_root.join("claude-config");
+    write_resume_transcript(&claude_config_dir, &impl_worktree);
+    db.insert_stage_run(NewStageRun {
+        id: "run-review",
+        task_id: "review-task",
+        stage: "review",
+        kind: "main",
+        agent: Some("review"),
+        agent_provider: Some("claude"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("review-task"),
+        provider_session_id: Some("review-provider-session"),
+        cwd: Some(review_worktree.to_string_lossy().as_ref()),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+
+    std::env::set_var("CLAUDE_CONFIG_DIR", &claude_config_dir);
+    let prepared = prepare_revision_task_for_api(
+        &db,
+        &config,
+        "review-task",
+        "in progress",
+        "Retry after a transient kill failure.",
+    )
+    .unwrap();
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let failed_kill_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        for response in [
+            kanna_daemon::protocol::Event::SessionList {
+                sessions: Vec::new(),
+                capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
+            },
+            kanna_daemon::protocol::Event::Error {
+                code: Some(kanna_daemon::protocol::ErrorCode::WriteFailed),
+                message: "transient kill failure".to_string(),
+            },
+        ] {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error = spawn_prepared_stage_run_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        prepared,
+    )
+    .await
+    .unwrap_err();
+    failed_kill_daemon.await.unwrap();
+    assert!(error.contains("transient kill failure"));
+
+    let runs = db.list_stage_runs_for_task("review-task").unwrap();
+    assert_eq!(
+        runs.len(),
+        2,
+        "failed successor reservation must be removed"
+    );
+    assert_eq!(runs.last().unwrap().id, "run-review");
+    assert_eq!(runs.last().unwrap().status, "running");
+
+    std::env::set_var("CLAUDE_CONFIG_DIR", &claude_config_dir);
+    let retry = prepare_revision_task_for_api(
+        &db,
+        &config,
+        "review-task",
+        "in progress",
+        "Retry after a transient kill failure.",
+    )
+    .unwrap();
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+    let retry_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone(), 1).await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    spawn_prepared_stage_run_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        retry,
+    )
+    .await
+    .unwrap();
+    retry_daemon.await.unwrap();
+
+    let revision_run = db.latest_stage_run("review-task").unwrap().unwrap();
+    assert_eq!(revision_run.stage, "in progress");
+    assert_eq!(revision_run.status, "running");
+    assert_eq!(
+        revision_run.resumed_from_run_id.as_deref(),
+        Some("run-impl")
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
 async fn old_daemon_cannot_record_a_resumed_revision_run() {
     let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
     let config = test_config("revision-resume-old-daemon");

@@ -37,6 +37,19 @@ fn capture_ownershipless_run_id(
         .map_err(|e| format!("db error: {e}"))
 }
 
+fn capture_ownershipless_created_run_id(
+    state: &http_api::AppState,
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    let db = crate::db::Db::open(&state.config().db_path).map_err(|e| format!("db error: {e}"))?;
+    db.pending_main_run_id_by_session(session_id)
+        .and_then(|pending| match pending {
+            Some(run_id) => Ok(Some(run_id)),
+            None => db.landed_main_run_id_by_session(session_id),
+        })
+        .map_err(|e| format!("db error: {e}"))
+}
+
 fn persist_waiting_prompt(
     state: &http_api::AppState,
     session_id: &str,
@@ -453,18 +466,26 @@ async fn terminal_state_watcher_once(
             }
             DaemonEvent::SessionCreated { session_id, run_id } => {
                 if run_id.is_none() {
-                    let captured = match capture_ownershipless_run_id(state, &session_id) {
-                        Ok(run_id) => run_id,
-                        Err(error) => {
-                            log::warn!(
-                                "failed to capture legacy run ownership for {}: {}",
-                                session_id,
-                                error
-                            );
-                            None
-                        }
-                    };
-                    ownershipless_sessions.insert(session_id, captured);
+                    // An existing binding belongs to an older session whose
+                    // delayed events precede its replacement Exit. Once that
+                    // Exit removes the binding, the replacement's immediate
+                    // ownershipless SessionCreated may claim the reserved
+                    // pending successor before it lands.
+                    if !ownershipless_sessions.contains_key(&session_id) {
+                        let captured =
+                            match capture_ownershipless_created_run_id(state, &session_id) {
+                                Ok(run_id) => run_id,
+                                Err(error) => {
+                                    log::warn!(
+                                        "failed to capture legacy created-run ownership for {}: {}",
+                                        session_id,
+                                        error
+                                    );
+                                    None
+                                }
+                            };
+                        ownershipless_sessions.insert(session_id, captured);
+                    }
                 } else {
                     ownershipless_sessions.remove(&session_id);
                 }
@@ -1103,6 +1124,165 @@ mod tests {
             let _ = std::fs::remove_file(socket_path);
             let _ = std::fs::remove_dir_all(daemon_dir);
         }
+    }
+
+    #[tokio::test]
+    async fn ownershipless_created_event_binds_pending_successor_through_land_and_exit() {
+        let unique = unique_name("terminal-watcher-pending-created-land-exit");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_notifying_task(&config);
+        let db = Db::open(&config.db_path).unwrap();
+        db.insert_stage_run(NewStageRun {
+            id: "run-source",
+            task_id: "task-child",
+            stage: "in progress",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-child"),
+            provider_session_id: None,
+            cwd: Some("/tmp/task-child"),
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+        let expected = db.task_action_state("task-child").unwrap();
+        db.replace_current_run_with_pending(
+            NewStageRun {
+                id: "run-successor",
+                task_id: "task-child",
+                stage: "review",
+                kind: "main",
+                agent: None,
+                agent_provider: Some("codex"),
+                model: None,
+                status: "pending",
+                result: None,
+                feedback: None,
+                session_id: Some("task-child"),
+                provider_session_id: None,
+                cwd: Some("/tmp/task-child-2"),
+                resumed_from_run_id: None,
+            },
+            Some("manual"),
+            &expected,
+            "cancelled",
+            None,
+            None,
+        )
+        .unwrap();
+        drop(db);
+
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let server_db_path = config.db_path.clone();
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe_with_list(
+                &listener,
+                Vec::new(),
+                kanna_daemon::protocol::DaemonCapabilities::legacy(),
+            )
+            .await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::SessionCreated {
+                    session_id: "task-child".to_string(),
+                    run_id: None,
+                },
+            )
+            .await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::ProviderSessionChanged {
+                    session_id: "task-child".to_string(),
+                    run_id: None,
+                    provider_session_id: "successor-provider".to_string(),
+                },
+            )
+            .await;
+
+            let db = Db::open(&server_db_path).unwrap();
+            for _ in 0..100 {
+                if db
+                    .latest_stage_run("task-child")
+                    .unwrap()
+                    .is_some_and(|run| {
+                        run.provider_session_id.as_deref() == Some("successor-provider")
+                    })
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert_eq!(
+                db.latest_stage_run("task-child")
+                    .unwrap()
+                    .unwrap()
+                    .provider_session_id
+                    .as_deref(),
+                Some("successor-provider"),
+                "ownershipless SessionCreated must bind the reserved successor"
+            );
+            db.land_stage_run(
+                "task-child",
+                "run-successor",
+                "review",
+                Some("task-child-2"),
+                None,
+            )
+            .unwrap();
+            drop(db);
+
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::Exit {
+                    session_id: "task-child".to_string(),
+                    run_id: None,
+                    code: 0,
+                    resume_session_id: Some("successor-provider".to_string()),
+                    killed: false,
+                },
+            )
+            .await;
+            let inputs = expect_completion_notification(&listener).await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+            inputs
+        });
+
+        timeout(
+            Duration::from_secs(2),
+            terminal_state_watcher_once(
+                &http_api::AppState::new(config.clone()),
+                &session_replacements::SessionReplacements::default(),
+            ),
+        )
+        .await
+        .expect("watcher did not finish")
+        .unwrap();
+        assert_eq!(server.await.unwrap().len(), 2);
+        assert_task_completed(&config);
+        let runs = Db::open(&config.db_path)
+            .unwrap()
+            .list_stage_runs_for_task("task-child")
+            .unwrap();
+        assert_eq!(
+            runs.iter()
+                .find(|run| run.id == "run-successor")
+                .and_then(|run| run.provider_session_id.as_deref()),
+            Some("successor-provider")
+        );
+        assert_eq!(
+            runs.iter()
+                .find(|run| run.id == "run-source")
+                .and_then(|run| run.provider_session_id.as_deref()),
+            None
+        );
+
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
     #[tokio::test]

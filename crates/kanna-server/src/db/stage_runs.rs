@@ -25,6 +25,15 @@ pub struct ProviderSessionUpdate {
     pub changed: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplacedStageRunSource {
+    pub run_id: String,
+    pub status: String,
+    pub result: Option<String>,
+    pub feedback: Option<String>,
+    pub finished_at: Option<String>,
+}
+
 impl Db {
     pub fn has_durable_running_task_session(&self, task_id: &str) -> Result<bool, rusqlite::Error> {
         self.conn.query_row(
@@ -169,6 +178,16 @@ impl Db {
         run: NewStageRun<'_>,
         completion_transition: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
+        let run_ownership_version =
+            if let ("post", Some(owner_run_id)) = (run.kind, run.resumed_from_run_id) {
+                self.conn.query_row(
+                    "SELECT run_ownership_version FROM stage_run WHERE id = ?1",
+                    [owner_run_id],
+                    |row| row.get::<_, i64>(0),
+                )?
+            } else {
+                CURRENT_RUN_OWNERSHIP_VERSION
+            };
         self.conn.execute(
             "INSERT INTO stage_run
              (id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback,
@@ -191,7 +210,7 @@ impl Db {
                 run.cwd,
                 run.resumed_from_run_id,
                 completion_transition,
-                CURRENT_RUN_OWNERSHIP_VERSION,
+                run_ownership_version,
             ),
         )?;
         Ok(())
@@ -211,7 +230,7 @@ impl Db {
         source_status: &str,
         source_result: Option<&str>,
         source_feedback: Option<&str>,
-    ) -> Result<(), rusqlite::Error> {
+    ) -> Result<Option<ReplacedStageRunSource>, rusqlite::Error> {
         let transaction = self.conn.unchecked_transaction()?;
         let current = transaction
             .query_row(
@@ -251,7 +270,22 @@ impl Db {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
 
-        if let Some(source_run_id) = expected.active_run_id.as_deref() {
+        let replaced_source = if let Some(source_run_id) = expected.active_run_id.as_deref() {
+            let source = transaction.query_row(
+                "SELECT id, status, result, feedback, finished_at
+                 FROM stage_run
+                 WHERE id = ?1 AND task_id = ?2",
+                (source_run_id, run.task_id),
+                |row| {
+                    Ok(ReplacedStageRunSource {
+                        run_id: row.get(0)?,
+                        status: row.get(1)?,
+                        result: row.get(2)?,
+                        feedback: row.get(3)?,
+                        finished_at: row.get(4)?,
+                    })
+                },
+            )?;
             transaction.execute(
                 "UPDATE stage_run
                  SET status = ?2,
@@ -267,7 +301,10 @@ impl Db {
                     run.task_id,
                 ),
             )?;
-        }
+            Some(source)
+        } else {
+            None
+        };
 
         let task_changed = transaction.execute(
             "UPDATE pipeline_item
@@ -306,6 +343,83 @@ impl Db {
                 CURRENT_RUN_OWNERSHIP_VERSION,
             ),
         )?;
+        transaction.commit()?;
+        Ok(replaced_source)
+    }
+
+    /// Undo a successor reservation only while it is still the task's latest
+    /// pending run and the task remains at the source stage/branch. This
+    /// restores the source verdict exactly so a live process whose guarded
+    /// kill failed remains the action owner for a later retry.
+    pub fn rollback_pending_replacement_and_restore_source(
+        &self,
+        task_id: &str,
+        successor_run_id: &str,
+        expected: &TaskActionState,
+        source: Option<&ReplacedStageRunSource>,
+    ) -> Result<(), rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let reservation_is_current = transaction.query_row(
+            "SELECT EXISTS(
+               SELECT 1
+               FROM pipeline_item task
+               JOIN stage_run successor
+                 ON successor.id = ?2
+                AND successor.task_id = task.id
+                AND successor.status = 'pending'
+               WHERE task.id = ?1
+                 AND task.closed_at IS NULL
+                 AND task.stage = ?3
+                 AND task.branch = ?4
+                 AND (
+                   SELECT id
+                   FROM stage_run
+                   WHERE task_id = task.id
+                   ORDER BY datetime(started_at) DESC, rowid DESC
+                   LIMIT 1
+                 ) = successor.id
+             )",
+            (
+                task_id,
+                successor_run_id,
+                expected.stage.as_str(),
+                expected.branch.as_str(),
+            ),
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !reservation_is_current {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+
+        let deleted = transaction.execute(
+            "DELETE FROM stage_run
+             WHERE id = ?1 AND task_id = ?2 AND status = 'pending'",
+            (successor_run_id, task_id),
+        )?;
+        if deleted == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        if let Some(source) = source {
+            let restored = transaction.execute(
+                "UPDATE stage_run
+                 SET status = ?2,
+                     result = ?3,
+                     feedback = ?4,
+                     finished_at = ?5
+                 WHERE id = ?1 AND task_id = ?6",
+                (
+                    source.run_id.as_str(),
+                    source.status.as_str(),
+                    source.result.as_deref(),
+                    source.feedback.as_deref(),
+                    source.finished_at.as_deref(),
+                    task_id,
+                ),
+            )?;
+            if restored == 0 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+        }
         transaction.commit()
     }
 
@@ -444,6 +558,34 @@ impl Db {
                    AND run.kind = 'main'
                    AND run.status != 'pending'
                    AND task.closed_at IS NULL
+                 ORDER BY datetime(run.started_at) DESC, run.rowid DESC
+                 LIMIT 1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    pub fn pending_main_run_id_by_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT run.id
+                 FROM stage_run run
+                 JOIN pipeline_item task ON task.id = run.task_id
+                 WHERE run.session_id = ?1
+                   AND run.kind = 'main'
+                   AND run.status = 'pending'
+                   AND task.closed_at IS NULL
+                   AND run.id = (
+                     SELECT latest.id
+                     FROM stage_run latest
+                     WHERE latest.task_id = run.task_id
+                     ORDER BY datetime(latest.started_at) DESC, latest.rowid DESC
+                     LIMIT 1
+                   )
                  ORDER BY datetime(run.started_at) DESC, run.rowid DESC
                  LIMIT 1",
                 [session_id],

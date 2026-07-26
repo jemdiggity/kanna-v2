@@ -1175,6 +1175,7 @@ dependencies = [
  "kanna-agent-protocol",
  "kanna-daemon",
  "kanna-runtime-defaults",
+ "kanna-tool-catalog",
  "libc",
  "log",
  "mdns-sd",
@@ -1190,6 +1191,14 @@ dependencies = [
  "toml",
  "tower",
  "tower-http",
+]
+
+[[package]]
+name = "kanna-tool-catalog"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

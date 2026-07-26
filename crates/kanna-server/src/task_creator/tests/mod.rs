@@ -328,6 +328,94 @@ async fn spawn_fake_daemon_fork_transition(
     })
 }
 
+async fn spawn_fake_daemon_disconnect_after_spawn_acceptance(
+    daemon_dir: String,
+) -> tokio::task::JoinHandle<Vec<kanna_daemon::protocol::Command>> {
+    let socket_path = test_daemon_socket_path(&daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut commands = Vec::new();
+        let (accepted_session_id, accepted_run_id, accepted_cwd) = loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            match &command {
+                kanna_daemon::protocol::Command::Kill { .. } => {
+                    commands.push(command);
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                kanna_daemon::protocol::Command::Spawn {
+                    session_id,
+                    cwd,
+                    env,
+                    ..
+                } => {
+                    let accepted = (
+                        session_id.clone(),
+                        env.get("KANNA_STAGE_RUN_ID").cloned().unwrap(),
+                        cwd.clone(),
+                    );
+                    commands.push(command);
+                    break accepted;
+                }
+                kanna_daemon::protocol::Command::SpawnAgent { session_id, params } => {
+                    let accepted = (
+                        session_id.clone(),
+                        params.env.get("KANNA_STAGE_RUN_ID").cloned().unwrap(),
+                        params.cwd.clone(),
+                    );
+                    commands.push(command);
+                    break accepted;
+                }
+                other => panic!("unexpected daemon command: {other:?}"),
+            }
+        };
+        drop(reader);
+        drop(write_half);
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: kanna_daemon::protocol::Command = serde_json::from_str(line.trim()).unwrap();
+        assert!(matches!(command, kanna_daemon::protocol::Command::List));
+        commands.push(command);
+        let response = kanna_daemon::protocol::Event::SessionList {
+            sessions: vec![kanna_daemon::protocol::SessionInfo {
+                session_id: accepted_session_id,
+                pid: 42,
+                cwd: accepted_cwd,
+                state: kanna_daemon::protocol::SessionState::Active,
+                idle_seconds: 0,
+                status: kanna_daemon::protocol::SessionStatus::Busy,
+                kind: Default::default(),
+                run_id: Some(accepted_run_id),
+            }],
+            capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
+        };
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        commands
+    })
+}
+
 /// Fake daemon for a transition out of a live injected post. The database's
 /// latest action row is the post, but the daemon process is still owned by
 /// the main run that received the injected prompt.

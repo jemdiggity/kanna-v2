@@ -196,6 +196,149 @@ async fn legacy_daemon_revision_rejection_preserves_active_run_through_http() {
 }
 
 #[tokio::test]
+async fn request_revision_reports_failure_after_preflight_acceptance() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let _env_guard = crate::task_creator::tests::CLAUDE_CONFIG_DIR_LOCK
+        .lock()
+        .unwrap();
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-revision-landing-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-revision-landing-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        pairing_store_path: format!("/tmp/kanna-pairings-revision-landing-{unique}.json"),
+    };
+    let (repo_root, db) = crate::task_creator::tests::revision::init_resume_revision_fixture(
+        &format!("http-revision-landing-{unique}"),
+        &config,
+    );
+    let claude_config_dir = repo_root.join("claude-config");
+    crate::task_creator::tests::revision::write_resume_transcript(
+        &claude_config_dir,
+        &repo_root.join(".kanna-worktrees/task-review-task"),
+    );
+    std::env::set_var("CLAUDE_CONFIG_DIR", &claude_config_dir);
+
+    let socket_path = daemon_socket_path_for_dir(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let fake_daemon = tokio::spawn(async move {
+        for connection_index in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::List
+            ));
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::SessionList {
+                            sessions: Vec::new(),
+                            capabilities: Some(
+                                kanna_daemon::protocol::DaemonCapabilities::current()
+                            ),
+                        })
+                        .unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            if connection_index == 1 {
+                line.clear();
+                reader.read_line(&mut line).await.unwrap();
+                assert!(matches!(
+                    serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                    DaemonCommand::Kill { .. }
+                ));
+                write_half
+                    .write_all(
+                        format!(
+                            "{}\n",
+                            serde_json::to_string(&DaemonEvent::Error {
+                                code: Some(kanna_daemon::protocol::ErrorCode::WriteFailed),
+                                message: "forced post-accept kill failure".to_string(),
+                            })
+                            .unwrap()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/review-task/actions/request-revision")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "targetStage": "in progress",
+                        "summary": "landing failed",
+                        "prompt": "Keep this revision draft for retry."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+    fake_daemon.await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&body).contains("forced post-accept kill failure"),
+        "response must explain the landing failure: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let runs = db.list_stage_runs_for_task("review-task").unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].id, "run-impl");
+    assert_eq!(runs[0].status, "succeeded");
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[tokio::test]
 async fn request_revision_route_resolves_branch_style_task_id() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

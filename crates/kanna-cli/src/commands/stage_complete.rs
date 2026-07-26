@@ -67,11 +67,10 @@ pub(crate) async fn run(
     // New Kanna spawns always provide immutable ownership. A pre-upgrade CLI
     // process has no such environment value; omission is preserved so the
     // server can authorize it only against a durable legacy run marker.
-    request.run_id = run_id.filter(|value| !value.trim().is_empty()).or_else(|| {
-        env::var("KANNA_STAGE_RUN_ID")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-    });
+    request.run_id = env::var("KANNA_STAGE_RUN_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| run_id.filter(|value| !value.trim().is_empty()));
     let response = complete_stage_via_api(&base_url, &task_id, &request)
         .await
         .unwrap_or_else(|e| {

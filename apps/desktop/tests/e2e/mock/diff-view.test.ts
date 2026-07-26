@@ -205,6 +205,7 @@ async function waitForDiffScrollHeight(
 interface StageActionRecorderOptions {
   requestRevisionStatus?: number;
   requestRevisionBody?: string;
+  requestRevisionDelayMs?: number;
 }
 
 interface DiffLineViewportSnapshot {
@@ -248,6 +249,9 @@ async function installStageActionRecorder(
          const recorderOptions = window.__KANNA_NATIVE_REVIEW_OPTIONS__ || {};
          if (item && url.endsWith("/actions/request-revision")) {
            const status = recorderOptions.requestRevisionStatus || 200;
+           if (recorderOptions.requestRevisionDelayMs) {
+             await new Promise((resolve) => setTimeout(resolve, recorderOptions.requestRevisionDelayMs));
+           }
            if (status < 200 || status >= 300) {
              return new Response(recorderOptions.requestRevisionBody || "request revision failed", {
                status,
@@ -306,6 +310,33 @@ async function waitForRecordedStageActions(
      const check = () => {
        const calls = read();
        if (calls.length >= expected) finish(calls);
+     };
+     const interval = setInterval(check, 100);
+     const timeout = setTimeout(() => finish(read()), 10000);
+     check();`
+  );
+}
+
+async function waitForRecordedStageAction(
+  client: WebDriverClient,
+  action: string,
+): Promise<{ url: string; method: string; body: string } | null> {
+  return client.executeAsync<{ url: string; method: string; body: string } | null>(
+    `const cb = arguments[arguments.length - 1];
+     const action = ${JSON.stringify(action)};
+     let done = false;
+     const read = () => (window.__KANNA_NATIVE_REVIEW_ACTIONS__ || [])
+       .find((call) => call.url.endsWith("/actions/" + action)) || null;
+     const finish = (value) => {
+       if (done) return;
+       done = true;
+       clearInterval(interval);
+       clearTimeout(timeout);
+       cb(value);
+     };
+     const check = () => {
+       const call = read();
+       if (call) finish(call);
      };
      const interval = setInterval(check, 100);
      const timeout = setTimeout(() => finish(read()), 10000);
@@ -1824,7 +1855,7 @@ describe("diff view", () => {
     await restoreSharedFixtureTask(task.id);
   });
 
-  it("keeps pending review comments and summary draft when request-revision fails", async () => {
+  it("keeps pending review comments and summary draft when revision landing fails after acceptance", async () => {
     const taskId = await client.executeSync<string>(
       `const ctx = window.__KANNA_E2E__.setupState;
        return ctx.selectedItem().id;`
@@ -1853,7 +1884,8 @@ describe("diff view", () => {
     );
     await installStageActionRecorder(client, {
       requestRevisionStatus: 500,
-      requestRevisionBody: "mock request revision failure",
+      requestRevisionBody: "mock revision landing failure",
+      requestRevisionDelayMs: 200,
     });
 
     await openDiffModal(client);
@@ -1873,8 +1905,8 @@ describe("diff view", () => {
     await client.sendKeys(summaryTextarea, "This draft should survive.");
     await client.click(await client.findElement(".summary-actions .primary"));
 
-    const calls = await waitForRecordedStageActions(client, 1);
-    expect(calls[0].url).toContain(`/v1/tasks/${encodeURIComponent(taskId)}/actions/request-revision`);
+    const requestCall = await waitForRecordedStageAction(client, "request-revision");
+    expect(requestCall?.url).toContain(`/v1/tasks/${encodeURIComponent(taskId)}/actions/request-revision`);
     await client.waitForElement(".summary-composer", 2_000);
     await waitForReviewCommentCount(client, 1);
     const retainedDraft = await client.executeSync<string>(

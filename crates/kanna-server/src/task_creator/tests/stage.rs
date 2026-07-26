@@ -951,7 +951,7 @@ fn prepare_stage_completion_for_closed_task_is_idempotent_without_definitions() 
 }
 
 #[tokio::test]
-async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
+async fn accepted_stage_spawn_is_reconciled_after_pre_ack_disconnect() {
     let repo_root = init_git_repo("advance-stage-same-task-run");
     std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
@@ -1081,7 +1081,8 @@ async fn prepare_advance_stage_forks_workspace_for_next_run_in_same_task() {
     assert_eq!(run.cwd, fork_worktree);
     assert!(std::path::Path::new(&fork_worktree).is_dir());
 
-    let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone(), 1).await;
+    let fake_daemon =
+        spawn_fake_daemon_disconnect_after_spawn_acceptance(config.daemon_dir.clone()).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
     let advanced = spawn_prepared_stage_run_for_api(
         &config.db_path,

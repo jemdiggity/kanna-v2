@@ -1,5 +1,5 @@
 use kanna_daemon::protocol::{Command, DaemonCapabilities, Event, SessionInfo};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -21,6 +21,7 @@ pub struct DaemonClient {
     /// arrive and would pair with the wrong request, so the connection is
     /// unusable.
     poisoned: bool,
+    socket_path: PathBuf,
 }
 
 pub struct DaemonClientReader {
@@ -80,6 +81,7 @@ impl DaemonClient {
             writer: write_half,
             command_timeout: COMMAND_TIMEOUT,
             poisoned: false,
+            socket_path,
         })
     }
 
@@ -88,6 +90,21 @@ impl DaemonClient {
     #[cfg(test)]
     pub(crate) fn set_command_timeout_for_test(&mut self, timeout: Duration) {
         self.command_timeout = timeout;
+    }
+
+    pub async fn reconnect(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
+            format!(
+                "Failed to reconnect to daemon at {}: {}",
+                self.socket_path.display(),
+                e
+            )
+        })?;
+        let (read_half, write_half) = stream.into_split();
+        self.reader = BufReader::new(read_half);
+        self.writer = write_half;
+        self.poisoned = false;
+        Ok(())
     }
 
     pub async fn send_command(

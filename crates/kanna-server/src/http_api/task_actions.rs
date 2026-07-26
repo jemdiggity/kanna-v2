@@ -821,6 +821,37 @@ fn execute_stage_transition_detached_holding(
     });
 }
 
+async fn execute_stage_transition_awaited(
+    state: Arc<AppState>,
+    task_id: String,
+    transition: crate::task_creator::PreparedStageTransition,
+    action_flight: TaskActionFlight,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let handle = tokio::runtime::Handle::current();
+    let worker_task_id = task_id.clone();
+    tokio::task::spawn_blocking(move || {
+        handle.block_on(async move {
+            let _action_flight = action_flight;
+            let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
+                .await
+                .map_err(|error| {
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        format!("stage transition for {task_id} failed to reach daemon: {error}"),
+                    )
+                })?;
+            execute_stage_transition(&state, &mut daemon, transition).await
+        })
+    })
+    .await
+    .map_err(|join_error| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("stage transition worker for {worker_task_id} failed: {join_error}"),
+        )
+    })?
+}
+
 pub(super) async fn rerun_stage(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
@@ -1382,14 +1413,13 @@ pub(super) async fn request_revision(
             prepared,
             budget,
         } => {
-            // Ownership moves into the worker: the task stays claimed until
-            // the revision has actually landed, not just until this response.
-            execute_stage_transition_detached_holding(
+            let mut response = execute_stage_transition_awaited(
                 Arc::clone(&state),
                 source_task_id.clone(),
                 crate::task_creator::PreparedStageTransition::Run(prepared),
-                Some(revision_in_flight),
-            );
+                revision_in_flight,
+            )
+            .await?;
             state.publish_state_changed(StateChangeScope::Tasks);
 
             let message = if budget.limit > 0 && origin.is_agent() {
@@ -1407,16 +1437,13 @@ pub(super) async fn request_revision(
             } else {
                 "Revision started; this pipeline sets no revision-round limit.".to_string()
             };
-            Ok(Json(crate::mobile_api::TaskActionResponse {
-                task_id: source_task_id,
-                follow_task: None,
-                revision_budget: Some(crate::mobile_api::RevisionBudgetStatus {
-                    rounds: budget.rounds,
-                    limit: budget.limit,
-                    exhausted: false,
-                    message,
-                }),
-            }))
+            response.0.revision_budget = Some(crate::mobile_api::RevisionBudgetStatus {
+                rounds: budget.rounds,
+                limit: budget.limit,
+                exhausted: false,
+                message,
+            });
+            Ok(response)
         }
     }
 }
