@@ -448,7 +448,7 @@ fn current_mcp_process_binds_run_id_after_resolving_old_override_catalog() {
         .find(|tool| tool.name == "kanna_complete_stage")
         .unwrap()
         .params
-        .retain(|param| param.name != "run_id");
+        .retain(|param| param.name != "run_id" && param.name != "completion_attempt");
     std::fs::write(
         root.join(".kanna/mcp-tools.json"),
         serde_json::to_vec(&catalog).unwrap(),
@@ -461,7 +461,8 @@ fn current_mcp_process_binds_run_id_after_resolving_old_override_catalog() {
         body: Some(json!({
             "status": "success",
             "summary": "completed through old override",
-            "runId": "run-current"
+            "runId": "run-current",
+            "completionAttempt": "attempt-current"
         })),
         response_status: "200 OK",
         response_body: json!({ "taskId": "task-current" }),
@@ -477,7 +478,9 @@ fn current_mcp_process_binds_run_id_after_resolving_old_override_catalog() {
                 "arguments": {
                     "task_id": "task-current",
                     "status": "success",
-                    "summary": "completed through old override"
+                    "summary": "completed through old override",
+                    "run_id": "caller-supplied-current-run",
+                    "completion_attempt": "attempt-current"
                 }
             }
         })],

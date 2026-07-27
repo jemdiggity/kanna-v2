@@ -70,7 +70,7 @@ fn generic_complete_stage_tool_call_supports_old_override_catalog() {
         .find(|tool| tool.name == "kanna_complete_stage")
         .unwrap()
         .params
-        .retain(|param| param.name != "run_id");
+        .retain(|param| param.name != "run_id" && param.name != "completion_attempt");
     std::fs::write(
         root.join(".kanna/mcp-tools.json"),
         serde_json::to_vec(&catalog).unwrap(),
@@ -86,7 +86,7 @@ fn generic_complete_stage_tool_call_supports_old_override_catalog() {
         let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
         assert!(request.starts_with("POST /v1/tasks/task-current/actions/complete-stage HTTP/1.1"));
         assert!(request.contains(
-            r#"{"runId":"run-current","status":"success","summary":"completed through old override"}"#
+            r#"{"completionAttempt":"attempt-current","runId":"run-current","status":"success","summary":"completed through old override"}"#
         ));
 
         let body = r#"{"taskId":"task-current"}"#;
@@ -108,7 +108,7 @@ fn generic_complete_stage_tool_call_supports_old_override_catalog() {
             "call",
             "kanna_complete_stage",
             "--json",
-            r#"{"task_id":"task-current","status":"success","summary":"completed through old override","run_id":"caller-supplied-current-run"}"#,
+            r#"{"task_id":"task-current","status":"success","summary":"completed through old override","run_id":"caller-supplied-current-run","completion_attempt":"attempt-current"}"#,
             "--server-url",
             &format!("http://{address}"),
         ])

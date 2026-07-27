@@ -20,6 +20,18 @@ const STARTUP_LIFECYCLE_BUFFER_PERIOD: std::time::Duration = std::time::Duration
 const STARTUP_DAEMON_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(test)]
 const STARTUP_DAEMON_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+const SPAWN_RECONCILIATION_ATTEMPTS: usize = 3;
+#[cfg(not(test))]
+const SPAWN_RECONCILIATION_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+#[cfg(test)]
+const SPAWN_RECONCILIATION_ATTEMPT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(50);
+
+enum SpawnAcceptanceReconciliation {
+    Accepted,
+    Rejected(String),
+    Indeterminate(String),
+}
 
 pub(crate) fn prepared_task_id(prepared: &PreparedTaskSpawn) -> &str {
     &prepared.created_task.task_id
@@ -73,11 +85,6 @@ pub(crate) async fn reconcile_pending_stage_actions_on_startup(
         .await
         .map_err(|_| "startup action reconciliation list timed out".to_string())?
         .map_err(|error| format!("startup action reconciliation list failed: {error}"))?;
-    if !listed.capabilities.immutable_run_ownership {
-        return Err(
-            "startup action reconciliation requires immutable daemon run ownership".to_string(),
-        );
-    }
     let expected_successors = actions
         .iter()
         .map(|action| {
@@ -638,17 +645,22 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     let event = match spawn_result {
         Ok(event) => Some(event),
         Err(command_error) => {
-            if let Err(reconcile_error) =
-                reconcile_spawn_acceptance(daemon, &session_id, &run_id).await
-            {
-                return Err(fail_prepared_stage_spawn(
-                    db_path,
-                    &run_id,
-                    &prepared,
-                    format!("{command_error}; {reconcile_error}"),
+            match reconcile_spawn_acceptance(daemon, &session_id, &run_id).await {
+                SpawnAcceptanceReconciliation::Accepted => None,
+                SpawnAcceptanceReconciliation::Rejected(reconcile_error) => {
+                    return Err(fail_prepared_stage_spawn(
+                        db_path,
+                        &run_id,
+                        &prepared,
+                        format!("{command_error}; {reconcile_error}"),
+                    ));
+                }
+                SpawnAcceptanceReconciliation::Indeterminate(reconcile_error) => {
+                    return Err(format!(
+                    "{command_error}; {reconcile_error}; successor reservation retained for startup reconciliation"
                 ));
+                }
             }
-            None
         }
     };
     match event {
@@ -819,29 +831,54 @@ async fn reconcile_spawn_acceptance(
     daemon: &mut DaemonClient,
     session_id: &str,
     run_id: &str,
-) -> Result<(), String> {
-    daemon
-        .reconnect()
-        .await
-        .map_err(|error| format!("spawn reconciliation could not reconnect: {error}"))?;
-    let sessions = daemon
-        .list()
-        .await
-        .map_err(|error| format!("spawn reconciliation could not list sessions: {error}"))?;
-    match sessions
-        .sessions
-        .into_iter()
-        .find(|session| session.session_id == session_id)
-    {
-        Some(session) if session.run_id.as_deref() == Some(run_id) => Ok(()),
-        Some(session) => Err(format!(
-            "spawn reconciliation found session {session_id} owned by {:?}, expected {run_id}",
-            session.run_id
-        )),
-        None => Err(format!(
-            "spawn reconciliation did not find accepted session {session_id}"
-        )),
+) -> SpawnAcceptanceReconciliation {
+    let mut failures = Vec::with_capacity(SPAWN_RECONCILIATION_ATTEMPTS);
+    for attempt in 1..=SPAWN_RECONCILIATION_ATTEMPTS {
+        let listed =
+            tokio::time::timeout(SPAWN_RECONCILIATION_ATTEMPT_TIMEOUT, async {
+                daemon.reconnect().await.map_err(|error| {
+                    format!("spawn reconciliation could not reconnect: {error}")
+                })?;
+                daemon.list().await.map_err(|error| {
+                    format!("spawn reconciliation could not list sessions: {error}")
+                })
+            })
+            .await;
+        let sessions = match listed {
+            Ok(Ok(sessions)) => sessions,
+            Ok(Err(error)) => {
+                failures.push(format!("attempt {attempt}: {error}"));
+                continue;
+            }
+            Err(_) => {
+                failures.push(format!(
+                    "attempt {attempt}: spawn reconciliation timed out after {:?}",
+                    SPAWN_RECONCILIATION_ATTEMPT_TIMEOUT
+                ));
+                continue;
+            }
+        };
+        return match sessions
+            .sessions
+            .into_iter()
+            .find(|session| session.session_id == session_id)
+        {
+            Some(session) if session.run_id.as_deref() == Some(run_id) => {
+                SpawnAcceptanceReconciliation::Accepted
+            }
+            Some(session) => SpawnAcceptanceReconciliation::Rejected(format!(
+                "spawn reconciliation found session {session_id} owned by {:?}, expected {run_id}",
+                session.run_id
+            )),
+            None => SpawnAcceptanceReconciliation::Rejected(format!(
+                "spawn reconciliation did not find accepted session {session_id}"
+            )),
+        };
     }
+    SpawnAcceptanceReconciliation::Indeterminate(format!(
+        "spawn reconciliation remained indeterminate after {SPAWN_RECONCILIATION_ATTEMPTS} attempts ({})",
+        failures.join("; ")
+    ))
 }
 
 pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
@@ -1104,14 +1141,19 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     let event = match spawn_result {
         Ok(event) => Some(event),
         Err(command_error) => {
-            if let Err(reconcile_error) =
-                reconcile_spawn_acceptance(daemon, &session_id, &run_id).await
-            {
-                return Err(record_failure(format!(
-                    "{command_error}; {reconcile_error}"
-                )));
+            match reconcile_spawn_acceptance(daemon, &session_id, &run_id).await {
+                SpawnAcceptanceReconciliation::Accepted => None,
+                SpawnAcceptanceReconciliation::Rejected(reconcile_error) => {
+                    return Err(record_failure(format!(
+                        "{command_error}; {reconcile_error}"
+                    )));
+                }
+                SpawnAcceptanceReconciliation::Indeterminate(reconcile_error) => {
+                    return Err(format!(
+                    "{command_error}; {reconcile_error}; successor reservation retained for startup reconciliation"
+                ));
+                }
             }
-            None
         }
     };
     match event {

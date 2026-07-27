@@ -430,6 +430,78 @@ async fn spawn_fake_daemon_disconnect_after_spawn_acceptance(
     })
 }
 
+#[derive(Clone, Copy)]
+enum SpawnReconciliationFailure {
+    Disconnect,
+    Stall,
+}
+
+async fn spawn_fake_daemon_accept_spawn_then_reconciliation_fails(
+    daemon_dir: String,
+    failure: SpawnReconciliationFailure,
+) -> tokio::task::JoinHandle<()> {
+    let socket_path = test_daemon_socket_path(&daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            match command {
+                kanna_daemon::protocol::Command::Kill { .. } => {
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                kanna_daemon::protocol::Command::Spawn { .. }
+                | kanna_daemon::protocol::Command::SpawnAgent { .. } => break,
+                other => panic!("unexpected daemon command before Spawn: {other:?}"),
+            }
+        }
+        drop(reader);
+        drop(write_half);
+
+        let mut stalled = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.unwrap();
+                    let mode = failure;
+                    stalled.spawn(async move {
+                        let (read_half, _write_half) = stream.into_split();
+                        let mut reader = BufReader::new(read_half);
+                        let mut line = String::new();
+                        reader.read_line(&mut line).await.unwrap();
+                        assert!(matches!(
+                            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim())
+                                .unwrap(),
+                            kanna_daemon::protocol::Command::List
+                        ));
+                        if matches!(mode, SpawnReconciliationFailure::Stall) {
+                            std::future::pending::<()>().await;
+                        }
+                    });
+                }
+                Some(result) = stalled.join_next(), if !stalled.is_empty() => {
+                    result.unwrap();
+                }
+            }
+        }
+    })
+}
+
 /// Fake daemon for a transition out of a live injected post. The database's
 /// latest action row is the post, but the daemon process is still owned by
 /// the main run that received the injected prompt.

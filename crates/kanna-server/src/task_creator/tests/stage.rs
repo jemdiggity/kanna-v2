@@ -1176,6 +1176,251 @@ async fn accepted_stage_spawn_is_reconciled_after_pre_ack_disconnect() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
+async fn assert_ambiguous_accepted_spawn_preserves_reservation(
+    test_name: &str,
+    failure: SpawnReconciliationFailure,
+) {
+    let config = test_config(test_name);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Keep an ambiguous accepted Spawn durable",
+        Some("Ambiguous Spawn"),
+        "in progress",
+        "2026-07-27 08:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-1", "task-1", "default", None, "codex")
+        .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-source",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let expected_source = db.task_action_state("task-1").unwrap();
+    let prepared = super::super::types::PreparedStageRunSpawn {
+        task_id: "task-1".to_string(),
+        source_session_id: "task-1".to_string(),
+        next_stage: "review".to_string(),
+        run_stage: "review".to_string(),
+        run_kind: "main",
+        workspace: super::super::types::PreparedRunWorkspace::Current,
+        workspace_teardown: None,
+        blocking_teardown_session_id: None,
+        stage_agent: Some("reviewer".to_string()),
+        agent_provider: "codex".to_string(),
+        model: None,
+        completion_transition: PipelineStageTransition::Manual,
+        feedback: None,
+        provider_session_id: None,
+        resumed_from_run_id: None,
+        cwd: "/tmp/task-1".to_string(),
+        env: HashMap::new(),
+        deferred_setup: Vec::new(),
+        terminal_prelude: None,
+        session: PreparedSessionSpawn::Pty {
+            executable: "/bin/sh".to_string(),
+            args: vec!["-lc".to_string(), "true".to_string()],
+            cols: 80,
+            rows: 24,
+            agent_provider: DaemonAgentProvider::Codex,
+        },
+        expected_source,
+        source_completion_status: "succeeded",
+        source_completion_result: None,
+        source_completion_feedback: None,
+        action_request_key: None,
+    };
+
+    let fake_daemon = spawn_fake_daemon_accept_spawn_then_reconciliation_fails(
+        config.daemon_dir.clone(),
+        failure,
+    )
+    .await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    daemon.set_command_timeout_for_test(std::time::Duration::from_millis(50));
+    let error = spawn_prepared_stage_run_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        prepared,
+    )
+    .await
+    .expect_err("transport-indeterminate Spawn must not report success");
+    fake_daemon.abort();
+
+    assert!(
+        error.contains("reconciliation"),
+        "unexpected ambiguous Spawn error: {error}"
+    );
+    let pending = db.pending_stage_actions().unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "ambiguous accepted Spawn must retain its durable pending action"
+    );
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].id, "run-source");
+    assert_eq!(runs[0].status, "succeeded");
+    assert_eq!(runs[1].id, pending[0].successor_run_id);
+    assert_eq!(
+        runs[1].status, "pending",
+        "potentially live successor must not be finalized failed"
+    );
+    let task = db.get_task_stage_source("task-1").unwrap().unwrap();
+    assert_eq!(task.stage.as_deref(), Some("in progress"));
+    assert_eq!(task.branch.as_deref(), Some("task-1"));
+}
+
+#[tokio::test]
+async fn accepted_spawn_with_failed_reconciliation_list_keeps_reservation_durable() {
+    assert_ambiguous_accepted_spawn_preserves_reservation(
+        "accepted-spawn-failed-list",
+        SpawnReconciliationFailure::Disconnect,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn accepted_spawn_with_stalled_reconciliation_list_keeps_reservation_durable() {
+    assert_ambiguous_accepted_spawn_preserves_reservation(
+        "accepted-spawn-stalled-list",
+        SpawnReconciliationFailure::Stall,
+    )
+    .await;
+}
+
+async fn assert_ambiguous_accepted_rerun_spawn_preserves_reservation(
+    test_name: &str,
+    failure: SpawnReconciliationFailure,
+) {
+    let config = test_config(test_name);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Keep an ambiguous accepted rerun Spawn durable",
+        Some("Ambiguous rerun Spawn"),
+        "in progress",
+        "2026-07-27 08:30:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-1", "task-1", "default", None, "codex")
+        .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-source",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let prepared = super::super::types::PreparedStageRerun {
+        task_id: "task-1".to_string(),
+        source_session_id: "task-1".to_string(),
+        stage: "in progress".to_string(),
+        run_kind: "main",
+        stage_agent: Some("implement".to_string()),
+        agent_provider: "codex".to_string(),
+        model: None,
+        completion_transition: PipelineStageTransition::Manual,
+        provider_session_id: None,
+        cwd: "/tmp/task-1".to_string(),
+        env: HashMap::new(),
+        deferred_setup: Vec::new(),
+        recovery_snapshot: None,
+        session: PreparedSessionSpawn::Pty {
+            executable: "/bin/sh".to_string(),
+            args: vec!["-lc".to_string(), "true".to_string()],
+            cols: 80,
+            rows: 24,
+            agent_provider: DaemonAgentProvider::Codex,
+        },
+        expected_source: db.task_action_state("task-1").unwrap(),
+        action_request_key: None,
+    };
+
+    let fake_daemon = spawn_fake_daemon_accept_spawn_then_reconciliation_fails(
+        config.daemon_dir.clone(),
+        failure,
+    )
+    .await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    daemon.set_command_timeout_for_test(std::time::Duration::from_millis(50));
+    let error = rerun_prepared_stage_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        prepared,
+    )
+    .await
+    .expect_err("transport-indeterminate rerun Spawn must not report success");
+    fake_daemon.abort();
+
+    assert!(
+        error.contains("reservation retained"),
+        "unexpected ambiguous rerun Spawn error: {error}"
+    );
+    let pending = db.pending_stage_actions().unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "ambiguous accepted rerun Spawn must retain its durable pending action"
+    );
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].id, "run-source");
+    assert_eq!(runs[0].status, "cancelled");
+    assert_eq!(runs[1].id, pending[0].successor_run_id);
+    assert_eq!(
+        runs[1].status, "pending",
+        "potentially live rerun successor must not be finalized failed"
+    );
+}
+
+#[tokio::test]
+async fn accepted_rerun_spawn_with_failed_reconciliation_list_keeps_reservation_durable() {
+    assert_ambiguous_accepted_rerun_spawn_preserves_reservation(
+        "accepted-rerun-spawn-failed-list",
+        SpawnReconciliationFailure::Disconnect,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn accepted_rerun_spawn_with_stalled_reconciliation_list_keeps_reservation_durable() {
+    assert_ambiguous_accepted_rerun_spawn_preserves_reservation(
+        "accepted-rerun-spawn-stalled-list",
+        SpawnReconciliationFailure::Stall,
+    )
+    .await;
+}
+
 /// A wedged daemon must not silently strand a stage transition: when the
 /// kill round-trip times out, the transition fails with the timeout error,
 /// the forked workspace is rolled back, and the task's stage/branch stay
@@ -1397,6 +1642,7 @@ async fn write_startup_event(
 async fn spawn_startup_list_daemon(
     config: &Config,
     successor_state: Option<kanna_daemon::protocol::SessionState>,
+    include_unrelated_legacy_session: bool,
 ) -> tokio::task::JoinHandle<()> {
     std::fs::create_dir_all(&config.daemon_dir).unwrap();
     let socket_path = test_daemon_socket_path(&config.daemon_dir);
@@ -1423,7 +1669,7 @@ async fn spawn_startup_list_daemon(
             serde_json::from_str::<kanna_daemon::protocol::Command>(control_line.trim()).unwrap(),
             kanna_daemon::protocol::Command::List
         ));
-        let sessions = if let Some(state) = successor_state {
+        let mut sessions = if let Some(state) = successor_state {
             vec![kanna_daemon::protocol::SessionInfo {
                 session_id: "task-1".to_string(),
                 pid: 42,
@@ -1437,11 +1683,27 @@ async fn spawn_startup_list_daemon(
         } else {
             Vec::new()
         };
+        if include_unrelated_legacy_session {
+            sessions.push(kanna_daemon::protocol::SessionInfo {
+                session_id: "unrelated-legacy-task".to_string(),
+                pid: 43,
+                cwd: "/tmp/unrelated-legacy-task".to_string(),
+                state: kanna_daemon::protocol::SessionState::Active,
+                idle_seconds: 0,
+                status: kanna_daemon::protocol::SessionStatus::Busy,
+                kind: Default::default(),
+                run_id: None,
+            });
+        }
+        let mut capabilities = kanna_daemon::protocol::DaemonCapabilities::current();
+        if include_unrelated_legacy_session {
+            capabilities.immutable_run_ownership = false;
+        }
         write_startup_event(
             &mut control_write,
             &kanna_daemon::protocol::Event::SessionList {
                 sessions,
-                capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
+                capabilities: Some(capabilities),
             },
         )
         .await;
@@ -1710,9 +1972,39 @@ async fn startup_reconciliation_times_out_when_list_stalls() {
 async fn startup_reconciliation_lands_daemon_owned_successor() {
     let config = test_config("startup-reconcile-land");
     seed_pending_startup_action(&config);
-    let daemon =
-        spawn_startup_list_daemon(&config, Some(kanna_daemon::protocol::SessionState::Active))
-            .await;
+    let daemon = spawn_startup_list_daemon(
+        &config,
+        Some(kanna_daemon::protocol::SessionState::Active),
+        false,
+    )
+    .await;
+
+    crate::task_creator::reconcile_pending_stage_actions_on_startup(&config)
+        .await
+        .unwrap();
+    daemon.await.unwrap();
+
+    let db = Db::open(&config.db_path).unwrap();
+    assert!(db.pending_stage_actions().unwrap().is_empty());
+    let task = db.get_pipeline_item("task-1").unwrap().unwrap();
+    assert_eq!(task.stage.as_deref(), Some("in progress"));
+    assert_eq!(task.branch.as_deref(), Some("task-task-1-2"));
+    assert_eq!(
+        db.latest_stage_run("task-1").unwrap().unwrap().status,
+        "running"
+    );
+}
+
+#[tokio::test]
+async fn startup_reconciliation_lands_exact_successor_with_unrelated_legacy_session() {
+    let config = test_config("startup-reconcile-mixed-ownership");
+    seed_pending_startup_action(&config);
+    let daemon = spawn_startup_list_daemon(
+        &config,
+        Some(kanna_daemon::protocol::SessionState::Active),
+        true,
+    )
+    .await;
 
     crate::task_creator::reconcile_pending_stage_actions_on_startup(&config)
         .await
@@ -1734,7 +2026,7 @@ async fn startup_reconciliation_lands_daemon_owned_successor() {
 async fn startup_reconciliation_restores_source_when_successor_was_not_accepted() {
     let config = test_config("startup-reconcile-restore");
     seed_pending_startup_action(&config);
-    let daemon = spawn_startup_list_daemon(&config, None).await;
+    let daemon = spawn_startup_list_daemon(&config, None, false).await;
 
     crate::task_creator::reconcile_pending_stage_actions_on_startup(&config)
         .await
@@ -1760,6 +2052,7 @@ async fn startup_reconciliation_restores_source_when_list_retains_exited_success
     let daemon = spawn_startup_list_daemon(
         &config,
         Some(kanna_daemon::protocol::SessionState::Exited(0)),
+        false,
     )
     .await;
 
