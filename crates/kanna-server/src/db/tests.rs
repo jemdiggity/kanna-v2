@@ -165,7 +165,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "039_task_action_execution_phase");
+    assert_eq!(latest_migration, "040_live_post_delivery_recovery");
 
     let stage_run_sql: String = db
         .conn
@@ -693,6 +693,7 @@ fn open_migrates_origin_main_028_activity_revision() {
         "037_task_action_request",
         "038_task_action_hardening",
         "039_task_action_execution_phase",
+        "040_live_post_delivery_recovery",
     ] {
         let count: i64 = db
             .conn
@@ -842,12 +843,17 @@ fn activity_revision_migration_precedes_new_stage_run_migrations() {
         .iter()
         .position(|migration| *migration == "039_task_action_execution_phase")
         .expect("task action execution phase migration");
+    let live_post_recovery = CURRENT_SCHEMA_MIGRATIONS
+        .iter()
+        .position(|migration| *migration == "040_live_post_delivery_recovery")
+        .expect("live post delivery recovery migration");
 
     assert!(activity_revision < ownership);
     assert!(ownership < pending_action);
     assert!(pending_action < action_request);
     assert!(action_request < hardening);
     assert!(hardening < execution_phase);
+    assert!(execution_phase < live_post_recovery);
 }
 
 #[test]
@@ -3532,6 +3538,160 @@ fn revision_round_action_replay_reuses_the_durable_budget_charge() {
         1,
         "crash replay must not double-charge the task"
     );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn schema_038_pending_revision_requests_reuse_the_legacy_budget_charge() {
+    let path = Db::test_db_path("schema-038-pending-revision-charge");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    for (task_id, rounds) in [("limit-one", 1_i64), ("higher-limit", 2_i64)] {
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-1",
+            "Revise task",
+            Some("Revise Task"),
+            "review",
+            "2026-07-28T00:00:00Z",
+        )
+        .expect("task");
+        assert_eq!(
+            db.claim_task_action_request(
+                &format!("{task_id}-revision"),
+                task_id,
+                "request-revision",
+                r#"{"targetStage":"in progress","origin":"agent"}"#,
+            )
+            .expect("claim legacy revision request"),
+            TaskActionRequestClaim::Claimed
+        );
+        db.conn
+            .execute(
+                "UPDATE task_action_request
+                 SET created_at = '2026-07-28 00:00:00',
+                     updated_at = '2026-07-28 00:00:00'
+                 WHERE idempotency_key = ?1",
+                [format!("{task_id}-revision")],
+            )
+            .expect("timestamp legacy request claim");
+        db.conn
+            .execute(
+                "UPDATE pipeline_item
+                 SET revision_rounds = ?2, updated_at = '2026-07-28 00:00:01'
+                 WHERE id = ?1",
+                (task_id, rounds),
+            )
+            .expect("seed legacy task-level charge after the request claim");
+    }
+    db.insert_test_pipeline_item(
+        "uncharged",
+        "repo-1",
+        "Revise task",
+        Some("Revise Task"),
+        "review",
+        "2026-07-28T00:00:00Z",
+    )
+    .expect("uncharged task");
+    db.conn
+        .execute(
+            "UPDATE pipeline_item
+             SET revision_rounds = 1, updated_at = '2026-07-28 00:00:00'
+             WHERE id = 'uncharged'",
+            [],
+        )
+        .expect("seed an older completed revision charge");
+    assert_eq!(
+        db.claim_task_action_request(
+            "uncharged-revision",
+            "uncharged",
+            "request-revision",
+            r#"{"targetStage":"in progress","origin":"agent"}"#,
+        )
+        .expect("claim uncharged revision request"),
+        TaskActionRequestClaim::Claimed
+    );
+    db.conn
+        .execute(
+            "UPDATE task_action_request
+             SET created_at = '2026-07-28 00:00:02',
+                 updated_at = '2026-07-28 00:00:02'
+             WHERE idempotency_key = 'uncharged-revision'",
+            [],
+        )
+        .expect("timestamp uncharged request after the older charge");
+    drop(db);
+
+    // Recreate the request table exactly as it existed after schema 038:
+    // the old handler had already charged pipeline_item.revision_rounds, but
+    // there was nowhere on the pending request to record that charge.
+    let conn = Connection::open(&path).expect("open schema-038 fixture");
+    conn.execute_batch(
+        r#"
+        PRAGMA foreign_keys = OFF;
+        ALTER TABLE task_action_request RENAME TO task_action_request_current;
+        CREATE TABLE task_action_request (
+          idempotency_key TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+          action TEXT NOT NULL,
+          request_json TEXT NOT NULL,
+          successor_run_id TEXT UNIQUE REFERENCES stage_run(id) ON DELETE SET NULL,
+          state TEXT NOT NULL CHECK (state IN ('pending', 'succeeded', 'failed')),
+          http_status INTEGER,
+          response_body TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO task_action_request (
+          idempotency_key, task_id, action, request_json, successor_run_id,
+          state, http_status, response_body, created_at, updated_at
+        )
+        SELECT
+          idempotency_key, task_id, action, request_json, successor_run_id,
+          state, http_status, response_body, created_at, updated_at
+        FROM task_action_request_current;
+        DROP TABLE task_action_request_current;
+        DELETE FROM schema_migrations
+        WHERE id IN (
+          '039_task_action_execution_phase',
+          '040_live_post_delivery_recovery'
+        );
+        PRAGMA foreign_keys = ON;
+        "#,
+    )
+    .expect("downgrade fixture to schema 038");
+    drop(conn);
+
+    let migrated = Db::open_migrated(&path).expect("upgrade schema-038 fixture");
+    assert_eq!(
+        migrated
+            .claim_agent_revision_round_for_task_action("limit-one-revision", "limit-one", 1,)
+            .expect("replay limit-one request"),
+        Some(1),
+        "an already charged limit-one request must not be parked"
+    );
+    assert_eq!(migrated.task_revision_rounds("limit-one").unwrap(), 1);
+    assert_eq!(
+        migrated
+            .claim_agent_revision_round_for_task_action("higher-limit-revision", "higher-limit", 3,)
+            .expect("replay higher-limit request"),
+        Some(2),
+        "an already charged higher-limit request must reuse its old round"
+    );
+    assert_eq!(
+        migrated.task_revision_rounds("higher-limit").unwrap(),
+        2,
+        "schema upgrade must not charge the task twice"
+    );
+    assert_eq!(
+        migrated
+            .claim_agent_revision_round_for_task_action("uncharged-revision", "uncharged", 3,)
+            .expect("replay uncharged request"),
+        Some(2),
+        "a request created after the task's older charge must spend its own round"
+    );
+    assert_eq!(migrated.task_revision_rounds("uncharged").unwrap(), 2);
 
     let _ = std::fs::remove_file(path);
 }

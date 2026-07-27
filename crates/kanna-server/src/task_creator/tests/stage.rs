@@ -3514,7 +3514,7 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
 }
 
 #[tokio::test]
-async fn cancelled_live_post_after_reservation_stays_pending_without_reinjection() {
+async fn crashed_live_post_before_delivery_releases_the_reservation_for_replay() {
     let repo_root = init_git_repo("live-post-reservation");
     write_post_pipeline_fixtures(&repo_root);
 
@@ -3601,28 +3601,257 @@ async fn cancelled_live_post_after_reservation_stays_pending_without_reinjection
         "a reserved but undelivered post must not accept completion"
     );
 
-    // Dropping the dispatch future after insertion must not make the durable
-    // key executable again: delivery is unknown, so replay remains pending
-    // and cannot inject the post a second time.
+    // The delivery-start marker is written only immediately before daemon I/O.
+    // Crashing at this earlier boundary is therefore definitely undelivered:
+    // restart reconciliation must remove the unused post and release the
+    // durable request for one fresh execution.
     dispatch.abort();
     assert!(dispatch.await.unwrap_err().is_cancelled());
     fake_daemon.abort();
-    assert!(matches!(
+    assert_eq!(
         db.reconcile_task_action_request("live-post-key").unwrap(),
-        crate::db::TaskActionRequestClaim::Pending {
-            phase,
-            successor_run_id: Some(successor),
-            ..
-        } if phase == "post_reserved" && successor == latest.id
-    ));
+        crate::db::TaskActionRequestClaim::Claimed
+    );
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(runs.len(), 1, "the undelivered post reservation is removed");
+    assert_eq!(runs[0].id, "run-main");
+    assert_eq!(runs[0].status, "running");
     assert!(matches!(
         db.claim_task_action_request("live-post-key", "task-1", "advance-stage", "{}")
             .unwrap(),
         crate::db::TaskActionRequestClaim::Pending {
             phase,
-            successor_run_id: Some(successor),
+            successor_run_id: None,
             ..
-        } if phase == "post_reserved" && successor == latest.id
+        } if phase == "claimed"
+    ));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn live_post_completion_lands_delivery_acknowledged_before_the_server_crash() {
+    let repo_root = init_git_repo("live-post-delivered-before-land");
+    write_post_pipeline_fixtures(&repo_root);
+
+    let config = test_config("live-post-delivered-before-land");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_pipeline_task(&config, &db, &repo_root);
+    db.insert_stage_run(NewStageRun {
+        id: "run-main",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("claude"),
+        model: Some("sonnet"),
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some(repo_root.to_string_lossy().as_ref()),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    assert_eq!(
+        db.claim_task_action_request("delivered-post-key", "task-1", "advance-stage", "{}")
+            .unwrap(),
+        crate::db::TaskActionRequestClaim::Claimed,
+    );
+    db.begin_task_action_request_execution("delivered-post-key", "server-before-crash")
+        .unwrap();
+
+    let mut post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Post(post) => post,
+        _ => panic!("expected post dispatch"),
+    };
+    post.action_request_key = Some("delivered-post-key".to_string());
+    let completion_attempt = post.completion_attempt.clone();
+    let (delivered, _release) =
+        crate::task_creator::pause_next_live_post_after_delivery("delivered-post-key");
+    let fake_daemon = spawn_fake_daemon_input_ok(config.daemon_dir.clone(), 2).await;
+    let db_path = config.db_path.clone();
+    let daemon_dir = config.daemon_dir.clone();
+    let dispatch = tokio::spawn(async move {
+        let mut daemon = DaemonClient::connect(&daemon_dir).await.unwrap();
+        crate::task_creator::dispatch_prepared_post_for_api(
+            &db_path,
+            &mut daemon,
+            &crate::session_replacements::SessionReplacements::default(),
+            *post,
+        )
+        .await
+    });
+    delivered
+        .acquire()
+        .await
+        .expect("post delivery pause disappeared")
+        .forget();
+    fake_daemon.await.unwrap();
+
+    let latest = db.latest_stage_run("task-1").unwrap().unwrap();
+    assert_eq!(latest.kind, "post");
+    assert_eq!(latest.status, "pending");
+    let delivery_started: Option<String> = db
+        .connection_for_e2e_tests()
+        .query_row(
+            "SELECT post_delivery_started_at
+             FROM task_action_request
+             WHERE idempotency_key = 'delivered-post-key'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        delivery_started.is_some(),
+        "daemon delivery must be preceded by a durable marker"
+    );
+
+    // Simulate the server dying after the daemon acknowledged both writes but
+    // before land_reserved_live_post committed. The agent's scoped completion
+    // is durable evidence that delivery happened and must atomically land and
+    // finish the reserved post and its action request.
+    dispatch.abort();
+    assert!(dispatch.await.unwrap_err().is_cancelled());
+    let finished = db
+        .finish_active_stage_run_with_completion_attempt(
+            "task-1",
+            Some("run-main"),
+            Some(&completion_attempt),
+            "succeeded",
+            Some(r#"{"status":"success"}"#),
+            Some("post completed after server restart"),
+        )
+        .expect("completion reconciles the delivered reservation")
+        .expect("reserved post completes");
+    assert_eq!(finished.kind, "post");
+    assert_eq!(
+        db.latest_stage_run("task-1").unwrap().unwrap().status,
+        "succeeded"
+    );
+    assert!(matches!(
+        db.claim_task_action_request("delivered-post-key", "task-1", "advance-stage", "{}")
+            .unwrap(),
+        crate::db::TaskActionRequestClaim::Completed { status: 200, .. }
+    ));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn ambiguous_live_post_ack_stays_indeterminate_until_scoped_completion() {
+    let repo_root = init_git_repo("live-post-ambiguous-ack");
+    write_post_pipeline_fixtures(&repo_root);
+
+    let config = test_config("live-post-ambiguous-ack");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_pipeline_task(&config, &db, &repo_root);
+    db.insert_stage_run(NewStageRun {
+        id: "run-main",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("claude"),
+        model: Some("sonnet"),
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some(repo_root.to_string_lossy().as_ref()),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    assert_eq!(
+        db.claim_task_action_request("ambiguous-post-key", "task-1", "advance-stage", "{}")
+            .unwrap(),
+        crate::db::TaskActionRequestClaim::Claimed,
+    );
+    db.begin_task_action_request_execution("ambiguous-post-key", "server-before-ack-loss")
+        .unwrap();
+
+    let mut post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Post(post) => post,
+        _ => panic!("expected post dispatch"),
+    };
+    post.action_request_key = Some("ambiguous-post-key".to_string());
+    let completion_attempt = post.completion_attempt.clone();
+
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let fake_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+
+        let mut message_line = String::new();
+        reader.read_line(&mut message_line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(message_line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::Input { .. }
+        ));
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let mut enter_line = String::new();
+        reader.read_line(&mut enter_line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(enter_line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::Input { data, .. } if data == vec![b'\r']
+        ));
+        // The daemon enqueued Enter but the connection vanished before its
+        // acknowledgement reached the server.
+    });
+
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error = crate::task_creator::dispatch_prepared_post_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *post,
+    )
+    .await
+    .expect_err("lost acknowledgement is not synchronous success");
+    fake_daemon.await.unwrap();
+    assert!(
+        error.is_indeterminate(),
+        "ambiguous delivery must not be persisted as a terminal failure: {error}"
+    );
+    assert!(matches!(
+        db.claim_task_action_request("ambiguous-post-key", "task-1", "advance-stage", "{}")
+            .unwrap(),
+        crate::db::TaskActionRequestClaim::Pending {
+            phase,
+            successor_run_id: Some(_),
+            ..
+        } if phase == "post_reserved"
+    ));
+
+    db.finish_active_stage_run_with_completion_attempt(
+        "task-1",
+        Some("run-main"),
+        Some(&completion_attempt),
+        "succeeded",
+        Some(r#"{"status":"success"}"#),
+        Some("post completed after acknowledgement loss"),
+    )
+    .expect("completion reconciles ambiguous delivery")
+    .expect("reserved post completes");
+    assert!(matches!(
+        db.claim_task_action_request("ambiguous-post-key", "task-1", "advance-stage", "{}")
+            .unwrap(),
+        crate::db::TaskActionRequestClaim::Completed { status: 200, .. }
     ));
 
     let _ = std::fs::remove_dir_all(&repo_root);

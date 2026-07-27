@@ -382,7 +382,9 @@ impl Db {
         let transaction = self.conn.unchecked_transaction()?;
         let request = transaction
             .query_row(
-                "SELECT state, http_status, response_body, successor_run_id, phase, owner_id
+                "SELECT state, http_status, response_body, successor_run_id, phase, owner_id,
+                        post_delivery_started_at, post_source_run_id, post_source_status,
+                        post_source_finished_at
                  FROM task_action_request
                  WHERE idempotency_key = ?1",
                 [key],
@@ -394,6 +396,10 @@ impl Db {
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
                     ))
                 },
             )
@@ -437,6 +443,61 @@ impl Db {
             }
             Some("pending") => {
                 if request.4 == "post_reserved" {
+                    if request.6.is_none() {
+                        let deleted = transaction.execute(
+                            "DELETE FROM stage_run
+                             WHERE id = ?1
+                               AND status = 'pending'
+                               AND kind = 'post'
+                               AND id = (
+                                 SELECT id FROM stage_run
+                                 WHERE task_id = (
+                                   SELECT task_id FROM task_action_request
+                                   WHERE idempotency_key = ?2
+                                 )
+                                 ORDER BY datetime(started_at) DESC, rowid DESC
+                                 LIMIT 1
+                               )",
+                            (&successor_run_id, key),
+                        )?;
+                        if deleted != 1 {
+                            return Err(rusqlite::Error::QueryReturnedNoRows);
+                        }
+                        if let (Some(source_run_id), Some(source_status)) =
+                            (request.7.as_deref(), request.8.as_deref())
+                        {
+                            let restored = transaction.execute(
+                                "UPDATE stage_run
+                                 SET status = ?2, finished_at = ?3
+                                 WHERE id = ?1",
+                                (source_run_id, source_status, request.9.as_deref()),
+                            )?;
+                            if restored != 1 {
+                                return Err(rusqlite::Error::QueryReturnedNoRows);
+                            }
+                        }
+                        let released = transaction.execute(
+                            "UPDATE task_action_request
+                             SET successor_run_id = NULL,
+                                 phase = 'claimed',
+                                 owner_id = NULL,
+                                 post_delivery_started_at = NULL,
+                                 post_source_run_id = NULL,
+                                 post_source_status = NULL,
+                                 post_source_finished_at = NULL,
+                                 updated_at = datetime('now')
+                             WHERE idempotency_key = ?1
+                               AND state = 'pending'
+                               AND phase = 'post_reserved'
+                               AND post_delivery_started_at IS NULL",
+                            [key],
+                        )?;
+                        if released != 1 {
+                            return Err(rusqlite::Error::QueryReturnedNoRows);
+                        }
+                        transaction.commit()?;
+                        return Ok(TaskActionRequestClaim::Claimed);
+                    }
                     transaction.commit()?;
                     return Ok(TaskActionRequestClaim::Pending {
                         phase: request.4,

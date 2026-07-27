@@ -3891,6 +3891,191 @@ fn ambiguous_spawn_action_fixture(
     (root, config)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_advance_and_rerun_preparation_futures_do_not_strand_their_requests() {
+    let _sidecar_guard = crate::test_sidecar_guard();
+    let (kanna_cli_path, created_sidecar) = ensure_test_kanna_cli_sidecar();
+
+    for action in ["advance-stage", "rerun-stage"] {
+        let label = format!("dropped-{action}");
+        let key = format!("dropped-{action}-key");
+        let (_root, config) = ambiguous_spawn_action_fixture(&label, &kanna_cli_path);
+        let app = super::router(Arc::new(super::AppState::new(config.clone())));
+        let (preparation_reached, release_preparation) =
+            crate::http_api::task_actions::pause_next_stage_action_during_blocking_preparation(
+                &key,
+            );
+        let request_app = app.clone();
+        let request_key = key.clone();
+        let request = tokio::spawn(async move {
+            request_app
+                .oneshot(
+                    Request::post(format!("/v1/tasks/task-ambiguous/actions/{action}"))
+                        .header("idempotency-key", request_key)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+        });
+        tokio::task::spawn_blocking(move || {
+            preparation_reached
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("stage action never entered blocking preparation");
+        })
+        .await
+        .unwrap();
+
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        release_preparation.send(()).unwrap();
+
+        let mut durable_state = "pending".to_string();
+        for _ in 0..200 {
+            durable_state = Db::open(&config.db_path)
+                .unwrap()
+                .connection_for_e2e_tests()
+                .query_row(
+                    "SELECT state FROM task_action_request WHERE idempotency_key = ?1",
+                    [&key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if durable_state != "pending" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            durable_state, "failed",
+            "the detached {action} owner must persist its definite daemon-connect failure"
+        );
+
+        let replay = app
+            .oneshot(
+                Request::post(format!("/v1/tasks/task-ambiguous/actions/{action}"))
+                    .header("idempotency-key", &key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    if created_sidecar {
+        let _ = std::fs::remove_file(kanna_cli_path);
+    }
+}
+
+#[tokio::test]
+async fn advance_and_rerun_preparation_failures_are_durable_and_replayable() {
+    let _sidecar_guard = crate::test_sidecar_guard();
+    let (kanna_cli_path, created_sidecar) = ensure_test_kanna_cli_sidecar();
+
+    for action in ["advance-stage", "rerun-stage"] {
+        let label = format!("preparation-failure-{action}");
+        let key = format!("preparation-failure-{action}-key");
+        let (root, config) = ambiguous_spawn_action_fixture(&label, &kanna_cli_path);
+        let repo_root = root.path().join("repo");
+        std::fs::write(
+            repo_root.join(".kanna/pipelines/default.json"),
+            "{ invalid pipeline json",
+        )
+        .unwrap();
+        assert!(Command::new("git")
+            .args(["add", ".kanna/pipelines/default.json"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "break pipeline fixture"])
+            .current_dir(&repo_root)
+            .status()
+            .unwrap()
+            .success());
+        super::publish_test_origin_main(&repo_root);
+
+        let app = super::router(Arc::new(super::AppState::new(config.clone())));
+        let invoke = || {
+            Request::post(format!("/v1/tasks/task-ambiguous/actions/{action}"))
+                .header("idempotency-key", &key)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let first = app.clone().oneshot(invoke()).await.unwrap();
+        assert_eq!(first.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        let replay = app.oneshot(invoke()).await.unwrap();
+        assert_eq!(replay.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            axum::body::to_bytes(replay.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+            first_body,
+            "{action} preparation failure must replay instead of remaining pending"
+        );
+    }
+
+    if created_sidecar {
+        let _ = std::fs::remove_file(kanna_cli_path);
+    }
+}
+
+#[tokio::test]
+async fn advance_and_rerun_daemon_connect_failures_finish_the_durable_request() {
+    let _sidecar_guard = crate::test_sidecar_guard();
+    let (kanna_cli_path, created_sidecar) = ensure_test_kanna_cli_sidecar();
+
+    for action in ["advance-stage", "rerun-stage"] {
+        let label = format!("daemon-connect-failure-{action}");
+        let key = format!("daemon-connect-failure-{action}-key");
+        let (root, config) = ambiguous_spawn_action_fixture(&label, &kanna_cli_path);
+        let app = super::router(Arc::new(super::AppState::new(config.clone())));
+        let invoke = || {
+            Request::post(format!("/v1/tasks/task-ambiguous/actions/{action}"))
+                .header("idempotency-key", &key)
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone().oneshot(invoke()).await.unwrap().status(),
+            StatusCode::OK,
+            "{action} acknowledges after preparation and detaches daemon execution"
+        );
+
+        let mut replay_status = StatusCode::CONFLICT;
+        for _ in 0..200 {
+            replay_status = app.clone().oneshot(invoke()).await.unwrap().status();
+            if replay_status != StatusCode::CONFLICT {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            replay_status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{action} daemon-connect failure must be terminal and replayable"
+        );
+        if action == "advance-stage" {
+            assert!(
+                !root
+                    .path()
+                    .join("repo/.kanna-worktrees/task-task-ambiguous-2")
+                    .exists(),
+                "definite daemon-connect failure must remove the unclaimed prepared worktree"
+            );
+        }
+    }
+
+    if created_sidecar {
+        let _ = std::fs::remove_file(kanna_cli_path);
+    }
+}
+
 async fn spawn_daemon_that_loses_spawn_and_all_reconciliation_replies(
     daemon_dir: &str,
 ) -> tokio::task::JoinHandle<()> {

@@ -1,7 +1,8 @@
 use super::environment::{resolve_headless_agent_executable, run_workspace_setup_commands};
 use super::types::{
     CreatedTask, PreparedPostDispatch, PreparedRunWorkspace, PreparedSessionSpawn,
-    PreparedStageRerun, PreparedStageRunSpawn, PreparedTaskSpawn, PreparedWorkspaceTeardown,
+    PreparedStageRerun, PreparedStageRunSpawn, PreparedStageTransition, PreparedTaskSpawn,
+    PreparedWorkspaceTeardown,
 };
 use super::worktree::remove_prepared_worktree;
 use crate::daemon_client::DaemonClient;
@@ -93,6 +94,11 @@ static LIVE_POST_RESERVATION_PAUSES: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 #[cfg(test)]
+static LIVE_POST_DELIVERY_PAUSES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, LivePostReservationPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
 pub(crate) fn pause_next_live_post_after_reservation(
     key: &str,
 ) -> (
@@ -112,8 +118,36 @@ pub(crate) fn pause_next_live_post_after_reservation(
 }
 
 #[cfg(test)]
+pub(crate) fn pause_next_live_post_after_delivery(
+    key: &str,
+) -> (
+    std::sync::Arc<tokio::sync::Semaphore>,
+    std::sync::Arc<tokio::sync::Semaphore>,
+) {
+    let reached = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    LIVE_POST_DELIVERY_PAUSES.lock().unwrap().insert(
+        key.to_string(),
+        LivePostReservationPause {
+            reached: std::sync::Arc::clone(&reached),
+            release: std::sync::Arc::clone(&release),
+        },
+    );
+    (reached, release)
+}
+
+#[cfg(test)]
 async fn pause_live_post_after_reservation(key: Option<&str>) {
     let pause = key.and_then(|key| LIVE_POST_RESERVATION_PAUSES.lock().unwrap().remove(key));
+    if let Some(pause) = pause {
+        pause.reached.add_permits(1);
+        let _ = pause.release.acquire().await;
+    }
+}
+
+#[cfg(test)]
+async fn pause_live_post_after_delivery(key: Option<&str>) {
+    let pause = key.and_then(|key| LIVE_POST_DELIVERY_PAUSES.lock().unwrap().remove(key));
     if let Some(pause) = pause {
         pause.reached.add_permits(1);
         let _ = pause.release.acquire().await;
@@ -959,6 +993,18 @@ fn rollback_prepared_stage_fork(prepared: &PreparedStageRunSpawn, error: String)
     error
 }
 
+pub(crate) fn rollback_prepared_stage_transition_for_api(
+    transition: &PreparedStageTransition,
+) -> Result<(), String> {
+    let PreparedStageTransition::Run(prepared) = transition else {
+        return Ok(());
+    };
+    let PreparedRunWorkspace::Forked(fork) = &prepared.workspace else {
+        return Ok(());
+    };
+    remove_prepared_worktree(&fork.worktree_path, &fork.branch)
+}
+
 async fn reconcile_spawn_acceptance(
     daemon: &mut DaemonClient,
     session_id: &str,
@@ -1642,11 +1688,34 @@ pub(crate) async fn dispatch_prepared_post_for_api(
     #[cfg(test)]
     pause_live_post_after_reservation(prepared.action_request_key.as_deref()).await;
 
+    if prepared.action_request_key.is_some() {
+        if let Err(error) = Db::open(db_path)
+            .and_then(|db| db.mark_reserved_live_post_delivery_started(&task_id, &run_id))
+        {
+            let rollback = Db::open(db_path)
+                .and_then(|db| db.rollback_reserved_live_post(&task_id, &run_id, source.as_ref()))
+                .map_err(|rollback_error| rollback_error.to_string());
+            return match rollback {
+                Ok(()) => Err(format!("db error: {error}").into()),
+                Err(rollback_error) => Err(StageSpawnError::Indeterminate(format!(
+                    "db error: {error}; failed to roll back undelivered live post \
+                     {run_id}: {rollback_error}"
+                ))),
+            };
+        }
+    }
     match try_submit_task_input(daemon, &prepared.session_id, &prepared.message).await {
         Ok(()) => {
-            Db::open(db_path)
-                .and_then(|db| db.land_reserved_live_post(&task_id, &run_id))
-                .map_err(|e| format!("db error: {}", e))?;
+            #[cfg(test)]
+            pause_live_post_after_delivery(prepared.action_request_key.as_deref()).await;
+            if let Err(error) =
+                Db::open(db_path).and_then(|db| db.land_reserved_live_post(&task_id, &run_id))
+            {
+                return Err(StageSpawnError::Indeterminate(format!(
+                    "db error: {error}; live post reservation {run_id} retained because \
+                     daemon delivery was acknowledged"
+                )));
+            }
             Ok(crate::mobile_api::TaskActionResponse {
                 task_id,
                 follow_task: None,
@@ -1659,10 +1728,9 @@ pub(crate) async fn dispatch_prepared_post_for_api(
                 .map_err(|e| format!("db error: {}", e))?;
             spawn_prepared_stage_run_for_api(db_path, daemon, replacements, prepared.fallback).await
         }
-        Err(TaskInputError::Other(message)) => Err(format!(
+        Err(TaskInputError::Other(message)) => Err(StageSpawnError::Indeterminate(format!(
             "{message}; live post reservation {run_id} retained because delivery is indeterminate"
-        )
-        .into()),
+        ))),
     }
 }
 

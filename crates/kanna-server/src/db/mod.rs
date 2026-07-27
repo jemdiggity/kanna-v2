@@ -85,6 +85,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "037_task_action_request",
     "038_task_action_hardening",
     "039_task_action_execution_phase",
+    "040_live_post_delivery_recovery",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1414,6 +1415,10 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
                 CHECK (phase IN ('claimed', 'preparing', 'successor_reserved', 'post_reserved')),
               owner_id TEXT,
               revision_round INTEGER,
+              post_delivery_started_at TEXT,
+              post_source_run_id TEXT,
+              post_source_status TEXT,
+              post_source_finished_at TEXT,
               http_status INTEGER,
               response_body TEXT,
               created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -1443,6 +1448,65 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         )?;
         add_column(conn, "task_action_request", "owner_id", "TEXT")?;
         add_column(conn, "task_action_request", "revision_round", "INTEGER")?;
+        // Before this column existed, an agent revision charged the task and
+        // only then linked its successor. A crash in that gap leaves a
+        // pending schema-038 request whose charge is visible only on the task.
+        // Attribute the current round to that request so replay neither parks
+        // at the limit nor spends the same round again.
+        conn.execute(
+            "UPDATE task_action_request
+             SET revision_round = (
+               SELECT revision_rounds
+               FROM pipeline_item
+               WHERE pipeline_item.id = task_action_request.task_id
+             )
+             WHERE state = 'pending'
+               AND action = 'request-revision'
+               AND successor_run_id IS NULL
+               AND revision_round IS NULL
+               AND request_json LIKE '%\"origin\":\"agent\"%'
+               AND (
+                 SELECT revision_rounds
+                 FROM pipeline_item
+                 WHERE pipeline_item.id = task_action_request.task_id
+               ) > 0
+               AND datetime((
+                 SELECT updated_at
+                 FROM pipeline_item
+                 WHERE pipeline_item.id = task_action_request.task_id
+               )) >= datetime(task_action_request.created_at)",
+            [],
+        )?;
+        Ok(())
+    })?;
+
+    run_migration(conn, "040_live_post_delivery_recovery", |conn| {
+        add_column(
+            conn,
+            "task_action_request",
+            "post_delivery_started_at",
+            "TEXT",
+        )?;
+        add_column(conn, "task_action_request", "post_source_run_id", "TEXT")?;
+        add_column(conn, "task_action_request", "post_source_status", "TEXT")?;
+        add_column(
+            conn,
+            "task_action_request",
+            "post_source_finished_at",
+            "TEXT",
+        )?;
+        // A pre-040 `post_reserved` row may already have crossed the daemon
+        // delivery boundary; the old schema could not say. Preserve it as
+        // indeterminate so a scoped completion can reconcile it, rather than
+        // treating it as definitely undelivered and reinjecting the post.
+        conn.execute(
+            "UPDATE task_action_request
+             SET post_delivery_started_at = COALESCE(updated_at, created_at, datetime('now'))
+             WHERE state = 'pending'
+               AND phase = 'post_reserved'
+               AND post_delivery_started_at IS NULL",
+            [],
+        )?;
         Ok(())
     })?;
 

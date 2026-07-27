@@ -210,7 +210,25 @@ impl Db {
         {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        if !matches!(current_status.as_str(), "running" | "succeeded" | "failed") {
+        let completing_delivered_reservation = if current_status == "pending" && kind == "post" {
+            transaction.query_row(
+                "SELECT EXISTS(
+                   SELECT 1
+                   FROM task_action_request
+                   WHERE successor_run_id = ?1
+                     AND state = 'pending'
+                     AND phase = 'post_reserved'
+                     AND post_delivery_started_at IS NOT NULL
+                 )",
+                [&run_id],
+                |row| row.get::<_, bool>(0),
+            )?
+        } else {
+            false
+        };
+        if !matches!(current_status.as_str(), "running" | "succeeded" | "failed")
+            && !completing_delivered_reservation
+        {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
         let changed = transaction.execute(
@@ -222,6 +240,20 @@ impl Db {
         )?;
         if changed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        if completing_delivered_reservation {
+            let action_changed = transaction.execute(
+                "UPDATE task_action_request
+                 SET state = 'succeeded', updated_at = datetime('now')
+                 WHERE successor_run_id = ?1
+                   AND state = 'pending'
+                   AND phase = 'post_reserved'
+                   AND post_delivery_started_at IS NOT NULL",
+                [&run_id],
+            )?;
+            if action_changed != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
         }
         transaction.commit()?;
         Ok(Some(FinishedStageRun {
@@ -390,6 +422,10 @@ impl Db {
                      phase = 'post_reserved',
                      http_status = ?3,
                      response_body = ?4,
+                     post_delivery_started_at = NULL,
+                     post_source_run_id = ?6,
+                     post_source_status = ?7,
+                     post_source_finished_at = ?8,
                      updated_at = datetime('now')
                  WHERE idempotency_key = ?1
                    AND task_id = ?5
@@ -402,6 +438,9 @@ impl Db {
                     request.success_status,
                     request.success_response_body,
                     run.task_id,
+                    current.as_ref().map(|source| source.0.as_str()),
+                    current.as_ref().map(|source| source.1.as_str()),
+                    current.as_ref().and_then(|source| source.4.as_deref()),
                 ],
             )?;
             if linked != 1 {
@@ -410,6 +449,27 @@ impl Db {
         }
         transaction.commit()?;
         Ok(source)
+    }
+
+    pub fn mark_reserved_live_post_delivery_started(
+        &self,
+        task_id: &str,
+        run_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let changed = self.conn.execute(
+            "UPDATE task_action_request
+             SET post_delivery_started_at = COALESCE(post_delivery_started_at, datetime('now')),
+                 updated_at = datetime('now')
+             WHERE task_id = ?1
+               AND successor_run_id = ?2
+               AND state = 'pending'
+               AND phase = 'post_reserved'",
+            (task_id, run_id),
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
     }
 
     pub fn land_reserved_live_post(
@@ -493,6 +553,10 @@ impl Db {
             "UPDATE task_action_request
              SET successor_run_id = NULL,
                  phase = 'preparing',
+                 post_delivery_started_at = NULL,
+                 post_source_run_id = NULL,
+                 post_source_status = NULL,
+                 post_source_finished_at = NULL,
                  updated_at = datetime('now')
              WHERE successor_run_id = ?1
                AND state = 'pending'

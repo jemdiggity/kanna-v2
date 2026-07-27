@@ -86,6 +86,39 @@ fn pause_revision_during_blocking_preparation(key: Option<&str>) {
     }
 }
 
+#[cfg(test)]
+static STAGE_ACTION_PREPARATION_PAUSES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, RevisionPreparationPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+pub(super) fn pause_next_stage_action_during_blocking_preparation(
+    key: &str,
+) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    STAGE_ACTION_PREPARATION_PAUSES.lock().unwrap().insert(
+        key.to_string(),
+        RevisionPreparationPause {
+            reached: reached_tx,
+            release: release_rx,
+        },
+    );
+    (reached_rx, release_tx)
+}
+
+#[cfg(test)]
+fn pause_stage_action_during_blocking_preparation(key: Option<&str>) {
+    let Some(key) = key else {
+        return;
+    };
+    let pause = STAGE_ACTION_PREPARATION_PAUSES.lock().unwrap().remove(key);
+    if let Some(pause) = pause {
+        let _ = pause.reached.send(());
+        let _ = pause.release.recv();
+    }
+}
+
 fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
     if error.starts_with("task is blocked:")
         || error.starts_with("daemon does not support provider resume")
@@ -1066,38 +1099,69 @@ pub(super) async fn advance_stage(
         drop(action_flight);
         return result.map(|response| Json(response).into_response());
     }
-    let mut transition = {
-        let state = Arc::clone(&state);
-        let task_id = task_id.clone();
-        super::blocking::run_handler_blocking("stage advance prepare", move || {
-            let db = Db::open(&state.config.db_path).map_err(|e| {
+    // Preparation owns the durable request and task flight. Run it in an
+    // independent task before awaiting so dropping the HTTP future cannot
+    // cancel ownership between `preparing` and detached execution.
+    let worker_state = Arc::clone(&state);
+    let worker_task_id = task_id.clone();
+    let worker = tokio::spawn(async move {
+        let preparation_state = Arc::clone(&state);
+        let preparation_task_id = task_id.clone();
+        let preparation_key = idempotency_key.clone();
+        let prepared = super::blocking::run_handler_blocking("stage advance prepare", move || {
+            #[cfg(test)]
+            pause_stage_action_during_blocking_preparation(preparation_key.as_deref());
+            #[cfg(not(test))]
+            let _ = preparation_key;
+            let db = Db::open(&preparation_state.config.db_path).map_err(|e| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     format!("db error: {}", e),
                 )
             })?;
-            crate::task_creator::prepare_advance_stage_for_api(&db, &state.config, &task_id)
-                .map_err(|e| (stage_action_error_status(&e), e))
+            crate::task_creator::prepare_advance_stage_for_api(
+                &db,
+                &preparation_state.config,
+                &preparation_task_id,
+            )
+            .map_err(|e| (stage_action_error_status(&e), e))
         })
-        .await?
-    };
-    if let Some(key) = idempotency_key.clone() {
-        transition.set_action_request_key(key);
-    }
-    let response = crate::mobile_api::TaskActionResponse {
-        task_id: task_id.clone(),
-        follow_task: None,
-        revision_budget: None,
-    };
-    execute_stage_transition_detached(
-        Arc::clone(&state),
-        task_id,
-        transition,
-        Some(action_flight),
-        idempotency_key,
-    );
-    state.publish_state_changed(StateChangeScope::Tasks);
-    Ok(Json(response).into_response())
+        .await;
+        let mut transition = match prepared {
+            Ok(transition) => transition,
+            Err((status, message)) => {
+                if let Some(key) = idempotency_key.as_deref() {
+                    finish_idempotent_task_action(&worker_state, key, "failed", status, &message)
+                        .await?;
+                }
+                drop(action_flight);
+                return Err((status, message));
+            }
+        };
+        if let Some(key) = idempotency_key.clone() {
+            transition.set_action_request_key(key);
+        }
+        let response = crate::mobile_api::TaskActionResponse {
+            task_id: task_id.clone(),
+            follow_task: None,
+            revision_budget: None,
+        };
+        execute_stage_transition_detached(
+            Arc::clone(&worker_state),
+            task_id,
+            transition,
+            Some(action_flight),
+            idempotency_key,
+        );
+        worker_state.publish_state_changed(StateChangeScope::Tasks);
+        Ok(Json(response).into_response())
+    });
+    worker.await.map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("stage advance preparation worker for {worker_task_id} failed: {error}"),
+        )
+    })?
 }
 
 struct TaskActionExecutionError {
@@ -1210,11 +1274,36 @@ fn execute_stage_transition_detached(
                     {
                         Ok(daemon) => daemon,
                         Err(error) => {
-                            log::error!(
-                                "stage transition for {} failed to reach daemon: {}",
-                                task_id,
-                                error
+                            let mut message = format!(
+                                "stage transition for {task_id} failed to reach daemon: {error}"
                             );
+                            if let Err(rollback_error) =
+                                crate::task_creator::rollback_prepared_stage_transition_for_api(
+                                    &transition,
+                                )
+                            {
+                                message.push_str(&format!(
+                                    "; prepared transition rollback failed: {rollback_error}"
+                                ));
+                            }
+                            if let Some(key) = idempotency_key.as_deref() {
+                                if let Err((_, finish_error)) = finish_idempotent_task_action(
+                                    &state,
+                                    key,
+                                    "failed",
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    &message,
+                                )
+                                .await
+                                {
+                                    log::error!(
+                                    "stage transition for {} could not persist daemon failure: {}",
+                                    task_id,
+                                    finish_error
+                                );
+                                }
+                            }
+                            log::error!("{message}");
                             return;
                         }
                     };
@@ -1304,6 +1393,113 @@ async fn execute_stage_transition_awaited(
     })?
 }
 
+fn execute_stage_rerun_detached(
+    state: Arc<AppState>,
+    task_id: String,
+    prepared: crate::task_creator::PreparedStageRerun,
+    action_flight: RequestedTaskOperation,
+    idempotency_key: Option<String>,
+) {
+    tokio::spawn(async move {
+        let _action_flight = action_flight;
+        let handle = tokio::runtime::Handle::current();
+        let worker_task_id = task_id.clone();
+        let joined = tokio::task::spawn_blocking(move || {
+            handle.block_on(async move {
+                let mut daemon =
+                    match crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
+                        .await
+                    {
+                        Ok(daemon) => daemon,
+                        Err(error) => {
+                            let message = format!(
+                                "stage rerun for {task_id} failed to reach daemon: {error}"
+                            );
+                            if let Some(key) = idempotency_key.as_deref() {
+                                if let Err((_, finish_error)) = finish_idempotent_task_action(
+                                    &state,
+                                    key,
+                                    "failed",
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    &message,
+                                )
+                                .await
+                                {
+                                    log::error!(
+                                        "stage rerun for {} could not persist daemon failure: {}",
+                                        task_id,
+                                        finish_error
+                                    );
+                                }
+                            }
+                            log::error!("{message}");
+                            return;
+                        }
+                    };
+                let result = crate::task_creator::rerun_prepared_stage_for_api(
+                    &state.config.db_path,
+                    &mut daemon,
+                    &state.session_replacements,
+                    prepared,
+                )
+                .await;
+                if let Some(key) = idempotency_key.as_deref() {
+                    let finish = match &result {
+                        Ok(response) => match serde_json::to_string(response) {
+                            Ok(body) => {
+                                finish_idempotent_task_action(
+                                    &state,
+                                    key,
+                                    "succeeded",
+                                    StatusCode::OK,
+                                    &body,
+                                )
+                                .await
+                            }
+                            Err(error) => Err((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("failed to serialize task action response: {error}"),
+                            )),
+                        },
+                        Err(error) if error.is_indeterminate() => Ok(()),
+                        Err(error) => {
+                            finish_idempotent_task_action(
+                                &state,
+                                key,
+                                "failed",
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                &error.to_string(),
+                            )
+                            .await
+                        }
+                    };
+                    if let Err((_, error)) = finish {
+                        log::error!(
+                            "stage rerun for {} could not persist idempotent result: {}",
+                            task_id,
+                            error
+                        );
+                    }
+                }
+                if let Err(error) = result {
+                    log::error!("stage rerun for {} failed: {}", task_id, error);
+                    state.publish_state_changed(StateChangeScope::Tasks);
+                    return;
+                }
+                state.publish_state_changed(StateChangeScope::Tasks);
+            })
+        })
+        .await;
+        if let Err(join_error) = joined {
+            log::error!(
+                "stage rerun worker for {} failed: {}",
+                worker_task_id,
+                join_error
+            );
+        }
+    });
+}
+
 pub(super) async fn rerun_stage(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
@@ -1339,120 +1535,66 @@ pub(super) async fn rerun_stage(
         drop(action_flight);
         return result.map(|response| Json(response).into_response());
     }
-    let mut prepared = {
-        let state = Arc::clone(&state);
-        let task_id = task_id.clone();
-        super::blocking::run_handler_blocking("stage rerun prepare", move || {
-            let db = Db::open(&state.config.db_path).map_err(|e| {
+    let worker_state = Arc::clone(&state);
+    let worker_task_id = task_id.clone();
+    let worker = tokio::spawn(async move {
+        let preparation_state = Arc::clone(&state);
+        let preparation_task_id = task_id.clone();
+        let preparation_key = idempotency_key.clone();
+        let prepared = super::blocking::run_handler_blocking("stage rerun prepare", move || {
+            #[cfg(test)]
+            pause_stage_action_during_blocking_preparation(preparation_key.as_deref());
+            #[cfg(not(test))]
+            let _ = preparation_key;
+            let db = Db::open(&preparation_state.config.db_path).map_err(|e| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     format!("db error: {}", e),
                 )
             })?;
-            crate::task_creator::prepare_rerun_stage_for_api(&db, &state.config, &task_id)
-                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
-        })
-        .await?
-    };
-    if let Some(key) = idempotency_key.clone() {
-        prepared.set_action_request_key(key);
-    }
-    // Detached for the same reason as execute_stage_transition_detached: the
-    // rerun kills the session that may carry this very request. Driven from
-    // the blocking pool for the same reason as well — the rerun records runs
-    // and rolls back forks with synchronous git/SQLite work.
-    let rerun_state = Arc::clone(&state);
-    let rerun_task_id = task_id.clone();
-    tokio::spawn(async move {
-        let _action_flight = action_flight;
-        let handle = tokio::runtime::Handle::current();
-        let worker_task_id = rerun_task_id.clone();
-        let joined = tokio::task::spawn_blocking(move || {
-            handle.block_on(async move {
-                let mut daemon = match crate::daemon_client::DaemonClient::connect(
-                    &rerun_state.config.daemon_dir,
-                )
-                .await
-                {
-                    Ok(daemon) => daemon,
-                    Err(error) => {
-                        log::error!(
-                            "stage rerun for {} failed to reach daemon: {}",
-                            rerun_task_id,
-                            error
-                        );
-                        return;
-                    }
-                };
-                let result = crate::task_creator::rerun_prepared_stage_for_api(
-                    &rerun_state.config.db_path,
-                    &mut daemon,
-                    &rerun_state.session_replacements,
-                    prepared,
-                )
-                .await;
-                if let Some(key) = idempotency_key.as_deref() {
-                    let finish = match &result {
-                        Ok(response) => match serde_json::to_string(response) {
-                            Ok(body) => {
-                                finish_idempotent_task_action(
-                                    &rerun_state,
-                                    key,
-                                    "succeeded",
-                                    StatusCode::OK,
-                                    &body,
-                                )
-                                .await
-                            }
-                            Err(error) => Err((
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                format!("failed to serialize task action response: {error}"),
-                            )),
-                        },
-                        Err(error) if error.is_indeterminate() => Ok(()),
-                        Err(error) => {
-                            finish_idempotent_task_action(
-                                &rerun_state,
-                                key,
-                                "failed",
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                &error.to_string(),
-                            )
-                            .await
-                        }
-                    };
-                    if let Err((_, error)) = finish {
-                        log::error!(
-                            "stage rerun for {} could not persist idempotent result: {}",
-                            rerun_task_id,
-                            error
-                        );
-                    }
-                }
-                if let Err(error) = result {
-                    log::error!("stage rerun for {} failed: {}", rerun_task_id, error);
-                    rerun_state.publish_state_changed(StateChangeScope::Tasks);
-                    return;
-                }
-                rerun_state.publish_state_changed(StateChangeScope::Tasks);
-            })
+            crate::task_creator::prepare_rerun_stage_for_api(
+                &db,
+                &preparation_state.config,
+                &preparation_task_id,
+            )
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
         })
         .await;
-        if let Err(join_error) = joined {
-            log::error!(
-                "stage rerun worker for {} failed: {}",
-                worker_task_id,
-                join_error
-            );
+        let mut prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err((status, message)) => {
+                if let Some(key) = idempotency_key.as_deref() {
+                    finish_idempotent_task_action(&worker_state, key, "failed", status, &message)
+                        .await?;
+                }
+                drop(action_flight);
+                return Err((status, message));
+            }
+        };
+        if let Some(key) = idempotency_key.clone() {
+            prepared.set_action_request_key(key);
         }
+        execute_stage_rerun_detached(
+            Arc::clone(&worker_state),
+            task_id.clone(),
+            prepared,
+            action_flight,
+            idempotency_key,
+        );
+        worker_state.publish_state_changed(StateChangeScope::Tasks);
+        Ok(Json(crate::mobile_api::TaskActionResponse {
+            task_id,
+            follow_task: None,
+            revision_budget: None,
+        })
+        .into_response())
     });
-    state.publish_state_changed(StateChangeScope::Tasks);
-    Ok(Json(crate::mobile_api::TaskActionResponse {
-        task_id,
-        follow_task: None,
-        revision_budget: None,
-    })
-    .into_response())
+    worker.await.map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("stage rerun preparation worker for {worker_task_id} failed: {error}"),
+        )
+    })?
 }
 
 /// A pull-request URL carried by a stage-complete verdict: explicitly via
