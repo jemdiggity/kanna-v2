@@ -12,6 +12,8 @@ use std::time::Duration;
 const CRASH_DB_ENV: &str = "KANNA_TEST_CRASH_LEGACY_DB";
 const CRASH_READY_ENV: &str = "KANNA_TEST_CRASH_LEGACY_READY";
 
+static PROCESS_FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct TestRoot {
     temp_dir: Option<tempfile::TempDir>,
 }
@@ -101,12 +103,29 @@ impl Drop for ChildGuard {
     }
 }
 
-fn free_loopback_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback port should be available");
-    listener
-        .local_addr()
-        .expect("loopback listener should have an address")
-        .port()
+struct ServerPortReservations {
+    lan: TcpListener,
+    transfer: TcpListener,
+}
+
+impl ServerPortReservations {
+    fn new() -> Self {
+        let lan = TcpListener::bind("127.0.0.1:0").expect("LAN port should be available");
+        let transfer = TcpListener::bind("127.0.0.1:0").expect("transfer port should be available");
+        assert_ne!(
+            lan.local_addr().unwrap().port(),
+            transfer.local_addr().unwrap().port()
+        );
+        Self { lan, transfer }
+    }
+
+    fn lan_port(&self) -> u16 {
+        self.lan.local_addr().unwrap().port()
+    }
+
+    fn transfer_port(&self) -> u16 {
+        self.transfer.local_addr().unwrap().port()
+    }
 }
 
 fn app_support_root(test_root: &Path) -> (PathBuf, PathBuf) {
@@ -279,8 +298,8 @@ fn write_server_config(
     daemon_dir: &Path,
     pairing_store_path: &Path,
     port: u16,
+    transfer_port: u16,
 ) {
-    let transfer_port = free_loopback_port();
     let config = format!(
         "relay_url = \"\"\n\
          device_token = \"test-device-token\"\n\
@@ -372,6 +391,7 @@ async fn put_setting(client: &Client, port: u16, key: &str, value: &str) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn legacy_only_database_is_relocated_before_serving_and_persists_after_restart() {
+    let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
     let mut root = TestRoot::new();
     let (home, data_root) = app_support_root(root.path());
     let legacy_db_path =
@@ -385,7 +405,8 @@ async fn legacy_only_database_is_relocated_before_serving_and_persists_after_res
     let pairing_store_path = root.path().join("pairings.json");
     let ready_path = root.path().join("crash-writer.ready");
     let main_only_copy_path = root.path().join("legacy-main-only.db");
-    let port = free_loopback_port();
+    let ports = ServerPortReservations::new();
+    let port = ports.lan_port();
     let client = Client::new();
 
     bootstrap_legacy_database(&legacy_db_path);
@@ -409,7 +430,11 @@ async fn legacy_only_database_is_relocated_before_serving_and_persists_after_res
         &daemon_dir,
         &pairing_store_path,
         port,
+        ports.transfer_port(),
     );
+    let ServerPortReservations { lan, transfer } = ports;
+    drop(lan);
+    drop(transfer);
     assert!(legacy_db_path.exists());
     assert!(!canonical_db_path.exists());
 
@@ -459,6 +484,7 @@ async fn legacy_only_database_is_relocated_before_serving_and_persists_after_res
 
 #[tokio::test(flavor = "current_thread")]
 async fn canonical_database_wins_and_legacy_state_is_archived_when_both_paths_exist() {
+    let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
     let mut root = TestRoot::new();
     let (home, data_root) = app_support_root(root.path());
     let legacy_db_path =
@@ -468,7 +494,8 @@ async fn canonical_database_wins_and_legacy_state_is_archived_when_both_paths_ex
     let config_path = root.path().join("server.toml");
     let daemon_dir = root.path().join("daemon");
     let pairing_store_path = root.path().join("pairings.json");
-    let port = free_loopback_port();
+    let ports = ServerPortReservations::new();
+    let port = ports.lan_port();
     let client = Client::new();
 
     bootstrap_legacy_database(&legacy_db_path);
@@ -481,7 +508,11 @@ async fn canonical_database_wins_and_legacy_state_is_archived_when_both_paths_ex
         &daemon_dir,
         &pairing_store_path,
         port,
+        ports.transfer_port(),
     );
+    let ServerPortReservations { lan, transfer } = ports;
+    drop(lan);
+    drop(transfer);
 
     let mut server = start_server(&config_path, &home, &data_root, port).await;
     assert_eq!(
@@ -516,6 +547,7 @@ async fn canonical_database_wins_and_legacy_state_is_archived_when_both_paths_ex
 
 #[tokio::test(flavor = "current_thread")]
 async fn canonical_database_wins_while_archiving_legacy_wal_only_writes() {
+    let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
     let mut root = TestRoot::new();
     let (home, data_root) = app_support_root(root.path());
     let legacy_db_path =
@@ -526,7 +558,8 @@ async fn canonical_database_wins_while_archiving_legacy_wal_only_writes() {
     let daemon_dir = root.path().join("daemon");
     let pairing_store_path = root.path().join("pairings.json");
     let ready_path = root.path().join("crash-writer.ready");
-    let port = free_loopback_port();
+    let ports = ServerPortReservations::new();
+    let port = ports.lan_port();
     let client = Client::new();
 
     bootstrap_legacy_database(&legacy_db_path);
@@ -548,7 +581,11 @@ async fn canonical_database_wins_while_archiving_legacy_wal_only_writes() {
         &daemon_dir,
         &pairing_store_path,
         port,
+        ports.transfer_port(),
     );
+    let ServerPortReservations { lan, transfer } = ports;
+    drop(lan);
+    drop(transfer);
     let mut server = start_server(&config_path, &home, &data_root, port).await;
     assert_eq!(
         get_setting(&client, port, "canonicalOnly").await,

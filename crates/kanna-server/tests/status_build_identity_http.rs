@@ -14,6 +14,8 @@ struct RunningServer {
     status_url: String,
 }
 
+static PROCESS_FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 impl Drop for RunningServer {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -21,24 +23,29 @@ impl Drop for RunningServer {
     }
 }
 
-fn two_free_loopback_ports() -> (u16, u16) {
-    let first = TcpListener::bind(("127.0.0.1", 0)).expect("bind first loopback port");
-    let second = TcpListener::bind(("127.0.0.1", 0)).expect("bind second loopback port");
-    let first_port = first.local_addr().expect("read first loopback port").port();
-    let second_port = second
-        .local_addr()
-        .expect("read second loopback port")
-        .port();
-    assert_ne!(first_port, second_port);
-    (first_port, second_port)
+struct ServerPortReservations {
+    lan: TcpListener,
+    transfer: TcpListener,
 }
 
-fn free_loopback_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind loopback port")
-        .local_addr()
-        .expect("read loopback port")
-        .port()
+impl ServerPortReservations {
+    fn new() -> Self {
+        let lan = TcpListener::bind(("127.0.0.1", 0)).expect("bind LAN loopback port");
+        let transfer = TcpListener::bind(("127.0.0.1", 0)).expect("bind transfer loopback port");
+        assert_ne!(
+            lan.local_addr().unwrap().port(),
+            transfer.local_addr().unwrap().port()
+        );
+        Self { lan, transfer }
+    }
+
+    fn lan_port(&self) -> u16 {
+        self.lan.local_addr().unwrap().port()
+    }
+
+    fn transfer_port(&self) -> u16 {
+        self.transfer.local_addr().unwrap().port()
+    }
 }
 
 fn registered_config_path(root: &Path) -> PathBuf {
@@ -68,9 +75,10 @@ fn launch_server(
     desktop_name: &str,
     version: &str,
     environment: &str,
-    port: u16,
+    ports: ServerPortReservations,
 ) -> RunningServer {
-    let transfer_port = free_loopback_port();
+    let port = ports.lan_port();
+    let transfer_port = ports.transfer_port();
     let root = tempfile::Builder::new()
         .prefix(&format!("kanna-status-{label}-"))
         .tempdir()
@@ -104,6 +112,9 @@ fn launch_server(
     )
     .expect("write server configuration");
 
+    let ServerPortReservations { lan, transfer } = ports;
+    drop(lan);
+    drop(transfer);
     let child = Command::new(env!("CARGO_BIN_EXE_kanna-server"))
         .env("KANNA_SERVER_CONFIG", &config_path)
         .env("RUST_LOG", "off")
@@ -149,14 +160,16 @@ async fn wait_for_status(server: &mut RunningServer) -> Value {
 
 #[tokio::test]
 async fn production_and_staging_processes_report_exact_build_identity_over_http() {
-    let (production_port, staging_port) = two_free_loopback_ports();
+    let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
+    let production_ports = ServerPortReservations::new();
+    let staging_ports = ServerPortReservations::new();
     let mut production = launch_server(
         "production",
         "desktop-production",
         "Production Mac",
         "0.0.69",
         "production",
-        production_port,
+        production_ports,
     );
     let mut staging = launch_server(
         "staging",
@@ -164,7 +177,7 @@ async fn production_and_staging_processes_report_exact_build_identity_over_http(
         "Staging Mac",
         "0.0.69-staging.1",
         "staging",
-        staging_port,
+        staging_ports,
     );
 
     let (production_status, staging_status) = tokio::join!(
@@ -206,6 +219,7 @@ async fn production_and_staging_processes_report_exact_build_identity_over_http(
 
 #[tokio::test]
 async fn register_emits_a_startable_development_config_with_build_identity() {
+    let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
     let root = tempfile::Builder::new()
         .prefix("kanna-status-register-")
         .tempdir()
@@ -231,8 +245,9 @@ async fn register_emits_a_startable_development_config_with_build_identity() {
     assert!(registered_config.contains("environment = \"development\""));
     assert!(registered_config.contains("transfer_port = 4455"));
 
-    let port = free_loopback_port();
-    let transfer_port = free_loopback_port();
+    let ports = ServerPortReservations::new();
+    let port = ports.lan_port();
+    let transfer_port = ports.transfer_port();
     std::fs::write(
         &config_path,
         registered_config.replace(
@@ -250,6 +265,9 @@ async fn register_emits_a_startable_development_config_with_build_identity() {
     )
     .expect("configure registered server loopback port");
 
+    let ServerPortReservations { lan, transfer } = ports;
+    drop(lan);
+    drop(transfer);
     let child = Command::new(env!("CARGO_BIN_EXE_kanna-server"))
         .env("HOME", root.path())
         .env("XDG_DATA_HOME", root.path())

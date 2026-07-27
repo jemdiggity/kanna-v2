@@ -989,7 +989,7 @@ fn attach_snapshot_registration_is_ordered_before_a_concurrent_kill_exit() {
 #[test]
 fn same_id_respawn_waits_until_kill_finishes_stale_fanout_cleanup() {
     let daemon =
-        DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_KILL_AFTER_EXIT_PAUSE_MS", "250")]);
+        DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_KILL_AFTER_EXIT_PAUSE_MS", "1200")]);
     let mut creator = daemon.connect();
     spawn_shell_session(&mut creator, "sess-kill-respawn-race", "sleep 30");
     let mut stale_attached = daemon.connect();
@@ -1002,7 +1002,7 @@ fn same_id_respawn_waits_until_kill_finishes_stale_fanout_cleanup() {
     wait_for_daemon_log(
         &daemon,
         "[kill-test-pause] session=sess-kill-respawn-race",
-        Duration::from_secs(2),
+        Duration::from_secs(4),
     );
 
     let mut respawner = daemon.connect();
@@ -1965,30 +1965,50 @@ fn natural_exit_finalization_precedes_same_id_replacement_creation() {
     let session_id = "sess-natural-linearized-reuse";
     let mut subscriber = daemon.connect();
     subscriber.send(&Cmd::Subscribe);
-    assert!(matches!(subscriber.recv(), Evt::Ok));
+    wait_for_ok_with_timeout(
+        &mut subscriber,
+        "subscribe before natural-exit reuse",
+        Duration::from_secs(15),
+    );
 
     let mut creator = daemon.connect();
-    spawn_shell_session(
-        &mut creator,
-        session_id,
-        "printf 'OLD_NATURAL_INCARNATION\\r\\n'",
-    );
+    creator.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "printf 'OLD_NATURAL_INCARNATION\\r\\n'".to_string(),
+        ],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        terminal_prelude: None,
+    });
+    expect_session_created_with_timeout(&mut creator, session_id, Duration::from_secs(15));
+
+    let natural_exit_deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        match subscriber.recv() {
-            Evt::SessionCreated {
+        let remaining = natural_exit_deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for the old incarnation's natural Exit"
+        );
+        match subscriber.recv_with_timeout(remaining.min(Duration::from_millis(50))) {
+            Ok(Evt::SessionCreated {
                 session_id: created,
-            } => assert_eq!(created, session_id),
-            Evt::Exit {
+            }) => assert_eq!(created, session_id),
+            Ok(Evt::Exit {
                 session_id: exited,
                 killed,
                 ..
-            } => {
+            }) => {
                 assert_eq!(exited, session_id);
                 assert!(!killed);
                 break;
             }
-            Evt::Output { .. } | Evt::StatusChanged { .. } => {}
-            other => panic!("expected natural session lifecycle event, got: {other:?}"),
+            Ok(Evt::Output { .. }) | Ok(Evt::StatusChanged { .. }) | Err(_) => {}
+            Ok(other) => panic!("expected natural session lifecycle event, got: {other:?}"),
         }
     }
 
