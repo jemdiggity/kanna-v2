@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 
 use kanna_agent_protocol::{AgentEvent, PermissionDecision, SessionEndReason};
 use kanna_daemon::protocol::{
-    AgentProvider, AgentSpawnParams, Command, Event, SeqAgentEvent, SessionState, SessionStatus,
+    AgentProvider, AgentSpawnParams, Command, ErrorCode, Event, SeqAgentEvent, SessionState,
+    SessionStatus,
 };
 
 // ---- Harness ----
@@ -89,6 +90,18 @@ impl DaemonHandle {
         self.dir
             .join("agent-journals")
             .join(format!("{session_id}.ndjson"))
+    }
+
+    fn journal_metadata_path(&self, session_id: &str) -> PathBuf {
+        self.dir
+            .join("agent-journals")
+            .join(format!("{session_id}.meta.json"))
+    }
+
+    fn recovery_snapshot_path(&self, session_id: &str) -> PathBuf {
+        self.dir
+            .join("terminal-recovery")
+            .join(format!("{session_id}.json"))
     }
 }
 
@@ -343,6 +356,13 @@ printf '{"type":"text","sessionID":"fake-opencode","timestamp":2,"part":{"type":
 printf '{"type":"step_finish","sessionID":"fake-opencode","timestamp":3,"part":{"type":"step-finish","id":"step-1","messageID":"msg-1"}}\n'
 "#;
 
+const SPAWN_SENTINEL_AGENT: &str = r#"#!/bin/sh
+printf 'provider child ran' > "$SENTINEL_FILE"
+read -r first
+echo '{"type":"system","subtype":"init","session_id":"sentinel-provider","model":"fake-model"}'
+sleep 1
+"#;
+
 fn is_session_ended(event: &AgentEvent) -> bool {
     matches!(event, AgentEvent::SessionEnded { .. })
 }
@@ -352,6 +372,72 @@ fn is_turn_completed(event: &AgentEvent) -> bool {
 }
 
 // ---- Tests ----
+
+#[test]
+fn hostile_agent_session_ids_are_rejected_before_spawn_or_persistence() {
+    let dir = temp_dir("hostile-session-id");
+    let script = write_script(&dir, "spawn-sentinel-agent.sh", SPAWN_SENTINEL_AGENT);
+    let daemon = DaemonHandle::start_in(&dir);
+    std::fs::create_dir_all(dir.join("agent-journals")).unwrap();
+    std::fs::create_dir_all(dir.join("terminal-recovery")).unwrap();
+
+    for (index, session_id) in ["../outside-agent", "Agent", "caf\u{e9}"]
+        .into_iter()
+        .enumerate()
+    {
+        let sentinel = dir.join(format!("provider-sentinel-{index}"));
+        let mut params = spawn_params(&dir, &script, "must not run");
+        params.env.insert(
+            "SENTINEL_FILE".to_string(),
+            sentinel.to_string_lossy().to_string(),
+        );
+
+        let mut conn = daemon.connect();
+        conn.send(&Command::SpawnAgent {
+            session_id: session_id.to_string(),
+            params,
+        });
+        match conn.recv() {
+            Event::Error { code, message } => {
+                assert_eq!(code, Some(ErrorCode::AgentSpawnFailed));
+                assert!(
+                    message.contains("invalid session id"),
+                    "unexpected spawn error for {session_id:?}: {message}"
+                );
+            }
+            other => panic!("expected AgentSpawnFailed for {session_id:?}, got {other:?}"),
+        }
+
+        conn.send(&Command::List);
+        match conn.recv() {
+            Event::SessionList { sessions } => assert!(
+                sessions
+                    .iter()
+                    .all(|session| session.session_id != session_id),
+                "hostile agent id {session_id:?} entered the registry"
+            ),
+            other => panic!("expected SessionList after rejected spawn, got {other:?}"),
+        }
+
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !sentinel.exists(),
+            "provider executable ran for hostile id {session_id:?}"
+        );
+        assert!(
+            !daemon.journal_path(session_id).exists(),
+            "journal created for hostile id {session_id:?}"
+        );
+        assert!(
+            !daemon.journal_metadata_path(session_id).exists(),
+            "journal metadata created for hostile id {session_id:?}"
+        );
+        assert!(
+            !daemon.recovery_snapshot_path(session_id).exists(),
+            "recovery snapshot created for hostile id {session_id:?}"
+        );
+    }
+}
 
 #[test]
 fn idle_status_broadcast_carries_latest_assistant_text() {
