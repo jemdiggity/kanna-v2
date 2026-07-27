@@ -238,36 +238,43 @@ export function handleTaskPullRequested(
         machine.peerId === request.requesterPeerId);
       if (requester) {
         if (requester.relayDesktopId && options.refreshCloudTransferRoute) {
-          try {
-            await options.refreshCloudTransferRoute(request.requesterPeerId);
-          } catch (error: unknown) {
-            if (attempt + 1 < maxAttempts) {
-              await waitForRetry(retryDelayMs);
-              continue;
+          for (let refreshAttempt = 0; refreshAttempt < maxAttempts; refreshAttempt += 1) {
+            try {
+              await options.refreshCloudTransferRoute(request.requesterPeerId);
+              break;
+            } catch (error: unknown) {
+              if (options.signal?.aborted) return "interrupted";
+              if (refreshAttempt + 1 < maxAttempts) {
+                await waitForRetry(retryDelayMs);
+                continue;
+              }
+              options.reportOperationalError?.(error);
+              return "terminal";
             }
-            options.reportOperationalError?.(error);
-            return "terminal";
           }
           if (options.signal?.aborted) return "interrupted";
         }
-        try {
-          await store.pushTaskToPeer(source.id, request.requesterPeerId, {
-            transport: requester.preferredTransport,
-            cloudFallback: requester.cloudFallback,
-            targetDesktopId: requester.desktopId,
-          });
-        } catch (error: unknown) {
-          if (isRetryableTaskPushError(error) && attempt + 1 < maxAttempts) {
-            await waitForRetry(retryDelayMs);
-            continue;
+        for (let pushAttempt = 0; pushAttempt < maxAttempts; pushAttempt += 1) {
+          try {
+            await store.pushTaskToPeer(source.id, request.requesterPeerId, {
+              transport: requester.preferredTransport,
+              cloudFallback: requester.cloudFallback,
+              targetDesktopId: requester.desktopId,
+            });
+            return "delivered";
+          } catch (error: unknown) {
+            if (options.signal?.aborted) return "interrupted";
+            if (isRetryableTaskPushError(error) && pushAttempt + 1 < maxAttempts) {
+              await waitForRetry(retryDelayMs);
+              continue;
+            }
+            // Transfer preflight and setup can already have reserved or staged
+            // state before rejecting. Replaying that work is not idempotent, so
+            // settle this lifecycle delivery instead of retrying it.
+            options.reportOperationalError?.(error);
+            return "terminal";
           }
-          // Transfer preflight and setup can already have reserved or staged
-          // state before rejecting. Replaying that work is not idempotent, so
-          // settle this lifecycle delivery instead of retrying it.
-          options.reportOperationalError?.(error);
-          return "terminal";
         }
-        return "delivered";
       }
       if (attempt + 1 < maxAttempts) {
         await waitForRetry(retryDelayMs);

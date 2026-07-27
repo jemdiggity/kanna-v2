@@ -197,7 +197,7 @@ fn remove_managed_artifact_root_impl(
     encoded_peer_id: &str,
 ) -> std::io::Result<()> {
     use std::ffi::{CStr, CString, OsStr};
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
     struct DirectoryStream(*mut libc::DIR);
@@ -250,11 +250,17 @@ fn remove_managed_artifact_root_impl(
         Ok(())
     }
 
-    fn directory_entries(directory: RawFd) -> std::io::Result<Vec<std::ffi::OsString>> {
-        let duplicate = unsafe { libc::dup(directory) };
+    fn duplicate_directory(directory: RawFd) -> std::io::Result<OwnedFd> {
+        let duplicate = unsafe { libc::fcntl(directory, libc::F_DUPFD_CLOEXEC, 0) };
         if duplicate < 0 {
             return Err(std::io::Error::last_os_error());
         }
+        Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
+    }
+
+    fn first_directory_entry(directory: RawFd) -> std::io::Result<Option<std::ffi::OsString>> {
+        let duplicate = duplicate_directory(directory)?;
+        let duplicate = duplicate.into_raw_fd();
         let stream = unsafe { libc::fdopendir(duplicate) };
         if stream.is_null() {
             let error = std::io::Error::last_os_error();
@@ -264,7 +270,6 @@ fn remove_managed_artifact_root_impl(
             return Err(error);
         }
         let stream = DirectoryStream(stream);
-        let mut entries = Vec::new();
         loop {
             let entry = unsafe { libc::readdir(stream.0) };
             if entry.is_null() {
@@ -272,29 +277,80 @@ fn remove_managed_artifact_root_impl(
             }
             let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
             if name != b"." && name != b".." {
-                entries.push(std::ffi::OsString::from_vec(name.to_vec()));
+                return Ok(Some(std::ffi::OsString::from_vec(name.to_vec())));
             }
         }
-        Ok(entries)
+        Ok(None)
+    }
+
+    fn open_relative_directory(
+        root: RawFd,
+        components: &[std::ffi::OsString],
+    ) -> std::io::Result<OwnedFd> {
+        let mut directory = duplicate_directory(root)?;
+        for component in components {
+            directory = open_child_directory(directory.as_raw_fd(), component)?;
+        }
+        Ok(directory)
     }
 
     fn remove_child_tree(parent: RawFd, name: &OsStr) -> std::io::Result<()> {
-        match open_child_directory(parent, name) {
-            Ok(directory) => {
-                for child in directory_entries(directory.as_raw_fd())? {
-                    remove_child_tree(directory.as_raw_fd(), &child)?;
+        let mut current = vec![name.to_os_string()];
+        while !current.is_empty() {
+            let directory = match open_relative_directory(parent, &current) {
+                Ok(directory) => directory,
+                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+                    current.pop();
+                    continue;
                 }
-                unlink_child(parent, name, libc::AT_REMOVEDIR)
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ENOTDIR)
+                        || error.raw_os_error() == Some(libc::ELOOP) =>
+                {
+                    let (leaf, ancestors) = current
+                        .split_last()
+                        .expect("non-empty cleanup path has a leaf");
+                    let ancestor = open_relative_directory(parent, ancestors)?;
+                    match unlink_child(ancestor.as_raw_fd(), leaf, 0) {
+                        Ok(()) => {}
+                        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                        Err(error) => return Err(error),
+                    }
+                    current.pop();
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let Some(child) = first_directory_entry(directory.as_raw_fd())? else {
+                let (leaf, ancestors) = current
+                    .split_last()
+                    .expect("non-empty cleanup path has a leaf");
+                let ancestor = open_relative_directory(parent, ancestors)?;
+                match unlink_child(ancestor.as_raw_fd(), leaf, libc::AT_REMOVEDIR) {
+                    Ok(()) => current.pop(),
+                    Err(error) if error.raw_os_error() == Some(libc::ENOENT) => current.pop(),
+                    Err(error) if error.raw_os_error() == Some(libc::ENOTEMPTY) => continue,
+                    Err(error) => return Err(error),
+                };
+                continue;
+            };
+            match open_child_directory(directory.as_raw_fd(), &child) {
+                Ok(_) => current.push(child),
+                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ENOTDIR)
+                        || error.raw_os_error() == Some(libc::ELOOP) =>
+                {
+                    match unlink_child(directory.as_raw_fd(), &child, 0) {
+                        Ok(()) => {}
+                        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(()),
-            Err(error)
-                if error.raw_os_error() == Some(libc::ENOTDIR)
-                    || error.raw_os_error() == Some(libc::ELOOP) =>
-            {
-                unlink_child(parent, name, 0)
-            }
-            Err(error) => Err(error),
         }
+        Ok(())
     }
 
     let registry = match open_path_directory(registry_root) {

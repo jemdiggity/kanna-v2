@@ -29,6 +29,7 @@ struct PendingLifecycleEvent {
     lease_expires_at: Option<Instant>,
     recovery_required: bool,
     claimed_phases: HashSet<String>,
+    nacked_by: HashSet<String>,
 }
 
 const MAX_PENDING_LIFECYCLE_EVENTS: usize = 256;
@@ -94,6 +95,7 @@ impl TransferEventConsumer {
             lease_expires_at: None,
             recovery_required: false,
             claimed_phases: HashSet::new(),
+            nacked_by: HashSet::new(),
         });
         self.pending_bytes += bytes;
         while let Some(label) = self.ready_labels.front().cloned() {
@@ -124,6 +126,9 @@ impl TransferEventConsumer {
             }
             if event.leased_to.is_some() {
                 return Ok(());
+            }
+            if event.nacked_by.contains(label) {
+                continue;
             }
             let mut delivered_payload = event.payload.clone();
             if let Some(object) = delivered_payload.as_object_mut() {
@@ -173,10 +178,9 @@ impl TransferEventConsumer {
         event.recovery_required = true;
         event.leased_to = None;
         event.lease_expires_at = None;
-        // A NACK means this renderer could not safely complete the work. Remove
-        // it from the consumer rotation so the same queue head cannot be
-        // synchronously re-leased to the same failing listener.
-        self.ready_labels.retain(|candidate| candidate != label);
+        // A NACK excludes this renderer only from this delivery. It remains a
+        // mounted consumer for later queue entries.
+        event.nacked_by.insert(label.to_string());
         true
     }
 
@@ -189,7 +193,17 @@ impl TransferEventConsumer {
         if !self.nack(label, delivery_id) {
             return Ok(false);
         }
-        let Some(next_label) = self.ready_labels.front().cloned() else {
+        let excluded = self
+            .pending
+            .iter()
+            .find(|event| event.delivery_id == delivery_id)
+            .map(|event| &event.nacked_by);
+        let Some(next_label) = self
+            .ready_labels
+            .iter()
+            .find(|candidate| !excluded.is_some_and(|labels| labels.contains(candidate.as_str())))
+            .cloned()
+        else {
             return Ok(true);
         };
         self.flush_pending_to(&next_label, |target, event_name, payload| {
@@ -2084,9 +2098,66 @@ mod tests {
             .expect("standby NACK should settle"));
 
         assert_eq!(delivered_to, ["window-owner", "window-standby"]);
-        assert!(consumer.ready_labels.is_empty());
+        assert_eq!(
+            consumer.ready_labels.iter().cloned().collect::<Vec<_>>(),
+            ["window-owner", "window-standby"],
+        );
         assert!(consumer.pending[0].recovery_required);
         assert_eq!(consumer.pending[0].leased_to, None);
+    }
+
+    #[test]
+    fn exhausted_nack_candidates_remain_available_for_later_deliveries() {
+        let mut consumer = TransferEventConsumer::default();
+        assert!(consumer.claim("window-owner"));
+        assert!(!consumer.claim("window-standby"));
+        let mut delivered = Vec::new();
+        consumer
+            .dispatch_with(
+                "task-pull-requested",
+                json!({"sequence": 1}),
+                |label, _, payload| {
+                    delivered.push((label.to_string(), payload["sequence"].clone()));
+                    Ok(())
+                },
+            )
+            .expect("owner should receive initial delivery");
+        let delivery_id = consumer.pending[0].delivery_id.clone();
+        assert!(consumer
+            .nack_with("window-owner", &delivery_id, |label, _, payload| {
+                delivered.push((label.to_string(), payload["sequence"].clone()));
+                Ok(())
+            })
+            .expect("owner NACK should settle"));
+        assert!(consumer
+            .nack_with("window-standby", &delivery_id, |_, _, _| {
+                unreachable!("the first delivery exhausted its candidates")
+            })
+            .expect("standby NACK should settle"));
+
+        consumer
+            .dispatch_with(
+                "outgoing-transfer-committed",
+                json!({"sequence": 2}),
+                |label, _, payload| {
+                    delivered.push((label.to_string(), payload["sequence"].clone()));
+                    Ok(())
+                },
+            )
+            .expect("a mounted consumer should receive the later delivery");
+
+        assert_eq!(
+            delivered,
+            [
+                ("window-owner".to_string(), json!(1)),
+                ("window-standby".to_string(), json!(1)),
+                ("window-owner".to_string(), json!(2)),
+            ],
+        );
+        assert_eq!(
+            consumer.ready_labels.iter().cloned().collect::<Vec<_>>(),
+            ["window-owner", "window-standby"],
+        );
     }
 
     #[test]

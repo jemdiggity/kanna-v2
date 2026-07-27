@@ -415,6 +415,7 @@ vi.mock("./composables/terminalFileLinkRegistry", () => ({
 vi.mock("./services/desktopAuthSdk", () => ({
   getConfiguredDesktopAuthSession: vi.fn(async () => ({
     initialize: vi.fn(async () => {}),
+    getIdToken: vi.fn(async () => "desktop-id-token"),
     subscribe: vi.fn((handler: (state: unknown) => void) => {
       desktopAuthStateListeners.add(handler);
       handler({
@@ -1070,6 +1071,7 @@ describe("App", () => {
     dbMock.execute.mockReset();
     dbMock.execute.mockResolvedValue({ rowsAffected: 0 });
     updateDesktopServerClientHandlersForTests({
+      ensureMobileServer: async () => {},
       fetchRepoKannaDefinitions: async () => ({
         revision: "remote-rev",
         refName: "origin/main",
@@ -5481,6 +5483,110 @@ describe("App", () => {
       deliveryId: "lifecycle-pull-failover-1",
     });
     standby.unmount();
+  });
+
+  it("NACKs without pushing or toasting when unmount aborts a rejected route refresh", async () => {
+    store.items = [{
+      id: "task-source",
+      repo_id: "repo-1",
+      closed_at: null,
+      stage: "in progress",
+      branch: "task-source",
+      prompt: "Return this task",
+      tags: "[]",
+    }];
+    store.pushTaskToPeer.mockReset();
+    const refresh = createDeferred<{ endpoint: string }>();
+    let rejectNextRouteRefresh = false;
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "mobile_server_status") {
+        return { desktopId: "desktop-local", lanPort: 48120 };
+      }
+      if (command === "read_env_var") {
+        return args?.name === "KANNA_RELAY_URL" ? "ws://127.0.0.1:48200" : "/Users/test";
+      }
+      if (command === "get_transfer_identity") {
+        return {
+          peerId: "peer-local",
+          displayName: "Local Mac",
+          publicKey: "local-key",
+          protocolVersion: 1,
+          acceptingTransfers: true,
+        };
+      }
+      if (command === "ensure_cloud_transfer_proxy") {
+        if (rejectNextRouteRefresh) return await refresh.promise;
+        return { endpoint: "127.0.0.1:48201" };
+      }
+      if (
+        command === "upsert_external_transfer_peer"
+        || command === "remove_external_transfer_peer"
+        || command === "remove_cloud_transfer_proxy"
+        || command === "clear_external_transfer_peers"
+        || command === "clear_cloud_transfer_proxies"
+      ) {
+        return null;
+      }
+      if (command === "list_transfer_peers") return [];
+      return await defaultInvoke?.(command, args);
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => new Response(null, { status: 204 })) as typeof fetch;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const owner = await mountApp(SidebarWithRepoStub);
+    try {
+      emitDesktopCloudSnapshot({
+        repos: [],
+        items: [],
+        terminalRefs: {},
+        blockedByTaskIds: {},
+        transferMachines: [{
+          desktopId: "desktop-requester",
+          displayName: "Requester",
+          online: true,
+          peerId: "peer-requester",
+          publicKey: "requester-key",
+          protocolVersion: 1,
+          acceptingTransfers: true,
+        }],
+      });
+      await waitForCondition(() =>
+        invokeMock.mock.calls.some(([command]) => command === "upsert_external_transfer_peer"),
+        30,
+      );
+      const initialRefreshes = invokeMock.mock.calls.filter(
+        ([command]) => command === "ensure_cloud_transfer_proxy",
+      ).length;
+      expect(initialRefreshes).toBeGreaterThan(0);
+      rejectNextRouteRefresh = true;
+      const handler = listenHandlers.get("task-pull-requested");
+      const delivery = handler?.(buildTaskPullRequestedEvent());
+      await waitForCondition(() =>
+        invokeMock.mock.calls.filter(
+          ([command]) => command === "ensure_cloud_transfer_proxy",
+        ).length > initialRefreshes,
+        30,
+      );
+
+      owner.unmount();
+      refresh.reject(new Error("route refresh failed during unmount"));
+      await delivery;
+
+      expect(store.pushTaskToPeer).not.toHaveBeenCalled();
+      expect(toastErrorMock).not.toHaveBeenCalled();
+      expect(invokeMock).toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
+        deliveryId: "lifecycle-pull-failover-1",
+      });
+      expect(invokeMock).not.toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
+        deliveryId: "lifecycle-pull-failover-1",
+      });
+    } finally {
+      owner.unmount();
+      errorSpy.mockRestore();
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("does not start transfer services when a mutating listener is not ready", async () => {

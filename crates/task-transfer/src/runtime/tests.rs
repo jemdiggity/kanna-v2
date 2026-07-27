@@ -303,6 +303,86 @@ async fn startup_refuses_artifact_cleanup_through_a_symlinked_ancestor() {
 }
 
 #[cfg(unix)]
+#[test]
+fn managed_artifact_cleanup_handles_trees_deeper_than_the_process_fd_limit() {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = tempfile::tempdir().expect("temp registry");
+    let peer_id = "peer-deep-cleanup";
+    let artifact_root = utils::managed_artifact_root(temp.path(), peer_id);
+    std::fs::create_dir_all(&artifact_root).expect("create artifact root");
+    let root = CString::new(artifact_root.as_os_str().as_bytes()).expect("artifact root path");
+    let descriptor = unsafe {
+        libc::open(
+            root.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    assert!(descriptor >= 0, "open artifact root");
+    let mut current = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let child = CString::new("nested").expect("child name");
+    for depth in 0..512 {
+        let created = unsafe { libc::mkdirat(current.as_raw_fd(), child.as_ptr(), 0o700) };
+        assert_eq!(
+            created,
+            0,
+            "create descriptor-relative directory at depth {depth}: {}",
+            std::io::Error::last_os_error(),
+        );
+        let next = unsafe {
+            libc::openat(
+                current.as_raw_fd(),
+                child.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        assert!(
+            next >= 0,
+            "open descriptor-relative directory at depth {depth}: {}",
+            std::io::Error::last_os_error(),
+        );
+        current = unsafe { OwnedFd::from_raw_fd(next) };
+    }
+    drop(current);
+
+    utils::remove_managed_artifact_root(temp.path(), peer_id)
+        .expect("cleanup should not retain one descriptor per depth");
+    assert!(!artifact_root.exists());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startup_artifact_cleanup_yields_the_async_runtime_worker() {
+    let temp = tempfile::tempdir().expect("temp registry");
+    let peer_id = "peer-startup-cleanup-worker";
+    let artifact_root = utils::managed_artifact_root(temp.path(), peer_id);
+    std::fs::create_dir_all(&artifact_root).expect("create artifact root");
+    std::fs::write(artifact_root.join("stale"), b"stale").expect("write stale artifact");
+    let yielded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let yielded_in_task = yielded.clone();
+    tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        yielded_in_task.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        peer_id,
+        "Cleanup Worker Peer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .expect("spawn peer");
+
+    assert!(
+        yielded.load(std::sync::atomic::Ordering::SeqCst),
+        "startup cleanup blocked the async runtime worker",
+    );
+    drop(runtime);
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn drop_does_not_follow_an_artifacts_ancestor_replaced_with_a_symlink() {
     use std::os::unix::fs::symlink;

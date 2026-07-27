@@ -46,7 +46,15 @@ impl TransferRuntime {
     pub async fn spawn(mut config: RuntimeConfig) -> Result<Self, RuntimeError> {
         crate::discovery::validate_peer_id(&config.peer_id)
             .map_err(|error| RuntimeError::InvalidConfig(error.to_string()))?;
-        remove_managed_artifact_root(&config.registry_dir, &config.peer_id)?;
+        let cleanup_registry_dir = config.registry_dir.clone();
+        let cleanup_peer_id = config.peer_id.clone();
+        tokio::task::spawn_blocking(move || {
+            remove_managed_artifact_root(&cleanup_registry_dir, &cleanup_peer_id)
+        })
+        .await
+        .map_err(|error| {
+            std::io::Error::other(format!("managed artifact cleanup task failed: {error}"))
+        })??;
         let listener = TcpListener::bind((config.bind_host(), config.listen_port)).await?;
         config.listen_port = listener.local_addr()?.port();
         let identity = load_or_create_identity(&config.registry_dir, &config.peer_id)?;
