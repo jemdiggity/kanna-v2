@@ -60,6 +60,15 @@ export interface PushTaskTransferOptions {
   targetDesktopId?: string | null;
 }
 
+export class RetryableTaskPushError extends Error {
+  readonly retryableTaskPush = true;
+}
+
+export function isRetryableTaskPushError(error: unknown): boolean {
+  return error instanceof Error
+    && (error as Error & { retryableTaskPush?: unknown }).retryableTaskPush === true;
+}
+
 export interface IncomingTransferOwnership {
   signal?: AbortSignal;
   assertOwnership?: (phase: string) => Promise<boolean>;
@@ -614,7 +623,9 @@ export function createTransferApi(
           .catch(() => null)
         : null;
       if (options.targetDesktopId && !sourceDesktopId) {
-        throw new Error("source desktop identity is unavailable for cloud transfer");
+        throw new RetryableTaskPushError(
+          "source desktop identity is unavailable for cloud transfer",
+        );
       }
       const preflightPayload = (transport?: "lan" | "cloud") => ({
         phase: "preflight",

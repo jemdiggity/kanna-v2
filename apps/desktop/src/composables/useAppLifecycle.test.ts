@@ -127,6 +127,77 @@ describe("handleTaskPullRequested", () => {
     expect(inFlight).toEqual(new Map());
   });
 
+  it("retries route refresh failures with a delay before starting one return push", async () => {
+    const refreshCloudTransferRoute = vi.fn()
+      .mockRejectedValueOnce(new Error("relay route unavailable"))
+      .mockRejectedValueOnce(new Error("relay route unavailable"))
+      .mockResolvedValue(undefined);
+    const pushTaskToPeer = vi.fn(async () => {});
+    const waitForRetry = vi.fn(async () => {});
+
+    await expect(handleTaskPullRequested({
+      requestId: "pull-route-retry",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [machine()], {
+      maxAttempts: 3,
+      retryDelayMs: 125,
+      refreshCloudTransferRoute,
+      waitForRetry,
+    })).resolves.toBe("delivered");
+
+    expect(refreshCloudTransferRoute).toHaveBeenCalledTimes(3);
+    expect(waitForRetry).toHaveBeenCalledTimes(2);
+    expect(waitForRetry).toHaveBeenNthCalledWith(1, 125);
+    expect(waitForRetry).toHaveBeenNthCalledWith(2, 125);
+    expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a rejected return push as terminal instead of replaying non-idempotent setup", async () => {
+    const pushTaskToPeer = vi.fn(async () => {
+      throw new Error("preflight failed after reserving a transfer");
+    });
+    const waitForRetry = vi.fn(async () => {});
+
+    await expect(handleTaskPullRequested({
+      requestId: "pull-terminal-push",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [machine()], {
+      maxAttempts: 3,
+      waitForRetry,
+    })).resolves.toBe("terminal");
+
+    expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
+    expect(waitForRetry).not.toHaveBeenCalled();
+  });
+
+  it("retries explicitly safe pre-mutation push failures with a bounded delay", async () => {
+    const retryable = Object.assign(new Error("source desktop identity unavailable"), {
+      retryableTaskPush: true,
+    });
+    const pushTaskToPeer = vi.fn()
+      .mockRejectedValueOnce(retryable)
+      .mockRejectedValueOnce(retryable)
+      .mockResolvedValue(undefined);
+    const waitForRetry = vi.fn(async () => {});
+
+    await expect(handleTaskPullRequested({
+      requestId: "pull-retryable-push",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [machine()], {
+      maxAttempts: 3,
+      retryDelayMs: 125,
+      waitForRetry,
+    })).resolves.toBe("delivered");
+
+    expect(pushTaskToPeer).toHaveBeenCalledTimes(3);
+    expect(waitForRetry).toHaveBeenCalledTimes(2);
+    expect(waitForRetry).toHaveBeenNthCalledWith(1, 125);
+    expect(waitForRetry).toHaveBeenNthCalledWith(2, 125);
+  });
+
   it("rejects a requester that is absent from the current eligible machine catalog", async () => {
     const pushTaskToPeer = vi.fn(async () => {});
 

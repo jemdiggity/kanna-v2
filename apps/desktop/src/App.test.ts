@@ -5297,7 +5297,7 @@ describe("App", () => {
     wrapper.unmount();
   });
 
-  it("nacks a task pull when the return push is rejected", async () => {
+  it("acknowledges a task pull when non-idempotent return setup is rejected", async () => {
     store.items = [{
       id: "task-source",
       repo_id: "repo-1",
@@ -5329,10 +5329,29 @@ describe("App", () => {
 
     await handler?.(buildTaskPullRequestedEvent());
 
-    expect(invokeMock).toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
+    expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
       deliveryId: "lifecycle-pull-failover-1",
     });
-    expect(invokeMock).not.toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
+    expect(invokeMock).not.toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+    });
+    errorSpy.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("acknowledges a malformed terminal task pull instead of re-emitting it", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    const handler = listenHandlers.get("task-pull-requested");
+    const malformed = buildTaskPullRequestedEvent();
+    malformed.payload.requester_peer_id = "";
+
+    await handler?.(malformed);
+
+    expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
       deliveryId: "lifecycle-pull-failover-1",
     });
     errorSpy.mockRestore();

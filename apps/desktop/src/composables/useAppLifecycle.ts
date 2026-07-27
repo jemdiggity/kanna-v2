@@ -6,6 +6,7 @@ import i18n from "../i18n";
 import { invoke } from "../invoke";
 import { listen, listenCurrentWebviewWindow } from "../listen";
 import type { useKannaStore } from "../stores/kanna";
+import { isRetryableTaskPushError } from "../stores/transfer";
 import { isTauri } from "../tauri-mock";
 import {
   normalizeAppThemePreference,
@@ -185,7 +186,6 @@ function lifecycleDeliveryOwnership(event: unknown): {
 export type TaskPullHandlingOutcome =
   | "delivered"
   | "terminal"
-  | "retryable"
   | "interrupted";
 
 export function handleTaskPullRequested(
@@ -199,6 +199,7 @@ export function handleTaskPullRequested(
     signal?: AbortSignal;
     refreshCloudTransferRoute?: (peerId: string) => Promise<void>;
     waitForRetry?: (delayMs: number) => Promise<void>;
+    reportOperationalError?: (error: unknown) => void;
   } = {},
 ): Promise<TaskPullHandlingOutcome> {
   const readMachines = typeof transferMachines === "function"
@@ -237,14 +238,35 @@ export function handleTaskPullRequested(
         machine.peerId === request.requesterPeerId);
       if (requester) {
         if (requester.relayDesktopId && options.refreshCloudTransferRoute) {
-          await options.refreshCloudTransferRoute(request.requesterPeerId);
+          try {
+            await options.refreshCloudTransferRoute(request.requesterPeerId);
+          } catch (error: unknown) {
+            if (attempt + 1 < maxAttempts) {
+              await waitForRetry(retryDelayMs);
+              continue;
+            }
+            options.reportOperationalError?.(error);
+            return "terminal";
+          }
           if (options.signal?.aborted) return "interrupted";
         }
-        await store.pushTaskToPeer(source.id, request.requesterPeerId, {
-          transport: requester.preferredTransport,
-          cloudFallback: requester.cloudFallback,
-          targetDesktopId: requester.desktopId,
-        });
+        try {
+          await store.pushTaskToPeer(source.id, request.requesterPeerId, {
+            transport: requester.preferredTransport,
+            cloudFallback: requester.cloudFallback,
+            targetDesktopId: requester.desktopId,
+          });
+        } catch (error: unknown) {
+          if (isRetryableTaskPushError(error) && attempt + 1 < maxAttempts) {
+            await waitForRetry(retryDelayMs);
+            continue;
+          }
+          // Transfer preflight and setup can already have reserved or staged
+          // state before rejecting. Replaying that work is not idempotent, so
+          // settle this lifecycle delivery instead of retrying it.
+          options.reportOperationalError?.(error);
+          return "terminal";
+        }
         return "delivered";
       }
       if (attempt + 1 < maxAttempts) {
@@ -509,7 +531,7 @@ export function useAppLifecycle({
     }
     try {
       const unlistenTaskPullRequested = await listen("task-pull-requested", async (event: unknown) => {
-        let outcome: TaskPullHandlingOutcome = "retryable";
+        let outcome: TaskPullHandlingOutcome = "terminal";
         const stopRenewing = renewLifecycleDeliveryWhileHandling(event);
         try {
           outcome = await handleTaskPullRequested(
@@ -520,6 +542,10 @@ export function useAppLifecycle({
             {
               refreshCloudTransferRoute,
               signal: taskPullAbortController.signal,
+              reportOperationalError(error) {
+                console.error("[App] failed to handle task pull request:", error);
+                toast.error(error instanceof Error ? error.message : String(error));
+              },
             },
           );
         } catch (e: unknown) {
@@ -529,7 +555,7 @@ export function useAppLifecycle({
           stopRenewing();
           await settleLifecycleDelivery(
             event,
-            outcome === "delivered" || outcome === "terminal" ? "ack" : "nack",
+            outcome === "interrupted" ? "nack" : "ack",
           ).catch((error: unknown) => {
             console.error("[App] failed to settle task-pull lifecycle delivery:", error);
           });

@@ -873,6 +873,29 @@ describe("pushTaskToPeer", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("signal_session", expect.anything());
   });
 
+  it("marks unavailable source desktop identity as safe to retry before preflight", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    store.repos = [buildRepo()];
+    store.items = [buildItem()];
+    invokeMock.mockImplementation(async (cmd) => {
+      if (cmd === "mobile_server_status") return {};
+      return null;
+    });
+
+    const error = await store.pushTaskToPeer("task-source", "peer-target", {
+      transport: "cloud",
+      targetDesktopId: "desktop-target",
+    }).catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      message: "source desktop identity is unavailable for cloud transfer",
+      retryableTaskPush: true,
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("prepare_outgoing_transfer", expect.anything());
+  });
+
   it("falls back from LAN connection failure to cloud before creating the transfer row", async () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");

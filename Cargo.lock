@@ -2978,6 +2978,7 @@ dependencies = [
  "if-addrs",
  "kanna-daemon",
  "kanna-runtime-defaults",
+ "libc",
  "mdns-sd",
  "rand_core 0.6.4",
  "rusqlite",

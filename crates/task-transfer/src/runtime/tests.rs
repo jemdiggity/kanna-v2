@@ -216,34 +216,31 @@ async fn peer_artifact_root_cleanup_is_isolated_for_dot_and_its_encoded_name() {
 }
 
 #[tokio::test]
-async fn legacy_peer_artifact_root_is_reconciled_without_touching_another_peer() {
+async fn raw_legacy_root_that_casefolds_to_an_encoded_peer_root_is_never_recursively_cleaned() {
     let temp = tempfile::tempdir().expect("temp registry");
-    let legacy_root = temp.path().join("artifacts").join("peer-upgrade");
-    let managed_root = utils::managed_artifact_root(temp.path(), "peer-upgrade");
-    let other_root = utils::managed_artifact_root(temp.path(), "peer-other");
-    assert_ne!(legacy_root, managed_root);
-    assert_ne!(legacy_root, other_root);
+    let legacy_root = temp.path().join("artifacts").join("lg");
+    let encoded_peer_root = utils::managed_artifact_root(temp.path(), ".");
+    assert_eq!(
+        encoded_peer_root
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str),
+        Some("Lg"),
+    );
 
-    std::fs::create_dir_all(&legacy_root).expect("create legacy artifact root");
-    let startup_orphan = legacy_root.join("legacy-transfer").join("orphan.bundle");
-    std::fs::create_dir_all(startup_orphan.parent().expect("legacy transfer parent"))
-        .expect("create legacy transfer");
-    std::fs::write(&startup_orphan, b"legacy").expect("write legacy orphan");
-
-    let other_runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
-        "peer-other",
-        "Other Peer",
+    let encoded_peer_runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        ".",
+        "Encoded Peer",
         temp.path(),
         0,
     ))
     .await
-    .expect("spawn other peer");
-    std::fs::create_dir_all(&other_root).expect("create other peer artifact root");
-    let other_sentinel = other_root.join("owned-by-other");
-    std::fs::write(&other_sentinel, b"other").expect("write other peer artifact");
+    .expect("spawn encoded peer");
+    std::fs::create_dir_all(&encoded_peer_root).expect("create encoded peer root");
+    let sentinel = encoded_peer_root.join("owned-by-encoded-peer");
+    std::fs::write(&sentinel, b"encoded").expect("write encoded peer sentinel");
 
     let upgraded_runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
-        "peer-upgrade",
+        "lg",
         "Upgraded Peer",
         temp.path(),
         0,
@@ -251,26 +248,89 @@ async fn legacy_peer_artifact_root_is_reconciled_without_touching_another_peer()
     .await
     .expect("spawn upgraded peer");
     assert!(
-        !legacy_root.exists(),
-        "startup reconciliation retained the pre-upgrade raw artifact root",
-    );
-    assert!(
-        other_sentinel.exists(),
-        "startup reconciliation deleted another valid peer's artifacts",
+        sentinel.exists(),
+        "startup recursively deleted another peer's encoded root through its raw case-fold alias",
     );
 
-    std::fs::create_dir_all(&legacy_root).expect("recreate legacy artifact root");
-    std::fs::write(legacy_root.join("drop-orphan"), b"legacy").expect("write drop orphan");
     drop(upgraded_runtime);
     assert!(
-        !legacy_root.exists(),
-        "drop reconciliation retained the pre-upgrade raw artifact root",
+        sentinel.exists(),
+        "Drop recursively deleted another peer's encoded root through its raw case-fold alias",
+    );
+    drop(encoded_peer_runtime);
+    assert!(!encoded_peer_root.exists(), "owning peer retained its root");
+    assert!(
+        legacy_root
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("Lg")),
+        "fixture must model the raw/encoded case-fold alias",
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn startup_refuses_artifact_cleanup_through_a_symlinked_ancestor() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("temp registry");
+    let external = tempfile::tempdir().expect("external artifacts");
+    let external_peer_root = utils::managed_artifact_root(external.path(), "peer-symlink");
+    std::fs::create_dir_all(&external_peer_root).expect("create external peer root");
+    let sentinel = external_peer_root.join("must-survive-startup");
+    std::fs::write(&sentinel, b"external").expect("write external sentinel");
+    symlink(
+        external.path().join("artifacts"),
+        temp.path().join("artifacts"),
+    )
+    .expect("symlink artifacts ancestor");
+
+    let result = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-symlink",
+        "Symlink Peer",
+        temp.path(),
+        0,
+    ))
+    .await;
+
+    assert!(
+        result.is_err(),
+        "startup accepted a symlinked artifacts ancestor"
     );
     assert!(
-        other_sentinel.exists(),
-        "drop reconciliation deleted another valid peer's artifacts",
+        sentinel.exists(),
+        "startup deleted data outside the registry"
     );
-    drop(other_runtime);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn drop_does_not_follow_an_artifacts_ancestor_replaced_with_a_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("temp registry");
+    let external = tempfile::tempdir().expect("external artifacts");
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-drop-symlink",
+        "Drop Symlink Peer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .expect("spawn peer");
+    let artifacts = temp.path().join("artifacts");
+    std::fs::create_dir_all(&artifacts).expect("create managed artifacts ancestor");
+    std::fs::rename(&artifacts, temp.path().join("artifacts-before-symlink"))
+        .expect("move managed artifacts ancestor");
+
+    let external_peer_root = utils::managed_artifact_root(external.path(), "peer-drop-symlink");
+    std::fs::create_dir_all(&external_peer_root).expect("create external peer root");
+    let sentinel = external_peer_root.join("must-survive-drop");
+    std::fs::write(&sentinel, b"external").expect("write external sentinel");
+    symlink(external.path().join("artifacts"), &artifacts).expect("replace artifacts with symlink");
+
+    drop(runtime);
+
+    assert!(sentinel.exists(), "Drop deleted data outside the registry");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

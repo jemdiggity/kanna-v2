@@ -170,9 +170,32 @@ impl TransferEventConsumer {
         }) else {
             return false;
         };
+        event.recovery_required = true;
         event.leased_to = None;
         event.lease_expires_at = None;
+        // A NACK means this renderer could not safely complete the work. Remove
+        // it from the consumer rotation so the same queue head cannot be
+        // synchronously re-leased to the same failing listener.
+        self.ready_labels.retain(|candidate| candidate != label);
         true
+    }
+
+    fn nack_with(
+        &mut self,
+        label: &str,
+        delivery_id: &str,
+        mut emit: impl FnMut(&str, &str, &Value) -> Result<(), String>,
+    ) -> Result<bool, String> {
+        if !self.nack(label, delivery_id) {
+            return Ok(false);
+        }
+        let Some(next_label) = self.ready_labels.front().cloned() else {
+            return Ok(true);
+        };
+        self.flush_pending_to(&next_label, |target, event_name, payload| {
+            emit(target, event_name, payload)
+        })?;
+        Ok(true)
     }
 
     fn renew(&mut self, label: &str, delivery_id: &str) -> bool {
@@ -1354,10 +1377,7 @@ pub fn nack_transfer_lifecycle_event_in_state(
     let mut consumer = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !consumer.nack(label, delivery_id) {
-        return Ok(false);
-    }
-    consumer.flush_pending_to(label, |target, event_name, payload| {
+    consumer.nack_with(label, delivery_id, |target, event_name, payload| {
         if app.get_webview_window(target).is_none() {
             return Err(format!(
                 "transfer event consumer {target} is no longer available"
@@ -1365,8 +1385,7 @@ pub fn nack_transfer_lifecycle_event_in_state(
         }
         app.emit_to(EventTarget::webview_window(target), event_name, payload)
             .map_err(|error| error.to_string())
-    })?;
-    Ok(true)
+    })
 }
 
 pub fn renew_transfer_lifecycle_event_in_state(
@@ -2032,6 +2051,42 @@ mod tests {
         assert_eq!(recovery_flags, vec![None, Some(true)]);
         assert!(consumer.acknowledge("window-standby", &delivered_ids[1]));
         assert!(consumer.pending.is_empty());
+    }
+
+    #[test]
+    fn nacked_lifecycle_delivery_reemits_only_to_standby_consumers_and_stops_when_exhausted() {
+        let mut consumer = TransferEventConsumer::default();
+        assert!(consumer.claim("window-owner"));
+        assert!(!consumer.claim("window-standby"));
+        let mut delivered_to = Vec::new();
+        consumer
+            .dispatch_with(
+                "task-pull-requested",
+                json!({"sequence": 1}),
+                |label, _, _| {
+                    delivered_to.push(label.to_string());
+                    Ok(())
+                },
+            )
+            .expect("owner should receive initial delivery");
+        let delivery_id = consumer.pending[0].delivery_id.clone();
+
+        assert!(consumer
+            .nack_with("window-owner", &delivery_id, |label, _, _| {
+                delivered_to.push(label.to_string());
+                Ok(())
+            })
+            .expect("owner NACK should settle"));
+        assert!(consumer
+            .nack_with("window-standby", &delivery_id, |_, _, _| {
+                unreachable!("no consumer remains for another re-emission")
+            })
+            .expect("standby NACK should settle"));
+
+        assert_eq!(delivered_to, ["window-owner", "window-standby"]);
+        assert!(consumer.ready_labels.is_empty());
+        assert!(consumer.pending[0].recovery_required);
+        assert_eq!(consumer.pending[0].leased_to, None);
     }
 
     #[test]

@@ -184,34 +184,150 @@ pub(super) fn managed_artifact_root(registry_root: &Path, peer_id: &str) -> Path
         .join(URL_SAFE_NO_PAD.encode(peer_id.as_bytes()))
 }
 
-pub(super) fn legacy_managed_artifact_root(registry_root: &Path, peer_id: &str) -> Option<PathBuf> {
-    let legacy_root_was_raw = match Path::new(peer_id)
-        .components()
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
-        [std::path::Component::Normal(component)]
-            if component == &std::ffi::OsStr::new(peer_id) =>
-        {
-            true
+pub(super) fn remove_managed_artifact_root(
+    registry_root: &Path,
+    peer_id: &str,
+) -> std::io::Result<()> {
+    remove_managed_artifact_root_impl(registry_root, &URL_SAFE_NO_PAD.encode(peer_id.as_bytes()))
+}
+
+#[cfg(unix)]
+fn remove_managed_artifact_root_impl(
+    registry_root: &Path,
+    encoded_peer_id: &str,
+) -> std::io::Result<()> {
+    use std::ffi::{CStr, CString, OsStr};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    struct DirectoryStream(*mut libc::DIR);
+
+    impl Drop for DirectoryStream {
+        fn drop(&mut self) {
+            unsafe {
+                libc::closedir(self.0);
+            }
         }
-        _ => false,
+    }
+
+    fn open_path_directory(path: &Path) -> std::io::Result<OwnedFd> {
+        let path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let descriptor = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
+    }
+
+    fn open_child_directory(parent: RawFd, name: &OsStr) -> std::io::Result<OwnedFd> {
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let descriptor = unsafe {
+            libc::openat(
+                parent,
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
+    }
+
+    fn unlink_child(parent: RawFd, name: &OsStr, flags: libc::c_int) -> std::io::Result<()> {
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        if unsafe { libc::unlinkat(parent, name.as_ptr(), flags) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn directory_entries(directory: RawFd) -> std::io::Result<Vec<std::ffi::OsString>> {
+        let duplicate = unsafe { libc::dup(directory) };
+        if duplicate < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let stream = unsafe { libc::fdopendir(duplicate) };
+        if stream.is_null() {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(duplicate);
+            }
+            return Err(error);
+        }
+        let stream = DirectoryStream(stream);
+        let mut entries = Vec::new();
+        loop {
+            let entry = unsafe { libc::readdir(stream.0) };
+            if entry.is_null() {
+                break;
+            }
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+            if name != b"." && name != b".." {
+                entries.push(std::ffi::OsString::from_vec(name.to_vec()));
+            }
+        }
+        Ok(entries)
+    }
+
+    fn remove_child_tree(parent: RawFd, name: &OsStr) -> std::io::Result<()> {
+        match open_child_directory(parent, name) {
+            Ok(directory) => {
+                for child in directory_entries(directory.as_raw_fd())? {
+                    remove_child_tree(directory.as_raw_fd(), &child)?;
+                }
+                unlink_child(parent, name, libc::AT_REMOVEDIR)
+            }
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(()),
+            Err(error)
+                if error.raw_os_error() == Some(libc::ENOTDIR)
+                    || error.raw_os_error() == Some(libc::ELOOP) =>
+            {
+                unlink_child(parent, name, 0)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    let registry = match open_path_directory(registry_root) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
     };
-    if !legacy_root_was_raw {
-        return None;
+    let artifacts = match open_child_directory(registry.as_raw_fd(), OsStr::new("artifacts")) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    remove_child_tree(artifacts.as_raw_fd(), OsStr::new(encoded_peer_id))
+}
+
+#[cfg(not(unix))]
+fn remove_managed_artifact_root_impl(
+    registry_root: &Path,
+    encoded_peer_id: &str,
+) -> std::io::Result<()> {
+    let artifacts = registry_root.join("artifacts");
+    if std::fs::symlink_metadata(&artifacts).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "managed artifact ancestor is a symlink",
+        ));
     }
-    let decoded_peer_id = URL_SAFE_NO_PAD
-        .decode(peer_id.as_bytes())
-        .ok()
-        .and_then(|decoded| String::from_utf8(decoded).ok());
-    if decoded_peer_id.as_deref().is_some_and(|decoded| {
-        decoded != peer_id
-            && URL_SAFE_NO_PAD.encode(decoded.as_bytes()) == peer_id
-            && crate::discovery::validate_peer_id(decoded).is_ok()
-    }) {
-        return None;
+    match std::fs::remove_dir_all(artifacts.join(encoded_peer_id)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
-    Some(registry_root.join("artifacts").join(peer_id))
 }
 
 pub(super) fn peer_store(root: &Path, self_peer_id: &str) -> Result<PeerStore, RuntimeError> {
