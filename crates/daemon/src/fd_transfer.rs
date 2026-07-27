@@ -178,6 +178,9 @@ fn collect_scm_rights_fds(msg: &libc::msghdr, expected: usize) -> io::Result<Vec
     let fd_size = std::mem::size_of::<RawFd>();
 
     let mut fds: Vec<RawFd> = Vec::new();
+    // A shape error that must not stop the walk, because descriptors may still be
+    // sitting in later SCM_RIGHTS messages waiting to be closed.
+    let mut deferred: Option<String> = None;
     let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(msg) };
     while !cmsg.is_null() {
         let cmsg_ref = unsafe { &*cmsg };
@@ -193,19 +196,33 @@ fn collect_scm_rights_fds(msg: &libc::msghdr, expected: usize) -> io::Result<Vec
             }));
         }
         if cmsg_ref.cmsg_level != libc::SOL_SOCKET || cmsg_ref.cmsg_type != libc::SCM_RIGHTS {
-            close_all(&fds);
-            return Err(invalid(format!(
-                "unexpected control message: level={}, type={}",
-                cmsg_ref.cmsg_level, cmsg_ref.cmsg_type
-            )));
+            // Record and KEEP WALKING. Returning here would leak every descriptor
+            // carried by SCM_RIGHTS messages behind this header: `recvmsg` has
+            // already installed them in this process's fd table, so a bundle like
+            // `[SCM_CREDS, SCM_RIGHTS(a, b)]` left a and b open forever — and they
+            // arrive inheritable, so the next child spawned pinned them. The walk
+            // continues purely to inventory what has to be closed.
+            if deferred.is_none() {
+                deferred = Some(format!(
+                    "unexpected control message: level={}, type={}",
+                    cmsg_ref.cmsg_level, cmsg_ref.cmsg_type
+                ));
+            }
+            cmsg = unsafe { libc::CMSG_NXTHDR(msg, cmsg) };
+            continue;
         }
         let data_len = cmsg_len - header_len;
         if !data_len.is_multiple_of(fd_size) {
-            close_all(&fds);
-            return Err(invalid(format!(
-                "SCM_RIGHTS payload of {} bytes is not a whole number of fds",
-                data_len
-            )));
+            // `cmsg_len` is already bounds-checked above, so advancing is safe;
+            // keep walking for the same reason as a foreign header.
+            if deferred.is_none() {
+                deferred = Some(format!(
+                    "SCM_RIGHTS payload of {} bytes is not a whole number of fds",
+                    data_len
+                ));
+            }
+            cmsg = unsafe { libc::CMSG_NXTHDR(msg, cmsg) };
+            continue;
         }
         let data = unsafe { libc::CMSG_DATA(cmsg) };
         for index in 0..data_len / fd_size {
@@ -222,6 +239,10 @@ fn collect_scm_rights_fds(msg: &libc::msghdr, expected: usize) -> io::Result<Vec
         cmsg = unsafe { libc::CMSG_NXTHDR(msg, cmsg) };
     }
 
+    if let Some(reason) = deferred {
+        close_all(&fds);
+        return Err(invalid(reason));
+    }
     if truncated {
         close_all(&fds);
         return Err(invalid(
@@ -870,5 +891,84 @@ mod tests {
             libc::close(pipe_write);
             libc::close(received[0]);
         }
+    }
+
+    /// A descriptor on a fresh, already-unlinked temp file, plus its identity.
+    ///
+    /// Files rather than pipes: macOS reports the same dev/ino for distinct pipes,
+    /// so a pipe fd that was correctly closed and whose number was reused by a
+    /// parallel test is indistinguishable from one that leaked. A regular file has
+    /// a unique inode, which makes "is this still the same object" answerable.
+    fn probe_file() -> (RawFd, (libc::dev_t, libc::ino_t)) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("kanna-fdprobe-{}-{seq}", std::process::id()));
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).expect("path");
+        let fd = unsafe {
+            libc::open(
+                c.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+                0o600 as libc::c_uint,
+            )
+        };
+        assert!(fd >= 0, "failed to create probe file {path:?}");
+        unsafe { libc::unlink(c.as_ptr()) };
+        (fd, fd_file_identity(fd))
+    }
+
+    /// Build a two-message ancillary chain: a foreign header, then SCM_RIGHTS.
+    fn crafted_foreign_then_rights(fds: &[RawFd]) -> (Vec<u8>, libc::msghdr) {
+        let rights_size = std::mem::size_of_val(fds);
+        let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize
+            + unsafe { libc::CMSG_SPACE(rights_size as u32) } as usize;
+        let mut buf = vec![0u8; space];
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_control = buf.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = space as _;
+        unsafe {
+            let one = libc::CMSG_FIRSTHDR(&msg);
+            (*one).cmsg_level = libc::SOL_SOCKET;
+            (*one).cmsg_type = libc::SCM_RIGHTS.wrapping_add(1);
+            (*one).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
+            let two = libc::CMSG_NXTHDR(&msg, one);
+            assert!(!two.is_null(), "control buffer too small for a second cmsg");
+            (*two).cmsg_level = libc::SOL_SOCKET;
+            (*two).cmsg_type = libc::SCM_RIGHTS;
+            (*two).cmsg_len = libc::CMSG_LEN(rights_size as u32) as _;
+            std::ptr::copy_nonoverlapping(
+                fds.as_ptr() as *const u8,
+                libc::CMSG_DATA(two),
+                rights_size,
+            );
+        }
+        (buf, msg)
+    }
+
+    /// Descriptors carried BEHIND an unexpected header must still be closed.
+    ///
+    /// The walk used to return at the first foreign control message. `recvmsg` has
+    /// already installed every SCM_RIGHTS descriptor in this process's fd table by
+    /// then, so a chain like `[foreign, SCM_RIGHTS(a, b)]` was refused while a and
+    /// b stayed open — inheritable, and therefore pinned in the next child spawned.
+    #[test]
+    fn collect_closes_descriptors_carried_behind_a_foreign_header() {
+        let (a, a_id) = probe_file();
+        let (b, b_id) = probe_file();
+        let (_buf, msg) = crafted_foreign_then_rights(&[a, b]);
+
+        let error = collect_scm_rights_fds(&msg, 2)
+            .expect_err("a chain containing a foreign control message must be refused");
+        assert!(
+            error.to_string().contains("unexpected control message"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !fd_still_refers_to(a, a_id),
+            "descriptor {a} behind the foreign header leaked"
+        );
+        assert!(
+            !fd_still_refers_to(b, b_id),
+            "descriptor {b} behind the foreign header leaked"
+        );
     }
 }
