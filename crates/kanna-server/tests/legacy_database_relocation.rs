@@ -280,6 +280,7 @@ fn write_server_config(
     pairing_store_path: &Path,
     port: u16,
 ) {
+    let transfer_port = free_loopback_port();
     let config = format!(
         "relay_url = \"\"\n\
          device_token = \"test-device-token\"\n\
@@ -292,7 +293,7 @@ fn write_server_config(
          environment = \"development\"\n\
          lan_host = \"127.0.0.1\"\n\
          lan_port = {port}\n\
-         transfer_port = 4455\n\
+         transfer_port = {transfer_port}\n\
          pairing_store_path = \"{}\"\n",
         daemon_dir.display(),
         canonical_db_path.display(),

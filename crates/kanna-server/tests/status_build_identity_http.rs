@@ -70,6 +70,7 @@ fn launch_server(
     environment: &str,
     port: u16,
 ) -> RunningServer {
+    let transfer_port = free_loopback_port();
     let root = tempfile::Builder::new()
         .prefix(&format!("kanna-status-{label}-"))
         .tempdir()
@@ -94,7 +95,7 @@ fn launch_server(
              environment = \"{environment}\"\n\
              lan_host = \"127.0.0.1\"\n\
              lan_port = {port}\n\
-             transfer_port = 4455\n\
+             transfer_port = {transfer_port}\n\
              pairing_store_path = \"{}\"\n",
             toml_string(&daemon_dir),
             toml_string(&db_path),
@@ -231,6 +232,15 @@ async fn register_emits_a_startable_development_config_with_build_identity() {
     assert!(registered_config.contains("transfer_port = 4455"));
 
     let port = free_loopback_port();
+    let transfer_port = free_loopback_port();
+    std::fs::write(
+        &config_path,
+        registered_config.replace(
+            "transfer_port = 4455",
+            &format!("transfer_port = {transfer_port}"),
+        ),
+    )
+    .expect("write isolated transfer port");
     writeln!(
         OpenOptions::new()
             .append(true)

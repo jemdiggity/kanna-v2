@@ -183,6 +183,7 @@ fn write_server_config(root: &Path, port: u16) -> (PathBuf, PathBuf, PathBuf) {
     let daemon_dir = root.join("daemon");
     let db_path = root.join("kanna.db");
     let fake_kanna_cli = root.join("kanna-cli");
+    let transfer_port = free_loopback_port();
     std::fs::create_dir_all(&daemon_dir).expect("daemon directory should be created");
     write_executable(&fake_kanna_cli);
     let config = format!(
@@ -198,7 +199,7 @@ fn write_server_config(root: &Path, port: u16) -> (PathBuf, PathBuf, PathBuf) {
          environment = \"development\"\n\
          lan_host = \"127.0.0.1\"\n\
          lan_port = {port}\n\
-         transfer_port = 4455\n\
+         transfer_port = {transfer_port}\n\
          pairing_store_path = \"{}\"\n",
         daemon_dir.display(),
         db_path.display(),

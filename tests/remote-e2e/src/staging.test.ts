@@ -47,7 +47,8 @@ describe("staging remote E2E configuration", () => {
       deviceToken: "staging-buffy-device-token",
       kannaCliPath: "/tmp/repo/.build/debug/kanna-cli",
       lanPort: 48129,
-      pairingStorePath: "/tmp/pairings.json"
+      pairingStorePath: "/tmp/pairings.json",
+      transferPort: 48130
     });
 
     expect(lines).toContain('relay_url = "wss://relay-staging.kanna.build"');
@@ -57,6 +58,7 @@ describe("staging remote E2E configuration", () => {
     expect(lines).toContain('desktop_id = "remote-e2e-staging-test"');
     expect(lines).toContain('version = "0.0.69-staging.1"');
     expect(lines).toContain('environment = "staging"');
+    expect(lines).toContain("transfer_port = 48130");
     expect(lines.some((line) => line.startsWith("server_version = "))).toBe(false);
     expect(lines).not.toContain("firebase_auth_emulator_url");
     expect(lines).not.toContain("firebase_firestore_emulator_host");
