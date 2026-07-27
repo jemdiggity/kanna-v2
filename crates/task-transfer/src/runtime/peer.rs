@@ -117,6 +117,48 @@ fn ensure_optional_artifact_metadata_match(
     Ok(())
 }
 
+pub(super) fn artifact_response_line_limit(
+    artifact_framing: ArtifactFraming,
+    max_peer_response_bytes: usize,
+    max_artifact_response_bytes: usize,
+) -> usize {
+    if artifact_framing.is_streamed() {
+        max_peer_response_bytes
+    } else {
+        max_artifact_response_bytes.min(super::MAX_LEGACY_ARTIFACT_RESPONSE_BYTES)
+    }
+}
+
+pub(super) fn ensure_legacy_artifact_payload_size(
+    payload_b64: &str,
+    maximum_size: u64,
+) -> Result<(), RuntimeError> {
+    let encoded_size = u64::try_from(payload_b64.len()).map_err(|_| {
+        RuntimeError::Protocol("legacy artifact payload size cannot be represented".into())
+    })?;
+    let complete_quads = encoded_size / 4;
+    let trailing_bytes = match encoded_size % 4 {
+        0 => 0,
+        2 => 1,
+        3 => 2,
+        _ => {
+            return Err(RuntimeError::Protocol(
+                "invalid artifact payload: invalid unpadded base64 length".into(),
+            ));
+        }
+    };
+    let decoded_size = complete_quads
+        .checked_mul(3)
+        .and_then(|size| size.checked_add(trailing_bytes))
+        .ok_or_else(|| RuntimeError::Protocol("legacy artifact payload size overflow".into()))?;
+    if decoded_size > maximum_size {
+        return Err(RuntimeError::Protocol(format!(
+            "transfer artifact exceeds maximum size of {maximum_size} bytes",
+        )));
+    }
+    Ok(())
+}
+
 impl TransferRuntime {
     pub async fn find_peer(&self, target_peer_id: &str) -> Result<PeerRegistryEntry, RuntimeError> {
         self.find_peer_with_transport(target_peer_id, TransferTransport::Auto)
@@ -464,17 +506,21 @@ impl TransferRuntime {
             .map_err(|_| {
                 RuntimeError::Backpressure("artifact peer request capacity is exhausted".into())
             })?;
-        let permitted_size = super::MAX_TRANSFER_ARTIFACT_BYTES;
+        let permitted_size = if artifact_framing.is_streamed() {
+            super::MAX_TRANSFER_ARTIFACT_BYTES
+        } else {
+            super::MAX_LEGACY_TRANSFER_ARTIFACT_BYTES
+        };
         let fetch_result = tokio::time::timeout(self.config.peer_request_timeout, async {
             let mut stream = TcpStream::connect(&peer.endpoint).await?;
             write_json_line(&mut stream, &request).await?;
             let mut reader = BufReader::new(stream);
             let mut response_line = String::with_capacity(4096);
-            let response_line_limit = if artifact_framing.is_streamed() {
-                self.config.max_peer_response_bytes
-            } else {
-                self.config.max_artifact_response_bytes
-            };
+            let response_line_limit = artifact_response_line_limit(
+                artifact_framing,
+                self.config.max_peer_response_bytes,
+                self.config.max_artifact_response_bytes,
+            );
             let read = {
                 let mut bounded =
                     (&mut reader).take(response_line_limit as u64 + 1);
@@ -592,14 +638,10 @@ impl TransferRuntime {
                             "legacy artifact fetch response missing payload_b64".into(),
                         )
                     })?;
+                ensure_legacy_artifact_payload_size(payload_b64, permitted_size)?;
                 let payload = URL_SAFE_NO_PAD.decode(payload_b64).map_err(|error| {
                     RuntimeError::Protocol(format!("invalid artifact payload: {error}"))
                 })?;
-                if payload.len() as u64 > permitted_size {
-                    return Err(RuntimeError::Protocol(format!(
-                        "transfer artifact exceeds maximum size of {permitted_size} bytes",
-                    )));
-                }
                 let mut partial = GuardedArtifactPart::create(&artifact_dir).await?;
                 partial.write_all(&payload).await?;
                 partial.commit(&destination_path).await?;

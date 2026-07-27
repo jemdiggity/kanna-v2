@@ -747,14 +747,28 @@ async fn handle_connection(
                     .ok_or_else(|| {
                         RuntimeError::Protocol("artifact fetch request missing artifact_id".into())
                     })?;
+                let negotiated_artifact_framing =
+                    ArtifactFraming::for_protocol(requester_peer.protocol_version);
                 let artifact_framing = match request_payload.get("artifact_framing") {
-                    Some(Value::String(name)) => ArtifactFraming::parse(name)?,
+                    Some(Value::String(name)) => {
+                        let requested = ArtifactFraming::parse(name)?;
+                        if requested != negotiated_artifact_framing {
+                            return Err(RuntimeError::Protocol(format!(
+                                "requested artifact framing {} does not match negotiated {} framing",
+                                requested.name(),
+                                negotiated_artifact_framing.name(),
+                            )));
+                        }
+                        requested
+                    }
                     Some(_) => {
                         return Err(RuntimeError::Protocol(
                             "artifact fetch request has invalid artifact_framing".into(),
                         ));
                     }
-                    None => ArtifactFraming::for_protocol(requester_peer.protocol_version),
+                    // Protocol v2 peers predate this field. For requests that omit
+                    // it, the pinned peer capability remains the source of truth.
+                    None => negotiated_artifact_framing,
                 };
 
                 let (artifact, expired_artifacts) = {
@@ -774,10 +788,15 @@ async fn handle_connection(
                         artifact_id, transfer_id
                     )))?;
                 let metadata = tokio::fs::metadata(&artifact.path).await?;
-                if metadata.len() > super::MAX_TRANSFER_ARTIFACT_BYTES {
+                let maximum_artifact_size = if artifact_framing.is_streamed() {
+                    super::MAX_TRANSFER_ARTIFACT_BYTES
+                } else {
+                    super::MAX_LEGACY_TRANSFER_ARTIFACT_BYTES
+                };
+                if metadata.len() > maximum_artifact_size {
                     return Err(RuntimeError::Protocol(format!(
                         "transfer artifact exceeds maximum size of {} bytes",
-                        super::MAX_TRANSFER_ARTIFACT_BYTES,
+                        maximum_artifact_size,
                     )));
                 }
                 let filename = artifact
@@ -787,37 +806,44 @@ async fn handle_connection(
                     .unwrap_or("artifact")
                     .to_string();
                 if !artifact_framing.is_streamed() {
-                    let file = tokio::fs::File::open(&artifact.path).await?;
-                    let materialization = read_bounded_legacy_artifact(
-                        file,
-                        metadata.len(),
-                        super::MAX_TRANSFER_ARTIFACT_BYTES,
-                        Arc::clone(&context.legacy_artifact_response_permits),
-                    )
-                    .await?;
-                    let payload_b64 = URL_SAFE_NO_PAD.encode(&materialization.payload);
-                    let sealed_payload = seal_json(
-                        &identity,
-                        &requester_public_key,
-                        &serde_json::json!({
-                            "request_id": request_id,
-                            "transfer_id": transfer_id,
-                            "artifact_id": artifact_id,
-                            "artifact_framing": artifact_framing.name(),
-                            "filename": filename,
-                            "payload_b64": payload_b64,
-                        }),
-                    )?;
-                    write_json_line(
-                        &mut stream,
-                        &PeerResponse::FetchTransferArtifact {
-                            request_id: request_id.clone(),
-                            transfer_id,
-                            sealed_payload,
-                            stream_header: None,
-                        },
-                    )
-                    .await?;
+                    tokio::time::timeout(context.peer_request_timeout, async {
+                        let file = tokio::fs::File::open(&artifact.path).await?;
+                        let materialization = read_bounded_legacy_artifact(
+                            file,
+                            metadata.len(),
+                            maximum_artifact_size,
+                            Arc::clone(&context.legacy_artifact_response_permits),
+                        )
+                        .await?;
+                        let payload_b64 = URL_SAFE_NO_PAD.encode(&materialization.payload);
+                        let sealed_payload = seal_json(
+                            &identity,
+                            &requester_public_key,
+                            &serde_json::json!({
+                                "request_id": request_id,
+                                "transfer_id": transfer_id,
+                                "artifact_id": artifact_id,
+                                "artifact_framing": artifact_framing.name(),
+                                "filename": filename,
+                                "payload_b64": payload_b64,
+                            }),
+                        )?;
+                        write_json_line(
+                            &mut stream,
+                            &PeerResponse::FetchTransferArtifact {
+                                request_id: request_id.clone(),
+                                transfer_id,
+                                sealed_payload,
+                                stream_header: None,
+                            },
+                        )
+                        .await
+                    })
+                    .await
+                    .map_err(|_| RuntimeError::PeerRequestTimeout {
+                        peer_id: requester_peer_id.clone(),
+                        timeout_ms: context.peer_request_timeout.as_millis(),
+                    })??;
                     return Ok::<(), RuntimeError>(());
                 }
                 let sealed_payload = seal_json(

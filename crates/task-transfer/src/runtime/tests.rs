@@ -293,6 +293,37 @@ async fn legacy_artifact_materialization_checks_bytes_read_after_metadata() {
     );
 }
 
+#[test]
+fn legacy_artifact_payload_size_is_rejected_before_decode() {
+    use base64::Engine as _;
+
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"five!".as_slice());
+    let error = peer::ensure_legacy_artifact_payload_size(&encoded, 4)
+        .expect_err("encoded plaintext above the legacy limit must be rejected");
+
+    assert!(
+        error.to_string().contains("maximum size of 4 bytes"),
+        "unexpected pre-decode size rejection: {error}",
+    );
+}
+
+#[test]
+fn legacy_artifact_response_line_has_a_hard_memory_derived_cap() {
+    assert_eq!(
+        peer::artifact_response_line_limit(
+            utils::ArtifactFraming::LegacySealedV1,
+            usize::MAX,
+            usize::MAX,
+        ),
+        super::MAX_LEGACY_ARTIFACT_RESPONSE_BYTES,
+    );
+    assert!(
+        super::MAX_LEGACY_ARTIFACT_RESPONSE_BYTES
+            < super::LEGACY_ARTIFACT_TOTAL_MEMORY_BUDGET_BYTES as usize,
+        "legacy line alone exhausted the total response memory budget",
+    );
+}
+
 #[tokio::test]
 async fn guarded_artifact_part_cleans_timeout_before_retry_commit() {
     let temp = tempfile::tempdir().unwrap();
