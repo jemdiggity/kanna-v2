@@ -1,0 +1,14 @@
+# Root-anchored workspace manifest for the terminal-recovery Bazel crate universe.
+#
+# `crate.from_cargo` copies the manifests it is given into a flat temporary
+# directory, so a manifest referenced directly at `packages/terminal-recovery`
+# cannot resolve its `../../crates/runtime-defaults` path dependency — the target
+# would land outside the copied tree. Anchoring the workspace at the repo root and
+# naming both crates as members keeps every relative path valid, which is the same
+# arrangement `Cargo.daemon.toml` and its siblings use for exactly this reason.
+[workspace]
+members = [
+    "crates/runtime-defaults",
+    "packages/terminal-recovery",
+]
+resolver = "2"
