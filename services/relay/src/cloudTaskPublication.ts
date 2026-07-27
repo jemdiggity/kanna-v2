@@ -75,9 +75,10 @@ export function validateCloudTaskPublication(
   if (encodedBytes > MAX_TASK_SNAPSHOT_BYTES) {
     throw new Error(`task snapshot exceeds ${MAX_TASK_SNAPSHOT_BYTES} bytes`);
   }
-  if (root.schemaVersion !== 1) {
-    throw new Error("task snapshot schemaVersion must be 1");
+  if (root.schemaVersion !== 1 && root.schemaVersion !== 2) {
+    throw new Error("task snapshot schemaVersion must be 1 or 2");
   }
+  const schemaVersion = root.schemaVersion;
   const desktop = requiredRecord(root.desktop, "task snapshot desktop");
   const displayName = requiredString(desktop.displayName, "desktop.displayName", 256);
   const transfer = desktop.transfer === undefined || desktop.transfer === null
@@ -92,7 +93,7 @@ export function validateCloudTaskPublication(
 
   const identities = new Set<string>();
   const tasks = root.tasks.map((raw, index) => {
-    const task = validateTask(raw, index, authenticatedDesktopId);
+    const task = validateTask(raw, index, authenticatedDesktopId, schemaVersion);
     const key = taskIdentity(task);
     if (identities.has(key)) {
       throw new Error(`task snapshot contains duplicate identity ${key}`);
@@ -119,7 +120,12 @@ function validateCloudTransferIdentity(value: unknown): CloudTransferIdentity {
   };
 }
 
-function validateTask(value: unknown, index: number, desktopId: string): CloudTaskDocument {
+function validateTask(
+  value: unknown,
+  index: number,
+  desktopId: string,
+  schemaVersion: 1 | 2,
+): CloudTaskDocument {
   const path = `tasks[${index}]`;
   const task = requiredRecord(value, path);
   const cloudTaskId = task.cloudTaskId === undefined
@@ -137,6 +143,9 @@ function validateTask(value: unknown, index: number, desktopId: string): CloudTa
   const transferState = requiredString(transfer.state, `${path}.transfer.state`, 32);
   if (!new Set(["none", "outgoing", "incoming", "finalization_pending"]).has(transferState)) {
     throw new Error(`${path}.transfer.state is invalid`);
+  }
+  if (schemaVersion === 1 && transferState !== "none") {
+    throw new Error(`${path}.transfer.state must be none for schemaVersion 1`);
   }
   const validatedTransfer = transferState === "none"
     ? validateEmptyTransfer(transfer, path)

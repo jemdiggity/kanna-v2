@@ -118,10 +118,26 @@ impl Db {
         &self,
         transfer_id: &str,
         payload_json: &str,
+        claim_owner_token: Option<&str>,
     ) -> Result<bool, rusqlite::Error> {
         let rows_affected = self.conn.execute(
-            "UPDATE task_transfer SET payload_json = ?, error = NULL WHERE id = ?",
-            (payload_json, transfer_id),
+            "UPDATE task_transfer
+             SET payload_json = ?, error = NULL
+             WHERE id = ?
+               AND (
+                 direction = 'outgoing'
+                 OR (
+                   direction = 'incoming'
+                   AND ? IS NOT NULL
+                   AND claim_owner_token = ?
+                 )
+               )",
+            (
+                payload_json,
+                transfer_id,
+                claim_owner_token,
+                claim_owner_token,
+            ),
         )?;
         Ok(rows_affected == 1)
     }
@@ -295,7 +311,6 @@ impl Db {
                  OR (
                    ? = 1
                    AND status IN ('claimed', 'importing', 'awaiting_acknowledgment')
-                   AND (claim_expires_at IS NULL OR claim_expires_at <= datetime('now'))
                  )
                )",
             (owner_token, transfer_id, i64::from(recovery)),

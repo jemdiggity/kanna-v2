@@ -50,6 +50,18 @@ pub enum RelayInvoke {
     },
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayCapabilities {
+    #[serde(default)]
+    pub task_snapshot_publication: Option<TaskSnapshotPublicationCapability>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TaskSnapshotPublicationCapability {
+    pub version: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum RelayMessage {
@@ -105,6 +117,8 @@ pub enum RelayMessage {
     AuthOk {
         #[serde(rename = "userId")]
         user_id: String,
+        #[serde(default)]
+        capabilities: RelayCapabilities,
     },
     #[serde(rename = "tunnel_establish")]
     TunnelEstablish {

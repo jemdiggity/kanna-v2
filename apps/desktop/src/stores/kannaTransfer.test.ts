@@ -1569,6 +1569,71 @@ describe("incoming transfer approval", () => {
     vi.useRealTimers();
   });
 
+  it.each([
+    ["repository acquisition completion", 0],
+    ["artifact materialization completion", 0],
+    ["task creation completion", 1],
+  ])("fences stale import ownership after %s", async (lostPhase, expectedTasks) => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const payload = {
+      ...buildIncomingTransferPayload(),
+      task: {
+        ...buildIncomingTransferPayload().task,
+        resume_session_id: "resume-fenced",
+      },
+      artifacts: [{
+        artifact_id: "artifact-fenced",
+        filename: "claude-session.tar.gz",
+        provider: "claude" as const,
+        kind: "session-archive" as const,
+        materialization: "extract-tar-gz" as const,
+        home_rel_path: ".claude/tasks/resume-fenced",
+      }],
+    };
+    const fakeDb = createTransferDb({
+      transfers: [{
+        id: "transfer-1",
+        direction: "incoming",
+        status: "claimed",
+        source_peer_id: "peer-source",
+        target_peer_id: null,
+        source_task_id: "task-source",
+        local_task_id: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(payload),
+      }],
+    });
+    await store.init(fakeDb);
+    mockIncomingTransferApprovalInvoke(payload, async (cmd, args) => {
+      if (cmd === "file_exists") return (args?.path as string) === "/tmp/repo-1";
+      if (cmd === "fetch_transfer_artifact") return { path: "/tmp/session.tar.gz" };
+      if (cmd === "materialize_transfer_artifact") return true;
+      if (cmd === "which_binary") return args?.name === "claude" ? "/usr/bin/claude" : null;
+      if (cmd === "git_worktree_add" || cmd === "spawn_agent_session") return null;
+      throw new Error(`unexpected invoke: ${cmd}`);
+    });
+
+    await expect(store.approveIncomingTransfer(
+      "transfer-1",
+      "owner-stale",
+      {
+        assertOwnership: async (phase) => phase !== lostPhase,
+      },
+    )).rejects.toThrow(/ownership was lost/);
+
+    expect(fakeDb.tables.pipeline_item).toHaveLength(expectedTasks);
+    expect(fakeDb.tables.task_transfer[0]?.status).not.toBe("completed");
+    expect(fakeDb.tables.task_transfer_provenance).toHaveLength(0);
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "acknowledge_incoming_transfer_commit",
+      expect.anything(),
+    );
+  });
+
   it("rejects finalized payload provenance that differs from the durable reservation", async () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");

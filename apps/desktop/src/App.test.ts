@@ -1082,6 +1082,7 @@ describe("App", () => {
         return true;
       },
       fetchPendingIncomingTransfers: async () => await dbSelectMock(),
+      getTaskTransfer: async () => null,
       claimPendingIncomingTransfer: async (transferId, ownerToken, recovery) => {
         const result = await dbMock.execute(
           "UPDATE task_transfer SET status = 'claimed', claim_owner_token = ? WHERE id = ? AND (status = 'pending' OR ? = 1)",
@@ -5172,8 +5173,49 @@ describe("App", () => {
     expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
       "transfer-1",
       expect.any(String),
+      expect.objectContaining({ assertOwnership: expect.any(Function) }),
     );
     expect(wrapper.text()).not.toContain("peer-source");
+  });
+
+  it("takes over and acknowledges a retained transfer when its owner closes mid-import", async () => {
+    const recoveryClaims: boolean[] = [];
+    updateDesktopServerClientHandlersForTests({
+      claimPendingIncomingTransfer: async (_transferId, _ownerToken, recovery) => {
+        recoveryClaims.push(recovery);
+        return recovery;
+      },
+    });
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "acknowledge_transfer_lifecycle_event") return true;
+      return await defaultInvoke?.(command, args);
+    });
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    const handler = listenHandlers.get("transfer-request");
+    const event = buildIncomingTransferEvent();
+    Object.assign(event.payload, {
+      __kannaLifecycleDeliveryId: "lifecycle-owner-close",
+      __kannaLifecycleRecovery: true,
+    });
+
+    await handler?.(event);
+    await flushPromises();
+
+    expect(recoveryClaims).toEqual([true]);
+    expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
+      "transfer-1",
+      expect.any(String),
+      expect.objectContaining({ assertOwnership: expect.any(Function) }),
+    );
+    expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-owner-close",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "nack_transfer_lifecycle_event",
+      expect.anything(),
+    );
+    wrapper.unmount();
   });
 
   it("claims transfer event authority only after every lifecycle listener is ready and before LAN sync", async () => {
@@ -5263,6 +5305,7 @@ describe("App", () => {
     expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
       "transfer-db-1",
       expect.any(String),
+      expect.objectContaining({ assertOwnership: expect.any(Function) }),
     );
     expect(dbMock.execute).toHaveBeenCalledWith(
       expect.stringContaining("status = 'claimed'"),
@@ -5292,6 +5335,7 @@ describe("App", () => {
     expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
       "transfer-1",
       expect.any(String),
+      expect.objectContaining({ assertOwnership: expect.any(Function) }),
     );
     wrapper.unmount();
   });
@@ -5386,6 +5430,7 @@ describe("App", () => {
     expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
       "transfer-db-1",
       expect.any(String),
+      expect.objectContaining({ assertOwnership: expect.any(Function) }),
     );
 
     first.unmount();
@@ -5504,6 +5549,7 @@ describe("App", () => {
     expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
       "transfer-stale",
       expect.any(String),
+      expect.objectContaining({ assertOwnership: expect.any(Function) }),
     );
     expect(dbMock.execute).toHaveBeenCalledWith(
       expect.stringContaining("status = 'failed'"),

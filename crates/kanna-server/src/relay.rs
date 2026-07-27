@@ -389,9 +389,16 @@ pub(crate) async fn run_relay_loop(
                                 }
                             }
                         },
-                        RelayMessage::AuthOk { user_id } => {
+                        RelayMessage::AuthOk {
+                            user_id,
+                            capabilities,
+                        } => {
                             log::info!("Relay authenticated as user {}", user_id);
-                            publisher.on_authenticated();
+                            publisher.on_authenticated(
+                                capabilities
+                                    .task_snapshot_publication
+                                    .map(|capability| capability.version),
+                            );
                         }
                         RelayMessage::TaskSnapshotAck { id, ok, error } => {
                             if let Err(message) =
@@ -967,6 +974,7 @@ mod tests {
             listener: &tokio::net::TcpListener,
         ) -> (
             String,
+            serde_json::Value,
             tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
         ) {
             let (stream, _) = listener.accept().await.expect("accept relay connection");
@@ -1001,6 +1009,7 @@ mod tests {
                 if message["type"] == "task_snapshot_publish" {
                     return (
                         message["id"].as_str().expect("publication id").to_string(),
+                        message["snapshot"].clone(),
                         ws,
                     );
                 }
@@ -1053,17 +1062,19 @@ mod tests {
         let publications = tokio::time::timeout(Duration::from_secs(15), async {
             tokio::select! {
                 publications = async {
-                    let (first_id, mut first_connection) = receive_publication(&listener).await;
+                    let (first_id, first_snapshot, mut first_connection) =
+                        receive_publication(&listener).await;
                     first_connection
                         .close(None)
                         .await
                         .expect("disconnect first relay connection without ack");
-                    let (second_id, mut second_connection) = receive_publication(&listener).await;
+                    let (second_id, second_snapshot, mut second_connection) =
+                        receive_publication(&listener).await;
                     second_connection
                         .close(None)
                         .await
                         .expect("close second relay connection");
-                    (first_id, second_id)
+                    (first_id, first_snapshot, second_id, second_snapshot)
                 } => publications,
                 result = &mut relay_loop => {
                     panic!("relay loop exited before reconnecting: {result:?}")
@@ -1074,7 +1085,9 @@ mod tests {
         .expect("relay did not reconnect and republish");
 
         assert_eq!(publications.0, "task-snapshot-1");
-        assert_eq!(publications.1, "task-snapshot-2");
+        assert_eq!(publications.1["schemaVersion"], 1);
+        assert_eq!(publications.2, "task-snapshot-2");
+        assert_eq!(publications.3["schemaVersion"], 1);
         let _ = std::fs::remove_file(db_path);
     }
 

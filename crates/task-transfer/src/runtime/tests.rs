@@ -171,3 +171,35 @@ fn from_env_prefers_runtime_path_overrides() {
 
     let _ = std::fs::remove_dir_all(home);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closed_pairing_lifecycle_channel_does_not_retain_pending_admission() {
+    let temp = tempfile::tempdir().expect("temp registry");
+    let target = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-target", "Target", temp.path(), 0)
+            .with_peer_request_timeout(std::time::Duration::from_millis(250))
+            .with_runtime_admission_limits(1, 8, 2),
+    )
+    .await
+    .expect("spawn target");
+    target.incoming_events.lock().await.close();
+    let requester = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-requester", "Requester", temp.path(), 0)
+            .with_peer_request_timeout(std::time::Duration::from_millis(250)),
+    )
+    .await
+    .expect("spawn requester");
+
+    let error = requester
+        .start_pairing("peer-target")
+        .await
+        .expect_err("closed lifecycle receiver must reject pairing");
+    assert!(
+        error.to_string().contains("incoming event channel closed"),
+        "unexpected closed-channel error: {error}",
+    );
+    assert!(
+        target.pending_pairing_requests.lock().await.is_empty(),
+        "closed lifecycle enqueue retained pairing admission",
+    );
+}

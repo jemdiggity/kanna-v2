@@ -2,7 +2,6 @@ use super::events::RuntimeError;
 use super::state::{PendingTaskPullRequest, TransferRuntime};
 use super::utils::unexpected_peer_response;
 use super::TransferTransport;
-use crate::crypto::{parse_public_key, seal_json};
 use crate::protocol::{PeerRequest, PeerResponse};
 use std::time::{Duration, Instant};
 
@@ -59,13 +58,19 @@ impl TransferRuntime {
             &target_peer.public_key,
             resolved_transport,
         )?;
-        let target_public_key = parse_public_key(&target_peer.public_key)?;
-        let sealed_payload = seal_json(
-            &self.identity,
-            &target_public_key,
-            &serde_json::json!({ "source_task_id": source_task_id }),
-        )?;
         let wire_request_id = self.next_request_id("task-pull");
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &target_peer,
+                "request_task_pull",
+                &wire_request_id,
+                serde_json::json!({
+                    "requester_peer_id": self.config.peer_id,
+                    "source_task_id": source_task_id,
+                    "reserved_target_peer_id": target_peer.peer_id,
+                }),
+            )
+            .await?;
         let response = self
             .send_peer_request(
                 &target_peer,

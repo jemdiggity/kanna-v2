@@ -45,6 +45,7 @@ pub(super) struct UpsertTransferRequest {
 #[serde(rename_all = "camelCase")]
 pub(super) struct UpdateTransferPayloadRequest {
     payload_json: String,
+    claim_owner_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,7 +136,11 @@ pub(super) async fn update_task_transfer_payload(
 ) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
     let db = open_db(&state)?;
     let updated = db
-        .update_task_transfer_payload(&transfer_id, &payload.payload_json)
+        .update_task_transfer_payload(
+            &transfer_id,
+            &payload.payload_json,
+            payload.claim_owner_token.as_deref(),
+        )
         .map_err(db_error)?;
     Ok(Json(TransferUpdateResponse { updated }))
 }

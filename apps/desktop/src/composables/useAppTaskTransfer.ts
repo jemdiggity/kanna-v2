@@ -15,6 +15,7 @@ import {
   failPendingIncomingTransfer,
   fetchIncomingTransferCleanupCandidates,
   fetchPendingIncomingTransfers,
+  getDesktopTaskTransfer,
   markIncomingTransferSidecarCleanupCompleted,
   renewIncomingTransferClaim,
   type PendingIncomingTransfer,
@@ -53,33 +54,80 @@ export function useAppTaskTransfer({
   const transferPeersLoading = ref(false);
   const transferPeerActionPending = ref(false);
   let transferPeerLoadRequestId = 0;
+  const incomingImportsInFlight = new Map<
+    string,
+    { promise: Promise<boolean>; ownershipConfirmed: boolean }
+  >();
 
   async function importIncomingTransfer(
     transferId: string,
     recovery: boolean,
   ): Promise<boolean> {
-    const ownerToken = crypto.randomUUID();
-    if (!await claimPendingIncomingTransfer(transferId, ownerToken, recovery)) {
-      return false;
+    const existingImport = incomingImportsInFlight.get(transferId);
+    if (existingImport?.ownershipConfirmed) {
+      // This authoritative renderer already owns a live import. The retained
+      // lifecycle delivery can be ACKed while that durable owner continues.
+      return true;
     }
+    if (existingImport) {
+      return await existingImport.promise;
+    }
+    const entry = {
+      promise: Promise.resolve(false),
+      ownershipConfirmed: false,
+    };
+    entry.promise = (async (): Promise<boolean> => {
+      const ownerToken = crypto.randomUUID();
+      if (!await claimPendingIncomingTransfer(transferId, ownerToken, recovery)) {
+        const transfer = await getDesktopTaskTransfer(transferId);
+        return transfer?.direction === "incoming"
+          && ["completed", "rejected", "failed"].includes(transfer.status);
+      }
+      entry.ownershipConfirmed = true;
 
-    const renewal = window.setInterval(() => {
-      void renewIncomingTransferClaim(transferId, ownerToken).then((renewed) => {
+      const ownership = new AbortController();
+      const assertOwnership = async (): Promise<boolean> => {
+        if (ownership.signal.aborted) return false;
+        let renewed: boolean;
+        try {
+          renewed = await renewIncomingTransferClaim(transferId, ownerToken);
+        } catch (error) {
+          entry.ownershipConfirmed = false;
+          ownership.abort();
+          throw error;
+        }
         if (!renewed) {
+          entry.ownershipConfirmed = false;
+          ownership.abort();
           console.warn("[App] incoming transfer claim lease was lost:", { transferId });
         }
-      }).catch((error: unknown) => {
-        console.warn("[App] failed to renew incoming transfer claim lease:", {
-          transferId,
-          error: error instanceof Error ? error.message : String(error),
+        return renewed;
+      };
+      const renewal = window.setInterval(() => {
+        void assertOwnership().catch((error: unknown) => {
+          console.warn("[App] failed to renew incoming transfer claim lease:", {
+            transferId,
+            error: error instanceof Error ? error.message : String(error),
+          });
         });
-      });
-    }, 10_000);
+      }, 10_000);
+      try {
+        await store.approveIncomingTransfer(transferId, ownerToken, {
+          signal: ownership.signal,
+          assertOwnership,
+        });
+        return true;
+      } finally {
+        window.clearInterval(renewal);
+      }
+    })();
+    incomingImportsInFlight.set(transferId, entry);
     try {
-      await store.approveIncomingTransfer(transferId, ownerToken);
-      return true;
+      return await entry.promise;
     } finally {
-      window.clearInterval(renewal);
+      if (incomingImportsInFlight.get(transferId) === entry) {
+        incomingImportsInFlight.delete(transferId);
+      }
     }
   }
 
@@ -335,6 +383,12 @@ export function useAppTaskTransfer({
         }
       } catch (error: unknown) {
         const reason = error instanceof Error ? error.message : String(error);
+        if (reason.includes("incoming transfer ownership was lost")) {
+          console.warn("[App] stopped stale incoming transfer recovery after ownership loss:", {
+            transferId: row.id,
+          });
+          continue;
+        }
         if (await failPendingIncomingTransfer(row.id, reason)) {
           await cleanupTerminalIncomingTransfer(row.id);
           console.warn("[App] failed to auto-import pending incoming transfer; marked failed:", {

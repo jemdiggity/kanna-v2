@@ -271,7 +271,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           tunnelServices: ["ksp", "task-transfer"],
           ...(serverAuthProof?.kind === "desktop" ? {
             taskSnapshotPublication: {
-              version: 1,
+              version: 2,
               authModes: ["desktop-secret"],
             },
           } : {}),

@@ -59,9 +59,10 @@ function publication(
       acceptingTransfers: true,
     },
   },
+  schemaVersion: 1 | 2 = 2,
 ): Record<string, unknown> {
   return {
-    schemaVersion: 1,
+    schemaVersion,
     desktop,
     tasks,
   };
@@ -92,11 +93,25 @@ describe("cloud task publication validation", () => {
 
   it("accepts older publishers without desktop transfer metadata", () => {
     const parsed = validateCloudTaskPublication(
-      publication([], { displayName: "Studio Mac" }),
+      publication([], { displayName: "Studio Mac" }, 1),
       "desktop-1",
     );
 
     expect(parsed.transfer).toBeNull();
+  });
+
+  it("requires schema v1 publishers to down-convert widened transfer states", () => {
+    expect(() => validateCloudTaskPublication(
+      publication([task({
+        transfer: {
+          state: "outgoing",
+          transferId: "transfer-1",
+          sourceDesktopId: "desktop-1",
+          destinationDesktopId: "desktop-b",
+        },
+      })], { displayName: "Studio Mac" }, 1),
+      "desktop-1",
+    )).toThrow(/must be none for schemaVersion 1/);
   });
 
   it.each([

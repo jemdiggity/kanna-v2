@@ -183,14 +183,33 @@ async fn handle_connection(
                 context.request_counter.fetch_add(1, Ordering::Relaxed)
             );
             let (approval_sender, approval_receiver) = oneshot::channel();
-            context.pending_pairing_requests.lock().await.insert(
-                pairing_request_id.clone(),
-                PendingPairingRequest {
-                    verification_code: verification_code.clone(),
-                    responder: approval_sender,
-                },
-            );
-            context
+            {
+                let mut pending = context.pending_pairing_requests.lock().await;
+                if pending.len() >= context.max_pending_pairing_requests {
+                    drop(pending);
+                    write_json_line(
+                        &mut stream,
+                        &PeerResponse::Error {
+                            request_id,
+                            message: RuntimeError::Backpressure(format!(
+                                "pending pairing request capacity {} is exhausted",
+                                context.max_pending_pairing_requests,
+                            ))
+                            .to_string(),
+                        },
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                pending.insert(
+                    pairing_request_id.clone(),
+                    PendingPairingRequest {
+                        verification_code: verification_code.clone(),
+                        responder: approval_sender,
+                    },
+                );
+            }
+            if context
                 .incoming_sender
                 .try_send(RuntimeEvent::PairingRequested(PairingRequestedEvent {
                     request_id: pairing_request_id.clone(),
@@ -198,22 +217,36 @@ async fn handle_connection(
                     display_name: source_display_name.clone(),
                     verification_code: verification_code.clone(),
                 }))
-                .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
+                .is_err()
+            {
+                context
+                    .pending_pairing_requests
+                    .lock()
+                    .await
+                    .remove(&pairing_request_id);
+                write_json_line(
+                    &mut stream,
+                    &PeerResponse::Error {
+                        request_id,
+                        message: RuntimeError::IncomingEventChannelClosed.to_string(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
 
             let approved =
                 match tokio::time::timeout(context.peer_request_timeout, approval_receiver).await {
                     Ok(Ok(PairingDecision::Accepted)) => true,
                     Ok(Ok(PairingDecision::Rejected)) => false,
                     Ok(Err(_)) => false,
-                    Err(_) => {
-                        context
-                            .pending_pairing_requests
-                            .lock()
-                            .await
-                            .remove(&pairing_request_id);
-                        false
-                    }
+                    Err(_) => false,
                 };
+            context
+                .pending_pairing_requests
+                .lock()
+                .await
+                .remove(&pairing_request_id);
             if !approved {
                 PeerResponse::Error {
                     request_id,
@@ -328,31 +361,26 @@ async fn handle_connection(
                     "cannot request a task pull from this runtime".into(),
                 ));
             }
-            let requester_peer = find_peer(
-                &context.discovery,
-                &context.external_peers,
-                &context.self_peer_id,
+            let authenticated = authenticate_peer_request(
+                &context,
                 &requester_peer_id,
-                TransferTransport::Auto,
+                Some(&sealed_payload),
+                "request_task_pull",
+                &request_id,
             )
             .await?;
-            ensure_peer_is_trusted(
-                &context.registry_root,
-                &context.self_peer_id,
-                &context.external_peers,
+            ensure_authenticated_argument(
+                &authenticated,
+                "requester_peer_id",
                 &requester_peer_id,
-                &requester_peer.public_key,
             )?;
-            let requester_public_key = parse_public_key(&requester_peer.public_key)?;
-            let identity = load_or_create_identity(&context.registry_root, &context.self_peer_id)?;
-            let decrypted_payload = open_json(&identity, &requester_public_key, &sealed_payload)?;
-            let source_task_id = decrypted_payload
-                .get("source_task_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    RuntimeError::Protocol("task-pull payload missing source_task_id".into())
-                })?
-                .to_owned();
+            ensure_authenticated_argument(
+                &authenticated,
+                "reserved_target_peer_id",
+                &context.self_peer_id,
+            )?;
+            let source_task_id =
+                authenticated_argument::<String>(&authenticated, "source_task_id")?;
             validate_source_task_id(&source_task_id)?;
 
             let key = (requester_peer_id.clone(), source_task_id.clone());
@@ -1227,7 +1255,11 @@ async fn authenticate_peer_request(
     let expires_at = now_ms.max(issued_at_unix_ms).saturating_add(freshness_ms);
     let durable = matches!(
         expected_action,
-        "close_task" | "advance_task_stage" | "prepare_transfer" | "finalize_transfer"
+        "close_task"
+            | "advance_task_stage"
+            | "prepare_transfer"
+            | "finalize_transfer"
+            | "request_task_pull"
     );
     let expired_durable = {
         let mut authenticated_requests = context.authenticated_peer_requests.lock().await;

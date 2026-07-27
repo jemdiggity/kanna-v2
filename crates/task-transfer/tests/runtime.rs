@@ -59,6 +59,33 @@ async fn send_raw_task_pull(
     serde_json::from_str(response.trim()).unwrap()
 }
 
+fn seal_authenticated_task_pull(
+    registry_root: &Path,
+    source: &TransferRuntime,
+    requester_peer_id: &str,
+    request_id: &str,
+    source_task_id: &str,
+    owner_epoch: &str,
+    issued_at_unix_ms: u64,
+) -> String {
+    let requester_identity = stored_runtime_identity(registry_root, requester_peer_id);
+    let source_public_key = parse_public_key(&source.local_identity().public_key).unwrap();
+    seal_json(
+        &requester_identity,
+        &source_public_key,
+        &json!({
+            "action": "request_task_pull",
+            "request_id": request_id,
+            "owner_epoch": owner_epoch,
+            "issued_at_unix_ms": issued_at_unix_ms,
+            "requester_peer_id": requester_peer_id,
+            "source_task_id": source_task_id,
+            "reserved_target_peer_id": source.local_identity().peer_id,
+        }),
+    )
+    .unwrap()
+}
+
 async fn send_raw_peer_value(endpoint: &str, request: &serde_json::Value) -> PeerResponse {
     let mut stream = TcpStream::connect(endpoint).await.unwrap();
     stream
@@ -857,6 +884,190 @@ async fn task_pull_is_sealed_idempotent_and_emitted_once_for_paired_peers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_rejects_stale_and_captured_requests_before_renderer_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&destination, &source, "peer-source").await;
+    consume_pairing_completed(&source).await;
+    let endpoint = runtime_endpoint(temp.path(), "peer-source");
+    let owner_epoch = authenticated_request_epoch(&endpoint).await;
+    let stale_payload = seal_authenticated_task_pull(
+        temp.path(),
+        &source,
+        "peer-destination",
+        "stale-pull",
+        "task-stale",
+        &owner_epoch,
+        current_unix_ms().saturating_sub(10 * 60 * 1_000),
+    );
+
+    let stale = send_raw_task_pull(
+        temp.path(),
+        "peer-source",
+        "stale-pull",
+        "peer-destination",
+        stale_payload,
+    )
+    .await;
+    assert!(
+        matches!(
+            stale,
+            PeerResponse::Error { ref message, .. }
+                if message.contains("stale authenticated request_task_pull request")
+        ),
+        "unexpected stale task-pull response: {stale:?}",
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), source.next_event())
+            .await
+            .is_err(),
+        "stale task pull emitted renderer work",
+    );
+
+    let captured_payload = seal_authenticated_task_pull(
+        temp.path(),
+        &source,
+        "peer-destination",
+        "captured-pull",
+        "task-captured",
+        &owner_epoch,
+        current_unix_ms(),
+    );
+    assert!(matches!(
+        send_raw_task_pull(
+            temp.path(),
+            "peer-source",
+            "captured-pull",
+            "peer-destination",
+            captured_payload.clone(),
+        )
+        .await,
+        PeerResponse::RequestTaskPull { .. }
+    ));
+    assert!(matches!(
+        source.next_event().await.unwrap(),
+        RuntimeEvent::TaskPullRequested(_)
+    ));
+    let replay = send_raw_task_pull(
+        temp.path(),
+        "peer-source",
+        "captured-pull",
+        "peer-destination",
+        captured_payload,
+    )
+    .await;
+    assert!(
+        matches!(
+            replay,
+            PeerResponse::Error { ref message, .. }
+                if message.contains("replayed authenticated request_task_pull request")
+        ),
+        "unexpected captured replay response: {replay:?}",
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), source.next_event())
+            .await
+            .is_err(),
+        "captured task-pull replay emitted renderer work",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_pull_replay_reservation_survives_source_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_config = RuntimeConfig::for_tests("peer-source", "Source", temp.path(), 0);
+    let source = TransferRuntime::spawn(source_config.clone()).await.unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&destination, &source, "peer-source").await;
+    consume_pairing_completed(&source).await;
+    let request_id = "restart-pull";
+    let owner_epoch =
+        authenticated_request_epoch(&runtime_endpoint(temp.path(), "peer-source")).await;
+    let first_payload = seal_authenticated_task_pull(
+        temp.path(),
+        &source,
+        "peer-destination",
+        request_id,
+        "task-restart",
+        &owner_epoch,
+        current_unix_ms(),
+    );
+    assert!(matches!(
+        send_raw_task_pull(
+            temp.path(),
+            "peer-source",
+            request_id,
+            "peer-destination",
+            first_payload,
+        )
+        .await,
+        PeerResponse::RequestTaskPull { .. }
+    ));
+    assert!(matches!(
+        source.next_event().await.unwrap(),
+        RuntimeEvent::TaskPullRequested(_)
+    ));
+    drop(source);
+
+    let restarted = TransferRuntime::spawn(source_config).await.unwrap();
+    let restarted_epoch =
+        authenticated_request_epoch(&runtime_endpoint(temp.path(), "peer-source")).await;
+    let replay_payload = seal_authenticated_task_pull(
+        temp.path(),
+        &restarted,
+        "peer-destination",
+        request_id,
+        "task-restart",
+        &restarted_epoch,
+        current_unix_ms(),
+    );
+    let replay = send_raw_task_pull(
+        temp.path(),
+        "peer-source",
+        request_id,
+        "peer-destination",
+        replay_payload,
+    )
+    .await;
+    assert!(
+        matches!(
+            replay,
+            PeerResponse::Error { ref message, .. }
+                if message.contains("replayed authenticated request_task_pull request")
+        ),
+        "unexpected restart replay response: {replay:?}",
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), restarted.next_event())
+            .await
+            .is_err(),
+        "restart task-pull replay emitted renderer work",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_pull_source_rejects_sustained_unique_requests_at_its_admission_cap() {
     let temp = tempfile::tempdir().unwrap();
     let source = TransferRuntime::spawn(
@@ -1148,6 +1359,8 @@ async fn task_pull_listener_rejects_blank_and_control_character_task_ids() {
         .await
         .unwrap();
     let source_public_key = parse_public_key(&source.local_identity().public_key).unwrap();
+    let owner_epoch =
+        authenticated_request_epoch(&runtime_endpoint(source_root.path(), "peer-source")).await;
 
     for (request_id, task_id, expected_error) in [
         ("blank-pull", "   ", "must not be blank"),
@@ -1160,7 +1373,15 @@ async fn task_pull_listener_rejects_blank_and_control_character_task_ids() {
         let sealed_payload = seal_json(
             &requester,
             &source_public_key,
-            &json!({ "source_task_id": task_id }),
+            &json!({
+                "action": "request_task_pull",
+                "request_id": request_id,
+                "owner_epoch": owner_epoch,
+                "issued_at_unix_ms": current_unix_ms(),
+                "requester_peer_id": "peer-destination",
+                "source_task_id": task_id,
+                "reserved_target_peer_id": "peer-source",
+            }),
         )
         .unwrap();
         let error = peer_error_message(
@@ -1742,6 +1963,116 @@ async fn start_pairing_waits_for_target_acceptance_before_trusting() {
         pairing_completed.verification_code,
         pairing_request.verification_code
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_unauthenticated_pairing_admission_is_bounded() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-target", "Target", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_millis(250))
+            .with_runtime_admission_limits(1, 8, 2),
+    )
+    .await
+    .unwrap();
+    let first = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-first",
+        "First",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let second = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-second",
+        "Second",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    let first_pairing = tokio::spawn(async move { first.start_pairing("peer-target").await });
+    let RuntimeEvent::PairingRequested(first_request) = target.next_event().await.unwrap() else {
+        panic!("expected first pairing request");
+    };
+
+    let second_error = second
+        .start_pairing("peer-target")
+        .await
+        .expect_err("pending unauthenticated pairing admission must be bounded");
+    assert!(
+        second_error
+            .to_string()
+            .contains("pending pairing request capacity 1"),
+        "unexpected pairing admission error: {second_error}",
+    );
+    target
+        .reject_pairing(&first_request.request_id)
+        .await
+        .unwrap();
+    assert!(first_pairing.await.unwrap().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saturated_pairing_event_enqueue_does_not_retain_pending_admission() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-target", "Target", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_millis(250))
+            .with_runtime_admission_limits(1, 8, 2),
+    )
+    .await
+    .unwrap();
+    let seed = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-seed", "Seed", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_millis(250)),
+    )
+    .await
+    .unwrap();
+    pair_peers(&seed, &target, "peer-target").await;
+    consume_pairing_completed(&target).await;
+    seed.request_task_pull("peer-target", "task-fill", TransferTransport::Lan)
+        .await
+        .expect("fill target lifecycle channel");
+
+    let saturated = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-saturated", "Saturated", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_millis(250)),
+    )
+    .await
+    .unwrap();
+    let saturated_error = saturated
+        .start_pairing("peer-target")
+        .await
+        .expect_err("full lifecycle channel must reject pairing enqueue");
+    assert!(
+        saturated_error
+            .to_string()
+            .contains("incoming event channel closed"),
+        "unexpected saturated enqueue error: {saturated_error}",
+    );
+    assert!(matches!(
+        target.next_event().await.unwrap(),
+        RuntimeEvent::TaskPullRequested(_)
+    ));
+
+    let retry = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-retry", "Retry", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_millis(250)),
+    )
+    .await
+    .unwrap();
+    let retry_pairing = tokio::spawn(async move { retry.start_pairing("peer-target").await });
+    let request = tokio::time::timeout(Duration::from_millis(250), target.next_event())
+        .await
+        .expect("cleaned pairing admission should allow retry")
+        .unwrap();
+    let RuntimeEvent::PairingRequested(request) = request else {
+        panic!("expected retry pairing request");
+    };
+    target.reject_pairing(&request.request_id).await.unwrap();
+    assert!(retry_pairing.await.unwrap().is_err());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

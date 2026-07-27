@@ -27,6 +27,7 @@ struct PendingLifecycleEvent {
     bytes: usize,
     leased_to: Option<String>,
     lease_expires_at: Option<Instant>,
+    recovery_required: bool,
 }
 
 const MAX_PENDING_LIFECYCLE_EVENTS: usize = 256;
@@ -59,6 +60,7 @@ impl TransferEventConsumer {
         self.ready_labels.retain(|label| label != candidate);
         for event in &mut self.pending {
             if event.leased_to.as_deref() == Some(candidate) {
+                event.recovery_required = true;
                 event.leased_to = None;
                 event.lease_expires_at = None;
             }
@@ -89,6 +91,7 @@ impl TransferEventConsumer {
             bytes,
             leased_to: None,
             lease_expires_at: None,
+            recovery_required: false,
         });
         self.pending_bytes += bytes;
         while let Some(label) = self.ready_labels.front().cloned() {
@@ -126,6 +129,9 @@ impl TransferEventConsumer {
                     "__kannaLifecycleDeliveryId".into(),
                     Value::String(event.delivery_id.clone()),
                 );
+                if event.recovery_required {
+                    object.insert("__kannaLifecycleRecovery".into(), Value::Bool(true));
+                }
             }
             if let Err(error) = emit(label, &event.name, &delivered_payload) {
                 failed_emit = Some(error);
@@ -1940,6 +1946,7 @@ mod tests {
         let mut consumer = TransferEventConsumer::default();
         assert!(consumer.claim("window-owner"));
         let mut delivered_ids = Vec::new();
+        let mut recovery_flags = Vec::new();
         consumer
             .dispatch_with(
                 "transfer-request",
@@ -1951,6 +1958,7 @@ mod tests {
                             .expect("delivery id")
                             .to_string(),
                     );
+                    recovery_flags.push(payload["__kannaLifecycleRecovery"].as_bool());
                     Ok(())
                 },
             )
@@ -1966,12 +1974,14 @@ mod tests {
                         .expect("redelivery id")
                         .to_string(),
                 );
+                recovery_flags.push(payload["__kannaLifecycleRecovery"].as_bool());
                 Ok(())
             })
             .expect("redeliver to standby");
 
         assert_eq!(delivered_ids.len(), 2);
         assert_eq!(delivered_ids[0], delivered_ids[1]);
+        assert_eq!(recovery_flags, vec![None, Some(true)]);
         assert!(consumer.acknowledge("window-standby", &delivered_ids[1]));
         assert!(consumer.pending.is_empty());
     }

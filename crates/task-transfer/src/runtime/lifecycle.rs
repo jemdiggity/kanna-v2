@@ -160,6 +160,7 @@ impl TransferRuntime {
             peer_request_timeout: config.peer_request_timeout,
             incoming_connection_permits,
             max_peer_request_bytes: config.max_peer_request_bytes,
+            max_pending_pairing_requests: config.max_lifecycle_events,
             max_task_pull_requests: config.max_task_pull_requests,
             max_finalization_waiters: config.max_finalization_waiters,
             pending_pairing_requests: Arc::clone(&pending_pairing_requests),

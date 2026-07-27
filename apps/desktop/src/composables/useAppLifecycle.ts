@@ -101,6 +101,15 @@ function lifecycleDeliveryId(event: unknown): string | null {
   return typeof deliveryId === "string" && deliveryId.length > 0 ? deliveryId : null;
 }
 
+function lifecycleRecoveryRequired(event: unknown): boolean {
+  const payload = eventPayload(event);
+  return Boolean(
+    payload
+    && typeof payload === "object"
+    && (payload as Record<string, unknown>).__kannaLifecycleRecovery === true,
+  );
+}
+
 async function settleLifecycleDelivery(event: unknown, succeeded: boolean): Promise<void> {
   const deliveryId = lifecycleDeliveryId(event);
   if (!deliveryId) return;
@@ -415,8 +424,10 @@ export function useAppLifecycle({
           await invoke("mark_incoming_transfer_event_recorded", {
             transferId: request.transferId,
           });
-          await importIncomingTransfer(request.transferId, false);
-          succeeded = true;
+          succeeded = await importIncomingTransfer(
+            request.transferId,
+            lifecycleRecoveryRequired(event),
+          );
         } catch (e: unknown) {
           console.error("[App] failed to import incoming transfer request:", e);
           toast.error(e instanceof Error ? e.message : String(e));

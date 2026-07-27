@@ -2,6 +2,10 @@ import { computed, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TransferMachine } from "../services/desktopTransferMachines";
+import {
+  setDesktopServerClientHandlersForTests,
+} from "../services/desktopServerClient";
+import type { IncomingTransferOwnership } from "../stores/transfer";
 import type { WorkspaceTask } from "../workspace/types";
 import { invoke } from "../invoke";
 import { useAppTaskTransfer } from "./useAppTaskTransfer";
@@ -59,7 +63,13 @@ function createController(
 ) {
   const store = {
     pushTaskToPeer: vi.fn(async () => {}),
-    approveIncomingTransfer: vi.fn(async () => ""),
+    approveIncomingTransfer: vi.fn(
+      async (
+        _transferId: string,
+        _ownerToken?: string,
+        _ownership?: IncomingTransferOwnership,
+      ) => "",
+    ),
   };
   const toast = {
     error: vi.fn(),
@@ -80,6 +90,106 @@ describe("useAppTaskTransfer", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     invokeMock.mockResolvedValue([]);
+    setDesktopServerClientHandlersForTests(null);
+  });
+
+  it("aborts stale import work when lease renewal loses ownership", async () => {
+    setDesktopServerClientHandlersForTests({
+      claimPendingIncomingTransfer: async () => true,
+      renewIncomingTransferClaim: async () => false,
+    });
+    const { controller, store } = createController();
+    let releaseStaleImport!: () => void;
+    store.approveIncomingTransfer.mockImplementation(
+      async (_transferId, _ownerToken, ownership) => {
+        expect(await ownership?.assertOwnership?.("fault injection")).toBe(false);
+        expect(ownership?.signal?.aborted).toBe(true);
+        await new Promise<void>((resolve) => {
+          releaseStaleImport = resolve;
+        });
+        throw new Error("ownership aborted");
+      },
+    );
+
+    const importing = controller.importIncomingTransfer("transfer-stale", false);
+    await vi.waitFor(() => expect(store.approveIncomingTransfer).toHaveBeenCalledOnce());
+    const retainedDelivery = controller.importIncomingTransfer("transfer-stale", true);
+    let retainedSettled = false;
+    void retainedDelivery.finally(() => {
+      retainedSettled = true;
+    }).catch(() => {});
+    await Promise.resolve();
+    expect(retainedSettled).toBe(false);
+
+    releaseStaleImport();
+    await expect(importing).rejects.toThrow("ownership aborted");
+    await expect(retainedDelivery).rejects.toThrow("ownership aborted");
+    expect(store.approveIncomingTransfer.mock.calls[0]?.[2]?.signal.aborted).toBe(true);
+  });
+
+  it("confirms an existing live owner without starting a duplicate import", async () => {
+    let finishImport!: () => void;
+    setDesktopServerClientHandlersForTests({
+      claimPendingIncomingTransfer: async () => true,
+      renewIncomingTransferClaim: async () => true,
+    });
+    const { controller, store } = createController();
+    store.approveIncomingTransfer.mockImplementation(async () => await new Promise<string>(
+      (resolve) => {
+        finishImport = () => resolve("task-imported");
+      },
+    ));
+
+    const first = controller.importIncomingTransfer("transfer-live", true);
+    await vi.waitFor(() => expect(store.approveIncomingTransfer).toHaveBeenCalledTimes(1));
+    await expect(controller.importIncomingTransfer("transfer-live", false)).resolves.toBe(true);
+    expect(store.approveIncomingTransfer).toHaveBeenCalledTimes(1);
+
+    finishImport();
+    await expect(first).resolves.toBe(true);
+  });
+
+  it("confirms a terminal durable transfer without restarting import work", async () => {
+    setDesktopServerClientHandlersForTests({
+      claimPendingIncomingTransfer: async () => false,
+      getTaskTransfer: async () => ({
+        direction: "incoming",
+        status: "completed",
+      } as never),
+    });
+    const { controller, store } = createController();
+
+    await expect(controller.importIncomingTransfer("transfer-completed", true)).resolves.toBe(true);
+    expect(store.approveIncomingTransfer).not.toHaveBeenCalled();
+  });
+
+  it("does not let a stale recovery terminalize the replacement owner's transfer", async () => {
+    const failPending = vi.fn(async () => true);
+    setDesktopServerClientHandlersForTests({
+      fetchIncomingTransferCleanupCandidates: async () => [],
+      fetchPendingIncomingTransfers: async () => [{
+        id: "transfer-replaced",
+        status: "claimed",
+        source_peer_id: "peer-source",
+        source_task_id: "task-source",
+        local_task_id: null,
+        payload_json: JSON.stringify({
+          task: { source_task_id: "task-source" },
+          repo: { mode: "reuse-local" },
+        }),
+      }],
+      claimPendingIncomingTransfer: async () => true,
+      renewIncomingTransferClaim: async () => true,
+      failPendingIncomingTransfer: failPending,
+    });
+    const { controller, store } = createController();
+    store.approveIncomingTransfer.mockRejectedValue(
+      new Error("incoming transfer ownership was lost before task creation"),
+    );
+
+    await controller.importPendingIncomingTransfers();
+
+    expect(failPending).not.toHaveBeenCalled();
   });
 
   it("offers same-account cloud machines without requiring LAN pairing", async () => {

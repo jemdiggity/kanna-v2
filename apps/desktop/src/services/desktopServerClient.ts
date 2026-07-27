@@ -87,7 +87,11 @@ export interface DesktopServerClientHandlersForTests {
   reorderPinnedTasks?: (repoId: string, orderedIds: string[]) => MaybePromise<void>;
   insertTaskTransfer?: (transfer: NewTaskTransferInput) => MaybePromise<void>;
   getTaskTransfer?: (transferId: string) => MaybePromise<TaskTransfer | null>;
-  updateTaskTransferPayload?: (transferId: string, payloadJson: string) => MaybePromise<boolean>;
+  updateTaskTransferPayload?: (
+    transferId: string,
+    payloadJson: string,
+    ownerToken?: string,
+  ) => MaybePromise<boolean>;
   markTaskTransferImporting?: (transferId: string, localTaskId: string, ownerToken?: string) => MaybePromise<boolean>;
   markTaskTransferAwaitingAcknowledgment?: (transferId: string, localTaskId: string, ownerToken?: string) => MaybePromise<boolean>;
   completeTaskTransfer?: (transferId: string, localTaskId: string, ownerToken?: string) => MaybePromise<boolean>;
@@ -953,15 +957,20 @@ export async function getDesktopTaskTransfer(transferId: string): Promise<TaskTr
 export async function updateDesktopTaskTransferPayload(
   transferId: string,
   payloadJson: string,
+  ownerToken?: string,
 ): Promise<boolean> {
   if (clientHandlersForTests?.updateTaskTransferPayload) {
-    return await clientHandlersForTests.updateTaskTransferPayload(transferId, payloadJson);
+    return await clientHandlersForTests.updateTaskTransferPayload(
+      transferId,
+      payloadJson,
+      ownerToken,
+    );
   }
   const response = await requestJson<{ updated: boolean }>(
     `/v1/transfers/${encodeURIComponent(transferId)}/payload`,
     {
       method: "PUT",
-      body: { payloadJson },
+      body: { payloadJson, claimOwnerToken: ownerToken },
     },
   );
   return response.updated;

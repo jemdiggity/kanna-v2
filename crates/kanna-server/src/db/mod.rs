@@ -1349,6 +1349,17 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         add_column(conn, "task_transfer", "claim_expires_at", "TEXT")?;
         conn.execute_batch(
             r#"
+            UPDATE task_transfer
+            SET status = CASE
+                    WHEN local_task_id IS NULL THEN 'pending'
+                    ELSE 'importing'
+                END,
+                claim_owner_token = NULL,
+                claim_expires_at = NULL,
+                error = NULL
+            WHERE direction = 'incoming'
+              AND status = 'streaming';
+
             UPDATE task_transfer AS loser
             SET status = 'failed',
                 completed_at = datetime('now'),

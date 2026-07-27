@@ -2043,7 +2043,11 @@ mod tests {
             .expect("bind test listener");
         let addr = listener.local_addr().expect("local addr");
         tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
+            let _ = axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await;
         });
         format!("ws://{addr}/v1/stream")
     }
@@ -5026,16 +5030,18 @@ mod tests {
         let _ = task.await;
     }
 
-    #[tokio::test]
-    async fn previous_mobile_fixture_opens_credentialless_non_loopback_v1_stream() {
+    async fn serve_non_loopback_test_router(
+        desktop_id: &str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
             .await
             .expect("bind non-loopback KSP listener");
         let port = listener.local_addr().expect("listener address").port();
+        let desktop_id = desktop_id.to_string();
         let server = tokio::spawn(async move {
             let _ = axum::serve(
                 listener,
-                crate::http_api::test_router("ksp-v1-network-auth", "KSP v1 Network Auth")
+                crate::http_api::test_router(&desktop_id, "KSP Network Auth")
                     .into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
             .await;
@@ -5046,40 +5052,80 @@ mod tests {
             .map(|interface| interface.ip())
             .find(|ip| ip.is_ipv4() && !ip.is_loopback())
             .expect("test host must expose a non-loopback IPv4 address");
-        let mut socket = ws_connect(&format!("ws://{lan_ip}:{port}/v1/stream")).await;
+        (format!("ws://{lan_ip}:{port}"), server)
+    }
 
-        // Exact first frame emitted by the deployed previous mobile client.
-        use futures_util::SinkExt;
-        socket
-            .send(TungsteniteMessage::Text(r#"{"type":"auth"}"#.into()))
-            .await
-            .expect("send previous-mobile auth frame");
+    #[tokio::test]
+    async fn non_loopback_v1_stream_endpoint_rejects_empty_auth() {
+        let (base_url, server) = serve_non_loopback_test_router("ksp-v1-network-auth").await;
+        let mut socket = ws_connect(&format!("{base_url}/v1/stream")).await;
 
-        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+
+        assert!(matches!(
+            recv_frame(&mut socket).await,
+            ServerFrame::Error { code, .. } if code == "unauthorized"
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn non_loopback_v1_rejects_agent_terminal_lifecycle_and_file_frames() {
+        let (base_url, server) = serve_non_loopback_test_router("ksp-v1-privileged-denial").await;
+        let frames = [
+            ClientFrame::AgentInput {
+                task_id: "task-1".into(),
+                text: "must not reach the agent".into(),
+            },
+            ClientFrame::TermInput {
+                task_id: "shell-task-1".into(),
+                data_b64: b64(b"must not reach the terminal"),
+            },
+            ClientFrame::Request {
+                id: 1,
+                method: "POST".into(),
+                path: "/v1/tasks/task-1/actions/advance-stage".into(),
+                body: None,
+            },
+            ClientFrame::Request {
+                id: 2,
+                method: "POST".into(),
+                path: "/v1/tasks/task-1/actions/close".into(),
+                body: None,
+            },
+            ClientFrame::Request {
+                id: 3,
+                method: "GET".into(),
+                path: "/v1/tasks/task-1/files/content?path=secret.txt".into(),
+                body: None,
+            },
+        ];
+
+        for frame in frames {
+            let mut socket = ws_connect(&format!("{base_url}/v1/stream")).await;
+            send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+            send_frame(&mut socket, &frame).await;
+            assert!(
+                matches!(
+                    recv_frame(&mut socket).await,
+                    ServerFrame::Error { code, .. } if code == "unauthorized"
+                ),
+                "non-loopback v1 frame was not denied before dispatch: {frame:?}",
+            );
+            assert!(
+                recv_frame_with_timeout(&mut socket, Duration::from_millis(100))
+                    .await
+                    .is_none(),
+                "non-loopback v1 frame produced a privileged response: {frame:?}",
+            );
+        }
         server.abort();
     }
 
     #[tokio::test]
     async fn non_loopback_v2_stream_endpoint_rejects_empty_auth() {
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
-            .await
-            .expect("bind non-loopback KSP listener");
-        let port = listener.local_addr().expect("listener address").port();
-        let server = tokio::spawn(async move {
-            let _ = axum::serve(
-                listener,
-                crate::http_api::test_router("ksp-v2-network-auth", "KSP v2 Network Auth")
-                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .await;
-        });
-        let lan_ip = if_addrs::get_if_addrs()
-            .expect("enumerate network interfaces")
-            .into_iter()
-            .map(|interface| interface.ip())
-            .find(|ip| ip.is_ipv4() && !ip.is_loopback())
-            .expect("test host must expose a non-loopback IPv4 address");
-        let mut socket = ws_connect(&format!("ws://{lan_ip}:{port}/v2/stream")).await;
+        let (base_url, server) = serve_non_loopback_test_router("ksp-v2-network-auth").await;
+        let mut socket = ws_connect(&format!("{base_url}/v2/stream")).await;
 
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
 

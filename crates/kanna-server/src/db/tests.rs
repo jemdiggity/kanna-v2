@@ -411,6 +411,15 @@ fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
     assert!(db
         .claim_pending_incoming_transfer("transfer-1", "owner-a", false)
         .expect("claim pending transfer after restart"));
+    assert!(!db
+        .update_task_transfer_payload("transfer-1", "{\"stale\":true}", None)
+        .expect("unowned payload update is fenced"));
+    assert!(!db
+        .update_task_transfer_payload("transfer-1", "{\"stale\":true}", Some("owner-stale"))
+        .expect("stale owner payload update is fenced"));
+    assert!(db
+        .update_task_transfer_payload("transfer-1", "{}", Some("owner-a"))
+        .expect("active owner updates payload"));
 
     assert!(db
         .mark_incoming_transfer_importing("transfer-1", "task-local", "owner-a")
@@ -451,15 +460,18 @@ fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
     assert_eq!(resumable.len(), 1);
     assert_eq!(resumable[0].status, "awaiting_acknowledgment");
     assert_eq!(resumable[0].local_task_id.as_deref(), Some("task-local"));
-    assert!(!db
-        .claim_pending_incoming_transfer("transfer-1", "owner-b", true)
-        .expect("active lease prevents recovery takeover"));
     assert!(db
+        .claim_pending_incoming_transfer("transfer-1", "owner-b", true)
+        .expect("authoritative recovery takes over the active lease"));
+    assert!(!db
         .renew_incoming_transfer_claim("transfer-1", "owner-a")
-        .expect("owner renews resumable transfer"));
+        .expect("superseded owner cannot renew resumable transfer"));
+    assert!(db
+        .renew_incoming_transfer_claim("transfer-1", "owner-b")
+        .expect("replacement owner renews resumable transfer"));
 
     assert!(db
-        .mark_task_transfer_completed("transfer-1", "task-local", Some("owner-a"))
+        .mark_task_transfer_completed("transfer-1", "task-local", Some("owner-b"))
         .expect("mark complete"));
     assert!(db
         .list_pending_incoming_transfers()
@@ -810,6 +822,82 @@ fn open_migrates_origin_main_028_activity_revision() {
         .expect("transitioned pipeline item exists");
     assert_eq!(item.activity.as_deref(), Some("working"));
     assert_eq!(item.activity_revision, 1);
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn pre_035_streaming_incoming_transfers_recover_without_duplicate_tasks() {
+    let path = temp_db_path();
+    let conn = Connection::open(&path).expect("open pre-035 fixture db");
+    conn.execute_batch(include_str!("fixtures/origin_main_028.sql"))
+        .expect("load origin/main base fixture");
+    conn.execute_batch(include_str!("fixtures/pre_035_task_transfer.sql"))
+        .expect("load exact pre-035 transfer fixture");
+    let migration_035_index = CURRENT_SCHEMA_MIGRATIONS
+        .iter()
+        .position(|id| *id == "035_task_transfer_ownership_leases")
+        .expect("035 ownership migration exists");
+    for migration_id in &CURRENT_SCHEMA_MIGRATIONS[..migration_035_index] {
+        conn.execute(
+            "INSERT INTO schema_migrations (id) VALUES (?1)",
+            [migration_id],
+        )
+        .expect("record migration through 034");
+    }
+    drop(conn);
+
+    let db = Db::open_migrated(path.to_str().expect("utf8 path"))
+        .expect("migrate exact pre-035 transfer fixture");
+    let before_task = db
+        .get_task_transfer("legacy-stream-before-task")
+        .expect("read transfer without task")
+        .expect("transfer without task exists");
+    assert_eq!(before_task.status, "pending");
+    assert!(before_task.local_task_id.is_none());
+    assert!(before_task.claim_owner_token.is_none());
+    assert!(db
+        .claim_pending_incoming_transfer("legacy-stream-before-task", "owner-before", false)
+        .expect("freshly pending transfer is claimable"));
+
+    let after_task = db
+        .get_task_transfer("legacy-stream-after-task")
+        .expect("read transfer with task")
+        .expect("transfer with task exists");
+    assert_eq!(after_task.status, "importing");
+    assert_eq!(
+        after_task.local_task_id.as_deref(),
+        Some("origin-main-task")
+    );
+    assert!(after_task.claim_owner_token.is_none());
+    assert!(db
+        .claim_pending_incoming_transfer("legacy-stream-after-task", "owner-after", true)
+        .expect("partially imported transfer is recoverable"));
+    assert!(db
+        .mark_incoming_transfer_awaiting_acknowledgment(
+            "legacy-stream-after-task",
+            "origin-main-task",
+            "owner-after",
+        )
+        .expect("recovered transfer reaches acknowledgment"));
+    assert!(db
+        .mark_task_transfer_completed(
+            "legacy-stream-after-task",
+            "origin-main-task",
+            Some("owner-after"),
+        )
+        .expect("recovered transfer completes"));
+
+    let task_count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM pipeline_item WHERE id = 'origin-main-task'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count imported task");
+    assert_eq!(task_count, 1);
 
     drop(db);
     let _ = std::fs::remove_file(path);
