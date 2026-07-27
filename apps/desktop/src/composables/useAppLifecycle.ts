@@ -246,6 +246,7 @@ export function handleTaskPullRequested(
               if (options.signal?.aborted) return "interrupted";
               if (refreshAttempt + 1 < maxAttempts) {
                 await waitForRetry(retryDelayMs);
+                if (options.signal?.aborted) return "interrupted";
                 continue;
               }
               options.reportOperationalError?.(error);
@@ -263,9 +264,11 @@ export function handleTaskPullRequested(
             });
             return "delivered";
           } catch (error: unknown) {
-            if (options.signal?.aborted) return "interrupted";
-            if (isRetryableTaskPushError(error) && pushAttempt + 1 < maxAttempts) {
+            const retryable = isRetryableTaskPushError(error);
+            if (retryable && options.signal?.aborted) return "interrupted";
+            if (retryable && pushAttempt + 1 < maxAttempts) {
               await waitForRetry(retryDelayMs);
+              if (options.signal?.aborted) return "interrupted";
               continue;
             }
             // Transfer preflight and setup can already have reserved or staged

@@ -184,6 +184,39 @@ describe("handleTaskPullRequested", () => {
     expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
   });
 
+  it("aborts during a route-refresh retry delay without refreshing or pushing again", async () => {
+    let releaseRetry!: () => void;
+    const refreshCloudTransferRoute = vi.fn(async () => {
+      throw new Error("relay route unavailable");
+    });
+    const pushTaskToPeer = vi.fn(async () => {});
+    const waitForRetry = vi.fn(() =>
+      new Promise<void>((resolve) => { releaseRetry = resolve; }));
+    const reportOperationalError = vi.fn();
+    const abortController = new AbortController();
+
+    const pending = handleTaskPullRequested({
+      requestId: "pull-route-retry-unmount",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [machine()], {
+      maxAttempts: 3,
+      refreshCloudTransferRoute,
+      reportOperationalError,
+      signal: abortController.signal,
+      waitForRetry,
+    });
+
+    await vi.waitFor(() => expect(waitForRetry).toHaveBeenCalledTimes(1));
+    abortController.abort();
+    releaseRetry();
+
+    await expect(pending).resolves.toBe("interrupted");
+    expect(refreshCloudTransferRoute).toHaveBeenCalledTimes(1);
+    expect(pushTaskToPeer).not.toHaveBeenCalled();
+    expect(reportOperationalError).not.toHaveBeenCalled();
+  });
+
   it("treats a rejected return push as terminal instead of replaying non-idempotent setup", async () => {
     const pushTaskToPeer = vi.fn(async () => {
       throw new Error("preflight failed after reserving a transfer");
@@ -201,6 +234,35 @@ describe("handleTaskPullRequested", () => {
 
     expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
     expect(waitForRetry).not.toHaveBeenCalled();
+  });
+
+  it("preserves terminal settlement when abort races with a non-retryable push rejection", async () => {
+    let rejectPush!: (error: unknown) => void;
+    const pushTaskToPeer = vi.fn(() =>
+      new Promise<void>((_resolve, reject) => { rejectPush = reject; }));
+    const reportOperationalError = vi.fn();
+    const abortController = new AbortController();
+
+    const pending = handleTaskPullRequested({
+      requestId: "pull-terminal-push-unmount",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [
+      machine({ relayDesktopId: null }),
+    ], {
+      maxAttempts: 3,
+      reportOperationalError,
+      signal: abortController.signal,
+    });
+
+    await vi.waitFor(() => expect(pushTaskToPeer).toHaveBeenCalledTimes(1));
+    abortController.abort();
+    const error = new Error("preflight failed after reserving a transfer");
+    rejectPush(error);
+
+    await expect(pending).resolves.toBe("terminal");
+    expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
+    expect(reportOperationalError).toHaveBeenCalledWith(error);
   });
 
   it("retries explicitly safe pre-mutation push failures with a bounded delay", async () => {
@@ -227,6 +289,41 @@ describe("handleTaskPullRequested", () => {
     expect(waitForRetry).toHaveBeenCalledTimes(2);
     expect(waitForRetry).toHaveBeenNthCalledWith(1, 125);
     expect(waitForRetry).toHaveBeenNthCalledWith(2, 125);
+  });
+
+  it("aborts during a safe push retry delay without pushing again", async () => {
+    const retryable = Object.assign(new Error("source desktop identity unavailable"), {
+      retryableTaskPush: true,
+    });
+    let releaseRetry!: () => void;
+    const pushTaskToPeer = vi.fn(async () => {
+      throw retryable;
+    });
+    const waitForRetry = vi.fn(() =>
+      new Promise<void>((resolve) => { releaseRetry = resolve; }));
+    const reportOperationalError = vi.fn();
+    const abortController = new AbortController();
+
+    const pending = handleTaskPullRequested({
+      requestId: "pull-retryable-push-unmount",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [
+      machine({ relayDesktopId: null }),
+    ], {
+      maxAttempts: 3,
+      reportOperationalError,
+      signal: abortController.signal,
+      waitForRetry,
+    });
+
+    await vi.waitFor(() => expect(waitForRetry).toHaveBeenCalledTimes(1));
+    abortController.abort();
+    releaseRetry();
+
+    await expect(pending).resolves.toBe("interrupted");
+    expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
+    expect(reportOperationalError).not.toHaveBeenCalled();
   });
 
   it("preserves one successful route refresh across safe return-push retries", async () => {

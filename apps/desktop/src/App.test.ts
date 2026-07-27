@@ -5299,7 +5299,7 @@ describe("App", () => {
     wrapper.unmount();
   });
 
-  it("acknowledges a task pull when non-idempotent return setup is rejected", async () => {
+  it("ACKs and reports a non-idempotent push rejection that races with unmount", async () => {
     store.items = [{
       id: "task-source",
       repo_id: "repo-1",
@@ -5309,7 +5309,8 @@ describe("App", () => {
       prompt: "Return this task",
       tags: "[]",
     }];
-    store.pushTaskToPeer.mockRejectedValueOnce(new Error("preflight failed"));
+    const push = createDeferred<void>();
+    store.pushTaskToPeer.mockImplementationOnce(async () => push.promise);
     const defaultInvoke = invokeMock.getMockImplementation();
     invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
       if (command === "list_transfer_peers") {
@@ -5329,7 +5330,11 @@ describe("App", () => {
     const wrapper = await mountApp(SidebarWithRepoStub);
     const handler = listenHandlers.get("task-pull-requested");
 
-    await handler?.(buildTaskPullRequestedEvent());
+    const delivery = handler?.(buildTaskPullRequestedEvent());
+    await waitForCondition(() => store.pushTaskToPeer.mock.calls.length === 1);
+    wrapper.unmount();
+    push.reject(new Error("preflight failed after reserving a transfer"));
+    await delivery;
 
     expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
       deliveryId: "lifecycle-pull-failover-1",
@@ -5337,8 +5342,10 @@ describe("App", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
       deliveryId: "lifecycle-pull-failover-1",
     });
+    expect(toastErrorMock).toHaveBeenCalledWith(
+      "preflight failed after reserving a transfer",
+    );
     errorSpy.mockRestore();
-    wrapper.unmount();
   });
 
   it("acknowledges a malformed terminal task pull instead of re-emitting it", async () => {
@@ -5485,7 +5492,63 @@ describe("App", () => {
     standby.unmount();
   });
 
-  it("NACKs without pushing or toasting when unmount aborts a rejected route refresh", async () => {
+  it("NACKs without another push or toast when unmount occurs during a push retry delay", async () => {
+    store.items = [{
+      id: "task-source",
+      repo_id: "repo-1",
+      closed_at: null,
+      stage: "in progress",
+      branch: "task-source",
+      prompt: "Return this task",
+      tags: "[]",
+    }];
+    const retryable = Object.assign(new Error("source desktop identity unavailable"), {
+      retryableTaskPush: true,
+    });
+    store.pushTaskToPeer.mockReset();
+    store.pushTaskToPeer.mockRejectedValue(retryable);
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "list_transfer_peers") {
+        return [{
+          peer_id: "peer-requester",
+          display_name: "Requester",
+          public_key: "requester-key",
+          endpoint: "127.0.0.1:43100",
+          pid: 42,
+          trusted: true,
+          accepting_transfers: true,
+        }];
+      }
+      return await defaultInvoke?.(command, args);
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const owner = await mountApp(SidebarWithRepoStub);
+    try {
+      const handler = listenHandlers.get("task-pull-requested");
+      const delivery = handler?.(buildTaskPullRequestedEvent());
+      await waitForCondition(() => store.pushTaskToPeer.mock.calls.length === 1);
+      await flushPromises();
+
+      owner.unmount();
+      await delivery;
+
+      expect(store.pushTaskToPeer).toHaveBeenCalledTimes(1);
+      expect(toastErrorMock).not.toHaveBeenCalled();
+      expect(invokeMock).toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
+        deliveryId: "lifecycle-pull-failover-1",
+      });
+      expect(invokeMock).not.toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
+        deliveryId: "lifecycle-pull-failover-1",
+      });
+    } finally {
+      owner.unmount();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("NACKs without another refresh, push, or toast when unmount occurs during a route retry delay", async () => {
     store.items = [{
       id: "task-source",
       repo_id: "repo-1",
@@ -5496,8 +5559,8 @@ describe("App", () => {
       tags: "[]",
     }];
     store.pushTaskToPeer.mockReset();
-    const refresh = createDeferred<{ endpoint: string }>();
     let rejectNextRouteRefresh = false;
+    let rejectedRefreshes = 0;
     const defaultInvoke = invokeMock.getMockImplementation();
     invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
       if (command === "mobile_server_status") {
@@ -5516,7 +5579,10 @@ describe("App", () => {
         };
       }
       if (command === "ensure_cloud_transfer_proxy") {
-        if (rejectNextRouteRefresh) return await refresh.promise;
+        if (rejectNextRouteRefresh) {
+          rejectedRefreshes += 1;
+          throw new Error("route refresh unavailable");
+        }
         return { endpoint: "127.0.0.1:48201" };
       }
       if (
@@ -5569,11 +5635,12 @@ describe("App", () => {
         ).length > initialRefreshes,
         30,
       );
+      await flushPromises();
 
       owner.unmount();
-      refresh.reject(new Error("route refresh failed during unmount"));
       await delivery;
 
+      expect(rejectedRefreshes).toBe(1);
       expect(store.pushTaskToPeer).not.toHaveBeenCalled();
       expect(toastErrorMock).not.toHaveBeenCalled();
       expect(invokeMock).toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
