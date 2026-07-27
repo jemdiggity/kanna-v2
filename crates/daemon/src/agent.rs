@@ -26,6 +26,15 @@ use crate::protocol::{AgentProvider, AgentSpawnParams, SeqAgentEvent, SessionSta
 /// A single attached client's writer handle (same shape as PTY writers).
 pub type AgentClientWriter = Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>;
 
+/// Fill `buf` from the operating system's random source.
+///
+/// `/dev/urandom` is available on every Unix target Kanna supports, including
+/// macOS release hosts and Linux CI, without adding a dynamic dependency.
+fn fill_random(buf: &mut [u8]) -> std::io::Result<()> {
+    use std::io::Read as _;
+    std::fs::File::open("/dev/urandom")?.read_exact(buf)
+}
+
 /// Registry of agent sessions, separate from the PTY `SessionManager`.
 pub type AgentSessions = Arc<Mutex<HashMap<String, AgentSessionRecord>>>;
 
@@ -76,7 +85,161 @@ pub fn event_status(event: &AgentEvent) -> Option<SessionStatus> {
 /// Append-only event journal: in memory plus an NDJSON file under
 /// `<daemon-data>/agent-journals/{session_id}.ndjson`. Each line is a
 /// [`SeqAgentEvent`]; the file is reloaded on daemon restart/handoff.
+///
+/// Path-based I/O is re-resolved by the kernel on every call, so anything that
+/// can create a symlink in (or in place of) the journal directory between two
+/// calls redirects the write. Two distinct exposures existed:
+///
+///   * the DIRECTORY: `agent-journals` itself replaced by a symlink, which
+///     `create_dir_all` happily accepts because the target exists as a
+///     directory; and
+///   * the LEAF: `<session>.ndjson` or `<session>.meta.json` replaced by a
+///     symlink, which plain `OpenOptions::open` follows.
+///
+/// `O_DIRECTORY | O_NOFOLLOW` on the directory refuses the first, and every leaf
+/// is opened `O_NOFOLLOW` relative to that descriptor and confirmed to be a
+/// regular file, which refuses the second. The descriptor also pins the
+/// directory we validated: later operations cannot be redirected by a rename of
+/// a path component.
+struct JournalDir {
+    fd: std::os::unix::io::OwnedFd,
+}
+
+// Test-only: force the directory fsync to fail, so the durability-propagation
+// path can be exercised. A directory fsync does not fail on a healthy
+// filesystem, so this is the only practical way to cover it.
+#[cfg(test)]
+thread_local! {
+    static TEST_FAIL_DIR_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl JournalDir {
+    /// Create the journal directory if needed, then open it in a way that
+    /// refuses a symlink standing in for it.
+    fn open(path: PathBuf) -> std::io::Result<Self> {
+        std::fs::create_dir_all(&path)?;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has NUL"))?;
+        // O_NOFOLLOW makes this fail with ELOOP when the final component is a
+        // symlink, even one pointing at a real directory.
+        let raw = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self {
+            fd: unsafe { std::os::unix::io::FromRawFd::from_raw_fd(raw) },
+        })
+    }
+
+    fn raw(&self) -> std::os::unix::io::RawFd {
+        std::os::unix::io::AsRawFd::as_raw_fd(&self.fd)
+    }
+
+    /// `openat` relative to this directory, refusing symlinks and anything that
+    /// is not a regular file.
+    ///
+    /// `O_NONBLOCK` is used for the open itself so that a FIFO planted at the
+    /// name cannot block the daemon in `open`; it is cleared once the descriptor
+    /// is confirmed regular. `O_NOFOLLOW` alone would not cover that case.
+    fn open_file(&self, name: &str, flags: libc::c_int) -> std::io::Result<std::fs::File> {
+        let c_name = std::ffi::CString::new(name)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "name has NUL"))?;
+        let raw = unsafe {
+            libc::openat(
+                self.raw(),
+                c_name.as_ptr(),
+                flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                0o600 as libc::c_uint,
+            )
+        };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let file: std::fs::File = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(raw) };
+
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(raw, &mut stat) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{name:?} in the journal directory is not a regular file"),
+            ));
+        }
+
+        // Clear O_NONBLOCK now that the target is known to be a regular file;
+        // leaving it set would change read/write semantics.
+        let current = unsafe { libc::fcntl(raw, libc::F_GETFL) };
+        if current < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(raw, libc::F_SETFL, current & !libc::O_NONBLOCK) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(file)
+    }
+
+    fn read(&self, name: &str) -> std::io::Result<Vec<u8>> {
+        use std::io::Read as _;
+        let mut file = self.open_file(name, libc::O_RDONLY)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn rename(&self, from: &str, to: &str) -> std::io::Result<()> {
+        let from_c = std::ffi::CString::new(from)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "name has NUL"))?;
+        let to_c = std::ffi::CString::new(to)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "name has NUL"))?;
+        let ret = unsafe { libc::renameat(self.raw(), from_c.as_ptr(), self.raw(), to_c.as_ptr()) };
+        if ret < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// `unlinkat` relative to this directory.
+    ///
+    /// Returns the error so callers that are deleting a session's real files can
+    /// report a genuine failure; staging cleanup discards it.
+    fn unlink(&self, name: &str) -> std::io::Result<()> {
+        let c_name = std::ffi::CString::new(name)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "name has NUL"))?;
+        if unsafe { libc::unlinkat(self.raw(), c_name.as_ptr(), 0) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// fsync the DIRECTORY, so a rename into it survives a crash.
+    fn sync(&self) -> std::io::Result<()> {
+        // Thread-local, like the other fault injections in this crate: a
+        // process-global flag made an unrelated parallel test's write fail.
+        #[cfg(test)]
+        if TEST_FAIL_DIR_SYNC.with(|slot| slot.get()) {
+            return Err(std::io::Error::from_raw_os_error(libc::EIO));
+        }
+        if unsafe { libc::fsync(self.raw()) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
 pub struct AgentJournal {
+    /// `None` when the journal directory could not be opened safely.
+    dir: Option<JournalDir>,
+    /// File NAMES within `dir`. All I/O uses these with `*at` calls; the `PathBuf`s
+    /// below exist only for log messages.
+    file_name: String,
+    metadata_name: String,
     path: PathBuf,
     metadata_path: PathBuf,
     file: Option<std::fs::File>,
@@ -93,18 +256,54 @@ struct AgentJournalMetadata {
 }
 
 impl AgentJournal {
+    /// A journal that keeps events in memory and never touches disk.
+    ///
+    /// Used when the journal directory cannot be opened safely. The paths and
+    /// leaf names are empty because nothing must ever open them.
+    fn memory_only() -> Self {
+        Self {
+            dir: None,
+            file_name: String::new(),
+            metadata_name: String::new(),
+            path: PathBuf::new(),
+            metadata_path: PathBuf::new(),
+            file: None,
+            events: Vec::new(),
+            provider_session_id: None,
+            degraded: true,
+        }
+    }
+
     pub fn journal_dir(data_dir: &Path) -> PathBuf {
         data_dir.join("agent-journals")
     }
 
     /// Open (or create) the journal for a session, loading existing events.
     pub fn open(data_dir: &Path, session_id: &str) -> Self {
-        let dir = Self::journal_dir(data_dir);
-        let path = dir.join(format!("{session_id}.ndjson"));
-        let metadata_path = dir.join(format!("{session_id}.meta.json"));
+        let dir_path = Self::journal_dir(data_dir);
+        let file_name = format!("{session_id}.ndjson");
+        let metadata_name = format!("{session_id}.meta.json");
+        let path = dir_path.join(&file_name);
+        let metadata_path = dir_path.join(&metadata_name);
+
+        // Open the directory ONCE, refusing a symlink in its place, and perform
+        // every later operation relative to this descriptor.
+        let dir = match JournalDir::open(dir_path) {
+            Ok(dir) => dir,
+            Err(error) => {
+                log::error!(
+                    "[agent] refusing to use journal directory for {path:?}: {error}; \
+                     running memory-only"
+                );
+                return Self::memory_only();
+            }
+        };
 
         let mut events = Vec::new();
-        if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(content) = dir
+            .read(&file_name)
+            .and_then(|bytes| String::from_utf8(bytes).map_err(std::io::Error::other))
+        {
             for line in content.lines() {
                 let line = line.trim();
                 if line.is_empty() {
@@ -119,8 +318,10 @@ impl AgentJournal {
             }
         }
 
-        let provider_session_id = std::fs::read_to_string(&metadata_path)
+        let provider_session_id = dir
+            .read(&metadata_name)
             .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
             .and_then(|content| serde_json::from_str::<AgentJournalMetadata>(&content).ok())
             .and_then(|metadata| metadata.provider_session_id);
 
@@ -139,7 +340,7 @@ impl AgentJournal {
                     event: entry.event,
                 })
                 .collect();
-            match Self::rewrite_atomically(&dir, &path, &repaired) {
+            match Self::rewrite_atomically(&dir, &file_name, &repaired) {
                 Ok(()) => log::info!(
                     "[agent] migrated {} journal entries in {:?} to a dense unique sequence",
                     repaired.len(),
@@ -154,13 +355,8 @@ impl AgentJournal {
             events = repaired;
         }
 
-        let file = std::fs::create_dir_all(&dir)
-            .and_then(|_| {
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)
-            })
+        let file = dir
+            .open_file(&file_name, libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT)
             .map_err(|error| {
                 log::error!("[agent] journal disk persistence unavailable for {path:?}: {error}");
                 error
@@ -169,6 +365,9 @@ impl AgentJournal {
         let degraded = file.is_none();
 
         Self {
+            dir: Some(dir),
+            file_name,
+            metadata_name,
             path,
             metadata_path,
             file,
@@ -192,21 +391,74 @@ impl AgentJournal {
     /// the original, so a crash mid-migration leaves the old file intact rather
     /// than a half-written history.
     fn rewrite_atomically(
-        dir: &Path,
-        path: &Path,
+        dir: &JournalDir,
+        name: &str,
         events: &[SeqAgentEvent],
     ) -> std::io::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        let staging = path.with_extension("ndjson.migrating");
-        {
-            let mut file = std::fs::File::create(&staging)?;
-            for entry in events {
-                let line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
-                writeln!(file, "{line}")?;
-            }
-            file.sync_all()?;
+        let mut body = Vec::new();
+        for entry in events {
+            let line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
+            body.extend_from_slice(line.as_bytes());
+            body.push(b'\n');
         }
-        std::fs::rename(&staging, path)
+        Self::replace_durably(dir, name, &body)
+    }
+
+    /// Write `contents` to `name` within `dir` atomically and durably.
+    ///
+    /// Every step is relative to the directory descriptor, so no part of this
+    /// re-resolves a path that could have been swapped for a symlink since the
+    /// directory was validated. Three things matter here beyond that:
+    ///
+    ///   * the staging file is created `O_CREAT | O_EXCL`, which refuses an existing
+    ///     path — symlink included — so nothing pre-planted at the name can capture
+    ///     the write. `File::create` on the old fixed `<session>.ndjson.migrating`
+    ///     followed such a symlink. The name is also unpredictable, which is a
+    ///     separate benefit: a pre-planted REGULAR file cannot wedge the rewrite
+    ///     forever, as it would with a fixed name;
+    ///   * the directory is fsynced after the rename, or the rename itself can be
+    ///     lost on a crash even though the file contents were synced; and
+    ///   * that fsync's failure is PROPAGATED, because reporting a durable write
+    ///     that is not durable lets the caller clear retry state it still needs.
+    fn replace_durably(dir: &JournalDir, name: &str, contents: &[u8]) -> std::io::Result<()> {
+        Self::replace_durably_with_nonce_source(dir, name, contents, || {
+            let mut nonce = [0u8; 12];
+            fill_random(&mut nonce)?;
+            Ok(nonce)
+        })
+    }
+
+    fn replace_durably_with_nonce_source(
+        dir: &JournalDir,
+        name: &str,
+        contents: &[u8],
+        mut next_nonce: impl FnMut() -> std::io::Result<[u8; 12]>,
+    ) -> std::io::Result<()> {
+        let mut attempt = 0;
+        let (staging, mut file) = loop {
+            let nonce = next_nonce()?;
+            let suffix: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+            let candidate = format!("{name}.tmp.{suffix}");
+            match dir.open_file(&candidate, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL) {
+                Ok(file) => break (candidate, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt < 8 => {
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        };
+
+        let staged = file.write_all(contents).and_then(|_| file.sync_all());
+        drop(file);
+        if let Err(error) = staged {
+            let _ = dir.unlink(&staging);
+            return Err(error);
+        }
+        if let Err(error) = dir.rename(&staging, name) {
+            let _ = dir.unlink(&staging);
+            return Err(error);
+        }
+        dir.sync()
     }
 
     /// Append an event; returns its seq. Disk failures degrade to
@@ -278,13 +530,17 @@ impl AgentJournal {
         let metadata = AgentJournalMetadata {
             provider_session_id: self.provider_session_id.clone(),
         };
-        let write_result = std::fs::create_dir_all(
-            self.metadata_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new(".")),
-        )
-        .and_then(|_| serde_json::to_string(&metadata).map_err(std::io::Error::other))
-        .and_then(|json| std::fs::write(&self.metadata_path, json));
+        // Atomic, not `fs::write`. A plain write TRUNCATES first, so a crash
+        // mid-write leaves the metadata empty or half-written and the provider
+        // session id is gone — which silently costs the session its `--resume`
+        // capability. Staged under an unpredictable name, fsynced, renamed, and the
+        // directory fsynced so the rename survives a crash too.
+        let write_result = match self.dir.as_ref() {
+            Some(dir) => serde_json::to_string(&metadata)
+                .map_err(std::io::Error::other)
+                .and_then(|json| Self::replace_durably(dir, &self.metadata_name, json.as_bytes())),
+            None => Ok(()),
+        };
         if let Err(error) = write_result {
             log::warn!(
                 "[agent] failed to persist provider session id to {:?}: {}",
@@ -340,24 +596,26 @@ impl AgentJournal {
         pending
     }
 
+    /// Delete this session's history and metadata.
+    ///
+    /// Both removals go through the PINNED directory descriptor. Path-based
+    /// `remove_file` re-resolves `agent-journals` on every call, so a directory
+    /// swapped for a symlink between open and deletion made this unlink two files
+    /// of the attacker's choosing anywhere on the filesystem.
     pub fn remove_file(&mut self) {
         self.file = None;
-        if let Err(error) = std::fs::remove_file(&self.path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                log::warn!(
-                    "[agent] failed to remove journal {:?}: {}",
-                    self.path,
-                    error
-                );
-            }
-        }
-        if let Err(error) = std::fs::remove_file(&self.metadata_path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                log::warn!(
-                    "[agent] failed to remove journal metadata {:?}: {}",
-                    self.metadata_path,
-                    error
-                );
+        let Some(dir) = self.dir.as_ref() else {
+            // Memory-only: no path was ever derived, so there is nothing on disk.
+            return;
+        };
+        for (name, path) in [
+            (&self.file_name, &self.path),
+            (&self.metadata_name, &self.metadata_path),
+        ] {
+            match dir.unlink(name) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => log::warn!("[agent] failed to remove {path:?}: {error}"),
             }
         }
     }
@@ -803,6 +1061,226 @@ pub fn signal_agent_pid(
 
 #[cfg(test)]
 mod tests {
+    fn temp_journal_base(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kanna-jdir-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// A symlink standing in for the journal DIRECTORY must not redirect a write.
+    ///
+    /// `create_dir_all` accepts such a symlink — its target exists as a directory —
+    /// and every path-based open then followed it, so a canary outside the data
+    /// directory received the journal. `O_DIRECTORY | O_NOFOLLOW` refuses it.
+    #[test]
+    fn a_symlinked_journal_directory_is_refused_and_the_canary_stays_empty() {
+        let base = temp_journal_base("dirsymlink");
+        let canary_dir = base.join("canary-target");
+        std::fs::create_dir_all(&canary_dir).expect("canary dir");
+        std::os::unix::fs::symlink(&canary_dir, AgentJournal::journal_dir(&base))
+            .expect("plant directory symlink");
+
+        let mut journal = AgentJournal::open(&base, "victim");
+        journal.append(AgentEvent::Diagnostic {
+            message: "must not be written through a symlink".to_string(),
+        });
+        journal.set_provider_session_id("must-not-land-either");
+
+        assert!(
+            journal.is_degraded(),
+            "a symlinked journal directory must degrade to memory-only"
+        );
+        let leaked: Vec<_> = std::fs::read_dir(&canary_dir)
+            .expect("canary readable")
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "a symlinked journal directory redirected writes into {canary_dir:?}: {leaked:?}"
+        );
+
+        let _ = std::fs::remove_file(AgentJournal::journal_dir(&base));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A symlink standing in for a journal LEAF must not redirect a write either.
+    #[test]
+    fn a_symlinked_journal_leaf_is_refused_and_the_canary_stays_empty() {
+        let base = temp_journal_base("leafsymlink");
+        let journal_dir = AgentJournal::journal_dir(&base);
+        std::fs::create_dir_all(&journal_dir).expect("journal dir");
+        let canary = base.join("canary-file");
+        std::fs::write(&canary, b"").expect("canary");
+
+        std::os::unix::fs::symlink(&canary, journal_dir.join("victim.ndjson"))
+            .expect("plant history symlink");
+        let mut journal = AgentJournal::open(&base, "victim");
+        journal.append(AgentEvent::Diagnostic {
+            message: "must not follow the leaf symlink".to_string(),
+        });
+        assert_eq!(
+            std::fs::read(&canary).expect("canary readable"),
+            Vec::<u8>::new(),
+            "a symlinked history leaf redirected the append into the canary"
+        );
+
+        std::os::unix::fs::symlink(&canary, journal_dir.join("meta.meta.json"))
+            .expect("plant metadata symlink");
+        let mut meta_journal = AgentJournal::open(&base, "meta");
+        meta_journal.set_provider_session_id("must-not-be-written-through-a-symlink");
+        assert_eq!(
+            std::fs::read(&canary).expect("canary readable"),
+            Vec::<u8>::new(),
+            "a symlinked metadata leaf redirected the persist into the canary"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn exclusive_staging_rejects_symlink_and_regular_file_collisions_then_retries() {
+        let base = temp_journal_base("staging");
+        let journal_path = AgentJournal::journal_dir(&base);
+        let dir = JournalDir::open(journal_path.clone()).expect("journal dir");
+        let canary = base.join("staging-canary");
+        std::fs::write(&canary, b"").expect("canary");
+
+        let symlink_nonce = [0u8; 12];
+        let regular_nonce = [1u8; 12];
+        let usable_nonce = [2u8; 12];
+        let candidate = |nonce: [u8; 12]| {
+            let suffix: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+            journal_path.join(format!("dup.ndjson.tmp.{suffix}"))
+        };
+        std::os::unix::fs::symlink(&canary, candidate(symlink_nonce))
+            .expect("plant staging symlink");
+        std::fs::write(candidate(regular_nonce), b"regular collision")
+            .expect("plant regular staging file");
+        let mut nonces = [symlink_nonce, regular_nonce, usable_nonce].into_iter();
+
+        AgentJournal::replace_durably_with_nonce_source(&dir, "dup.ndjson", b"replacement", || {
+            nonces
+                .next()
+                .ok_or_else(|| std::io::Error::other("nonce sequence exhausted"))
+        })
+        .expect("collisions should be retried");
+
+        assert_eq!(
+            std::fs::read(&canary).expect("canary readable"),
+            Vec::<u8>::new(),
+            "O_CREAT | O_EXCL must refuse the pre-existing symlink"
+        );
+        assert_eq!(
+            std::fs::read(candidate(regular_nonce)).expect("regular collision survives"),
+            b"regular collision",
+            "the random retry must leave a pre-existing regular file untouched"
+        );
+        assert_eq!(
+            dir.read("dup.ndjson").expect("replacement readable"),
+            b"replacement"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_fifo_journal_leaf_is_rejected_without_blocking_open() {
+        let base = temp_journal_base("fifo");
+        let journal_dir = AgentJournal::journal_dir(&base);
+        std::fs::create_dir_all(&journal_dir).expect("journal dir");
+        let fifo = journal_dir.join("victim.ndjson");
+        let fifo_c =
+            std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).expect("fifo path");
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let journal = AgentJournal::open(&base, "victim");
+            let _ = sender.send(journal.is_degraded());
+            let _ = std::fs::remove_dir_all(&base);
+        });
+
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::from_secs(2)),
+            Ok(true),
+            "opening a planted FIFO must return promptly and degrade persistence"
+        );
+    }
+
+    #[test]
+    fn journal_io_stays_in_the_pinned_directory_after_the_path_is_replaced() {
+        let base = temp_journal_base("pinned");
+        let journal_path = AgentJournal::journal_dir(&base);
+        let pinned_path = base.join("pinned-original");
+        let canary_path = base.join("canary-target");
+
+        let mut journal = AgentJournal::open(&base, "victim");
+        journal.append(AgentEvent::Diagnostic {
+            message: "before directory replacement".to_string(),
+        });
+        std::fs::rename(&journal_path, &pinned_path).expect("rename open journal directory");
+        std::fs::create_dir_all(&canary_path).expect("canary dir");
+        std::fs::write(canary_path.join("victim.ndjson"), b"history canary")
+            .expect("history canary");
+        std::fs::write(canary_path.join("victim.meta.json"), b"metadata canary")
+            .expect("metadata canary");
+        std::os::unix::fs::symlink(&canary_path, &journal_path)
+            .expect("replace journal path with symlink");
+
+        journal.append(AgentEvent::Diagnostic {
+            message: "after directory replacement".to_string(),
+        });
+        journal.set_provider_session_id("provider-session");
+        journal.remove_file();
+
+        assert_eq!(
+            std::fs::read(canary_path.join("victim.ndjson")).expect("history canary survives"),
+            b"history canary"
+        );
+        assert_eq!(
+            std::fs::read(canary_path.join("victim.meta.json")).expect("metadata canary survives"),
+            b"metadata canary"
+        );
+        assert!(
+            std::fs::read_dir(&pinned_path)
+                .expect("pinned directory readable")
+                .next()
+                .is_none(),
+            "both real journal leaves must be removed from the pinned directory"
+        );
+
+        let _ = std::fs::remove_file(&journal_path);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn durable_replace_propagates_directory_sync_failure() {
+        let base = temp_journal_base("dirsync");
+        let dir = JournalDir::open(AgentJournal::journal_dir(&base)).expect("journal directory");
+
+        TEST_FAIL_DIR_SYNC.with(|slot| slot.set(true));
+        let result = AgentJournal::replace_durably(&dir, "metadata.json", b"durable contents");
+        TEST_FAIL_DIR_SYNC.with(|slot| slot.set(false));
+
+        assert_eq!(
+            result
+                .expect_err("directory fsync failure must be returned")
+                .raw_os_error(),
+            Some(libc::EIO)
+        );
+        assert_eq!(
+            dir.read("metadata.json")
+                .expect("renamed file remains readable"),
+            b"durable contents"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     use super::*;
     use std::io::Read;
 
