@@ -532,12 +532,10 @@ async fn finalize_transfer_authenticates_reserved_target_and_rejects_replay_befo
     )
     .await
     .unwrap();
-    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
-        "peer-destination",
-        "Destination",
-        temp.path(),
-        0,
-    ))
+    let destination = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-destination", "Destination", temp.path(), 0)
+            .with_peer_response_limits(8 * 1024, 80 * 1024),
+    )
     .await
     .unwrap();
     pair_peers(&source, &destination, "peer-destination").await;
@@ -4995,6 +4993,23 @@ async fn destination_can_acknowledge_import_commit_back_to_source() {
         .prepare_transfer_preflight("peer-secondary", "task-source")
         .await
         .unwrap();
+    let owned_source = temp.path().join("owned-source-success.bundle");
+    std::fs::write(&owned_source, b"owned source").unwrap();
+    primary
+        .stage_transfer_artifact(
+            &preflight.transfer_id,
+            "owned-source-success",
+            owned_source.clone(),
+            true,
+        )
+        .await
+        .unwrap();
+    let managed_source = primary
+        .fetch_transfer_artifact(&preflight.transfer_id, "owned-source-success")
+        .await
+        .unwrap()
+        .path;
+    assert!(!owned_source.exists());
 
     primary
         .prepare_transfer_commit(
@@ -5015,11 +5030,100 @@ async fn destination_can_acknowledge_import_commit_back_to_source() {
         .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
         .await
         .unwrap();
+    assert!(
+        !managed_source.exists(),
+        "source artifact survived successful import acknowledgment",
+    );
 
     let ack = next_outgoing_transfer_committed(&primary).await;
     assert_eq!(ack.transfer_id, preflight.transfer_id);
     assert_eq!(ack.source_task_id, "task-source");
     assert_eq!(ack.destination_local_task_id, "task-dest");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_outgoing_finalization_deletes_owned_source_artifacts() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = std::sync::Arc::new(
+        TransferRuntime::spawn(RuntimeConfig::for_tests(
+            "peer-secondary-failure",
+            "Secondary",
+            temp.path(),
+            0,
+        ))
+        .await
+        .unwrap(),
+    );
+    let primary = std::sync::Arc::new(
+        TransferRuntime::spawn(RuntimeConfig::for_tests(
+            "peer-primary-failure",
+            "Primary",
+            temp.path(),
+            0,
+        ))
+        .await
+        .unwrap(),
+    );
+    pair_peers(&primary, &secondary, "peer-secondary-failure").await;
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary-failure", "task-source")
+        .await
+        .unwrap();
+    let owned_source = temp.path().join("owned-source-failure.bundle");
+    std::fs::write(&owned_source, b"owned failure source").unwrap();
+    primary
+        .stage_transfer_artifact(
+            &preflight.transfer_id,
+            "owned-source-failure",
+            owned_source,
+            true,
+        )
+        .await
+        .unwrap();
+    let managed_source = primary
+        .fetch_transfer_artifact(&preflight.transfer_id, "owned-source-failure")
+        .await
+        .unwrap()
+        .path;
+    primary
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-secondary-failure",
+                "task": { "source_task_id": "task-source" }
+            }),
+        )
+        .await
+        .unwrap();
+    let _incoming = next_incoming_transfer_request(&secondary).await;
+
+    let primary_for_completion = std::sync::Arc::clone(&primary);
+    let completion = tokio::spawn(async move {
+        let event = primary_for_completion.next_event().await.unwrap();
+        let RuntimeEvent::OutgoingTransferFinalizationRequested(event) = event else {
+            panic!("expected outgoing transfer finalization request");
+        };
+        primary_for_completion
+            .complete_outgoing_transfer_finalization(
+                &event.transfer_id,
+                Err(kanna_task_transfer::runtime::RuntimeError::Protocol(
+                    "renderer finalization failed".into(),
+                )),
+            )
+            .await
+            .unwrap();
+    });
+
+    let error = secondary
+        .finalize_outgoing_transfer(&preflight.transfer_id)
+        .await
+        .unwrap_err();
+    completion.await.unwrap();
+    assert!(error.to_string().contains("renderer finalization failed"));
+    assert!(
+        !managed_source.exists(),
+        "owned source artifact survived terminal finalization failure",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6203,7 +6307,7 @@ async fn staged_transfer_artifacts_can_be_fetched_by_transfer_and_artifact_id() 
     std::fs::write(&bundle_path, b"bundle").unwrap();
 
     runtime
-        .stage_transfer_artifact("transfer-1", "artifact-1", bundle_path.clone())
+        .stage_transfer_artifact("transfer-1", "artifact-1", bundle_path.clone(), false)
         .await
         .unwrap();
 
@@ -6239,8 +6343,10 @@ async fn destination_fetches_staged_transfer_artifacts_from_the_source_peer() {
     pair_peers(&source, &destination, "peer-destination").await;
 
     let bundle_path = temp.path().join("source.bundle");
-    let bundle_bytes = b"bundle-contents";
-    std::fs::write(&bundle_path, bundle_bytes).unwrap();
+    let bundle_bytes = (0..(256 * 1024 + 37))
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    std::fs::write(&bundle_path, &bundle_bytes).unwrap();
 
     let preflight = source
         .prepare_transfer_preflight("peer-destination", "task-source")
@@ -6251,6 +6357,7 @@ async fn destination_fetches_staged_transfer_artifacts_from_the_source_peer() {
             &preflight.transfer_id,
             "artifact-remote",
             bundle_path.clone(),
+            false,
         )
         .await
         .unwrap();
@@ -6277,6 +6384,160 @@ async fn destination_fetches_staged_transfer_artifacts_from_the_source_peer() {
 
     assert_ne!(fetched.path, bundle_path);
     assert_eq!(std::fs::read(&fetched.path).unwrap(), bundle_bytes);
+    destination
+        .mark_import_ack_completed(&preflight.transfer_id)
+        .await
+        .unwrap();
+    assert!(
+        !fetched.path.exists(),
+        "receiver staging artifact survived terminal success cleanup",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_artifacts_are_deleted_on_ttl_shutdown_and_startup_while_borrowed_files_survive() {
+    let temp = tempfile::tempdir().unwrap();
+    let startup_orphan = temp
+        .path()
+        .join("artifacts")
+        .join("peer-cleanup")
+        .join("stale-transfer")
+        .join("orphan.bundle");
+    std::fs::create_dir_all(startup_orphan.parent().unwrap()).unwrap();
+    std::fs::write(&startup_orphan, b"orphan").unwrap();
+
+    let managed_shutdown_path;
+    let borrowed_path = temp.path().join("borrowed-rollout.jsonl");
+    std::fs::write(&borrowed_path, b"borrowed").unwrap();
+    {
+        let runtime = TransferRuntime::spawn(
+            RuntimeConfig::for_tests("peer-cleanup", "Cleanup", temp.path(), 0)
+                .with_pending_transfer_ttl(Duration::from_millis(5)),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !startup_orphan.exists(),
+            "startup reconciliation retained an orphaned staging artifact",
+        );
+
+        let owned_ttl = temp.path().join("owned-ttl.bundle");
+        std::fs::write(&owned_ttl, b"ttl").unwrap();
+        runtime
+            .stage_transfer_artifact("transfer-ttl", "artifact-ttl", owned_ttl.clone(), true)
+            .await
+            .unwrap();
+        let managed_ttl = runtime
+            .fetch_transfer_artifact("transfer-ttl", "artifact-ttl")
+            .await
+            .unwrap()
+            .path;
+        assert!(!owned_ttl.exists());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(runtime
+            .fetch_transfer_artifact("transfer-ttl", "artifact-ttl")
+            .await
+            .is_err(),);
+        assert!(
+            !managed_ttl.exists(),
+            "TTL pruning retained an owned artifact"
+        );
+
+        let owned_shutdown = temp.path().join("owned-shutdown.bundle");
+        std::fs::write(&owned_shutdown, b"shutdown").unwrap();
+        runtime
+            .stage_transfer_artifact(
+                "transfer-shutdown",
+                "artifact-shutdown",
+                owned_shutdown.clone(),
+                true,
+            )
+            .await
+            .unwrap();
+        managed_shutdown_path = runtime
+            .fetch_transfer_artifact("transfer-shutdown", "artifact-shutdown")
+            .await
+            .unwrap()
+            .path;
+        runtime
+            .stage_transfer_artifact(
+                "transfer-borrowed",
+                "artifact-borrowed",
+                borrowed_path.clone(),
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    assert!(
+        !managed_shutdown_path.exists(),
+        "runtime shutdown retained an owned artifact",
+    );
+    assert!(
+        borrowed_path.exists(),
+        "runtime shutdown deleted a borrowed source artifact",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_rejects_artifacts_over_128_mib_before_streaming_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source-oversize",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination-oversize",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination-oversize").await;
+
+    let artifact_path = temp.path().join("oversize.bundle");
+    let artifact = std::fs::File::create(&artifact_path).unwrap();
+    artifact
+        .set_len(kanna_task_transfer::runtime::MAX_TRANSFER_ARTIFACT_BYTES + 1)
+        .unwrap();
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination-oversize", "task-source")
+        .await
+        .unwrap();
+    source
+        .stage_transfer_artifact(
+            &preflight.transfer_id,
+            "artifact-oversize",
+            artifact_path,
+            false,
+        )
+        .await
+        .unwrap();
+    source
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-destination-oversize",
+                "task": { "source_task_id": "task-source" }
+            }),
+        )
+        .await
+        .unwrap();
+    let _incoming = next_incoming_transfer_request(&destination).await;
+
+    let error = destination
+        .fetch_transfer_artifact(&preflight.transfer_id, "artifact-oversize")
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("exceeds maximum size"),
+        "unexpected oversize error: {error}",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6508,6 +6769,7 @@ async fn fetch_transfer_artifact_does_not_leak_artifact_bytes_on_the_wire() {
             &preflight.transfer_id,
             "artifact-remote",
             bundle_path.clone(),
+            false,
         )
         .await
         .unwrap();
@@ -6571,6 +6833,9 @@ async fn fetch_transfer_artifact_does_not_leak_artifact_bytes_on_the_wire() {
             .write_all(response_line.as_bytes())
             .await
             .unwrap();
+        tokio::io::copy(&mut upstream_reader, &mut client_writer)
+            .await
+            .unwrap();
     });
 
     let fetched = destination
@@ -6585,6 +6850,123 @@ async fn fetch_transfer_artifact_does_not_leak_artifact_bytes_on_the_wire() {
     );
     let fetched_bytes = std::fs::read(fetched.path).unwrap();
     assert_eq!(fetched_bytes, bundle_bytes);
+    proxy.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timed_out_artifact_receive_removes_its_partial_staging_file() {
+    let temp = tempfile::tempdir().unwrap();
+
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source-timeout",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-destination-timeout", "Destination", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_millis(75)),
+    )
+    .await
+    .unwrap();
+
+    pair_peers(&source, &destination, "peer-destination-timeout").await;
+
+    let bundle_path = temp.path().join("timeout-source.bundle");
+    std::fs::write(&bundle_path, b"bundle-contents").unwrap();
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination-timeout", "task-source")
+        .await
+        .unwrap();
+    source
+        .stage_transfer_artifact(
+            &preflight.transfer_id,
+            "artifact-timeout",
+            bundle_path,
+            false,
+        )
+        .await
+        .unwrap();
+    source
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-destination-timeout",
+                "task": { "source_task_id": "task-source" }
+            }),
+        )
+        .await
+        .unwrap();
+    let _incoming = next_incoming_transfer_request(&destination).await;
+
+    let source_peer = destination
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-source-timeout")
+        .unwrap();
+    let real_endpoint = source_peer.endpoint.clone();
+    let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_port = proxy_listener.local_addr().unwrap().port();
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-source-timeout".into(),
+            display_name: "Source".into(),
+            endpoint: format!("127.0.0.1:{proxy_port}"),
+            pid: std::process::id(),
+            public_key: source_peer.public_key,
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .unwrap();
+
+    let proxy = tokio::spawn(async move {
+        let (client_stream, _) = proxy_listener.accept().await.unwrap();
+        let upstream = TcpStream::connect(real_endpoint).await.unwrap();
+        let (client_reader, mut client_writer) = client_stream.into_split();
+        let (upstream_reader, mut upstream_writer) = upstream.into_split();
+
+        let mut client_reader = BufReader::new(client_reader);
+        let mut request_line = String::new();
+        client_reader.read_line(&mut request_line).await.unwrap();
+        upstream_writer
+            .write_all(request_line.as_bytes())
+            .await
+            .unwrap();
+
+        let mut upstream_reader = BufReader::new(upstream_reader);
+        let mut response_line = String::new();
+        upstream_reader.read_line(&mut response_line).await.unwrap();
+        client_writer
+            .write_all(response_line.as_bytes())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    });
+
+    let error = destination
+        .fetch_transfer_artifact(&preflight.transfer_id, "artifact-timeout")
+        .await
+        .expect_err("stalled artifact stream should time out");
+    assert!(
+        error.to_string().contains("timed out"),
+        "unexpected stalled-stream error: {error}",
+    );
+    let staging_dir = temp
+        .path()
+        .join("artifacts")
+        .join("peer-destination-timeout")
+        .join(&preflight.transfer_id);
+    if staging_dir.exists() {
+        assert_eq!(
+            std::fs::read_dir(staging_dir).unwrap().count(),
+            0,
+            "timed-out receive retained a partial staging artifact",
+        );
+    }
     proxy.await.unwrap();
 }
 

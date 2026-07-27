@@ -44,6 +44,12 @@ impl TransferRuntime {
     }
 
     pub async fn spawn(mut config: RuntimeConfig) -> Result<Self, RuntimeError> {
+        let owned_artifact_root = config.registry_dir.join("artifacts").join(&config.peer_id);
+        match tokio::fs::remove_dir_all(&owned_artifact_root).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         let listener = TcpListener::bind((config.bind_host(), config.listen_port)).await?;
         config.listen_port = listener.local_addr()?.port();
         let identity = load_or_create_identity(&config.registry_dir, &config.peer_id)?;
@@ -884,8 +890,24 @@ impl Drop for TransferRuntime {
             pending.clear();
         }
         if let Ok(mut transfer_artifacts) = self.transfer_artifacts.try_lock() {
-            transfer_artifacts.clear();
+            for artifact in transfer_artifacts
+                .drain()
+                .flat_map(|(_, artifacts)| artifacts.into_values())
+                .filter(|artifact| artifact.owned)
+            {
+                let _ = std::fs::remove_file(artifact.path);
+            }
         }
+        // Every owned source and receiver artifact is first moved beneath this
+        // runtime-private root. Removing the root is therefore both complete
+        // and safe even if an async artifact-map task still owns the mutex
+        // while the final runtime handle is being dropped.
+        let _ = std::fs::remove_dir_all(
+            self.config
+                .registry_dir
+                .join("artifacts")
+                .join(&self.config.peer_id),
+        );
         if let Ok(mut task_snapshot) = self.task_snapshot.try_lock() {
             *task_snapshot = Value::Null;
         }

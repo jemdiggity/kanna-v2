@@ -698,6 +698,7 @@ function buildOutgoingTransferCommittedEvent() {
       transfer_id: "transfer-1",
       source_task_id: "task-source",
       destination_local_task_id: "task-imported",
+      __kannaLifecycleDeliveryId: "lifecycle-commit-1",
     },
   };
 }
@@ -707,6 +708,7 @@ function buildOutgoingTransferFinalizationRequestedEvent() {
     payload: {
       type: "outgoing_transfer_finalization_requested",
       transfer_id: "transfer-1",
+      __kannaLifecycleDeliveryId: "lifecycle-finalization-1",
     },
   };
 }
@@ -1128,6 +1130,14 @@ describe("App", () => {
       if (command === "mark_incoming_transfer_event_recorded") return null;
       if (command === "claim_transfer_event_consumer") return true;
       if (command === "release_transfer_event_consumer") return null;
+      if (command === "renew_transfer_lifecycle_event") return true;
+      if (command === "claim_transfer_lifecycle_phase") return true;
+      if (command === "acknowledge_transfer_lifecycle_event") return true;
+      if (command === "nack_transfer_lifecycle_event") return true;
+      if (command === "nack_outgoing_transfer_commit") return null;
+      if (command === "complete_outgoing_transfer_finalization") {
+        return { transferId: (args as Record<string, unknown> | undefined)?.transferId ?? "transfer-1" };
+      }
       throw new Error(`unexpected invoke: ${command}`);
     });
   });
@@ -5576,11 +5586,17 @@ describe("App", () => {
     await handler?.(buildOutgoingTransferCommittedEvent());
     await flushPromises();
 
-    expect(store.handleOutgoingTransferCommitted).toHaveBeenCalledWith({
-      transferId: "transfer-1",
-      sourceTaskId: "task-source",
-      destinationLocalTaskId: "task-imported",
-    });
+    expect(store.handleOutgoingTransferCommitted).toHaveBeenCalledWith(
+      {
+        transferId: "transfer-1",
+        sourceTaskId: "task-source",
+        destinationLocalTaskId: "task-imported",
+      },
+      expect.objectContaining({
+        deliveryId: "lifecycle-commit-1",
+        assertOwnership: expect.any(Function),
+      }),
+    );
   });
 
   it("nacks an outgoing transfer commit when delayed desktop application fails", async () => {
@@ -5596,6 +5612,7 @@ describe("App", () => {
 
     expect(invokeMock).toHaveBeenCalledWith("nack_outgoing_transfer_commit", {
       transferId: "transfer-1",
+      deliveryId: "lifecycle-commit-1",
     });
     errorSpy.mockRestore();
   });
@@ -5611,12 +5628,19 @@ describe("App", () => {
     await handler?.(buildOutgoingTransferFinalizationRequestedEvent());
     await flushPromises();
 
-    expect(store.finalizeOutgoingTransfer).toHaveBeenCalledWith("transfer-1");
+    expect(store.finalizeOutgoingTransfer).toHaveBeenCalledWith(
+      "transfer-1",
+      expect.objectContaining({
+        deliveryId: "lifecycle-finalization-1",
+        assertOwnership: expect.any(Function),
+      }),
+    );
     expect(invokeMock).toHaveBeenCalledWith("complete_outgoing_transfer_finalization", {
       transferId: "transfer-1",
       payload: expect.any(Object),
       finalizedCleanly: true,
       error: null,
+      deliveryId: "lifecycle-finalization-1",
     });
   });
 

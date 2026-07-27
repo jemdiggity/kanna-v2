@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -28,6 +28,7 @@ struct PendingLifecycleEvent {
     leased_to: Option<String>,
     lease_expires_at: Option<Instant>,
     recovery_required: bool,
+    claimed_phases: HashSet<String>,
 }
 
 const MAX_PENDING_LIFECYCLE_EVENTS: usize = 256;
@@ -92,6 +93,7 @@ impl TransferEventConsumer {
             leased_to: None,
             lease_expires_at: None,
             recovery_required: false,
+            claimed_phases: HashSet::new(),
         });
         self.pending_bytes += bytes;
         while let Some(label) = self.ready_labels.front().cloned() {
@@ -181,6 +183,21 @@ impl TransferEventConsumer {
         };
         event.lease_expires_at = Some(Instant::now() + LIFECYCLE_EVENT_LEASE);
         true
+    }
+
+    fn claim_phase(&mut self, label: &str, delivery_id: &str, phase: &str) -> Result<bool, String> {
+        let event = self
+            .pending
+            .iter_mut()
+            .find(|event| event.delivery_id == delivery_id)
+            .ok_or_else(|| format!("unknown transfer lifecycle delivery {delivery_id}"))?;
+        if event.leased_to.as_deref() != Some(label) {
+            return Err(format!(
+                "transfer lifecycle delivery {delivery_id} is no longer owned by {label}",
+            ));
+        }
+        event.lease_expires_at = Some(Instant::now() + LIFECYCLE_EVENT_LEASE);
+        Ok(event.claimed_phases.insert(phase.to_string()))
     }
 }
 
@@ -659,6 +676,7 @@ impl TransferSidecarClient {
         transfer_id: String,
         artifact_id: String,
         path: String,
+        owned: bool,
     ) -> Result<Value, String> {
         let request_id = self.next_request_id("stage-artifact");
         let response = self
@@ -669,6 +687,7 @@ impl TransferSidecarClient {
                     "transfer_id": transfer_id,
                     "artifact_id": artifact_id,
                     "path": path,
+                    "owned": owned,
                 }),
                 &request_id,
             )
@@ -1361,6 +1380,35 @@ pub fn renew_transfer_lifecycle_event_in_state(
     consumer.renew(label, delivery_id)
 }
 
+pub fn require_transfer_lifecycle_event_owner_in_state(
+    state: &TransferEventConsumerState,
+    label: &str,
+    delivery_id: &str,
+) -> Result<(), String> {
+    if renew_transfer_lifecycle_event_in_state(state, label, delivery_id) {
+        Ok(())
+    } else {
+        Err(format!(
+            "transfer lifecycle delivery {delivery_id} is no longer owned by {label}",
+        ))
+    }
+}
+
+pub fn claim_transfer_lifecycle_phase_in_state(
+    state: &TransferEventConsumerState,
+    label: &str,
+    delivery_id: &str,
+    phase: &str,
+) -> Result<bool, String> {
+    if phase.trim().is_empty() {
+        return Err("transfer lifecycle phase must not be empty".into());
+    }
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .claim_phase(label, delivery_id, phase)
+}
+
 #[cfg(test)]
 fn build_transfer_sidecar_env(
     app_data_dir: &std::path::Path,
@@ -2039,6 +2087,51 @@ mod tests {
                 > Instant::now() + Duration::from_secs(20)
         );
         assert!(!consumer.renew("standby", &delivery_id));
+    }
+
+    #[test]
+    fn mutating_lifecycle_work_rejects_a_released_delivery_owner() {
+        let state = TransferEventConsumerState::default();
+        let delivery_id = {
+            let mut consumer = state.lock().unwrap();
+            assert!(consumer.claim("owner"));
+            consumer
+                .dispatch_with("outgoing-transfer-committed", json!({}), |_, _, _| Ok(()))
+                .unwrap();
+            consumer.pending[0].delivery_id.clone()
+        };
+
+        assert!(
+            require_transfer_lifecycle_event_owner_in_state(&state, "owner", &delivery_id,).is_ok()
+        );
+        assert!(claim_transfer_lifecycle_phase_in_state(
+            &state,
+            "owner",
+            &delivery_id,
+            "pty-finalization-signal",
+        )
+        .unwrap());
+        {
+            let mut consumer = state.lock().unwrap();
+            consumer.release("owner");
+            assert!(consumer.claim("replacement"));
+            consumer
+                .flush_pending_to("replacement", |_, _, _| Ok(()))
+                .unwrap();
+        }
+        let error = require_transfer_lifecycle_event_owner_in_state(&state, "owner", &delivery_id)
+            .unwrap_err();
+        assert!(error.contains("no longer owned"));
+        assert!(
+            !claim_transfer_lifecycle_phase_in_state(
+                &state,
+                "replacement",
+                &delivery_id,
+                "pty-finalization-signal",
+            )
+            .unwrap(),
+            "redelivery repeated a single-flight finalization phase",
+        );
     }
 
     #[test]

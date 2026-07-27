@@ -78,7 +78,11 @@ export interface DesktopServerClientHandlersForTests {
     recovery: boolean,
   ) => MaybePromise<boolean>;
   renewIncomingTransferClaim?: (transferId: string, ownerToken: string) => MaybePromise<boolean>;
-  failPendingIncomingTransfer?: (transferId: string, reason: string) => MaybePromise<boolean>;
+  failPendingIncomingTransfer?: (
+    transferId: string,
+    reason: string,
+    ownerToken?: string,
+  ) => MaybePromise<boolean>;
   fetchClosedTaskIdentities?: () => MaybePromise<ClosedTaskIdentity[]>;
   patchTask?: (taskId: string, input: PatchDesktopTaskInput) => MaybePromise<void>;
   setTaskParent?: (taskId: string, parentTaskId: string | null) => MaybePromise<void>;
@@ -899,15 +903,19 @@ export async function renewIncomingTransferClaim(
   return response.updated;
 }
 
-export async function failPendingIncomingTransfer(transferId: string, reason: string): Promise<boolean> {
+export async function failPendingIncomingTransfer(
+  transferId: string,
+  reason: string,
+  ownerToken?: string,
+): Promise<boolean> {
   if (clientHandlersForTests?.failPendingIncomingTransfer) {
-    return await clientHandlersForTests.failPendingIncomingTransfer(transferId, reason);
+    return await clientHandlersForTests.failPendingIncomingTransfer(transferId, reason, ownerToken);
   }
   const response = await requestJson<{ updated: boolean }>(
     `/v1/transfers/${encodeURIComponent(transferId)}/actions/fail`,
     {
       method: "POST",
-      body: { reason },
+      body: { reason, claimOwnerToken: ownerToken },
     },
   );
   return response.updated;

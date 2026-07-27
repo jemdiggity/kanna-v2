@@ -21,13 +21,12 @@ use super::state::{
 use super::utils::{
     extract_request_id, load_or_create_identity, local_capabilities_json,
     pairing_verification_code, peer_store, prune_outgoing_transfers, prune_transfer_artifacts,
-    supports_authenticated_task_requests, write_json_line,
+    remove_owned_artifact_paths, supports_authenticated_task_requests, take_transfer_artifacts,
+    write_json_line,
 };
-use crate::crypto::{open_json, parse_public_key, seal_json};
+use crate::crypto::{open_json, parse_public_key, seal_json, StreamSealer};
 use crate::peer_store::PeerRecord;
 use crate::protocol::{PairingPeer, PeerRequest, PeerResponse};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
 use chrono::Utc;
 use rand_core::{OsRng, RngCore};
 use serde::de::DeserializeOwned;
@@ -36,7 +35,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex};
 
@@ -693,45 +692,76 @@ async fn handle_connection(
                         RuntimeError::Protocol("artifact fetch request missing artifact_id".into())
                     })?;
 
-                let mut artifacts = context.transfer_artifacts.lock().await;
-                prune_transfer_artifacts(&mut artifacts, context.pending_transfer_ttl);
-                match artifacts
+                let (artifact, expired_artifacts) = {
+                    let mut artifacts = context.transfer_artifacts.lock().await;
+                    let expired =
+                        prune_transfer_artifacts(&mut artifacts, context.pending_transfer_ttl);
+                    let artifact = artifacts
                     .get(&transfer_id)
                     .and_then(|artifacts| artifacts.get(artifact_id))
-                    .cloned()
-                {
-                    Some(artifact) => {
-                        let filename = artifact
-                            .path
-                            .file_name()
-                            .and_then(|value| value.to_str())
-                            .unwrap_or("artifact")
-                            .to_string();
-                        let payload_b64 = URL_SAFE_NO_PAD.encode(std::fs::read(&artifact.path)?);
-                        let sealed_payload = seal_json(
-                            &identity,
-                            &requester_public_key,
-                            &serde_json::json!({
-                                "artifact_id": artifact_id,
-                                "filename": filename,
-                                "payload_b64": payload_b64,
-                            }),
-                        )?;
-                        Ok::<PeerResponse, RuntimeError>(PeerResponse::FetchTransferArtifact {
-                            request_id: request_id.clone(),
-                            transfer_id,
-                            sealed_payload,
-                        })
-                    }
-                    None => Err(RuntimeError::Protocol(format!(
+                    .cloned();
+                    (artifact, expired)
+                };
+                remove_owned_artifact_paths(expired_artifacts).await;
+                let artifact = artifact
+                .ok_or_else(|| RuntimeError::Protocol(format!(
                         "missing transfer artifact {} for transfer {}",
                         artifact_id, transfer_id
-                    ))),
+                    )))?;
+                let metadata = tokio::fs::metadata(&artifact.path).await?;
+                if metadata.len() > super::MAX_TRANSFER_ARTIFACT_BYTES {
+                    return Err(RuntimeError::Protocol(format!(
+                        "transfer artifact exceeds maximum size of {} bytes",
+                        super::MAX_TRANSFER_ARTIFACT_BYTES,
+                    )));
                 }
+                let filename = artifact
+                    .path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("artifact")
+                    .to_string();
+                let sealed_payload = seal_json(
+                    &identity,
+                    &requester_public_key,
+                    &serde_json::json!({
+                        "artifact_id": artifact_id,
+                        "filename": filename,
+                        "plaintext_size": metadata.len(),
+                    }),
+                )?;
+                let mut sealer = StreamSealer::new(&identity, &requester_public_key)?;
+                write_json_line(
+                    &mut stream,
+                    &PeerResponse::FetchTransferArtifact {
+                        request_id: request_id.clone(),
+                        transfer_id,
+                        sealed_payload,
+                        stream_header: sealer.header(),
+                    },
+                )
+                .await?;
+
+                let mut file = tokio::fs::File::open(&artifact.path).await?;
+                let mut buffer = vec![0u8; super::TRANSFER_ARTIFACT_CHUNK_BYTES];
+                loop {
+                    let read = file.read(&mut buffer).await?;
+                    if read == 0 {
+                        break;
+                    }
+                    write_artifact_chunk(
+                        &mut stream,
+                        &sealer.seal_chunk(&buffer[..read], false)?,
+                        false,
+                    )
+                    .await?;
+                }
+                write_artifact_chunk(&mut stream, &sealer.seal_chunk(&[], true)?, true).await?;
+                Ok::<(), RuntimeError>(())
             }
             .await
             {
-                Ok(response) => response,
+                Ok(()) => return Ok(()),
                 Err(error) => PeerResponse::Error {
                     request_id,
                     message: error.to_string(),
@@ -875,6 +905,11 @@ async fn handle_connection(
                     .lock()
                     .await
                     .remove(&transfer_id);
+                let owned_artifacts = {
+                    let mut artifacts = context.transfer_artifacts.lock().await;
+                    take_transfer_artifacts(&mut artifacts, &transfer_id)
+                };
+                remove_owned_artifact_paths(owned_artifacts).await;
                 receipts.insert(transfer_id.clone(), receipt);
                 receipts
                     .get_mut(&transfer_id)
@@ -1149,6 +1184,19 @@ async fn handle_connection(
     };
 
     write_json_line(&mut stream, &response).await?;
+    Ok(())
+}
+
+async fn write_artifact_chunk(
+    stream: &mut TcpStream,
+    ciphertext: &[u8],
+    final_chunk: bool,
+) -> Result<(), RuntimeError> {
+    let length = u32::try_from(ciphertext.len())
+        .map_err(|_| RuntimeError::Protocol("artifact chunk length overflow".into()))?;
+    stream.write_u8(u8::from(final_chunk)).await?;
+    stream.write_u32(length).await?;
+    stream.write_all(ciphertext).await?;
     Ok(())
 }
 

@@ -192,6 +192,45 @@ describe("useAppTaskTransfer", () => {
     expect(failPending).not.toHaveBeenCalled();
   });
 
+  it("fences recovery failure and cleanup with the claim token after a takeover", async () => {
+    const failPending = vi.fn(async () => false);
+    setDesktopServerClientHandlersForTests({
+      fetchIncomingTransferCleanupCandidates: async () => [],
+      fetchPendingIncomingTransfers: async () => [{
+        id: "transfer-taken-over",
+        status: "claimed",
+        source_peer_id: "peer-source",
+        source_task_id: "task-source",
+        local_task_id: null,
+        payload_json: JSON.stringify({
+          task: { source_task_id: "task-source" },
+          repo: { mode: "reuse-local" },
+        }),
+      }],
+      claimPendingIncomingTransfer: async () => true,
+      renewIncomingTransferClaim: async () => true,
+      failPendingIncomingTransfer: failPending,
+    });
+    const { controller, store } = createController();
+    store.approveIncomingTransfer.mockRejectedValue(new Error("materialization failed"));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await controller.importPendingIncomingTransfers();
+
+    const claimToken = store.approveIncomingTransfer.mock.calls[0]?.[1];
+    expect(claimToken).toEqual(expect.any(String));
+    expect(failPending).toHaveBeenCalledWith(
+      "transfer-taken-over",
+      "materialization failed",
+      claimToken,
+    );
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "mark_incoming_transfer_ack_completed",
+      expect.anything(),
+    );
+    warnSpy.mockRestore();
+  });
+
   it("offers same-account cloud machines without requiring LAN pairing", async () => {
     const { controller } = createController([cloudMachine()]);
 

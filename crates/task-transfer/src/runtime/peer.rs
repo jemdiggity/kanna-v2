@@ -8,16 +8,15 @@ use super::utils::{
     ensure_peer_is_trusted_for, parse_peer_response_line, peer_store, prune_transfer_artifacts,
     sanitize_artifact_filename, supports_authenticated_task_requests, write_json_line,
 };
+use crate::crypto::{open_json, StreamOpener};
 use crate::peer_store::PeerRecord;
 use crate::protocol::DiscoveredPeer;
 use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 
@@ -342,46 +341,203 @@ impl TransferRuntime {
         artifact_id: &str,
     ) -> Option<PathBuf> {
         let mut transfer_artifacts = self.transfer_artifacts.lock().await;
-        prune_transfer_artifacts(&mut transfer_artifacts, self.config.pending_transfer_ttl);
-        transfer_artifacts
+        let expired =
+            prune_transfer_artifacts(&mut transfer_artifacts, self.config.pending_transfer_ttl);
+        let path = transfer_artifacts
             .get(transfer_id)
             .and_then(|artifacts| artifacts.get(artifact_id))
-            .map(|artifact| artifact.path.clone())
+            .map(|artifact| artifact.path.clone());
+        drop(transfer_artifacts);
+        super::utils::remove_owned_artifact_paths(expired).await;
+        path
     }
 
-    pub(super) async fn materialize_transfer_artifact(
+    pub(super) async fn fetch_peer_artifact_stream(
         &self,
+        peer: &PeerRegistryEntry,
+        request: PeerRequest,
+        request_id: &str,
         transfer_id: &str,
         artifact_id: &str,
-        filename: &str,
-        payload_b64: &str,
+        source_public_key: &x25519_dalek::PublicKey,
     ) -> Result<PathBuf, RuntimeError> {
-        let artifact_dir = self.config.registry_dir.join("artifacts").join(transfer_id);
-        std::fs::create_dir_all(&artifact_dir)?;
+        let _permit = Arc::clone(&self.artifact_peer_request_permits)
+            .try_acquire_owned()
+            .map_err(|_| {
+                RuntimeError::Backpressure("artifact peer request capacity is exhausted".into())
+            })?;
+        let permitted_size = super::MAX_TRANSFER_ARTIFACT_BYTES;
+        let mut partial_path_to_cleanup = None;
+        let fetch_result = tokio::time::timeout(self.config.peer_request_timeout, async {
+            let mut stream = TcpStream::connect(&peer.endpoint).await?;
+            write_json_line(&mut stream, &request).await?;
+            let mut reader = BufReader::new(stream);
+            let mut response_line = String::with_capacity(4096);
+            let read = {
+                let mut bounded =
+                    (&mut reader).take(self.config.max_peer_response_bytes as u64 + 1);
+                bounded.read_line(&mut response_line).await?
+            };
+            if read == 0
+                || read > self.config.max_peer_response_bytes
+                || !response_line.ends_with('\n')
+            {
+                return Err(RuntimeError::Protocol(
+                    "artifact response header exceeded the peer response frame limit".into(),
+                ));
+            }
+            let response = parse_peer_response_line(
+                &peer.peer_id,
+                "artifact fetch",
+                &response_line,
+            )?;
+            let (sealed_payload, stream_header) = match response {
+                PeerResponse::FetchTransferArtifact {
+                    request_id: response_request_id,
+                    transfer_id: response_transfer_id,
+                    sealed_payload,
+                    stream_header,
+                } => {
+                    if response_request_id != request_id {
+                        return Err(RuntimeError::Protocol(format!(
+                            "mismatched request id in artifact fetch response: expected {request_id}, got {response_request_id}",
+                        )));
+                    }
+                    if response_transfer_id != transfer_id {
+                        return Err(RuntimeError::Protocol(format!(
+                            "mismatched transfer id in artifact fetch response: expected {transfer_id}, got {response_transfer_id}",
+                        )));
+                    }
+                    (sealed_payload, stream_header)
+                }
+                PeerResponse::Error { message, .. } => {
+                    return Err(RuntimeError::Protocol(message));
+                }
+                other => {
+                    return Err(RuntimeError::Protocol(format!(
+                        "unexpected response while fetching transfer artifact: {other:?}",
+                    )));
+                }
+            };
 
-        let destination_path = artifact_dir.join(format!(
-            "{}-{}",
-            artifact_id,
-            sanitize_artifact_filename(filename)
-        ));
-        let payload = URL_SAFE_NO_PAD.decode(payload_b64).map_err(|error| {
-            RuntimeError::Protocol(format!("invalid artifact payload: {}", error))
-        })?;
-        std::fs::write(&destination_path, payload)?;
+            let metadata = open_json(&self.identity, source_public_key, &sealed_payload)?;
+            let response_artifact_id = metadata
+                .get("artifact_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| RuntimeError::Protocol(
+                    "artifact fetch response missing artifact_id".into(),
+                ))?;
+            if response_artifact_id != artifact_id {
+                return Err(RuntimeError::Protocol(format!(
+                    "mismatched artifact id in artifact fetch response: expected {artifact_id}, got {response_artifact_id}",
+                )));
+            }
+            let filename = metadata
+                .get("filename")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| RuntimeError::Protocol(
+                    "artifact fetch response missing filename".into(),
+                ))?;
+            let plaintext_size = metadata
+                .get("plaintext_size")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| RuntimeError::Protocol(
+                    "artifact fetch response missing plaintext_size".into(),
+                ))?;
+            if plaintext_size > permitted_size {
+                return Err(RuntimeError::Protocol(format!(
+                    "transfer artifact exceeds maximum size of {permitted_size} bytes",
+                )));
+            }
+
+            let artifact_dir = self
+                .config
+                .registry_dir
+                .join("artifacts")
+                .join(&self.config.peer_id)
+                .join(transfer_id);
+            tokio::fs::create_dir_all(&artifact_dir).await?;
+            let safe_artifact_id = sanitize_artifact_filename(artifact_id);
+            let destination_path = artifact_dir.join(format!(
+                "{}-{}",
+                safe_artifact_id,
+                sanitize_artifact_filename(filename),
+            ));
+            let partial_path = artifact_dir.join(format!(
+                ".{}-{}.part",
+                safe_artifact_id, self.request_namespace,
+            ));
+            partial_path_to_cleanup = Some(partial_path.clone());
+            let mut file = tokio::fs::File::create(&partial_path).await?;
+            let mut opener =
+                StreamOpener::new(&self.identity, source_public_key, &stream_header)?;
+            let mut sequence = 0u64;
+            let mut written = 0u64;
+            loop {
+                let final_chunk = reader.read_u8().await? != 0;
+                let ciphertext_len = reader.read_u32().await? as usize;
+                let maximum_ciphertext = super::TRANSFER_ARTIFACT_CHUNK_BYTES + 16;
+                if ciphertext_len > maximum_ciphertext {
+                    return Err(RuntimeError::Protocol(format!(
+                        "artifact chunk exceeds maximum encrypted size of {maximum_ciphertext} bytes",
+                    )));
+                }
+                let mut ciphertext = vec![0u8; ciphertext_len];
+                reader.read_exact(&mut ciphertext).await?;
+                let plaintext = opener.open_chunk(sequence, &ciphertext, final_chunk)?;
+                sequence = sequence.checked_add(1).ok_or_else(|| {
+                    RuntimeError::Protocol("artifact chunk sequence exhausted".into())
+                })?;
+                if final_chunk {
+                    if !plaintext.is_empty() || written != plaintext_size {
+                        return Err(RuntimeError::Protocol(
+                            "artifact stream ended with a size mismatch".into(),
+                        ));
+                    }
+                    break;
+                }
+                written = written.checked_add(plaintext.len() as u64).ok_or_else(|| {
+                    RuntimeError::Protocol("artifact plaintext size overflow".into())
+                })?;
+                if written > plaintext_size || written > permitted_size {
+                    return Err(RuntimeError::Protocol(
+                        "artifact stream exceeded its declared size".into(),
+                    ));
+                }
+                file.write_all(&plaintext).await?;
+            }
+            file.flush().await?;
+            tokio::fs::rename(&partial_path, &destination_path).await?;
+            partial_path_to_cleanup = None;
+            Ok::<PathBuf, RuntimeError>(destination_path)
+        })
+        .await;
+        if !matches!(&fetch_result, Ok(Ok(_))) {
+            if let Some(partial_path) = partial_path_to_cleanup.take() {
+                let _ = tokio::fs::remove_file(partial_path).await;
+            }
+        }
+        let destination = fetch_result.map_err(|_| RuntimeError::PeerRequestTimeout {
+            peer_id: peer.peer_id.clone(),
+            timeout_ms: self.config.peer_request_timeout.as_millis(),
+        })??;
 
         let mut transfer_artifacts = self.transfer_artifacts.lock().await;
-        prune_transfer_artifacts(&mut transfer_artifacts, self.config.pending_transfer_ttl);
+        let expired =
+            prune_transfer_artifacts(&mut transfer_artifacts, self.config.pending_transfer_ttl);
         transfer_artifacts
             .entry(transfer_id.to_owned())
             .or_default()
             .insert(
                 artifact_id.to_owned(),
                 TransferArtifactRecord {
-                    path: destination_path.clone(),
+                    path: destination.clone(),
                     created_at: Instant::now(),
+                    owned: true,
                 },
             );
-
-        Ok(destination_path)
+        drop(transfer_artifacts);
+        super::utils::remove_owned_artifact_paths(expired).await;
+        Ok(destination)
     }
 }

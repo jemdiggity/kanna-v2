@@ -335,6 +335,7 @@ pub fn run() {
             commands::transfer::acknowledge_transfer_lifecycle_event,
             commands::transfer::nack_transfer_lifecycle_event,
             commands::transfer::renew_transfer_lifecycle_event,
+            commands::transfer::claim_transfer_lifecycle_phase,
             commands::transfer::finalize_outgoing_transfer,
             commands::transfer::complete_outgoing_transfer_finalization,
             commands::transfer::acknowledge_incoming_transfer_commit,

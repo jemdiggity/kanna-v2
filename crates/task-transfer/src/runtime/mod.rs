@@ -25,3 +25,6 @@ pub use events::{
 };
 pub use external_peers::{ExternalPeer, PeerRoutes, TransferTransport};
 pub use state::{StagedTransferArtifact, TransferRuntime};
+
+pub const MAX_TRANSFER_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
+pub(super) const TRANSFER_ARTIFACT_CHUNK_BYTES: usize = 64 * 1024;

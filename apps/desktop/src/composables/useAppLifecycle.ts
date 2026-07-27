@@ -132,6 +132,51 @@ function renewLifecycleDeliveryWhileHandling(event: unknown): () => void {
   return () => window.clearInterval(interval);
 }
 
+function lifecycleDeliveryOwnership(event: unknown): {
+  deliveryId: string;
+  assertOwnership: (phase: string) => Promise<void>;
+  claimPhase: (phase: string) => Promise<boolean>;
+  stop: () => void;
+} {
+  const deliveryId = lifecycleDeliveryId(event);
+  if (!deliveryId) {
+    throw new Error("transfer lifecycle event is missing its delivery ownership token");
+  }
+  let lost = false;
+  const renew = async (): Promise<boolean> => {
+    if (lost) return false;
+    const owned = await invoke<boolean>("renew_transfer_lifecycle_event", { deliveryId });
+    if (!owned) lost = true;
+    return owned;
+  };
+  const interval = window.setInterval(() => {
+    void renew().catch((error: unknown) => {
+      lost = true;
+      console.error("[App] failed to renew transfer lifecycle delivery:", error);
+    });
+  }, 10_000);
+  return {
+    deliveryId,
+    async assertOwnership(phase: string) {
+      if (lost || !await renew()) {
+        throw new Error(`lifecycle delivery ownership was lost before ${phase}`);
+      }
+    },
+    async claimPhase(phase: string) {
+      if (lost) {
+        throw new Error(`lifecycle delivery ownership was lost before ${phase}`);
+      }
+      return await invoke<boolean>("claim_transfer_lifecycle_phase", {
+        deliveryId,
+        phase,
+      });
+    },
+    stop() {
+      window.clearInterval(interval);
+    },
+  };
+}
+
 export async function handleTaskPullRequested(
   request: TaskPullRequestedEvent,
   store: Pick<ReturnType<typeof useKannaStore>, "items" | "pushTaskToPeer">,
@@ -590,23 +635,26 @@ export function useAppLifecycle({
       const unlistenOutgoingTransferCommitted = await listen("outgoing-transfer-committed", async (event: unknown) => {
         let transferId: string | null = null;
         let succeeded = false;
-        const stopRenewing = renewLifecycleDeliveryWhileHandling(event);
+        const ownership = lifecycleDeliveryOwnership(event);
         try {
           const committed = parseOutgoingTransferCommittedEvent(eventPayload(event));
           transferId = committed.transferId;
-          await store.handleOutgoingTransferCommitted(committed);
+          await store.handleOutgoingTransferCommitted(committed, ownership);
           succeeded = true;
         } catch (e: unknown) {
           console.error("[App] failed to handle outgoing transfer commit acknowledgment:", e);
           if (transferId) {
             try {
-              await invoke("nack_outgoing_transfer_commit", { transferId });
+              await invoke("nack_outgoing_transfer_commit", {
+                transferId,
+                deliveryId: ownership.deliveryId,
+              });
             } catch (nackError: unknown) {
               console.error("[App] failed to nack outgoing transfer commit acknowledgment:", nackError);
             }
           }
         } finally {
-          stopRenewing();
+          ownership.stop();
           await settleLifecycleDelivery(event, succeeded).catch((error: unknown) => {
             console.error("[App] failed to settle outgoing commit lifecycle delivery:", error);
           });
@@ -622,29 +670,34 @@ export function useAppLifecycle({
       const unlistenOutgoingTransferFinalizationRequested = await listen("outgoing-transfer-finalization-requested", async (event: unknown) => {
         const request = parseOutgoingTransferFinalizationRequestEvent(eventPayload(event));
         let succeeded = false;
-        const stopRenewing = renewLifecycleDeliveryWhileHandling(event);
+        const ownership = lifecycleDeliveryOwnership(event);
         try {
-          const finalized = await store.finalizeOutgoingTransfer(request.transferId);
+          const finalized = await store.finalizeOutgoingTransfer(request.transferId, ownership);
+          await ownership.assertOwnership("finalization completion");
           await invoke("complete_outgoing_transfer_finalization", {
             transferId: request.transferId,
             payload: finalized.payload,
             finalizedCleanly: finalized.finalizedCleanly,
             error: null,
+            deliveryId: ownership.deliveryId,
           });
           succeeded = true;
         } catch (error: unknown) {
           console.error("[App] failed to finalize outgoing transfer:", error);
-          succeeded = await invoke("complete_outgoing_transfer_finalization", {
+          succeeded = await ownership.assertOwnership("finalization failure report")
+            .then(() => invoke("complete_outgoing_transfer_finalization", {
             transferId: request.transferId,
             payload: null,
             finalizedCleanly: false,
             error: error instanceof Error ? error.message : String(error),
-          }).then(() => true).catch((invokeError: unknown) => {
+            deliveryId: ownership.deliveryId,
+          }))
+            .then(() => true).catch((invokeError: unknown) => {
             console.error("[App] failed to report outgoing transfer finalization error:", invokeError);
             return false;
           });
         } finally {
-          stopRenewing();
+          ownership.stop();
           await settleLifecycleDelivery(event, succeeded).catch((error: unknown) => {
             console.error("[App] failed to settle finalization lifecycle delivery:", error);
           });

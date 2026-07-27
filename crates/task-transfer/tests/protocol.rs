@@ -553,6 +553,7 @@ fn transfer_artifact_control_messages_roundtrip() {
         transfer_id: "transfer-1".into(),
         artifact_id: "artifact-1".into(),
         path: "/tmp/transfer-1.bundle".into(),
+        owned: true,
     });
 
     assert_roundtrip(ControlRequest::FetchTransferArtifact {
@@ -585,6 +586,11 @@ fn transfer_artifact_control_messages_roundtrip() {
         request_id: "req-peer-fetch".into(),
         transfer_id: "transfer-1".into(),
         sealed_payload: "sealed-response".into(),
+        stream_header: kanna_task_transfer::crypto::SealedStreamHeader {
+            version: 1,
+            ephemeral_public_key: "ephemeral-key".into(),
+            nonce_prefix_b64: "nonce-prefix".into(),
+        },
     });
 
     assert_roundtrip(ControlRequest::FinalizeOutgoingTransfer {
@@ -948,6 +954,11 @@ fn remaining_protocol_variants_use_expected_json_shapes() {
         request_id: "req-14".into(),
         transfer_id: "transfer-13".into(),
         sealed_payload: "sealed-response".into(),
+        stream_header: kanna_task_transfer::crypto::SealedStreamHeader {
+            version: 1,
+            ephemeral_public_key: "ephemeral-key".into(),
+            nonce_prefix_b64: "nonce-prefix".into(),
+        },
     };
     assert_eq!(
         serde_json::to_value(&peer_fetch_artifact_response).unwrap(),
@@ -956,6 +967,11 @@ fn remaining_protocol_variants_use_expected_json_shapes() {
             "request_id": "req-14",
             "transfer_id": "transfer-13",
             "sealed_payload": "sealed-response",
+            "stream_header": {
+                "version": 1,
+                "ephemeral_public_key": "ephemeral-key",
+                "nonce_prefix_b64": "nonce-prefix",
+            },
         })
     );
 
@@ -977,6 +993,7 @@ fn remaining_protocol_variants_use_expected_json_shapes() {
         transfer_id: "transfer-13".into(),
         artifact_id: "artifact-13".into(),
         path: "/tmp/transfer-13.bundle".into(),
+        owned: true,
     };
     assert_eq!(
         serde_json::to_value(&stage_artifact_request).unwrap(),
@@ -986,6 +1003,7 @@ fn remaining_protocol_variants_use_expected_json_shapes() {
             "transfer_id": "transfer-13",
             "artifact_id": "artifact-13",
             "path": "/tmp/transfer-13.bundle",
+            "owned": true,
         })
     );
 

@@ -338,12 +338,31 @@ impl Db {
         &self,
         transfer_id: &str,
         reason: &str,
+        claim_owner_token: Option<&str>,
     ) -> Result<bool, rusqlite::Error> {
         let rows_affected = self.conn.execute(
             "UPDATE task_transfer
              SET status = 'failed', completed_at = datetime('now'), error = ?
-             WHERE id = ? AND direction = 'incoming' AND status IN ('pending', 'claimed')",
-            (reason, transfer_id),
+             WHERE id = ? AND direction = 'incoming'
+               AND (
+                 (
+                   ? IS NULL
+                   AND status = 'pending'
+                   AND claim_owner_token IS NULL
+                 )
+                 OR (
+                   ? IS NOT NULL
+                   AND status = 'claimed'
+                   AND claim_owner_token = ?
+                 )
+               )",
+            (
+                reason,
+                transfer_id,
+                claim_owner_token,
+                claim_owner_token,
+                claim_owner_token,
+            ),
         )?;
         Ok(rows_affected == 1)
     }

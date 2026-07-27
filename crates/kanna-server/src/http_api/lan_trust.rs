@@ -25,6 +25,12 @@ pub(super) struct TrustedLanDeviceAccess;
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PrivilegedTaskAccess;
 
+/// Authority reserved for the desktop process talking to its own real HTTP
+/// listener. Unlike ordinary privileged controls, paired LAN devices and
+/// authenticated tunnels cannot satisfy this extractor.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DesktopLocalAccess;
+
 impl FromRequestParts<Arc<AppState>> for PrivilegedTaskAccess {
     type Rejection = (StatusCode, String);
 
@@ -33,6 +39,28 @@ impl FromRequestParts<Arc<AppState>> for PrivilegedTaskAccess {
         _state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         privileged_task_access(&parts.extensions)
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for DesktopLocalAccess {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        if parts.extensions.get::<TunneledHttpInvoke>().is_none()
+            && parts
+                .extensions
+                .get::<ConnectInfo<std::net::SocketAddr>>()
+                .is_some_and(|ConnectInfo(peer)| peer.ip().is_loopback())
+        {
+            return Ok(Self);
+        }
+        Err((
+            StatusCode::UNAUTHORIZED,
+            "control requires a direct desktop loopback connection".into(),
+        ))
     }
 }
 
@@ -75,6 +103,9 @@ pub(super) async fn require_privileged_task_access(request: Request<Body>, next:
 }
 
 fn is_privileged_task_route(method: &axum::http::Method, path: &str) -> bool {
+    if path == "/v1/cloud/relay/actions/reconnect" {
+        return method != axum::http::Method::OPTIONS;
+    }
     if path == "/v1/transfers" || path.starts_with("/v1/transfers/") {
         return method != axum::http::Method::OPTIONS;
     }

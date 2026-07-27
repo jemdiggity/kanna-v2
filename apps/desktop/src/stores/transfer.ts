@@ -65,6 +65,12 @@ export interface IncomingTransferOwnership {
   assertOwnership?: (phase: string) => Promise<boolean>;
 }
 
+export interface TransferLifecycleOwnership {
+  deliveryId?: string;
+  assertOwnership?: (phase: string) => Promise<void>;
+  claimPhase?: (phase: string) => Promise<boolean>;
+}
+
 export interface TransferApi {
   pushTaskToPeer: (
     taskId: string,
@@ -72,14 +78,20 @@ export interface TransferApi {
     options?: PushTaskTransferOptions,
   ) => Promise<void>;
   recordIncomingTransfer: (request: IncomingTransferRequest) => Promise<void>;
-  finalizeOutgoingTransfer: (transferId: string) => Promise<FinalizedOutgoingTransferResult>;
+  finalizeOutgoingTransfer: (
+    transferId: string,
+    ownership?: TransferLifecycleOwnership,
+  ) => Promise<FinalizedOutgoingTransferResult>;
   approveIncomingTransfer: (
     transferId: string,
     ownerToken?: string,
     ownership?: IncomingTransferOwnership,
   ) => Promise<string>;
   rejectIncomingTransfer: (transferId: string) => Promise<void>;
-  handleOutgoingTransferCommitted: (event: OutgoingTransferCommittedEvent) => Promise<void>;
+  handleOutgoingTransferCommitted: (
+    event: OutgoingTransferCommittedEvent,
+    ownership?: TransferLifecycleOwnership,
+  ) => Promise<void>;
 }
 
 function isDuplicateTaskTransferError(error: unknown): boolean {
@@ -153,8 +165,15 @@ async function destinationTaskIdForTransfer(transferId: string): Promise<string>
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function buildTransferArchivePath(transferId: string, suffix: string): string {
-  return `/tmp/kanna-transfer-${transferId}-${suffix}.tar.gz`;
+function buildTransferArchivePath(
+  transferId: string,
+  suffix: string,
+  deliveryId?: string,
+): string {
+  const deliverySuffix = deliveryId
+    ? `-${deliveryId.replace(/[^a-zA-Z0-9_-]/g, "-")}`
+    : "";
+  return `/tmp/kanna-transfer-${transferId}-${suffix}${deliverySuffix}.tar.gz`;
 }
 
 function normalizeTransferRefName(ref: string | null | undefined): string | null {
@@ -267,24 +286,41 @@ async function stageSessionArchiveArtifact(
   repoPath: string,
   home: string,
   config: SessionArchiveConfig,
+  ownership?: TransferLifecycleOwnership,
 ): Promise<TransferArtifactPayload[]> {
   const sourceRoot = `${home}/${config.sourceRootRelativePath}`;
   const sourceDir = `${sourceRoot}/${sessionId}`;
   const exists = await fileExistsSafe(sourceDir);
   if (!exists) return [];
 
-  const archivePath = buildTransferArchivePath(transferId, config.archiveSuffix);
-  await invoke("run_script", {
-    script: `tar -C ${shellQuote(sourceRoot)} -czf ${shellQuote(archivePath)} ${shellQuote(sessionId)}`,
-    cwd: repoPath,
-    env: applyWorktreeProcessIsolation({ KANNA_WORKTREE: "1" }),
-  });
-  const artifactId = config.artifactId(transferId);
-  await invoke("stage_transfer_artifact", {
+  const archivePath = buildTransferArchivePath(
     transferId,
-    artifactId,
-    path: archivePath,
-  });
+    config.archiveSuffix,
+    ownership?.deliveryId,
+  );
+  const artifactId = config.artifactId(transferId);
+  let staged = false;
+  try {
+    await ownership?.assertOwnership?.(`${config.label} archive creation`);
+    await invoke("run_script", {
+      script: `tar -C ${shellQuote(sourceRoot)} -czf ${shellQuote(archivePath)} ${shellQuote(sessionId)}`,
+      cwd: repoPath,
+      env: applyWorktreeProcessIsolation({ KANNA_WORKTREE: "1" }),
+    });
+    await ownership?.assertOwnership?.(`${config.label} archive staging`);
+    await invoke("stage_transfer_artifact", {
+      transferId,
+      artifactId,
+      path: archivePath,
+      owned: true,
+      ...(ownership?.deliveryId ? { deliveryId: ownership.deliveryId } : {}),
+    });
+    staged = true;
+  } finally {
+    if (!staged) {
+      await invoke("remove_file", { path: archivePath }).catch(() => {});
+    }
+  }
   return [{
     artifact_id: artifactId,
     filename: config.archiveFilename,
@@ -299,6 +335,7 @@ async function stageTransferredSessionArtifacts(
   transferId: string,
   item: PipelineItem,
   repoPath: string,
+  ownership?: TransferLifecycleOwnership,
 ): Promise<TransferArtifactPayload[]> {
   if (!item.agent_session_id || !item.agent_provider) {
     return [];
@@ -310,10 +347,13 @@ async function stageTransferredSessionArtifacts(
       if (!rollout) return [];
 
       const artifactId = buildCodexRolloutArtifactId(transferId);
+      await ownership?.assertOwnership?.("Codex rollout staging");
       await invoke("stage_transfer_artifact", {
         transferId,
         artifactId,
         path: rollout.absolutePath,
+        owned: false,
+        ...(ownership?.deliveryId ? { deliveryId: ownership.deliveryId } : {}),
       });
       return [{
         artifact_id: artifactId,
@@ -335,8 +375,15 @@ async function stageTransferredSessionArtifacts(
       repoPath,
       home,
       config,
+      ownership,
     );
   } catch (error) {
+    if (
+      error instanceof Error
+      && error.message.includes("lifecycle delivery ownership was lost")
+    ) {
+      throw error;
+    }
     console.error("[store] failed to stage provider session artifacts:", error);
   }
 
@@ -626,6 +673,7 @@ export function createTransferApi(
           transferId: preflight.transferId,
           artifactId,
           path: bundlePath,
+          owned: true,
         });
         bundle = {
           artifactId,
@@ -709,6 +757,7 @@ export function createTransferApi(
 
   async function finalizeOutgoingTransfer(
     transferId: string,
+    ownership: TransferLifecycleOwnership = {},
   ): Promise<FinalizedOutgoingTransferResult> {
     const transfer = await getDesktopTaskTransfer(transferId);
     if (!transfer) {
@@ -736,9 +785,15 @@ export function createTransferApi(
 
     let finalizedCleanly = item.agent_type !== "pty";
     if (item.agent_type === "pty") {
-      await invoke("signal_session", { sessionId: item.id, signal: "SIGINT" }).catch((error: unknown) => {
-        console.error("[store] transfer finalization signal failed:", error);
-      });
+      await ownership.assertOwnership?.("PTY finalization signal");
+      const shouldSignal = ownership.claimPhase
+        ? await ownership.claimPhase("pty-finalization-signal")
+        : true;
+      if (shouldSignal) {
+        await invoke("signal_session", { sessionId: item.id, signal: "SIGINT" }).catch((error: unknown) => {
+          console.error("[store] transfer finalization signal failed:", error);
+        });
+      }
       finalizedCleanly = await waitForSessionExitWithin(
         sessions.waitForSessionExit,
         item.id,
@@ -746,6 +801,7 @@ export function createTransferApi(
       );
     }
 
+    await ownership.assertOwnership?.("finalization snapshot refresh");
     await queries.reloadSnapshot();
     const refreshedItem = context.state.items.value.find((candidate) => candidate.id === item.id) ?? item;
     const repoRemoteUrl = existingPayload.repo.mode === "reuse-local"
@@ -762,7 +818,12 @@ export function createTransferApi(
       : null;
     const sourcePeerId = transfer.source_peer_id ?? existingPayload.task.source_peer_id;
     const sourceTaskId = transfer.source_task_id ?? existingPayload.task.source_task_id;
-    const artifacts = await stageTransferredSessionArtifacts(transferId, refreshedItem, repo.path);
+    const artifacts = await stageTransferredSessionArtifacts(
+      transferId,
+      refreshedItem,
+      repo.path,
+      ownership,
+    );
     const payload = buildOutgoingTransferPayload({
       sourcePeerId,
       sourceDesktopId: transfer.source_desktop_id ?? existingPayload.task.source_desktop_id,
@@ -780,6 +841,7 @@ export function createTransferApi(
       bundle,
     });
 
+    await ownership.assertOwnership?.("finalized payload persistence");
     await updateDesktopTaskTransferPayload(transferId, JSON.stringify(payload));
     await queries.reloadSnapshot();
 
@@ -941,6 +1003,7 @@ export function createTransferApi(
 
   async function handleOutgoingTransferCommitted(
     event: OutgoingTransferCommittedEvent,
+    ownership: TransferLifecycleOwnership = {},
   ): Promise<void> {
     const transfer = await getDesktopTaskTransfer(event.transferId);
     if (!transfer) {
@@ -948,8 +1011,10 @@ export function createTransferApi(
       // previously successful delivery whose sidecar response was lost.
       // Tombstone the receipt so the explicit apply/nack protocol cannot leave
       // it claimed forever or replay it after the next sidecar restart.
+      await ownership.assertOwnership?.("missing-row commit tombstone");
       await invoke("mark_outgoing_transfer_commit_applied", {
         transferId: event.transferId,
+        deliveryId: ownership.deliveryId,
       });
       return;
     }
@@ -962,6 +1027,7 @@ export function createTransferApi(
       );
     }
 
+    await ownership.assertOwnership?.("source task closure");
     const closedNow = await tasks.closeTask(event.sourceTaskId);
     if (!closedNow) {
       const sourceIsDurablyClosed = (await fetchClosedTaskIdentities())
@@ -972,14 +1038,17 @@ export function createTransferApi(
         );
       }
     }
+    await ownership.assertOwnership?.("outgoing transfer completion");
     if (!await completeDesktopTaskTransfer(
       event.transferId,
       transfer.local_task_id ?? event.sourceTaskId,
     )) {
       throw new Error(`failed to complete outgoing transfer: ${event.transferId}`);
     }
+    await ownership.assertOwnership?.("outgoing commit tombstone");
     await invoke("mark_outgoing_transfer_commit_applied", {
       transferId: event.transferId,
+      deliveryId: ownership.deliveryId,
     });
     await queries.reloadSnapshot();
   }

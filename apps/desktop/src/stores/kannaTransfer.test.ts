@@ -1209,6 +1209,7 @@ describe("pushTaskToPeer", () => {
       transferId: "transfer-123",
       artifactId: "transfer-123-codex-rollout",
       path: "/Users/tester/.codex/sessions/2026/04/18/rollout-2026-04-18T06-27-04-019d9a8c-9f39-7240-818f-88367a7c31df.jsonl",
+      owned: false,
     });
 
     const prepareCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer");
@@ -1288,6 +1289,7 @@ describe("pushTaskToPeer", () => {
       transferId: "transfer-123",
       artifactId: "transfer-123-claude-session",
       path: "/tmp/kanna-transfer-transfer-123-claude-session.tar.gz",
+      owned: true,
     });
 
     const prepareCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer");
@@ -1365,6 +1367,7 @@ describe("pushTaskToPeer", () => {
       transferId: "transfer-123",
       artifactId: "transfer-123-copilot-session",
       path: "/tmp/kanna-transfer-transfer-123-copilot-session.tar.gz",
+      owned: true,
     });
 
     const prepareCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer");
@@ -1437,6 +1440,7 @@ describe("pushTaskToPeer", () => {
       transferId: "transfer-123",
       artifactId: expect.any(String),
       path: expect.stringContaining(".bundle"),
+      owned: true,
     });
 
     const prepareCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer");
@@ -3347,6 +3351,87 @@ describe("source transfer finalization", () => {
     expect(result.payload.task.source_task_id).toBe("task-source");
   });
 
+  it("stops finalization before snapshot persistence after delivery ownership is lost", async () => {
+    vi.useFakeTimers();
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const sourceItem = buildItem();
+    sourceItem.agent_session_id = "claude-session-owner-lost";
+    const outgoingPayload = buildOutgoingTransferPayload({
+      sourcePeerId: "peer-source",
+      sourceTaskId: sourceItem.id,
+      targetPeerId: "peer-target",
+      item: sourceItem,
+      repoPath: "/tmp/repo-1",
+      repoName: "repo-1",
+      repoDefaultBranch: "main",
+      repoRemoteUrl: null,
+      recovery: null,
+      artifacts: [],
+      targetHasRepo: true,
+      bundle: null,
+    });
+    const fakeDb = createTransferDb({
+      repos: [buildRepo()],
+      items: [sourceItem],
+      transfers: [{
+        id: "transfer-owner-lost",
+        direction: "outgoing",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: "peer-target",
+        source_task_id: sourceItem.id,
+        local_task_id: sourceItem.id,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(outgoingPayload),
+      }],
+    });
+    const updatePayload = vi.fn(async () => true);
+    updateDesktopServerClientHandlersForTests({
+      updateTaskTransferPayload: updatePayload,
+    });
+    await store.init(fakeDb);
+    store.repos = [buildRepo()];
+    store.items = [sourceItem];
+    invokeMock.mockImplementation(async (cmd) => {
+      if (cmd === "read_env_var") return "/Users/tester";
+      if (cmd === "file_exists") return true;
+      return null;
+    });
+
+    const assertOwnership = vi.fn(async (phase: string) => {
+      if (phase === "Claude archive staging") {
+        throw new Error("lifecycle delivery ownership was lost before archive staging");
+      }
+    });
+    const claimPhase = vi.fn(async () => true);
+    const finalizePromise = store.finalizeOutgoingTransfer("transfer-owner-lost", {
+      deliveryId: "lifecycle-finalization-lost",
+      assertOwnership,
+      claimPhase,
+    });
+    const rejection = expect(finalizePromise).rejects.toThrow("ownership was lost");
+    await vi.advanceTimersByTimeAsync(1500);
+
+    await rejection;
+    expect(invokeMock).toHaveBeenCalledWith("signal_session", {
+      sessionId: sourceItem.id,
+      signal: "SIGINT",
+    });
+    expect(claimPhase).toHaveBeenCalledWith("pty-finalization-signal");
+    expect(invokeMock).toHaveBeenCalledWith("remove_file", {
+      path: "/tmp/kanna-transfer-transfer-owner-lost-claude-session-lifecycle-finalization-lost.tar.gz",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "stage_transfer_artifact",
+      expect.anything(),
+    );
+    expect(updatePayload).not.toHaveBeenCalled();
+  });
+
   it("preserves authenticated desktop identities while rebuilding the finalized payload", async () => {
     vi.useFakeTimers();
     setActivePinia(createPinia());
@@ -3425,6 +3510,60 @@ describe("outgoing transfer commit acknowledgment", () => {
     expect(invokeMock).toHaveBeenCalledWith("mark_outgoing_transfer_commit_applied", {
       transferId: "transfer-compacted",
     });
+  });
+
+  it("does not complete a transfer when delivery ownership is lost during source closure", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const repo = buildRepo();
+    const sourceItem = buildItem(repo.id);
+    const fakeDb = createTransferDb({
+      repos: [repo],
+      items: [sourceItem],
+      transfers: [{
+        id: "transfer-owner-lost",
+        direction: "outgoing",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: "peer-target",
+        source_task_id: sourceItem.id,
+        local_task_id: sourceItem.id,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(buildIncomingTransferPayload()),
+      }],
+    });
+    const completeTransfer = vi.fn(async () => true);
+    updateDesktopServerClientHandlersForTests({
+      completeTaskTransfer: completeTransfer,
+    });
+    await store.init(fakeDb);
+    store.repos = [repo];
+    store.items = [sourceItem];
+    invokeMock.mockResolvedValue(null);
+    const assertOwnership = vi.fn(async (phase: string) => {
+      if (phase === "outgoing transfer completion") {
+        throw new Error("lifecycle delivery ownership was lost before completion");
+      }
+    });
+
+    await expect(store.handleOutgoingTransferCommitted({
+      transferId: "transfer-owner-lost",
+      sourceTaskId: sourceItem.id,
+      destinationLocalTaskId: "task-imported",
+    }, {
+      deliveryId: "lifecycle-commit-lost",
+      assertOwnership,
+    })).rejects.toThrow("ownership was lost");
+
+    expect(fakeDb.tables.pipeline_item[0]?.closed_at).not.toBeNull();
+    expect(completeTransfer).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "mark_outgoing_transfer_commit_applied",
+      expect.anything(),
+    );
   });
 
   it("marks the outgoing transfer completed and closes the source task", async () => {

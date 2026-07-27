@@ -33,6 +33,7 @@ pub(super) struct TransferUpdateResponse {
 #[serde(rename_all = "camelCase")]
 pub(super) struct FailTransferRequest {
     reason: String,
+    claim_owner_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,7 +255,11 @@ pub(super) async fn fail_pending_incoming_transfer(
 ) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
     let db = open_db(&state)?;
     let updated = db
-        .fail_pending_incoming_transfer(&transfer_id, &payload.reason)
+        .fail_pending_incoming_transfer(
+            &transfer_id,
+            &payload.reason,
+            payload.claim_owner_token.as_deref(),
+        )
         .map_err(db_error)?;
     Ok(Json(TransferUpdateResponse { updated }))
 }

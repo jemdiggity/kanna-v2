@@ -1,6 +1,7 @@
 use base64::Engine;
 use kanna_task_transfer::crypto::{
-    open_json, parse_public_key, public_key_to_string, seal_json, CryptoError, TransferIdentity,
+    open_json, parse_public_key, public_key_to_string, seal_json, CryptoError, StreamOpener,
+    StreamSealer, TransferIdentity,
 };
 use kanna_task_transfer::discovery::{decode_txt_record, encode_txt_record, DiscoveryError};
 use serde_json::{json, Value};
@@ -35,6 +36,43 @@ fn encrypted_payload_roundtrips() {
 
     assert!(parse_public_key(ephemeral_public_key).is_ok());
     assert_eq!(opened, payload);
+}
+
+#[test]
+fn artifact_stream_chunks_are_sequence_and_final_marker_authenticated() {
+    let sender = TransferIdentity::generate();
+    let receiver = TransferIdentity::generate();
+    let mut sealer = StreamSealer::new(&sender, &receiver.public_key).unwrap();
+    let header = sealer.header();
+    let first = sealer.seal_chunk(b"first", false).unwrap();
+    let final_chunk = sealer.seal_chunk(&[], true).unwrap();
+
+    let mut opener = StreamOpener::new(&receiver, &sender.public_key, &header).unwrap();
+    assert_eq!(opener.open_chunk(0, &first, false).unwrap(), b"first");
+    assert!(matches!(
+        opener.open_chunk(2, &final_chunk, true),
+        Err(CryptoError::UnexpectedStreamSequence {
+            expected: 1,
+            actual: 2,
+        }),
+    ));
+
+    let mut opener = StreamOpener::new(&receiver, &sender.public_key, &header).unwrap();
+    let mut tampered = first;
+    tampered[0] ^= 1;
+    assert!(matches!(
+        opener.open_chunk(0, &tampered, false),
+        Err(CryptoError::Decrypt),
+    ));
+
+    let mut marker_sealer = StreamSealer::new(&sender, &receiver.public_key).unwrap();
+    let marker_header = marker_sealer.header();
+    let not_final = marker_sealer.seal_chunk(b"not-final", false).unwrap();
+    let mut opener = StreamOpener::new(&receiver, &sender.public_key, &marker_header).unwrap();
+    assert!(matches!(
+        opener.open_chunk(0, &not_final, true),
+        Err(CryptoError::Decrypt),
+    ));
 }
 
 #[test]

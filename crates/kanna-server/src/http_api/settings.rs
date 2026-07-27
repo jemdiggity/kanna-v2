@@ -1,3 +1,4 @@
+use super::lan_trust::DesktopLocalAccess;
 use super::state::AppState;
 use crate::db::Db;
 use axum::extract::{Path, State};
@@ -32,6 +33,7 @@ pub(crate) struct CloudTransferIdentity {
 }
 
 pub(super) async fn put_cloud_transfer_identity(
+    _desktop: DesktopLocalAccess,
     State(state): State<Arc<AppState>>,
     Json(identity): Json<CloudTransferIdentity>,
 ) -> Result<Json<SettingResponse>, (axum::http::StatusCode, String)> {
@@ -118,6 +120,7 @@ pub(super) async fn put_setting(
     Path(key): Path<String>,
     Json(payload): Json<PutSettingRequest>,
 ) -> Result<Json<SettingResponse>, (axum::http::StatusCode, String)> {
+    reject_reserved_setting_mutation(&key)?;
     let db = Db::open(&state.config.db_path).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -141,6 +144,7 @@ pub(super) async fn delete_setting(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    reject_reserved_setting_mutation(&key)?;
     let db = Db::open(&state.config.db_path).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -155,4 +159,14 @@ pub(super) async fn delete_setting(
     })?;
     state.publish_state_changed(StateChangeScope::Settings);
     Ok(Json(serde_json::json!({ "key": key })))
+}
+
+fn reject_reserved_setting_mutation(key: &str) -> Result<(), (axum::http::StatusCode, String)> {
+    if key == CLOUD_TRANSFER_IDENTITY_SETTING {
+        return Err((
+            axum::http::StatusCode::FORBIDDEN,
+            "cloud transfer identity must use the desktop-local identity endpoint".into(),
+        ));
+    }
+    Ok(())
 }

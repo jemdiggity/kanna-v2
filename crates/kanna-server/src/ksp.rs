@@ -38,6 +38,7 @@ use auth::verify_firebase_id_token;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
     AllowEmpty,
+    LegacyReadOnlyOrPaired,
     AlreadyAuthenticated,
     RequirePairedDevice,
     #[allow(dead_code)]
@@ -1252,6 +1253,34 @@ impl StreamConn {
             };
         }
 
+        if self.auth_mode == AuthMode::LegacyReadOnlyOrPaired
+            && !matches!(
+                &frame,
+                ClientFrame::Auth { .. } | ClientFrame::Attach { .. } | ClientFrame::Detach { .. }
+            )
+        {
+            let task_id = match &frame {
+                ClientFrame::AgentInput { task_id, .. }
+                | ClientFrame::AgentPermission { task_id, .. }
+                | ClientFrame::AgentInterrupt { task_id }
+                | ClientFrame::AgentSetModel { task_id, .. }
+                | ClientFrame::TermInput { task_id, .. }
+                | ClientFrame::TermResize { task_id, .. }
+                | ClientFrame::CompanionEvent { task_id, .. } => Some(task_id.clone()),
+                ClientFrame::Request { .. }
+                | ClientFrame::Auth { .. }
+                | ClientFrame::Attach { .. }
+                | ClientFrame::Detach { .. } => None,
+            };
+            self.error(
+                task_id,
+                "unauthorized",
+                "legacy empty-auth stream is read-only; update or re-pair Kanna Mobile".into(),
+            )
+            .await;
+            return true;
+        }
+
         match frame {
             ClientFrame::Auth { .. } => {
                 self.send(auth_ok_frame()).await;
@@ -1345,6 +1374,10 @@ impl StreamConn {
     async fn handle_auth(&mut self, credential: Option<String>) -> bool {
         let valid = match self.auth_mode {
             AuthMode::AllowEmpty | AuthMode::AlreadyAuthenticated => true,
+            AuthMode::LegacyReadOnlyOrPaired => match credential.as_deref() {
+                Some(value) => self.paired_device_credential_matches(value),
+                None => true,
+            },
             AuthMode::RequirePairedDevice => match credential.as_deref() {
                 Some(value) => self.paired_device_credential_matches(value),
                 None => false,
@@ -1362,6 +1395,9 @@ impl StreamConn {
         }
 
         self.authed = true;
+        if self.auth_mode == AuthMode::LegacyReadOnlyOrPaired && credential.is_some() {
+            self.auth_mode = AuthMode::AlreadyAuthenticated;
+        }
         self.send(auth_ok_frame()).await;
         true
     }
@@ -5056,12 +5092,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_loopback_v1_stream_endpoint_rejects_empty_auth() {
-        let (base_url, server) = serve_non_loopback_test_router("ksp-v1-network-auth").await;
+    async fn previous_mobile_gets_read_only_v1_access_from_current_non_loopback_desktop() {
+        let (base_url, server) =
+            serve_non_loopback_test_router("ksp-v1-previous-mobile-upgrade").await;
         let mut socket = ws_connect(&format!("{base_url}/v1/stream")).await;
 
         send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
 
+        assert!(matches!(
+            recv_frame(&mut socket).await,
+            ServerFrame::AuthOk { .. }
+        ));
+        send_frame(
+            &mut socket,
+            &ClientFrame::AgentInput {
+                task_id: "task-1".into(),
+                text: "must remain read-only".into(),
+            },
+        )
+        .await;
         assert!(matches!(
             recv_frame(&mut socket).await,
             ServerFrame::Error { code, .. } if code == "unauthorized"
@@ -5104,6 +5153,10 @@ mod tests {
         for frame in frames {
             let mut socket = ws_connect(&format!("{base_url}/v1/stream")).await;
             send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+            assert!(matches!(
+                recv_frame(&mut socket).await,
+                ServerFrame::AuthOk { .. }
+            ));
             send_frame(&mut socket, &frame).await;
             assert!(
                 matches!(

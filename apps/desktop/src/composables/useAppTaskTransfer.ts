@@ -39,6 +39,16 @@ interface UseAppTaskTransferOptions {
 const TRANSFER_PEER_DISCOVERY_RETRY_MS = 250;
 const TRANSFER_PEER_DISCOVERY_TIMEOUT_MS = 2500;
 
+class ClaimedIncomingTransferError extends Error {
+  constructor(
+    message: string,
+    readonly claimOwnerToken: string,
+  ) {
+    super(message);
+    this.name = "ClaimedIncomingTransferError";
+  }
+}
+
 export function useAppTaskTransfer({
   db,
   store,
@@ -112,11 +122,19 @@ export function useAppTaskTransfer({
         });
       }, 10_000);
       try {
-        await store.approveIncomingTransfer(transferId, ownerToken, {
-          signal: ownership.signal,
-          assertOwnership,
-        });
-        return true;
+        try {
+          await store.approveIncomingTransfer(transferId, ownerToken, {
+            signal: ownership.signal,
+            assertOwnership,
+          });
+          return true;
+        } catch (error: unknown) {
+          const reason = error instanceof Error ? error.message : String(error);
+          if (reason.includes("incoming transfer ownership was lost")) {
+            throw error;
+          }
+          throw new ClaimedIncomingTransferError(reason, ownerToken);
+        }
       } finally {
         window.clearInterval(renewal);
       }
@@ -389,7 +407,10 @@ export function useAppTaskTransfer({
           });
           continue;
         }
-        if (await failPendingIncomingTransfer(row.id, reason)) {
+        const ownerToken = error instanceof ClaimedIncomingTransferError
+          ? error.claimOwnerToken
+          : undefined;
+        if (await failPendingIncomingTransfer(row.id, reason, ownerToken)) {
           await cleanupTerminalIncomingTransfer(row.id);
           console.warn("[App] failed to auto-import pending incoming transfer; marked failed:", {
             transferId: row.id,

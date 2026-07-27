@@ -1719,13 +1719,24 @@ fn test_stale_reader_does_not_remove_respawned_session_with_same_id() {
     );
 
     let mut first_attach = daemon.connect();
-    attach(&mut first_attach, "sess-respawn");
-    let old_output = first_attach.collect_output_until_contains("OLD_READY");
-    assert!(
-        String::from_utf8_lossy(&old_output).contains("OLD_READY"),
-        "old session precondition failed: {:?}",
-        String::from_utf8_lossy(&old_output)
-    );
+    first_attach.send(&Cmd::AttachSnapshot {
+        session_id: "sess-respawn".to_string(),
+        emulate_terminal: false,
+    });
+    let old_ready_in_snapshot = match first_attach.recv() {
+        Evt::Snapshot {
+            session_id,
+            snapshot,
+        } => {
+            assert_eq!(session_id, "sess-respawn");
+            snapshot.vt.contains("OLD_READY")
+        }
+        Evt::Error { message } => panic!("attach failed: {message}"),
+        other => panic!("expected Snapshot, got: {other:?}"),
+    };
+    if !old_ready_in_snapshot {
+        first_attach.wait_for_content_with_timeout("OLD_READY", Duration::from_secs(5));
+    }
 
     kill_session(&mut shared, "sess-respawn");
 
@@ -1736,13 +1747,24 @@ fn test_stale_reader_does_not_remove_respawned_session_with_same_id() {
     );
 
     let mut second_attach = daemon.connect();
-    attach(&mut second_attach, "sess-respawn");
-    let new_output = second_attach.collect_output_until_contains("NEW_READY");
-    assert!(
-        String::from_utf8_lossy(&new_output).contains("NEW_READY"),
-        "respawned session output should remain visible, got {:?}",
-        String::from_utf8_lossy(&new_output)
-    );
+    second_attach.send(&Cmd::AttachSnapshot {
+        session_id: "sess-respawn".to_string(),
+        emulate_terminal: false,
+    });
+    let ready_in_snapshot = match second_attach.recv() {
+        Evt::Snapshot {
+            session_id,
+            snapshot,
+        } => {
+            assert_eq!(session_id, "sess-respawn");
+            snapshot.vt.contains("NEW_READY")
+        }
+        Evt::Error { message } => panic!("attach failed: {message}"),
+        other => panic!("expected Snapshot, got: {other:?}"),
+    };
+    if !ready_in_snapshot {
+        second_attach.wait_for_content_with_timeout("NEW_READY", Duration::from_secs(5));
+    }
 
     std::thread::sleep(Duration::from_millis(250));
     let snapshot = wait_for_snapshot(&mut shared, "sess-respawn", "NEW_READY");

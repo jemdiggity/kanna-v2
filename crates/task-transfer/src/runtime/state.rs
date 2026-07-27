@@ -85,6 +85,7 @@ pub struct StagedTransferArtifact {
 pub(super) struct TransferArtifactRecord {
     pub(super) path: PathBuf,
     pub(super) created_at: Instant,
+    pub(super) owned: bool,
 }
 
 pub(super) struct TerminalObserverSlot {

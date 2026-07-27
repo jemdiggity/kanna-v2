@@ -387,8 +387,9 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             transfer_id,
             artifact_id,
             path,
+            owned,
         } => match runtime
-            .stage_transfer_artifact(&transfer_id, &artifact_id, path.into())
+            .stage_transfer_artifact(&transfer_id, &artifact_id, path.into(), owned)
             .await
         {
             Ok(()) => ControlResponse::StageTransferArtifact {

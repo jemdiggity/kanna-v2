@@ -94,6 +94,8 @@ pub enum ControlRequest {
         transfer_id: String,
         artifact_id: String,
         path: String,
+        #[serde(default)]
+        owned: bool,
     },
     FetchTransferArtifact {
         request_id: String,
@@ -437,6 +439,7 @@ pub enum PeerResponse {
         request_id: String,
         transfer_id: String,
         sealed_payload: String,
+        stream_header: crate::crypto::SealedStreamHeader,
     },
     ImportCommitted {
         request_id: String,

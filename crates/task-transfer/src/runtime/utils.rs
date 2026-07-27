@@ -235,13 +235,42 @@ pub(super) fn prune_outgoing_transfers(
 pub(super) fn prune_transfer_artifacts(
     transfer_artifacts: &mut HashMap<String, HashMap<String, TransferArtifactRecord>>,
     pending_transfer_ttl: Duration,
-) {
+) -> Vec<std::path::PathBuf> {
     let now = Instant::now();
+    let mut owned_paths = Vec::new();
     transfer_artifacts.retain(|_, artifacts| {
-        artifacts
-            .retain(|_, artifact| now.duration_since(artifact.created_at) < pending_transfer_ttl);
+        artifacts.retain(|_, artifact| {
+            let keep = now.duration_since(artifact.created_at) < pending_transfer_ttl;
+            if !keep && artifact.owned {
+                owned_paths.push(artifact.path.clone());
+            }
+            keep
+        });
         !artifacts.is_empty()
     });
+    owned_paths
+}
+
+pub(super) fn take_transfer_artifacts(
+    transfer_artifacts: &mut HashMap<String, HashMap<String, TransferArtifactRecord>>,
+    transfer_id: &str,
+) -> Vec<std::path::PathBuf> {
+    transfer_artifacts
+        .remove(transfer_id)
+        .into_iter()
+        .flat_map(|artifacts| artifacts.into_values())
+        .filter(|artifact| artifact.owned)
+        .map(|artifact| artifact.path)
+        .collect()
+}
+
+pub(super) async fn remove_owned_artifact_paths(paths: Vec<std::path::PathBuf>) {
+    for path in paths {
+        let _ = tokio::fs::remove_file(&path).await;
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::remove_dir(parent).await;
+        }
+    }
 }
 
 pub(super) fn sanitize_artifact_filename(filename: &str) -> String {

@@ -353,16 +353,27 @@ pub async fn request_task_pull(
 #[tauri::command]
 pub async fn stage_transfer_artifact(
     app: tauri::AppHandle,
-    state: tauri::State<'_, crate::TransferServiceState>,
+    webview: tauri::WebviewWindow,
+    service_state: tauri::State<'_, crate::TransferServiceState>,
+    consumer_state: tauri::State<'_, crate::TransferEventConsumerState>,
     transfer_id: String,
     artifact_id: String,
     path: String,
+    owned: Option<bool>,
+    delivery_id: Option<String>,
 ) -> Result<Value, String> {
+    if let Some(delivery_id) = delivery_id.as_deref() {
+        crate::transfer_sidecar::require_transfer_lifecycle_event_owner_in_state(
+            consumer_state.inner(),
+            webview.label(),
+            delivery_id,
+        )?;
+    }
     with_transfer_client!(
         app,
-        state,
+        service_state,
         client,
-        client.stage_transfer_artifact(transfer_id, artifact_id, path)
+        client.stage_transfer_artifact(transfer_id, artifact_id, path, owned.unwrap_or(false))
     )
 }
 
@@ -478,6 +489,21 @@ pub fn renew_transfer_lifecycle_event(
 }
 
 #[tauri::command]
+pub fn claim_transfer_lifecycle_phase(
+    webview: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::TransferEventConsumerState>,
+    delivery_id: String,
+    phase: String,
+) -> Result<bool, String> {
+    crate::transfer_sidecar::claim_transfer_lifecycle_phase_in_state(
+        state.inner(),
+        webview.label(),
+        &delivery_id,
+        &phase,
+    )
+}
+
+#[tauri::command]
 pub async fn acknowledge_incoming_transfer_commit(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::TransferServiceState>,
@@ -528,12 +554,20 @@ pub async fn mark_incoming_transfer_ack_completed(
 #[tauri::command]
 pub async fn mark_outgoing_transfer_commit_applied(
     app: tauri::AppHandle,
-    state: tauri::State<'_, crate::TransferServiceState>,
+    webview: tauri::WebviewWindow,
+    service_state: tauri::State<'_, crate::TransferServiceState>,
+    consumer_state: tauri::State<'_, crate::TransferEventConsumerState>,
     transfer_id: String,
+    delivery_id: String,
 ) -> Result<Value, String> {
+    crate::transfer_sidecar::require_transfer_lifecycle_event_owner_in_state(
+        consumer_state.inner(),
+        webview.label(),
+        &delivery_id,
+    )?;
     with_transfer_client!(
         app,
-        state,
+        service_state,
         client,
         client.mark_outgoing_transfer_commit_applied(transfer_id)
     )
@@ -542,12 +576,20 @@ pub async fn mark_outgoing_transfer_commit_applied(
 #[tauri::command]
 pub async fn nack_outgoing_transfer_commit(
     app: tauri::AppHandle,
-    state: tauri::State<'_, crate::TransferServiceState>,
+    webview: tauri::WebviewWindow,
+    service_state: tauri::State<'_, crate::TransferServiceState>,
+    consumer_state: tauri::State<'_, crate::TransferEventConsumerState>,
     transfer_id: String,
+    delivery_id: String,
 ) -> Result<Value, String> {
+    crate::transfer_sidecar::require_transfer_lifecycle_event_owner_in_state(
+        consumer_state.inner(),
+        webview.label(),
+        &delivery_id,
+    )?;
     with_transfer_client!(
         app,
-        state,
+        service_state,
         client,
         client.nack_outgoing_transfer_commit(transfer_id)
     )
@@ -570,15 +612,23 @@ pub async fn finalize_outgoing_transfer(
 #[tauri::command]
 pub async fn complete_outgoing_transfer_finalization(
     app: tauri::AppHandle,
-    state: tauri::State<'_, crate::TransferServiceState>,
+    webview: tauri::WebviewWindow,
+    service_state: tauri::State<'_, crate::TransferServiceState>,
+    consumer_state: tauri::State<'_, crate::TransferEventConsumerState>,
     transfer_id: String,
     payload: Option<Value>,
     finalized_cleanly: bool,
     error: Option<String>,
+    delivery_id: String,
 ) -> Result<Value, String> {
+    crate::transfer_sidecar::require_transfer_lifecycle_event_owner_in_state(
+        consumer_state.inner(),
+        webview.label(),
+        &delivery_id,
+    )?;
     with_transfer_client!(
         app,
-        state,
+        service_state,
         client,
         client.complete_outgoing_transfer_finalization(
             transfer_id,
