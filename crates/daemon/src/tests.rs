@@ -478,6 +478,7 @@ pub(crate) fn temp_daemon_dir(prefix: &str) -> PathBuf {
 fn handoff_session(kind: protocol::SessionKind, agent_fd_count: u8) -> protocol::HandoffSession {
     protocol::HandoffSession {
         session_id: "s1".to_string(),
+        run_id: None,
         pid: 42,
         child_start: None,
         cwd: "/tmp".to_string(),
@@ -488,7 +489,9 @@ fn handoff_session(kind: protocol::SessionKind, agent_fd_count: u8) -> protocol:
         status: SessionStatus::Idle,
         kind,
         provider_session_id: None,
+        codex_session: None,
         agent_fd_count,
+        agent_spawn_generation: 0,
         agent_spawn: None,
     }
 }
@@ -709,6 +712,9 @@ pub(crate) fn agent_record_fixture(
     let journal = AgentJournal::open(dir, session_id);
     AgentSessionRecord {
         provider: protocol::AgentProvider::Claude,
+        run_id: None,
+        spawn_generation: 0,
+        respawn_reservation: None,
         params: protocol::AgentSpawnParams {
             agent_provider: protocol::AgentProvider::Claude,
             prompt: "hi".to_string(),
@@ -723,6 +729,7 @@ pub(crate) fn agent_record_fixture(
             system_prompt: None,
             mcp_config_path: None,
             executable: None,
+            resume_session_id: None,
         },
         adapter: Arc::new(std::sync::Mutex::new(adapter)),
         shared: Arc::new(Mutex::new(AgentShared {
@@ -953,6 +960,7 @@ fn sleeper_spawn_params(session_id: &str) -> protocol::AgentSpawnParams {
         system_prompt: None,
         mcp_config_path: None,
         executable: Some("/bin/sleep".to_string()),
+        resume_session_id: None,
     }
 }
 
@@ -1055,7 +1063,7 @@ async fn kill_during_initial_spawn_cleans_up_the_loser() {
 
     // Kill lands while the spawn is in flight.
     assert!(
-        crate::agent_runtime::kill_agent_session("cksess", &agents, &broadcast_tx).await
+        crate::agent_runtime::kill_agent_session("cksess", None, &agents, &broadcast_tx).await
             == crate::agent_runtime::AgentKillOutcome::Killed,
         "kill should remove the reservation"
     );
@@ -1102,7 +1110,7 @@ async fn stale_installer_from_previous_life_cannot_take_over_recreated_session()
     agents.lock().await.insert("aba".to_string(), first_life);
     // ...is killed...
     assert_eq!(
-        crate::agent_runtime::kill_agent_session("aba", &agents, &broadcast_tx).await,
+        crate::agent_runtime::kill_agent_session("aba", None, &agents, &broadcast_tx).await,
         crate::agent_runtime::AgentKillOutcome::Killed
     );
     // ...and recreated under the same id with a fresh incarnation.
@@ -1224,6 +1232,7 @@ async fn forged_agent_handoff_cannot_target_unrelated_processes() {
 
     let info = protocol::HandoffSession {
         session_id: "forged".to_string(),
+        run_id: None,
         pid: victim.id(),
         child_start: victim_start,
         cwd: "/tmp".to_string(),
@@ -1234,7 +1243,9 @@ async fn forged_agent_handoff_cannot_target_unrelated_processes() {
         status: SessionStatus::Busy,
         kind: protocol::SessionKind::Agent,
         provider_session_id: Some("prov-forged".to_string()),
+        codex_session: None,
         agent_fd_count: 2,
+        agent_spawn_generation: 0,
         agent_spawn: Some(sleeper_spawn_params("forged")),
     };
     crate::agent_runtime::adopt_agent_session(
@@ -1256,7 +1267,7 @@ async fn forged_agent_handoff_cannot_target_unrelated_processes() {
         );
     }
     assert_eq!(
-        crate::agent_runtime::kill_agent_session("forged", &agents, &broadcast_tx).await,
+        crate::agent_runtime::kill_agent_session("forged", None, &agents, &broadcast_tx).await,
         crate::agent_runtime::AgentKillOutcome::Killed
     );
     std::thread::sleep(Duration::from_millis(50));
@@ -1295,6 +1306,7 @@ async fn legacy_handoff_without_identity_keeps_live_agents_killable() {
 
     let info = protocol::HandoffSession {
         session_id: "legacy".to_string(),
+        run_id: None,
         pid: spawned.pid,
         child_start: None, // old-v2 senders never transferred identity
         cwd: "/tmp".to_string(),
@@ -1305,7 +1317,9 @@ async fn legacy_handoff_without_identity_keeps_live_agents_killable() {
         status: SessionStatus::Busy,
         kind: protocol::SessionKind::Agent,
         provider_session_id: Some("prov-legacy".to_string()),
+        codex_session: None,
         agent_fd_count: 2,
+        agent_spawn_generation: 0,
         agent_spawn: Some(sleeper_spawn_params("legacy")),
     };
     crate::agent_runtime::adopt_agent_session(
@@ -1327,7 +1341,7 @@ async fn legacy_handoff_without_identity_keeps_live_agents_killable() {
         );
     }
     assert_eq!(
-        crate::agent_runtime::kill_agent_session("legacy", &agents, &broadcast_tx).await,
+        crate::agent_runtime::kill_agent_session("legacy", None, &agents, &broadcast_tx).await,
         crate::agent_runtime::AgentKillOutcome::Killed
     );
     let status = spawned.child.wait().expect("legacy child reaped");
@@ -1370,7 +1384,7 @@ async fn stale_reader_from_previous_life_cannot_touch_the_recreated_session() {
 
     // Life 1 is killed and the id recreated with its own adapter/journal.
     assert_eq!(
-        crate::agent_runtime::kill_agent_session("life", &agents, &broadcast_tx).await,
+        crate::agent_runtime::kill_agent_session("life", None, &agents, &broadcast_tx).await,
         crate::agent_runtime::AgentKillOutcome::Killed
     );
     let mut second = agent_record_fixture(&dir, "life");
@@ -1899,7 +1913,7 @@ async fn killing_an_initial_reservation_emits_exactly_one_exit() {
     agents.lock().await.insert("resv".to_string(), reservation);
 
     assert!(
-        crate::agent_runtime::kill_agent_session("resv", &agents, &broadcast_tx).await
+        crate::agent_runtime::kill_agent_session("resv", None, &agents, &broadcast_tx).await
             == crate::agent_runtime::AgentKillOutcome::Killed,
         "removing a reservation is a successful kill"
     );
@@ -1950,7 +1964,7 @@ async fn killing_a_live_agent_session_still_emits_exactly_one_exit() {
     agents.lock().await.insert("live".to_string(), record);
 
     assert_eq!(
-        crate::agent_runtime::kill_agent_session("live", &agents, &broadcast_tx).await,
+        crate::agent_runtime::kill_agent_session("live", None, &agents, &broadcast_tx).await,
         crate::agent_runtime::AgentKillOutcome::Killed
     );
     let mut killed_exits = 0;
@@ -2023,7 +2037,7 @@ async fn killing_an_idle_per_turn_session_emits_exactly_one_exit() {
 
     // Now close the task. This is the state the session normally sits in.
     assert_eq!(
-        crate::agent_runtime::kill_agent_session("perturn", &agents, &broadcast_tx).await,
+        crate::agent_runtime::kill_agent_session("perturn", None, &agents, &broadcast_tx).await,
         crate::agent_runtime::AgentKillOutcome::Killed
     );
     assert_eq!(
@@ -2082,7 +2096,7 @@ async fn killing_an_already_announced_session_does_not_double_announce() {
     );
 
     assert_eq!(
-        crate::agent_runtime::kill_agent_session("persistent", &agents, &broadcast_tx).await,
+        crate::agent_runtime::kill_agent_session("persistent", None, &agents, &broadcast_tx).await,
         crate::agent_runtime::AgentKillOutcome::Killed
     );
     assert_eq!(
@@ -2209,7 +2223,7 @@ async fn a_kill_after_the_handoff_snapshot_is_refused_not_acknowledged() {
     // registry, so every later Kill must see it.
     let seal = crate::agent_runtime::AgentHandoffSealGuard::arm();
     assert_eq!(
-        crate::agent_runtime::kill_agent_session("sealed", &agents, &broadcast_tx).await,
+        crate::agent_runtime::kill_agent_session("sealed", None, &agents, &broadcast_tx).await,
         crate::agent_runtime::AgentKillOutcome::HandoffInFlight,
         "a Kill racing a committed snapshot must be refused"
     );
@@ -2227,7 +2241,7 @@ async fn a_kill_after_the_handoff_snapshot_is_refused_not_acknowledged() {
     // succeeds, so the refusal really is retryable rather than terminal.
     drop(seal);
     assert_eq!(
-        crate::agent_runtime::kill_agent_session("sealed", &agents, &broadcast_tx).await,
+        crate::agent_runtime::kill_agent_session("sealed", None, &agents, &broadcast_tx).await,
         crate::agent_runtime::AgentKillOutcome::Killed
     );
     assert_eq!(drain_exits(&mut rx, "sealed"), 1);
@@ -2246,7 +2260,7 @@ async fn a_kill_for_an_unknown_agent_session_reports_not_found() {
     let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(8);
     assert_eq!(
-        crate::agent_runtime::kill_agent_session("nope", &agents, &broadcast_tx).await,
+        crate::agent_runtime::kill_agent_session("nope", None, &agents, &broadcast_tx).await,
         crate::agent_runtime::AgentKillOutcome::NotFound
     );
 }

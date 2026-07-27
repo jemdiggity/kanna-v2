@@ -3614,6 +3614,268 @@ async fn rerun_stage_replays_one_durable_result_for_a_retried_request_key() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
+fn ambiguous_spawn_action_fixture(
+    label: &str,
+    kanna_cli_path: &std::path::Path,
+) -> (tempfile::TempDir, Config) {
+    let root = tempfile::Builder::new()
+        .prefix(&format!("kanna-http-{label}-"))
+        .tempdir()
+        .unwrap();
+    let repo_root = root.path().join("repo");
+    init_test_git_repo(&repo_root);
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/implementer")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual", "agent": "implementer" },
+    { "name": "review", "transition": "manual", "agent": "reviewer" }
+  ]
+}"#,
+    )
+    .unwrap();
+    for (agent, name) in [("implementer", "Implementer"), ("reviewer", "Reviewer")] {
+        std::fs::write(
+            repo_root.join(format!(".kanna/agents/{agent}/AGENT.md")),
+            format!(
+                "---\nname: {name}\ndescription: Ambiguous spawn test\nagent_provider: claude\n---\nContinue $TASK_PROMPT"
+            ),
+        )
+        .unwrap();
+    }
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add action fixture"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    super::publish_test_origin_main(&repo_root);
+    assert!(Command::new("git")
+        .args(["branch", "task-source"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let daemon_dir = root.path().join("daemon");
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: root.path().join("kanna.db").to_string_lossy().to_string(),
+        kanna_cli_path: Some(kanna_cli_path.to_string_lossy().to_string()),
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        pairing_store_path: root
+            .path()
+            .join("pairings.json")
+            .to_string_lossy()
+            .to_string(),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-ambiguous",
+        "repo-1",
+        "Preserve an ambiguous spawn",
+        Some("Preserve an ambiguous spawn"),
+        "in progress",
+        "2026-07-27 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "task-ambiguous",
+        "task-source",
+        "default",
+        Some("{\"status\":\"success\"}"),
+        "claude",
+    )
+    .unwrap();
+    db.upsert_worktree(
+        "wt-task-ambiguous",
+        "task-ambiguous",
+        &repo_root.to_string_lossy(),
+        "task-source",
+    )
+    .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "source-run",
+        task_id: "task-ambiguous",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implementer"),
+        agent_provider: Some("claude"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("source-run"),
+        provider_session_id: None,
+        cwd: Some(repo_root.to_string_lossy().as_ref()),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    (root, config)
+}
+
+async fn spawn_daemon_that_loses_spawn_and_all_reconciliation_replies(
+    daemon_dir: &str,
+) -> tokio::task::JoinHandle<()> {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let socket_path = daemon_socket_path_for_dir(daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let mut spawn_seen = false;
+        let mut lost_lists = 0usize;
+        while !spawn_seen || lost_lists < 3 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                match command {
+                    DaemonCommand::Kill { .. } => {
+                        let response = DaemonEvent::Error {
+                            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                            message: "session not found".to_string(),
+                        };
+                        write_half
+                            .write_all(
+                                format!("{}\n", serde_json::to_string(&response).unwrap())
+                                    .as_bytes(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    DaemonCommand::Spawn { .. } | DaemonCommand::SpawnAgent { .. } => {
+                        spawn_seen = true;
+                        // The daemon accepted the bytes, but the response was
+                        // lost. Closing leaves acceptance genuinely unknown.
+                        break;
+                    }
+                    DaemonCommand::List => {
+                        lost_lists += 1;
+                        // Every bounded reconciliation probe also loses its
+                        // reply, so lifecycle must retain the reservation.
+                        break;
+                    }
+                    other => panic!("unexpected ambiguous-spawn command: {other:?}"),
+                }
+            }
+        }
+    })
+}
+
+fn assert_action_stays_linked_and_pending(config: &Config, key: &str) {
+    let db = Db::open(&config.db_path).unwrap();
+    let actions = db.pending_stage_actions().unwrap();
+    assert_eq!(actions.len(), 1);
+    let (state, successor_run_id): (String, Option<String>) = db
+        .connection_for_e2e_tests()
+        .query_row(
+            "SELECT state, successor_run_id
+             FROM task_action_request
+             WHERE idempotency_key = ?1",
+            [key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "pending");
+    assert_eq!(
+        successor_run_id.as_deref(),
+        Some(actions[0].successor_run_id.as_str())
+    );
+    assert_eq!(
+        db.latest_stage_run("task-ambiguous")
+            .unwrap()
+            .unwrap()
+            .status,
+        "pending"
+    );
+}
+
+#[tokio::test]
+async fn advance_stage_ambiguous_spawn_keeps_durable_request_pending_for_reconciliation() {
+    let _sidecar_guard = crate::test_sidecar_guard();
+    let (kanna_cli_path, created_sidecar) = ensure_test_kanna_cli_sidecar();
+    let (_root, config) = ambiguous_spawn_action_fixture("advance-ambiguous", &kanna_cli_path);
+    let daemon =
+        spawn_daemon_that_loses_spawn_and_all_reconciliation_replies(&config.daemon_dir).await;
+    let response = super::router(Arc::new(super::AppState::new(config.clone())))
+        .oneshot(
+            Request::post("/v1/tasks/task-ambiguous/actions/advance-stage")
+                .header("idempotency-key", "advance-ambiguous")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    tokio::time::timeout(std::time::Duration::from_secs(5), daemon)
+        .await
+        .expect("advance reconciliation did not finish probing")
+        .unwrap();
+    assert_action_stays_linked_and_pending(&config, "advance-ambiguous");
+    if created_sidecar {
+        let _ = std::fs::remove_file(kanna_cli_path);
+    }
+}
+
+#[tokio::test]
+async fn rerun_stage_ambiguous_spawn_keeps_durable_request_pending_for_reconciliation() {
+    let _sidecar_guard = crate::test_sidecar_guard();
+    let (kanna_cli_path, created_sidecar) = ensure_test_kanna_cli_sidecar();
+    let (_root, config) = ambiguous_spawn_action_fixture("rerun-ambiguous", &kanna_cli_path);
+    let daemon =
+        spawn_daemon_that_loses_spawn_and_all_reconciliation_replies(&config.daemon_dir).await;
+    let response = super::router(Arc::new(super::AppState::new(config.clone())))
+        .oneshot(
+            Request::post("/v1/tasks/task-ambiguous/actions/rerun-stage")
+                .header("idempotency-key", "rerun-ambiguous")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    tokio::time::timeout(std::time::Duration::from_secs(5), daemon)
+        .await
+        .expect("rerun reconciliation did not finish probing")
+        .unwrap();
+    assert_action_stays_linked_and_pending(&config, "rerun-ambiguous");
+    if created_sidecar {
+        let _ = std::fs::remove_file(kanna_cli_path);
+    }
+}
+
 #[tokio::test]
 async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
@@ -4652,6 +4914,118 @@ async fn old_format_completion_finishes_pre_upgrade_running_row() {
     let run = db.latest_stage_run("task-1").unwrap().unwrap();
     assert_eq!(run.status, "succeeded");
     assert_eq!(run.run_ownership_version, 0);
+}
+
+#[tokio::test]
+async fn old_peer_can_complete_new_protected_post_injected_into_its_process() {
+    let repo_temp = tempfile::Builder::new()
+        .prefix("kanna-http-old-peer-protected-post-")
+        .tempdir()
+        .unwrap();
+    let repo_root = repo_temp.path().join("repo");
+    init_test_git_repo(&repo_root);
+    let repo_path = repo_root.to_string_lossy().to_string();
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", move |db| {
+        db.insert_test_repo_with_path("repo-1", &repo_path, "Repo One")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Finish an injected post after upgrading Kanna",
+            Some("Finish an injected post after upgrading Kanna"),
+            "review",
+            "2026-07-25 00:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context("task-1", "main", "default", None, "codex")
+            .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "pre-upgrade-main",
+            task_id: "task-1",
+            stage: "review",
+            kind: "main",
+            agent: Some("review"),
+            agent_provider: Some("codex"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("pre-upgrade-main"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+        db.connection_for_e2e_tests()
+            .execute(
+                "UPDATE stage_run
+                 SET run_ownership_version = 0
+                 WHERE id = 'pre-upgrade-main'",
+                [],
+            )
+            .unwrap();
+        db.finish_stage_run("pre-upgrade-main", "succeeded", None, None)
+            .unwrap();
+        db.insert_stage_run_with_completion_attempt(
+            crate::db::NewStageRun {
+                id: "protected-post",
+                task_id: "task-1",
+                stage: "commit",
+                kind: "post",
+                agent: Some("review"),
+                agent_provider: Some("codex"),
+                model: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some("pre-upgrade-main"),
+                provider_session_id: None,
+                cwd: None,
+                resumed_from_run_id: Some("pre-upgrade-main"),
+            },
+            Some("manual"),
+            Some("attempt-new-server-only"),
+        )
+        .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+
+    // This is the payload shape emitted by the already-running old MCP/CLI:
+    // it knows its immutable run owner but predates completionAttempt.
+    let response = super::router(state)
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "status": "success",
+                        "summary": "protected post completed by old peer",
+                        "runId": "pre-upgrade-main"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    if response.status() != StatusCode::OK {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        panic!(
+            "old peer completion failed with {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let run = Db::open(&db_path)
+        .unwrap()
+        .latest_stage_run("task-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.id, "protected-post");
+    assert_eq!(run.status, "succeeded");
 }
 
 #[tokio::test]

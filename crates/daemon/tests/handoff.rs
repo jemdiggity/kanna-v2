@@ -612,6 +612,7 @@ fn agent_params(script: &Path, prompt: &str) -> AgentSpawnParams {
         system_prompt: None,
         mcp_config_path: None,
         executable: Some(script.to_string_lossy().to_string()),
+        resume_session_id: None,
     }
 }
 

@@ -642,8 +642,9 @@ async fn run_terminal_control(
     mut cancel_rx: watch::Receiver<bool>,
     frame_tx: mpsc::Sender<ServerFrame>,
 ) {
-    let session_id = match initial_session_id {
-        Some(session_id) => session_id,
+    let direct_session_id = initial_session_id;
+    let mut session_id = match direct_session_id.as_ref() {
+        Some(session_id) => session_id.clone(),
         None => {
             let resolved = tokio::select! {
                 biased;
@@ -684,6 +685,31 @@ async fn run_terminal_control(
     });
 
     loop {
+        if direct_session_id.is_none() {
+            let resolved = tokio::select! {
+                biased;
+                _ = terminal_control_cancelled(&mut cancel_rx) => return,
+                resolved = resolve_task_session_id(
+                    state.config().db_path.clone(),
+                    task_id.clone(),
+                ) => resolved,
+            };
+            match resolved {
+                Ok(current_session_id) => session_id = current_session_id,
+                Err(message) => {
+                    tokio::select! {
+                        biased;
+                        _ = terminal_control_cancelled(&mut cancel_rx) => return,
+                        _ = send_task_error(&frame_tx, &task_id, "no_session", message) => {}
+                    }
+                    if !terminal_control_retry_delay(retry_attempt, &mut cancel_rx).await {
+                        return;
+                    }
+                    retry_attempt += 1;
+                    continue;
+                }
+            }
+        }
         let connected = tokio::select! {
             biased;
             _ = terminal_control_cancelled(&mut cancel_rx) => return,
@@ -765,6 +791,38 @@ async fn run_terminal_control(
                     let Some(command) = command else {
                         return;
                     };
+                    if direct_session_id.is_none() {
+                        let resolved = tokio::select! {
+                            biased;
+                            _ = terminal_control_cancelled(&mut cancel_rx) => return,
+                            resolved = resolve_task_session_id(
+                                state.config().db_path.clone(),
+                                task_id.clone(),
+                            ) => resolved,
+                        };
+                        match resolved {
+                            Ok(current_session_id) if current_session_id != session_id => {
+                                session_id = current_session_id;
+                                pending_command = Some(command);
+                                break;
+                            }
+                            Ok(_) => {}
+                            Err(message) => {
+                                tokio::select! {
+                                    biased;
+                                    _ = terminal_control_cancelled(&mut cancel_rx) => return,
+                                    _ = send_task_error(
+                                        &frame_tx,
+                                        &task_id,
+                                        "no_session",
+                                        message,
+                                    ) => {}
+                                }
+                                pending_command = Some(command);
+                                break;
+                            }
+                        }
+                    }
                     let daemon_command = command.into_daemon_command(session_id.clone());
                     let write_result = tokio::select! {
                         biased;
@@ -1059,6 +1117,21 @@ impl StreamConn {
             Self::retire_terminal_control(existing).await;
         }
         let control = self.create_terminal_control(task_id.to_string(), Some(session_id));
+        self.terminal_controls.insert(task_id.to_string(), control);
+    }
+
+    async fn ensure_live_terminal_control_route(&mut self, task_id: &str) {
+        let route_is_live = self
+            .terminal_controls
+            .get(task_id)
+            .is_some_and(|control| control.session_id.is_none());
+        if route_is_live {
+            return;
+        }
+        if let Some(existing) = self.terminal_controls.remove(task_id) {
+            Self::retire_terminal_control(existing).await;
+        }
+        let control = self.create_terminal_control(task_id.to_string(), None);
         self.terminal_controls.insert(task_id.to_string(), control);
     }
 
@@ -1481,8 +1554,12 @@ impl StreamConn {
         };
 
         if kind == StreamKind::Terminal {
-            self.replace_terminal_control_route(&task_id, session_id.clone())
-                .await;
+            if direct_terminal_session_id(&task_id).is_some() {
+                self.replace_terminal_control_route(&task_id, session_id.clone())
+                    .await;
+            } else {
+                self.ensure_live_terminal_control_route(&task_id).await;
+            }
         }
 
         // Replace any existing attachment for this (task, kind).
@@ -1499,10 +1576,9 @@ impl StreamConn {
                 daemon_dir, task_id, session_id, from_seq, frame_tx,
             )),
             StreamKind::Terminal => {
-                let lease = self.state.terminal_attachments().attach(session_id.clone());
+                let state = self.state.clone();
                 tokio::spawn(async move {
-                    let _lease = lease;
-                    stream_terminal(daemon_dir, task_id, session_id, frame_tx).await;
+                    stream_terminal(state, task_id, session_id, frame_tx).await;
                 })
             }
             StreamKind::Companion => unreachable!("companion attach handled above"),
@@ -1632,6 +1708,12 @@ enum StreamRunEnd {
     /// The daemon connection dropped mid-stream (restart/handoff/crash).
     /// The session may still be alive in the replacement daemon; re-attach.
     DaemonLost,
+}
+
+enum TerminalStreamRunEnd {
+    Done,
+    DaemonLost,
+    SessionExited(i32),
 }
 
 /// Per-attachment forwarding task: its own daemon connection attaches to the
@@ -1836,16 +1918,18 @@ async fn stream_agent_once(
 /// restart/handoff), re-attaches with backoff; the fresh snapshot resyncs the
 /// client instead of leaving it frozen on a dead stream.
 async fn stream_terminal(
-    daemon_dir: String,
+    state: Arc<AppState>,
     task_id: String,
-    session_id: String,
+    mut session_id: String,
     frame_tx: mpsc::Sender<ServerFrame>,
 ) {
+    let direct_session = direct_terminal_session_id(&task_id).is_some();
+    let mut _lease = state.terminal_attachments().attach(session_id.clone());
     let mut attached_once = false;
     let mut retry_attempt = 0usize;
     loop {
         match stream_terminal_once(
-            &daemon_dir,
+            &state.config().daemon_dir,
             &task_id,
             &session_id,
             &mut attached_once,
@@ -1853,13 +1937,110 @@ async fn stream_terminal(
         )
         .await
         {
-            StreamRunEnd::Done => return,
-            StreamRunEnd::DaemonLost => {
+            TerminalStreamRunEnd::Done if direct_session => return,
+            TerminalStreamRunEnd::Done => {
+                daemon_stream_retry_delay(retry_attempt).await;
+                retry_attempt += 1;
+                match resolve_task_session_id(state.config().db_path.clone(), task_id.clone()).await
+                {
+                    Ok(current_session_id) => {
+                        if current_session_id != session_id {
+                            _lease = state
+                                .terminal_attachments()
+                                .attach(current_session_id.clone());
+                            session_id = current_session_id;
+                            attached_once = false;
+                            retry_attempt = 0;
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "[ksp] terminal alias {task_id} could not resolve after session end: {error}"
+                        );
+                    }
+                }
+            }
+            TerminalStreamRunEnd::DaemonLost => {
                 log::warn!(
                     "[ksp] terminal stream lost daemon connection (session={session_id}, attempt={retry_attempt}); re-attaching"
                 );
                 daemon_stream_retry_delay(retry_attempt).await;
                 retry_attempt += 1;
+                if !direct_session {
+                    match resolve_task_session_id(state.config().db_path.clone(), task_id.clone())
+                        .await
+                    {
+                        Ok(current_session_id) if current_session_id != session_id => {
+                            _lease = state
+                                .terminal_attachments()
+                                .attach(current_session_id.clone());
+                            session_id = current_session_id;
+                            attached_once = false;
+                            retry_attempt = 0;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            log::warn!(
+                                "[ksp] terminal alias {task_id} could not resolve after daemon loss: {error}"
+                            );
+                        }
+                    }
+                }
+            }
+            TerminalStreamRunEnd::SessionExited(code) if direct_session => {
+                let _ = frame_tx
+                    .send(ServerFrame::SessionExit {
+                        task_id: task_id.clone(),
+                        code,
+                    })
+                    .await;
+                return;
+            }
+            TerminalStreamRunEnd::SessionExited(code) => {
+                daemon_stream_retry_delay(retry_attempt).await;
+                retry_attempt += 1;
+                match resolve_task_session_id(state.config().db_path.clone(), task_id.clone()).await
+                {
+                    Ok(current_session_id) if current_session_id != session_id => {
+                        _lease = state
+                            .terminal_attachments()
+                            .attach(current_session_id.clone());
+                        session_id = current_session_id;
+                        attached_once = false;
+                        retry_attempt = 0;
+                    }
+                    Ok(_) => {
+                        let db_path = state.config().db_path.clone();
+                        let pending_task_id = task_id.clone();
+                        let replacement_pending = tokio::task::spawn_blocking(move || {
+                            Db::open(&db_path)
+                                .and_then(|db| db.pending_stage_actions())
+                                .map(|actions| {
+                                    actions
+                                        .iter()
+                                        .any(|action| action.task_id == pending_task_id)
+                                })
+                        })
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .unwrap_or(false);
+                        if !replacement_pending {
+                            let _ = frame_tx
+                                .send(ServerFrame::SessionExit {
+                                    task_id: task_id.clone(),
+                                    code,
+                                })
+                                .await;
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "[ksp] terminal alias {task_id} could not resolve after session exit: {error}"
+                        );
+                    }
+                }
             }
         }
     }
@@ -1871,7 +2052,7 @@ async fn stream_terminal_once(
     session_id: &str,
     attached_once: &mut bool,
     frame_tx: &mpsc::Sender<ServerFrame>,
-) -> StreamRunEnd {
+) -> TerminalStreamRunEnd {
     let send_error = |code: &'static str, message: String| {
         let frame_tx = frame_tx.clone();
         let task_id = task_id.to_string();
@@ -1890,9 +2071,9 @@ async fn stream_terminal_once(
     // After that, they mean the daemon went away mid-stream: re-attach.
     let transport_failure = |attached_once: bool| {
         if attached_once {
-            StreamRunEnd::DaemonLost
+            TerminalStreamRunEnd::DaemonLost
         } else {
-            StreamRunEnd::Done
+            TerminalStreamRunEnd::Done
         }
     };
 
@@ -1933,7 +2114,7 @@ async fn stream_terminal_once(
             .await
             .is_err()
             {
-                return StreamRunEnd::Done;
+                return TerminalStreamRunEnd::Done;
             }
         }
         Ok(DaemonEvent::Error { message, .. }) => {
@@ -1943,11 +2124,11 @@ async fn stream_terminal_once(
                 "daemon"
             };
             send_error(code, message).await;
-            return StreamRunEnd::Done;
+            return TerminalStreamRunEnd::Done;
         }
         Ok(other) => {
             send_error("daemon", format!("unexpected attach reply: {other:?}")).await;
-            return StreamRunEnd::Done;
+            return TerminalStreamRunEnd::Done;
         }
         Err(error) => {
             if !*attached_once {
@@ -1975,7 +2156,7 @@ async fn stream_terminal_once(
                 .await
                 .is_err()
                 {
-                    return StreamRunEnd::Done;
+                    return TerminalStreamRunEnd::Done;
                 }
             }
             // A mid-stream snapshot is the daemon resynchronizing this
@@ -2000,7 +2181,7 @@ async fn stream_terminal_once(
                 .await
                 .is_err()
                 {
-                    return StreamRunEnd::Done;
+                    return TerminalStreamRunEnd::Done;
                 }
             }
             Ok(DaemonEvent::StatusChanged {
@@ -2016,7 +2197,7 @@ async fn stream_terminal_once(
                     .await
                     .is_err()
                 {
-                    return StreamRunEnd::Done;
+                    return TerminalStreamRunEnd::Done;
                 }
             }
             Ok(DaemonEvent::Exit {
@@ -2024,15 +2205,11 @@ async fn stream_terminal_once(
                 code,
                 ..
             }) if event_session == session_id => {
-                let _ = frame_tx
-                    .send(ServerFrame::SessionExit {
-                        task_id: task_id.to_string(),
-                        code,
-                    })
-                    .await;
-                return StreamRunEnd::Done;
+                return TerminalStreamRunEnd::SessionExited(code);
             }
-            Ok(DaemonEvent::ShuttingDown) | Err(_) => return StreamRunEnd::DaemonLost,
+            Ok(DaemonEvent::ShuttingDown) | Err(_) => {
+                return TerminalStreamRunEnd::DaemonLost;
+            }
             Ok(_) => {}
         }
     }
@@ -4249,6 +4426,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_terminal_control_live_route_follows_the_latest_owned_run() {
+        let unique = format!(
+            "ksp-terminal-live-route-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config("ksp-terminal-live-route", "KSP Terminal Live Route");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let db = Db::open_for_tests(&config.db_path).expect("open test db");
+        db.insert_test_repo("repo-live-route", "Live Route Repo")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "task-live-route",
+            "repo-live-route",
+            "Follow a revision session",
+            None,
+            "in progress",
+            "2026-07-27 00:00:00",
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-old",
+            task_id: "task-live-route",
+            stage: "review",
+            kind: "main",
+            agent: Some("review"),
+            agent_provider: Some("codex"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("daemon-session-old"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+
+        let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 2).await;
+        let state = Arc::new(AppState::new(config));
+        let (frame_tx, companion_tx, _outbound_rx) = outbound_frame_channel(8);
+        let mut conn = StreamConn {
+            state,
+            frame_tx,
+            companion_tx,
+            attachments: HashMap::new(),
+            terminal_controls: HashMap::new(),
+            agent_commands: None,
+            requests: None,
+            companion_event_times: HashMap::new(),
+            authed: true,
+            auth_mode: AuthMode::AllowEmpty,
+        };
+
+        conn.ensure_live_terminal_control_route("task-live-route")
+            .await;
+        conn.enqueue_terminal_control(
+            "task-live-route".into(),
+            TerminalControlCommand::Input(b"before-revision".to_vec()),
+        );
+        assert_command(
+            commands.recv().await,
+            DaemonCommand::InputNoReply {
+                session_id: "daemon-session-old".into(),
+                data: b"before-revision".to_vec(),
+            },
+        );
+
+        db.finish_stage_run("run-old", "failed", None, Some("request changes"))
+            .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-revision",
+            task_id: "task-live-route",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("implement"),
+            agent_provider: Some("codex"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: Some("request changes"),
+            session_id: Some("daemon-session-revision"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: Some("run-old"),
+        })
+        .unwrap();
+        conn.enqueue_terminal_control(
+            "task-live-route".into(),
+            TerminalControlCommand::Input(b"after-revision".to_vec()),
+        );
+        assert_command(
+            tokio::time::timeout(std::time::Duration::from_secs(2), commands.recv())
+                .await
+                .expect("live control route did not reconnect"),
+            DaemonCommand::InputNoReply {
+                session_id: "daemon-session-revision".into(),
+                data: b"after-revision".to_vec(),
+            },
+        );
+        assert_eq!(daemon.await.expect("live route daemon failed"), 2);
+        conn.shutdown().await;
+
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
     async fn route_replacement_cancels_old_worker_during_reconnect_backoff() {
         let unique = format!(
             "ksp-terminal-cancel-backoff-{}-{}",
@@ -4559,7 +4850,7 @@ mod tests {
                 &frame_tx,
             )
             .await,
-            StreamRunEnd::Done
+            TerminalStreamRunEnd::SessionExited(0)
         ));
 
         assert!(matches!(
@@ -4575,10 +4866,6 @@ mod tests {
             frame_rx.try_recv(),
             Ok(ServerFrame::StatusChanged { ref task_id, ref status })
                 if task_id == "task-status" && status == "waiting"
-        ));
-        assert!(matches!(
-            frame_rx.try_recv(),
-            Ok(ServerFrame::SessionExit { ref task_id, code: 0 }) if task_id == "task-status"
         ));
         assert!(
             frame_rx.try_recv().is_err(),

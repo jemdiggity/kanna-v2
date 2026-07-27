@@ -487,6 +487,22 @@ fn init_resume_revision_fixture_for_provider(
 
 const RESUME_SESSION_UUID: &str = "6f7d2f7a-1b2e-4c3d-9a8b-123456789abc";
 
+pub(crate) fn owned_resume_daemon_session(
+    run_id: &str,
+    cwd: &std::path::Path,
+) -> kanna_daemon::protocol::SessionInfo {
+    kanna_daemon::protocol::SessionInfo {
+        session_id: "review-task".to_string(),
+        pid: 1234,
+        cwd: cwd.to_string_lossy().into_owned(),
+        state: kanna_daemon::protocol::SessionState::Active,
+        idle_seconds: 0,
+        status: kanna_daemon::protocol::SessionStatus::Idle,
+        kind: kanna_daemon::protocol::SessionKind::Agent,
+        run_id: Some(run_id.to_string()),
+    }
+}
+
 /// Points the Claude session store at a test directory and writes the
 /// transcript file the CLI would have for `RESUME_SESSION_UUID` under the
 /// implement worktree.
@@ -550,7 +566,12 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
         Some("Add e2e coverage for the revision loop.")
     );
 
-    let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone(), 1).await;
+    let fake_daemon = spawn_fake_daemon_fork_transition_with_sessions(
+        config.daemon_dir.clone(),
+        1,
+        vec![owned_resume_daemon_session("run-impl", &impl_worktree)],
+    )
+    .await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
     let response = spawn_prepared_stage_run_for_api(
         &config.db_path,
@@ -776,6 +797,7 @@ async fn resumed_revision_waits_for_target_teardown_before_setup_and_provider_sp
         tokio::sync::mpsc::unbounded_channel::<kanna_daemon::protocol::Command>();
     let (release_teardown_tx, release_teardown_rx) = tokio::sync::oneshot::channel::<()>();
     let marker_for_daemon = setup_marker.clone();
+    let owned_source = owned_resume_daemon_session("run-impl", &impl_worktree);
     let fake_daemon = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
@@ -792,7 +814,7 @@ async fn resumed_revision_waits_for_target_teardown_before_setup_and_provider_sp
             let response = match &command {
                 kanna_daemon::protocol::Command::List => {
                     kanna_daemon::protocol::Event::SessionList {
-                        sessions: Vec::new(),
+                        sessions: vec![owned_source.clone()],
                         capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
                     }
                 }
@@ -951,6 +973,7 @@ async fn assert_blocking_teardown_kill_failure_aborts(label: &str, disconnect: b
     let socket_path = test_daemon_socket_path(&config.daemon_dir);
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).unwrap();
+    let owned_source = owned_resume_daemon_session("run-impl", &impl_worktree);
     let fake_daemon = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
@@ -979,7 +1002,7 @@ async fn assert_blocking_teardown_kill_failure_aborts(label: &str, disconnect: b
                 }
             } else if matches!(commands.last(), Some(kanna_daemon::protocol::Command::List)) {
                 kanna_daemon::protocol::Event::SessionList {
-                    sessions: Vec::new(),
+                    sessions: vec![owned_source.clone()],
                     capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
                 }
             } else {
@@ -1078,13 +1101,14 @@ async fn failed_owned_kill_restores_source_run_so_revision_can_retry() {
     let socket_path = test_daemon_socket_path(&config.daemon_dir);
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).unwrap();
+    let owned_source = owned_resume_daemon_session("run-review", &review_worktree);
     let failed_kill_daemon = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         for response in [
             kanna_daemon::protocol::Event::SessionList {
-                sessions: Vec::new(),
+                sessions: vec![owned_source.clone()],
                 capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
             },
             kanna_daemon::protocol::Event::Error {
@@ -1132,7 +1156,12 @@ async fn failed_owned_kill_restores_source_run_so_revision_can_retry() {
     )
     .unwrap();
     std::env::remove_var("CLAUDE_CONFIG_DIR");
-    let retry_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone(), 1).await;
+    let retry_daemon = spawn_fake_daemon_fork_transition_with_sessions(
+        config.daemon_dir.clone(),
+        1,
+        vec![owned_resume_daemon_session("run-review", &review_worktree)],
+    )
+    .await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
     spawn_prepared_stage_run_for_api(
         &config.db_path,

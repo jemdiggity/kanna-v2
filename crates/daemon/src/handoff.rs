@@ -898,7 +898,9 @@ pub(crate) async fn handle_handoff(
                     status: parts.status,
                     kind: protocol::SessionKind::Pty,
                     provider_session_id: parts.provider_session_id,
+                    codex_session: parts.codex_session,
                     agent_fd_count: 0,
+                    agent_spawn_generation: 0,
                     agent_spawn: None,
                 });
                 fds.push(fd);
@@ -989,7 +991,9 @@ pub(crate) async fn handle_handoff(
             status: record.status,
             kind: protocol::SessionKind::Agent,
             provider_session_id: record.provider_session_id.clone(),
+            codex_session: None,
             agent_fd_count,
+            agent_spawn_generation: record.spawn_generation,
             agent_spawn: Some(record.params.clone()),
         });
         fds.extend(session_fds);

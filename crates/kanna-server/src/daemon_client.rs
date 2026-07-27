@@ -57,12 +57,34 @@ fn capabilities_from_list_event(event: Event) -> Result<DaemonCapabilities, Stri
 }
 
 pub fn require_provider_resume(capabilities: &DaemonCapabilities) -> Result<(), String> {
-    if !capabilities.provider_resume || !capabilities.immutable_run_ownership {
+    if !capabilities.provider_resume {
         return Err(
             "daemon does not support provider resume with immutable run ownership".to_string(),
         );
     }
     Ok(())
+}
+
+pub fn require_owned_provider_resume(
+    listed: &DaemonList,
+    session_id: &str,
+    run_id: &str,
+) -> Result<(), String> {
+    require_provider_resume(&listed.capabilities)?;
+    match listed
+        .sessions
+        .iter()
+        .find(|session| session.session_id == session_id)
+    {
+        Some(session) if session.run_id.as_deref() == Some(run_id) => Ok(()),
+        Some(session) => Err(format!(
+            "daemon provider resume target {session_id} is owned by {:?}, expected {run_id}",
+            session.run_id
+        )),
+        None => Err(format!(
+            "daemon provider resume target session not found: {session_id}"
+        )),
+    }
 }
 
 impl DaemonClient {
@@ -317,5 +339,72 @@ mod tests {
         .unwrap();
 
         require_provider_resume(&capabilities).unwrap();
+    }
+
+    #[test]
+    fn provider_resume_accepts_exact_target_with_unrelated_legacy_session() {
+        let mut capabilities = DaemonCapabilities::current();
+        capabilities.immutable_run_ownership = false;
+        let listed = DaemonList {
+            sessions: vec![
+                SessionInfo {
+                    session_id: "target-session".to_string(),
+                    pid: 1,
+                    cwd: "/tmp/target".to_string(),
+                    state: kanna_daemon::protocol::SessionState::Active,
+                    idle_seconds: 0,
+                    status: kanna_daemon::protocol::SessionStatus::Idle,
+                    kind: kanna_daemon::protocol::SessionKind::Agent,
+                    run_id: Some("target-run".to_string()),
+                },
+                SessionInfo {
+                    session_id: "unrelated-legacy".to_string(),
+                    pid: 2,
+                    cwd: "/tmp/legacy".to_string(),
+                    state: kanna_daemon::protocol::SessionState::Active,
+                    idle_seconds: 0,
+                    status: kanna_daemon::protocol::SessionStatus::Idle,
+                    kind: kanna_daemon::protocol::SessionKind::Agent,
+                    run_id: None,
+                },
+            ],
+            capabilities,
+        };
+
+        require_owned_provider_resume(&listed, "target-session", "target-run").unwrap();
+    }
+
+    #[test]
+    fn provider_resume_rejects_target_owned_by_a_different_run() {
+        let listed = DaemonList {
+            sessions: vec![
+                SessionInfo {
+                    session_id: "target-session".to_string(),
+                    pid: 1,
+                    cwd: "/tmp/target".to_string(),
+                    state: kanna_daemon::protocol::SessionState::Active,
+                    idle_seconds: 0,
+                    status: kanna_daemon::protocol::SessionStatus::Idle,
+                    kind: kanna_daemon::protocol::SessionKind::Agent,
+                    run_id: Some("stale-run".to_string()),
+                },
+                SessionInfo {
+                    session_id: "unrelated-session".to_string(),
+                    pid: 2,
+                    cwd: "/tmp/unrelated".to_string(),
+                    state: kanna_daemon::protocol::SessionState::Active,
+                    idle_seconds: 0,
+                    status: kanna_daemon::protocol::SessionStatus::Idle,
+                    kind: kanna_daemon::protocol::SessionKind::Agent,
+                    run_id: Some("target-run".to_string()),
+                },
+            ],
+            capabilities: DaemonCapabilities::current(),
+        };
+
+        let error =
+            require_owned_provider_resume(&listed, "target-session", "target-run").unwrap_err();
+        assert!(error.contains("stale-run"));
+        assert!(error.contains("expected target-run"));
     }
 }

@@ -153,12 +153,18 @@ impl Db {
         let transaction = self.conn.unchecked_transaction()?;
         let run = transaction
             .query_row(
-                "SELECT id, kind, completion_transition, status,
-                        resumed_from_run_id, run_ownership_version,
-                        completion_attempt
-                 FROM stage_run
-                 WHERE task_id = ?1
-                 ORDER BY datetime(started_at) DESC, rowid DESC
+                "SELECT sr.id, sr.kind, sr.completion_transition, sr.status,
+                        sr.resumed_from_run_id, sr.run_ownership_version,
+                        sr.completion_attempt,
+                        (
+                          SELECT owner.run_ownership_version
+                          FROM stage_run owner
+                          WHERE owner.id = sr.resumed_from_run_id
+                            AND owner.task_id = sr.task_id
+                        )
+                 FROM stage_run sr
+                 WHERE sr.task_id = ?1
+                 ORDER BY datetime(sr.started_at) DESC, sr.rowid DESC
                  LIMIT 1",
                 [task_id],
                 |row| {
@@ -170,6 +176,7 @@ impl Db {
                         row.get::<_, Option<String>>(4)?,
                         row.get::<_, i64>(5)?,
                         row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
                     ))
                 },
             )
@@ -182,21 +189,28 @@ impl Db {
             completion_owner_run_id,
             run_ownership_version,
             required_completion_attempt,
+            completion_owner_ownership_version,
         )) = run
         else {
             return Ok(None);
         };
         let ownership_matches = expected_run_id.is_some_and(|expected| {
-            expected == run_id
-                || (kind == "post"
-                    && completion_owner_run_id
-                        .as_deref()
-                        .is_some_and(|owner| owner == expected)
-                    && required_completion_attempt
-                        .as_deref()
-                        .is_some_and(|required| {
-                            completion_attempt.is_some_and(|provided| provided == required)
-                        }))
+            if expected == run_id {
+                return true;
+            }
+            if kind != "post" || completion_owner_run_id.as_deref() != Some(expected) {
+                return false;
+            }
+            let scoped_attempt_matches =
+                required_completion_attempt
+                    .as_deref()
+                    .is_some_and(|required| {
+                        completion_attempt.is_some_and(|provided| provided == required)
+                    });
+            let pre_upgrade_owner_cannot_send_attempt = completion_attempt.is_none()
+                && completion_owner_ownership_version
+                    .is_some_and(|version| version < CURRENT_RUN_OWNERSHIP_VERSION);
+            scoped_attempt_matches || pre_upgrade_owner_cannot_send_attempt
         });
         if run_ownership_version >= CURRENT_RUN_OWNERSHIP_VERSION && !ownership_matches {
             return Err(rusqlite::Error::QueryReturnedNoRows);

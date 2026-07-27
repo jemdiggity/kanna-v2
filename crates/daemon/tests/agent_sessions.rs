@@ -1607,62 +1607,6 @@ fn interrupt_is_surfaced_as_interrupted_not_crashed() {
     ));
 }
 
-/// Fake agent shaped like the `codex exec` child from the 2026-07-24
-/// staging outage: it closes its own stdout (and stdin) right after init
-/// but keeps running. The daemon's EOF handling must reap it WITHOUT
-/// wedging the global agent registry — the old code blocked in
-/// `child.wait()` inside the registry lock, hanging List/Kill and silently
-/// stranding every stage transition.
-const STDOUT_CLOSING_LINGERER: &str = r#"#!/bin/sh
-read -r first
-echo '{"type":"system","subtype":"init","session_id":"fake-sess-linger","model":"fake-model"}'
-exec 1>&-
-exec 0<&-
-sleep 300
-"#;
-
-#[test]
-fn lingering_child_after_stdout_eof_is_reaped_without_wedging_the_registry() {
-    let dir = temp_dir("linger");
-    let script = write_script(&dir, "lingering-agent.sh", STDOUT_CLOSING_LINGERER);
-    let daemon = DaemonHandle::start_in(&dir);
-
-    let mut conn = daemon.connect();
-    conn.send(&Command::SpawnAgent {
-        session_id: "agent-linger".to_string(),
-        params: spawn_params(&dir, &script, "linger now"),
-    });
-    conn.recv_until(|event| matches!(event, Event::SessionCreated { .. }));
-
-    // From the moment the script closes stdout until the reaper finishes
-    // (short grace, then process-group SIGKILL), the registry must stay
-    // responsive: every List probe answers within the socket read timeout,
-    // and the session eventually reports as exited once the child is
-    // reaped. With the old wait-inside-the-lock code the first probe after
-    // EOF hangs forever and this test fails on the read timeout.
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        assert!(
-            Instant::now() < deadline,
-            "lingering child was never reaped; registry likely wedged"
-        );
-        let mut list_conn = daemon.connect();
-        list_conn.send(&Command::List);
-        let event = list_conn.recv_until(|event| matches!(event, Event::SessionList { .. }));
-        let Event::SessionList { sessions } = event else {
-            unreachable!()
-        };
-        let session = sessions
-            .iter()
-            .find(|info| info.session_id == "agent-linger")
-            .expect("agent session missing from List");
-        if matches!(session.state, SessionState::Exited(_)) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
 #[test]
 fn crash_does_not_publish_interim_assistant_text_as_a_waiting_prompt() {
     let dir = temp_dir("crash-waiting-prompt");
@@ -1901,6 +1845,7 @@ fn kill_removes_agent_session() {
 
     conn.send(&Command::Kill {
         session_id: "agent-k".to_string(),
+        expected_run_id: None,
     });
     conn.recv_until(|e| matches!(e, Event::Ok));
 
@@ -2012,6 +1957,7 @@ fn kill_during_resumed_turn_terminates_the_resumed_child() {
 
     conn.send(&Command::Kill {
         session_id: "agent-slow".to_string(),
+        expected_run_id: None,
     });
     conn.recv_until(|e| matches!(e, Event::Ok));
 

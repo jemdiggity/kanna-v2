@@ -289,6 +289,14 @@ async fn spawn_fake_daemon_fork_transition(
     daemon_dir: String,
     expected_spawns: usize,
 ) -> tokio::task::JoinHandle<Vec<kanna_daemon::protocol::Command>> {
+    spawn_fake_daemon_fork_transition_with_sessions(daemon_dir, expected_spawns, Vec::new()).await
+}
+
+async fn spawn_fake_daemon_fork_transition_with_sessions(
+    daemon_dir: String,
+    expected_spawns: usize,
+    sessions: Vec<kanna_daemon::protocol::SessionInfo>,
+) -> tokio::task::JoinHandle<Vec<kanna_daemon::protocol::Command>> {
     let socket_path = test_daemon_socket_path(&daemon_dir);
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).unwrap();
@@ -306,7 +314,7 @@ async fn spawn_fake_daemon_fork_transition(
             let response = match &command {
                 kanna_daemon::protocol::Command::List => {
                     kanna_daemon::protocol::Event::SessionList {
-                        sessions: Vec::new(),
+                        sessions: sessions.clone(),
                         capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
                     }
                 }

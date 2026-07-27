@@ -619,15 +619,6 @@ pub(crate) async fn handle_command(
                         )
                         .await;
                     });
-
-                    let evt = Event::SessionCreated {
-                        session_id: session_id.clone(),
-                        run_id,
-                    };
-                    let _ = write_event(&mut *writer.lock().await, &evt).await;
-                    if let Ok(json) = serde_json::to_string(&evt) {
-                        let _ = broadcast_tx.send(json);
-                    }
                 }
                 Err(e) => {
                     let evt = error_event(

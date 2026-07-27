@@ -12,7 +12,11 @@ use kanna_agent_protocol::StateChangeScope;
 use std::sync::Arc;
 
 fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
-    if error.starts_with("task is blocked:") {
+    if error.starts_with("task is blocked:")
+        || error.starts_with("daemon does not support provider resume")
+        || error.starts_with("daemon provider resume target")
+        || error.starts_with("provider resume requires an exact source process owner")
+    {
         axum::http::StatusCode::CONFLICT
     } else {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
@@ -146,7 +150,7 @@ async fn claim_durable_task_action(
     state: &Arc<AppState>,
     task_id: &str,
     action: &'static str,
-    request_json: &'static str,
+    request_json: &str,
     headers: &HeaderMap,
 ) -> Result<DurableTaskActionClaim, (StatusCode, String)> {
     let Some(key) = idempotency_key_from_headers(headers)? else {
@@ -159,10 +163,11 @@ async fn claim_durable_task_action(
         let state = Arc::clone(state);
         let key = key.clone();
         let task_id = task_id.to_string();
+        let request_json = request_json.to_string();
         super::blocking::run_handler_blocking("task action idempotency claim", move || {
             let db = Db::open(&state.config.db_path)
                 .map_err(|error| db_write_error("db error", error))?;
-            db.claim_task_action_request(&key, &task_id, action, request_json)
+            db.claim_task_action_request(&key, &task_id, action, &request_json)
                 .map_err(|error| match error {
                     TaskActionRequestError::Conflict => (
                         StatusCode::CONFLICT,
@@ -976,6 +981,33 @@ pub(super) async fn advance_stage(
     Ok(Json(response).into_response())
 }
 
+struct TaskActionExecutionError {
+    status: StatusCode,
+    message: String,
+    indeterminate_spawn: bool,
+}
+
+impl TaskActionExecutionError {
+    fn spawn(error: crate::task_creator::StageSpawnError) -> Self {
+        let message = error.to_string();
+        Self {
+            status: stage_action_error_status(&message),
+            indeterminate_spawn: error.is_indeterminate(),
+            message,
+        }
+    }
+}
+
+impl From<(StatusCode, String)> for TaskActionExecutionError {
+    fn from((status, message): (StatusCode, String)) -> Self {
+        Self {
+            status,
+            message,
+            indeterminate_spawn: false,
+        }
+    }
+}
+
 /// Execute a prepared transition: swap to the next stage's run, dispatch a
 /// post into the running session, or close past the final stage. Shared by
 /// `advance_stage` and `complete_stage`.
@@ -983,7 +1015,7 @@ async fn execute_stage_transition(
     state: &Arc<AppState>,
     daemon: &mut crate::daemon_client::DaemonClient,
     transition: crate::task_creator::PreparedStageTransition,
-) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, TaskActionExecutionError> {
     match transition {
         crate::task_creator::PreparedStageTransition::Run(prepared) => {
             let advanced = crate::task_creator::spawn_prepared_stage_run_for_api(
@@ -993,7 +1025,7 @@ async fn execute_stage_transition(
                 *prepared,
             )
             .await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            .map_err(TaskActionExecutionError::spawn)?;
             state.publish_state_changed(StateChangeScope::Tasks);
             Ok(Json(advanced))
         }
@@ -1007,22 +1039,21 @@ async fn execute_stage_transition(
                 *prepared,
             )
             .await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            .map_err(TaskActionExecutionError::spawn)?;
             state.publish_state_changed(StateChangeScope::Tasks);
             Ok(Json(dispatched))
         }
         crate::task_creator::PreparedStageTransition::Close {
             task_id,
             workspace_teardown,
-        } => {
-            close_task_after_final_stage(
-                state,
-                daemon,
-                task_id,
-                workspace_teardown.map(|teardown| *teardown),
-            )
-            .await
-        }
+        } => close_task_after_final_stage(
+            state,
+            daemon,
+            task_id,
+            workspace_teardown.map(|teardown| *teardown),
+        )
+        .await
+        .map_err(Into::into),
     }
 }
 
@@ -1087,9 +1118,16 @@ fn execute_stage_transition_detached(
                                 format!("failed to serialize task action response: {error}"),
                             )),
                         },
-                        Err((status, message)) => {
-                            finish_idempotent_task_action(&state, key, "failed", *status, message)
-                                .await
+                        Err(error) if error.indeterminate_spawn => Ok(()),
+                        Err(error) => {
+                            finish_idempotent_task_action(
+                                &state,
+                                key,
+                                "failed",
+                                error.status,
+                                &error.message,
+                            )
+                            .await
                         }
                     };
                     if let Err((_, error)) = finish {
@@ -1100,8 +1138,8 @@ fn execute_stage_transition_detached(
                         );
                     }
                 }
-                if let Err((_, message)) = result {
-                    log::error!("stage transition for {} failed: {}", task_id, message);
+                if let Err(error) = result {
+                    log::error!("stage transition for {} failed: {}", task_id, error.message);
                 }
             })
         })
@@ -1121,7 +1159,7 @@ async fn execute_stage_transition_awaited(
     task_id: String,
     transition: crate::task_creator::PreparedStageTransition,
     action_flight: RequestedTaskOperation,
-) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, TaskActionExecutionError> {
     let handle = tokio::runtime::Handle::current();
     let worker_task_id = task_id.clone();
     tokio::task::spawn_blocking(move || {
@@ -1129,21 +1167,21 @@ async fn execute_stage_transition_awaited(
             let _action_flight = action_flight;
             let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
                 .await
-                .map_err(|error| {
-                    (
-                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                        format!("stage transition for {task_id} failed to reach daemon: {error}"),
-                    )
+                .map_err(|error| TaskActionExecutionError {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    message: format!(
+                        "stage transition for {task_id} failed to reach daemon: {error}"
+                    ),
+                    indeterminate_spawn: false,
                 })?;
             execute_stage_transition(&state, &mut daemon, transition).await
         })
     })
     .await
-    .map_err(|join_error| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("stage transition worker for {worker_task_id} failed: {join_error}"),
-        )
+    .map_err(|join_error| TaskActionExecutionError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: format!("stage transition worker for {worker_task_id} failed: {join_error}"),
+        indeterminate_spawn: false,
     })?
 }
 
@@ -1252,13 +1290,14 @@ pub(super) async fn rerun_stage(
                                 format!("failed to serialize task action response: {error}"),
                             )),
                         },
+                        Err(error) if error.is_indeterminate() => Ok(()),
                         Err(error) => {
                             finish_idempotent_task_action(
                                 &rerun_state,
                                 key,
                                 "failed",
                                 StatusCode::INTERNAL_SERVER_ERROR,
-                                error,
+                                &error.to_string(),
                             )
                             .await
                         }
@@ -1563,15 +1602,22 @@ async fn unblock_dependents_of_pr_resolved_blocker(state: &Arc<AppState>, task_i
 pub(super) async fn request_revision(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
+    headers: HeaderMap,
     Json(payload): Json<crate::mobile_api::RequestRevisionRequest>,
-) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+) -> Result<Response, (axum::http::StatusCode, String)> {
     #[cfg(test)]
     if let Some(revision_requester) = state.revision_requester.clone() {
         return revision_requester(task_id, payload)
-            .map(Json)
+            .map(|response| Json(response).into_response())
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
     }
 
+    let request_json = serde_json::to_string(&payload).map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid revision request: {error}"),
+        )
+    })?;
     let origin = payload.origin.unwrap_or_default();
     // Resolve first, so the single-flight key below is the durable task id
     // rather than whichever alias (id or branch name) the caller used.
@@ -1602,20 +1648,20 @@ pub(super) async fn request_revision(
         .await?
     };
 
-    // One revision action per task at a time. Budget admission, workspace
-    // preparation, and the round accounting are one decision: overlapping
-    // requests would otherwise both see the last free slot, both start a
-    // revision, and spend the task past its cap — defeating the bound this
-    // endpoint exists to enforce. The guard releases on drop, including on
-    // every error path below.
-    let Some(revision_in_flight) = state.begin_requested_task_revision(&source_task_id) else {
-        return Err((
-            axum::http::StatusCode::CONFLICT,
-            format!("a revision is already in progress for task {source_task_id}"),
-        ));
+    let (revision_in_flight, idempotency_key) = match claim_durable_task_action(
+        &state,
+        &source_task_id,
+        "request-revision",
+        &request_json,
+        &headers,
+    )
+    .await?
+    {
+        DurableTaskActionClaim::Execute { flight, key } => (flight, key),
+        DurableTaskActionClaim::Respond(response) => return Ok(response),
     };
 
-    let outcome = {
+    let outcome_result = {
         let state = Arc::clone(&state);
         let source_task_id = source_task_id.clone();
         super::blocking::run_handler_blocking("revision prepare", move || {
@@ -1741,7 +1787,17 @@ pub(super) async fn request_revision(
                 },
             })
         })
-        .await?
+        .await
+    };
+    let outcome = match outcome_result {
+        Ok(outcome) => outcome,
+        Err((status, message)) => {
+            if let Some(key) = idempotency_key.as_deref() {
+                finish_idempotent_task_action(&state, key, "failed", status, &message).await?;
+            }
+            drop(revision_in_flight);
+            return Err((status, message));
+        }
     };
 
     match outcome {
@@ -1750,7 +1806,7 @@ pub(super) async fn request_revision(
             budget,
         } => {
             state.publish_state_changed(StateChangeScope::Tasks);
-            Ok(Json(crate::mobile_api::TaskActionResponse {
+            let response = crate::mobile_api::TaskActionResponse {
                 task_id: source_task_id,
                 follow_task: None,
                 revision_budget: Some(crate::mobile_api::RevisionBudgetStatus {
@@ -1765,22 +1821,25 @@ pub(super) async fn request_revision(
                         limit = budget.limit,
                     ),
                 }),
-            }))
+            };
+            if let Some(key) = idempotency_key.as_deref() {
+                let body = serde_json::to_string(&response).map_err(|error| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to serialize revision response: {error}"),
+                    )
+                })?;
+                finish_idempotent_task_action(&state, key, "succeeded", StatusCode::OK, &body)
+                    .await?;
+            }
+            drop(revision_in_flight);
+            Ok(Json(response).into_response())
         }
         RevisionOutcome::Started {
             source_task_id,
-            prepared,
+            mut prepared,
             budget,
         } => {
-            let mut response = execute_stage_transition_awaited(
-                Arc::clone(&state),
-                source_task_id.clone(),
-                crate::task_creator::PreparedStageTransition::Run(prepared),
-                revision_in_flight,
-            )
-            .await?;
-            state.publish_state_changed(StateChangeScope::Tasks);
-
             let message = if budget.limit > 0 && origin.is_agent() {
                 format!(
                     "Revision round {rounds} of {limit} started.",
@@ -1796,13 +1855,49 @@ pub(super) async fn request_revision(
             } else {
                 "Revision started; this pipeline sets no revision-round limit.".to_string()
             };
-            response.0.revision_budget = Some(crate::mobile_api::RevisionBudgetStatus {
-                rounds: budget.rounds,
-                limit: budget.limit,
-                exhausted: false,
-                message,
-            });
-            Ok(response)
+            let response = crate::mobile_api::TaskActionResponse {
+                task_id: source_task_id.clone(),
+                follow_task: None,
+                revision_budget: Some(crate::mobile_api::RevisionBudgetStatus {
+                    rounds: budget.rounds,
+                    limit: budget.limit,
+                    exhausted: false,
+                    message,
+                }),
+            };
+            if let Some(key) = idempotency_key.as_ref() {
+                let body = serde_json::to_string(&response).map_err(|error| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to serialize revision response: {error}"),
+                    )
+                })?;
+                prepared.set_action_request(key.clone(), body);
+            }
+            let execution = execute_stage_transition_awaited(
+                Arc::clone(&state),
+                source_task_id.clone(),
+                crate::task_creator::PreparedStageTransition::Run(prepared),
+                revision_in_flight,
+            )
+            .await;
+            if let Err(error) = execution {
+                if let Some(key) = idempotency_key.as_deref() {
+                    if !error.indeterminate_spawn {
+                        finish_idempotent_task_action(
+                            &state,
+                            key,
+                            "failed",
+                            error.status,
+                            &error.message,
+                        )
+                        .await?;
+                    }
+                }
+                return Err((error.status, error.message));
+            }
+            state.publish_state_changed(StateChangeScope::Tasks);
+            Ok(Json(response).into_response())
         }
     }
 }

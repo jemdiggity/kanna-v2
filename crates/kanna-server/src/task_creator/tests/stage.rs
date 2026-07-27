@@ -1244,6 +1244,7 @@ async fn assert_ambiguous_accepted_spawn_preserves_reservation(
         source_completion_result: None,
         source_completion_feedback: None,
         action_request_key: None,
+        action_success_body: None,
     };
 
     let fake_daemon = spawn_fake_daemon_accept_spawn_then_reconciliation_fails(

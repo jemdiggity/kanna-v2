@@ -31,6 +31,7 @@ use environment::{
     claim_task_ports, kanna_server_base_url, resolve_headless_agent_executable,
     resolve_provider_executable, run_workspace_setup_commands, write_kanna_mcp_config,
 };
+pub(crate) use lifecycle::StageSpawnError;
 use prompt::{build_stage_prompt, PromptContext};
 use provider::{
     normalize_agent_type, resolve_agent_provider, resolve_agent_provider_candidates,
@@ -978,6 +979,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         source_completion_result: None,
         source_completion_feedback: None,
         action_request_key: None,
+        action_success_body: None,
     })
 }
 

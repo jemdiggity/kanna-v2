@@ -51,6 +51,7 @@ import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo"
 import { advanceStageWithShortcut, pressAdvanceStageShortcut } from "../helpers/stageAdvance";
 import { resolveAppKannaServer, type AppKannaServer } from "../helpers/kannaServer";
 import { buildGlobalKeydownScript } from "../helpers/keyboard";
+import { sendKeysToActiveTerminal } from "../helpers/terminalInput";
 
 const execFileAsync = promisify(execFile);
 
@@ -147,6 +148,28 @@ async function waitForStageRuns(
     await sleep(100);
   }
   throw new Error(`timed out waiting for stage runs for ${taskId}; last rows: ${JSON.stringify(last)}`);
+}
+
+async function waitForTaskTerminalText(
+  client: WebDriverClient,
+  taskId: string,
+  text: string,
+  timeoutMs = 20_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let latest: string[] = [];
+  while (Date.now() < deadline) {
+    latest = await client.executeSync<string[]>(
+      `return window.__KANNA_E2E__?.terminalBuffers
+         ?.lines(${JSON.stringify(taskId)})?.slice(-100) ?? [];`,
+    );
+    if (latest.some((line) => line.includes(text))) return;
+    await sleep(100);
+  }
+  throw new Error(
+    `timed out waiting for terminal text ${JSON.stringify(text)} for ${taskId}; ` +
+    `latest=${JSON.stringify(latest)}`,
+  );
 }
 
 async function countRepoTasks(client: WebDriverClient, repoId: string): Promise<number> {
@@ -598,7 +621,8 @@ describe("stage advance", () => {
         "fi",
         "mkdir -p .kanna",
         "printf '%s\\n' \"$@\" > .kanna/revision-codex-args.txt",
-        "while :; do printf '.'; sleep 1; done",
+        "printf 'revision-session-ready\\n'",
+        "while IFS= read -r line; do printf 'revision-input:%s\\n' \"$line\"; done",
         "",
       ].join("\n"),
     );
@@ -1051,6 +1075,13 @@ describe("stage advance", () => {
     expect(capturedArgs).toContain(`Original task:\n${reviewPrompt}`);
     expect(capturedArgs).toContain("Reviewer feedback:\nRevision requested from review");
     expect(capturedArgs).toContain(revisionPrompt);
+    await waitForTaskTerminalText(client, taskId, "revision-session-ready");
+    await sendKeysToActiveTerminal(client, "fallback-terminal-input\n");
+    await waitForTaskTerminalText(
+      client,
+      taskId,
+      "revision-input:fallback-terminal-input",
+    );
     await closeDiffModalIfOpen(client);
   });
 
@@ -1188,6 +1219,13 @@ describe("stage advance", () => {
     expect(capturedArgs).toContain(`Original task:\n${originalPrompt}`);
     expect(capturedArgs).toContain("Reviewer feedback:\nRevision requested from review");
     expect(capturedArgs).toContain(revisionPrompt);
+    await waitForTaskTerminalText(client, taskId, "revision-session-ready");
+    await sendKeysToActiveTerminal(client, "resumed-terminal-input\n");
+    await waitForTaskTerminalText(
+      client,
+      taskId,
+      "revision-input:resumed-terminal-input",
+    );
     await closeDiffModalIfOpen(client);
   });
 });

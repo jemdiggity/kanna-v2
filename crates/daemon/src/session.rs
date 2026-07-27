@@ -835,6 +835,8 @@ pub mod test_support {
         )?;
         Ok(SessionRecord {
             pty,
+            run_id: None,
+            codex_session_locator: None,
             headless_terminal: HeadlessTerminal::new(80, 24, 10_000)?,
             stream_control: Some(stream_control.clone()),
             agent_provider: None,
@@ -857,6 +859,8 @@ pub mod test_support {
         )?;
         Ok(SessionRecord {
             pty,
+            run_id: None,
+            codex_session_locator: None,
             headless_terminal: HeadlessTerminal::new(80, 24, 10_000)?,
             stream_control: None,
             agent_provider: None,

@@ -249,40 +249,42 @@ async fn request_revision_reports_failure_after_preflight_acceptance() {
     let socket_path = daemon_socket_path_for_dir(&config.daemon_dir);
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).unwrap();
+    let owned_source = crate::task_creator::tests::revision::owned_resume_daemon_session(
+        "run-impl",
+        &repo_root.join(".kanna-worktrees/task-review-task"),
+    );
     let fake_daemon = tokio::spawn(async move {
-        for connection_index in 0..2 {
+        loop {
             let (stream, _) = listener.accept().await.unwrap();
             let (read_half, mut write_half) = stream.into_split();
             let mut reader = BufReader::new(read_half);
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            assert!(matches!(
-                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
-                DaemonCommand::List
-            ));
-            write_half
-                .write_all(
-                    format!(
-                        "{}\n",
-                        serde_json::to_string(&DaemonEvent::SessionList {
-                            sessions: Vec::new(),
-                            capabilities: Some(
-                                kanna_daemon::protocol::DaemonCapabilities::current()
-                            ),
-                        })
-                        .unwrap()
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
-            if connection_index == 1 {
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                if matches!(command, DaemonCommand::List) {
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&DaemonEvent::SessionList {
+                                    sessions: vec![owned_source.clone()],
+                                    capabilities: Some(
+                                        kanna_daemon::protocol::DaemonCapabilities::current()
+                                    ),
+                                })
+                                .unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                assert!(matches!(command, DaemonCommand::Kill { .. }));
                 line.clear();
-                reader.read_line(&mut line).await.unwrap();
-                assert!(matches!(
-                    serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
-                    DaemonCommand::Kill { .. }
-                ));
                 write_half
                     .write_all(
                         format!(
@@ -297,6 +299,7 @@ async fn request_revision_reports_failure_after_preflight_acceptance() {
                     )
                     .await
                     .unwrap();
+                return;
             }
         }
     });
@@ -1154,6 +1157,10 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
         .unwrap();
     let created: TaskActionResponse = from_slice(&replay_body).unwrap();
     assert_eq!(created.task_id, "review-task");
+    assert!(
+        created.revision_budget.is_some(),
+        "restart replay must return the final serialized revision budget"
+    );
     let db = Db::open(&config.db_path).unwrap();
     assert_eq!(
         db.list_stage_runs_for_task("review-task").unwrap().len(),

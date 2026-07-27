@@ -2768,6 +2768,79 @@ fn injected_post_completion_requires_its_scoped_attempt_from_the_live_main_proce
 }
 
 #[test]
+fn injected_post_accepts_missing_attempt_from_pre_upgrade_process_owner() {
+    let path = Db::test_db_path("mixed-version-injected-post-completion");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Complete a protected post from an old process",
+        None,
+        "in progress",
+        "2026-07-27 00:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "pre-upgrade-main",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("codex"),
+        model: None,
+        status: "succeeded",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    db.conn
+        .execute(
+            "UPDATE stage_run SET run_ownership_version = 0 WHERE id = ?1",
+            ["pre-upgrade-main"],
+        )
+        .unwrap();
+    db.insert_stage_run_with_completion_attempt(
+        NewStageRun {
+            id: "protected-post",
+            task_id: "task-1",
+            stage: "commit",
+            kind: "post",
+            agent: None,
+            agent_provider: Some("codex"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: Some("/tmp/task-1"),
+            resumed_from_run_id: Some("pre-upgrade-main"),
+        },
+        Some("auto"),
+        Some("post-attempt-current"),
+    )
+    .unwrap();
+
+    let finished = db
+        .finish_active_stage_run_with_completion_attempt(
+            "task-1",
+            Some("pre-upgrade-main"),
+            None,
+            "succeeded",
+            Some("{}"),
+            Some("completed by the preserved old peer"),
+        )
+        .expect("old process owner should negotiate missing completion_attempt")
+        .expect("protected post run");
+    assert_eq!(finished.kind, "post");
+}
+
+#[test]
 fn insert_pipeline_item_stores_stage_metadata() {
     let path = temp_db_path();
     let conn = Connection::open(&path).expect("open temp db");

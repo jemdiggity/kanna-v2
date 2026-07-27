@@ -273,6 +273,8 @@ pub(crate) struct PreparedStageRunSpawn {
     pub(super) source_completion_result: Option<String>,
     pub(super) source_completion_feedback: Option<String>,
     pub(super) action_request_key: Option<String>,
+    /// Serialized final HTTP response persisted with a durable action claim.
+    pub(super) action_success_body: Option<String>,
 }
 
 /// Detached best-effort cleanup for a workspace that the task is leaving.
@@ -303,6 +305,11 @@ impl PreparedStageRunSpawn {
 
     pub(crate) fn set_action_request_key(&mut self, key: String) {
         self.action_request_key = Some(key);
+    }
+
+    pub(crate) fn set_action_request(&mut self, key: String, success_body: String) {
+        self.action_request_key = Some(key);
+        self.action_success_body = Some(success_body);
     }
 
     /// The freshly created workspace, when this run forked one.

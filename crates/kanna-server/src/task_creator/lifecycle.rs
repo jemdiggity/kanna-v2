@@ -33,6 +33,37 @@ enum SpawnAcceptanceReconciliation {
     Indeterminate(String),
 }
 
+#[derive(Debug)]
+pub(crate) enum StageSpawnError {
+    Failed(String),
+    Indeterminate(String),
+}
+
+impl StageSpawnError {
+    pub(crate) fn is_indeterminate(&self) -> bool {
+        matches!(self, Self::Indeterminate(_))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, pattern: &str) -> bool {
+        self.to_string().contains(pattern)
+    }
+}
+
+impl From<String> for StageSpawnError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl std::fmt::Display for StageSpawnError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(error) | Self::Indeterminate(error) => formatter.write_str(error),
+        }
+    }
+}
+
 pub(crate) fn prepared_task_id(prepared: &PreparedTaskSpawn) -> &str {
     &prepared.created_task.task_id
 }
@@ -452,7 +483,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     daemon: &mut DaemonClient,
     replacements: &SessionReplacements,
     mut prepared: PreparedStageRunSpawn,
-) -> Result<crate::mobile_api::TaskActionResponse, String> {
+) -> Result<crate::mobile_api::TaskActionResponse, StageSpawnError> {
     let task_id = prepared.task_id.clone();
     let source_session_id = prepared.source_session_id.clone();
     let blocking_teardown_session_id =
@@ -468,22 +499,24 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         });
 
     if prepared.resumed_from_run_id.is_some() {
-        let capabilities = daemon
-            .capabilities()
+        let source_run_id = prepared
+            .expected_source
+            .process_run_id
+            .as_deref()
+            .ok_or_else(|| {
+                StageSpawnError::Failed(
+                    "provider resume requires an exact source process owner".to_string(),
+                )
+            })?;
+        let listed = daemon
+            .list()
             .await
             .map_err(|error| format!("daemon capability negotiation failed: {error}"))?;
-        crate::daemon_client::require_provider_resume(&capabilities)?;
-    }
-
-    // A manual advance can leave the previous stage's run open (no explicit
-    // agent verdict); moving forward treats that work as accepted. Revision
-    // paths mark the previous run failed before preparing the new run. This
-    // happens BEFORE the kill so the run record never claims a dead session
-    // is still running.
-    {
-        let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
-        db.finish_latest_running_stage_run(&task_id, "succeeded", None, None)
-            .map_err(|e| format!("db error: {}", e))?;
+        crate::daemon_client::require_owned_provider_resume(
+            &listed,
+            &prepared.source_session_id,
+            source_run_id,
+        )?;
     }
 
     // Establish immutable ownership before the daemon can emit lifecycle
@@ -515,14 +548,22 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         .action_request_key
         .as_ref()
         .map(|_| {
-            serde_json::to_string(&crate::mobile_api::TaskActionResponse {
-                task_id: task_id.clone(),
-                follow_task: None,
-                revision_budget: None,
-            })
+            prepared.action_success_body.clone().map_or_else(
+                || {
+                    serde_json::to_string(&crate::mobile_api::TaskActionResponse {
+                        task_id: task_id.clone(),
+                        follow_task: None,
+                        revision_budget: None,
+                    })
+                },
+                Ok,
+            )
         })
         .transpose()
         .map_err(|error| format!("failed to serialize task action result: {error}"))?;
+    // Reserving the successor atomically snapshots the source row and marks
+    // a still-running source accepted before the kill. If that kill fails,
+    // rollback can therefore restore the exact pre-action source status.
     let replaced_source = {
         let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
         match db.replace_current_run_with_pending_action(
@@ -577,7 +618,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                 } else {
                     format!("db error: {error}")
                 };
-                return Err(rollback_prepared_stage_fork(&prepared, message));
+                return Err(rollback_prepared_stage_fork(&prepared, message).into());
             }
         }
     };
@@ -598,7 +639,8 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             &prepared,
             replaced_source.as_ref(),
             error,
-        ));
+        )
+        .into());
     }
     if !matches!(prepared.workspace, PreparedRunWorkspace::Current) {
         // The prewarmed shell session points at the previous worktree; kill
@@ -606,9 +648,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         if let Err(error) =
             kill_session_replacing(daemon, replacements, &format!("shell-wt-{task_id}")).await
         {
-            return Err(fail_prepared_stage_spawn(
-                db_path, &run_id, &prepared, error,
-            ));
+            return Err(fail_prepared_stage_spawn(db_path, &run_id, &prepared, error).into());
         }
         if let Some(teardown_session_id) = blocking_teardown_session_id.as_deref() {
             if let Err(error) =
@@ -621,14 +661,13 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                     format!(
                         "failed to stop workspace teardown session {teardown_session_id}: {error}"
                     ),
-                ));
+                )
+                .into());
             }
         }
     }
     if let Err(error) = prepare_deferred_stage_setup(&mut prepared) {
-        return Err(fail_prepared_stage_spawn(
-            db_path, &run_id, &prepared, error,
-        ));
+        return Err(fail_prepared_stage_spawn(db_path, &run_id, &prepared, error).into());
     }
 
     let command = spawn_session_command(
@@ -653,12 +692,13 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                         &run_id,
                         &prepared,
                         format!("{command_error}; {reconcile_error}"),
-                    ));
+                    )
+                    .into());
                 }
                 SpawnAcceptanceReconciliation::Indeterminate(reconcile_error) => {
-                    return Err(format!(
+                    return Err(StageSpawnError::Indeterminate(format!(
                     "{command_error}; {reconcile_error}; successor reservation retained for startup reconciliation"
-                ));
+                )));
                 }
             }
         }
@@ -685,12 +725,9 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                     "failed to clean up mismatched stage session {session_id}: {cleanup_error}"
                 );
             }
-            return Err(fail_prepared_stage_spawn(
-                db_path,
-                &run_id,
-                &prepared,
-                ownership_error,
-            ));
+            return Err(
+                fail_prepared_stage_spawn(db_path, &run_id, &prepared, ownership_error).into(),
+            );
         }
         Some(DaemonEvent::Error { message, .. }) => {
             return Err(fail_prepared_stage_spawn(
@@ -698,7 +735,8 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                 &run_id,
                 &prepared,
                 format!("daemon error: {}", message),
-            ))
+            )
+            .into())
         }
         Some(other) => {
             return Err(fail_prepared_stage_spawn(
@@ -706,7 +744,8 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                 &run_id,
                 &prepared,
                 format!("unexpected daemon response: {:?}", other),
-            ))
+            )
+            .into())
         }
     }
 
@@ -731,7 +770,8 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             rollback_closed_stage_spawn(db_path, &run_id, &prepared, message)
         } else {
             fail_prepared_stage_spawn(db_path, &run_id, &prepared, message)
-        });
+        }
+        .into());
     }
 
     spawn_prepared_workspace_teardown_best_effort(daemon, prepared.workspace_teardown).await;
@@ -921,7 +961,7 @@ pub(crate) async fn dispatch_prepared_post_for_api(
     daemon: &mut DaemonClient,
     replacements: &SessionReplacements,
     prepared: PreparedPostDispatch,
-) -> Result<crate::mobile_api::TaskActionResponse, String> {
+) -> Result<crate::mobile_api::TaskActionResponse, StageSpawnError> {
     let task_id = prepared.task_id.clone();
     match try_submit_task_input(daemon, &prepared.session_id, &prepared.message).await {
         Ok(()) => {
@@ -1005,7 +1045,7 @@ pub(crate) async fn dispatch_prepared_post_for_api(
         Err(TaskInputError::SessionNotFound) => {
             spawn_prepared_stage_run_for_api(db_path, daemon, replacements, prepared.fallback).await
         }
-        Err(TaskInputError::Other(message)) => Err(message),
+        Err(TaskInputError::Other(message)) => Err(message.into()),
     }
 }
 
@@ -1014,7 +1054,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     daemon: &mut DaemonClient,
     replacements: &SessionReplacements,
     mut prepared: PreparedStageRerun,
-) -> Result<crate::mobile_api::TaskActionResponse, String> {
+) -> Result<crate::mobile_api::TaskActionResponse, StageSpawnError> {
     let task_id = prepared.task_id.clone();
     let source_session_id = prepared.source_session_id.clone();
     let stage = prepared.stage.clone();
@@ -1115,14 +1155,15 @@ pub(crate) async fn rerun_prepared_stage_for_api(
             &prepared.expected_source,
             replaced_source.as_ref(),
             error,
-        ));
+        )
+        .into());
     }
     if let Err(error) = prepare_deferred_rerun_setup(&mut prepared) {
-        return Err(record_failure(error));
+        return Err(record_failure(error).into());
     }
     if let Some(snapshot) = prepared.recovery_snapshot.as_ref() {
         if let Err(error) = seed_recovery_snapshot(daemon, &session_id, snapshot).await {
-            return Err(record_failure(error));
+            return Err(record_failure(error).into());
         }
     }
 
@@ -1144,14 +1185,14 @@ pub(crate) async fn rerun_prepared_stage_for_api(
             match reconcile_spawn_acceptance(daemon, &session_id, &run_id).await {
                 SpawnAcceptanceReconciliation::Accepted => None,
                 SpawnAcceptanceReconciliation::Rejected(reconcile_error) => {
-                    return Err(record_failure(format!(
-                        "{command_error}; {reconcile_error}"
-                    )));
+                    return Err(
+                        record_failure(format!("{command_error}; {reconcile_error}")).into(),
+                    );
                 }
                 SpawnAcceptanceReconciliation::Indeterminate(reconcile_error) => {
-                    return Err(format!(
+                    return Err(StageSpawnError::Indeterminate(format!(
                     "{command_error}; {reconcile_error}; successor reservation retained for startup reconciliation"
-                ));
+                )));
                 }
             }
         }
@@ -1197,14 +1238,12 @@ pub(crate) async fn rerun_prepared_stage_for_api(
                     "; failed to kill mismatched session: {kill_error}"
                 ));
             }
-            Err(record_failure(error))
+            Err(record_failure(error).into())
         }
         Some(DaemonEvent::Error { message, .. }) => {
-            Err(record_failure(format!("daemon error: {message}")))
+            Err(record_failure(format!("daemon error: {message}")).into())
         }
-        Some(other) => Err(record_failure(format!(
-            "unexpected daemon response: {other:?}"
-        ))),
+        Some(other) => Err(record_failure(format!("unexpected daemon response: {other:?}")).into()),
     }
 }
 
