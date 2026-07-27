@@ -140,9 +140,20 @@ struct PersistedRecoverySnapshot {
     serialized: String,
     cols: u16,
     rows: u16,
-    cursor_row: u16,
-    cursor_col: u16,
-    cursor_visible: bool,
+    /// Absent in snapshots written by v0.0.30 and earlier.
+    ///
+    /// This is a SECOND deserializer for the same on-disk format — the recovery
+    /// worker has its own — and both hard-required these three fields, so a
+    /// snapshot written by a shipped build failed to parse and the session's whole
+    /// scrollback was dropped on upgrade, silently, because the read path treats a
+    /// parse failure as "no snapshot". Teaching only one loader would leave the
+    /// other still rejecting them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cursor_row: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cursor_col: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cursor_visible: Option<bool>,
     saved_at: u64,
     sequence: u64,
 }
@@ -208,9 +219,9 @@ impl RecoveryManager {
             serialized: snapshot.serialized.clone(),
             cols: snapshot.cols,
             rows: snapshot.rows,
-            cursor_row: snapshot.cursor_row,
-            cursor_col: snapshot.cursor_col,
-            cursor_visible: snapshot.cursor_visible,
+            cursor_row: Some(snapshot.cursor_row),
+            cursor_col: Some(snapshot.cursor_col),
+            cursor_visible: Some(snapshot.cursor_visible),
             saved_at: snapshot.saved_at,
             sequence: snapshot.sequence,
         };
@@ -408,9 +419,16 @@ impl RecoveryManager {
             serialized: snapshot.serialized,
             cols: snapshot.cols,
             rows: snapshot.rows,
-            cursor_row: snapshot.cursor_row,
-            cursor_col: snapshot.cursor_col,
-            cursor_visible: snapshot.cursor_visible,
+            // The client-facing snapshot has no way to say "cursor unknown": it
+            // feeds `TerminalSnapshot`, whose cursor fields are concrete and are
+            // applied by the renderer, so a v0.0.30 snapshot falls back to the
+            // origin here. The AUTHORITATIVE resume path does better — the worker's
+            // `SessionMirror::restore` skips repositioning entirely when the cursor
+            // is unknown. The asymmetry is deliberate: the alternative is widening
+            // `TerminalSnapshot` and every renderer that consumes it.
+            cursor_row: snapshot.cursor_row.unwrap_or(0),
+            cursor_col: snapshot.cursor_col.unwrap_or(0),
+            cursor_visible: snapshot.cursor_visible.unwrap_or(true),
             saved_at: snapshot.saved_at,
             sequence: snapshot.sequence,
         }))
@@ -937,6 +955,60 @@ fn unique_test_snapshot_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact JSON v0.0.30 wrote: no cursor fields at all.
+    const V0_0_30_SNAPSHOT: &str = r#"{"sessionId":"legacy-v0030","serialized":"LEGACY_SCROLLBACK\r\n","cols":80,"rows":24,"savedAt":1700000000000,"sequence":7}"#;
+
+    /// A released v0.0.30 snapshot must still load.
+    ///
+    /// Both deserializers of this on-disk format hard-required cursorRow/cursorCol/
+    /// cursorVisible, so a snapshot from a shipped build failed to parse and the
+    /// session's whole scrollback was dropped on upgrade — silently, because the
+    /// read path treats a parse failure as "no snapshot".
+    #[tokio::test]
+    async fn a_v0_0_30_snapshot_without_cursor_fields_still_loads() {
+        let snapshot_dir = unique_test_snapshot_dir();
+        std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
+        std::fs::write(snapshot_dir.join("legacy-v0030.json"), V0_0_30_SNAPSHOT)
+            .expect("write legacy fixture");
+
+        // Self-validating guard: prove the fixture is one the PRE-FIX shape
+        // rejects, or this test could pass for the wrong reason. `Option<T>` is
+        // implicitly optional in serde, so deleting the `#[serde(default)]`
+        // attributes is a no-op — the mechanism is the TYPE, and a type-level
+        // mutation does not compile. This assertion is the mutation check.
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        #[allow(dead_code)]
+        struct RequiredCursorShape {
+            session_id: String,
+            serialized: String,
+            cols: u16,
+            rows: u16,
+            cursor_row: u16,
+            cursor_col: u16,
+            cursor_visible: bool,
+            saved_at: u64,
+            sequence: u64,
+        }
+        assert!(
+            serde_json::from_str::<RequiredCursorShape>(V0_0_30_SNAPSHOT).is_err(),
+            "fixture must be rejected by the old required-cursor shape, else this test \
+             proves nothing about v0.0.30 compatibility"
+        );
+
+        let manager = RecoveryManager::new(snapshot_dir.clone(), None);
+        let loaded = manager
+            .get_snapshot("legacy-v0030")
+            .await
+            .expect("a legacy snapshot must not be an error")
+            .expect("a legacy snapshot must be found, not silently dropped");
+        assert_eq!(loaded.serialized, "LEGACY_SCROLLBACK\r\n");
+        assert_eq!(loaded.cols, 80);
+        assert_eq!(loaded.sequence, 7);
+
+        let _ = std::fs::remove_dir_all(&snapshot_dir);
+    }
 
     #[tokio::test]
     async fn seeded_snapshot_is_readable_without_live_recovery_worker() {

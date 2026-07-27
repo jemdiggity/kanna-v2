@@ -23,9 +23,9 @@ fn snapshot_response_serializes_cursor_fields() {
         serialized: "prompt>".to_string(),
         cols: 120,
         rows: 45,
-        cursor_row: 12,
-        cursor_col: 4,
-        cursor_visible: false,
+        cursor_row: Some(12),
+        cursor_col: Some(4),
+        cursor_visible: Some(false),
         saved_at: 123,
         sequence: 9,
     });
