@@ -493,7 +493,7 @@ export function useAppLifecycle({
         let succeeded = false;
         const stopRenewing = renewLifecycleDeliveryWhileHandling(event);
         try {
-          await handleTaskPullRequested(
+          succeeded = await handleTaskPullRequested(
             parseTaskPullRequestedEvent(eventPayload(event)),
             store,
             taskPullPushesInFlight,
@@ -503,7 +503,6 @@ export function useAppLifecycle({
               signal: taskPullAbortController.signal,
             },
           );
-          succeeded = true;
         } catch (e: unknown) {
           console.error("[App] failed to handle task pull request:", e);
           toast.error(e instanceof Error ? e.message : String(e));

@@ -274,6 +274,73 @@ async fn oversized_peer_request_is_closed_without_a_response() {
     drop(runtime);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_input_chunk_at_the_ui_boundary_fits_the_authenticated_peer_frame() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let runtime = runtime_with_trusted_hostile_peer(temp.path(), &listener).await;
+    let server = tokio::spawn(async move {
+        let (epoch_stream, _) = listener.accept().await.unwrap();
+        let mut epoch_reader = BufReader::new(epoch_stream);
+        let mut epoch_line = String::new();
+        epoch_reader.read_line(&mut epoch_line).await.unwrap();
+        let epoch_request: PeerRequest = serde_json::from_str(epoch_line.trim()).unwrap();
+        let PeerRequest::GetAuthenticatedRequestEpoch { request_id } = epoch_request else {
+            panic!("expected owner epoch request");
+        };
+        epoch_reader
+            .get_mut()
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&PeerResponse::AuthenticatedRequestEpoch {
+                        request_id,
+                        epoch: "owner-epoch".into(),
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let (input_stream, _) = listener.accept().await.unwrap();
+        let mut input_reader = BufReader::new(input_stream);
+        let mut input_line = String::new();
+        input_reader.read_line(&mut input_line).await.unwrap();
+        assert!(
+            input_line.len() <= 64 * 1024,
+            "4 KiB terminal input expanded to a {}-byte peer frame",
+            input_line.len(),
+        );
+        let input_request: PeerRequest = serde_json::from_str(input_line.trim()).unwrap();
+        let PeerRequest::SendSessionInput {
+            request_id, data, ..
+        } = input_request
+        else {
+            panic!("expected terminal input request");
+        };
+        assert_eq!(data, vec![u8::MAX; 4 * 1024]);
+        input_reader
+            .get_mut()
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&PeerResponse::SendSessionInput { request_id }).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    runtime
+        .send_peer_session_input("peer-hostile", "task-boundary", vec![u8::MAX; 4 * 1024])
+        .await
+        .unwrap();
+    server.await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn peer_listener_rejects_connections_beyond_its_hard_cap() {
     let temp = tempfile::tempdir().unwrap();
@@ -7700,6 +7767,80 @@ async fn owned_artifacts_are_deleted_on_ttl_shutdown_and_startup_while_borrowed_
     assert!(
         borrowed_path.exists(),
         "runtime shutdown deleted a borrowed source artifact",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hostile_self_peer_id_cannot_escape_artifact_cleanup_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let registry_root = temp.path().join("registry");
+    let absolute_canary_root = temp.path().join("absolute-must-survive");
+    let absolute_canary = absolute_canary_root.join("canary.txt");
+    std::fs::create_dir_all(registry_root.join("artifacts")).unwrap();
+    std::fs::create_dir_all(&absolute_canary_root).unwrap();
+    std::fs::write(&absolute_canary, b"safe").unwrap();
+    let absolute_peer_id = absolute_canary_root.to_string_lossy().into_owned();
+
+    let invalid = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        &absolute_peer_id,
+        "Absolute path peer",
+        &registry_root,
+        0,
+    ))
+    .await;
+    assert!(
+        invalid.is_err(),
+        "absolute peer id unexpectedly passed validation"
+    );
+    assert!(
+        absolute_canary.exists(),
+        "startup cleanup acted on an absolute peer id before validating it",
+    );
+
+    let dot_canary = registry_root.join("dot-canary.txt");
+    std::fs::create_dir_all(registry_root.join("artifacts")).unwrap();
+    std::fs::write(&dot_canary, b"safe").unwrap();
+
+    let managed_path;
+    {
+        let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+            "..",
+            "Dot path peer",
+            &registry_root,
+            0,
+        ))
+        .await
+        .unwrap();
+        assert!(
+            dot_canary.exists(),
+            "startup cleanup treated a dot peer id as path traversal",
+        );
+
+        let source = temp.path().join("owned.bundle");
+        std::fs::write(&source, b"owned").unwrap();
+        runtime
+            .stage_transfer_artifact("transfer-1", "artifact-1", source, true)
+            .await
+            .unwrap();
+        managed_path = runtime
+            .fetch_transfer_artifact("transfer-1", "artifact-1")
+            .await
+            .unwrap()
+            .path;
+        assert!(
+            managed_path.starts_with(registry_root.join("artifacts")),
+            "managed artifact escaped its registry root: {managed_path:?}",
+        );
+    }
+
+    assert!(
+        absolute_canary.exists(),
+        "drop cleanup removed the absolute canary"
+    );
+    assert!(dot_canary.exists(), "drop cleanup removed the dot canary");
+    assert!(
+        !managed_path.exists(),
+        "drop cleanup retained the managed artifact"
     );
 }
 

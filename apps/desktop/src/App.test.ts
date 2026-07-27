@@ -713,6 +713,19 @@ function buildOutgoingTransferFinalizationRequestedEvent() {
   };
 }
 
+function buildTaskPullRequestedEvent() {
+  return {
+    payload: {
+      type: "task_pull_requested",
+      request_id: "pull-failover-1",
+      requester_peer_id: "peer-requester",
+      source_task_id: "task-source",
+      __kannaLifecycleDeliveryId: "lifecycle-pull-failover-1",
+      __kannaLifecycleRecovery: true,
+    },
+  };
+}
+
 function emitDesktopCloudSnapshot(snapshot: DesktopCloudSnapshot): void {
   for (const listener of desktopCloudTaskSnapshotListeners) {
     listener(snapshot);
@@ -5266,6 +5279,72 @@ describe("App", () => {
     expect(lanTasksMock).toHaveBeenCalled();
     expect(store.approveIncomingTransfer).not.toHaveBeenCalled();
     wrapper.unmount();
+  });
+
+  it("requeues an aborted task pull so a standby performs exactly one push after release", async () => {
+    store.items = [{
+      id: "task-source",
+      repo_id: "repo-1",
+      closed_at: null,
+      stage: "in progress",
+      branch: "task-source",
+      prompt: "Return this task",
+      tags: "[]",
+    }];
+    store.pushTaskToPeer.mockReset();
+    store.pushTaskToPeer.mockResolvedValue(undefined);
+    const event = buildTaskPullRequestedEvent();
+    let standbyReady = false;
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "list_transfer_peers") {
+        return standbyReady
+          ? [{
+              peer_id: "peer-requester",
+              display_name: "Requester",
+              public_key: "requester-key",
+              endpoint: "127.0.0.1:43100",
+              pid: 42,
+              trusted: true,
+              accepting_transfers: true,
+            }]
+          : [];
+      }
+      return await defaultInvoke?.(command, args);
+    });
+
+    const owner = await mountApp(SidebarWithRepoStub);
+    const ownerHandler = listenHandlers.get("task-pull-requested");
+    expect(ownerHandler).toBeTypeOf("function");
+    const ownerDelivery = ownerHandler?.(event);
+    owner.unmount();
+    await ownerDelivery;
+
+    expect(invokeMock).toHaveBeenCalledWith("release_transfer_event_consumer", undefined);
+    expect(invokeMock).toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+    });
+    expect(store.pushTaskToPeer).not.toHaveBeenCalled();
+
+    standbyReady = true;
+    const standby = await mountApp(SidebarWithRepoStub);
+    const standbyHandler = listenHandlers.get("task-pull-requested");
+    await standbyHandler?.(event);
+
+    expect(store.pushTaskToPeer).toHaveBeenCalledTimes(1);
+    expect(store.pushTaskToPeer).toHaveBeenCalledWith(
+      "task-source",
+      "peer-requester",
+      {
+        transport: "lan",
+        cloudFallback: false,
+        targetDesktopId: null,
+      },
+    );
+    expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+    });
+    standby.unmount();
   });
 
   it("does not start transfer services when a mutating listener is not ready", async () => {

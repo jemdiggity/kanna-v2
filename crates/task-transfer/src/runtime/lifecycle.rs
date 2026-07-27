@@ -7,8 +7,8 @@ use super::listener::run_listener;
 use super::replay_store::{unix_ms, TransferReplayStore};
 use super::state::{ListenerContext, TerminalObserverSlot, TransferRuntime};
 use super::utils::{
-    load_or_create_identity, registry_entry_path, terminal_observer_key, unexpected_peer_response,
-    CURRENT_PROTOCOL_VERSION,
+    load_or_create_identity, managed_artifact_root, registry_entry_path, terminal_observer_key,
+    unexpected_peer_response, CURRENT_PROTOCOL_VERSION,
 };
 use crate::crypto::{parse_public_key, public_key_to_string, seal_json};
 use crate::discovery::encode_txt_record;
@@ -44,7 +44,9 @@ impl TransferRuntime {
     }
 
     pub async fn spawn(mut config: RuntimeConfig) -> Result<Self, RuntimeError> {
-        let owned_artifact_root = config.registry_dir.join("artifacts").join(&config.peer_id);
+        crate::discovery::validate_peer_id(&config.peer_id)
+            .map_err(|error| RuntimeError::InvalidConfig(error.to_string()))?;
+        let owned_artifact_root = managed_artifact_root(&config.registry_dir, &config.peer_id);
         match tokio::fs::remove_dir_all(&owned_artifact_root).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -908,12 +910,10 @@ impl Drop for TransferRuntime {
         // runtime-private root. Removing the root is therefore both complete
         // and safe even if an async artifact-map task still owns the mutex
         // while the final runtime handle is being dropped.
-        let _ = std::fs::remove_dir_all(
-            self.config
-                .registry_dir
-                .join("artifacts")
-                .join(&self.config.peer_id),
-        );
+        let _ = std::fs::remove_dir_all(managed_artifact_root(
+            &self.config.registry_dir,
+            &self.config.peer_id,
+        ));
         if let Ok(mut task_snapshot) = self.task_snapshot.try_lock() {
             *task_snapshot = Value::Null;
         }

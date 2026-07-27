@@ -135,6 +135,75 @@ describe("CloudTerminalView", () => {
     wrapper.unmount();
   });
 
+  it("chunks the largest accepted paste into wire-safe UTF-8 input frames", async () => {
+    harness.sendInput.mockResolvedValue(undefined);
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+        transport: "cloud",
+      },
+    });
+    await flushPromises();
+    const paste = "界".repeat(64 * 1024);
+
+    harness.dataListener?.(paste);
+    await vi.waitFor(() => {
+      const sent = harness.sendInput.mock.calls
+        .map(([request]) => request.data)
+        .join("");
+      expect(sent).toBe(paste);
+    });
+
+    expect(harness.sendInput.mock.calls.length).toBeGreaterThan(1);
+    for (const [request] of harness.sendInput.mock.calls) {
+      expect(new TextEncoder().encode(request.data).byteLength).toBeLessThanOrEqual(4 * 1024);
+    }
+    wrapper.unmount();
+  });
+
+  it("keeps a failed input queue in error through later output and rebuilds it on retry", async () => {
+    harness.sendInput
+      .mockRejectedValueOnce(new Error("peer frame rejected"))
+      .mockResolvedValue(undefined);
+    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+        transport: "cloud",
+      },
+    });
+    await flushPromises();
+
+    harness.dataListener?.("first");
+    await flushPromises();
+    expect(wrapper.attributes("data-status")).toBe("error");
+
+    harness.subscriptionListener?.({
+      type: "output",
+      taskId: "task-1",
+      text: "late output",
+    });
+    await flushPromises();
+    expect(wrapper.attributes("data-status")).toBe("error");
+
+    await wrapper.setProps({ ownerTaskId: "task-2" });
+    await flushPromises();
+    expect(wrapper.attributes("data-status")).toBe("live");
+    harness.dataListener?.("retry");
+    await flushPromises();
+
+    expect(harness.sendInput).toHaveBeenCalledTimes(2);
+    expect(harness.sendInput).toHaveBeenLastCalledWith({
+      desktopId: "desktop-1",
+      taskId: "task-2",
+      data: "retry",
+    });
+    wrapper.unmount();
+  });
+
   it("closes a delayed client instead of installing it after route replacement", async () => {
     const firstFactory = deferred<ReturnType<typeof terminalClient>>();
     const staleClient = terminalClient();

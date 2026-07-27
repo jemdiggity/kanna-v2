@@ -974,6 +974,12 @@ function createTrustedLanFallbackClient({
   invalidatePendingValidatedRoutes(): void;
 } {
   const validatedBaseUrls = new Map<string, string>();
+  const validatedClients = new Map<string, {
+    baseUrl: string;
+    deviceId: string | null;
+    deviceSecret: string | null;
+    client: KannaClient;
+  }>();
   let lastValidatedDesktopId: string | null = null;
   let pendingValidationCount = 0;
   const replaceValidatedBaseUrls = (
@@ -987,12 +993,18 @@ function createTrustedLanFallbackClient({
     for (const [desktopId, baseUrl] of nextBaseUrls) {
       validatedBaseUrls.set(desktopId, baseUrl);
     }
+    for (const [desktopId, cached] of validatedClients) {
+      if (nextBaseUrls.get(desktopId) !== cached.baseUrl) {
+        validatedClients.delete(desktopId);
+      }
+    }
     lastValidatedDesktopId = endpoints[0]?.desktopId ?? null;
     if (changed) onValidatedRoutesChanged();
   };
   const setValidatedBaseUrl = (desktopId: string, baseUrl: string) => {
     const changed = validatedBaseUrls.get(desktopId) !== baseUrl;
     validatedBaseUrls.set(desktopId, baseUrl);
+    if (changed) validatedClients.delete(desktopId);
     lastValidatedDesktopId = desktopId;
     if (changed) onValidatedRoutesChanged();
   };
@@ -1010,12 +1022,29 @@ function createTrustedLanFallbackClient({
   const invalidatePendingValidatedRoutes = () => {
     if (pendingValidationCount > 0) invalidateValidatedRoutes();
   };
-  const clientForBaseUrl = (resolvedBaseUrl: string, desktopId: string) =>
-    createKannaClient(
+  const clientForBaseUrl = (resolvedBaseUrl: string, desktopId: string) => {
+    const credentials = getLanDeviceCredentials(desktopId);
+    const cached = validatedClients.get(desktopId);
+    if (
+      cached?.baseUrl === resolvedBaseUrl
+      && cached.deviceId === (credentials?.deviceId ?? null)
+      && cached.deviceSecret === (credentials?.deviceSecret ?? null)
+    ) {
+      return cached.client;
+    }
+    const client = createKannaClient(
       createLanTransport(resolvedBaseUrl, fetchImpl, undefined, {
-        deviceCredentials: getLanDeviceCredentials(desktopId)
+        deviceCredentials: credentials
       })
     );
+    validatedClients.set(desktopId, {
+      baseUrl: resolvedBaseUrl,
+      deviceId: credentials?.deviceId ?? null,
+      deviceSecret: credentials?.deviceSecret ?? null,
+      client
+    });
+    return client;
+  };
   const resolveClient = async (desktopId: string | null) => {
     const trustedDesktopIds = desktopId
       ? getTrustedDesktopIds().filter((trustedId) => trustedId === desktopId)
@@ -1036,6 +1065,7 @@ function createTrustedLanFallbackClient({
     if (!endpoint) {
       if (desktopId) {
         if (validatedBaseUrls.delete(desktopId)) {
+          validatedClients.delete(desktopId);
           if (lastValidatedDesktopId === desktopId) {
             lastValidatedDesktopId = validatedBaseUrls.keys().next().value ?? null;
           }

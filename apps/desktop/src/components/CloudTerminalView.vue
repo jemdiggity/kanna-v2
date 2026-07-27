@@ -35,6 +35,9 @@ let subscription: DesktopRelayTerminalSubscription | null = null;
 let unregisterE2ETerminalBuffer: (() => void) | null = null;
 let fileLinkProvider: RemoteTerminalFileLinkProvider | null = null;
 const MAX_PENDING_REMOTE_INPUT_CHARS = 64 * 1024;
+// LAN input is repeated in the authenticated peer envelope. A 4 KiB UTF-8
+// chunk stays below the task-transfer runtime's 64 KiB request-frame limit.
+const MAX_REMOTE_INPUT_FRAME_BYTES = 4 * 1024;
 let startGeneration = 0;
 
 interface RemoteInputQueue {
@@ -74,8 +77,8 @@ function closeInputQueue() {
 
 function drainRemoteInput(queue: RemoteInputQueue) {
   if (queue.closed || queue.inFlight || queue.pending.length === 0) return;
-  const data = queue.pending;
-  queue.pending = "";
+  const [data, remaining] = takeRemoteInputChunk(queue.pending);
+  queue.pending = remaining;
   queue.inFlight = true;
   void queue.client.sendInput({
     desktopId: queue.desktopId,
@@ -93,6 +96,25 @@ function drainRemoteInput(queue: RemoteInputQueue) {
       drainRemoteInput(queue);
     }
   });
+}
+
+function takeRemoteInputChunk(data: string): [string, string] {
+  let end = 0;
+  let bytes = 0;
+  for (const character of data) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    const characterBytes = codePoint <= 0x7f
+      ? 1
+      : codePoint <= 0x7ff
+        ? 2
+        : codePoint <= 0xffff
+          ? 3
+          : 4;
+    if (bytes + characterBytes > MAX_REMOTE_INPUT_FRAME_BYTES) break;
+    bytes += characterBytes;
+    end += character.length;
+  }
+  return [data.slice(0, end), data.slice(end)];
 }
 
 function enqueueRemoteInput(data: string) {
@@ -147,7 +169,7 @@ async function start() {
     }
     const client = acquiredClient;
     relayClient = client;
-    inputQueue = {
+    const queue: RemoteInputQueue = {
       client,
       desktopId,
       taskId,
@@ -155,6 +177,7 @@ async function start() {
       inFlight: false,
       closed: false,
     };
+    inputQueue = queue;
     subscription = client.observeTerminal({
       desktopId,
       taskId,
@@ -165,12 +188,16 @@ async function start() {
           || event.taskId !== taskId
         ) return;
         if (event.type === "ready") {
-          status.value = "live";
-          fitAndResizeRemote();
+          if (inputQueue === queue && !queue.closed) {
+            status.value = "live";
+            fitAndResizeRemote();
+          }
           return;
         }
         if (event.type === "output") {
-          status.value = "live";
+          if (inputQueue === queue && !queue.closed) {
+            status.value = "live";
+          }
           terminal?.write(event.text);
           return;
         }
