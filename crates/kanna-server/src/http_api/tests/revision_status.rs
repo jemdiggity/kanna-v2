@@ -14,6 +14,7 @@ async fn request_revision_route_uses_revision_requester() {
             Ok(TaskActionResponse {
                 task_id: "revision-task".to_string(),
                 follow_task: None,
+                revision_budget: None,
             })
         }),
     );
@@ -80,18 +81,10 @@ async fn request_revision_error_body_survives_error_logging_middleware() {
 #[tokio::test]
 async fn request_revision_route_resolves_branch_style_task_id() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-branch-{unique}"));
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
@@ -181,6 +174,10 @@ async fn request_revision_route_resolves_branch_style_task_id() {
                     let command_line = args.join(" ");
                     assert!(command_line.contains("Implement revision:"));
                     assert!(command_line.contains("Add e2e coverage for task creation."));
+                    // The pipeline declares no revision_limit, so the default
+                    // cap applies and the revising agent is told which round
+                    // it is and that the loop is bounded.
+                    assert!(command_line.contains("Revision round 1 of 3"));
                     session_id
                 }
                 other => panic!("expected revision spawn command, got {:?}", other),
@@ -287,6 +284,8 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         revision_run.feedback.as_deref(),
         Some("Add e2e coverage for task creation.")
     );
+    // An agent-requested revision spends one round of the task's budget.
+    assert_eq!(db.task_revision_rounds("710917fb").unwrap(), 1);
 
     daemon_server.await.unwrap();
     let _ = std::fs::remove_file(&socket_path);
@@ -297,19 +296,12 @@ async fn request_revision_route_resolves_branch_style_task_id() {
 #[tokio::test]
 async fn automatic_revision_completion_dispatches_commit_post_through_http_routes() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
     use tokio::sync::mpsc;
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-loop-{unique}"));
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
@@ -652,14 +644,7 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-title-{unique}"));
     init_test_git_repo(&repo_root);
     let kanna_dir = repo_root.join(".kanna");
@@ -915,4 +900,1054 @@ async fn status_route_does_not_expose_pairing_secret() {
     assert_eq!(status_json["environment"], "development");
     assert_eq!(status_json["serverVersion"], "test-version");
     assert!(status.pairing_code.is_none());
+}
+
+/// Repo + config + seeded task for the revision-budget tests: a pipeline that
+/// caps revision rounds, a task parked at `review` with a running review run,
+/// and the round budget already spent.
+struct RevisionBudgetFixture {
+    config: Config,
+    repo_root: PathBuf,
+    daemon_dir: PathBuf,
+    socket_path: PathBuf,
+}
+
+fn setup_revision_budget_fixture(label: &str, revision_limit: i64) -> RevisionBudgetFixture {
+    let unique = format!("{label}-{}", super::unique_test_suffix());
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-budget-{unique}"));
+    init_test_git_repo(&repo_root);
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/budget.json"),
+        serde_json::json!({
+            "name": "budget",
+            "revision_limit": revision_limit,
+            "stages": [
+                {
+                    "name": "in progress",
+                    "prompt": "$TASK_PROMPT",
+                    "policy": { "transition": "manual" }
+                },
+                { "name": "review", "policy": { "transition": "auto" } },
+                { "name": "pr", "policy": { "transition": "manual" } }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add budgeted pipeline"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    publish_test_origin_main(&repo_root);
+    assert!(Command::new("git")
+        .args(["branch", "task-budget-1"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-revision-budget-d-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-revision-budget-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        pairing_store_path: format!("/tmp/kanna-pairings-revision-budget-{unique}.json"),
+    };
+
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "budget-1",
+        "repo-1",
+        "Add a focused fix",
+        Some("Add a focused fix"),
+        "review",
+        "2026-07-26 10:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "budget-1",
+        "task-budget-1",
+        "budget",
+        None,
+        "claude",
+    )
+    .unwrap();
+    // Spend the whole budget, as a task that has already been round-tripped
+    // through review this many times would have.
+    for _ in 0..revision_limit {
+        db.try_claim_agent_revision_round("budget-1", 0).unwrap();
+    }
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "budget-review-run",
+        task_id: "budget-1",
+        stage: "review",
+        kind: "main",
+        agent: Some("qa-dispatcher"),
+        agent_provider: Some("claude"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("budget-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    drop(db);
+
+    RevisionBudgetFixture {
+        config,
+        repo_root,
+        daemon_dir,
+        socket_path,
+    }
+}
+
+/// A permissive fake daemon for a fixture socket: `Kill` is answered with
+/// `SessionNotFound`, spawns with `SessionCreated`, anything else with `Ok`.
+///
+/// When `first_command_seen`/`release` are supplied the daemon reads the first
+/// command, reports it, and then waits — holding the detached stage transition
+/// open so a test can act inside the window between the HTTP response and the
+/// transition landing.
+fn spawn_fixture_daemon(
+    socket_path: std::path::PathBuf,
+    first_command_seen: Option<tokio::sync::oneshot::Sender<()>>,
+    release: Option<tokio::sync::oneshot::Receiver<()>>,
+) -> tokio::task::JoinHandle<()> {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let mut first_command_seen = first_command_seen;
+        let mut release = release;
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let Ok(command) = serde_json::from_str::<DaemonCommand>(line.trim()) else {
+                    break;
+                };
+                if let Some(seen) = first_command_seen.take() {
+                    let _ = seen.send(());
+                }
+                if let Some(gate) = release.take() {
+                    let _ = gate.await;
+                }
+                let response = match command {
+                    DaemonCommand::Kill { .. } => DaemonEvent::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    },
+                    DaemonCommand::SpawnAgent { session_id, .. }
+                    | DaemonCommand::Spawn { session_id, .. } => {
+                        DaemonEvent::SessionCreated { session_id }
+                    }
+                    _ => DaemonEvent::Ok,
+                };
+                if write_half
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                    )
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    })
+}
+
+/// Poll until the task's revision run for `stage` exists, so assertions run
+/// against a transition that actually landed rather than a race.
+async fn wait_for_revision_run(db: &Db, task_id: &str, stage: &str) -> crate::db::StageRun {
+    for _ in 0..500 {
+        if let Some(run) = db
+            .list_stage_runs_for_task(task_id)
+            .unwrap()
+            .into_iter()
+            .find(|run| run.stage == stage && run.kind == "main")
+        {
+            return run;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("no {stage} revision run landed for task {task_id}");
+}
+
+fn cleanup_revision_budget_fixture(fixture: &RevisionBudgetFixture) {
+    let _ = std::fs::remove_file(&fixture.socket_path);
+    let _ = std::fs::remove_dir_all(&fixture.daemon_dir);
+    let _ = std::fs::remove_dir_all(&fixture.repo_root);
+}
+
+#[tokio::test]
+async fn agent_revision_request_parks_the_task_once_the_round_budget_is_spent() {
+    let fixture = setup_revision_budget_fixture("agent", 2);
+
+    // No daemon is listening: an exhausted budget must start nothing, so the
+    // request cannot need one.
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/budget-1/actions/request-revision")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "targetStage": "in progress",
+                        "summary": "QA failed: review-ui",
+                        "prompt": "Rebuild the sidebar with a different layout."
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let action: TaskActionResponse = from_slice(&body).unwrap();
+    assert_eq!(action.task_id, "budget-1");
+    let budget = action.revision_budget.expect("revision budget reported");
+    assert!(budget.exhausted);
+    assert_eq!(budget.rounds, 2);
+    assert_eq!(budget.limit, 2);
+    assert!(
+        budget.message.contains("parked"),
+        "the agent must be told why nothing started: {}",
+        budget.message
+    );
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    let task = db.get_task_stage_source("budget-1").unwrap().unwrap();
+    // Parked: the task stays where it was, and no round was spent on a
+    // revision that never happened.
+    assert_eq!(task.stage.as_deref(), Some("review"));
+    assert_eq!(task.branch.as_deref(), Some("task-budget-1"));
+    assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 2);
+    assert_eq!(
+        db.get_pipeline_item("budget-1")
+            .unwrap()
+            .unwrap()
+            .activity
+            .as_deref(),
+        Some("unread"),
+        "a parked task must surface to its human"
+    );
+
+    // The review verdict is still recorded, with the requested changes kept as
+    // the run's feedback so nothing the reviewer found is lost.
+    let runs = db.list_stage_runs_for_task("budget-1").unwrap();
+    assert_eq!(runs.len(), 1, "no revision run may be created");
+    let review_run = &runs[0];
+    assert_eq!(review_run.status, "failed");
+    assert_eq!(
+        review_run.feedback.as_deref(),
+        Some("Rebuild the sidebar with a different layout.")
+    );
+    let result: serde_json::Value =
+        serde_json::from_str(review_run.result.as_deref().unwrap()).unwrap();
+    let summary = result["summary"].as_str().unwrap();
+    assert!(summary.contains("Parked for human review"), "{summary}");
+    assert!(summary.contains("QA failed: review-ui"), "{summary}");
+
+    drop(db);
+    cleanup_revision_budget_fixture(&fixture);
+}
+
+#[tokio::test]
+async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let fixture = setup_revision_budget_fixture("human", 1);
+
+    // Fake daemon: the human-requested revision must reach a real spawn even
+    // though the agent budget is spent.
+    let daemon_listener = UnixListener::bind(&fixture.socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = daemon_listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let session_id = match command {
+                DaemonCommand::Kill { .. } => {
+                    let response = DaemonEvent::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    };
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                DaemonCommand::SpawnAgent { session_id, .. } => session_id,
+                DaemonCommand::Spawn { session_id, .. } => session_id,
+                other => panic!("expected revision spawn command, got {:?}", other),
+            };
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            break;
+        }
+    });
+
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/budget-1/actions/request-revision")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "targetStage": "in progress",
+                        "summary": "needs one more pass",
+                        "prompt": "Fix the failing typecheck.",
+                        "origin": "human"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    if response.status() != StatusCode::OK {
+        daemon_server.abort();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        cleanup_revision_budget_fixture(&fixture);
+        panic!(
+            "human revision must not be refused by the agent budget, got {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let action: TaskActionResponse = from_slice(&body).unwrap();
+    let budget = action.revision_budget.expect("revision budget reported");
+    assert!(!budget.exhausted);
+    assert_eq!(budget.rounds, 0, "the budget is handed back to the agents");
+    assert_eq!(budget.limit, 1);
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    let task = super::actions::wait_for_task_stage(&db, "budget-1", "in progress").await;
+    assert_eq!(task.stage.as_deref(), Some("in progress"));
+    assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 0);
+
+    daemon_server.await.unwrap();
+    drop(db);
+    cleanup_revision_budget_fixture(&fixture);
+}
+
+/// `$PREV_RESULT` binds the latest finished run of any kind, so for a review
+/// stage whose predecessor declares a commit post it is the *commit* agent's
+/// result — the implementer's own report, including work it declined, is not
+/// reachable through it. `$PREV_MAIN_RESULT` binds the previous main run.
+/// This drives the real chain (implementation main run -> commit post ->
+/// stage transition -> review prompt) through the router, because the bug
+/// lives in how stage-run persistence, post completion, and prompt
+/// substitution meet.
+#[tokio::test]
+async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_the_post_result() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    const DECLINED_MARKER: &str = "DECLINED: the migration finding is out of scope for this task.";
+    const COMMIT_SUMMARY: &str = "committed 2 files for review";
+
+    let unique = super::unique_test_suffix();
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-prev-main-{unique}"));
+    init_test_git_repo(&repo_root);
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/prevmain.json"),
+        serde_json::json!({
+            "name": "prevmain",
+            "stages": [
+                {
+                    "name": "in progress",
+                    "policy": { "transition": "auto" },
+                    "agent": "implement",
+                    "prompt": "$TASK_PROMPT",
+                    "post": { "name": "commit", "prompt": "Commit for $TASK_PROMPT" }
+                },
+                {
+                    "name": "review",
+                    "policy": { "transition": "manual" },
+                    "agent": "reviewer",
+                    "prompt": "IMPLEMENTER_RESULT[$PREV_MAIN_RESULT]\nLATEST_RESULT[$PREV_RESULT]"
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    for agent in ["implement", "reviewer"] {
+        std::fs::write(
+            repo_root.join(format!(".kanna/agents/{agent}/AGENT.md")),
+            format!("---\nname: {agent}\ndescription: Test {agent} agent\nagent_provider: claude\n---\nRun {agent}."),
+        )
+        .unwrap();
+    }
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add prev-main pipeline"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    super::publish_test_origin_main(&repo_root);
+    assert!(Command::new("git")
+        .args(["branch", "task-prevmain"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-prev-main-d-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+
+    // Records every prompt the daemon is asked to spawn, so the review
+    // stage's rendered prompt can be inspected after the transition.
+    let spawned_prompts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&spawned_prompts);
+    let daemon_server = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = daemon_listener.accept().await else {
+                return;
+            };
+            let recorder = Arc::clone(&recorder);
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(_) => {}
+                    }
+                    let Ok(command) = serde_json::from_str::<DaemonCommand>(line.trim()) else {
+                        return;
+                    };
+                    let response = match command {
+                        DaemonCommand::Kill { .. } => DaemonEvent::Error {
+                            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                            message: "session not found".to_string(),
+                        },
+                        DaemonCommand::SpawnAgent { session_id, params } => {
+                            recorder.lock().unwrap().push(params.prompt.clone());
+                            DaemonEvent::SessionCreated { session_id }
+                        }
+                        DaemonCommand::Spawn {
+                            session_id, args, ..
+                        } => {
+                            recorder.lock().unwrap().push(args.join(" "));
+                            DaemonEvent::SessionCreated { session_id }
+                        }
+                        DaemonCommand::Input { .. } => DaemonEvent::Ok,
+                        _ => DaemonEvent::Ok,
+                    };
+                    if write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-prev-main-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        pairing_store_path: format!("/tmp/kanna-pairings-prev-main-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "prevmain-1",
+        "repo-1",
+        "Original implementation prompt.",
+        Some("Prev main result"),
+        "in progress",
+        "2026-07-27 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "prevmain-1",
+        "task-prevmain",
+        "prevmain",
+        None,
+        "claude",
+    )
+    .unwrap();
+    db.insert_stage_run_with_completion_transition(
+        crate::db::NewStageRun {
+            id: "prevmain-impl-run",
+            task_id: "prevmain-1",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("implement"),
+            agent_provider: Some("claude"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("prevmain-1"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        },
+        Some("auto"),
+    )
+    .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+
+    // 1. The implementation main run reports what it did — and what it
+    //    declined. Auto completion dispatches the commit post.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/prevmain-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "status": "success",
+                        "summary": format!("Implemented the fix. {DECLINED_MARKER}")
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let db = Db::open(&config.db_path).unwrap();
+    let mut post_run = None;
+    for _ in 0..200 {
+        if let Some(run) = db
+            .list_stage_runs_for_task("prevmain-1")
+            .unwrap()
+            .into_iter()
+            .find(|run| run.kind == "post" && run.stage == "commit")
+        {
+            post_run = Some(run);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(post_run.is_some(), "the commit post was not dispatched");
+
+    // 2. The commit post reports its own, different result and finishes,
+    //    which performs the transition into the review stage.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/prevmain-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "status": "success", "summary": COMMIT_SUMMARY })
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut review_prompt = None;
+    for _ in 0..200 {
+        if let Some(prompt) = spawned_prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|prompt| prompt.contains("IMPLEMENTER_RESULT["))
+            .cloned()
+        {
+            review_prompt = Some(prompt);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let review_prompt = review_prompt.expect("the review stage never spawned with its prompt");
+
+    let implementer_field = review_prompt
+        .split("IMPLEMENTER_RESULT[")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .expect("IMPLEMENTER_RESULT field")
+        .to_string();
+    let latest_field = review_prompt
+        .split("LATEST_RESULT[")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .expect("LATEST_RESULT field")
+        .to_string();
+
+    // $PREV_MAIN_RESULT carries the implementer's report, declined finding
+    // and all — this is what the QA dispatcher reads to know an earlier
+    // finding was never addressed.
+    assert!(
+        implementer_field.contains(DECLINED_MARKER),
+        "the review stage must receive the implementer's declined finding: {implementer_field}"
+    );
+    assert!(
+        !implementer_field.contains(COMMIT_SUMMARY),
+        "the implementer binding must not be the commit post's result: {implementer_field}"
+    );
+    // $PREV_RESULT keeps its documented meaning for the pipelines that want
+    // the post's result.
+    assert!(
+        latest_field.contains(COMMIT_SUMMARY),
+        "$PREV_RESULT must still carry the latest run's result: {latest_field}"
+    );
+
+    let item = db.get_pipeline_item("prevmain-1").unwrap().unwrap();
+    assert_eq!(item.stage.as_deref(), Some("review"));
+
+    daemon_server.abort();
+    drop(db);
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// The cap is the load-bearing behavior of the revision budget, so it must not
+/// be bypassable by request timing. Two agent requests arriving together at
+/// the task's last free slot must not both be admitted: reading the count and
+/// spending it are one atomic claim, and one revision action runs at a time
+/// per task. Drives the real router, DB, and stage preparation, because a unit
+/// test of `RevisionBudget::exhausted` cannot prove that wiring.
+#[tokio::test]
+async fn concurrent_agent_revision_requests_cannot_spend_past_the_budget() {
+    // Limit 2 with one round already spent: exactly one slot remains, so two
+    // concurrent requests contend for it.
+    let fixture = setup_revision_budget_fixture("race", 2);
+    {
+        let db = Db::open(&fixture.config.db_path).unwrap();
+        db.release_agent_revision_round("budget-1").unwrap();
+        assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 1);
+    }
+
+    // A real (if fake) daemon, so the winning request's detached transition
+    // completes and can be asserted on.
+    let daemon = spawn_fixture_daemon(fixture.socket_path.clone(), None, None);
+
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let request = || {
+        Request::post("/v1/tasks/budget-1/actions/request-revision")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "targetStage": "in progress",
+                    "summary": "QA failed: review-ui",
+                    "prompt": "Fix the finding."
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let (first, second) = tokio::join!(
+        app.clone().oneshot(request()),
+        app.clone().oneshot(request())
+    );
+
+    let mut started = 0;
+    let mut refused = 0;
+    for response in [first.unwrap(), second.unwrap()] {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        match status {
+            // Serialized behind the winner, then observed the spent budget.
+            StatusCode::OK => {
+                let action: TaskActionResponse = from_slice(&body).unwrap();
+                let budget = action.revision_budget.expect("revision budget reported");
+                if budget.exhausted {
+                    refused += 1;
+                } else {
+                    started += 1;
+                }
+                assert!(
+                    budget.rounds <= budget.limit,
+                    "a response must never report more rounds than the limit: {budget:?}"
+                );
+            }
+            // Rejected as a concurrent revision for the same task.
+            StatusCode::CONFLICT => {
+                let message = String::from_utf8_lossy(&body);
+                assert!(
+                    message.contains("already in progress"),
+                    "conflict must say why: {message}"
+                );
+                refused += 1;
+            }
+            other => panic!(
+                "unexpected status {other}: {}",
+                String::from_utf8_lossy(&body)
+            ),
+        }
+    }
+
+    assert_eq!(
+        (started, refused),
+        (1, 1),
+        "exactly one revision may start and the other must be refused"
+    );
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    // The invariant: the stored count never passes the configured cap.
+    assert_eq!(
+        db.task_revision_rounds("budget-1").unwrap(),
+        2,
+        "the last slot must be spent exactly once"
+    );
+    // The winner's transition must actually land — "no runs at all" would
+    // satisfy a bare upper bound while proving nothing.
+    wait_for_revision_run(&db, "budget-1", "in progress").await;
+    let revision_runs = db
+        .list_stage_runs_for_task("budget-1")
+        .unwrap()
+        .into_iter()
+        .filter(|run| run.stage == "in progress" && run.kind == "main")
+        .count();
+    assert_eq!(
+        revision_runs, 1,
+        "exactly one revision run must land, found {revision_runs}"
+    );
+
+    daemon.abort();
+    drop(db);
+    cleanup_revision_budget_fixture(&fixture);
+}
+
+/// A human request is never refused by the budget, but it must not race an
+/// agent's claim either: the two would otherwise both start a revision on one
+/// task, and the human's reset would collide with the agent's increment.
+#[tokio::test]
+async fn concurrent_human_and_agent_revision_requests_are_serialized() {
+    let fixture = setup_revision_budget_fixture("overlap", 1);
+    {
+        // Budget already spent, so the agent request is the one that must not
+        // start anything even if it wins the race.
+        let db = Db::open(&fixture.config.db_path).unwrap();
+        assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 1);
+    }
+
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let build = |origin: &str| {
+        Request::post("/v1/tasks/budget-1/actions/request-revision")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "targetStage": "in progress",
+                    "summary": "needs another pass",
+                    "prompt": "Fix the finding.",
+                    "origin": origin
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+    let (agent, human) = tokio::join!(
+        app.clone().oneshot(build("agent")),
+        app.clone().oneshot(build("human"))
+    );
+
+    let mut outcomes = Vec::new();
+    for response in [agent.unwrap(), human.unwrap()] {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        if status == StatusCode::OK {
+            let action: TaskActionResponse = from_slice(&body).unwrap();
+            let budget = action.revision_budget.expect("revision budget reported");
+            outcomes.push(if budget.exhausted {
+                "parked"
+            } else {
+                "started"
+            });
+            assert!(budget.rounds <= budget.limit, "{budget:?}");
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT);
+            outcomes.push("conflict");
+        }
+    }
+
+    // Whichever order they land in, at most one revision starts: the human's
+    // (never refused by the budget) or none, when the human lost the flight.
+    assert!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == "started")
+            .count()
+            <= 1,
+        "at most one revision may start: {outcomes:?}"
+    );
+    assert!(
+        outcomes.contains(&"conflict") || outcomes.contains(&"parked"),
+        "the losing or over-budget request must be refused: {outcomes:?}"
+    );
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    // The agent can never push the count past the cap, and a human revision
+    // that ran resets it to 0.
+    let rounds = db.task_revision_rounds("budget-1").unwrap();
+    assert!(
+        rounds <= 1,
+        "rounds must never exceed the limit, got {rounds}"
+    );
+
+    drop(db);
+    cleanup_revision_budget_fixture(&fixture);
+}
+
+/// The window that the simultaneous-request test cannot reach: after the
+/// handler has answered 200 but before the detached transition has landed.
+///
+/// The response has to come first — the transition kills and respawns the
+/// caller's own session — so for that whole window the task's stage, branch,
+/// and session are still the pre-revision ones. A second request admitted
+/// there would spend another budget slot and prepare a workspace from state
+/// the in-flight transition is about to replace. The per-task guard therefore
+/// belongs to the detached worker, not to the handler.
+#[tokio::test]
+async fn a_second_revision_is_refused_until_the_detached_transition_lands() {
+    // Deliberate slack in the budget (limit 3, nothing spent): without the
+    // guard the second request is not stopped by exhaustion, so it would
+    // really claim another round and prepare another workspace from the stale
+    // task state — the failure mode under test, rather than the easier case
+    // where the budget happens to catch it.
+    let fixture = setup_revision_budget_fixture("window", 3);
+    {
+        let db = Db::open(&fixture.config.db_path).unwrap();
+        for _ in 0..3 {
+            db.release_agent_revision_round("budget-1").unwrap();
+        }
+        assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 0);
+    }
+
+    // The daemon holds the first transition open at its first command.
+    let (first_command_tx, first_command_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let daemon = spawn_fixture_daemon(
+        fixture.socket_path.clone(),
+        Some(first_command_tx),
+        Some(release_rx),
+    );
+
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let request = || {
+        Request::post("/v1/tasks/budget-1/actions/request-revision")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "targetStage": "in progress",
+                    "summary": "QA failed: review-ui",
+                    "prompt": "Fix the finding."
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let first = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(first.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let started: TaskActionResponse = from_slice(&body).unwrap();
+    let budget = started.revision_budget.expect("revision budget reported");
+    assert!(!budget.exhausted);
+    assert_eq!(budget.rounds, 1);
+
+    // The response has landed; the transition is now mid-flight, blocked on
+    // the daemon. This is the window under test.
+    tokio::time::timeout(std::time::Duration::from_secs(10), first_command_rx)
+        .await
+        .expect("the detached transition never reached the daemon")
+        .expect("daemon gate dropped");
+
+    let second = app.clone().oneshot(request()).await.unwrap();
+    let second_status = second.status();
+    let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        second_status,
+        StatusCode::CONFLICT,
+        "a revision arriving before the first landed must be refused: {}",
+        String::from_utf8_lossy(&second_body)
+    );
+
+    {
+        // Refusing must not have spent a round or prepared a second workspace,
+        // even though the budget had room for one.
+        let db = Db::open(&fixture.config.db_path).unwrap();
+        assert_eq!(
+            db.task_revision_rounds("budget-1").unwrap(),
+            1,
+            "a refused request must not spend a budget slot"
+        );
+        let workspaces = std::fs::read_dir(fixture.repo_root.join(".kanna-worktrees"))
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert!(
+            workspaces <= 1,
+            "a refused request must not fork a second workspace, found {workspaces}"
+        );
+    }
+
+    let _ = release_tx.send(());
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    wait_for_revision_run(&db, "budget-1", "in progress").await;
+    let revision_runs = db
+        .list_stage_runs_for_task("budget-1")
+        .unwrap()
+        .into_iter()
+        .filter(|run| run.stage == "in progress" && run.kind == "main")
+        .count();
+    assert_eq!(
+        revision_runs, 1,
+        "exactly one revision run may land, found {revision_runs}"
+    );
+    assert_eq!(
+        db.task_revision_rounds("budget-1").unwrap(),
+        1,
+        "exactly one round may be spent while the transition was in flight"
+    );
+
+    // Once the worker exits the task is claimable again — the guard is tied to
+    // the transition, not held forever. With budget still available, the next
+    // request is admitted, which is the released-guard proof.
+    let mut third_status = StatusCode::CONFLICT;
+    let mut third_body = Vec::new();
+    for _ in 0..250 {
+        let third = app.clone().oneshot(request()).await.unwrap();
+        third_status = third.status();
+        third_body = axum::body::to_bytes(third.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        if third_status != StatusCode::CONFLICT {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        third_status,
+        StatusCode::OK,
+        "the guard must release when the transition finishes: {}",
+        String::from_utf8_lossy(&third_body)
+    );
+    let admitted: TaskActionResponse = from_slice(&third_body).unwrap();
+    let admitted_budget = admitted.revision_budget.expect("revision budget reported");
+    assert!(
+        !admitted_budget.exhausted,
+        "budget remained, so the request after the transition must be admitted"
+    );
+    assert_eq!(
+        admitted_budget.rounds, 2,
+        "the admitted request spends the next round"
+    );
+
+    daemon.abort();
+    drop(db);
+    cleanup_revision_budget_fixture(&fixture);
 }

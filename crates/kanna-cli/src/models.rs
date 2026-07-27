@@ -72,6 +72,15 @@ pub(crate) struct TaskDetail {
     pub(crate) commits_ahead: i64,
     pub(crate) commits_behind: i64,
     pub(crate) dirty: bool,
+    /// Agent-requested revision rounds spent, and the cap the task's pipeline
+    /// allows (`0` = unlimited). Optional so a desktop server predating the
+    /// revision budget still deserializes; when the server sends them, a
+    /// no-MCP agent reading `kanna-cli task get` sees the same budget an MCP
+    /// caller sees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) revision_rounds: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) revision_limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -201,6 +210,22 @@ pub(crate) struct TaskActionResponse {
     pub(crate) task_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) follow_task: Option<bool>,
+    /// Where the task stands against its revision-round budget after a
+    /// `request-revision`, and whether a revision actually started. Dropping
+    /// it here would hide `exhausted` from no-MCP agents, who would read a
+    /// parked task as a started revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) revision_budget: Option<RevisionBudgetStatus>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RevisionBudgetStatus {
+    pub(crate) rounds: i64,
+    pub(crate) limit: i64,
+    pub(crate) exhausted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) message: Option<String>,
 }
 
 pub(crate) struct TaskCreateOptions {

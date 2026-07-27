@@ -10,6 +10,14 @@ function readRepoFile(path: string): string {
   return readFileSync(resolve(repoRoot, path), "utf8");
 }
 
+/**
+ * Agent prompts are hard-wrapped prose, so a phrase can straddle a newline.
+ * Phrase assertions read the unwrapped text.
+ */
+function readRepoPhrases(path: string): string {
+  return readRepoFile(path).replace(/\s+/g, " ");
+}
+
 describe("built-in agent completion protocol", () => {
   const agentNames = readdirSync(resolve(repoRoot, ".kanna/agents"));
 
@@ -126,6 +134,118 @@ describe("QA pipeline assets", () => {
     expect(prAgent).toContain("$BASE_REF");
     expect(prAgent).not.toContain("latest main");
     expect(prAgent).not.toContain("origin/main");
+  });
+
+  it("holds every review agent to the same in-scope, blocking-only bar", () => {
+    const reviewers = readdirSync(resolve(repoRoot, ".kanna/agents")).filter(
+      (name) => name === "review" || name === "qa-dispatcher" || name.startsWith("review-")
+    );
+    // Guards the mechanism that turned scoped tasks into open-ended projects:
+    // reviewers that keep finding new, out-of-scope work every round.
+    expect(reviewers).toContain("review");
+    expect(reviewers).toContain("qa-dispatcher");
+    expect(reviewers).toContain("review-ui");
+
+    for (const name of reviewers) {
+      const agent = readRepoPhrases(`.kanna/agents/${name}/AGENT.md`);
+      expect(agent, name).toContain("## Scope Discipline");
+      expect(agent, name).toContain("caused by this diff");
+      expect(agent, name).toContain("Follow-ups (non-blocking):");
+      expect(agent, name).toContain("at most five blocking findings");
+    }
+  });
+
+  it("tells the deciding review agents that revision rounds are budgeted", () => {
+    // Only the agents that can request a revision need to understand the
+    // budget; specialty reviewers only record verdicts.
+    for (const name of ["review", "qa-dispatcher"]) {
+      const agent = readRepoPhrases(`.kanna/agents/${name}/AGENT.md`);
+      expect(agent, name).toContain("revisionRounds");
+      expect(agent, name).toContain("revisionLimit");
+      expect(agent, name).toContain("parks the task for its human");
+      expect(agent, name).toMatch(/do not retry the request/i);
+
+      // The blocking bar must not move with the budget. Relaxing it on the
+      // last round would approve a branch that still has blocking findings —
+      // the designed ending for those is the park, where a human decides.
+      expect(agent, name).toContain("The bar above does not move with the budget");
+      expect(agent, name).toContain("a finding that clears the bar still");
+      expect(agent, name).toContain("Do not approve a branch to avoid parking it");
+      expect(agent, name).not.toMatch(/raise the bar as the budget shrinks/i);
+      expect(agent, name).not.toMatch(/only for defects a user would hit/i);
+      expect(agent, name).not.toMatch(/last (available )?round,? (fail|block) only/i);
+      // A revision request must be a closed list, not an open invitation.
+      expect(agent, name).toContain("closed list");
+      expect(agent, name).toContain('No "also consider"');
+    }
+  });
+
+  it("gates specialty dispatch on the surfaces the round actually changes", () => {
+    const dispatcher = readRepoPhrases(".kanna/agents/qa-dispatcher/AGENT.md");
+
+    // Relevance, not a headcount: the specialties have disjoint scopes, so a
+    // change that touches several genuinely needs several reviewers. Scope is
+    // held by the bar every reviewer works to and by the round budget.
+    expect(dispatcher).toContain("Dispatch every specialty whose surface **this round's change** touches");
+    expect(dispatcher).toContain("There is no cap");
+    expect(dispatcher).toContain("Skip the specialties this round's change does not touch");
+    expect(dispatcher).toContain("### 5. Filter the findings");
+    expect(dispatcher).toContain("Do not create follow-up tasks");
+  });
+
+  it("reviews each round incrementally against the previous round's workspace branch", () => {
+    const dispatcher = readRepoPhrases(".kanna/agents/qa-dispatcher/AGENT.md");
+
+    // Workspace branches are the round markers: a review workspace never
+    // commits, so `task-{id}-{n}` still points at what that round reviewed.
+    expect(dispatcher).toContain('git for-each-ref');
+    expect(dispatcher).toContain("refs/heads/task-$KANNA_TASK_ID*");
+    expect(dispatcher).toContain("git merge-base --is-ancestor");
+    expect(dispatcher).toContain("previous review point");
+    // Ancestry does not survive a rebase, so the rebased path must exist or
+    // the mechanism silently no-ops on any repo that rebases mid-task.
+    expect(dispatcher).toContain("git range-diff");
+    expect(dispatcher).toContain("already reviewed");
+    // Narrowing the range must fail safe, not silently under-review.
+    expect(dispatcher).toContain("**Full branch** — if neither path is clear-cut");
+    expect(dispatcher).toContain("If this round's change is empty, dispatch nothing");
+    expect(dispatcher).toContain("$PREV_RESULT");
+    // Children judge the round but read the whole branch for context.
+    expect(dispatcher).toContain("Changes to review:");
+    expect(dispatcher).toContain("Full branch context:");
+
+    // The pipeline has to feed the dispatcher the previous stage result for
+    // the declined-findings check to be possible at all.
+    expect(readRepoFile(".kanna/pipelines/qa-dispatch.json")).toContain("$PREV_RESULT");
+  });
+
+  it("tells specialty reviewers to judge the review range their prompt names", () => {
+    const specialties = readdirSync(resolve(repoRoot, ".kanna/agents")).filter((name) =>
+      name.startsWith("review-")
+    );
+    expect(specialties.length).toBeGreaterThan(0);
+
+    for (const name of specialties) {
+      const agent = readRepoPhrases(`.kanna/agents/${name}/AGENT.md`);
+      expect(agent, name).toContain("Inspect the changes your prompt names");
+      expect(agent, name).toContain("what changed since the last review round");
+      expect(agent, name).toContain("Read the full branch");
+    }
+  });
+
+  it("keeps the implement agent inside the task's scope on revisions", () => {
+    const implement = readRepoPhrases(".kanna/agents/implement/AGENT.md");
+
+    expect(implement).toContain("Do not widen the task");
+    expect(implement).toContain("the reviewer's feedback is the whole assignment");
+  });
+
+  it("bounds revision rounds on the dispatched QA pipeline and publishes the field", () => {
+    const parsed = parsePipelineJson(readRepoFile(".kanna/pipelines/qa-dispatch.json"));
+    expect(parsed.revision_limit).toBe(3);
+
+    const schema = JSON.parse(readRepoFile(".kanna/pipelines/schema.json"));
+    expect(schema.properties.revision_limit).toMatchObject({ type: "integer", minimum: 0 });
   });
 
   it("keeps the merge master git-first and safe for stacked branches", () => {

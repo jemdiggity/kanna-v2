@@ -8,7 +8,7 @@ use super::definitions::{
 use super::prepare_stage_run_spawn;
 use super::prompt::{
     build_revision_resume_message, build_revision_task_prompt, build_target_stage_prompt,
-    build_target_stage_prompt_with_instructions,
+    build_target_stage_prompt_with_instructions, RevisionRound,
 };
 use super::resume::{claude_transcript_exists, current_branch, rev_parse_head};
 use super::types::{
@@ -372,6 +372,7 @@ fn prepare_stage_run_for_target_returning_prompt(
     let source_branch =
         resolve_current_source_worktree_branch(&context.repo.path, source_task.branch.as_deref());
     let prev_result = previous_stage_result(db, context.source_task_id, source_task)?;
+    let prev_main_result = previous_main_stage_result(db, context.source_task_id)?;
     let task_prompt = prompt_override
         .or(source_task.prompt.as_deref())
         .unwrap_or("");
@@ -397,6 +398,7 @@ fn prepare_stage_run_for_target_returning_prompt(
         target_stage,
         task_prompt,
         prev_result.as_deref(),
+        prev_main_result.as_deref(),
         prompt_branch.as_deref(),
         source_task.base_ref.as_deref(),
         source_task.branch.as_deref(),
@@ -408,6 +410,7 @@ fn prepare_stage_run_for_target_returning_prompt(
             target_stage,
             task_prompt,
             prev_result.as_deref(),
+            prev_main_result.as_deref(),
             prompt_branch.as_deref(),
             source_task.base_ref.as_deref(),
             source_task.branch.as_deref(),
@@ -472,12 +475,26 @@ pub(crate) fn previous_stage_result(
         .map_err(|e| format!("db error: {}", e))
 }
 
+/// Result of the previous stage agent's own run, skipping posts. A stage
+/// whose predecessor declares a post (e.g. `in progress` → `commit` →
+/// `review`) sees the post's result in `$PREV_RESULT`; this is what binds
+/// `$PREV_MAIN_RESULT` so such a stage can still read what the stage agent
+/// itself reported.
+pub(crate) fn previous_main_stage_result(
+    db: &Db,
+    source_task_id: &str,
+) -> Result<Option<String>, String> {
+    db.latest_finished_main_stage_run_result(source_task_id)
+        .map_err(|e| format!("db error: {}", e))
+}
+
 pub(crate) fn prepare_revision_task_for_api(
     db: &Db,
     config: &Config,
     source_task_id: &str,
     target_stage_name: &str,
     revision_prompt: &str,
+    round: Option<RevisionRound>,
 ) -> Result<PreparedStageRunSpawn, String> {
     let identity = load_stage_identity(db, source_task_id)?;
     if identity.source_task.closed_at.is_some() {
@@ -518,7 +535,7 @@ pub(crate) fn prepare_revision_task_for_api(
     // Every failed precondition falls back to today's fresh-fork behavior.
     if run_kind == "main" {
         if let Some(prepared) =
-            prepare_revision_resume(db, config, &context, &target_stage, revision_prompt)?
+            prepare_revision_resume(db, config, &context, &target_stage, revision_prompt, round)?
         {
             return Ok(prepared);
         }
@@ -532,6 +549,7 @@ pub(crate) fn prepare_revision_task_for_api(
     let composed_prompt = build_revision_task_prompt(
         loaded.source_task.prompt.as_deref().unwrap_or(""),
         revision_prompt,
+        round,
     );
     prepare_stage_run_for_target_with_provider(
         db,
@@ -558,6 +576,7 @@ fn prepare_revision_resume(
     context: &StageTransitionContext<'_>,
     target_stage: &PipelineStage,
     revision_prompt: &str,
+    round: Option<RevisionRound>,
 ) -> Result<Option<PreparedStageRunSpawn>, String> {
     let task_id = context.source_task_id;
     let fall_back = |reason: &str| {
@@ -609,6 +628,7 @@ fn prepare_revision_resume(
         revision_prompt,
         task_id,
         target_stage.policy.revision_transition(),
+        round,
     );
     // A resumed run continues the recorded run's conversation, so it must
     // resolve to that run's provider — never the agent def's priority list.
@@ -655,6 +675,59 @@ fn prepare_revision_resume(
         prepared.cwd
     );
     Ok(Some(prepared))
+}
+
+/// How many agent-requested revision rounds a task has spent, and how many
+/// its pipeline allows. A `limit` of `0` means the pipeline opted out of the
+/// cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RevisionBudget {
+    pub(crate) rounds: i64,
+    pub(crate) limit: i64,
+}
+
+impl RevisionBudget {
+    /// True when the next agent-requested revision would exceed the cap. The
+    /// engine parks the task for its human instead of forking another round.
+    pub(crate) fn exhausted(&self) -> bool {
+        self.limit > 0 && self.rounds >= self.limit
+    }
+}
+
+/// Effective revision-round cap for a task's pinned pipeline.
+pub(crate) fn resolve_revision_limit(
+    repo: &Repo,
+    pipeline_name: &str,
+    pipeline_def: Option<&str>,
+) -> Result<i64, String> {
+    let pipeline = match pipeline_def.filter(|value| !value.trim().is_empty()) {
+        Some(stored) => parse_stored_pipeline_definition(stored)?,
+        None => RepoDefinitions::resolve(repo)?.pipeline(pipeline_name)?,
+    };
+    Ok(pipeline.revision_limit())
+}
+
+/// Rounds spent plus the pipeline's cap for a task, as the revision endpoint
+/// needs them before deciding whether to fork another revision run.
+pub(crate) fn resolve_revision_budget(
+    db: &Db,
+    source_task_id: &str,
+) -> Result<RevisionBudget, String> {
+    let identity = load_stage_identity(db, source_task_id)?;
+    let pipeline_name = identity
+        .source_task
+        .pipeline
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    let limit = resolve_revision_limit(
+        &identity.repo,
+        &pipeline_name,
+        identity.source_task.pipeline_def.as_deref(),
+    )?;
+    let rounds = db
+        .task_revision_rounds(source_task_id)
+        .map_err(|e| format!("db error: {}", e))?;
+    Ok(RevisionBudget { rounds, limit })
 }
 
 pub(crate) fn resolve_stage_transition(

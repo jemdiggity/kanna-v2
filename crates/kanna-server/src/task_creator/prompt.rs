@@ -2,12 +2,14 @@ use std::collections::HashMap;
 
 use super::definitions::{PipelineStage, PipelineStageTransition, RepoDefinitions};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_target_stage_prompt(
     definitions: &RepoDefinitions,
     repo_path: &str,
     stage: &PipelineStage,
     task_prompt: &str,
     prev_result: Option<&str>,
+    prev_main_result: Option<&str>,
     branch: Option<&str>,
     base_ref: Option<&str>,
     source_worktree_branch: Option<&str>,
@@ -18,6 +20,7 @@ pub(super) fn build_target_stage_prompt(
         stage,
         task_prompt,
         prev_result,
+        prev_main_result,
         branch,
         base_ref,
         source_worktree_branch,
@@ -32,6 +35,7 @@ pub(super) fn build_target_stage_prompt_with_instructions(
     stage: &PipelineStage,
     task_prompt: &str,
     prev_result: Option<&str>,
+    prev_main_result: Option<&str>,
     branch: Option<&str>,
     base_ref: Option<&str>,
     source_worktree_branch: Option<&str>,
@@ -42,6 +46,7 @@ pub(super) fn build_target_stage_prompt_with_instructions(
     let context = PromptContext {
         task_prompt: Some(task_prompt),
         prev_result,
+        prev_main_result,
         branch,
         base_ref,
         source_worktree: source_worktree.as_deref(),
@@ -84,6 +89,11 @@ pub(super) fn build_target_stage_prompt_with_instructions(
 pub(super) struct PromptContext<'a> {
     pub(super) task_prompt: Option<&'a str>,
     pub(super) prev_result: Option<&'a str>,
+    /// Result of the previous **main** run, skipping posts. `$PREV_RESULT`
+    /// binds the latest run of any kind, which for a stage following one that
+    /// declares a post is the post's result; a stage that needs the previous
+    /// stage agent's own report reads this instead.
+    pub(super) prev_main_result: Option<&'a str>,
     pub(super) branch: Option<&'a str>,
     pub(super) base_ref: Option<&'a str>,
     pub(super) source_worktree: Option<&'a str>,
@@ -98,6 +108,7 @@ const RESERVED_PROMPT_VARS: &[&str] = &[
     "BASE_REF",
     "BRANCH",
     "KANNA_TASK_ID",
+    "PREV_MAIN_RESULT",
     "PREV_RESULT",
     "SOURCE_WORKTREE",
     "TASK_PROMPT",
@@ -110,6 +121,7 @@ fn prompt_var_value<'a>(name: &str, context: &'a PromptContext<'_>) -> Option<&'
     match name {
         "TASK_PROMPT" => Some(context.task_prompt.unwrap_or("")),
         "PREV_RESULT" => Some(context.prev_result.unwrap_or("")),
+        "PREV_MAIN_RESULT" => Some(context.prev_main_result.unwrap_or("")),
         "BRANCH" => Some(context.branch.unwrap_or("")),
         "BASE_REF" => Some(context.base_ref.unwrap_or("")),
         "SOURCE_WORKTREE" => Some(context.source_worktree.unwrap_or("")),
@@ -193,12 +205,49 @@ fn build_prompt_section(
     Some(format!("{heading}\n\n{body}"))
 }
 
+/// Which capped revision round a run is, when the pipeline caps them. Told to
+/// the revising agent so it knows the loop is bounded and that widening the
+/// task is not an option. Human-requested revisions carry no round: they are
+/// the human's call, and they hand the budget back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RevisionRound {
+    pub(crate) number: i64,
+    pub(crate) limit: i64,
+}
+
+impl RevisionRound {
+    fn instructions(&self) -> String {
+        let mut text = format!(
+            "Revision round {} of {} for this task. Address exactly what the feedback below asks \
+for, inside the original task's scope: do not rebuild, refactor, or re-architect code the \
+feedback does not name, and do not add work the original task did not ask for. If a finding is \
+out of scope, wrong, or would grow this task into a larger project, say so in your summary \
+instead of implementing it.",
+            self.number, self.limit
+        );
+        if self.number >= self.limit {
+            text.push_str(
+                " This is the final automatic revision round: if review is not satisfied after \
+it, Kanna parks the task for its human rather than starting another round.",
+            );
+        }
+        text
+    }
+}
+
 /// Composed revision context: what the task originally was plus what the
 /// reviewer wants changed. Used as the `$TASK_PROMPT` substitution when a
 /// revision spawns a fresh agent (which otherwise never sees the original
 /// task prompt), and as the body of the resume message.
-pub(super) fn build_revision_task_prompt(original_task_prompt: &str, feedback: &str) -> String {
+pub(super) fn build_revision_task_prompt(
+    original_task_prompt: &str,
+    feedback: &str,
+    round: Option<RevisionRound>,
+) -> String {
     let mut parts = vec!["Review feedback requires changes on this task.".to_string()];
+    if let Some(round) = round {
+        parts.push(round.instructions());
+    }
     if !original_task_prompt.trim().is_empty() {
         parts.push(format!("Original task:\n{}", original_task_prompt.trim()));
     }
@@ -219,6 +268,7 @@ pub(super) fn build_revision_resume_message(
     feedback: &str,
     task_id: &str,
     transition: PipelineStageTransition,
+    round: Option<RevisionRound>,
 ) -> String {
     let completion = match transition {
         PipelineStageTransition::Auto => format!(
@@ -230,7 +280,7 @@ pub(super) fn build_revision_resume_message(
     };
     format!(
         "{}\n\n{completion}",
-        build_revision_task_prompt(original_task_prompt, feedback)
+        build_revision_task_prompt(original_task_prompt, feedback, round)
     )
 }
 

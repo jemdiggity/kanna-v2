@@ -98,7 +98,8 @@ impl Db {
                 parent_task_id TEXT,
                 agent_session_id TEXT,
                 agent_spawn_options TEXT,
-                teardown_started_at TEXT
+                teardown_started_at TEXT,
+                revision_rounds INTEGER NOT NULL DEFAULT 0
             );
             CREATE UNIQUE INDEX idx_pipeline_item_open_cloud_task_id
             ON pipeline_item(cloud_task_id)

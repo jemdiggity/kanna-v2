@@ -330,6 +330,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     Ok(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,
+        revision_budget: None,
     })
 }
 
@@ -437,6 +438,7 @@ pub(crate) async fn dispatch_prepared_post_for_api(
             Ok(crate::mobile_api::TaskActionResponse {
                 task_id,
                 follow_task: None,
+                revision_budget: None,
             })
         }
         Err(TaskInputError::SessionNotFound) => {
@@ -528,6 +530,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
             Ok(crate::mobile_api::TaskActionResponse {
                 task_id,
                 follow_task: None,
+                revision_budget: None,
             })
         }
         DaemonEvent::Error { message, .. } => {

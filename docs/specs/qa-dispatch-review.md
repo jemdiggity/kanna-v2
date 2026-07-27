@@ -96,6 +96,203 @@ Two gaps stood between the dispatcher and the existing primitives:
    result JSON; non-verdict results (e.g. orphaned-workspace markers) pass
    through as-is.
 
+## Bounding the loop
+
+Dispatched review made the review→revise cycle cheap enough to run away with:
+each round re-reviews a larger diff with several specialists, every one of
+which can find something new, so a scoped task can accumulate dozens of rounds
+and grow into a project nobody asked for. Two mechanisms bound it — one the
+engine enforces, one the prompts ask for. The engine's is the load-bearing
+one; prompts alone cannot hold a limit.
+
+### Revision-round budget (engine)
+
+A pipeline declares `revision_limit` (top level, default
+`DEFAULT_REVISION_LIMIT` = 3; `0` opts out). A negative value is a definition
+error in every parser — the Rust source of truth
+(`normalize_pipeline_definition`, covering both repo pipeline files and pinned
+`pipeline_def` snapshots), the JSON schema, and the TypeScript loader — rather
+than being clamped to `0`, since silently reading a typo as "unlimited" would
+disable the bound the field exists to set. `pipeline_item.revision_rounds`
+counts agent-requested revisions on the task, and `kanna_request_revision`
+resolves the pair before doing anything:
+
+- **Under budget** — the revision runs as before, the round is counted only
+  after preparation succeeds (a failed prepare ran no agent, so it costs
+  nothing), and the response carries
+  `revisionBudget {rounds, limit, exhausted: false, message}`.
+- **Budget spent** — nothing is forked. The review run is closed as `failed`
+  with a summary that says the task was parked and keeps the reviewer's
+  requested changes as the run's `feedback`, the task is marked `unread` at its
+  current stage, and the response reports `exhausted: true`. The task's human
+  decides what happens next; the loop cannot restart itself.
+
+Admission is atomic and single-flight, because a cap that request timing can
+step over is not a cap. `try_claim_agent_revision_round` reads the count and
+increments it inside one `BEGIN IMMEDIATE` transaction, so two requests cannot
+both be admitted on the last free slot; if preparation then fails, the round is
+released, preserving the rule that a revision which never ran costs nothing.
+On top of that, one revision action runs per task at a time (the same per-task
+operation flight that guards task creation and abort): a second concurrent
+request gets `409 Conflict` rather than waiting through a workspace fork, and a
+request arriving after the winner finishes sees the spent budget and parks.
+
+That flight is owned by the **detached transition**, not by the handler. The
+response must be sent before the transition runs — it kills and respawns the
+caller's own session — so for the whole window between the 200 and the
+transition landing, the task's stage, branch, and session are still the
+pre-revision ones. A guard released at the response would reopen that window: a
+second request admitted there claims another round and forks another workspace
+from state the in-flight transition is about to replace. Moving ownership into
+the worker closes it, and the guard drops on every worker exit path, including
+a daemon that never answers.
+Without both, two admitted requests also raced on the *same* forked branch name
+— the regression test in `http_api::tests::revision_status` reproduces exactly
+that when either guard is removed.
+
+Origin is what separates a bounded agent loop from human judgment.
+`RequestRevisionRequest.origin` (`agent`, the default, or `human`) is
+deliberately **not** exposed in the tool catalog — an agent cannot claim human
+origin. The desktop's revision action (⇧⌘S in the diff modal) sends
+`origin: "human"`: it is never refused, and it resets `revision_rounds` to 0,
+handing the agents a fresh budget to satisfy what the human asked for.
+
+Every revision run also tells the revising agent where it stands: the composed
+revision prompt (and the resume message, since a resumed session never re-reads
+the prompt) opens with `Revision round N of M`, the instruction to stay inside
+the original task's scope, and — on the last round — that the next failure
+parks the task.
+
+Tasks in flight are covered too: pinned `pipeline_def` snapshots written before
+`revision_limit` existed omit the field and inherit the default.
+
+A parked task surfaces the way any failed review does: unread, at its current
+stage, with the dispatcher's findings in its terminal and the verdict on the
+stage run. The desktop does not render stage-run summaries anywhere today, so
+there is deliberately no new UI badge for "parked because the budget is spent";
+adding one means first giving the UI a place to show run results, which is its
+own change.
+
+The bar does not move with the budget. A shrinking budget never makes a
+blocking finding acceptable: on the last available round, a finding that
+clears the bar still fails the review and still goes back as a revision, and
+if that spends the budget the task parks. Parking a branch whose findings are
+unresolved is the designed ending — a human reads them and decides — so a
+deciding agent must never approve to avoid it. What the budget changes is what
+happens when the rounds run out, not what counts as blocking; the shipped
+agent assets are held to that by `qa-assets.test.ts`.
+
+The budget bounds revising, not verdicts. A review agent that records
+`kanna_complete_stage success` instead of requesting a revision still advances
+the task — unchanged, and the same trust the pipeline has always placed in a
+review stage's verdict. What the budget removes is the ability to keep sending
+work back forever without a human looking.
+
+### Scope contract (prompts)
+
+The budget caps how long a runaway can run; the scope contract keeps rounds
+from being spent on work nobody asked for. The dispatcher, the generic `review`
+agent, and every specialty reviewer share one bar: a finding may block the
+branch only if it is **caused by this diff** and **blocking** (wrong behavior,
+regression, security or data-integrity defect, broken contract, or missing
+coverage for behavior the diff introduces). Pre-existing issues, preferred
+refactors, hardening beyond the task, and coverage for untouched behavior are
+never blocking — they belong in the pass summary under
+`Follow-ups (non-blocking):`, and no reviewer creates follow-up tasks for them.
+
+Two further limits keep a round from widening. The dispatcher filters its
+children's findings against the same bar before merging them (a specialty sees
+one slice and can mistake "could be better" for "must change"), and carries at
+most five blocking findings into a revision as a **closed list** — each item
+with file and line, no "also consider", no open-ended "harden this area". The
+`implement` agent's half of the contract: on a revision run, fix exactly what
+the feedback names, and report anything out of scope instead of building it.
+
+### Incremental rounds
+
+A later review round reviews **what changed since the previous round**, not the
+whole branch again. Re-reviewing settled code is how a round that failed on one
+specialty drags every other specialty through the same diff a second time.
+
+The round markers already exist: workspace branches. Each stage fork keeps its
+branch (`task-{id}`, `task-{id}-2`, `-3`, …, never deleted while the task
+lives), and a review workspace never commits — so a previous review branch
+still points at exactly the commit that round reviewed. This is the
+load-bearing reason to keep the `task-{id}-{n}` workspace-branch naming: it is
+the task's round history, readable from git alone with no new engine state.
+
+Note which stage the markers come from. A Claude revision *resumes* the
+implementing agent in its original workspace instead of forking, so implement
+rounds add no branch and the unnumbered branch tracks the tip; every review
+entry is a forward stage transition, which always forks
+(`stages.rs`, `run_kind == "main"` → `RunWorkspaceSpec::Fork`). The numbered
+branches are therefore the review rounds — which is exactly what makes them
+usable as round markers.
+
+Finding the round's change takes three paths, first clear answer wins:
+
+1. **Ancestor** — the nearest strict ancestor of `HEAD` among
+   `refs/heads/task-{id}*` (smallest non-zero `rev-list --count <sha>..HEAD`)
+   is the previous review point, and `<sha>..HEAD` is the round's change.
+2. **Rebased** — if no marker is an ancestor, the branch's history was
+   rewritten since the last review and ancestry is gone. `git range-diff`
+   between the two rounds' patch series recovers the answer: `=` patches were
+   already reviewed, `!`/`>` are this round's change (a `<` patch was dropped;
+   its replacement shows up as `>`).
+3. **Full branch** — anything less than clear-cut reviews `$BASE_REF..HEAD`.
+
+Both of the first two paths were checked against real multi-round tasks before
+being written down. On a six-round task every previous review branch was still
+an ancestor and the nearest was one commit behind `HEAD` — the ideal case. On a
+seven-round task whose branch had been rebased mid-task, *no* marker survived
+as an ancestor (path 1 degrades to path 3, safe but inert), while `range-diff`
+across the two rounds separated 152 unchanged patches from 30 new ones — the
+narrowing that round actually needed. Path 2 is what keeps the mechanism from
+quietly no-opping on any repo that rebases.
+
+Dispatch is then gated on the round's change: a specialty whose surface this
+round did not touch is not re-dispatched, because the code it judged has not
+moved since the round that judged it. Children receive both ranges — the review
+range they judge, and the full branch they read for context, since a defect can
+live in how the round's change meets what earlier rounds built. The aggregate
+summary names the specialties that were not re-reviewed and why, so a human
+sees the whole panel rather than one round's slice.
+
+Three fallbacks keep the narrowing honest:
+
+- **Ambiguous history** — review the whole branch, and say so in the summary so
+  a human can tell a narrow round from a full one. Reviewing too much costs a
+  round; reviewing the wrong range misses defects.
+- **Empty round** — dispatch nothing and request a revision: if the revision
+  committed nothing, the previous round's findings cannot have been addressed.
+- **Declined findings** — the review stage prompt carries `$PREV_MAIN_RESULT`,
+  the implementing agent's own summary of what it changed and what it declined.
+  A finding the previous round demanded and the implementer declined is still
+  blocking, whether or not any specialty re-runs this round.
+
+  This needs its own binding. `$PREV_RESULT` is the latest finished run of any
+  kind, and the `in progress` stage declares a `commit` post, so at review time
+  it holds the *commit* agent's result — what was committed, not what the
+  implementer decided. Routing the declined-findings check through it would
+  have dropped exactly the report the check exists to read.
+  `$PREV_MAIN_RESULT` (`latest_finished_main_stage_run_result`, posts excluded)
+  resolves the previous stage agent's own run, leaving `$PREV_RESULT` untouched
+  for the pipelines that want the post result — the `approve` post still reads
+  it. The chain is covered end to end in
+  `http_api::tests::revision_status`: an implementation main run reporting a
+  declined finding, its commit post reporting a different summary, and the
+  review stage prompt that follows, asserting each binding carries its own
+  result.
+
+Deliberately *not* a limit: how many specialties one dispatch may fan out.
+The built-in specialties have disjoint scopes, and migration, security, and
+concurrency each apply to a large share of real changes — capping the panel
+would drop a reviewer that had something in scope to say, which is a coverage
+loss, not a scope win. Dispatch is gated on relevance instead: a specialty is
+dispatched when the diff changes its surface, and skipped when it does not,
+since a reviewer pointed at an unmodified surface can only report out-of-scope
+findings.
+
 ## Verdict flow
 
 ```
@@ -105,8 +302,11 @@ parent review stage (qa-dispatcher, auto)
   ├─ kanna_wait_task until finished (per child; notify "TASK <id> DONE" doubles as a wake-up)
   ├─ kanna_get_task → latestRun.status/summary   (succeeded=PASS / failed=FAIL)
   ├─ kanna_close_task (every child, after collecting its verdict)
-  └─ all PASS → kanna_complete_stage success → auto-advance to pr
-     any FAIL → kanna_request_revision "in progress" with merged findings
+  ├─ filter findings against the scope bar (caused by this diff AND blocking)
+  └─ nothing blocking → kanna_complete_stage success → auto-advance to pr
+     blocking findings → kanna_request_revision "in progress" with the closed list
+       ├─ under budget  → revision round N of M starts
+       └─ budget spent  → nothing starts; task parks unread for its human
 ```
 
 ## Test coverage
@@ -122,6 +322,22 @@ parent review stage (qa-dispatcher, auto)
   spawn bound to the specialty agent with a manual completion transition.
 - `crates/kanna-server` `mobile_api` — `get_task` surfaces the latest stage
   run verdict (and omits `latestRun` for tasks without runs).
+- `crates/kanna-server` `task_creator::tests::revision` — `revision_limit`
+  parses (default when omitted, explicit value, `0` = unlimited),
+  `RevisionBudget::exhausted` only bites at a positive limit, and the composed
+  revision prompt and resume message announce the round, the scope rules, and
+  the final round.
+- `crates/kanna-server` `http_api::tests::revision_status` — against the real
+  router and DB: an agent revision under budget starts a round, counts it, and
+  spawns with `Revision round 1 of 3` in the prompt; an agent revision with the
+  budget spent starts nothing (no daemon is even listening), leaves the task at
+  `review`, marks it `unread`, records the parked verdict with the findings as
+  feedback, and reports `exhausted: true`; a `human`-origin revision at the same
+  spent budget proceeds and resets the count to 0.
+- `apps/desktop` `pipeline.requestRevision.test.ts` and the diff-modal E2E
+  (`tests/e2e/mock/diff-view.test.ts`) — the desktop revision action posts
+  `origin: "human"`, which is what exempts a user-requested revision from the
+  agent budget.
 - `packages/core` `qa-assets.test.ts` — the new agents satisfy the built-in
   agent completion-protocol contract (MCP-first with CLI fallback).
 

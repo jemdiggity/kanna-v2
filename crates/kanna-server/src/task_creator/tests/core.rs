@@ -2107,6 +2107,7 @@ fn read_agent_definition_substitutes_repo_config_vars_in_agent_body() {
         &PromptContext {
             task_prompt: None,
             prev_result: None,
+            prev_main_result: None,
             branch: None,
             base_ref: Some("origin/main"),
             source_worktree: None,
@@ -2139,6 +2140,7 @@ fn build_stage_prompt_does_not_reexpand_reserved_tokens_in_var_values() {
         &PromptContext {
             task_prompt: Some("actual task prompt"),
             prev_result: None,
+            prev_main_result: None,
             branch: None,
             base_ref: None,
             source_worktree: None,
@@ -2162,6 +2164,7 @@ fn build_stage_prompt_leaves_unknown_vars_literal() {
         &PromptContext {
             task_prompt: None,
             prev_result: None,
+            prev_main_result: None,
             branch: None,
             base_ref: None,
             source_worktree: None,
@@ -2183,6 +2186,7 @@ fn build_stage_prompt_labels_agent_instructions_and_the_actual_task() {
         &PromptContext {
             task_prompt: Some("Fix the buried task."),
             prev_result: None,
+            prev_main_result: None,
             branch: None,
             base_ref: None,
             source_worktree: None,
@@ -2197,6 +2201,7 @@ fn build_stage_prompt_omits_empty_prompt_sections() {
     let context = PromptContext {
         task_prompt: Some("Ship it."),
         prev_result: None,
+        prev_main_result: None,
         branch: None,
         base_ref: None,
         source_worktree: None,
@@ -2234,6 +2239,7 @@ fn build_stage_prompt_replaces_base_ref() {
         &PromptContext {
             task_prompt: None,
             prev_result: None,
+            prev_main_result: None,
             branch: Some("task-source"),
             base_ref: Some("origin/main"),
             source_worktree: Some("/tmp/repo/.kanna-worktrees/task-source"),
@@ -2272,6 +2278,7 @@ fn build_target_stage_prompt_sections_a_carried_task_without_rescanning_it() {
         &stage,
         "Carry $PREV_RESULT literally.",
         Some("do not reveal"),
+        None,
         None,
         None,
         None,

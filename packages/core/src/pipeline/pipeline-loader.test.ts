@@ -460,6 +460,29 @@ describe("parsePipelineJson", () => {
       prompt: "Commit new",
     });
   });
+
+  it("preserves a revision_limit and leaves it unset when omitted", () => {
+    const stages = [{ name: "in progress", policy: { transition: "manual" } }];
+
+    expect(parsePipelineJson(JSON.stringify({ name: "p", stages })).revision_limit).toBeUndefined();
+    expect(
+      parsePipelineJson(JSON.stringify({ name: "p", revision_limit: 2, stages })).revision_limit
+    ).toBe(2);
+    // 0 is a meaningful value (no cap), not an absent one.
+    expect(
+      parsePipelineJson(JSON.stringify({ name: "p", revision_limit: 0, stages })).revision_limit
+    ).toBe(0);
+  });
+
+  it("rejects a revision_limit that is not a non-negative integer", () => {
+    const stages = [{ name: "in progress", policy: { transition: "manual" } }];
+
+    for (const limit of [-1, 1.5, "3", true]) {
+      expect(() =>
+        parsePipelineJson(JSON.stringify({ name: "p", revision_limit: limit, stages }))
+      ).toThrow(/revision_limit/);
+    }
+  });
 });
 
 describe("validatePipeline", () => {

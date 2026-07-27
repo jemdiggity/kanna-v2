@@ -1613,8 +1613,12 @@ describe("diff view", () => {
       targetStage: string;
       summary: string;
       prompt: string;
+      origin: string;
     };
     expect(requestPayload.targetStage).toBe("in progress");
+    // A revision the user asked for is exempt from the agent revision-round
+    // budget and resets it, so the UI must mark its origin.
+    expect(requestPayload.origin).toBe("human");
     expect(requestPayload.summary).toBe("Please apply both review notes.");
     expect(requestPayload.prompt).toContain(`Revision requested from review of task-${taskId} @ ${headCommit.slice(0, 8)} (branch diff vs main).`);
     expect(requestPayload.prompt).toContain("native-review-e2e/review.ts:2");

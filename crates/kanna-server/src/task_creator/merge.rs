@@ -66,6 +66,7 @@ fn build_merge_task_request() -> Result<TaskCreationRequest, String> {
             post: None,
         }],
         environments: None,
+        revision_limit: None,
     };
     let pipeline_def =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;

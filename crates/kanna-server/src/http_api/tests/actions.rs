@@ -3267,6 +3267,7 @@ async fn advance_stage_route_uses_stage_advancer() {
             Ok(TaskActionResponse {
                 task_id: "task-2".to_string(),
                 follow_task: None,
+                revision_budget: None,
             })
         }),
     );
@@ -3298,6 +3299,7 @@ async fn rerun_stage_route_uses_stage_rerunner() {
             Ok(TaskActionResponse {
                 task_id: "task-1".to_string(),
                 follow_task: None,
+                revision_budget: None,
             })
         }),
     );
@@ -4036,6 +4038,7 @@ async fn complete_stage_route_uses_stage_completer() {
             Ok(TaskActionResponse {
                 task_id: "task-2".to_string(),
                 follow_task: None,
+                revision_budget: None,
             })
         }),
     );

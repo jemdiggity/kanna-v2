@@ -7,6 +7,7 @@ fn revision_resume_message_follows_target_stage_transition() {
         "Add coverage.",
         "task-1",
         PipelineStageTransition::Manual,
+        None,
     );
     assert!(manual.contains("do not record stage completion"));
     assert!(
@@ -21,6 +22,7 @@ fn revision_resume_message_follows_target_stage_transition() {
         "Add coverage.",
         "task-1",
         PipelineStageTransition::Auto,
+        None,
     );
     assert!(auto.contains("record stage completion"));
     assert!(auto.contains("kanna_complete_stage {\"task_id\": \"task-1\", \"status\": \"success\""));
@@ -106,6 +108,7 @@ async fn prepared_revision_agent_task_spawn_sends_task_specific_kanna_context() 
         "review-task",
         "in progress",
         "Add integration coverage for spawned Kanna context.",
+        None,
     )
     .unwrap();
     assert!(
@@ -260,6 +263,7 @@ async fn request_revision_forks_workspace_for_target_stage_run_with_feedback() {
         "review-task",
         "in progress",
         "Fix the test gap before PR.",
+        None,
     )
     .unwrap();
 
@@ -365,6 +369,7 @@ fn prepare_revision_task_rejects_closed_source_task_even_when_stage_is_active() 
         "review-task",
         "in progress",
         "Add more tests",
+        None,
     ) {
         Ok(_) => panic!("closed task should not prepare a revision task"),
         Err(err) => err,
@@ -500,6 +505,7 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
             "review-task",
             "in progress",
             "Add e2e coverage for the revision loop.",
+            None,
         );
         std::env::remove_var("CLAUDE_CONFIG_DIR");
         prepared.unwrap()
@@ -622,6 +628,7 @@ async fn request_revision_falls_back_to_fork_when_worktree_tip_diverged() {
         "review-task",
         "in progress",
         "Address the review fixes.",
+        None,
     )
     .unwrap();
 
@@ -664,6 +671,7 @@ async fn request_revision_falls_back_to_fork_without_cli_transcript() {
         "review-task",
         "in progress",
         "Add e2e coverage.",
+        None,
     );
     std::env::remove_var("CLAUDE_CONFIG_DIR");
     let prepared = prepared.unwrap();
@@ -744,6 +752,7 @@ fn request_revision_keeps_the_task_provider_over_agent_def_priority() {
         "review-task",
         "in progress",
         "Also create goodbye.txt.",
+        None,
     )
     .unwrap();
 
@@ -756,4 +765,158 @@ fn request_revision_keeps_the_task_provider_over_agent_def_priority() {
         );
     }
     let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn pipeline_revision_limit_defaults_and_can_be_overridden() {
+    let stored_without_limit = serde_json::json!({
+        "name": "stored",
+        "stages": [{ "name": "in progress", "transition": "manual" }]
+    })
+    .to_string();
+    let pipeline =
+        super::super::definitions::parse_stored_pipeline_definition(&stored_without_limit).unwrap();
+    // Pinned snapshots written before the field existed inherit the default,
+    // so in-flight tasks are bounded too.
+    assert_eq!(
+        pipeline.revision_limit(),
+        super::super::definitions::DEFAULT_REVISION_LIMIT
+    );
+
+    let stored_with_limit = serde_json::json!({
+        "name": "stored",
+        "revision_limit": 1,
+        "stages": [{ "name": "in progress", "transition": "manual" }]
+    })
+    .to_string();
+    let pipeline =
+        super::super::definitions::parse_stored_pipeline_definition(&stored_with_limit).unwrap();
+    assert_eq!(pipeline.revision_limit(), 1);
+
+    let stored_unlimited = serde_json::json!({
+        "name": "stored",
+        "revision_limit": 0,
+        "stages": [{ "name": "in progress", "transition": "manual" }]
+    })
+    .to_string();
+    let pipeline =
+        super::super::definitions::parse_stored_pipeline_definition(&stored_unlimited).unwrap();
+    assert_eq!(pipeline.revision_limit(), 0);
+}
+
+#[test]
+fn negative_pipeline_revision_limit_is_a_definition_error() {
+    // Both parser entry points (repo pipeline files and pinned pipeline_def
+    // snapshots) funnel through normalize_pipeline_definition, so validating
+    // there covers both. A negative value must not be read as "unlimited":
+    // silently clamping a typo to 0 would disable the very bound the field
+    // configures, which is the runaway this cap exists to prevent.
+    let stored_negative = serde_json::json!({
+        "name": "stored",
+        "revision_limit": -1,
+        "stages": [{ "name": "in progress", "transition": "manual" }]
+    })
+    .to_string();
+
+    let error = super::super::definitions::parse_stored_pipeline_definition(&stored_negative)
+        .expect_err("a negative revision_limit must be rejected");
+    assert!(
+        error.contains("revision_limit must be zero or greater"),
+        "the error must name the field and the rule: {error}"
+    );
+    assert!(
+        error.contains("-1"),
+        "the error must report the offending value: {error}"
+    );
+
+    // The neighbouring valid values still parse, so the check rejects only
+    // what it should.
+    for limit in [0, 1] {
+        let stored = serde_json::json!({
+            "name": "stored",
+            "revision_limit": limit,
+            "stages": [{ "name": "in progress", "transition": "manual" }]
+        })
+        .to_string();
+        let pipeline = super::super::definitions::parse_stored_pipeline_definition(&stored)
+            .unwrap_or_else(|error| panic!("revision_limit {limit} must parse: {error}"));
+        assert_eq!(pipeline.revision_limit(), limit);
+    }
+}
+
+#[test]
+fn revision_budget_is_exhausted_only_at_a_positive_limit() {
+    use super::super::RevisionBudget;
+
+    assert!(!RevisionBudget {
+        rounds: 2,
+        limit: 3
+    }
+    .exhausted());
+    assert!(RevisionBudget {
+        rounds: 3,
+        limit: 3
+    }
+    .exhausted());
+    assert!(RevisionBudget {
+        rounds: 4,
+        limit: 3
+    }
+    .exhausted());
+    // `0` opts the pipeline out of the cap entirely.
+    assert!(!RevisionBudget {
+        rounds: 80,
+        limit: 0
+    }
+    .exhausted());
+}
+
+#[test]
+fn revision_prompt_announces_the_round_and_holds_scope() {
+    use super::super::RevisionRound;
+
+    let unbounded = build_revision_task_prompt("Original prompt", "Add coverage.", None);
+    assert!(!unbounded.contains("Revision round"));
+    assert!(unbounded.contains("Original task:\nOriginal prompt"));
+    assert!(unbounded.contains("Reviewer feedback:\nAdd coverage."));
+
+    let mid = build_revision_task_prompt(
+        "Original prompt",
+        "Add coverage.",
+        Some(RevisionRound {
+            number: 2,
+            limit: 3,
+        }),
+    );
+    assert!(mid.contains("Revision round 2 of 3"));
+    assert!(
+        mid.contains("do not rebuild, refactor, or re-architect code the feedback does not name")
+    );
+    assert!(!mid.contains("final automatic revision round"));
+
+    let last = build_revision_task_prompt(
+        "Original prompt",
+        "Add coverage.",
+        Some(RevisionRound {
+            number: 3,
+            limit: 3,
+        }),
+    );
+    assert!(last.contains("Revision round 3 of 3"));
+    assert!(last.contains("final automatic revision round"));
+
+    // The resume path carries the same round context into the existing
+    // session, since a resumed agent never re-reads the composed prompt.
+    let resumed = build_revision_resume_message(
+        "Original prompt",
+        "Add coverage.",
+        "task-1",
+        PipelineStageTransition::Auto,
+        Some(RevisionRound {
+            number: 3,
+            limit: 3,
+        }),
+    );
+    assert!(resumed.contains("Revision round 3 of 3"));
+    assert!(resumed.contains("final automatic revision round"));
 }

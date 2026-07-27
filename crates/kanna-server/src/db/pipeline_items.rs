@@ -9,7 +9,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds
              FROM pipeline_item
              WHERE closed_at IS NULL
              ORDER BY updated_at DESC, created_at DESC",
@@ -44,6 +44,7 @@ impl Db {
                 pipeline_def: row.get(25)?,
                 activity_revision: row.get(26)?,
                 cloud_task_id: row.get(27)?,
+                revision_rounds: row.get(28)?,
             })
         })?;
         rows.collect()
@@ -54,7 +55,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds
              FROM pipeline_item
              WHERE closed_at IS NULL
                AND (
@@ -93,6 +94,7 @@ impl Db {
                 pipeline_def: row.get(25)?,
                 activity_revision: row.get(26)?,
                 cloud_task_id: row.get(27)?,
+                revision_rounds: row.get(28)?,
             })
         })?;
         rows.collect()
@@ -102,7 +104,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds \
              FROM pipeline_item WHERE repo_id = ? AND closed_at IS NULL \
              ORDER BY pin_order ASC, created_at DESC",
         )?;
@@ -136,6 +138,7 @@ impl Db {
                 pipeline_def: row.get(25)?,
                 activity_revision: row.get(26)?,
                 cloud_task_id: row.get(27)?,
+                revision_rounds: row.get(28)?,
             })
         })?;
         rows.collect()
@@ -145,7 +148,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage, \
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at, \
-             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id \
+             closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds \
              FROM pipeline_item WHERE id = ?",
         )?;
         let mut rows = stmt.query_map([id], |row| {
@@ -178,6 +181,7 @@ impl Db {
                 pipeline_def: row.get(25)?,
                 activity_revision: row.get(26)?,
                 cloud_task_id: row.get(27)?,
+                revision_rounds: row.get(28)?,
             })
         })?;
         match rows.next() {
@@ -581,6 +585,73 @@ impl Db {
              WHERE id = ? AND activity != ? AND closed_at IS NULL",
             (activity, activity, id, activity),
         )?;
+        Ok(())
+    }
+
+    /// Agent-requested revision rounds recorded since the last
+    /// human-requested revision. The engine caps this to keep a review agent
+    /// from driving a task through unbounded revise/review loops.
+    pub fn task_revision_rounds(&self, id: &str) -> Result<i64, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT revision_rounds FROM pipeline_item WHERE id = ?",
+            [id],
+            |row| row.get(0),
+        )
+    }
+
+    /// Claim one agent-requested revision round if the budget still allows
+    /// it, returning the new total — or `None` when the budget is spent.
+    ///
+    /// The read and the increment share one immediate transaction so that two
+    /// concurrent requests cannot both observe the last free slot and both
+    /// spend it. `limit` of `0` means the pipeline opted out of the cap.
+    pub fn try_claim_agent_revision_round(
+        &self,
+        id: &str,
+        limit: i64,
+    ) -> Result<Option<i64>, rusqlite::Error> {
+        self.with_immediate_transaction(|db| {
+            let rounds = db.task_revision_rounds(id)?;
+            if limit > 0 && rounds >= limit {
+                return Ok(None);
+            }
+            let rows_affected = db.conn.execute(
+                "UPDATE pipeline_item
+                 SET revision_rounds = revision_rounds + 1, updated_at = datetime('now')
+                 WHERE id = ?",
+                [id],
+            )?;
+            if rows_affected == 0 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            Ok(Some(rounds + 1))
+        })
+    }
+
+    /// Hand a claimed round back: preparation failed, so no agent ever ran and
+    /// the round must not be charged to the task. Floors at zero.
+    pub fn release_agent_revision_round(&self, id: &str) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE pipeline_item
+             SET revision_rounds = MAX(revision_rounds - 1, 0), updated_at = datetime('now')
+             WHERE id = ?",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    /// Hand the round budget back: a human asked for this revision, so the
+    /// agents get a fresh set of autonomous rounds to satisfy it.
+    pub fn reset_task_revision_rounds(&self, id: &str) -> Result<(), rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item
+             SET revision_rounds = 0, updated_at = datetime('now')
+             WHERE id = ?",
+            [id],
+        )?;
+        if rows_affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
         Ok(())
     }
 

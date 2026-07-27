@@ -102,6 +102,13 @@ pub struct TaskDetail {
     /// orchestrators (e.g. the QA dispatcher) read a finished child's
     /// verdict from here after `kanna_wait_task` resolves.
     pub latest_run: Option<TaskLatestRun>,
+    /// Agent-requested revision rounds already spent on this task (reset by a
+    /// human-requested revision). A review agent reads this with
+    /// `revision_limit` to know how much rope the loop has left.
+    pub revision_rounds: i64,
+    /// Rounds the task's pipeline allows before the engine parks the task for
+    /// its human instead of revising again; `0` means unlimited.
+    pub revision_limit: i64,
     pub parent_task_id: Option<String>,
     #[serde(default)]
     pub blocked_by_task_ids: Vec<String>,
@@ -228,6 +235,27 @@ pub struct RequestRevisionRequest {
     pub summary: String,
     pub prompt: String,
     pub metadata: Option<serde_json::Value>,
+    /// Who asked for this revision. Agent-requested revisions spend the
+    /// task's revision-round budget and are refused once it is gone; a
+    /// human-requested revision is never refused and hands the budget back.
+    /// Deliberately absent from the agent tool catalog: an agent must not be
+    /// able to claim human origin.
+    #[serde(default)]
+    pub origin: Option<RevisionOrigin>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RevisionOrigin {
+    #[default]
+    Agent,
+    Human,
+}
+
+impl RevisionOrigin {
+    pub fn is_agent(self) -> bool {
+        matches!(self, Self::Agent)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -249,6 +277,24 @@ pub struct TaskActionResponse {
     pub task_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_task: Option<bool>,
+    /// Set by `request-revision`: where the task stands against its
+    /// revision-round budget, and whether a revision was actually started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_budget: Option<RevisionBudgetStatus>,
+}
+
+/// The revision-round budget as it stands after a revision request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RevisionBudgetStatus {
+    /// Agent-requested rounds spent, including the one just started.
+    pub rounds: i64,
+    /// Rounds the task's pipeline allows; `0` means unlimited.
+    pub limit: i64,
+    /// True when the budget is spent and no revision was started: the task is
+    /// parked at its current stage for its human.
+    pub exhausted: bool,
+    pub message: String,
 }
 
 impl MobileApi {
@@ -568,6 +614,17 @@ fn map_task_detail(
             .ok()
             .flatten()
         });
+    let revision_limit = repo
+        .zip(pipeline_name.as_deref())
+        .and_then(|(repo, pipeline_name)| {
+            crate::task_creator::resolve_revision_limit(
+                repo,
+                pipeline_name,
+                item.pipeline_def.as_deref(),
+            )
+            .ok()
+        })
+        .unwrap_or(crate::task_creator::DEFAULT_REVISION_LIMIT);
     let waiting_prompt_snippet = item.last_output_preview.clone();
     TaskDetail {
         id: item.id,
@@ -590,6 +647,8 @@ fn map_task_detail(
         commits_behind: git_state.commits_behind,
         dirty: git_state.dirty,
         latest_run: latest_run.map(map_task_latest_run),
+        revision_rounds: item.revision_rounds,
+        revision_limit,
         parent_task_id: item.parent_task_id,
         blocked_by_task_ids,
     }

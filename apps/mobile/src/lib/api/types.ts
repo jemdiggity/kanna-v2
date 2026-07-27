@@ -211,4 +211,8 @@ export interface TaskDetail extends TaskSummary {
   commitsBehind?: number;
   dirty?: boolean;
   latestRun?: TaskLatestRun | null;
+  /** Agent-requested revision rounds spent since the last human-requested one. */
+  revisionRounds?: number;
+  /** Rounds the task's pipeline allows before it parks for its human; 0 = unlimited. */
+  revisionLimit?: number;
 }

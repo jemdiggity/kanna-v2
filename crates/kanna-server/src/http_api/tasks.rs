@@ -139,6 +139,7 @@ pub(super) async fn update_task(
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,
         follow_task: None,
+        revision_budget: None,
     }))
 }
 
