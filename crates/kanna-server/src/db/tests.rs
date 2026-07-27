@@ -165,7 +165,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "038_task_action_hardening");
+    assert_eq!(latest_migration, "039_task_action_execution_phase");
 
     let stage_run_sql: String = db
         .conn
@@ -692,6 +692,7 @@ fn open_migrates_origin_main_028_activity_revision() {
         "036_pending_stage_action",
         "037_task_action_request",
         "038_task_action_hardening",
+        "039_task_action_execution_phase",
     ] {
         let count: i64 = db
             .conn
@@ -837,11 +838,16 @@ fn activity_revision_migration_precedes_new_stage_run_migrations() {
         .iter()
         .position(|migration| *migration == "038_task_action_hardening")
         .expect("task action hardening migration");
+    let execution_phase = CURRENT_SCHEMA_MIGRATIONS
+        .iter()
+        .position(|migration| *migration == "039_task_action_execution_phase")
+        .expect("task action execution phase migration");
 
     assert!(activity_revision < ownership);
     assert!(ownership < pending_action);
     assert!(pending_action < action_request);
     assert!(action_request < hardening);
+    assert!(hardening < execution_phase);
 }
 
 #[test]
@@ -3441,11 +3447,15 @@ fn task_action_request_claims_once_replays_results_and_rejects_key_reuse() {
             .expect("claim request"),
         TaskActionRequestClaim::Claimed
     );
-    assert_eq!(
+    assert!(matches!(
         db.claim_task_action_request("revision-key-1", "task-1", "request-revision", request)
             .expect("repeat pending request"),
-        TaskActionRequestClaim::Pending
-    );
+        TaskActionRequestClaim::Pending {
+            phase,
+            owner_id: None,
+            successor_run_id: None,
+        } if phase == "claimed"
+    ));
     assert!(matches!(
         db.claim_task_action_request(
             "revision-key-1",
@@ -3465,6 +3475,62 @@ fn task_action_request_claims_once_replays_results_and_rejects_key_reuse() {
             status: 200,
             body: r#"{"taskId":"task-1"}"#.to_string(),
         }
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn revision_round_action_replay_reuses_the_durable_budget_charge() {
+    let path = Db::test_db_path("task-action-revision-round");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Revise task",
+        Some("Revise Task"),
+        "review",
+        "2026-07-28T00:00:00Z",
+    )
+    .expect("task");
+    let request = r#"{"targetStage":"in progress","origin":"agent"}"#;
+    assert_eq!(
+        db.claim_task_action_request("revision-round-key", "task-1", "request-revision", request)
+            .unwrap(),
+        TaskActionRequestClaim::Claimed
+    );
+    assert_eq!(
+        db.begin_task_action_request_execution("revision-round-key", "server-a")
+            .unwrap(),
+        super::TaskActionExecutionClaim::Acquired
+    );
+    assert_eq!(
+        db.claim_agent_revision_round_for_task_action("revision-round-key", "task-1", 2)
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(db.task_revision_rounds("task-1").unwrap(), 1);
+    drop(db);
+
+    let restarted = Db::open(&path).expect("reopen test db");
+    assert_eq!(
+        restarted
+            .begin_task_action_request_execution("revision-round-key", "server-b")
+            .unwrap(),
+        super::TaskActionExecutionClaim::Acquired
+    );
+    assert_eq!(
+        restarted
+            .claim_agent_revision_round_for_task_action("revision-round-key", "task-1", 2)
+            .unwrap(),
+        Some(1),
+        "crash replay must reuse the recorded charge"
+    );
+    assert_eq!(
+        restarted.task_revision_rounds("task-1").unwrap(),
+        1,
+        "crash replay must not double-charge the task"
     );
 
     let _ = std::fs::remove_file(path);

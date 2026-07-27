@@ -12,7 +12,6 @@ use tokio::sync::{broadcast, Mutex, Notify};
 #[derive(Clone, Copy)]
 pub(super) struct TunneledHttpInvoke;
 
-#[derive(Clone)]
 pub struct AppState {
     pub(super) config: Config,
     pub(super) pairing_session: Arc<Mutex<Option<ActivePairingSession>>>,
@@ -22,8 +21,10 @@ pub struct AppState {
     pub(super) terminal_attachments: crate::terminal_attachments::TerminalAttachments,
     pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
     requested_task_operations: Arc<RequestedTaskOperations>,
+    action_owner_id: String,
     relay_reconnect: Arc<Notify>,
     state_changes: broadcast::Sender<ServerFrame>,
+    live_spawn_reconciler: Arc<crate::task_creator::LiveSpawnReconciler>,
     #[cfg(test)]
     pub(super) task_creator: Option<TestTaskCreator>,
     #[cfg(test)]
@@ -142,6 +143,10 @@ pub(super) fn db_write_error(
 }
 
 impl AppState {
+    pub(super) fn action_owner_id(&self) -> &str {
+        &self.action_owner_id
+    }
+
     pub(crate) fn config(&self) -> &Config {
         &self.config
     }
@@ -157,6 +162,17 @@ impl AppState {
     }
 
     pub fn new(config: Config) -> Self {
+        static NEXT_ACTION_OWNER_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let action_owner_id = format!(
+            "server-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default(),
+            NEXT_ACTION_OWNER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        );
         if let Err(err) = pairing::PairingStore::load(Path::new(&config.pairing_store_path)) {
             log::warn!(
                 "failed to load pairing store {}: {}",
@@ -164,6 +180,11 @@ impl AppState {
                 err
             );
         }
+        let state_changes = broadcast::channel(256).0;
+        let live_spawn_reconciler = crate::task_creator::register_live_spawn_reconciler(
+            &config.db_path,
+            state_changes.clone(),
+        );
 
         Self {
             config,
@@ -174,8 +195,10 @@ impl AppState {
             terminal_attachments: crate::terminal_attachments::TerminalAttachments::default(),
             repo_definitions: Arc::new(crate::task_creator::RepoDefinitionsCache::default()),
             requested_task_operations: Arc::new(RequestedTaskOperations::default()),
+            action_owner_id,
             relay_reconnect: Arc::new(Notify::new()),
-            state_changes: broadcast::channel(256).0,
+            state_changes,
+            live_spawn_reconciler,
             #[cfg(test)]
             task_creator: None,
             #[cfg(test)]
@@ -339,5 +362,11 @@ impl AppState {
         let mut state = Self::new(config);
         state.revision_requester = Some(revision_requester);
         state
+    }
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        crate::task_creator::shutdown_live_spawn_reconciler(&self.live_spawn_reconciler);
     }
 }

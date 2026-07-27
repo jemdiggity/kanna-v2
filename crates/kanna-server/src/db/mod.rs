@@ -32,7 +32,9 @@ pub use stage_runs::{
     FinishedStageRun, PendingStageAction, PendingStageActionTarget, PendingTaskActionRequest,
     ReplacedStageRunSource, TaskActionState,
 };
-pub use task_action_requests::{TaskActionRequestClaim, TaskActionRequestError};
+pub use task_action_requests::{
+    TaskActionExecutionClaim, TaskActionRequestClaim, TaskActionRequestError,
+};
 #[allow(unused_imports)]
 pub use transfers::{
     NewTaskTransfer, NewTaskTransferProvenance, PendingIncomingTransfer, TaskTransfer,
@@ -82,6 +84,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "036_pending_stage_action",
     "037_task_action_request",
     "038_task_action_hardening",
+    "039_task_action_execution_phase",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1407,6 +1410,10 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
               request_json TEXT NOT NULL,
               successor_run_id TEXT UNIQUE REFERENCES stage_run(id) ON DELETE SET NULL,
               state TEXT NOT NULL CHECK (state IN ('pending', 'succeeded', 'failed')),
+              phase TEXT NOT NULL DEFAULT 'claimed'
+                CHECK (phase IN ('claimed', 'preparing', 'successor_reserved', 'post_reserved')),
+              owner_id TEXT,
+              revision_round INTEGER,
               http_status INTEGER,
               response_body TEXT,
               created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -1423,6 +1430,19 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
              ON task_action_request(state, updated_at)",
             [],
         )?;
+        Ok(())
+    })?;
+
+    run_migration(conn, "039_task_action_execution_phase", |conn| {
+        add_column(
+            conn,
+            "task_action_request",
+            "phase",
+            "TEXT NOT NULL DEFAULT 'claimed'
+             CHECK (phase IN ('claimed', 'preparing', 'successor_reserved', 'post_reserved'))",
+        )?;
+        add_column(conn, "task_action_request", "owner_id", "TEXT")?;
+        add_column(conn, "task_action_request", "revision_round", "INTEGER")?;
         Ok(())
     })?;
 

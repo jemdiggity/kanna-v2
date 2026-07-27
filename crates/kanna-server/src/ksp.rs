@@ -634,6 +634,45 @@ fn direct_terminal_session_id(task_id: &str) -> Option<String> {
     task_id.starts_with("shell-").then(|| task_id.to_string())
 }
 
+#[cfg(test)]
+struct TerminalInitialResolutionPause {
+    reached: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(test)]
+static TERMINAL_INITIAL_RESOLUTION_PAUSES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, TerminalInitialResolutionPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+fn pause_next_terminal_control_after_initial_resolution(
+    task_id: &str,
+) -> (Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>) {
+    let reached = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    TERMINAL_INITIAL_RESOLUTION_PAUSES.lock().unwrap().insert(
+        task_id.to_string(),
+        TerminalInitialResolutionPause {
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        },
+    );
+    (reached, release)
+}
+
+#[cfg(test)]
+async fn pause_terminal_control_after_initial_resolution(task_id: &str) {
+    let pause = TERMINAL_INITIAL_RESOLUTION_PAUSES
+        .lock()
+        .unwrap()
+        .remove(task_id);
+    if let Some(pause) = pause {
+        pause.reached.add_permits(1);
+        let _ = pause.release.acquire().await;
+    }
+}
+
 async fn run_terminal_control(
     state: Arc<AppState>,
     task_id: String,
@@ -668,22 +707,60 @@ async fn run_terminal_control(
             }
         }
     };
+    #[cfg(test)]
+    pause_terminal_control_after_initial_resolution(&task_id).await;
     let daemon_dir = state.config().daemon_dir.clone();
     let mut retry_attempt = 0usize;
     // Do not open an otherwise idle control socket merely because a terminal
     // attached for output. Keep the first command pending across definite
     // connect failures; after the first connection, reconnect proactively so
     // handoff recovery is ready before the next keypress.
-    let mut pending_command = Some(tokio::select! {
-        biased;
-        _ = terminal_control_cancelled(&mut cancel_rx) => return,
-        command = command_rx.recv() => {
-            let Some(command) = command else {
-                return;
-            };
-            command
+    let mut pending_command = Some(loop {
+        tokio::select! {
+            biased;
+            _ = terminal_control_cancelled(&mut cancel_rx) => return,
+            state_change = state_changes.recv(), if direct_session_id.is_none() => {
+                let should_refresh = matches!(
+                    state_change,
+                    Ok(ServerFrame::StateChanged {
+                        scope: kanna_agent_protocol::StateChangeScope::Tasks,
+                    })
+                        | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                );
+                if should_refresh {
+                    match resolve_task_session_id(
+                        state.config().db_path.clone(),
+                        task_id.clone(),
+                    )
+                    .await
+                    {
+                        Ok(current_session_id) => session_id = current_session_id,
+                        Err(message) => {
+                            send_task_error(&frame_tx, &task_id, "no_session", message).await;
+                        }
+                    }
+                }
+            }
+            command = command_rx.recv() => {
+                let Some(command) = command else {
+                    return;
+                };
+                break command;
+            }
         }
     });
+    // A task transition and its notification can race the first queued
+    // command. Resolve once at the write boundary so notification scheduling
+    // cannot route that command to the session cached before the idle period.
+    if direct_session_id.is_none() {
+        match resolve_task_session_id(state.config().db_path.clone(), task_id.clone()).await {
+            Ok(current_session_id) => session_id = current_session_id,
+            Err(message) => {
+                send_task_error(&frame_tx, &task_id, "no_session", message).await;
+                return;
+            }
+        }
+    }
 
     loop {
         let connected = tokio::select! {
@@ -4511,7 +4588,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_terminal_control_live_route_follows_the_latest_owned_run() {
+    async fn terminal_control_first_command_follows_transition_while_idle() {
         let unique = format!(
             "ksp-terminal-live-route-{}-{}",
             std::process::id(),
@@ -4556,7 +4633,7 @@ mod tests {
         })
         .unwrap();
 
-        let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 2).await;
+        let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 1).await;
         let state = Arc::new(AppState::new(config));
         let (frame_tx, companion_tx, _outbound_rx) = outbound_frame_channel(8);
         let mut conn = StreamConn {
@@ -4572,20 +4649,15 @@ mod tests {
             auth_mode: AuthMode::AllowEmpty,
         };
 
+        let (route_resolved, release_idle) =
+            pause_next_terminal_control_after_initial_resolution("task-live-route");
         conn.ensure_live_terminal_control_route("task-live-route")
             .await;
-        conn.enqueue_terminal_control(
-            "task-live-route".into(),
-            TerminalControlCommand::Input(b"before-revision".to_vec()),
-        );
-        assert_command(
-            commands.recv().await,
-            DaemonCommand::InputNoReply {
-                session_id: "daemon-session-old".into(),
-                data: b"before-revision".to_vec(),
-            },
-        );
-
+        route_resolved
+            .acquire()
+            .await
+            .expect("initial route pause disappeared")
+            .forget();
         db.finish_stage_run("run-old", "failed", None, Some("request changes"))
             .unwrap();
         db.insert_stage_run(crate::db::NewStageRun {
@@ -4606,6 +4678,7 @@ mod tests {
         })
         .unwrap();
         state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+        release_idle.add_permits(1);
         conn.enqueue_terminal_control(
             "task-live-route".into(),
             TerminalControlCommand::Input(b"after-revision".to_vec()),

@@ -513,6 +513,7 @@ async fn spawn_fake_daemon_accept_spawn_then_reconciliation_fails(
 async fn spawn_fake_daemon_resolves_spawn_after_initial_probes(
     daemon_dir: String,
     accepted: bool,
+    exit_before_land: bool,
 ) -> tokio::task::JoinHandle<()> {
     let socket_path = test_daemon_socket_path(&daemon_dir);
     let _ = std::fs::remove_file(&socket_path);
@@ -577,41 +578,81 @@ async fn spawn_fake_daemon_resolves_spawn_after_initial_probes(
             ));
         }
 
-        // A later same-process recovery probe receives a definitive answer.
-        let (mut write_half, line) = loop {
-            let (probe, _) = listener.accept().await.unwrap();
-            let (read_half, write_half) = probe.into_split();
-            let mut reader = BufReader::new(read_half);
-            let mut line = String::new();
-            if reader.read_line(&mut line).await.unwrap() > 0 {
-                break (write_half, line);
+        // A later same-process recovery probe subscribes before its definitive
+        // List so an Exit racing the snapshot is fenced before DB land.
+        let mut lifecycle_write = None;
+        loop {
+            let (mut write_half, line) = loop {
+                let (probe, _) = listener.accept().await.unwrap();
+                let (read_half, write_half) = probe.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.unwrap() > 0 {
+                    break (write_half, line);
+                }
+            };
+            let command =
+                serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap();
+            if matches!(
+                command,
+                kanna_daemon::protocol::Command::SubscribeEvents { .. }
+            ) {
+                write_half
+                    .write_all(
+                        format!(
+                            "{}\n",
+                            serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                lifecycle_write = Some(write_half);
+                continue;
             }
-        };
-        assert!(matches!(
-            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
-            kanna_daemon::protocol::Command::List
-        ));
-        let sessions = accepted
-            .then(|| kanna_daemon::protocol::SessionInfo {
+            assert!(matches!(command, kanna_daemon::protocol::Command::List));
+            let sessions = accepted
+                .then(|| kanna_daemon::protocol::SessionInfo {
+                    session_id: session_id.clone(),
+                    pid: 42,
+                    cwd: cwd.clone(),
+                    state: kanna_daemon::protocol::SessionState::Active,
+                    idle_seconds: 0,
+                    status: kanna_daemon::protocol::SessionStatus::Busy,
+                    kind: Default::default(),
+                    run_id: Some(run_id.clone()),
+                })
+                .into_iter()
+                .collect();
+            let response = kanna_daemon::protocol::Event::SessionList {
+                sessions,
+                capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
+            };
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            break;
+        }
+        if exit_before_land {
+            let lifecycle_write = lifecycle_write
+                .as_mut()
+                .expect("late probe did not establish a lifecycle fence");
+            let exit = kanna_daemon::protocol::Event::Exit {
                 session_id,
-                pid: 42,
-                cwd,
-                state: kanna_daemon::protocol::SessionState::Active,
-                idle_seconds: 0,
-                status: kanna_daemon::protocol::SessionStatus::Busy,
-                kind: Default::default(),
                 run_id: Some(run_id),
-            })
-            .into_iter()
-            .collect();
-        let response = kanna_daemon::protocol::Event::SessionList {
-            sessions,
-            capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
-        };
-        write_half
-            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
-            .await
-            .unwrap();
+                code: 0,
+                resume_session_id: None,
+                killed: false,
+            };
+            lifecycle_write
+                .write_all(format!("{}\n", serde_json::to_string(&exit).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        } else if accepted {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        drop(lifecycle_write);
     })
 }
 

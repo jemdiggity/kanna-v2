@@ -14,6 +14,8 @@ use kanna_daemon::protocol::{
     AgentSpawnParams, Command as DaemonCommand, Event as DaemonEvent, TerminalSnapshot,
 };
 use std::collections::{HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, Weak};
 
 const STARTUP_LIFECYCLE_BUFFER_PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
 #[cfg(not(test))]
@@ -27,16 +29,95 @@ const SPAWN_RECONCILIATION_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Dur
 const SPAWN_RECONCILIATION_ATTEMPT_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(50);
 #[cfg(not(test))]
-const LIVE_SPAWN_RECONCILIATION_RETRY_DELAY: std::time::Duration =
-    std::time::Duration::from_secs(1);
+const LIVE_SPAWN_RECONCILIATION_BASE_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(250);
 #[cfg(test)]
-const LIVE_SPAWN_RECONCILIATION_RETRY_DELAY: std::time::Duration =
-    std::time::Duration::from_millis(10);
+const LIVE_SPAWN_RECONCILIATION_BASE_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(5);
+#[cfg(not(test))]
+const LIVE_SPAWN_RECONCILIATION_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const LIVE_SPAWN_RECONCILIATION_MAX_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(80);
+#[cfg(not(test))]
+const LIVE_SPAWN_LIFECYCLE_FENCE_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+#[cfg(test)]
+const LIVE_SPAWN_LIFECYCLE_FENCE_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+
+pub(crate) struct LiveSpawnReconciler {
+    active_runs: Mutex<HashSet<String>>,
+    shutdown: tokio::sync::watch::Sender<bool>,
+    state_changes: tokio::sync::broadcast::Sender<kanna_agent_protocol::ServerFrame>,
+}
+
+static LIVE_SPAWN_RECONCILERS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<String, Weak<LiveSpawnReconciler>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+pub(crate) fn register_live_spawn_reconciler(
+    db_path: &str,
+    state_changes: tokio::sync::broadcast::Sender<kanna_agent_protocol::ServerFrame>,
+) -> Arc<LiveSpawnReconciler> {
+    let (shutdown, _) = tokio::sync::watch::channel(false);
+    let reconciler = Arc::new(LiveSpawnReconciler {
+        active_runs: Mutex::new(HashSet::new()),
+        shutdown,
+        state_changes,
+    });
+    LIVE_SPAWN_RECONCILERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(db_path.to_string(), Arc::downgrade(&reconciler));
+    reconciler
+}
+
+pub(crate) fn shutdown_live_spawn_reconciler(reconciler: &LiveSpawnReconciler) {
+    reconciler.shutdown.send_replace(true);
+}
 
 enum SpawnAcceptanceReconciliation {
     Accepted,
     Rejected(String),
     Indeterminate(String),
+}
+
+#[cfg(test)]
+struct LivePostReservationPause {
+    reached: std::sync::Arc<tokio::sync::Semaphore>,
+    release: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(test)]
+static LIVE_POST_RESERVATION_PAUSES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, LivePostReservationPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+pub(crate) fn pause_next_live_post_after_reservation(
+    key: &str,
+) -> (
+    std::sync::Arc<tokio::sync::Semaphore>,
+    std::sync::Arc<tokio::sync::Semaphore>,
+) {
+    let reached = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    LIVE_POST_RESERVATION_PAUSES.lock().unwrap().insert(
+        key.to_string(),
+        LivePostReservationPause {
+            reached: std::sync::Arc::clone(&reached),
+            release: std::sync::Arc::clone(&release),
+        },
+    );
+    (reached, release)
+}
+
+#[cfg(test)]
+async fn pause_live_post_after_reservation(key: Option<&str>) {
+    let pause = key.and_then(|key| LIVE_POST_RESERVATION_PAUSES.lock().unwrap().remove(key));
+    if let Some(pause) = pause {
+        pause.reached.add_permits(1);
+        let _ = pause.release.acquire().await;
+    }
 }
 
 #[derive(Debug)]
@@ -909,22 +990,7 @@ async fn reconcile_spawn_acceptance(
                 continue;
             }
         };
-        return match sessions
-            .sessions
-            .into_iter()
-            .find(|session| session.session_id == session_id)
-        {
-            Some(session) if session.run_id.as_deref() == Some(run_id) => {
-                SpawnAcceptanceReconciliation::Accepted
-            }
-            Some(session) => SpawnAcceptanceReconciliation::Rejected(format!(
-                "spawn reconciliation found session {session_id} owned by {:?}, expected {run_id}",
-                session.run_id
-            )),
-            None => SpawnAcceptanceReconciliation::Rejected(format!(
-                "spawn reconciliation did not find accepted session {session_id}"
-            )),
-        };
+        return classify_spawn_acceptance(&sessions, session_id, run_id);
     }
     SpawnAcceptanceReconciliation::Indeterminate(format!(
         "spawn reconciliation remained indeterminate after {SPAWN_RECONCILIATION_ATTEMPTS} attempts ({})",
@@ -932,100 +998,524 @@ async fn reconcile_spawn_acceptance(
     ))
 }
 
+async fn reconcile_spawn_acceptance_with_lifecycle_fence(
+    daemon_dir: &str,
+    session_id: &str,
+    run_id: &str,
+) -> SpawnAcceptanceReconciliation {
+    let mut lifecycle = match tokio::time::timeout(
+        SPAWN_RECONCILIATION_ATTEMPT_TIMEOUT,
+        DaemonClient::connect(daemon_dir),
+    )
+    .await
+    {
+        Ok(Ok(lifecycle)) => lifecycle,
+        Ok(Err(error)) => {
+            return SpawnAcceptanceReconciliation::Indeterminate(format!(
+                "spawn lifecycle fence could not connect: {error}"
+            ));
+        }
+        Err(_) => {
+            return SpawnAcceptanceReconciliation::Indeterminate(
+                "spawn lifecycle fence connection timed out".to_string(),
+            );
+        }
+    };
+    let subscription = tokio::time::timeout(SPAWN_RECONCILIATION_ATTEMPT_TIMEOUT, async {
+        lifecycle
+            .send_one_way(&DaemonCommand::SubscribeEvents {
+                version: kanna_daemon::protocol::CURRENT_EVENT_STREAM_VERSION,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        lifecycle
+            .read_event()
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await;
+    match subscription {
+        Ok(Ok(DaemonEvent::Ok)) => {}
+        Ok(Ok(DaemonEvent::Error { message, .. })) => {
+            return SpawnAcceptanceReconciliation::Indeterminate(format!(
+                "spawn lifecycle fence subscription rejected: {message}"
+            ));
+        }
+        Ok(Ok(other)) => {
+            return SpawnAcceptanceReconciliation::Indeterminate(format!(
+                "spawn lifecycle fence received unexpected acknowledgement: {other:?}"
+            ));
+        }
+        Ok(Err(error)) => {
+            return SpawnAcceptanceReconciliation::Indeterminate(format!(
+                "spawn lifecycle fence subscription failed: {error}"
+            ));
+        }
+        Err(_) => {
+            return SpawnAcceptanceReconciliation::Indeterminate(
+                "spawn lifecycle fence subscription timed out".to_string(),
+            );
+        }
+    }
+
+    let listed = tokio::time::timeout(SPAWN_RECONCILIATION_ATTEMPT_TIMEOUT, async {
+        let mut daemon = DaemonClient::connect(daemon_dir)
+            .await
+            .map_err(|error| error.to_string())?;
+        daemon.list().await.map_err(|error| error.to_string())
+    })
+    .await;
+    let listed = match listed {
+        Ok(Ok(sessions)) => classify_spawn_acceptance(&sessions, session_id, run_id),
+        Ok(Err(error)) => SpawnAcceptanceReconciliation::Indeterminate(format!(
+            "spawn lifecycle fence control probe failed: {error}"
+        )),
+        Err(_) => SpawnAcceptanceReconciliation::Indeterminate(
+            "spawn lifecycle fence control probe timed out".to_string(),
+        ),
+    };
+    if !matches!(listed, SpawnAcceptanceReconciliation::Accepted) {
+        return listed;
+    }
+
+    // Subscription starts before List, so an Exit/removal racing the daemon
+    // snapshot is queued here. Buffer briefly before the guarded DB land, as
+    // startup reconciliation does, instead of trusting a stale List result.
+    let deadline = tokio::time::Instant::now() + LIVE_SPAWN_LIFECYCLE_FENCE_DELAY;
+    loop {
+        match tokio::time::timeout_at(deadline, lifecycle.read_event()).await {
+            Err(_) => return SpawnAcceptanceReconciliation::Accepted,
+            Ok(Ok(DaemonEvent::Exit {
+                session_id: exited_session,
+                run_id: exited_run,
+                ..
+            })) if exited_session == session_id && exited_run.as_deref() == Some(run_id) => {
+                return SpawnAcceptanceReconciliation::Rejected(format!(
+                    "spawn lifecycle fence observed expected run {run_id} exit before land"
+                ));
+            }
+            Ok(Ok(DaemonEvent::Exit {
+                session_id: exited_session,
+                run_id: None,
+                ..
+            })) if exited_session == session_id => {
+                return SpawnAcceptanceReconciliation::Indeterminate(format!(
+                    "spawn lifecycle fence observed ownershipless exit for {session_id}"
+                ));
+            }
+            Ok(Ok(DaemonEvent::ShuttingDown)) => {
+                return SpawnAcceptanceReconciliation::Indeterminate(
+                    "daemon shut down during spawn lifecycle fence".to_string(),
+                );
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                return SpawnAcceptanceReconciliation::Indeterminate(format!(
+                    "spawn lifecycle fence failed: {error}"
+                ));
+            }
+        }
+    }
+}
+
+fn classify_spawn_acceptance(
+    sessions: &crate::daemon_client::DaemonList,
+    session_id: &str,
+    run_id: &str,
+) -> SpawnAcceptanceReconciliation {
+    let strict_ownership = sessions.capabilities.immutable_run_ownership;
+    match sessions
+        .sessions
+        .iter()
+        .find(|session| session.session_id == session_id)
+    {
+        Some(session)
+            if session.run_id.as_deref() == Some(run_id)
+                && matches!(session.state, kanna_daemon::protocol::SessionState::Active) =>
+        {
+            SpawnAcceptanceReconciliation::Accepted
+        }
+        Some(session) if session.run_id.as_deref() == Some(run_id) => {
+            SpawnAcceptanceReconciliation::Rejected(format!(
+                "spawn reconciliation found expected session {session_id} no longer active"
+            ))
+        }
+        Some(session) if session.run_id.is_none() => {
+            SpawnAcceptanceReconciliation::Indeterminate(format!(
+                "spawn reconciliation found legacy session {session_id} without run ownership \
+                 (strict ownership: {strict_ownership})"
+            ))
+        }
+        Some(session) => SpawnAcceptanceReconciliation::Rejected(format!(
+            "spawn reconciliation found session {session_id} owned by {:?}, expected {run_id}",
+            session.run_id
+        )),
+        None => SpawnAcceptanceReconciliation::Rejected(format!(
+            "spawn reconciliation did not find accepted session {session_id}"
+        )),
+    }
+}
+
+#[cfg(test)]
+mod live_spawn_classification_tests {
+    use super::*;
+
+    fn listed(
+        state: Option<kanna_daemon::protocol::SessionState>,
+        run_id: Option<&str>,
+        current_capabilities: bool,
+    ) -> crate::daemon_client::DaemonList {
+        crate::daemon_client::DaemonList {
+            sessions: state
+                .map(|state| kanna_daemon::protocol::SessionInfo {
+                    session_id: "session-1".to_string(),
+                    pid: 42,
+                    cwd: "/tmp/task".to_string(),
+                    state,
+                    idle_seconds: 0,
+                    status: kanna_daemon::protocol::SessionStatus::Busy,
+                    kind: Default::default(),
+                    run_id: run_id.map(str::to_string),
+                })
+                .into_iter()
+                .collect(),
+            capabilities: if current_capabilities {
+                kanna_daemon::protocol::DaemonCapabilities::current()
+            } else {
+                kanna_daemon::protocol::DaemonCapabilities::legacy()
+            },
+        }
+    }
+
+    #[test]
+    fn late_probe_rejects_an_already_exited_exact_run() {
+        assert!(matches!(
+            classify_spawn_acceptance(
+                &listed(
+                    Some(kanna_daemon::protocol::SessionState::Exited(0)),
+                    Some("run-1"),
+                    true,
+                ),
+                "session-1",
+                "run-1",
+            ),
+            SpawnAcceptanceReconciliation::Rejected(_)
+        ));
+    }
+
+    #[test]
+    fn late_probe_fence_rejects_exit_between_list_and_land() {
+        let before_exit = listed(
+            Some(kanna_daemon::protocol::SessionState::Active),
+            Some("run-1"),
+            true,
+        );
+        assert!(matches!(
+            classify_spawn_acceptance(&before_exit, "session-1", "run-1"),
+            SpawnAcceptanceReconciliation::Accepted
+        ));
+        let after_exit = listed(
+            Some(kanna_daemon::protocol::SessionState::Exited(0)),
+            Some("run-1"),
+            true,
+        );
+        assert!(matches!(
+            classify_spawn_acceptance(&after_exit, "session-1", "run-1"),
+            SpawnAcceptanceReconciliation::Rejected(_)
+        ));
+    }
+
+    #[test]
+    fn late_probe_rejects_disappearance_before_the_probe() {
+        assert!(matches!(
+            classify_spawn_acceptance(&listed(None, None, true), "session-1", "run-1"),
+            SpawnAcceptanceReconciliation::Rejected(_)
+        ));
+    }
+
+    #[test]
+    fn late_probe_keeps_a_legacy_accepted_session_indeterminate() {
+        assert!(matches!(
+            classify_spawn_acceptance(
+                &listed(
+                    Some(kanna_daemon::protocol::SessionState::Active),
+                    None,
+                    false,
+                ),
+                "session-1",
+                "run-1",
+            ),
+            SpawnAcceptanceReconciliation::Indeterminate(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn live_reconciliation_deduplicates_one_owner_per_run_and_cancels() {
+        let db_path = Db::test_db_path("live-reconcile-deduplicate");
+        let state_changes = tokio::sync::broadcast::channel(8).0;
+        let reconciler = register_live_spawn_reconciler(&db_path, state_changes);
+        reconcile_indeterminate_spawn_in_background(
+            db_path.clone(),
+            "/tmp/missing-live-reconcile-daemon".to_string(),
+            "run-deduplicated".to_string(),
+        );
+        reconcile_indeterminate_spawn_in_background(
+            db_path,
+            "/tmp/missing-live-reconcile-daemon".to_string(),
+            "run-deduplicated".to_string(),
+        );
+        assert_eq!(
+            reconciler
+                .active_runs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            1
+        );
+        shutdown_live_spawn_reconciler(&reconciler);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if reconciler
+                    .active_runs
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("shutdown did not cancel the live reconciler");
+    }
+
+    #[test]
+    fn live_reconciliation_backoff_is_bounded_and_jittered_per_run() {
+        let first = (0..16)
+            .map(|attempt| live_spawn_retry_delay("run-a", attempt))
+            .collect::<Vec<_>>();
+        assert!(first
+            .iter()
+            .all(|delay| *delay <= LIVE_SPAWN_RECONCILIATION_MAX_DELAY));
+        assert!(
+            first.windows(2).all(|pair| pair[0] <= pair[1]),
+            "backoff must not regress: {first:?}"
+        );
+        assert!(
+            (0..8).any(|attempt| {
+                live_spawn_retry_delay("run-a", attempt) != live_spawn_retry_delay("run-b", attempt)
+            }),
+            "distinct runs must not synchronize every probe"
+        );
+    }
+}
+
 fn reconcile_indeterminate_spawn_in_background(
     db_path: String,
     daemon_dir: String,
     run_id: String,
 ) {
+    let reconciler = LIVE_SPAWN_RECONCILERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&db_path)
+        .and_then(Weak::upgrade);
+    let Some(reconciler) = reconciler else {
+        log::warn!(
+            "live spawn reconciliation for {run_id} has no registered server owner; \
+             startup reconciliation will retain ownership"
+        );
+        return;
+    };
+    {
+        let mut active = reconciler
+            .active_runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !active.insert(run_id.clone()) {
+            return;
+        }
+    }
     tokio::spawn(async move {
-        loop {
-            let action = match Db::open(&db_path).and_then(|db| db.pending_stage_actions()) {
-                Ok(actions) => actions
-                    .into_iter()
-                    .find(|action| action.successor_run_id == run_id),
-                Err(error) => {
-                    log::warn!(
-                        "live spawn reconciliation could not read reservation {run_id}: {error}"
-                    );
-                    tokio::time::sleep(LIVE_SPAWN_RECONCILIATION_RETRY_DELAY).await;
-                    continue;
-                }
-            };
-            let Some(action) = action else {
-                return;
-            };
-            let connection = DaemonClient::connect(&daemon_dir)
-                .await
-                .map_err(|error| error.to_string());
-            let mut daemon = match connection {
-                Ok(daemon) => daemon,
-                Err(error) => {
-                    log::warn!(
-                        "live spawn reconciliation could not reach daemon for {run_id}: {error}"
-                    );
-                    tokio::time::sleep(LIVE_SPAWN_RECONCILIATION_RETRY_DELAY).await;
-                    continue;
-                }
-            };
-            match reconcile_spawn_acceptance(&mut daemon, &action.session_id, &run_id).await {
-                SpawnAcceptanceReconciliation::Accepted => {
-                    match Db::open(&db_path).and_then(|db| db.land_pending_stage_action(&action)) {
-                        Ok(()) => {
-                            log::info!(
-                                "landed late-confirmed successor {run_id} for task {}",
-                                action.task_id
-                            );
-                            return;
-                        }
-                        Err(error) => {
-                            log::warn!("live spawn reconciliation could not land {run_id}: {error}")
-                        }
-                    }
-                }
-                SpawnAcceptanceReconciliation::Rejected(reason) => {
-                    match Db::open(&db_path)
-                        .and_then(|db| db.rollback_pending_stage_action(&action))
-                    {
-                        Ok(()) => {
-                            if action.remove_worktree_on_rollback {
-                                match (
-                                    action.target_worktree_path.as_deref(),
-                                    action.target_worktree_branch.as_deref(),
-                                ) {
-                                    (Some(path), Some(branch)) => {
-                                        if let Err(error) = remove_prepared_worktree(path, branch) {
-                                            log::warn!(
-                                                "rolled back late-rejected successor {run_id} \
-                                                 but could not remove its workspace: {error}"
-                                            );
-                                        }
-                                    }
-                                    _ => log::warn!(
-                                        "rolled back late-rejected successor {run_id} with \
-                                         incomplete workspace cleanup metadata"
-                                    ),
-                                }
-                            }
-                            log::info!(
-                                "rolled back late-rejected successor {run_id} for task {}: {reason}",
-                                action.task_id
-                            );
-                            return;
-                        }
-                        Err(error) => log::warn!(
-                            "live spawn reconciliation could not roll back {run_id}: {error}"
-                        ),
-                    }
-                }
-                SpawnAcceptanceReconciliation::Indeterminate(reason) => {
-                    log::warn!(
-                        "live spawn reconciliation remains indeterminate for {run_id}: {reason}"
-                    );
+        reconcile_indeterminate_spawn_loop(
+            Arc::clone(&reconciler),
+            db_path,
+            daemon_dir,
+            run_id.clone(),
+        )
+        .await;
+        reconciler
+            .active_runs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&run_id);
+    });
+}
+
+fn live_spawn_retry_delay(run_id: &str, attempt: usize) -> std::time::Duration {
+    let exponent = attempt.min(7) as u32;
+    let base_ms = LIVE_SPAWN_RECONCILIATION_BASE_DELAY
+        .as_millis()
+        .saturating_mul(1u128 << exponent)
+        .min(LIVE_SPAWN_RECONCILIATION_MAX_DELAY.as_millis());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    run_id.hash(&mut hasher);
+    attempt.hash(&mut hasher);
+    let jitter_window = (base_ms / 2).max(1);
+    let jitter = u128::from(hasher.finish()) % jitter_window;
+    std::time::Duration::from_millis(
+        (base_ms + jitter).min(LIVE_SPAWN_RECONCILIATION_MAX_DELAY.as_millis()) as u64,
+    )
+}
+
+async fn reconcile_indeterminate_spawn_loop(
+    reconciler: Arc<LiveSpawnReconciler>,
+    db_path: String,
+    daemon_dir: String,
+    run_id: String,
+) {
+    let mut shutdown = reconciler.shutdown.subscribe();
+    let mut attempt = 0usize;
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+        let delay = live_spawn_retry_delay(&run_id, attempt);
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
                 }
             }
-            tokio::time::sleep(LIVE_SPAWN_RECONCILIATION_RETRY_DELAY).await;
         }
-    });
+        let lookup_db_path = db_path.clone();
+        let lookup_run_id = run_id.clone();
+        let action = match tokio::task::spawn_blocking(move || {
+            Db::open(&lookup_db_path)?.pending_stage_action(&lookup_run_id)
+        })
+        .await
+        {
+            Ok(Ok(action)) => action,
+            Ok(Err(error)) => {
+                log::warn!(
+                    "live spawn reconciliation could not read reservation {run_id}: {error}"
+                );
+                attempt = attempt.saturating_add(1);
+                continue;
+            }
+            Err(error) => {
+                log::warn!("live spawn reconciliation lookup worker failed for {run_id}: {error}");
+                attempt = attempt.saturating_add(1);
+                continue;
+            }
+        };
+        let Some(action) = action else {
+            return;
+        };
+        let outcome = tokio::select! {
+            outcome = reconcile_spawn_acceptance_with_lifecycle_fence(
+                &daemon_dir,
+                &action.session_id,
+                &run_id,
+            ) => outcome,
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+                continue;
+            }
+        };
+        match outcome {
+            SpawnAcceptanceReconciliation::Accepted => {
+                let land_db_path = db_path.clone();
+                let land_action = action.clone();
+                match tokio::task::spawn_blocking(move || {
+                    Db::open(&land_db_path)?.land_pending_stage_action(&land_action)
+                })
+                .await
+                {
+                    Ok(Ok(())) => {
+                        let _ = reconciler.state_changes.send(
+                            kanna_agent_protocol::ServerFrame::StateChanged {
+                                scope: kanna_agent_protocol::StateChangeScope::Tasks,
+                            },
+                        );
+                        log::info!(
+                            "landed late-confirmed successor {run_id} for task {}",
+                            action.task_id
+                        );
+                        return;
+                    }
+                    Ok(Err(error)) => {
+                        log::warn!("live spawn reconciliation could not land {run_id}: {error}")
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "live spawn reconciliation land worker failed for {run_id}: {error}"
+                        )
+                    }
+                }
+            }
+            SpawnAcceptanceReconciliation::Rejected(reason) => {
+                let rollback_db_path = db_path.clone();
+                let rollback_action = action.clone();
+                let rolled_back = tokio::task::spawn_blocking(move || {
+                    let db = Db::open(&rollback_db_path)?;
+                    db.rollback_pending_stage_action(&rollback_action)?;
+                    let cleanup_error = if rollback_action.remove_worktree_on_rollback {
+                        match (
+                            rollback_action.target_worktree_path.as_deref(),
+                            rollback_action.target_worktree_branch.as_deref(),
+                        ) {
+                            (Some(path), Some(branch)) => {
+                                remove_prepared_worktree(path, branch).err()
+                            }
+                            _ => Some("rollback worktree metadata is incomplete".to_string()),
+                        }
+                    } else {
+                        None
+                    };
+                    Ok::<Option<String>, rusqlite::Error>(cleanup_error)
+                })
+                .await;
+                match rolled_back {
+                    Ok(Ok(cleanup_error)) => {
+                        let _ = reconciler.state_changes.send(
+                            kanna_agent_protocol::ServerFrame::StateChanged {
+                                scope: kanna_agent_protocol::StateChangeScope::Tasks,
+                            },
+                        );
+                        if let Some(error) = cleanup_error {
+                            log::warn!(
+                                "restored source for late-rejected successor {run_id}, but its \
+                                 worktree cleanup failed and will be retried by normal orphan \
+                                 reconciliation: {error}"
+                            );
+                        }
+                        log::info!(
+                            "rolled back late-rejected successor {run_id} for task {}: {reason}",
+                            action.task_id
+                        );
+                        return;
+                    }
+                    Ok(Err(error)) => log::warn!(
+                        "live spawn reconciliation could not roll back {run_id}: {error}"
+                    ),
+                    Err(error) => log::warn!(
+                        "live spawn reconciliation rollback worker failed for {run_id}: {error}"
+                    ),
+                }
+            }
+            SpawnAcceptanceReconciliation::Indeterminate(reason) => {
+                log::warn!(
+                    "live spawn reconciliation remains indeterminate for {run_id}: {reason}"
+                );
+            }
+        }
+        attempt = attempt.saturating_add(1);
+    }
 }
 
 pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
@@ -1070,46 +1560,52 @@ pub(crate) async fn dispatch_prepared_post_for_api(
     prepared: PreparedPostDispatch,
 ) -> Result<crate::mobile_api::TaskActionResponse, StageSpawnError> {
     let task_id = prepared.task_id.clone();
-    match try_submit_task_input(daemon, &prepared.session_id, &prepared.message).await {
-        Ok(()) => {
-            let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
-            // The live session keeps whatever agent is already running;
-            // attribute the post run to it rather than to the post's
-            // fallback agent binding.
-            let inherited = db
-                .latest_stage_run(&task_id)
-                .map_err(|e| format!("db error: {}", e))?;
-            let completion_owner_run_id = inherited.as_ref().map(|run| {
-                if run.kind == "post" {
-                    run.resumed_from_run_id
-                        .clone()
-                        .unwrap_or_else(|| run.id.clone())
-                } else {
-                    run.id.clone()
-                }
-            });
-            db.finish_latest_running_stage_run(&task_id, "succeeded", None, None)
-                .map_err(|e| format!("db error: {}", e))?;
-            // The post continues the inherited run's live agent session, so
-            // its provider session id and cwd carry over too.
-            let (agent, agent_provider, model, provider_session_id, cwd) = match inherited {
-                Some(run) => (
-                    run.agent,
-                    run.agent_provider,
-                    run.model,
-                    run.provider_session_id,
-                    run.cwd,
-                ),
-                None => (
-                    prepared.fallback.stage_agent.clone(),
-                    Some(prepared.fallback.agent_provider.clone()),
-                    prepared.fallback.model.clone(),
-                    None,
-                    Some(prepared.fallback.cwd.clone()),
-                ),
-            };
-            let run_id = generate_stage_run_id(&task_id);
-            db.insert_stage_run_with_completion_attempt(
+    let response = crate::mobile_api::TaskActionResponse {
+        task_id: task_id.clone(),
+        follow_task: None,
+        revision_budget: None,
+    };
+    let response_body = prepared
+        .action_request_key
+        .as_ref()
+        .map(|_| serde_json::to_string(&response))
+        .transpose()
+        .map_err(|error| format!("failed to serialize task action response: {error}"))?;
+    let (run_id, source) = {
+        let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
+        // The live session keeps whatever agent is already running; attribute
+        // the reserved post to it rather than to the fallback binding.
+        let inherited = db
+            .latest_stage_run(&task_id)
+            .map_err(|e| format!("db error: {}", e))?;
+        let completion_owner_run_id = inherited.as_ref().map(|run| {
+            if run.kind == "post" {
+                run.resumed_from_run_id
+                    .clone()
+                    .unwrap_or_else(|| run.id.clone())
+            } else {
+                run.id.clone()
+            }
+        });
+        let (agent, agent_provider, model, provider_session_id, cwd) = match inherited {
+            Some(run) => (
+                run.agent,
+                run.agent_provider,
+                run.model,
+                run.provider_session_id,
+                run.cwd,
+            ),
+            None => (
+                prepared.fallback.stage_agent.clone(),
+                Some(prepared.fallback.agent_provider.clone()),
+                prepared.fallback.model.clone(),
+                None,
+                Some(prepared.fallback.cwd.clone()),
+            ),
+        };
+        let run_id = generate_stage_run_id(&task_id);
+        let source = db
+            .reserve_live_post_action(
                 NewStageRun {
                     id: &run_id,
                     task_id: &task_id,
@@ -1118,31 +1614,39 @@ pub(crate) async fn dispatch_prepared_post_for_api(
                     agent: agent.as_deref(),
                     agent_provider: agent_provider.as_deref(),
                     model: model.as_deref(),
-                    status: "running",
+                    status: "pending",
                     result: None,
                     feedback: None,
                     session_id: Some(&prepared.session_id),
                     provider_session_id: provider_session_id.as_deref(),
                     cwd: cwd.as_deref(),
-                    // The live process cannot change its immutable environment
-                    // when a post is injected. Record the main run that owns
-                    // this post so its CLI-shaped verdict remains authorized.
                     resumed_from_run_id: completion_owner_run_id.as_deref(),
                 },
                 Some(prepared.fallback.completion_transition.as_str()),
-                Some(&prepared.completion_attempt),
+                &prepared.completion_attempt,
+                &prepared.fallback.expected_source,
+                prepared
+                    .action_request_key
+                    .as_deref()
+                    .map(|idempotency_key| PendingTaskActionRequest {
+                        idempotency_key,
+                        success_status: 200,
+                        success_response_body: response_body
+                            .as_deref()
+                            .expect("action response was serialized"),
+                    }),
             )
             .map_err(|e| format!("db error: {}", e))?;
-            if let Some(key) = prepared.action_request_key.as_deref() {
-                let body = serde_json::to_string(&crate::mobile_api::TaskActionResponse {
-                    task_id: task_id.clone(),
-                    follow_task: None,
-                    revision_budget: None,
-                })
-                .map_err(|error| format!("failed to serialize task action response: {error}"))?;
-                db.finish_task_action_request(key, "succeeded", 200, &body)
-                    .map_err(|error| format!("db error: {error}"))?;
-            }
+        (run_id, source)
+    };
+    #[cfg(test)]
+    pause_live_post_after_reservation(prepared.action_request_key.as_deref()).await;
+
+    match try_submit_task_input(daemon, &prepared.session_id, &prepared.message).await {
+        Ok(()) => {
+            Db::open(db_path)
+                .and_then(|db| db.land_reserved_live_post(&task_id, &run_id))
+                .map_err(|e| format!("db error: {}", e))?;
             Ok(crate::mobile_api::TaskActionResponse {
                 task_id,
                 follow_task: None,
@@ -1150,9 +1654,15 @@ pub(crate) async fn dispatch_prepared_post_for_api(
             })
         }
         Err(TaskInputError::SessionNotFound) => {
+            Db::open(db_path)
+                .and_then(|db| db.rollback_reserved_live_post(&task_id, &run_id, source.as_ref()))
+                .map_err(|e| format!("db error: {}", e))?;
             spawn_prepared_stage_run_for_api(db_path, daemon, replacements, prepared.fallback).await
         }
-        Err(TaskInputError::Other(message)) => Err(message.into()),
+        Err(TaskInputError::Other(message)) => Err(format!(
+            "{message}; live post reservation {run_id} retained because delivery is indeterminate"
+        )
+        .into()),
     }
 }
 

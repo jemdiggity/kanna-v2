@@ -287,6 +287,221 @@ impl Db {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_live_post_action(
+        &self,
+        run: NewStageRun<'_>,
+        completion_transition: Option<&str>,
+        completion_attempt: &str,
+        expected: &TaskActionState,
+        action_request: Option<PendingTaskActionRequest<'_>>,
+    ) -> Result<Option<ReplacedStageRunSource>, rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let task = transaction.query_row(
+            "SELECT stage, branch
+             FROM pipeline_item
+             WHERE id = ?1 AND closed_at IS NULL",
+            [run.task_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        if task.0 != expected.stage || task.1 != expected.branch {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        let current = transaction
+            .query_row(
+                "SELECT id, status, result, feedback, finished_at, run_ownership_version
+                 FROM stage_run
+                 WHERE task_id = ?1
+                 ORDER BY datetime(started_at) DESC, rowid DESC
+                 LIMIT 1",
+                [run.task_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if current.as_ref().map(|current| current.0.as_str()) != expected.active_run_id.as_deref() {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        let source = current.as_ref().map(|current| ReplacedStageRunSource {
+            run_id: current.0.clone(),
+            status: current.1.clone(),
+            result: current.2.clone(),
+            feedback: current.3.clone(),
+            finished_at: current.4.clone(),
+        });
+        if current
+            .as_ref()
+            .is_some_and(|current| current.1 == "running")
+        {
+            let changed = transaction.execute(
+                "UPDATE stage_run
+                 SET status = 'succeeded', finished_at = datetime('now')
+                 WHERE id = ?1 AND task_id = ?2 AND status = 'running'",
+                (
+                    current.as_ref().map(|current| current.0.as_str()),
+                    run.task_id,
+                ),
+            )?;
+            if changed != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+        }
+        transaction.execute(
+            "INSERT INTO stage_run
+             (id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback,
+              session_id, provider_session_id, cwd, resumed_from_run_id, completion_transition,
+              completion_attempt, run_ownership_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?9, ?10, ?11, ?12, ?13,
+                     ?14, ?15, ?16)",
+            params![
+                run.id,
+                run.task_id,
+                run.stage,
+                run.kind,
+                run.agent,
+                run.agent_provider,
+                run.model,
+                run.result,
+                run.feedback,
+                run.session_id,
+                run.provider_session_id,
+                run.cwd,
+                run.resumed_from_run_id,
+                completion_transition,
+                completion_attempt,
+                current
+                    .as_ref()
+                    .map(|current| current.5)
+                    .unwrap_or(CURRENT_RUN_OWNERSHIP_VERSION),
+            ],
+        )?;
+        if let Some(request) = action_request {
+            let linked = transaction.execute(
+                "UPDATE task_action_request
+                 SET successor_run_id = ?2,
+                     phase = 'post_reserved',
+                     http_status = ?3,
+                     response_body = ?4,
+                     updated_at = datetime('now')
+                 WHERE idempotency_key = ?1
+                   AND task_id = ?5
+                   AND state = 'pending'
+                   AND successor_run_id IS NULL
+                   AND phase = 'preparing'",
+                params![
+                    request.idempotency_key,
+                    run.id,
+                    request.success_status,
+                    request.success_response_body,
+                    run.task_id,
+                ],
+            )?;
+            if linked != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+        }
+        transaction.commit()?;
+        Ok(source)
+    }
+
+    pub fn land_reserved_live_post(
+        &self,
+        task_id: &str,
+        run_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let changed = transaction.execute(
+            "UPDATE stage_run
+             SET status = 'running'
+             WHERE id = ?1
+               AND task_id = ?2
+               AND kind = 'post'
+               AND status = 'pending'
+               AND id = (
+                 SELECT id FROM stage_run
+                 WHERE task_id = ?2
+                 ORDER BY datetime(started_at) DESC, rowid DESC
+                 LIMIT 1
+               )",
+            (run_id, task_id),
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        transaction.execute(
+            "UPDATE task_action_request
+             SET state = 'succeeded', updated_at = datetime('now')
+             WHERE successor_run_id = ?1
+               AND state = 'pending'
+               AND phase = 'post_reserved'",
+            [run_id],
+        )?;
+        transaction.commit()
+    }
+
+    pub fn rollback_reserved_live_post(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        source: Option<&ReplacedStageRunSource>,
+    ) -> Result<(), rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let deleted = transaction.execute(
+            "DELETE FROM stage_run
+             WHERE id = ?1
+               AND task_id = ?2
+               AND kind = 'post'
+               AND status = 'pending'
+               AND id = (
+                 SELECT id FROM stage_run
+                 WHERE task_id = ?2
+                 ORDER BY datetime(started_at) DESC, rowid DESC
+                 LIMIT 1
+               )",
+            (run_id, task_id),
+        )?;
+        if deleted != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        if let Some(source) = source {
+            let restored = transaction.execute(
+                "UPDATE stage_run
+                 SET status = ?2, result = ?3, feedback = ?4, finished_at = ?5
+                 WHERE id = ?1 AND task_id = ?6",
+                (
+                    source.run_id.as_str(),
+                    source.status.as_str(),
+                    source.result.as_deref(),
+                    source.feedback.as_deref(),
+                    source.finished_at.as_deref(),
+                    task_id,
+                ),
+            )?;
+            if restored != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+        }
+        transaction.execute(
+            "UPDATE task_action_request
+             SET successor_run_id = NULL,
+                 phase = 'preparing',
+                 updated_at = datetime('now')
+             WHERE successor_run_id = ?1
+               AND state = 'pending'
+               AND phase = 'post_reserved'",
+            [run_id],
+        )?;
+        transaction.commit()
+    }
+
     /// Reserve a successor run only while the task still has the exact
     /// stage, branch, and latest-run ownership observed during preparation.
     /// Finishing the source run and inserting the pending successor share
@@ -511,6 +726,7 @@ impl Db {
                 let linked = transaction.execute(
                     "UPDATE task_action_request
                      SET successor_run_id = ?2,
+                         phase = 'successor_reserved',
                          http_status = ?3,
                          response_body = ?4,
                          updated_at = datetime('now')
@@ -578,6 +794,56 @@ impl Db {
             })
         })?;
         rows.collect()
+    }
+
+    pub fn pending_stage_action(
+        &self,
+        successor_run_id: &str,
+    ) -> Result<Option<PendingStageAction>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT successor_run_id, task_id, session_id, target_stage, target_branch,
+                        target_worktree_id, target_worktree_path, target_worktree_branch,
+                        remove_worktree_on_rollback,
+                        source_stage, source_branch, source_active_run_id, source_process_run_id,
+                        source_run_id, source_status, source_result, source_feedback,
+                        source_finished_at
+                 FROM pending_stage_action
+                 WHERE successor_run_id = ?1",
+                [successor_run_id],
+                |row| {
+                    let source_run_id = row.get::<_, Option<String>>(13)?;
+                    let source_status = row.get::<_, Option<String>>(14)?;
+                    Ok(PendingStageAction {
+                        successor_run_id: row.get(0)?,
+                        task_id: row.get(1)?,
+                        session_id: row.get(2)?,
+                        target_stage: row.get(3)?,
+                        target_branch: row.get(4)?,
+                        target_worktree_id: row.get(5)?,
+                        target_worktree_path: row.get(6)?,
+                        target_worktree_branch: row.get(7)?,
+                        remove_worktree_on_rollback: row.get(8)?,
+                        source: TaskActionState {
+                            stage: row.get(9)?,
+                            branch: row.get(10)?,
+                            active_run_id: row.get(11)?,
+                            process_run_id: row.get(12)?,
+                        },
+                        replaced_source: match (source_run_id, source_status) {
+                            (Some(run_id), Some(status)) => Some(ReplacedStageRunSource {
+                                run_id,
+                                status,
+                                result: row.get(15)?,
+                                feedback: row.get(16)?,
+                                finished_at: row.get(17)?,
+                            }),
+                            _ => None,
+                        },
+                    })
+                },
+            )
+            .optional()
     }
 
     pub fn rollback_pending_stage_action(

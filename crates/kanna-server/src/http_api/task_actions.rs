@@ -3,7 +3,7 @@ use super::task_blockers::{
     resolve_existing_task_id, start_dependents_unblocked_by_close_with_daemon,
 };
 use super::task_input::{notify_task_completion, submit_task_input};
-use crate::db::{Db, TaskActionRequestClaim, TaskActionRequestError};
+use crate::db::{Db, TaskActionExecutionClaim, TaskActionRequestClaim, TaskActionRequestError};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -44,6 +44,45 @@ async fn pause_task_action_after_durable_claim(key: &str) {
     if let Some(pause) = pause {
         pause.reached.add_permits(1);
         let _ = pause.release.acquire().await;
+    }
+}
+
+#[cfg(test)]
+struct RevisionPreparationPause {
+    reached: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+static REVISION_PREPARATION_PAUSES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, RevisionPreparationPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+pub(super) fn pause_next_revision_during_blocking_preparation(
+    key: &str,
+) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    REVISION_PREPARATION_PAUSES.lock().unwrap().insert(
+        key.to_string(),
+        RevisionPreparationPause {
+            reached: reached_tx,
+            release: release_rx,
+        },
+    );
+    (reached_rx, release_tx)
+}
+
+#[cfg(test)]
+fn pause_revision_during_blocking_preparation(key: Option<&str>) {
+    let Some(key) = key else {
+        return;
+    };
+    let pause = REVISION_PREPARATION_PAUSES.lock().unwrap().remove(key);
+    if let Some(pause) = pause {
+        let _ = pause.reached.send(());
+        let _ = pause.release.recv();
     }
 }
 
@@ -195,11 +234,6 @@ async fn claim_durable_task_action(
             key: None,
         });
     };
-    // Own the process-local task flight before creating or inspecting the
-    // durable claim. A same-process duplicate must never observe `pending`
-    // while the original is live and mistake that original for a crashed
-    // request that it is allowed to reconcile.
-    let flight = begin_task_action(state, task_id)?;
     let claim = {
         let state = Arc::clone(state);
         let key = key.clone();
@@ -219,53 +253,98 @@ async fn claim_durable_task_action(
         })
         .await?
     };
-    #[cfg(test)]
-    pause_task_action_after_durable_claim(&key).await;
-    match claim {
+    let was_claimed = matches!(&claim, TaskActionRequestClaim::Claimed);
+    let should_reconcile = match claim {
         TaskActionRequestClaim::Completed { status, body } => {
+            return Ok(DurableTaskActionClaim::Respond(
+                task_action_replay_response(status, body)?,
+            ));
+        }
+        TaskActionRequestClaim::Pending {
+            owner_id,
+            successor_run_id,
+            ..
+        } => {
+            if owner_id.as_deref() == Some(state.action_owner_id()) {
+                return Ok(DurableTaskActionClaim::Respond(
+                    task_action_pending_response(),
+                ));
+            }
+            successor_run_id.is_some()
+        }
+        TaskActionRequestClaim::Claimed => false,
+    };
+
+    let flight = match begin_task_action(state, task_id) {
+        Ok(flight) => flight,
+        Err(_) if !was_claimed => {
+            return Ok(DurableTaskActionClaim::Respond(
+                task_action_pending_response(),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    if should_reconcile {
+        let reconciled = {
+            let state = Arc::clone(state);
+            let key = key.clone();
+            super::blocking::run_handler_blocking("task action idempotency reconcile", move || {
+                let db = Db::open(&state.config.db_path)
+                    .map_err(|error| db_write_error("db error", error))?;
+                db.reconcile_task_action_request(&key)
+                    .map_err(|error| db_write_error("db error", error))
+            })
+            .await?
+        };
+        match reconciled {
+            TaskActionRequestClaim::Completed { status, body } => {
+                drop(flight);
+                return Ok(DurableTaskActionClaim::Respond(
+                    task_action_replay_response(status, body)?,
+                ));
+            }
+            TaskActionRequestClaim::Pending { .. } => {
+                drop(flight);
+                return Ok(DurableTaskActionClaim::Respond(
+                    task_action_pending_response(),
+                ));
+            }
+            TaskActionRequestClaim::Claimed => {}
+        }
+    }
+
+    let execution = {
+        let state = Arc::clone(state);
+        let key = key.clone();
+        super::blocking::run_handler_blocking("task action execution ownership", move || {
+            let db = Db::open(&state.config.db_path)
+                .map_err(|error| db_write_error("db error", error))?;
+            db.begin_task_action_request_execution(&key, state.action_owner_id())
+                .map_err(|error| db_write_error("db error", error))
+        })
+        .await?
+    };
+    match execution {
+        TaskActionExecutionClaim::Acquired => {
+            #[cfg(test)]
+            pause_task_action_after_durable_claim(&key).await;
+            Ok(DurableTaskActionClaim::Execute {
+                flight,
+                key: Some(key),
+            })
+        }
+        TaskActionExecutionClaim::Pending => {
+            drop(flight);
+            Ok(DurableTaskActionClaim::Respond(
+                task_action_pending_response(),
+            ))
+        }
+        TaskActionExecutionClaim::Completed { status, body } => {
             drop(flight);
             Ok(DurableTaskActionClaim::Respond(
                 task_action_replay_response(status, body)?,
             ))
         }
-        TaskActionRequestClaim::Pending => {
-            let reconciled = {
-                let state = Arc::clone(state);
-                let key = key.clone();
-                super::blocking::run_handler_blocking(
-                    "task action idempotency reconcile",
-                    move || {
-                        let db = Db::open(&state.config.db_path)
-                            .map_err(|error| db_write_error("db error", error))?;
-                        db.reconcile_task_action_request(&key)
-                            .map_err(|error| db_write_error("db error", error))
-                    },
-                )
-                .await?
-            };
-            match reconciled {
-                TaskActionRequestClaim::Completed { status, body } => {
-                    drop(flight);
-                    Ok(DurableTaskActionClaim::Respond(
-                        task_action_replay_response(status, body)?,
-                    ))
-                }
-                TaskActionRequestClaim::Pending => {
-                    drop(flight);
-                    Ok(DurableTaskActionClaim::Respond(
-                        task_action_pending_response(),
-                    ))
-                }
-                TaskActionRequestClaim::Claimed => Ok(DurableTaskActionClaim::Execute {
-                    flight,
-                    key: Some(key),
-                }),
-            }
-        }
-        TaskActionRequestClaim::Claimed => Ok(DurableTaskActionClaim::Execute {
-            flight,
-            key: Some(key),
-        }),
     }
 }
 
@@ -1701,11 +1780,18 @@ pub(super) async fn request_revision(
         DurableTaskActionClaim::Respond(response) => return Ok(response),
     };
 
-    let outcome_result = {
-        let state = Arc::clone(&state);
-        let source_task_id = source_task_id.clone();
-        let parked_action_key = idempotency_key.clone();
-        super::blocking::run_handler_blocking("revision prepare", move || {
+    // The blocking preparation below cannot be cancelled once dispatched.
+    // Give the complete owned action its own task before awaiting it so a
+    // dropped HTTP future cannot discard the prepared workspace, release the
+    // task flight, and expose the same durable request for concurrent replay.
+    let worker = tokio::spawn(async move {
+        let outcome_result = {
+            let state = Arc::clone(&state);
+            let source_task_id = source_task_id.clone();
+            let parked_action_key = idempotency_key.clone();
+            super::blocking::run_handler_blocking("revision prepare", move || {
+            #[cfg(test)]
+            pause_revision_during_blocking_preparation(parked_action_key.as_deref());
             let db = Db::open(&state.config.db_path).map_err(|e| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -1736,8 +1822,14 @@ pub(super) async fn request_revision(
             // both be admitted on the last free slot. `None` means the budget
             // is spent. A human request claims nothing — it is never refused.
             let claimed_round = if origin.is_agent() {
-                let claimed = db
-                    .try_claim_agent_revision_round(&source_task_id, budget.limit)
+                let claimed = match parked_action_key.as_deref() {
+                    Some(key) => db.claim_agent_revision_round_for_task_action(
+                        key,
+                        &source_task_id,
+                        budget.limit,
+                    ),
+                    None => db.try_claim_agent_revision_round(&source_task_id, budget.limit),
+                }
                     .map_err(|e| {
                         (
                             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -1799,9 +1891,14 @@ pub(super) async fn request_revision(
                     // and the spend could not be split; preparation failing
                     // means no agent ran, so hand the round back.
                     if claimed_round.is_some() {
-                        if let Err(release_error) =
-                            db.release_agent_revision_round(&source_task_id)
-                        {
+                        let released = match parked_action_key.as_deref() {
+                            Some(key) => db.release_agent_revision_round_for_task_action(
+                                key,
+                                &source_task_id,
+                            ),
+                            None => db.release_agent_revision_round(&source_task_id),
+                        };
+                        if let Err(release_error) = released {
                             log::error!(
                                 "failed to release revision round for task {source_task_id}: {release_error}"
                             );
@@ -1835,89 +1932,96 @@ pub(super) async fn request_revision(
             })
         })
         .await
-    };
-    let outcome = match outcome_result {
-        Ok(outcome) => outcome,
-        Err((status, message)) => {
-            if let Some(key) = idempotency_key.as_deref() {
-                finish_idempotent_task_action(&state, key, "failed", status, &message).await?;
+        };
+        let outcome = match outcome_result {
+            Ok(outcome) => outcome,
+            Err((status, message)) => {
+                if let Some(key) = idempotency_key.as_deref() {
+                    finish_idempotent_task_action(&state, key, "failed", status, &message).await?;
+                }
+                drop(revision_in_flight);
+                return Err((status, message));
             }
-            drop(revision_in_flight);
-            return Err((status, message));
-        }
-    };
+        };
 
-    match outcome {
-        RevisionOutcome::Parked { response } => {
-            state.publish_state_changed(StateChangeScope::Tasks);
-            drop(revision_in_flight);
-            Ok(Json(response).into_response())
-        }
-        RevisionOutcome::Started {
-            source_task_id,
-            mut prepared,
-            budget,
-        } => {
-            let message = if budget.limit > 0 && origin.is_agent() {
-                format!(
-                    "Revision round {rounds} of {limit} started.",
-                    rounds = budget.rounds,
-                    limit = budget.limit,
-                )
-            } else if budget.limit > 0 {
-                format!(
+        match outcome {
+            RevisionOutcome::Parked { response } => {
+                state.publish_state_changed(StateChangeScope::Tasks);
+                drop(revision_in_flight);
+                Ok(Json(response).into_response())
+            }
+            RevisionOutcome::Started {
+                source_task_id,
+                mut prepared,
+                budget,
+            } => {
+                let message = if budget.limit > 0 && origin.is_agent() {
+                    format!(
+                        "Revision round {rounds} of {limit} started.",
+                        rounds = budget.rounds,
+                        limit = budget.limit,
+                    )
+                } else if budget.limit > 0 {
+                    format!(
                     "Revision started; the automatic revision budget was reset to 0 of {limit} \
                      round(s).",
                     limit = budget.limit,
                 )
-            } else {
-                "Revision started; this pipeline sets no revision-round limit.".to_string()
-            };
-            let response = crate::mobile_api::TaskActionResponse {
-                task_id: source_task_id.clone(),
-                follow_task: None,
-                revision_budget: Some(crate::mobile_api::RevisionBudgetStatus {
-                    rounds: budget.rounds,
-                    limit: budget.limit,
-                    exhausted: false,
-                    message,
-                }),
-            };
-            if let Some(key) = idempotency_key.as_ref() {
-                let body = serde_json::to_string(&response).map_err(|error| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("failed to serialize revision response: {error}"),
-                    )
-                })?;
-                prepared.set_action_request(key.clone(), body);
-            }
-            let execution = execute_stage_transition_awaited(
-                Arc::clone(&state),
-                source_task_id.clone(),
-                crate::task_creator::PreparedStageTransition::Run(prepared),
-                revision_in_flight,
-            )
-            .await;
-            if let Err(error) = execution {
-                if let Some(key) = idempotency_key.as_deref() {
-                    if !error.indeterminate_spawn {
-                        finish_idempotent_task_action(
-                            &state,
-                            key,
-                            "failed",
-                            error.status,
-                            &error.message,
+                } else {
+                    "Revision started; this pipeline sets no revision-round limit.".to_string()
+                };
+                let response = crate::mobile_api::TaskActionResponse {
+                    task_id: source_task_id.clone(),
+                    follow_task: None,
+                    revision_budget: Some(crate::mobile_api::RevisionBudgetStatus {
+                        rounds: budget.rounds,
+                        limit: budget.limit,
+                        exhausted: false,
+                        message,
+                    }),
+                };
+                if let Some(key) = idempotency_key.as_ref() {
+                    let body = serde_json::to_string(&response).map_err(|error| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("failed to serialize revision response: {error}"),
                         )
-                        .await?;
-                    }
+                    })?;
+                    prepared.set_action_request(key.clone(), body);
                 }
-                return Err((error.status, error.message));
+                let execution = execute_stage_transition_awaited(
+                    Arc::clone(&state),
+                    source_task_id.clone(),
+                    crate::task_creator::PreparedStageTransition::Run(prepared),
+                    revision_in_flight,
+                )
+                .await;
+                if let Err(error) = execution {
+                    if let Some(key) = idempotency_key.as_deref() {
+                        if !error.indeterminate_spawn {
+                            finish_idempotent_task_action(
+                                &state,
+                                key,
+                                "failed",
+                                error.status,
+                                &error.message,
+                            )
+                            .await?;
+                        }
+                    }
+                    return Err((error.status, error.message));
+                }
+                state.publish_state_changed(StateChangeScope::Tasks);
+                Ok(Json(response).into_response())
             }
-            state.publish_state_changed(StateChangeScope::Tasks);
-            Ok(Json(response).into_response())
         }
-    }
+    });
+    worker.await.map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("revision action worker failed: {error}"),
+        )
+    })?
 }
 
 /// Either a revision run to dispatch, or a parked task whose revision budget

@@ -114,6 +114,10 @@ CREATE TABLE IF NOT EXISTS task_action_request (
     request_json TEXT NOT NULL,
     successor_run_id TEXT UNIQUE REFERENCES stage_run(id) ON DELETE SET NULL,
     state TEXT NOT NULL CHECK (state IN ('pending', 'succeeded', 'failed')),
+    phase TEXT NOT NULL DEFAULT 'claimed'
+        CHECK (phase IN ('claimed', 'preparing', 'successor_reserved', 'post_reserved')),
+    owner_id TEXT,
+    revision_round INTEGER,
     http_status INTEGER,
     response_body TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),

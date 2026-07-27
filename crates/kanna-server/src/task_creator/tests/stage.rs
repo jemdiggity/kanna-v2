@@ -1306,8 +1306,14 @@ async fn accepted_spawn_with_stalled_reconciliation_list_keeps_reservation_durab
     .await;
 }
 
-async fn assert_late_spawn_probe_reconciles_without_restart(test_name: &str, accepted: bool) {
+async fn assert_late_spawn_probe_reconciles_without_restart(
+    test_name: &str,
+    accepted: bool,
+    exit_before_land: bool,
+) {
     let config = test_config(test_name);
+    let state = std::sync::Arc::new(crate::http_api::AppState::new(config.clone()));
+    let mut state_changes = state.subscribe_state_changes();
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo("repo-1", "Repo One").unwrap();
     db.insert_test_pipeline_item(
@@ -1385,9 +1391,12 @@ async fn assert_late_spawn_probe_reconciles_without_restart(test_name: &str, acc
         action_success_body: Some(r#"{"taskId":"task-1"}"#.to_string()),
     };
 
-    let fake_daemon =
-        spawn_fake_daemon_resolves_spawn_after_initial_probes(config.daemon_dir.clone(), accepted)
-            .await;
+    let fake_daemon = spawn_fake_daemon_resolves_spawn_after_initial_probes(
+        config.daemon_dir.clone(),
+        accepted,
+        exit_before_land,
+    )
+    .await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
     daemon.set_command_timeout_for_test(std::time::Duration::from_millis(50));
     let error = spawn_prepared_stage_run_for_api(
@@ -1411,6 +1420,15 @@ async fn assert_late_spawn_probe_reconciles_without_restart(test_name: &str, acc
     .await
     .expect("same-process reconciliation did not resolve the reservation");
     fake_daemon.await.unwrap();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), state_changes.recv())
+            .await
+            .expect("late reconciliation did not refresh observers")
+            .expect("state-change publisher closed"),
+        kanna_agent_protocol::ServerFrame::StateChanged {
+            scope: kanna_agent_protocol::StateChangeScope::Tasks,
+        }
+    ));
 
     let latest = db.latest_stage_run("task-1").unwrap().unwrap();
     let replay = db
@@ -1421,7 +1439,7 @@ async fn assert_late_spawn_probe_reconciles_without_restart(test_name: &str, acc
             action_request,
         )
         .unwrap();
-    if accepted {
+    if accepted && !exit_before_land {
         assert_eq!(latest.stage, "review");
         assert_eq!(latest.status, "running");
         assert_eq!(
@@ -1443,12 +1461,17 @@ async fn assert_late_spawn_probe_reconciles_without_restart(test_name: &str, acc
 
 #[tokio::test]
 async fn accepted_spawn_is_landed_by_a_late_probe_without_server_restart() {
-    assert_late_spawn_probe_reconciles_without_restart("late-probe-accepted", true).await;
+    assert_late_spawn_probe_reconciles_without_restart("late-probe-accepted", true, false).await;
 }
 
 #[tokio::test]
 async fn rejected_spawn_is_rolled_back_by_a_late_probe_without_server_restart() {
-    assert_late_spawn_probe_reconciles_without_restart("late-probe-rejected", false).await;
+    assert_late_spawn_probe_reconciles_without_restart("late-probe-rejected", false, false).await;
+}
+
+#[tokio::test]
+async fn exit_between_late_list_and_land_rolls_back_without_server_restart() {
+    assert_late_spawn_probe_reconciles_without_restart("late-probe-exit-fence", true, true).await;
 }
 
 async fn assert_ambiguous_accepted_rerun_spawn_preserves_reservation(
@@ -3486,6 +3509,121 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
     assert_eq!(runs[1].agent.as_deref(), Some("implement"));
     assert_eq!(runs[1].model.as_deref(), Some("sonnet"));
     assert_eq!(runs[1].session_id.as_deref(), Some("task-1"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn cancelled_live_post_after_reservation_stays_pending_without_reinjection() {
+    let repo_root = init_git_repo("live-post-reservation");
+    write_post_pipeline_fixtures(&repo_root);
+
+    let config = test_config("live-post-reservation");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_pipeline_task(&config, &db, &repo_root);
+    db.insert_stage_run(NewStageRun {
+        id: "run-main",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("claude"),
+        model: Some("sonnet"),
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some(repo_root.to_string_lossy().as_ref()),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    assert_eq!(
+        db.claim_task_action_request("live-post-key", "task-1", "advance-stage", "{}",)
+            .unwrap(),
+        crate::db::TaskActionRequestClaim::Claimed,
+    );
+    db.begin_task_action_request_execution("live-post-key", "server-live-post")
+        .unwrap();
+
+    let mut post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Post(post) => post,
+        _ => panic!("expected post dispatch"),
+    };
+    post.action_request_key = Some("live-post-key".to_string());
+    let completion_attempt = post.completion_attempt.clone();
+    let (reserved, _release) =
+        crate::task_creator::pause_next_live_post_after_reservation("live-post-key");
+    let fake_daemon = spawn_fake_daemon_input_ok(config.daemon_dir.clone(), 2).await;
+    let db_path = config.db_path.clone();
+    let daemon_dir = config.daemon_dir.clone();
+    let dispatch = tokio::spawn(async move {
+        let mut daemon = DaemonClient::connect(&daemon_dir).await.unwrap();
+        crate::task_creator::dispatch_prepared_post_for_api(
+            &db_path,
+            &mut daemon,
+            &crate::session_replacements::SessionReplacements::default(),
+            *post,
+        )
+        .await
+    });
+    reserved
+        .acquire()
+        .await
+        .expect("post reservation pause disappeared")
+        .forget();
+
+    let latest = db.latest_stage_run("task-1").unwrap().unwrap();
+    assert_eq!(latest.kind, "post");
+    assert_eq!(latest.status, "pending");
+    let (phase, successor): (String, Option<String>) = db
+        .connection_for_e2e_tests()
+        .query_row(
+            "SELECT phase, successor_run_id
+             FROM task_action_request
+             WHERE idempotency_key = 'live-post-key'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(phase, "post_reserved");
+    assert_eq!(successor.as_deref(), Some(latest.id.as_str()));
+    assert!(
+        db.finish_active_stage_run_with_completion_attempt(
+            "task-1",
+            Some("run-main"),
+            Some(&completion_attempt),
+            "succeeded",
+            Some(r#"{"status":"success"}"#),
+            Some("must not advance yet"),
+        )
+        .is_err(),
+        "a reserved but undelivered post must not accept completion"
+    );
+
+    // Dropping the dispatch future after insertion must not make the durable
+    // key executable again: delivery is unknown, so replay remains pending
+    // and cannot inject the post a second time.
+    dispatch.abort();
+    assert!(dispatch.await.unwrap_err().is_cancelled());
+    fake_daemon.abort();
+    assert!(matches!(
+        db.reconcile_task_action_request("live-post-key").unwrap(),
+        crate::db::TaskActionRequestClaim::Pending {
+            phase,
+            successor_run_id: Some(successor),
+            ..
+        } if phase == "post_reserved" && successor == latest.id
+    ));
+    assert!(matches!(
+        db.claim_task_action_request("live-post-key", "task-1", "advance-stage", "{}")
+            .unwrap(),
+        crate::db::TaskActionRequestClaim::Pending {
+            phase,
+            successor_run_id: Some(successor),
+            ..
+        } if phase == "post_reserved" && successor == latest.id
+    ));
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

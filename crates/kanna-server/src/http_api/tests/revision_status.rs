@@ -1589,6 +1589,11 @@ async fn exhausted_revision_replay_recovers_after_atomic_park_response_failure()
         .unwrap();
     drop(db);
 
+    // A pending row owned by the live AppState is intentionally not
+    // recoverable. Simulate the crash/restart that made the first owner stale
+    // before replaying the request.
+    drop(app);
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
     let replay = app
         .oneshot(
             Request::post("/v1/tasks/budget-1/actions/request-revision")
@@ -2156,6 +2161,110 @@ async fn concurrent_agent_revision_requests_cannot_spend_past_the_budget() {
     cleanup_revision_budget_fixture(&fixture);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropped_http_future_does_not_abandon_blocking_revision_preparation() {
+    let fixture = setup_revision_budget_fixture("dropped-http", 1);
+    {
+        let db = Db::open(&fixture.config.db_path).unwrap();
+        db.release_agent_revision_round("budget-1").unwrap();
+        assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 0);
+    }
+    let daemon = spawn_fixture_daemon(fixture.socket_path.clone(), None, None);
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let body = serde_json::json!({
+        "targetStage": "in progress",
+        "summary": "QA failed: review-ui",
+        "prompt": "Fix the finding."
+    })
+    .to_string();
+    let request = |request_body: &str| {
+        Request::post("/v1/tasks/budget-1/actions/request-revision")
+            .header("content-type", "application/json")
+            .header("idempotency-key", "dropped-http-revision")
+            .body(Body::from(request_body.to_string()))
+            .unwrap()
+    };
+    let (preparation_reached, release_preparation) =
+        crate::http_api::task_actions::pause_next_revision_during_blocking_preparation(
+            "dropped-http-revision",
+        );
+
+    let original_app = app.clone();
+    let original_body = body.clone();
+    let original = tokio::spawn(async move { original_app.oneshot(request(&original_body)).await });
+    tokio::task::spawn_blocking(move || {
+        preparation_reached
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("revision never entered blocking preparation");
+    })
+    .await
+    .unwrap();
+
+    // Simulate the client disconnecting while the non-cancellable blocking
+    // preparation owns the request. The child worker must retain both durable
+    // ownership and the per-task flight.
+    original.abort();
+    assert!(original.await.unwrap_err().is_cancelled());
+    let retry = app.clone().oneshot(request(&body)).await.unwrap();
+    assert_eq!(retry.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        retry
+            .headers()
+            .get("idempotency-status")
+            .and_then(|value| value.to_str().ok()),
+        Some("pending")
+    );
+    assert_eq!(
+        Db::open(&fixture.config.db_path)
+            .unwrap()
+            .task_revision_rounds("budget-1")
+            .unwrap(),
+        0,
+        "the paused preparation has not spent a round yet"
+    );
+
+    release_preparation.send(()).unwrap();
+
+    let mut replay_status = StatusCode::CONFLICT;
+    for _ in 0..500 {
+        let replay = app.clone().oneshot(request(&body)).await.unwrap();
+        replay_status = replay.status();
+        if replay_status == StatusCode::OK {
+            break;
+        }
+        assert_eq!(
+            replay
+                .headers()
+                .get("idempotency-status")
+                .and_then(|value| value.to_str().ok()),
+            Some("pending")
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        replay_status,
+        StatusCode::OK,
+        "the owned worker must finish and publish a replayable response"
+    );
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 1);
+    let revision_runs = db
+        .list_stage_runs_for_task("budget-1")
+        .unwrap()
+        .into_iter()
+        .filter(|run| run.stage == "in progress" && run.kind == "main")
+        .count();
+    assert_eq!(
+        revision_runs, 1,
+        "the dropped request must land exactly once"
+    );
+
+    daemon.abort();
+    drop(db);
+    cleanup_revision_budget_fixture(&fixture);
+}
+
 /// A human request is never refused by the budget, but it must not race an
 /// agent's claim either: the two would otherwise both start a revision on one
 /// task, and the human's reset would collide with the agent's increment.
@@ -2170,8 +2279,8 @@ async fn concurrent_human_and_agent_revision_requests_are_serialized() {
     }
 
     let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
-    let build = |origin: &str| {
-        Request::post("/v1/tasks/budget-1/actions/request-revision")
+    let build = |origin: &str, idempotency_key: Option<&str>| {
+        let mut request = Request::post("/v1/tasks/budget-1/actions/request-revision")
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::json!({
@@ -2182,12 +2291,34 @@ async fn concurrent_human_and_agent_revision_requests_are_serialized() {
                 })
                 .to_string(),
             ))
-            .unwrap()
+            .unwrap();
+        if let Some(key) = idempotency_key {
+            request
+                .headers_mut()
+                .insert("idempotency-key", key.parse().unwrap());
+        }
+        request
     };
-    let (agent, human) = tokio::join!(
-        app.clone().oneshot(build("agent")),
-        app.clone().oneshot(build("human"))
-    );
+    let (preparation_reached, release_preparation) =
+        crate::http_api::task_actions::pause_next_revision_during_blocking_preparation(
+            "serialized-agent-revision",
+        );
+    let agent_app = app.clone();
+    let agent = tokio::spawn(async move {
+        agent_app
+            .oneshot(build("agent", Some("serialized-agent-revision")))
+            .await
+    });
+    tokio::task::spawn_blocking(move || {
+        preparation_reached
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("agent revision never entered blocking preparation");
+    })
+    .await
+    .unwrap();
+    let human = app.clone().oneshot(build("human", None)).await;
+    release_preparation.send(()).unwrap();
+    let agent = agent.await.unwrap();
 
     let mut outcomes = Vec::new();
     for response in [agent.unwrap(), human.unwrap()] {
@@ -2287,21 +2418,15 @@ async fn a_second_revision_is_refused_until_the_detached_transition_lands() {
             .unwrap()
     };
 
-    let first = app.clone().oneshot(request()).await.unwrap();
-    assert_eq!(first.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(first.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let started: TaskActionResponse = from_slice(&body).unwrap();
-    let budget = started.revision_budget.expect("revision budget reported");
-    assert!(!budget.exhausted);
-    assert_eq!(budget.rounds, 1);
+    let first_app = app.clone();
+    let first = tokio::spawn(async move { first_app.oneshot(request()).await.unwrap() });
 
-    // The response has landed; the transition is now mid-flight, blocked on
-    // the daemon. This is the window under test.
+    // Preparation has finished and the owned action is mid-transition,
+    // blocked on the daemon. The HTTP waiter may still be awaiting that owned
+    // worker; either way, the durable owner and task flight must remain held.
     tokio::time::timeout(std::time::Duration::from_secs(10), first_command_rx)
         .await
-        .expect("the detached transition never reached the daemon")
+        .expect("the transition never reached the daemon")
         .expect("daemon gate dropped");
 
     let second = app.clone().oneshot(request()).await.unwrap();
@@ -2335,6 +2460,15 @@ async fn a_second_revision_is_refused_until_the_detached_transition_lands() {
     }
 
     let _ = release_tx.send(());
+    let first = first.await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(first.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let started: TaskActionResponse = from_slice(&body).unwrap();
+    let budget = started.revision_budget.expect("revision budget reported");
+    assert!(!budget.exhausted);
+    assert_eq!(budget.rounds, 1);
 
     let db = Db::open(&fixture.config.db_path).unwrap();
     wait_for_revision_run(&db, "budget-1", "in progress").await;

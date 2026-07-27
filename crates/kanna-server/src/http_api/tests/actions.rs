@@ -3625,6 +3625,14 @@ async fn concurrent_same_key_replay_cannot_reconcile_the_live_original_claim() {
         .unwrap();
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
     assert_eq!(
+        duplicate
+            .headers()
+            .get("idempotency-status")
+            .and_then(|value| value.to_str().ok()),
+        Some("pending"),
+        "a live same-key retry must expose durable pending state, not a generic task-flight conflict"
+    );
+    assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
         "the replay must not execute while the original owns the flight"
@@ -3633,6 +3641,89 @@ async fn concurrent_same_key_replay_cannot_reconcile_the_live_original_claim() {
     release_claim.add_permits(1);
     assert_eq!(original.await.unwrap().status(), StatusCode::OK);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_key_replays_while_an_unrelated_action_owns_the_task_flight() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_handler = Arc::clone(&calls);
+    let app = super::test_router_with_stage_advancer(
+        "desktop-completed-replay-flight",
+        "Studio Mac",
+        Arc::new(move |task_id| {
+            calls_for_handler.fetch_add(1, Ordering::SeqCst);
+            Ok(TaskActionResponse {
+                task_id,
+                follow_task: None,
+                revision_budget: None,
+            })
+        }),
+    );
+
+    let completed = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/advance-stage")
+                .header("idempotency-key", "completed-before-unrelated-flight")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(completed.status(), StatusCode::OK);
+    let completed_body = axum::body::to_bytes(completed.into_body(), usize::MAX)
+        .await
+        .unwrap();
+
+    let (claim_reached, release_claim) =
+        crate::http_api::task_actions::pause_next_task_action_after_durable_claim(
+            "unrelated-live-key",
+        );
+    let unrelated_app = app.clone();
+    let unrelated = tokio::spawn(async move {
+        unrelated_app
+            .oneshot(
+                Request::post("/v1/tasks/task-1/actions/advance-stage")
+                    .header("idempotency-key", "unrelated-live-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    });
+    claim_reached
+        .acquire()
+        .await
+        .expect("unrelated claim pause disappeared")
+        .forget();
+
+    let replay = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/advance-stage")
+                .header("idempotency-key", "completed-before-unrelated-flight")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(replay.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+        completed_body,
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "completed replay must not execute while an unrelated request owns the flight"
+    );
+
+    release_claim.add_permits(1);
+    assert_eq!(unrelated.await.unwrap().status(), StatusCode::OK);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

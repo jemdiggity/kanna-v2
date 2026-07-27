@@ -30,9 +30,14 @@ describe("database package migrations", () => {
 
       expect(
         db.prepare(
-          "SELECT successor_run_id FROM task_action_request WHERE idempotency_key = ?",
+          "SELECT successor_run_id, phase, owner_id, revision_round FROM task_action_request WHERE idempotency_key = ?",
         ).get("request-1"),
-      ).toEqual({ successor_run_id: "run-1" });
+      ).toEqual({
+        successor_run_id: "run-1",
+        phase: "claimed",
+        owner_id: null,
+        revision_round: null,
+      });
       expect(db.prepare("SELECT sort_order FROM repo WHERE id = ?").get("repo-1")).toEqual({
         sort_order: 0,
       });

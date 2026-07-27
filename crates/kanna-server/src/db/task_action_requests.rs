@@ -7,6 +7,20 @@ const MAX_COMPLETED_TASK_ACTION_REQUESTS: i64 = 128;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskActionRequestClaim {
     Claimed,
+    Pending {
+        phase: String,
+        owner_id: Option<String>,
+        successor_run_id: Option<String>,
+    },
+    Completed {
+        status: u16,
+        body: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TaskActionExecutionClaim {
+    Acquired,
     Pending,
     Completed { status: u16, body: String },
 }
@@ -75,7 +89,8 @@ impl Db {
             (key, task_id, action, request_json),
         )? > 0;
         let stored = transaction.query_row(
-            "SELECT task_id, action, request_json, state, http_status, response_body
+            "SELECT task_id, action, request_json, state, phase, owner_id,
+                    successor_run_id, http_status, response_body
              FROM task_action_request
              WHERE idempotency_key = ?1",
             [key],
@@ -85,8 +100,11 @@ impl Db {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, Option<u16>>(4)?,
+                    row.get::<_, String>(4)?,
                     row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<u16>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             },
         )?;
@@ -99,8 +117,12 @@ impl Db {
             return Ok(TaskActionRequestClaim::Claimed);
         }
         match stored.3.as_str() {
-            "pending" => Ok(TaskActionRequestClaim::Pending),
-            "succeeded" | "failed" => match (stored.4, stored.5) {
+            "pending" => Ok(TaskActionRequestClaim::Pending {
+                phase: stored.4,
+                owner_id: stored.5,
+                successor_run_id: stored.6,
+            }),
+            "succeeded" | "failed" => match (stored.7, stored.8) {
                 (Some(status), Some(body)) => {
                     Ok(TaskActionRequestClaim::Completed { status, body })
                 }
@@ -112,6 +134,163 @@ impl Db {
                 rusqlite::Error::InvalidQuery,
             )),
         }
+    }
+
+    /// Persist ownership before an HTTP action starts non-cancellable
+    /// preparation. One AppState uses one owner id, so same-process retries
+    /// remain pending; a restarted server may take over only while no durable
+    /// successor has been linked.
+    pub fn begin_task_action_request_execution(
+        &self,
+        key: &str,
+        owner_id: &str,
+    ) -> Result<TaskActionExecutionClaim, rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let request = transaction
+            .query_row(
+                "SELECT state, phase, owner_id, successor_run_id, http_status, response_body
+                 FROM task_action_request
+                 WHERE idempotency_key = ?1",
+                [key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<u16>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if request.0 != "pending" {
+            transaction.commit()?;
+            return match (request.4, request.5) {
+                (Some(status), Some(body)) => {
+                    Ok(TaskActionExecutionClaim::Completed { status, body })
+                }
+                _ => Err(rusqlite::Error::InvalidQuery),
+            };
+        }
+        if request.3.is_some()
+            || matches!(request.1.as_str(), "successor_reserved" | "post_reserved")
+            || request.2.as_deref() == Some(owner_id)
+        {
+            transaction.commit()?;
+            return Ok(TaskActionExecutionClaim::Pending);
+        }
+        let changed = transaction.execute(
+            "UPDATE task_action_request
+             SET phase = 'preparing',
+                 owner_id = ?2,
+                 updated_at = datetime('now')
+             WHERE idempotency_key = ?1
+               AND state = 'pending'
+               AND successor_run_id IS NULL
+               AND phase IN ('claimed', 'preparing')
+               AND (owner_id IS NULL OR owner_id != ?2)",
+            (key, owner_id),
+        )?;
+        transaction.commit()?;
+        if changed == 1 {
+            Ok(TaskActionExecutionClaim::Acquired)
+        } else {
+            Ok(TaskActionExecutionClaim::Pending)
+        }
+    }
+
+    /// Spend one agent revision round and record that exact charge on the
+    /// durable request in the same immediate transaction. A restarted owner
+    /// reuses the recorded round instead of incrementing the task again.
+    pub fn claim_agent_revision_round_for_task_action(
+        &self,
+        key: &str,
+        task_id: &str,
+        limit: i64,
+    ) -> Result<Option<i64>, rusqlite::Error> {
+        self.with_immediate_transaction(|db| {
+            let (request_task_id, state, recorded_round) = db.conn.query_row(
+                "SELECT task_id, state, revision_round
+                 FROM task_action_request
+                 WHERE idempotency_key = ?1",
+                [key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )?;
+            if request_task_id != task_id || state != "pending" {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            if let Some(round) = recorded_round {
+                return Ok(Some(round));
+            }
+            let rounds = db.task_revision_rounds(task_id)?;
+            if limit > 0 && rounds >= limit {
+                return Ok(None);
+            }
+            let next_round = rounds + 1;
+            let task_changed = db.conn.execute(
+                "UPDATE pipeline_item
+                 SET revision_rounds = ?2, updated_at = datetime('now')
+                 WHERE id = ?1 AND closed_at IS NULL",
+                (task_id, next_round),
+            )?;
+            let request_changed = db.conn.execute(
+                "UPDATE task_action_request
+                 SET revision_round = ?2, updated_at = datetime('now')
+                 WHERE idempotency_key = ?1
+                   AND task_id = ?3
+                   AND state = 'pending'
+                   AND revision_round IS NULL",
+                (key, next_round, task_id),
+            )?;
+            if task_changed != 1 || request_changed != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            Ok(Some(next_round))
+        })
+    }
+
+    pub fn release_agent_revision_round_for_task_action(
+        &self,
+        key: &str,
+        task_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.with_immediate_transaction(|db| {
+            let recorded_round = db.conn.query_row(
+                "SELECT revision_round
+                 FROM task_action_request
+                 WHERE idempotency_key = ?1 AND task_id = ?2 AND state = 'pending'",
+                (key, task_id),
+                |row| row.get::<_, Option<i64>>(0),
+            )?;
+            if recorded_round.is_none() {
+                return Ok(());
+            }
+            db.conn.execute(
+                "UPDATE pipeline_item
+                 SET revision_rounds = MAX(revision_rounds - 1, 0),
+                     updated_at = datetime('now')
+                 WHERE id = ?1",
+                [task_id],
+            )?;
+            let changed = db.conn.execute(
+                "UPDATE task_action_request
+                 SET revision_round = NULL, updated_at = datetime('now')
+                 WHERE idempotency_key = ?1 AND task_id = ?2 AND state = 'pending'",
+                (key, task_id),
+            )?;
+            if changed != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            Ok(())
+        })
     }
 
     pub fn finish_task_action_request(
@@ -203,7 +382,7 @@ impl Db {
         let transaction = self.conn.unchecked_transaction()?;
         let request = transaction
             .query_row(
-                "SELECT state, http_status, response_body, successor_run_id
+                "SELECT state, http_status, response_body, successor_run_id, phase, owner_id
                  FROM task_action_request
                  WHERE idempotency_key = ?1",
                 [key],
@@ -213,6 +392,8 @@ impl Db {
                         row.get::<_, Option<u16>>(1)?,
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
                     ))
                 },
             )
@@ -255,6 +436,14 @@ impl Db {
                 Ok(TaskActionRequestClaim::Completed { status, body })
             }
             Some("pending") => {
+                if request.4 == "post_reserved" {
+                    transaction.commit()?;
+                    return Ok(TaskActionRequestClaim::Pending {
+                        phase: request.4,
+                        owner_id: request.5,
+                        successor_run_id: Some(successor_run_id),
+                    });
+                }
                 let reservation_exists = transaction.query_row(
                     "SELECT EXISTS(
                        SELECT 1 FROM pending_stage_action WHERE successor_run_id = ?1
@@ -264,7 +453,11 @@ impl Db {
                 )?;
                 transaction.commit()?;
                 if reservation_exists {
-                    Ok(TaskActionRequestClaim::Pending)
+                    Ok(TaskActionRequestClaim::Pending {
+                        phase: request.4,
+                        owner_id: request.5,
+                        successor_run_id: Some(successor_run_id),
+                    })
                 } else {
                     Err(rusqlite::Error::InvalidQuery)
                 }
