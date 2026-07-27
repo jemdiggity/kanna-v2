@@ -288,7 +288,8 @@ impl RecoveryManager {
     }
 
     pub fn snapshot_file_for_test(&self, session_id: &str) -> PathBuf {
-        self.snapshot_file(session_id)
+        self.snapshot_path(session_id)
+            .expect("tests must use a safe session id")
     }
 
     pub fn has_persisted_snapshot(&self, session_id: &str) -> bool {

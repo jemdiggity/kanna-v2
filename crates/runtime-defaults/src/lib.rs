@@ -1,3 +1,5 @@
+pub mod session_id;
+
 use std::path::{Path, PathBuf};
 
 pub const DESKTOP_BUNDLE_IDENTIFIER: &str = "build.kanna";

@@ -2999,6 +2999,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "ghostty-xterm-compat-serialize",
+ "kanna-runtime-defaults",
  "libghostty-vt",
  "serde",
  "serde_json",
