@@ -215,6 +215,64 @@ async fn peer_artifact_root_cleanup_is_isolated_for_dot_and_its_encoded_name() {
     );
 }
 
+#[tokio::test]
+async fn legacy_peer_artifact_root_is_reconciled_without_touching_another_peer() {
+    let temp = tempfile::tempdir().expect("temp registry");
+    let legacy_root = temp.path().join("artifacts").join("peer-upgrade");
+    let managed_root = utils::managed_artifact_root(temp.path(), "peer-upgrade");
+    let other_root = utils::managed_artifact_root(temp.path(), "peer-other");
+    assert_ne!(legacy_root, managed_root);
+    assert_ne!(legacy_root, other_root);
+
+    std::fs::create_dir_all(&legacy_root).expect("create legacy artifact root");
+    let startup_orphan = legacy_root.join("legacy-transfer").join("orphan.bundle");
+    std::fs::create_dir_all(startup_orphan.parent().expect("legacy transfer parent"))
+        .expect("create legacy transfer");
+    std::fs::write(&startup_orphan, b"legacy").expect("write legacy orphan");
+
+    let other_runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-other",
+        "Other Peer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .expect("spawn other peer");
+    std::fs::create_dir_all(&other_root).expect("create other peer artifact root");
+    let other_sentinel = other_root.join("owned-by-other");
+    std::fs::write(&other_sentinel, b"other").expect("write other peer artifact");
+
+    let upgraded_runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-upgrade",
+        "Upgraded Peer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .expect("spawn upgraded peer");
+    assert!(
+        !legacy_root.exists(),
+        "startup reconciliation retained the pre-upgrade raw artifact root",
+    );
+    assert!(
+        other_sentinel.exists(),
+        "startup reconciliation deleted another valid peer's artifacts",
+    );
+
+    std::fs::create_dir_all(&legacy_root).expect("recreate legacy artifact root");
+    std::fs::write(legacy_root.join("drop-orphan"), b"legacy").expect("write drop orphan");
+    drop(upgraded_runtime);
+    assert!(
+        !legacy_root.exists(),
+        "drop reconciliation retained the pre-upgrade raw artifact root",
+    );
+    assert!(
+        other_sentinel.exists(),
+        "drop reconciliation deleted another valid peer's artifacts",
+    );
+    drop(other_runtime);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closed_pairing_lifecycle_channel_does_not_retain_pending_admission() {
     let temp = tempfile::tempdir().expect("temp registry");

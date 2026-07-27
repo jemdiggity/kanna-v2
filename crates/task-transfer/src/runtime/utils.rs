@@ -184,6 +184,36 @@ pub(super) fn managed_artifact_root(registry_root: &Path, peer_id: &str) -> Path
         .join(URL_SAFE_NO_PAD.encode(peer_id.as_bytes()))
 }
 
+pub(super) fn legacy_managed_artifact_root(registry_root: &Path, peer_id: &str) -> Option<PathBuf> {
+    let legacy_root_was_raw = match Path::new(peer_id)
+        .components()
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [std::path::Component::Normal(component)]
+            if component == &std::ffi::OsStr::new(peer_id) =>
+        {
+            true
+        }
+        _ => false,
+    };
+    if !legacy_root_was_raw {
+        return None;
+    }
+    let decoded_peer_id = URL_SAFE_NO_PAD
+        .decode(peer_id.as_bytes())
+        .ok()
+        .and_then(|decoded| String::from_utf8(decoded).ok());
+    if decoded_peer_id.as_deref().is_some_and(|decoded| {
+        decoded != peer_id
+            && URL_SAFE_NO_PAD.encode(decoded.as_bytes()) == peer_id
+            && crate::discovery::validate_peer_id(decoded).is_ok()
+    }) {
+        return None;
+    }
+    Some(registry_root.join("artifacts").join(peer_id))
+}
+
 pub(super) fn peer_store(root: &Path, self_peer_id: &str) -> Result<PeerStore, RuntimeError> {
     Ok(PeerStore::new(root.join("trusted-peers").join(format!(
         "{}.json",

@@ -5297,6 +5297,107 @@ describe("App", () => {
     wrapper.unmount();
   });
 
+  it("nacks a task pull when the return push is rejected", async () => {
+    store.items = [{
+      id: "task-source",
+      repo_id: "repo-1",
+      closed_at: null,
+      stage: "in progress",
+      branch: "task-source",
+      prompt: "Return this task",
+      tags: "[]",
+    }];
+    store.pushTaskToPeer.mockRejectedValueOnce(new Error("preflight failed"));
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "list_transfer_peers") {
+        return [{
+          peer_id: "peer-requester",
+          display_name: "Requester",
+          public_key: "requester-key",
+          endpoint: "127.0.0.1:43100",
+          pid: 42,
+          trusted: true,
+          accepting_transfers: true,
+        }];
+      }
+      return await defaultInvoke?.(command, args);
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    const handler = listenHandlers.get("task-pull-requested");
+
+    await handler?.(buildTaskPullRequestedEvent());
+
+    expect(invokeMock).toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+    });
+    errorSpy.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("settles an overlapping task-pull redelivery only after the primary push", async () => {
+    store.items = [{
+      id: "task-source",
+      repo_id: "repo-1",
+      closed_at: null,
+      stage: "in progress",
+      branch: "task-source",
+      prompt: "Return this task",
+      tags: "[]",
+    }];
+    const push = createDeferred<void>();
+    store.pushTaskToPeer.mockImplementationOnce(async () => push.promise);
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "list_transfer_peers") {
+        return [{
+          peer_id: "peer-requester",
+          display_name: "Requester",
+          public_key: "requester-key",
+          endpoint: "127.0.0.1:43100",
+          pid: 42,
+          trusted: true,
+          accepting_transfers: true,
+        }];
+      }
+      return await defaultInvoke?.(command, args);
+    });
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    const handler = listenHandlers.get("task-pull-requested");
+    const primaryEvent = buildTaskPullRequestedEvent();
+    const duplicateEvent = buildTaskPullRequestedEvent();
+    duplicateEvent.payload.__kannaLifecycleDeliveryId = "lifecycle-pull-failover-2";
+
+    const primary = handler?.(primaryEvent);
+    await waitForCondition(() => store.pushTaskToPeer.mock.calls.length === 1);
+    const duplicate = handler?.(duplicateEvent);
+    await flushPromises();
+
+    expect(invokeMock.mock.calls.filter(([command]) =>
+      command === "acknowledge_transfer_lifecycle_event"
+      || command === "nack_transfer_lifecycle_event")).toEqual([]);
+
+    push.resolve();
+    await Promise.all([primary, duplicate]);
+
+    expect(invokeMock.mock.calls.filter(([command]) =>
+      command === "acknowledge_transfer_lifecycle_event"
+      || command === "nack_transfer_lifecycle_event")).toEqual([
+      ["acknowledge_transfer_lifecycle_event", {
+        deliveryId: "lifecycle-pull-failover-1",
+      }],
+      ["acknowledge_transfer_lifecycle_event", {
+        deliveryId: "lifecycle-pull-failover-2",
+      }],
+    ]);
+    expect(store.pushTaskToPeer).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
   it("requeues an aborted task pull so a standby performs exactly one push after release", async () => {
     store.items = [{
       id: "task-source",

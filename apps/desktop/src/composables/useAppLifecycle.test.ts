@@ -32,7 +32,7 @@ describe("handleTaskPullRequested", () => {
     const refreshCloudTransferRoute = vi.fn(() =>
       new Promise<void>((resolve) => { releaseRefresh = resolve; }));
     const pushTaskToPeer = vi.fn(async () => {});
-    const inFlight = new Set<string>();
+    const inFlight = new Map();
     const store = { items: [item()], pushTaskToPeer };
     const event = {
       requestId: "pull-1",
@@ -49,8 +49,8 @@ describe("handleTaskPullRequested", () => {
 
     expect(refreshCloudTransferRoute).toHaveBeenCalledTimes(1);
     expect(pushTaskToPeer).not.toHaveBeenCalled();
-    expect(await duplicate).toBe("terminal");
     releaseRefresh();
+    expect(await duplicate).toBe("delivered");
     expect(await first).toBe("delivered");
     expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
     expect(pushTaskToPeer).toHaveBeenCalledWith("task-source", "peer-requester", {
@@ -87,7 +87,7 @@ describe("handleTaskPullRequested", () => {
       requestId: "pull-1",
       requesterPeerId: "peer-requester",
       sourceTaskId: "task-source",
-    }, { items: [item()], pushTaskToPeer } as never, new Set(), [
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [
       machine({
         peerId: "peer-other",
         desktopId: "desktop-other",
@@ -107,7 +107,7 @@ describe("handleTaskPullRequested", () => {
       new Promise<void>((resolve) => { releaseRefresh = resolve; }));
     const pushTaskToPeer = vi.fn(async () => {});
     const abortController = new AbortController();
-    const inFlight = new Set<string>();
+    const inFlight = new Map();
 
     const pending = handleTaskPullRequested({
       requestId: "pull-1",
@@ -124,7 +124,7 @@ describe("handleTaskPullRequested", () => {
 
     await expect(pending).resolves.toBe("interrupted");
     expect(pushTaskToPeer).not.toHaveBeenCalled();
-    expect(inFlight).toEqual(new Set());
+    expect(inFlight).toEqual(new Map());
   });
 
   it("rejects a requester that is absent from the current eligible machine catalog", async () => {
@@ -134,14 +134,14 @@ describe("handleTaskPullRequested", () => {
       requestId: "pull-1",
       requesterPeerId: "peer-requester",
       sourceTaskId: "task-source",
-    }, { items: [item()], pushTaskToPeer } as never, new Set(), [])).resolves.toBe("terminal");
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [])).resolves.toBe("terminal");
 
     expect(pushTaskToPeer).not.toHaveBeenCalled();
   });
 
   it("retains an event that arrives before the requester catalog and pushes exactly once", async () => {
     const pushTaskToPeer = vi.fn(async () => {});
-    const inFlight = new Set<string>();
+    const inFlight = new Map();
     let machines: TransferMachine[] = [];
     const waitForRetry = vi.fn(async () => {
       machines = [machine()];
@@ -168,7 +168,7 @@ describe("handleTaskPullRequested", () => {
       { maxAttempts: 2, waitForRetry },
     );
 
-    await expect(duplicate).resolves.toBe("terminal");
+    await expect(duplicate).resolves.toBe("delivered");
     await expect(pending).resolves.toBe("delivered");
     expect(waitForRetry).toHaveBeenCalledTimes(1);
     expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
@@ -193,7 +193,7 @@ describe("handleTaskPullRequested", () => {
       requestId: "pull-1",
       requesterPeerId: "peer-requester",
       sourceTaskId,
-    }, { items, pushTaskToPeer } as never, new Set(), [machine()])).resolves.toBe("terminal");
+    }, { items, pushTaskToPeer } as never, new Map(), [machine()])).resolves.toBe("terminal");
 
     expect(pushTaskToPeer).not.toHaveBeenCalled();
   });

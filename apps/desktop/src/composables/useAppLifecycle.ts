@@ -182,12 +182,16 @@ function lifecycleDeliveryOwnership(event: unknown): {
   };
 }
 
-export type TaskPullHandlingOutcome = "delivered" | "terminal" | "interrupted";
+export type TaskPullHandlingOutcome =
+  | "delivered"
+  | "terminal"
+  | "retryable"
+  | "interrupted";
 
-export async function handleTaskPullRequested(
+export function handleTaskPullRequested(
   request: TaskPullRequestedEvent,
   store: Pick<ReturnType<typeof useKannaStore>, "items" | "pushTaskToPeer">,
-  inFlightSourceTaskIds: Set<string>,
+  inFlightSourceTasks: Map<string, Promise<TaskPullHandlingOutcome>>,
   transferMachines: readonly TransferMachine[] | (() => readonly TransferMachine[]),
   options: {
     maxAttempts?: number;
@@ -218,11 +222,13 @@ export async function handleTaskPullRequested(
     }
     return source;
   };
-  const initialSource = sourceIsEligible();
-  if (!initialSource || inFlightSourceTaskIds.has(initialSource.id)) return "terminal";
+  const inFlight = inFlightSourceTasks.get(request.sourceTaskId);
+  if (inFlight) return inFlight;
 
-  inFlightSourceTaskIds.add(initialSource.id);
-  try {
+  const initialSource = sourceIsEligible();
+  if (!initialSource) return Promise.resolve("terminal");
+
+  const handling = (async (): Promise<TaskPullHandlingOutcome> => {
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       if (options.signal?.aborted) return "interrupted";
       const source = sourceIsEligible();
@@ -246,9 +252,15 @@ export async function handleTaskPullRequested(
       }
     }
     return "terminal";
-  } finally {
-    inFlightSourceTaskIds.delete(initialSource.id);
-  }
+  })();
+  inFlightSourceTasks.set(initialSource.id, handling);
+  const clearInFlight = () => {
+    if (inFlightSourceTasks.get(initialSource.id) === handling) {
+      inFlightSourceTasks.delete(initialSource.id);
+    }
+  };
+  void handling.then(clearInFlight, clearInFlight);
+  return handling;
 }
 
 function focusAgentTerminal() {
@@ -289,7 +301,7 @@ export function useAppLifecycle({
 }: UseAppLifecycleOptions) {
   const appUnlisteners: Array<() => void> = [];
   const fatalInitializationError = ref<string | null>(null);
-  const taskPullPushesInFlight = new Set<string>();
+  const taskPullPushesInFlight = new Map<string, Promise<TaskPullHandlingOutcome>>();
   const taskPullAbortController = new AbortController();
   let transferEventConsumerRegistered = false;
   let currentWindowClosePhase: "open" | "preparing" | "recovering" | "destroying" = "open";
@@ -497,7 +509,7 @@ export function useAppLifecycle({
     }
     try {
       const unlistenTaskPullRequested = await listen("task-pull-requested", async (event: unknown) => {
-        let outcome: TaskPullHandlingOutcome = "terminal";
+        let outcome: TaskPullHandlingOutcome = "retryable";
         const stopRenewing = renewLifecycleDeliveryWhileHandling(event);
         try {
           outcome = await handleTaskPullRequested(
@@ -517,7 +529,7 @@ export function useAppLifecycle({
           stopRenewing();
           await settleLifecycleDelivery(
             event,
-            outcome === "interrupted" ? "nack" : "ack",
+            outcome === "delivered" || outcome === "terminal" ? "ack" : "nack",
           ).catch((error: unknown) => {
             console.error("[App] failed to settle task-pull lifecycle delivery:", error);
           });
