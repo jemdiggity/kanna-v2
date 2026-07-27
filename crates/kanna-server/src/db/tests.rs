@@ -828,28 +828,28 @@ fn open_migrates_origin_main_028_activity_revision() {
 }
 
 #[test]
-fn pre_035_streaming_incoming_transfers_recover_without_duplicate_tasks() {
+fn pre_036_streaming_incoming_transfers_recover_without_duplicate_tasks() {
     let path = temp_db_path();
-    let conn = Connection::open(&path).expect("open pre-035 fixture db");
+    let conn = Connection::open(&path).expect("open pre-036 fixture db");
     conn.execute_batch(include_str!("fixtures/origin_main_028.sql"))
         .expect("load origin/main base fixture");
-    conn.execute_batch(include_str!("fixtures/pre_035_task_transfer.sql"))
-        .expect("load exact pre-035 transfer fixture");
-    let migration_035_index = CURRENT_SCHEMA_MIGRATIONS
+    conn.execute_batch(include_str!("fixtures/pre_036_task_transfer.sql"))
+        .expect("load exact pre-036 transfer fixture");
+    let migration_036_index = CURRENT_SCHEMA_MIGRATIONS
         .iter()
-        .position(|id| *id == "035_task_transfer_ownership_leases")
-        .expect("035 ownership migration exists");
-    for migration_id in &CURRENT_SCHEMA_MIGRATIONS[..migration_035_index] {
+        .position(|id| *id == "036_task_transfer_ownership_leases")
+        .expect("036 ownership migration exists");
+    for migration_id in &CURRENT_SCHEMA_MIGRATIONS[..migration_036_index] {
         conn.execute(
             "INSERT INTO schema_migrations (id) VALUES (?1)",
             [migration_id],
         )
-        .expect("record migration through 034");
+        .expect("record migration through 035");
     }
     drop(conn);
 
     let db = Db::open_migrated(path.to_str().expect("utf8 path"))
-        .expect("migrate exact pre-035 transfer fixture");
+        .expect("migrate exact pre-036 transfer fixture");
     let before_task = db
         .get_task_transfer("legacy-stream-before-task")
         .expect("read transfer without task")

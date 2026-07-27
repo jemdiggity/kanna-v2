@@ -16,6 +16,7 @@ CREATE TABLE create_task_intent (
     FOREIGN KEY (task_id) REFERENCES pipeline_item(id) ON DELETE CASCADE
 );
 
+ALTER TABLE pipeline_item ADD COLUMN revision_rounds INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE pipeline_item ADD COLUMN blocker_revision INTEGER NOT NULL DEFAULT 0;
 
 CREATE TRIGGER task_blocker_insert_revision

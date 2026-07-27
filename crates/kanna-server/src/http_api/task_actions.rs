@@ -841,17 +841,11 @@ struct StageTransitionOwnership {
     requested_operation: Option<super::state::RequestedTaskOperation>,
 }
 
-fn execute_stage_transition_detached(
-    state: Arc<AppState>,
-    task_id: String,
-    transition: crate::task_creator::PreparedStageTransition,
-) {
-    execute_stage_transition_detached_holding(
-        state,
-        task_id,
-        transition,
-        StageTransitionOwnership::default(),
-    );
+impl StageTransitionOwnership {
+    fn release(self) {
+        drop(self.task_mutation);
+        drop(self.requested_operation);
+    }
 }
 
 /// Same, but the detached worker takes ownership of a per-task operation
@@ -879,7 +873,6 @@ fn execute_stage_transition_detached_holding(
         // Bound to the worker's own scope: every exit path below — daemon
         // connect failure, transition error, success, join error, or the task
         // being dropped at runtime shutdown — releases the task.
-        let _ownership = ownership;
         let handle = tokio::runtime::Handle::current();
         let joined = tokio::task::spawn_blocking(move || {
             handle.block_on(async move {
@@ -905,6 +898,7 @@ fn execute_stage_transition_detached_holding(
             })
         })
         .await;
+        ownership.release();
         if let Err(join_error) = joined {
             log::error!(
                 "stage transition worker for {} failed: {}",
@@ -1285,6 +1279,12 @@ pub(super) async fn request_revision(
     Json(payload): Json<crate::mobile_api::RequestRevisionRequest>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
     let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
+    let Some(revision_in_flight) = state.begin_requested_task_revision(&task_id) else {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            format!("a revision is already in progress for task {task_id}"),
+        ));
+    };
     let task_mutation = state.begin_requested_task_mutation(&task_id).await;
 
     #[cfg(test)]
@@ -1295,47 +1295,12 @@ pub(super) async fn request_revision(
     }
 
     let origin = payload.origin.unwrap_or_default();
-    // Resolve first, so the single-flight key below is the durable task id
-    // rather than whichever alias (id or branch name) the caller used.
-    let source_task_id = {
-        let state = Arc::clone(&state);
-        let task_id = task_id.clone();
-        super::blocking::run_handler_blocking("revision resolve", move || {
-            let db = Db::open(&state.config.db_path).map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("db error: {}", e),
-                )
-            })?;
-            db.resolve_pipeline_item_id(&task_id)
-                .map_err(|e| {
-                    (
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("db error: {}", e),
-                    )
-                })?
-                .ok_or_else(|| {
-                    (
-                        axum::http::StatusCode::NOT_FOUND,
-                        format!("task not found: {}", task_id),
-                    )
-                })
-        })
-        .await?
-    };
-
-    // One revision action per task at a time. Budget admission, workspace
-    // preparation, and the round accounting are one decision: overlapping
-    // requests would otherwise both see the last free slot, both start a
-    // revision, and spend the task past its cap — defeating the bound this
-    // endpoint exists to enforce. The guard releases on drop, including on
-    // every error path below.
-    let Some(revision_in_flight) = state.begin_requested_task_revision(&source_task_id) else {
-        return Err((
-            axum::http::StatusCode::CONFLICT,
-            format!("a revision is already in progress for task {source_task_id}"),
-        ));
-    };
+    // `resolve_task_id_for_mutation` returned the durable id before either
+    // ownership guard was acquired. The nonblocking revision guard is taken
+    // before waiting for the broader mutation lease so a duplicate revision
+    // is refused immediately instead of sleeping until the first transition
+    // lands and then spending another round.
+    let source_task_id = task_id;
 
     let outcome = {
         let state = Arc::clone(&state);

@@ -30,7 +30,6 @@ pub struct AppState {
     pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
     requested_task_operations: Arc<RequestedTaskOperations>,
     relay_reconnect: Arc<Notify>,
-    requested_stage_advances: Arc<RequestedTaskOperations>,
     requested_task_mutations: Arc<RequestedTaskMutations>,
     state_changes: broadcast::Sender<ServerFrame>,
     #[cfg(test)]
@@ -212,7 +211,6 @@ impl AppState {
             repo_definitions: Arc::new(crate::task_creator::RepoDefinitionsCache::default()),
             requested_task_operations: Arc::new(RequestedTaskOperations::default()),
             relay_reconnect: Arc::new(Notify::new()),
-            requested_stage_advances: Arc::new(RequestedTaskOperations::default()),
             requested_task_mutations: Arc::new(RequestedTaskMutations::default()),
             state_changes: broadcast::channel(256).0,
             #[cfg(test)]
