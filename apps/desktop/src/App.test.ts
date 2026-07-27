@@ -5281,6 +5281,22 @@ describe("App", () => {
     wrapper.unmount();
   });
 
+  it("acknowledges a terminal task pull instead of requeueing it to the same owner", async () => {
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    const handler = listenHandlers.get("task-pull-requested");
+
+    await handler?.(buildTaskPullRequestedEvent());
+
+    expect(store.pushTaskToPeer).not.toHaveBeenCalled();
+    expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+    });
+    wrapper.unmount();
+  });
+
   it("requeues an aborted task pull so a standby performs exactly one push after release", async () => {
     store.items = [{
       id: "task-source",

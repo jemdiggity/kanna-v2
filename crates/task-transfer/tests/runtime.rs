@@ -22,6 +22,12 @@ use tokio::sync::{mpsc, oneshot};
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+fn peer_artifact_root(registry_root: &Path, peer_id: &str) -> std::path::PathBuf {
+    registry_root
+        .join("artifacts")
+        .join(URL_SAFE_NO_PAD.encode(peer_id.as_bytes()))
+}
+
 fn runtime_endpoint(registry_root: &Path, peer_id: &str) -> String {
     PeerRegistry::new(registry_root.to_path_buf())
         .list_peers("")
@@ -6398,7 +6404,7 @@ async fn owned_artifact_paths_encode_dot_dotdot_and_separator_transfer_ids() {
     ))
     .await
     .unwrap();
-    let peer_artifact_root = temp.path().join("artifacts").join("peer-safe-artifacts");
+    let peer_artifact_root = peer_artifact_root(temp.path(), "peer-safe-artifacts");
     let mut misplaced = Vec::new();
 
     for (index, transfer_id) in [".", "..", "nested/transfer", r"nested\transfer"]
@@ -7688,10 +7694,7 @@ async fn streamed_artifact_response_rejects_authenticated_framing_downgrade() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_artifacts_are_deleted_on_ttl_shutdown_and_startup_while_borrowed_files_survive() {
     let temp = tempfile::tempdir().unwrap();
-    let startup_orphan = temp
-        .path()
-        .join("artifacts")
-        .join("peer-cleanup")
+    let startup_orphan = peer_artifact_root(temp.path(), "peer-cleanup")
         .join("stale-transfer")
         .join("orphan.bundle");
     std::fs::create_dir_all(startup_orphan.parent().unwrap()).unwrap();

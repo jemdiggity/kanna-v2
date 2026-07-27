@@ -172,6 +172,49 @@ fn from_env_prefers_runtime_path_overrides() {
     let _ = std::fs::remove_dir_all(home);
 }
 
+#[tokio::test]
+async fn peer_artifact_root_cleanup_is_isolated_for_dot_and_its_encoded_name() {
+    let temp = tempfile::tempdir().expect("temp registry");
+    let dot_root = utils::managed_artifact_root(temp.path(), ".");
+    let encoded_name_root = utils::managed_artifact_root(temp.path(), "Lg");
+    assert_ne!(
+        dot_root, encoded_name_root,
+        "every valid peer id must have a distinct managed artifact root",
+    );
+
+    let dot_runtime =
+        TransferRuntime::spawn(RuntimeConfig::for_tests(".", "Dot Peer", temp.path(), 0))
+            .await
+            .expect("spawn dot peer");
+    std::fs::create_dir_all(&dot_root).expect("create dot peer artifact root");
+    let sentinel = dot_root.join("owned-by-dot");
+    std::fs::write(&sentinel, b"artifact").expect("write dot peer artifact");
+
+    let encoded_name_runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "Lg",
+        "Encoded Name Peer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .expect("spawn encoded-name peer");
+    assert!(
+        sentinel.exists(),
+        "starting another valid peer removed the dot peer's artifacts",
+    );
+
+    drop(encoded_name_runtime);
+    assert!(
+        sentinel.exists(),
+        "dropping another valid peer removed the dot peer's artifacts",
+    );
+    drop(dot_runtime);
+    assert!(
+        !dot_root.exists(),
+        "dropping the owning peer retained its managed artifacts",
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn closed_pairing_lifecycle_channel_does_not_retain_pending_admission() {
     let temp = tempfile::tempdir().expect("temp registry");

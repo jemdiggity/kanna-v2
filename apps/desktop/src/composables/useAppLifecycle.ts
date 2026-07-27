@@ -110,11 +110,16 @@ function lifecycleRecoveryRequired(event: unknown): boolean {
   );
 }
 
-async function settleLifecycleDelivery(event: unknown, succeeded: boolean): Promise<void> {
+type LifecycleDeliverySettlement = "ack" | "nack";
+
+async function settleLifecycleDelivery(
+  event: unknown,
+  settlement: LifecycleDeliverySettlement,
+): Promise<void> {
   const deliveryId = lifecycleDeliveryId(event);
   if (!deliveryId) return;
   await invoke(
-    succeeded
+    settlement === "ack"
       ? "acknowledge_transfer_lifecycle_event"
       : "nack_transfer_lifecycle_event",
     { deliveryId },
@@ -177,6 +182,8 @@ function lifecycleDeliveryOwnership(event: unknown): {
   };
 }
 
+export type TaskPullHandlingOutcome = "delivered" | "terminal" | "interrupted";
+
 export async function handleTaskPullRequested(
   request: TaskPullRequestedEvent,
   store: Pick<ReturnType<typeof useKannaStore>, "items" | "pushTaskToPeer">,
@@ -189,7 +196,7 @@ export async function handleTaskPullRequested(
     refreshCloudTransferRoute?: (peerId: string) => Promise<void>;
     waitForRetry?: (delayMs: number) => Promise<void>;
   } = {},
-): Promise<boolean> {
+): Promise<TaskPullHandlingOutcome> {
   const readMachines = typeof transferMachines === "function"
     ? transferMachines
     : () => transferMachines;
@@ -212,33 +219,33 @@ export async function handleTaskPullRequested(
     return source;
   };
   const initialSource = sourceIsEligible();
-  if (!initialSource || inFlightSourceTaskIds.has(initialSource.id)) return false;
+  if (!initialSource || inFlightSourceTaskIds.has(initialSource.id)) return "terminal";
 
   inFlightSourceTaskIds.add(initialSource.id);
   try {
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      if (options.signal?.aborted) return false;
+      if (options.signal?.aborted) return "interrupted";
       const source = sourceIsEligible();
-      if (!source) return false;
+      if (!source) return "terminal";
       const requester = readMachines().find((machine) =>
         machine.peerId === request.requesterPeerId);
       if (requester) {
         if (requester.relayDesktopId && options.refreshCloudTransferRoute) {
           await options.refreshCloudTransferRoute(request.requesterPeerId);
-          if (options.signal?.aborted) return false;
+          if (options.signal?.aborted) return "interrupted";
         }
         await store.pushTaskToPeer(source.id, request.requesterPeerId, {
           transport: requester.preferredTransport,
           cloudFallback: requester.cloudFallback,
           targetDesktopId: requester.desktopId,
         });
-        return true;
+        return "delivered";
       }
       if (attempt + 1 < maxAttempts) {
         await waitForRetry(retryDelayMs);
       }
     }
-    return false;
+    return "terminal";
   } finally {
     inFlightSourceTaskIds.delete(initialSource.id);
   }
@@ -478,7 +485,7 @@ export function useAppLifecycle({
           toast.error(e instanceof Error ? e.message : String(e));
         } finally {
           stopRenewing();
-          await settleLifecycleDelivery(event, succeeded).catch((error: unknown) => {
+          await settleLifecycleDelivery(event, succeeded ? "ack" : "nack").catch((error: unknown) => {
             console.error("[App] failed to settle incoming transfer lifecycle delivery:", error);
           });
         }
@@ -490,10 +497,10 @@ export function useAppLifecycle({
     }
     try {
       const unlistenTaskPullRequested = await listen("task-pull-requested", async (event: unknown) => {
-        let succeeded = false;
+        let outcome: TaskPullHandlingOutcome = "terminal";
         const stopRenewing = renewLifecycleDeliveryWhileHandling(event);
         try {
-          succeeded = await handleTaskPullRequested(
+          outcome = await handleTaskPullRequested(
             parseTaskPullRequestedEvent(eventPayload(event)),
             store,
             taskPullPushesInFlight,
@@ -508,7 +515,10 @@ export function useAppLifecycle({
           toast.error(e instanceof Error ? e.message : String(e));
         } finally {
           stopRenewing();
-          await settleLifecycleDelivery(event, succeeded).catch((error: unknown) => {
+          await settleLifecycleDelivery(
+            event,
+            outcome === "interrupted" ? "nack" : "ack",
+          ).catch((error: unknown) => {
             console.error("[App] failed to settle task-pull lifecycle delivery:", error);
           });
         }
@@ -654,7 +664,7 @@ export function useAppLifecycle({
           }
         } finally {
           ownership.stop();
-          await settleLifecycleDelivery(event, succeeded).catch((error: unknown) => {
+          await settleLifecycleDelivery(event, succeeded ? "ack" : "nack").catch((error: unknown) => {
             console.error("[App] failed to settle outgoing commit lifecycle delivery:", error);
           });
         }
@@ -697,7 +707,7 @@ export function useAppLifecycle({
           });
         } finally {
           ownership.stop();
-          await settleLifecycleDelivery(event, succeeded).catch((error: unknown) => {
+          await settleLifecycleDelivery(event, succeeded ? "ack" : "nack").catch((error: unknown) => {
             console.error("[App] failed to settle finalization lifecycle delivery:", error);
           });
         }

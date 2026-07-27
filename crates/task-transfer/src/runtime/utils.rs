@@ -179,19 +179,9 @@ pub(super) fn managed_artifact_dir(
 }
 
 pub(super) fn managed_artifact_root(registry_root: &Path, peer_id: &str) -> PathBuf {
-    let component = match Path::new(peer_id)
-        .components()
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
-        [std::path::Component::Normal(component)]
-            if component == &std::ffi::OsStr::new(peer_id) =>
-        {
-            peer_id.to_owned()
-        }
-        _ => URL_SAFE_NO_PAD.encode(peer_id.as_bytes()),
-    };
-    registry_root.join("artifacts").join(component)
+    registry_root
+        .join("artifacts")
+        .join(URL_SAFE_NO_PAD.encode(peer_id.as_bytes()))
 }
 
 pub(super) fn peer_store(root: &Path, self_peer_id: &str) -> Result<PeerStore, RuntimeError> {

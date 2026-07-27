@@ -49,9 +49,9 @@ describe("handleTaskPullRequested", () => {
 
     expect(refreshCloudTransferRoute).toHaveBeenCalledTimes(1);
     expect(pushTaskToPeer).not.toHaveBeenCalled();
-    expect(await duplicate).toBe(false);
+    expect(await duplicate).toBe("terminal");
     releaseRefresh();
-    expect(await first).toBe(true);
+    expect(await first).toBe("delivered");
     expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
     expect(pushTaskToPeer).toHaveBeenCalledWith("task-source", "peer-requester", {
       transport: "lan",
@@ -94,7 +94,7 @@ describe("handleTaskPullRequested", () => {
         relayDesktopId: "desktop-other",
       }),
       machine(requesterOverrides),
-    ], { refreshCloudTransferRoute })).resolves.toBe(true);
+    ], { refreshCloudTransferRoute })).resolves.toBe("delivered");
 
     expect(refreshCloudTransferRoute).toHaveBeenCalledTimes(1);
     expect(refreshCloudTransferRoute).toHaveBeenCalledWith("peer-requester");
@@ -122,7 +122,7 @@ describe("handleTaskPullRequested", () => {
     abortController.abort();
     releaseRefresh();
 
-    await expect(pending).resolves.toBe(false);
+    await expect(pending).resolves.toBe("interrupted");
     expect(pushTaskToPeer).not.toHaveBeenCalled();
     expect(inFlight).toEqual(new Set());
   });
@@ -134,7 +134,7 @@ describe("handleTaskPullRequested", () => {
       requestId: "pull-1",
       requesterPeerId: "peer-requester",
       sourceTaskId: "task-source",
-    }, { items: [item()], pushTaskToPeer } as never, new Set(), [])).resolves.toBe(false);
+    }, { items: [item()], pushTaskToPeer } as never, new Set(), [])).resolves.toBe("terminal");
 
     expect(pushTaskToPeer).not.toHaveBeenCalled();
   });
@@ -168,8 +168,8 @@ describe("handleTaskPullRequested", () => {
       { maxAttempts: 2, waitForRetry },
     );
 
-    await expect(duplicate).resolves.toBe(false);
-    await expect(pending).resolves.toBe(true);
+    await expect(duplicate).resolves.toBe("terminal");
+    await expect(pending).resolves.toBe("delivered");
     expect(waitForRetry).toHaveBeenCalledTimes(1);
     expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
   });
@@ -193,7 +193,7 @@ describe("handleTaskPullRequested", () => {
       requestId: "pull-1",
       requesterPeerId: "peer-requester",
       sourceTaskId,
-    }, { items, pushTaskToPeer } as never, new Set(), [machine()])).resolves.toBe(false);
+    }, { items, pushTaskToPeer } as never, new Set(), [machine()])).resolves.toBe("terminal");
 
     expect(pushTaskToPeer).not.toHaveBeenCalled();
   });
