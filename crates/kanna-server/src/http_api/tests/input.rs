@@ -1,5 +1,69 @@
 use super::*;
 
+#[tokio::test]
+async fn idempotent_submission_reconnects_when_the_first_connection_fails_before_acceptance() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "kanna-input-reconnect-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        // Drop the first connection without parsing a command: no submission
+        // can have crossed the daemon's atomic acceptance boundary.
+        let (first, _) = listener.accept().await.unwrap();
+        drop(first);
+
+        let (second, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = second.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        command
+    });
+
+    let mut daemon = crate::daemon_client::DaemonClient::connect(&daemon_dir.to_string_lossy())
+        .await
+        .unwrap();
+    crate::http_api::try_submit_task_input_idempotently(
+        &mut daemon,
+        "task-1",
+        "delivery-1",
+        "finish this post",
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        daemon_server.await.unwrap(),
+        DaemonCommand::SubmitInput {
+            session_id,
+            delivery_id,
+            message,
+            submit_delay_ms: 150,
+        } if session_id == "task-1"
+            && delivery_id == "delivery-1"
+            && message == b"finish this post"
+    ));
+
+    let _ = std::fs::remove_dir_all(daemon_dir);
+}
+
 async fn expect_task_state_changed(
     rx: &mut tokio::sync::broadcast::Receiver<kanna_agent_protocol::ServerFrame>,
 ) {

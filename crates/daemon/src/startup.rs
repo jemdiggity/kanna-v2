@@ -13,14 +13,14 @@ use crate::output::stream_output;
 use crate::paths::{
     app_support_dir, daemon_data_dir, handle_cli_args, install_panic_hook, CliAction,
 };
-use crate::session::{SessionHandle, SessionManager, SessionRecord, StreamControl};
+use crate::session::{QueuedInput, SessionHandle, SessionManager, SessionRecord, StreamControl};
 use crate::socket::bind_socket;
 use crate::{agent_runtime, headless_terminal};
 
 struct AdoptedPtyReader {
     session_id: String,
     io_fd: OwnedFd,
-    input_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    input_rx: mpsc::UnboundedReceiver<QueuedInput>,
     stream_control: StreamControl,
     handle: Arc<SessionHandle>,
     rows: u16,
@@ -159,6 +159,12 @@ pub(crate) async fn run_daemon() {
     }
 
     let sessions: Arc<Mutex<SessionManager>> = Arc::new(Mutex::new(SessionManager::new()));
+    sessions
+        .lock()
+        .await
+        .input_delivery_registry()
+        .restore_completed_ids(handoff_result.submitted_input_ids.clone())
+        .await;
     let fanouts: SessionFanouts = Arc::new(Mutex::new(HashMap::new()));
     let terminal_emulator_clients: TerminalEmulatorClients = Arc::new(Mutex::new(HashMap::new()));
     let session_sizes: SessionSizes = Arc::new(Mutex::new(HashMap::new()));

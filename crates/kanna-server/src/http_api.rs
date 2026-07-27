@@ -66,6 +66,8 @@ pub(crate) async fn dispatch_authenticated_http_invoke(
 pub async fn serve(state: std::sync::Arc<AppState>) -> Result<(), String> {
     routes::serve(state).await
 }
-pub(crate) use task_input::{handle_task_terminal_state, try_submit_task_input, TaskInputError};
+pub(crate) use task_input::{
+    handle_task_terminal_state, try_submit_task_input_idempotently, TaskInputError,
+};
 #[cfg(test)]
 pub(crate) use test_support::test_router;

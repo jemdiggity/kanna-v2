@@ -9,7 +9,7 @@ use crate::daemon_client::DaemonClient;
 use crate::db::{
     Db, NewStageRun, PendingStageActionTarget, PendingTaskActionRequest, ReplacedStageRunSource,
 };
-use crate::http_api::{try_submit_task_input, TaskInputError};
+use crate::http_api::{try_submit_task_input_idempotently, TaskInputError};
 use crate::session_replacements::SessionReplacements;
 use kanna_daemon::protocol::{
     AgentSpawnParams, Command as DaemonCommand, Event as DaemonEvent, TerminalSnapshot,
@@ -1688,24 +1688,29 @@ pub(crate) async fn dispatch_prepared_post_for_api(
     #[cfg(test)]
     pause_live_post_after_reservation(prepared.action_request_key.as_deref()).await;
 
-    if prepared.action_request_key.is_some() {
-        if let Err(error) = Db::open(db_path)
-            .and_then(|db| db.mark_reserved_live_post_delivery_started(&task_id, &run_id))
-        {
-            let rollback = Db::open(db_path)
-                .and_then(|db| db.rollback_reserved_live_post(&task_id, &run_id, source.as_ref()))
-                .map_err(|rollback_error| rollback_error.to_string());
-            return match rollback {
-                Ok(()) => Err(format!("db error: {error}").into()),
-                Err(rollback_error) => Err(StageSpawnError::Indeterminate(format!(
-                    "db error: {error}; failed to roll back undelivered live post \
-                     {run_id}: {rollback_error}"
-                ))),
-            };
-        }
-    }
-    match try_submit_task_input(daemon, &prepared.session_id, &prepared.message).await {
+    let delivery_id = prepared
+        .action_request_key
+        .as_deref()
+        .unwrap_or(prepared.completion_attempt.as_str());
+    match try_submit_task_input_idempotently(
+        daemon,
+        &prepared.session_id,
+        delivery_id,
+        &prepared.message,
+    )
+    .await
+    {
         Ok(()) => {
+            if prepared.action_request_key.is_some() {
+                if let Err(error) = Db::open(db_path).and_then(|db| {
+                    db.mark_reserved_live_post_delivery_acknowledged(&task_id, &run_id)
+                }) {
+                    return Err(StageSpawnError::Indeterminate(format!(
+                        "db error: {error}; live post reservation {run_id} retained because \
+                         the complete daemon submission was acknowledged"
+                    )));
+                }
+            }
             #[cfg(test)]
             pause_live_post_after_delivery(prepared.action_request_key.as_deref()).await;
             if let Err(error) =
@@ -1722,7 +1727,7 @@ pub(crate) async fn dispatch_prepared_post_for_api(
                 revision_budget: None,
             })
         }
-        Err(TaskInputError::SessionNotFound) => {
+        Err(TaskInputError::SessionNotFound | TaskInputError::DefiniteNonDelivery(_)) => {
             Db::open(db_path)
                 .and_then(|db| db.rollback_reserved_live_post(&task_id, &run_id, source.as_ref()))
                 .map_err(|e| format!("db error: {}", e))?;

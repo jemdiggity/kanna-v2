@@ -451,7 +451,7 @@ impl Db {
         Ok(source)
     }
 
-    pub fn mark_reserved_live_post_delivery_started(
+    pub fn mark_reserved_live_post_delivery_acknowledged(
         &self,
         task_id: &str,
         run_id: &str,

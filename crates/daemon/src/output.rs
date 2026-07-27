@@ -16,7 +16,8 @@ use crate::fanout::{
     existing_session_fanout, EnqueueReport, EventLine, SessionFanout, SessionFanouts,
 };
 use crate::session::{
-    MirrorResult, SessionHandle, SessionManager, StreamControl, STATUS_DETECTION_THROTTLE_MS,
+    MirrorResult, QueuedInput, SessionHandle, SessionManager, StreamControl,
+    STATUS_DETECTION_THROTTLE_MS,
 };
 
 const STATUS_IDLE_FLUSH_MS: u64 = STATUS_DETECTION_THROTTLE_MS;
@@ -110,7 +111,7 @@ pub(crate) fn should_rebuild_recovery_session_on_live_terminal_transition() -> b
 pub(crate) async fn stream_output(
     session_id: String,
     io_fd: std::os::fd::OwnedFd,
-    mut input_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut input_rx: mpsc::UnboundedReceiver<QueuedInput>,
     stream_control: StreamControl,
     broadcast_tx: broadcast::Sender<String>,
     fanouts: SessionFanouts,
@@ -128,6 +129,9 @@ pub(crate) async fn stream_output(
                 session_id,
                 error
             );
+            session
+                .fail_all_input_submissions("PTY writer could not start")
+                .await;
             stream_control.mark_stopped();
             return;
         }
@@ -136,8 +140,10 @@ pub(crate) async fn stream_output(
     let mut chunk_count: usize = 0;
     let mut previous_read_at = None;
     let mut previous_slow_stage = None;
-    let mut pending_input: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut pending_input: VecDeque<QueuedInput> = VecDeque::new();
+    let mut pending_chunk = 0usize;
     let mut pending_offset = 0usize;
+    let mut input_paused_until: Option<tokio::time::Instant> = None;
     let mut status_interval =
         tokio::time::interval(std::time::Duration::from_millis(STATUS_IDLE_FLUSH_MS));
     log::info!("[stream] start session={}", session_id);
@@ -145,6 +151,9 @@ pub(crate) async fn stream_output(
     loop {
         if stream_control.stop_requested() || session.is_retired() {
             log::info!("[stream] stopped retired reader session={}", session_id);
+            session
+                .fail_all_input_submissions("PTY stream stopped before submission completed")
+                .await;
             stream_control.mark_stopped();
             return;
         }
@@ -158,22 +167,40 @@ pub(crate) async fn stream_output(
                 }
             }
 
-            writable = async_fd.writable(), if !pending_input.is_empty() => {
+            _ = async {
+                match input_paused_until {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                input_paused_until = None;
+            }
+
+            writable = async_fd.writable(),
+                if !pending_input.is_empty() && input_paused_until.is_none() => {
                 let Ok(mut guard) = writable else {
                     log::error!("[stream] writable readiness failed session={}", session_id);
                     break;
                 };
                 if stream_control.stop_requested() || session.is_retired() {
                     log::info!("[stream] stopped retired reader session={}", session_id);
+                    session
+                        .fail_all_input_submissions(
+                            "PTY stream stopped before submission completed"
+                        )
+                        .await;
                     stream_control.mark_stopped();
                     return;
                 }
-                let Some(front) = pending_input.front() else {
+                let Some(front) = pending_input
+                    .front()
+                    .and_then(|input| input.chunks.get(pending_chunk))
+                else {
                     continue;
                 };
                 let result = guard.try_io(|inner| {
                     let fd = inner.get_ref().as_raw_fd();
-                    let slice = &front[pending_offset..];
+                    let slice = &front.data[pending_offset..];
                     let n = unsafe {
                         libc::write(fd, slice.as_ptr().cast::<libc::c_void>(), slice.len())
                     };
@@ -188,9 +215,26 @@ pub(crate) async fn stream_output(
                     Ok(Ok(n)) => {
                         session.mark_active().await;
                         pending_offset += n;
-                        if pending_offset >= front.len() {
-                            pending_input.pop_front();
+                        if pending_offset >= front.data.len() {
+                            let delay_after = front.delay_after;
                             pending_offset = 0;
+                            pending_chunk += 1;
+                            let batch_complete = pending_input
+                                .front()
+                                .is_some_and(|input| pending_chunk >= input.chunks.len());
+                            if batch_complete {
+                                let completed = pending_input.pop_front().expect("front exists");
+                                pending_chunk = 0;
+                                if let Some(delivery_id) = completed.delivery_id {
+                                    session
+                                        .complete_input_submission(&delivery_id, Ok(()))
+                                        .await;
+                                }
+                            }
+                            if !delay_after.is_zero() {
+                                input_paused_until =
+                                    Some(tokio::time::Instant::now() + delay_after);
+                            }
                         }
                     }
                     Ok(Err(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -209,6 +253,11 @@ pub(crate) async fn stream_output(
                 };
                 if stream_control.stop_requested() || session.is_retired() {
                     log::info!("[stream] stopped retired reader session={}", session_id);
+                    session
+                        .fail_all_input_submissions(
+                            "PTY stream stopped before submission completed"
+                        )
+                        .await;
                     stream_control.mark_stopped();
                     return;
                 }
@@ -235,6 +284,11 @@ pub(crate) async fn stream_output(
                                 session_id,
                                 n
                             );
+                            session
+                                .fail_all_input_submissions(
+                                    "PTY stream stopped before submission completed"
+                                )
+                                .await;
                             stream_control.mark_stopped();
                             return;
                         }
@@ -244,6 +298,11 @@ pub(crate) async fn stream_output(
                                 session_id,
                                 n
                             );
+                            session
+                                .fail_all_input_submissions(
+                                    "PTY stream stopped before submission completed"
+                                )
+                                .await;
                             stream_control.mark_stopped();
                             return;
                         }
@@ -255,6 +314,11 @@ pub(crate) async fn stream_output(
                                 session_id,
                                 n
                             );
+                            session
+                                .fail_all_input_submissions(
+                                    "PTY stream stopped before submission completed"
+                                )
+                                .await;
                             stream_control.mark_stopped();
                             return;
                         }
@@ -311,6 +375,11 @@ pub(crate) async fn stream_output(
             _ = status_interval.tick() => {
                 if stream_control.stop_requested() || session.is_retired() {
                     log::info!("[stream] stopped retired reader session={}", session_id);
+                    session
+                        .fail_all_input_submissions(
+                            "PTY stream stopped before submission completed"
+                        )
+                        .await;
                     stream_control.mark_stopped();
                     return;
                 }
@@ -323,6 +392,11 @@ pub(crate) async fn stream_output(
                 }
                 if stream_control.stop_requested() || session.is_retired() {
                     log::info!("[stream] stopped retired reader session={}", session_id);
+                    session
+                        .fail_all_input_submissions(
+                            "PTY stream stopped before submission completed"
+                        )
+                        .await;
                     stream_control.mark_stopped();
                     return;
                 }
@@ -333,6 +407,11 @@ pub(crate) async fn stream_output(
                     Ok(Some(status)) => {
                         if stream_control.stop_requested() || session.is_retired() {
                             log::info!("[stream] stopped retired reader session={}", session_id);
+                            session
+                                .fail_all_input_submissions(
+                                    "PTY stream stopped before submission completed"
+                                )
+                                .await;
                             stream_control.mark_stopped();
                             return;
                         }
@@ -361,6 +440,9 @@ pub(crate) async fn stream_output(
         }
     }
 
+    session
+        .fail_all_input_submissions("PTY stream ended before submission completed")
+        .await;
     if stream_control.stop_requested()
         || session.is_retired()
         || !session.owns_stream_control(&stream_control).await

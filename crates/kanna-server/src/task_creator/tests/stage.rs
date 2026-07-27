@@ -3464,8 +3464,9 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
         PreparedStageTransition::Post(post) => post,
         _ => panic!("expected post dispatch"),
     };
-    // Message write + discrete Enter: exactly two Input commands.
-    let fake_daemon = spawn_fake_daemon_input_ok(config.daemon_dir.clone(), 2).await;
+    // The complete message-plus-Enter operation crosses the client/daemon
+    // boundary as one idempotent command.
+    let fake_daemon = spawn_fake_daemon_input_ok(config.daemon_dir.clone(), 1).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
     let response = crate::task_creator::dispatch_prepared_post_for_api(
         &config.db_path,
@@ -3479,20 +3480,20 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
 
     assert_eq!(response.task_id, "task-1");
     match &commands[0] {
-        kanna_daemon::protocol::Command::Input { session_id, data } => {
+        kanna_daemon::protocol::Command::SubmitInput {
+            session_id,
+            delivery_id,
+            message,
+            submit_delay_ms,
+        } => {
             assert_eq!(session_id, "task-1");
-            let text = String::from_utf8(data.clone()).unwrap();
+            assert!(!delivery_id.is_empty());
+            assert_eq!(*submit_delay_ms, 150);
+            let text = String::from_utf8(message.clone()).unwrap();
             assert!(text.contains("Commit agent."), "input: {text}");
             assert!(text.contains("Commit Fix it"), "input: {text}");
         }
-        other => panic!("expected Input, got {other:?}"),
-    }
-    match &commands[1] {
-        kanna_daemon::protocol::Command::Input { session_id, data } => {
-            assert_eq!(session_id, "task-1");
-            assert_eq!(data, &vec![b'\r']);
-        }
-        other => panic!("expected Enter Input, got {other:?}"),
+        other => panic!("expected SubmitInput, got {other:?}"),
     }
 
     // The task never left its stage; the post run is attributed to the
@@ -3554,7 +3555,7 @@ async fn crashed_live_post_before_delivery_releases_the_reservation_for_replay()
     let completion_attempt = post.completion_attempt.clone();
     let (reserved, _release) =
         crate::task_creator::pause_next_live_post_after_reservation("live-post-key");
-    let fake_daemon = spawn_fake_daemon_input_ok(config.daemon_dir.clone(), 2).await;
+    let fake_daemon = spawn_fake_daemon_input_ok(config.daemon_dir.clone(), 1).await;
     let db_path = config.db_path.clone();
     let daemon_dir = config.daemon_dir.clone();
     let dispatch = tokio::spawn(async move {
@@ -3601,10 +3602,10 @@ async fn crashed_live_post_before_delivery_releases_the_reservation_for_replay()
         "a reserved but undelivered post must not accept completion"
     );
 
-    // The delivery-start marker is written only immediately before daemon I/O.
-    // Crashing at this earlier boundary is therefore definitely undelivered:
-    // restart reconciliation must remove the unused post and release the
-    // durable request for one fresh execution.
+    // The delivery marker remains null until the daemon acknowledges the
+    // complete atomic submission. Crashing at this earlier boundary is
+    // therefore definitely undelivered: restart reconciliation must remove
+    // the unused post and release the durable request for one fresh execution.
     dispatch.abort();
     assert!(dispatch.await.unwrap_err().is_cancelled());
     fake_daemon.abort();
@@ -3670,7 +3671,7 @@ async fn live_post_completion_lands_delivery_acknowledged_before_the_server_cras
     let completion_attempt = post.completion_attempt.clone();
     let (delivered, _release) =
         crate::task_creator::pause_next_live_post_after_delivery("delivered-post-key");
-    let fake_daemon = spawn_fake_daemon_input_ok(config.daemon_dir.clone(), 2).await;
+    let fake_daemon = spawn_fake_daemon_input_ok(config.daemon_dir.clone(), 1).await;
     let db_path = config.db_path.clone();
     let daemon_dir = config.daemon_dir.clone();
     let dispatch = tokio::spawn(async move {
@@ -3705,7 +3706,7 @@ async fn live_post_completion_lands_delivery_acknowledged_before_the_server_cras
         .unwrap();
     assert!(
         delivery_started.is_some(),
-        "daemon delivery must be preceded by a durable marker"
+        "the complete daemon submission acknowledgement must be durable"
     );
 
     // Simulate the server dying after the daemon acknowledged both writes but
@@ -3740,7 +3741,7 @@ async fn live_post_completion_lands_delivery_acknowledged_before_the_server_cras
 }
 
 #[tokio::test]
-async fn ambiguous_live_post_ack_stays_indeterminate_until_scoped_completion() {
+async fn lost_live_post_ack_retries_the_same_complete_delivery_identity() {
     let repo_root = init_git_repo("live-post-ambiguous-ack");
     write_post_pipeline_fixtures(&repo_root);
 
@@ -3783,59 +3784,62 @@ async fn ambiguous_live_post_ack_stays_indeterminate_until_scoped_completion() {
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).unwrap();
     let fake_daemon = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-
-        let mut message_line = String::new();
-        reader.read_line(&mut message_line).await.unwrap();
-        assert!(matches!(
-            serde_json::from_str::<kanna_daemon::protocol::Command>(message_line.trim()).unwrap(),
-            kanna_daemon::protocol::Command::Input { .. }
-        ));
-        write_half
-            .write_all(
-                format!(
-                    "{}\n",
-                    serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
+        let mut deliveries = Vec::new();
+        for attempt in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command =
+                serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap();
+            let kanna_daemon::protocol::Command::SubmitInput {
+                session_id,
+                delivery_id,
+                message,
+                submit_delay_ms,
+            } = command
+            else {
+                panic!("expected one complete SubmitInput command");
+            };
+            assert_eq!(session_id, "task-1");
+            assert!(!message.is_empty());
+            assert_eq!(submit_delay_ms, 150);
+            deliveries.push(delivery_id);
+            if attempt == 0 {
+                // The daemon accepted the atomic submission, but its
+                // acknowledgement was lost with this connection.
+                continue;
+            }
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
+                    )
+                    .as_bytes(),
                 )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-
-        let mut enter_line = String::new();
-        reader.read_line(&mut enter_line).await.unwrap();
-        assert!(matches!(
-            serde_json::from_str::<kanna_daemon::protocol::Command>(enter_line.trim()).unwrap(),
-            kanna_daemon::protocol::Command::Input { data, .. } if data == vec![b'\r']
-        ));
-        // The daemon enqueued Enter but the connection vanished before its
-        // acknowledgement reached the server.
+                .await
+                .unwrap();
+        }
+        deliveries
     });
 
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
-    let error = crate::task_creator::dispatch_prepared_post_for_api(
+    crate::task_creator::dispatch_prepared_post_for_api(
         &config.db_path,
         &mut daemon,
         &crate::session_replacements::SessionReplacements::default(),
         *post,
     )
     .await
-    .expect_err("lost acknowledgement is not synchronous success");
-    fake_daemon.await.unwrap();
-    assert!(
-        error.is_indeterminate(),
-        "ambiguous delivery must not be persisted as a terminal failure: {error}"
-    );
+    .expect("retry recovers the lost acknowledgement");
+    let deliveries = fake_daemon.await.unwrap();
+    assert_eq!(deliveries, vec!["ambiguous-post-key", "ambiguous-post-key"]);
     assert!(matches!(
         db.claim_task_action_request("ambiguous-post-key", "task-1", "advance-stage", "{}")
             .unwrap(),
-        crate::db::TaskActionRequestClaim::Pending {
-            phase,
-            successor_run_id: Some(_),
-            ..
-        } if phase == "post_reserved"
+        crate::db::TaskActionRequestClaim::Completed { status: 200, .. }
     ));
 
     db.finish_active_stage_run_with_completion_attempt(
@@ -3846,8 +3850,8 @@ async fn ambiguous_live_post_ack_stays_indeterminate_until_scoped_completion() {
         Some(r#"{"status":"success"}"#),
         Some("post completed after acknowledgement loss"),
     )
-    .expect("completion reconciles ambiguous delivery")
-    .expect("reserved post completes");
+    .expect("scoped completion still owns the acknowledged post")
+    .expect("post completes");
     assert!(matches!(
         db.claim_task_action_request("ambiguous-post-key", "task-1", "advance-stage", "{}")
             .unwrap(),
@@ -3888,7 +3892,7 @@ async fn completed_live_post_kills_main_process_owner_before_replacement_spawn()
         _ => panic!("expected post dispatch"),
     };
     let completion_attempt = post.completion_attempt.clone();
-    let input_daemon = spawn_fake_daemon_input_ok(config.daemon_dir.clone(), 2).await;
+    let input_daemon = spawn_fake_daemon_input_ok(config.daemon_dir.clone(), 1).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
     crate::task_creator::dispatch_prepared_post_for_api(
         &config.db_path,
@@ -3960,6 +3964,120 @@ async fn completed_live_post_kills_main_process_owner_before_replacement_spawn()
 }
 
 #[tokio::test]
+async fn live_post_write_failed_ack_rolls_back_before_fresh_session_fallback() {
+    let repo_root = init_git_repo("dispatch-post-write-failed");
+    write_post_pipeline_fixtures(&repo_root);
+
+    let mut config = test_config("dispatch-post-write-failed");
+    config.kanna_cli_path = Some("/tmp/kanna-cli".to_string());
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_pipeline_task(&config, &db, &repo_root);
+    assert_eq!(
+        db.claim_task_action_request("write-failed-post", "task-1", "advance-stage", "{}")
+            .unwrap(),
+        crate::db::TaskActionRequestClaim::Claimed
+    );
+    db.begin_task_action_request_execution("write-failed-post", "server-write-failed")
+        .unwrap();
+
+    let mut post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Post(post) => post,
+        _ => panic!("expected post dispatch"),
+    };
+    post.action_request_key = Some("write-failed-post".to_string());
+
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let fake_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut commands = Vec::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            let response = match &command {
+                kanna_daemon::protocol::Command::SubmitInput { .. } => {
+                    kanna_daemon::protocol::Event::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::WriteFailed),
+                        message: "input queue closed before submission".to_string(),
+                    }
+                }
+                kanna_daemon::protocol::Command::Kill { .. } => {
+                    kanna_daemon::protocol::Event::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    }
+                }
+                kanna_daemon::protocol::Command::Spawn { session_id, .. } => {
+                    kanna_daemon::protocol::Event::SessionCreated {
+                        session_id: session_id.clone(),
+                        run_id: None,
+                    }
+                }
+                other => panic!("unexpected daemon command: {other:?}"),
+            };
+            let done = matches!(&command, kanna_daemon::protocol::Command::Spawn { .. });
+            commands.push(command);
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            if done {
+                break;
+            }
+        }
+        commands
+    });
+
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    crate::task_creator::dispatch_prepared_post_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *post,
+    )
+    .await
+    .expect("definite non-delivery uses the fallback");
+    let commands = fake_daemon.await.unwrap();
+    assert!(matches!(
+        commands.first(),
+        Some(kanna_daemon::protocol::Command::SubmitInput { delivery_id, .. })
+            if delivery_id == "write-failed-post"
+    ));
+    assert!(commands
+        .iter()
+        .any(|command| matches!(command, kanna_daemon::protocol::Command::Spawn { .. })));
+
+    let delivery_started: Option<String> = db
+        .connection_for_e2e_tests()
+        .query_row(
+            "SELECT post_delivery_started_at
+             FROM task_action_request
+             WHERE idempotency_key = 'write-failed-post'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        delivery_started.is_none(),
+        "WriteFailed is proof the atomic submission was not accepted"
+    );
+
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(
+        runs.iter().filter(|run| run.kind == "post").count(),
+        1,
+        "the rolled-back live reservation must not survive beside the fallback run"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
 async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
     let repo_root = init_git_repo("dispatch-post-dead-session");
     write_post_pipeline_fixtures(&repo_root);
@@ -3990,7 +4108,7 @@ async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
             let command: kanna_daemon::protocol::Command =
                 serde_json::from_str(line.trim()).unwrap();
             let response = match &command {
-                kanna_daemon::protocol::Command::Input { .. }
+                kanna_daemon::protocol::Command::SubmitInput { .. }
                 | kanna_daemon::protocol::Command::Kill { .. } => {
                     kanna_daemon::protocol::Event::Error {
                         code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
@@ -4110,7 +4228,7 @@ async fn prompt_only_post_provider_overrides_source_task_provider_in_fallback_da
             let command: kanna_daemon::protocol::Command =
                 serde_json::from_str(line.trim()).unwrap();
             let response = match &command {
-                kanna_daemon::protocol::Command::Input { .. }
+                kanna_daemon::protocol::Command::SubmitInput { .. }
                 | kanna_daemon::protocol::Command::Kill { .. } => {
                     kanna_daemon::protocol::Event::Error {
                         code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),

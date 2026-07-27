@@ -71,11 +71,13 @@ fn parse_handoff_response_accepts_v2_payload() {
             agent_spawn_generation: 0,
             agent_spawn: None,
         }],
+        submitted_input_ids: Vec::new(),
     })
     .unwrap();
 
-    let sessions = parse_handoff_response(&line).unwrap();
+    let (sessions, submitted_input_ids) = parse_handoff_response(&line).unwrap();
     assert_eq!(sessions.len(), 1);
+    assert!(submitted_input_ids.is_empty());
     assert_eq!(sessions[0].session_id, "s1");
     assert!(sessions[0].snapshot.is_none());
     assert_eq!(sessions[0].rows, 24);
@@ -2198,6 +2200,115 @@ async fn a_pty_exit_during_a_sealed_handoff_defers_to_the_transfer_outcome() {
     assert!(
         !sessions.lock().await.contains("dying"),
         "normal exit cleanup resumes after the abort"
+    );
+}
+
+async fn run_input_writer_test_stream(
+    session_id: &str,
+    io_fd: std::os::fd::OwnedFd,
+    handle: Arc<crate::session::SessionHandle>,
+    sessions: Arc<Mutex<crate::session::SessionManager>>,
+) {
+    let input_rx = handle.take_input_rx().await.expect("input queue");
+    let stream_control = crate::session::StreamControl::new();
+    handle.set_stream_control(stream_control.clone()).await;
+    let (broadcast_tx, _) = tokio::sync::broadcast::channel(32);
+    let fanouts: SessionFanouts = Arc::new(Mutex::new(HashMap::new()));
+    let terminal_emulator_clients: TerminalEmulatorClients = Arc::new(Mutex::new(HashMap::new()));
+    let session_sizes: SessionSizes = Arc::new(Mutex::new(HashMap::new()));
+    let recovery_manager = kanna_daemon::recovery::RecoveryManager::start().await;
+    crate::output::stream_output(
+        session_id.to_string(),
+        io_fd,
+        input_rx,
+        stream_control,
+        broadcast_tx,
+        fanouts,
+        terminal_emulator_clients,
+        sessions,
+        session_sizes,
+        recovery_manager,
+        handle,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn complete_input_submission_reports_failure_before_the_first_pty_write() {
+    let session_id = "input-fails-before-first-write";
+    let handle = Arc::new(crate::session::SessionHandle::new(
+        crate::session::test_support::spawn_sleeper_record().expect("session record"),
+    ));
+    let sessions = Arc::new(Mutex::new(crate::session::SessionManager::new()));
+    sessions
+        .lock()
+        .await
+        .insert(session_id.to_string(), Arc::clone(&handle));
+
+    let (writer, peer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+    writer.set_nonblocking(true).expect("nonblocking writer");
+    drop(peer);
+    let io_fd: std::os::fd::OwnedFd = writer.into();
+
+    let submit_handle = Arc::clone(&handle);
+    let submit = tokio::spawn(async move {
+        submit_handle
+            .enqueue_input_submission(
+                "before-first-write".to_string(),
+                b"post message".to_vec(),
+                Duration::from_millis(150),
+            )
+            .await
+    });
+    run_input_writer_test_stream(session_id, io_fd, handle, sessions).await;
+    assert!(
+        submit.await.unwrap().is_err(),
+        "a closed PTY must return WriteFailed instead of acknowledging queued input"
+    );
+}
+
+#[tokio::test]
+async fn complete_input_submission_reports_failure_between_message_and_enter() {
+    use std::io::Read;
+
+    let session_id = "input-fails-between-message-and-enter";
+    let handle = Arc::new(crate::session::SessionHandle::new(
+        crate::session::test_support::spawn_sleeper_record().expect("session record"),
+    ));
+    let sessions = Arc::new(Mutex::new(crate::session::SessionManager::new()));
+    sessions
+        .lock()
+        .await
+        .insert(session_id.to_string(), Arc::clone(&handle));
+
+    let (writer, mut peer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+    writer.set_nonblocking(true).expect("nonblocking writer");
+    let io_fd: std::os::fd::OwnedFd = writer.into();
+    let message = b"post message".to_vec();
+    let expected = message.clone();
+    let peer_reader = tokio::task::spawn_blocking(move || {
+        let mut received = vec![0; expected.len()];
+        peer.read_exact(&mut received).expect("message bytes");
+        assert_eq!(received, expected);
+        // Drop the peer during the deliberate delay between the message and
+        // Enter so the second chunk cannot be written.
+    });
+
+    let submit_handle = Arc::clone(&handle);
+    let submit = tokio::spawn(async move {
+        submit_handle
+            .enqueue_input_submission(
+                "between-message-and-enter".to_string(),
+                message,
+                Duration::from_millis(150),
+            )
+            .await
+    });
+    run_input_writer_test_stream(session_id, io_fd, handle, sessions).await;
+    peer_reader.await.unwrap();
+    assert!(
+        submit.await.unwrap().is_err(),
+        "message-only delivery must not be acknowledged as a complete submission"
     );
 }
 

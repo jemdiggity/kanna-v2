@@ -98,6 +98,7 @@ impl OldDaemon {
 pub(crate) struct HandoffResult {
     pub(crate) adopted: Vec<(String, pty::PtySession, protocol::HandoffSession)>,
     pub(crate) adopted_agents: Vec<(protocol::HandoffSession, Vec<std::os::fd::RawFd>)>,
+    pub(crate) submitted_input_ids: Vec<String>,
     pub(crate) lost: HashMap<String, String>,
     pub(crate) old_daemon: Option<OldDaemon>,
     pub(crate) abort_start: Option<String>,
@@ -108,6 +109,7 @@ impl HandoffResult {
         HandoffResult {
             adopted: vec![],
             adopted_agents: vec![],
+            submitted_input_ids: vec![],
             lost: HashMap::new(),
             old_daemon: None,
             abort_start: None,
@@ -154,11 +156,14 @@ fn handoff_loss_message(reason: impl Into<String>) -> String {
 
 pub(crate) fn parse_handoff_response(
     line: &str,
-) -> Result<Vec<protocol::HandoffSession>, HandoffRequestError> {
+) -> Result<(Vec<protocol::HandoffSession>, Vec<String>), HandoffRequestError> {
     match serde_json::from_str::<Event>(line)
         .map_err(|error| HandoffRequestError::Other(format!("invalid handoff response: {error}")))?
     {
-        Event::HandoffReady { sessions } => Ok(sessions),
+        Event::HandoffReady {
+            sessions,
+            submitted_input_ids,
+        } => Ok((sessions, submitted_input_ids)),
         Event::Error {
             code: Some(protocol::ErrorCode::HandoffVersionMismatch),
             message,
@@ -188,6 +193,7 @@ pub(crate) fn blank_snapshot(rows: u16, cols: u16) -> protocol::TerminalSnapshot
 
 type HandoffTransfer = (
     Vec<protocol::HandoffSession>,
+    Vec<String>,
     Vec<std::os::fd::RawFd>,
     OldDaemon,
 );
@@ -289,7 +295,7 @@ async fn request_handoff(
         })?;
 
     log::info!("[handoff] received response: {}", line.trim());
-    let session_infos = parse_handoff_response(line.trim())?;
+    let (session_infos, submitted_input_ids) = parse_handoff_response(line.trim())?;
 
     if let Err(message) = validate_handoff_fd_counts(&session_infos) {
         // The fd stream is positional: one out-of-protocol count would
@@ -312,7 +318,7 @@ async fn request_handoff(
             std::time::Duration::from_secs(2),
         )
         .await?;
-        return Ok((session_infos, vec![], old_daemon));
+        return Ok((session_infos, submitted_input_ids, vec![], old_daemon));
     }
 
     log::info!(
@@ -350,7 +356,7 @@ async fn request_handoff(
         }
         return Err(error);
     }
-    Ok((session_infos, fds, old_daemon))
+    Ok((session_infos, submitted_input_ids, fds, old_daemon))
 }
 
 pub(crate) async fn wait_for_handoff_release_with(
@@ -574,7 +580,7 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
     let old_pid = pid_file_pid;
 
     let initial_mode = HandoffMode::TransactionalV3;
-    let (session_infos, fds, used_mode, old_daemon) = match request_handoff(
+    let (session_infos, submitted_input_ids, fds, used_mode, old_daemon) = match request_handoff(
         socket_path,
         initial_mode,
         pid_file_pid,
@@ -582,7 +588,13 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
     )
     .await
     {
-        Ok((session_infos, fds, old_daemon)) => (session_infos, fds, initial_mode, old_daemon),
+        Ok((session_infos, submitted_input_ids, fds, old_daemon)) => (
+            session_infos,
+            submitted_input_ids,
+            fds,
+            initial_mode,
+            old_daemon,
+        ),
         Err(error) => {
             log::info!(
                 "[handoff] mode {} (version {}) failed: {}",
@@ -598,6 +610,7 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
                 return HandoffResult {
                     adopted: vec![],
                     adopted_agents: vec![],
+                    submitted_input_ids: vec![],
                     lost: lost_sessions_from_handoff_error(&error),
                     old_daemon: Some(unauthenticated_old_daemon),
                     abort_start: Some(format!(
@@ -610,13 +623,19 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
                  but concurrent Spawn/Kill is outside a provable snapshot boundary"
             );
             match request_handoff(socket_path, legacy_mode, pid_file_pid, pinned_start).await {
-                Ok((session_infos, fds, old_daemon)) => {
+                Ok((session_infos, submitted_input_ids, fds, old_daemon)) => {
                     log::info!(
                         "[handoff] legacy fallback accepted (mode={}, version={})",
                         legacy_mode.label(),
                         legacy_mode.version()
                     );
-                    (session_infos, fds, legacy_mode, old_daemon)
+                    (
+                        session_infos,
+                        submitted_input_ids,
+                        fds,
+                        legacy_mode,
+                        old_daemon,
+                    )
                 }
                 Err(legacy_error) => {
                     log::info!(
@@ -627,6 +646,7 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
                     return HandoffResult {
                         adopted: vec![],
                         adopted_agents: vec![],
+                        submitted_input_ids: vec![],
                         lost: lost_sessions_from_handoff_error(&legacy_error),
                         old_daemon: Some(unauthenticated_old_daemon),
                         abort_start: Some(format!(
@@ -641,6 +661,7 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
     if session_infos.is_empty() {
         log::info!("[handoff] no sessions to adopt");
         return HandoffResult {
+            submitted_input_ids,
             old_daemon: Some(old_daemon),
             ..HandoffResult::empty()
         };
@@ -753,6 +774,7 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
     HandoffResult {
         adopted,
         adopted_agents,
+        submitted_input_ids,
         lost: HashMap::new(),
         old_daemon: Some(old_daemon),
         abort_start: None,
@@ -808,7 +830,10 @@ pub(crate) async fn handle_handoff(
     // session must not be reinserted behind the snapshot. The seal lifts on
     // every abort path below; a committed handoff keeps it until exit.
     let pty_epoch = sessions.lock().await.seal_for_handoff();
-    let handles = sessions.lock().await.handles();
+    let (handles, input_deliveries) = {
+        let manager = sessions.lock().await;
+        (manager.handles(), manager.input_delivery_registry())
+    };
     log::info!(
         "[handoff] found {} sessions in manager (epoch {})",
         handles.len(),
@@ -1011,9 +1036,21 @@ pub(crate) async fn handle_handoff(
         infos.len()
     );
 
+    // Every handle still in the manager was frozen by `handoff_parts` above,
+    // and a handle removed by a racing Kill was retired before this handoff
+    // acquired the manager seal. Wait on the daemon-wide registry as well as
+    // the captured handles: otherwise a removed session's writer could finish
+    // after this snapshot and its durable completion identity would be lost
+    // during adoption.
+    input_deliveries.wait_for_all_in_flight().await;
+
     // v2 deployed adopters understand this full payload and ignore optional
     // metadata fields introduced by hardened senders.
-    let evt = Event::HandoffReady { sessions: infos };
+    let submitted_input_ids = input_deliveries.completed_ids().await;
+    let evt = Event::HandoffReady {
+        sessions: infos,
+        submitted_input_ids,
+    };
     if let Err(error) = write_event(&mut *writer.lock().await, &evt).await {
         log::error!("[handoff] failed to write HandoffReady: {}", error);
     }

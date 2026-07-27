@@ -233,6 +233,15 @@ pub enum Command {
         session_id: String,
         data: Vec<u8>,
     },
+    /// One idempotent terminal submission: type the message, wait long enough
+    /// for interactive TUIs to leave paste mode, then press Enter. The daemon
+    /// acknowledges only after the PTY writer completes the entire sequence.
+    SubmitInput {
+        session_id: String,
+        delivery_id: String,
+        message: Vec<u8>,
+        submit_delay_ms: u64,
+    },
     /// Latency-sensitive terminal input. Success is deliberately not
     /// acknowledged, so callers can pipeline ordered bytes without waiting.
     /// Failures are still emitted as asynchronous `Event::Error` values.
@@ -376,6 +385,11 @@ pub enum Event {
     },
     HandoffReady {
         sessions: Vec<HandoffSession>,
+        /// Completed live-post identities belong to the daemon, not a PTY
+        /// incarnation: a retry stays idempotent after session exit or
+        /// replacement and across a seamless daemon handoff.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        submitted_input_ids: Vec<String>,
     },
     HandoffUnsupported,
     ShuttingDown,
@@ -505,6 +519,32 @@ mod tests {
             Command::Input { session_id, data } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(data, b"hello");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_command_submit_input_roundtrip_keeps_one_delivery_identity() {
+        let cmd = Command::SubmitInput {
+            session_id: "s1".to_string(),
+            delivery_id: "action-request-1".to_string(),
+            message: b"finish the post".to_vec(),
+            submit_delay_ms: 150,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let decoded: Command = serde_json::from_str(&json).unwrap();
+        match decoded {
+            Command::SubmitInput {
+                session_id,
+                delivery_id,
+                message,
+                submit_delay_ms,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(delivery_id, "action-request-1");
+                assert_eq!(message, b"finish the post");
+                assert_eq!(submit_delay_ms, 150);
             }
             _ => panic!("wrong variant"),
         }
@@ -954,14 +994,19 @@ mod tests {
                 agent_spawn_generation: 0,
                 agent_spawn: None,
             }],
+            submitted_input_ids: vec!["delivery-1".to_string()],
         };
 
         let json = serde_json::to_string(&evt).unwrap();
         let decoded: Event = serde_json::from_str(&json).unwrap();
 
         match decoded {
-            Event::HandoffReady { sessions } => {
+            Event::HandoffReady {
+                sessions,
+                submitted_input_ids,
+            } => {
                 assert_eq!(sessions.len(), 1);
+                assert_eq!(submitted_input_ids, vec!["delivery-1"]);
                 assert_eq!(sessions[0].session_id, "sess-1");
                 assert_eq!(sessions[0].rows, 24);
                 assert_eq!(sessions[0].cols, 80);

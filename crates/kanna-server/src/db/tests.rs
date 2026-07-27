@@ -165,7 +165,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "040_live_post_delivery_recovery");
+    assert_eq!(latest_migration, "041_revision_charge_repair");
 
     let stage_run_sql: String = db
         .conn
@@ -694,6 +694,7 @@ fn open_migrates_origin_main_028_activity_revision() {
         "038_task_action_hardening",
         "039_task_action_execution_phase",
         "040_live_post_delivery_recovery",
+        "041_revision_charge_repair",
     ] {
         let count: i64 = db
             .conn
@@ -847,6 +848,10 @@ fn activity_revision_migration_precedes_new_stage_run_migrations() {
         .iter()
         .position(|migration| *migration == "040_live_post_delivery_recovery")
         .expect("live post delivery recovery migration");
+    let revision_charge_repair = CURRENT_SCHEMA_MIGRATIONS
+        .iter()
+        .position(|migration| *migration == "041_revision_charge_repair")
+        .expect("revision charge repair migration");
 
     assert!(activity_revision < ownership);
     assert!(ownership < pending_action);
@@ -854,6 +859,7 @@ fn activity_revision_migration_precedes_new_stage_run_migrations() {
     assert!(action_request < hardening);
     assert!(hardening < execution_phase);
     assert!(execution_phase < live_post_recovery);
+    assert!(live_post_recovery < revision_charge_repair);
 }
 
 #[test]
@@ -3547,7 +3553,41 @@ fn schema_038_pending_revision_requests_reuse_the_legacy_budget_charge() {
     let path = Db::test_db_path("schema-038-pending-revision-charge");
     let db = Db::open_for_tests(&path).expect("open test db");
     db.insert_test_repo("repo-1", "Repo One").expect("repo");
-    for (task_id, rounds) in [("limit-one", 1_i64), ("higher-limit", 2_i64)] {
+
+    let persist_agent_request = |incoming: &str| {
+        let payload: crate::mobile_api::RequestRevisionRequest =
+            serde_json::from_str(incoming).expect("deserialize agent request");
+        serde_json::to_string(&payload).expect("serialize durable request")
+    };
+    let agent_tool_request = persist_agent_request(
+        r#"{"targetStage":"in progress","summary":"tool review","prompt":"fix tool finding"}"#,
+    );
+    let cli_request = persist_agent_request(
+        r#"{"targetStage":"in progress","summary":"cli review","prompt":"fix cli finding"}"#,
+    );
+    assert_eq!(
+        agent_tool_request,
+        r#"{"targetStage":"in progress","summary":"tool review","prompt":"fix tool finding","metadata":null,"origin":null}"#,
+        "the agent MCP/tool path persists a null origin"
+    );
+    assert_eq!(
+        cli_request,
+        r#"{"targetStage":"in progress","summary":"cli review","prompt":"fix cli finding","metadata":null,"origin":null}"#,
+        "the CLI path persists a null origin"
+    );
+
+    for (task_id, rounds, request_json) in [
+        ("limit-one", 1_i64, agent_tool_request.as_str()),
+        ("higher-limit", 2_i64, cli_request.as_str()),
+        ("same-second-uncharged", 1_i64, cli_request.as_str()),
+        ("unrelated-update", 1_i64, agent_tool_request.as_str()),
+        ("pruned-history", 1_i64, cli_request.as_str()),
+        (
+            "legacy-missing-baseline",
+            1_i64,
+            agent_tool_request.as_str(),
+        ),
+    ] {
         db.insert_test_pipeline_item(
             task_id,
             "repo-1",
@@ -3557,12 +3597,82 @@ fn schema_038_pending_revision_requests_reuse_the_legacy_budget_charge() {
             "2026-07-28T00:00:00Z",
         )
         .expect("task");
+        db.conn
+            .execute(
+                "UPDATE pipeline_item
+                 SET created_at = '2020-01-01 00:00:00'
+                 WHERE id = ?1",
+                [task_id],
+            )
+            .expect("seed a task that predates schema-023 stage-run backfill");
+
+        let initial_run_id = format!("migration-current-{task_id}");
+        let initial_stage = if task_id == "legacy-missing-baseline" {
+            "review"
+        } else {
+            "in progress"
+        };
+        db.insert_stage_run(super::NewStageRun {
+            id: &initial_run_id,
+            task_id,
+            stage: initial_stage,
+            kind: "main",
+            agent: Some("implement"),
+            agent_provider: Some("codex"),
+            model: None,
+            status: "succeeded",
+            result: None,
+            feedback: None,
+            session_id: None,
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .expect("original target-stage run");
+
+        if task_id != "limit-one" {
+            let prior_run_id = format!("{task_id}-prior-run");
+            db.insert_stage_run(super::NewStageRun {
+                id: &prior_run_id,
+                task_id,
+                stage: "in progress",
+                kind: "main",
+                agent: Some("implement"),
+                agent_provider: Some("codex"),
+                model: None,
+                status: "succeeded",
+                result: None,
+                feedback: None,
+                session_id: None,
+                provider_session_id: None,
+                cwd: None,
+                resumed_from_run_id: None,
+            })
+            .expect("prior charged revision run");
+            db.claim_task_action_request(
+                &format!("{task_id}-prior-revision"),
+                task_id,
+                "request-revision",
+                &agent_tool_request,
+            )
+            .expect("claim prior charged request");
+            db.conn
+                .execute(
+                    "UPDATE task_action_request
+                     SET successor_run_id = ?2, state = 'succeeded',
+                         http_status = 200, response_body = '{}'
+                     WHERE idempotency_key = ?1",
+                    (format!("{task_id}-prior-revision"), prior_run_id),
+                )
+                .expect("link prior charged request");
+        }
+
         assert_eq!(
             db.claim_task_action_request(
                 &format!("{task_id}-revision"),
                 task_id,
                 "request-revision",
-                r#"{"targetStage":"in progress","origin":"agent"}"#,
+                request_json,
             )
             .expect("claim legacy revision request"),
             TaskActionRequestClaim::Claimed
@@ -3579,48 +3689,27 @@ fn schema_038_pending_revision_requests_reuse_the_legacy_budget_charge() {
         db.conn
             .execute(
                 "UPDATE pipeline_item
-                 SET revision_rounds = ?2, updated_at = '2026-07-28 00:00:01'
+                 SET revision_rounds = ?2,
+                     updated_at = CASE ?1
+                       WHEN 'same-second-uncharged' THEN '2026-07-28 00:00:00'
+                       WHEN 'unrelated-update' THEN '2026-07-28 00:10:00'
+                       ELSE '2026-07-28 00:00:01'
+                     END
                  WHERE id = ?1",
                 (task_id, rounds),
             )
-            .expect("seed legacy task-level charge after the request claim");
+            .expect("seed legacy task-level rounds and later task updates");
     }
-    db.insert_test_pipeline_item(
-        "uncharged",
-        "repo-1",
-        "Revise task",
-        Some("Revise Task"),
-        "review",
-        "2026-07-28T00:00:00Z",
-    )
-    .expect("uncharged task");
     db.conn
         .execute(
-            "UPDATE pipeline_item
-             SET revision_rounds = 1, updated_at = '2026-07-28 00:00:00'
-             WHERE id = 'uncharged'",
+            "DELETE FROM task_action_request
+             WHERE idempotency_key IN (
+               'pruned-history-prior-revision',
+               'legacy-missing-baseline-prior-revision'
+             )",
             [],
         )
-        .expect("seed an older completed revision charge");
-    assert_eq!(
-        db.claim_task_action_request(
-            "uncharged-revision",
-            "uncharged",
-            "request-revision",
-            r#"{"targetStage":"in progress","origin":"agent"}"#,
-        )
-        .expect("claim uncharged revision request"),
-        TaskActionRequestClaim::Claimed
-    );
-    db.conn
-        .execute(
-            "UPDATE task_action_request
-             SET created_at = '2026-07-28 00:00:02',
-                 updated_at = '2026-07-28 00:00:02'
-             WHERE idempotency_key = 'uncharged-revision'",
-            [],
-        )
-        .expect("timestamp uncharged request after the older charge");
+        .expect("simulate normal retention pruning of the older charged action");
     drop(db);
 
     // Recreate the request table exactly as it existed after schema 038:
@@ -3655,7 +3744,8 @@ fn schema_038_pending_revision_requests_reuse_the_legacy_budget_charge() {
         DELETE FROM schema_migrations
         WHERE id IN (
           '039_task_action_execution_phase',
-          '040_live_post_delivery_recovery'
+          '040_live_post_delivery_recovery',
+          '041_revision_charge_repair'
         );
         PRAGMA foreign_keys = ON;
         "#,
@@ -3686,12 +3776,323 @@ fn schema_038_pending_revision_requests_reuse_the_legacy_budget_charge() {
     );
     assert_eq!(
         migrated
-            .claim_agent_revision_round_for_task_action("uncharged-revision", "uncharged", 3,)
-            .expect("replay uncharged request"),
-        Some(2),
-        "a request created after the task's older charge must spend its own round"
+            .claim_agent_revision_round_for_task_action(
+                "same-second-uncharged-revision",
+                "same-second-uncharged",
+                1,
+            )
+            .expect("replay same-second request"),
+        None,
+        "a same-second uncharged request must not inherit the older charged round"
     );
-    assert_eq!(migrated.task_revision_rounds("uncharged").unwrap(), 2);
+    assert_eq!(
+        migrated
+            .task_revision_rounds("same-second-uncharged")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        migrated
+            .claim_agent_revision_round_for_task_action(
+                "unrelated-update-revision",
+                "unrelated-update",
+                1,
+            )
+            .expect("replay request followed by unrelated update"),
+        None,
+        "an unrelated later task update must not make an old round belong to this request"
+    );
+    assert_eq!(
+        migrated.task_revision_rounds("unrelated-update").unwrap(),
+        1
+    );
+    assert_eq!(
+        migrated
+            .claim_agent_revision_round_for_task_action(
+                "pruned-history-revision",
+                "pruned-history",
+                1,
+            )
+            .expect("replay after prior action history was pruned"),
+        None,
+        "a pending request must not inherit a pruned older revision charge"
+    );
+    assert_eq!(migrated.task_revision_rounds("pruned-history").unwrap(), 1);
+    assert_eq!(
+        migrated
+            .claim_agent_revision_round_for_task_action(
+                "legacy-missing-baseline-revision",
+                "legacy-missing-baseline",
+                1,
+            )
+            .expect("replay legacy task without target-stage baseline"),
+        None,
+        "a schema-023 task backfilled in another stage must not treat its sole revision run as \
+         the original target-stage run"
+    );
+    assert_eq!(
+        migrated
+            .task_revision_rounds("legacy-missing-baseline")
+            .unwrap(),
+        1
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn schema_039_upgrade_repairs_revision_charge_and_reconciles_reserved_post() {
+    let path = Db::test_db_path("schema-039-revision-and-post-recovery");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+
+    db.insert_test_pipeline_item(
+        "revision-task",
+        "repo-1",
+        "Revise task",
+        Some("Revise Task"),
+        "review",
+        "2026-07-28T00:00:00Z",
+    )
+    .expect("revision task");
+    db.conn
+        .execute(
+            "UPDATE pipeline_item
+             SET created_at = '2020-01-01 00:00:00'
+             WHERE id = 'revision-task'",
+            [],
+        )
+        .expect("seed a task that predates schema-023 stage-run backfill");
+    db.insert_stage_run(super::NewStageRun {
+        id: "migration-current-revision-task",
+        task_id: "revision-task",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: None,
+        status: "succeeded",
+        result: None,
+        feedback: None,
+        session_id: None,
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .expect("original target-stage run");
+    let request_json = r#"{"targetStage":"in progress","summary":"agent review","prompt":"fix it","metadata":null,"origin":null}"#;
+    assert_eq!(
+        db.claim_task_action_request(
+            "schema-039-revision",
+            "revision-task",
+            "request-revision",
+            request_json,
+        )
+        .unwrap(),
+        TaskActionRequestClaim::Claimed
+    );
+    db.conn
+        .execute_batch(
+            "UPDATE task_action_request
+             SET created_at = '2026-07-28 00:00:00',
+                 updated_at = '2026-07-28 00:00:00'
+             WHERE idempotency_key = 'schema-039-revision';
+             UPDATE pipeline_item
+             SET revision_rounds = 1, updated_at = '2026-07-28 00:00:01'
+             WHERE id = 'revision-task';",
+        )
+        .expect("seed schema-038 revision charge");
+
+    db.insert_test_pipeline_item(
+        "post-task",
+        "repo-1",
+        "Run post",
+        Some("Run Post"),
+        "in progress",
+        "2026-07-28T00:00:00Z",
+    )
+    .expect("post task");
+    db.insert_stage_run(super::NewStageRun {
+        id: "post-source",
+        task_id: "post-task",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: None,
+        status: "succeeded",
+        result: None,
+        feedback: None,
+        session_id: Some("post-task"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .expect("source run");
+    db.insert_stage_run_with_completion_attempt(
+        super::NewStageRun {
+            id: "post-reserved-run",
+            task_id: "post-task",
+            stage: "commit",
+            kind: "post",
+            agent: Some("implement"),
+            agent_provider: Some("codex"),
+            model: None,
+            status: "pending",
+            result: None,
+            feedback: None,
+            session_id: Some("post-task"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: Some("post-source"),
+        },
+        Some("auto"),
+        Some("post-attempt-1"),
+    )
+    .expect("reserved post run");
+    db.claim_task_action_request("schema-039-post", "post-task", "advance-stage", "{}")
+        .expect("post action");
+    db.conn
+        .execute(
+            "UPDATE task_action_request
+             SET phase = 'post_reserved',
+                 owner_id = 'schema-039-owner',
+                 successor_run_id = 'post-reserved-run',
+                 http_status = 200,
+                 response_body = '{\"taskId\":\"post-task\"}',
+                 updated_at = '2026-07-28 00:00:02'
+             WHERE idempotency_key = 'schema-039-post'",
+            [],
+        )
+        .expect("reserve post action");
+    drop(db);
+
+    // Recreate the action table exactly as schema 039 shipped: execution
+    // ownership and revision_round exist, while the live-post delivery marker
+    // and source snapshot columns do not.
+    let conn = Connection::open(&path).expect("open schema-039 fixture");
+    conn.execute_batch(
+        r#"
+        PRAGMA foreign_keys = OFF;
+        ALTER TABLE task_action_request RENAME TO task_action_request_current;
+        CREATE TABLE task_action_request (
+          idempotency_key TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+          action TEXT NOT NULL,
+          request_json TEXT NOT NULL,
+          successor_run_id TEXT UNIQUE REFERENCES stage_run(id) ON DELETE SET NULL,
+          state TEXT NOT NULL CHECK (state IN ('pending', 'succeeded', 'failed')),
+          phase TEXT NOT NULL DEFAULT 'claimed'
+            CHECK (phase IN ('claimed', 'preparing', 'successor_reserved', 'post_reserved')),
+          owner_id TEXT,
+          revision_round INTEGER,
+          http_status INTEGER,
+          response_body TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO task_action_request (
+          idempotency_key, task_id, action, request_json, successor_run_id,
+          state, phase, owner_id, revision_round, http_status, response_body,
+          created_at, updated_at
+        )
+        SELECT
+          idempotency_key, task_id, action, request_json, successor_run_id,
+          state, phase, owner_id, revision_round, http_status, response_body,
+          created_at, updated_at
+        FROM task_action_request_current;
+        DROP TABLE task_action_request_current;
+        DELETE FROM schema_migrations
+        WHERE id IN (
+          '040_live_post_delivery_recovery',
+          '041_revision_charge_repair'
+        );
+        PRAGMA foreign_keys = ON;
+        "#,
+    )
+    .expect("downgrade fixture to schema 039");
+    drop(conn);
+
+    let migrated = Db::open_migrated(&path).expect("upgrade schema-039 fixture");
+    assert_eq!(
+        migrated
+            .claim_agent_revision_round_for_task_action("schema-039-revision", "revision-task", 1,)
+            .expect("replay repaired revision"),
+        Some(1),
+        "the post-039 repair migration must recover the already spent round"
+    );
+    assert_eq!(migrated.task_revision_rounds("revision-task").unwrap(), 1);
+
+    let action: (String, String, Option<String>, Option<String>) = migrated
+        .conn
+        .query_row(
+            "SELECT state, phase, successor_run_id, post_delivery_started_at
+             FROM task_action_request
+             WHERE idempotency_key = 'schema-039-post'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("migrated post action");
+    assert_eq!(action.0, "pending");
+    assert_eq!(action.1, "post_reserved");
+    assert_eq!(action.2.as_deref(), Some("post-reserved-run"));
+    assert!(
+        action.3.is_some(),
+        "migration 040 must mark an already reserved schema-039 post as indeterminate"
+    );
+    let reserved_run = migrated.latest_stage_run("post-task").unwrap().unwrap();
+    assert_eq!(reserved_run.id, "post-reserved-run");
+    assert_eq!(reserved_run.status, "pending");
+
+    let finished = migrated
+        .finish_active_stage_run_with_completion_attempt(
+            "post-task",
+            Some("post-source"),
+            Some("post-attempt-1"),
+            "succeeded",
+            Some(r#"{"status":"success"}"#),
+            Some("scoped post completion"),
+        )
+        .expect("reconcile migrated post")
+        .expect("reserved post completes");
+    assert_eq!(finished.kind, "post");
+    assert!(matches!(
+        migrated
+            .claim_task_action_request("schema-039-post", "post-task", "advance-stage", "{}")
+            .unwrap(),
+        TaskActionRequestClaim::Completed { status: 200, .. }
+    ));
+    drop(migrated);
+
+    let reopened = Db::open_migrated(&path).expect("reopen migrated fixture");
+    for migration_id in [
+        "040_live_post_delivery_recovery",
+        "041_revision_charge_repair",
+    ] {
+        let count: i64 = reopened
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE id = ?1",
+                [migration_id],
+                |row| row.get(0),
+            )
+            .expect("migration count");
+        assert_eq!(count, 1, "{migration_id} must be reopen-idempotent");
+    }
+    assert_eq!(
+        reopened
+            .latest_stage_run("post-task")
+            .unwrap()
+            .unwrap()
+            .status,
+        "succeeded"
+    );
+    assert!(matches!(
+        reopened
+            .claim_task_action_request("schema-039-post", "post-task", "advance-stage", "{}")
+            .unwrap(),
+        TaskActionRequestClaim::Completed { status: 200, .. }
+    ));
 
     let _ = std::fs::remove_file(path);
 }

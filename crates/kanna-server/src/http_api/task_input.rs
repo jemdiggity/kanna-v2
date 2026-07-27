@@ -32,8 +32,10 @@ pub(super) fn task_input_message(input: &str) -> &str {
 /// A task-input submission failure, distinguishing "the session does not
 /// exist" (a post dispatch falls back to spawning a fresh session) from
 /// everything else.
+#[derive(Debug)]
 pub(crate) enum TaskInputError {
     SessionNotFound,
+    DefiniteNonDelivery(String),
     Other(String),
 }
 
@@ -69,6 +71,76 @@ async fn send_session_input(
     }
 }
 
+async fn send_idempotent_submission(
+    daemon: &mut crate::daemon_client::DaemonClient,
+    session_id: &str,
+    delivery_id: &str,
+    message: Vec<u8>,
+) -> Result<(), TaskInputError> {
+    let command = DaemonCommand::SubmitInput {
+        session_id: session_id.to_string(),
+        delivery_id: delivery_id.to_string(),
+        message,
+        submit_delay_ms: SUBMIT_ENTER_DELAY_MS,
+    };
+    let event = daemon
+        .send_command(&command)
+        .await
+        .map_err(|error| TaskInputError::Other(format!("daemon error: {error}")))?;
+    match event {
+        DaemonEvent::Ok => Ok(()),
+        DaemonEvent::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+            ..
+        } => Err(TaskInputError::SessionNotFound),
+        DaemonEvent::Error {
+            code: Some(kanna_daemon::protocol::ErrorCode::WriteFailed),
+            message,
+        } => Err(TaskInputError::DefiniteNonDelivery(message)),
+        DaemonEvent::Error { message, .. }
+            if message.to_ascii_lowercase().contains("session not found") =>
+        {
+            Err(TaskInputError::SessionNotFound)
+        }
+        DaemonEvent::Error { message, .. } => Err(TaskInputError::Other(message)),
+        other => Err(TaskInputError::Other(format!(
+            "unexpected daemon response: {:?}",
+            other
+        ))),
+    }
+}
+
+/// Submit one complete message-plus-Enter operation under a stable delivery
+/// identity. A transport failure may mean the daemon accepted the operation
+/// but lost its acknowledgement, so reconnect once and replay the same
+/// identity; the daemon deduplicates it at the live session.
+pub(crate) async fn try_submit_task_input_idempotently(
+    daemon: &mut crate::daemon_client::DaemonClient,
+    session_id: &str,
+    delivery_id: &str,
+    input: &str,
+) -> Result<(), TaskInputError> {
+    let message = task_input_message(input).as_bytes().to_vec();
+    match send_idempotent_submission(daemon, session_id, delivery_id, message.clone()).await {
+        Err(TaskInputError::Other(first_error)) => {
+            daemon.reconnect().await.map_err(|reconnect_error| {
+                TaskInputError::Other(format!(
+                    "{first_error}; daemon reconnect failed: {reconnect_error}"
+                ))
+            })?;
+            send_idempotent_submission(daemon, session_id, delivery_id, message)
+                .await
+                .map_err(|error| match error {
+                    TaskInputError::Other(second_error) => TaskInputError::Other(format!(
+                        "{first_error}; retry after reconnect failed: {second_error}"
+                    )),
+                    other => other,
+                })
+        }
+        result => result,
+    }
+}
+
 /// Submit input to a daemon session, reporting a typed error.
 pub(crate) async fn try_submit_task_input(
     daemon: &mut crate::daemon_client::DaemonClient,
@@ -100,7 +172,7 @@ pub(crate) async fn submit_task_input(
                 axum::http::StatusCode::NOT_FOUND,
                 format!("session not found: {}", session_id),
             ),
-            TaskInputError::Other(message) => {
+            TaskInputError::DefiniteNonDelivery(message) | TaskInputError::Other(message) => {
                 (axum::http::StatusCode::INTERNAL_SERVER_ERROR, message)
             }
         })

@@ -706,6 +706,67 @@ pub(crate) async fn handle_command(
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
 
+        Command::SubmitInput {
+            session_id,
+            delivery_id,
+            message,
+            submit_delay_ms,
+        } => {
+            let input_deliveries = sessions.lock().await.input_delivery_registry();
+            if let Some(result) = input_deliveries.wait_for_existing(&delivery_id).await {
+                let evt = match result {
+                    Ok(()) => Event::Ok,
+                    Err(_) => error_event(
+                        Some(protocol::ErrorCode::WriteFailed),
+                        format!("input queue closed for session: {}", session_id),
+                    ),
+                };
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+            let Some(session) = session_handle(&sessions, &session_id).await else {
+                // Completion and session teardown are separate async paths.
+                // Catch a completion that landed after the optimistic check
+                // but before the manager lookup observed removal.
+                if let Some(result) = input_deliveries.wait_for_existing(&delivery_id).await {
+                    let evt = match result {
+                        Ok(()) => Event::Ok,
+                        Err(_) => error_event(
+                            Some(protocol::ErrorCode::WriteFailed),
+                            format!("input queue closed for session: {}", session_id),
+                        ),
+                    };
+                    let _ = write_event(&mut *writer.lock().await, &evt).await;
+                    return;
+                }
+                let evt = error_event(
+                    Some(protocol::ErrorCode::SessionNotFound),
+                    format!("session not found: {}", session_id),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            };
+
+            let evt = match session
+                .enqueue_input_submission(
+                    delivery_id.clone(),
+                    message,
+                    Duration::from_millis(submit_delay_ms),
+                )
+                .await
+            {
+                Ok(()) => Event::Ok,
+                Err(_) => match input_deliveries.wait_for_existing(&delivery_id).await {
+                    Some(Ok(())) => Event::Ok,
+                    Some(Err(_)) | None => error_event(
+                        Some(protocol::ErrorCode::WriteFailed),
+                        format!("input queue closed for session: {}", session_id),
+                    ),
+                },
+            };
+            let _ = write_event(&mut *writer.lock().await, &evt).await;
+        }
+
         Command::InputNoReply { session_id, data } => {
             let Some(session) = session_handle(&sessions, &session_id).await else {
                 let evt = error_event(

@@ -86,6 +86,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "038_task_action_hardening",
     "039_task_action_execution_phase",
     "040_live_post_delivery_recovery",
+    "041_revision_charge_repair",
 ];
 
 #[derive(Debug, Serialize)]
@@ -836,6 +837,139 @@ fn drop_column(conn: &Connection, table: &str, column: &str) {
     }
 }
 
+/// Schema 038 could crash after incrementing the task's revision counter but
+/// before linking the successor run. Repair only when the durable action rows
+/// account for every charged round: linked agent requests prove earlier
+/// charges, and exactly one pending unlinked agent request can own the final
+/// unmatched charge. Anything else is ambiguous and must go through normal
+/// budget enforcement on replay.
+fn repair_pending_agent_revision_charges(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        r#"
+        UPDATE task_action_request
+        SET revision_round = (
+          SELECT revision_rounds
+          FROM pipeline_item
+          WHERE pipeline_item.id = task_action_request.task_id
+        )
+        WHERE state = 'pending'
+          AND action = 'request-revision'
+          AND successor_run_id IS NULL
+          AND revision_round IS NULL
+          AND CASE
+                WHEN json_valid(request_json)
+                THEN COALESCE(json_extract(request_json, '$.origin') = 'human', 0)
+                ELSE 1
+              END = 0
+          AND (
+            SELECT revision_rounds
+            FROM pipeline_item
+            WHERE pipeline_item.id = task_action_request.task_id
+          ) > 0
+          AND (
+            SELECT COUNT(*)
+            FROM task_action_request AS pending_candidate
+            WHERE pending_candidate.task_id = task_action_request.task_id
+              AND pending_candidate.state = 'pending'
+              AND pending_candidate.action = 'request-revision'
+              AND pending_candidate.successor_run_id IS NULL
+              AND pending_candidate.revision_round IS NULL
+              AND CASE
+                    WHEN json_valid(pending_candidate.request_json)
+                    THEN COALESCE(
+                      json_extract(pending_candidate.request_json, '$.origin') = 'human',
+                      0
+                    )
+                    ELSE 1
+                  END = 0
+          ) = 1
+          AND (
+            SELECT COUNT(*)
+            FROM task_action_request AS charged_request
+            WHERE charged_request.task_id = task_action_request.task_id
+              AND charged_request.action = 'request-revision'
+              AND CASE
+                    WHEN json_valid(charged_request.request_json)
+                    THEN COALESCE(
+                      json_extract(charged_request.request_json, '$.origin') = 'human',
+                      0
+                    )
+                    ELSE 1
+                  END = 0
+              AND (
+                charged_request.successor_run_id IS NOT NULL
+                OR charged_request.idempotency_key = task_action_request.idempotency_key
+              )
+          ) = (
+            SELECT revision_rounds
+            FROM pipeline_item
+            WHERE pipeline_item.id = task_action_request.task_id
+          )
+          -- Completed action rows are retention-bounded, so their count is
+          -- not sufficient proof by itself. Stage runs are not pruned: for a
+          -- first-pass main stage there is one original run, and every
+          -- successfully prepared agent revision adds one more. In the crash
+          -- gap the charged-but-unprepared request makes that run count equal
+          -- the charged round count; an uncharged request after an older
+          -- round has one extra run and must fail closed.
+          AND (
+            SELECT COUNT(*)
+            FROM stage_run AS revision_run
+            WHERE revision_run.task_id = task_action_request.task_id
+              AND revision_run.kind = 'main'
+              AND revision_run.stage = COALESCE(
+                json_extract(task_action_request.request_json, '$.targetStage'),
+                'in progress'
+              )
+          ) = (
+            SELECT revision_rounds
+            FROM pipeline_item
+            WHERE pipeline_item.id = task_action_request.task_id
+          )
+          -- The count proof also needs a provable original run in the target
+          -- stage. Schema 023 backfilled only the task's then-current stage,
+          -- so an older task already in review may otherwise have one
+          -- retained revision run and no recorded original. Modern tasks are
+          -- safe only when they were created after schema 023 and the target
+          -- is their pinned pipeline's first stage.
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM stage_run AS baseline_run
+              WHERE baseline_run.task_id = task_action_request.task_id
+                AND baseline_run.id = 'migration-current-' || task_action_request.task_id
+                AND baseline_run.kind = 'main'
+                AND baseline_run.stage = COALESCE(
+                  json_extract(task_action_request.request_json, '$.targetStage'),
+                  'in progress'
+                )
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM pipeline_item AS modern_task
+              JOIN schema_migrations AS stage_run_schema
+                ON stage_run_schema.id = '023_stage_run_pipeline_snapshot'
+              WHERE modern_task.id = task_action_request.task_id
+                AND datetime(modern_task.created_at) > datetime(stage_run_schema.applied_at)
+                AND COALESCE(
+                  json_extract(task_action_request.request_json, '$.targetStage'),
+                  'in progress'
+                ) = CASE
+                      WHEN json_valid(modern_task.pipeline_def)
+                        THEN json_extract(modern_task.pipeline_def, '$.stages[0].name')
+                      WHEN COALESCE(modern_task.pipeline, 'default')
+                           IN ('default', 'qa', 'qa-dispatch')
+                        THEN 'in progress'
+                      ELSE NULL
+                    END
+            )
+          )
+        "#,
+        [],
+    )?;
+    Ok(())
+}
+
 fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     create_base_schema(conn)?;
 
@@ -1448,36 +1582,7 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         )?;
         add_column(conn, "task_action_request", "owner_id", "TEXT")?;
         add_column(conn, "task_action_request", "revision_round", "INTEGER")?;
-        // Before this column existed, an agent revision charged the task and
-        // only then linked its successor. A crash in that gap leaves a
-        // pending schema-038 request whose charge is visible only on the task.
-        // Attribute the current round to that request so replay neither parks
-        // at the limit nor spends the same round again.
-        conn.execute(
-            "UPDATE task_action_request
-             SET revision_round = (
-               SELECT revision_rounds
-               FROM pipeline_item
-               WHERE pipeline_item.id = task_action_request.task_id
-             )
-             WHERE state = 'pending'
-               AND action = 'request-revision'
-               AND successor_run_id IS NULL
-               AND revision_round IS NULL
-               AND request_json LIKE '%\"origin\":\"agent\"%'
-               AND (
-                 SELECT revision_rounds
-                 FROM pipeline_item
-                 WHERE pipeline_item.id = task_action_request.task_id
-               ) > 0
-               AND datetime((
-                 SELECT updated_at
-                 FROM pipeline_item
-                 WHERE pipeline_item.id = task_action_request.task_id
-               )) >= datetime(task_action_request.created_at)",
-            [],
-        )?;
-        Ok(())
+        repair_pending_agent_revision_charges(conn)
     })?;
 
     run_migration(conn, "040_live_post_delivery_recovery", |conn| {
@@ -1508,6 +1613,13 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             [],
         )?;
         Ok(())
+    })?;
+
+    // Migration 039 shipped with the initial repair inline. Databases that
+    // already recorded 039 never rerun that body, so repeat the corrected,
+    // ambiguity-safe repair under a new migration id.
+    run_migration(conn, "041_revision_charge_repair", |conn| {
+        repair_pending_agent_revision_charges(conn)
     })?;
 
     Ok(())

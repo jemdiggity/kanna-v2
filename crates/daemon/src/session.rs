@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Weak,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, RwLock, Weak,
 };
 use std::time::{Duration, Instant};
 
@@ -10,7 +10,7 @@ use crate::headless_terminal::HeadlessTerminal;
 use crate::protocol::{AgentProvider, SessionInfo, SessionState, SessionStatus};
 use crate::pty::PtySession;
 use kanna_daemon::terminal_perf::{self, TerminalPerfContext};
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 pub const STATUS_DETECTION_THROTTLE_MS: u64 = 500;
 
@@ -113,6 +113,130 @@ pub struct MirrorResult {
     pub replies: Vec<Vec<u8>>,
 }
 
+#[derive(Debug)]
+pub struct QueuedInput {
+    pub chunks: Vec<QueuedInputChunk>,
+    pub delivery_id: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct QueuedInputChunk {
+    pub data: Vec<u8>,
+    pub delay_after: Duration,
+}
+
+impl QueuedInput {
+    fn raw(data: Vec<u8>) -> Self {
+        Self {
+            chunks: vec![QueuedInputChunk {
+                data,
+                delay_after: Duration::ZERO,
+            }],
+            delivery_id: None,
+        }
+    }
+
+    fn submission(delivery_id: String, message: Vec<u8>, submit_delay: Duration) -> Self {
+        let mut chunks = Vec::with_capacity(2);
+        if !message.is_empty() {
+            chunks.push(QueuedInputChunk {
+                data: message,
+                delay_after: submit_delay,
+            });
+        }
+        chunks.push(QueuedInputChunk {
+            data: vec![b'\r'],
+            delay_after: Duration::ZERO,
+        });
+        Self {
+            chunks,
+            delivery_id: Some(delivery_id),
+        }
+    }
+}
+
+struct InFlightInputDelivery {
+    owner: u64,
+    waiters: Vec<oneshot::Sender<Result<(), String>>>,
+}
+
+#[derive(Default)]
+struct InputDeliveryTracker {
+    completed: VecDeque<String>,
+    in_flight: HashMap<String, InFlightInputDelivery>,
+}
+
+#[derive(Default)]
+pub struct InputDeliveryRegistry {
+    state: Mutex<InputDeliveryTracker>,
+    changed: Notify,
+}
+
+// The daemon binary consumes these through connection/handoff/startup; the
+// package's library-only target intentionally does not compile those modules.
+#[allow(dead_code)]
+impl InputDeliveryRegistry {
+    pub(crate) async fn is_completed(&self, delivery_id: &str) -> bool {
+        self.state
+            .lock()
+            .await
+            .completed
+            .iter()
+            .any(|existing| existing == delivery_id)
+    }
+
+    pub(crate) async fn completed_ids(&self) -> Vec<String> {
+        self.state.lock().await.completed.iter().cloned().collect()
+    }
+
+    pub(crate) async fn wait_for_all_in_flight(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.state.lock().await.in_flight.is_empty() {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    pub(crate) async fn wait_for_existing(&self, delivery_id: &str) -> Option<Result<(), String>> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let mut state = self.state.lock().await;
+        if state
+            .completed
+            .iter()
+            .any(|existing| existing == delivery_id)
+        {
+            return Some(Ok(()));
+        }
+        let in_flight = state.in_flight.get_mut(delivery_id)?;
+        in_flight.waiters.push(reply_tx);
+        drop(state);
+        Some(
+            reply_rx
+                .await
+                .unwrap_or_else(|_| Err("input submission completion was dropped".to_string())),
+        )
+    }
+
+    pub(crate) async fn restore_completed_ids(&self, delivery_ids: Vec<String>) {
+        let mut state = self.state.lock().await;
+        for delivery_id in delivery_ids {
+            if !state
+                .completed
+                .iter()
+                .any(|existing| existing == &delivery_id)
+            {
+                state.completed.push_back(delivery_id);
+            }
+        }
+    }
+}
+
+static NEXT_INPUT_DELIVERY_OWNER: AtomicU64 = AtomicU64::new(1);
+
 pub struct SessionHandle {
     pub(crate) pty: Mutex<PtySession>,
     /// Set by the first teardown to claim this session. Makes Kill
@@ -120,8 +244,17 @@ pub struct SessionHandle {
     /// enqueue unbounded whole-table sweep jobs.
     teardown_claimed: std::sync::atomic::AtomicBool,
     state: Mutex<SessionRuntimeState>,
-    input_tx: mpsc::UnboundedSender<Vec<u8>>,
-    input_rx: Mutex<Option<mpsc::UnboundedReceiver<Vec<u8>>>>,
+    input_tx: mpsc::UnboundedSender<QueuedInput>,
+    input_rx: Mutex<Option<mpsc::UnboundedReceiver<QueuedInput>>>,
+    /// Daemon-scoped live-post identities shared by every session
+    /// incarnation. The action request id is stable across reconnects and is
+    /// handed to a replacement daemon, so replay after a lost acknowledgement
+    /// cannot enqueue the post twice.
+    input_deliveries: RwLock<Arc<InputDeliveryRegistry>>,
+    input_delivery_owner: u64,
+    input_submissions_frozen: AtomicBool,
+    input_submissions_accepting: AtomicBool,
+    input_submissions_changed: Notify,
     /// Permanently fences an outgoing incarnation from publishing output or
     /// mutating id-keyed state after a same-id replacement is allowed.
     retired: AtomicBool,
@@ -179,6 +312,11 @@ impl SessionHandle {
             }),
             input_tx,
             input_rx: Mutex::new(Some(input_rx)),
+            input_deliveries: RwLock::new(Arc::new(InputDeliveryRegistry::default())),
+            input_delivery_owner: NEXT_INPUT_DELIVERY_OWNER.fetch_add(1, Ordering::Relaxed),
+            input_submissions_frozen: AtomicBool::new(false),
+            input_submissions_accepting: AtomicBool::new(true),
+            input_submissions_changed: Notify::new(),
             retired: AtomicBool::new(false),
             codex_discovery_cancellation: CodexDiscoveryCancellation::default(),
         }
@@ -186,21 +324,202 @@ impl SessionHandle {
 
     pub fn retire(&self) {
         self.retired.store(true, Ordering::SeqCst);
+        // SessionManager removal/replacement is the admission boundary. A
+        // command that resolved this incarnation before the manager change
+        // must not insert a new delivery after a retry observes it missing.
+        self.input_submissions_accepting
+            .store(false, Ordering::SeqCst);
+        self.input_submissions_changed.notify_waiters();
     }
 
     pub fn is_retired(&self) -> bool {
         self.retired.load(Ordering::SeqCst)
     }
 
-    pub fn enqueue_input(&self, data: Vec<u8>) -> Result<(), mpsc::error::SendError<Vec<u8>>> {
-        self.input_tx.send(data)
+    pub fn enqueue_input(&self, data: Vec<u8>) -> Result<(), mpsc::error::SendError<QueuedInput>> {
+        self.input_tx.send(QueuedInput::raw(data))
+    }
+
+    pub async fn enqueue_input_submission(
+        &self,
+        delivery_id: String,
+        message: Vec<u8>,
+        submit_delay: Duration,
+    ) -> Result<(), String> {
+        let (reply_rx, should_enqueue) = loop {
+            let unfrozen = self.input_submissions_changed.notified();
+            tokio::pin!(unfrozen);
+            unfrozen.as_mut().enable();
+            if self.input_submissions_frozen.load(Ordering::SeqCst) {
+                unfrozen.await;
+                continue;
+            }
+            if !self.input_submissions_accepting.load(Ordering::SeqCst) {
+                return Err("input writer is no longer accepting submissions".to_string());
+            }
+
+            let registry = self.input_delivery_registry();
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let mut deliveries = registry.state.lock().await;
+            // Recheck under the registry lock. Handoff freezes before taking
+            // this same lock, and writer shutdown closes admission before
+            // draining it, so neither boundary can miss this insertion.
+            if self.input_submissions_frozen.load(Ordering::SeqCst) {
+                continue;
+            }
+            if !self.input_submissions_accepting.load(Ordering::SeqCst) {
+                return Err("input writer is no longer accepting submissions".to_string());
+            }
+            if deliveries
+                .completed
+                .iter()
+                .any(|existing| existing == &delivery_id)
+            {
+                return Ok(());
+            }
+            if let Some(in_flight) = deliveries.in_flight.get_mut(&delivery_id) {
+                in_flight.waiters.push(reply_tx);
+                break (reply_rx, false);
+            }
+            deliveries.in_flight.insert(
+                delivery_id.clone(),
+                InFlightInputDelivery {
+                    owner: self.input_delivery_owner,
+                    waiters: vec![reply_tx],
+                },
+            );
+            break (reply_rx, true);
+        };
+
+        if should_enqueue
+            && self
+                .input_tx
+                .send(QueuedInput::submission(
+                    delivery_id.clone(),
+                    message,
+                    submit_delay,
+                ))
+                .is_err()
+        {
+            self.complete_input_submission(
+                &delivery_id,
+                Err("input queue closed before submission".to_string()),
+            )
+            .await;
+        }
+        reply_rx
+            .await
+            .unwrap_or_else(|_| Err("input submission completion was dropped".to_string()))
+    }
+
+    pub async fn complete_input_submission(&self, delivery_id: &str, result: Result<(), String>) {
+        let registry = self.input_delivery_registry();
+        let mut deliveries = registry.state.lock().await;
+        let waiters = match deliveries.in_flight.get(delivery_id) {
+            Some(in_flight) if in_flight.owner == self.input_delivery_owner => deliveries
+                .in_flight
+                .remove(delivery_id)
+                .map(|in_flight| in_flight.waiters)
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if result.is_ok()
+            && !waiters.is_empty()
+            && !deliveries
+                .completed
+                .iter()
+                .any(|existing| existing == delivery_id)
+        {
+            deliveries.completed.push_back(delivery_id.to_string());
+        }
+        drop(deliveries);
+        for waiter in waiters {
+            let _ = waiter.send(result.clone());
+        }
+        registry.changed.notify_waiters();
+        self.input_submissions_changed.notify_waiters();
+    }
+
+    pub async fn fail_all_input_submissions(&self, message: &str) {
+        // Close admission before taking the registry lock. A racing submitter
+        // rechecks this flag under that lock, so it either joins the drain or
+        // receives a definite WriteFailed response.
+        self.input_submissions_accepting
+            .store(false, Ordering::SeqCst);
+        let registry = self.input_delivery_registry();
+        let mut deliveries = registry.state.lock().await;
+        let delivery_ids = deliveries
+            .in_flight
+            .iter()
+            .filter_map(|(delivery_id, in_flight)| {
+                (in_flight.owner == self.input_delivery_owner).then_some(delivery_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut waiters = Vec::new();
+        for delivery_id in delivery_ids {
+            if let Some(in_flight) = deliveries.in_flight.remove(&delivery_id) {
+                waiters.extend(in_flight.waiters);
+            }
+        }
+        drop(deliveries);
+        for waiter in waiters {
+            let _ = waiter.send(Err(message.to_string()));
+        }
+        registry.changed.notify_waiters();
+        self.input_submissions_changed.notify_waiters();
+    }
+
+    async fn wait_for_input_submissions(&self) {
+        loop {
+            let registry = self.input_delivery_registry();
+            let notified = registry.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let has_owned_delivery = registry
+                .state
+                .lock()
+                .await
+                .in_flight
+                .values()
+                .any(|in_flight| in_flight.owner == self.input_delivery_owner);
+            if !has_owned_delivery {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn input_delivery_registry(&self) -> Arc<InputDeliveryRegistry> {
+        self.input_deliveries
+            .read()
+            .expect("input delivery registry poisoned")
+            .clone()
+    }
+
+    fn bind_input_delivery_registry(&self, registry: Arc<InputDeliveryRegistry>) {
+        *self
+            .input_deliveries
+            .write()
+            .expect("input delivery registry poisoned") = registry;
+    }
+
+    async fn freeze_input_submissions(&self) {
+        self.input_submissions_frozen.store(true, Ordering::SeqCst);
+        // Synchronize with a submitter that passed the first atomic check.
+        let registry = self.input_delivery_registry();
+        drop(registry.state.lock().await);
+    }
+
+    fn unfreeze_input_submissions(&self) {
+        self.input_submissions_frozen.store(false, Ordering::SeqCst);
+        self.input_submissions_changed.notify_waiters();
     }
 
     pub async fn try_clone_io_fd(&self) -> std::io::Result<std::os::fd::OwnedFd> {
         self.pty.lock().await.try_clone_io_fd()
     }
 
-    pub async fn take_input_rx(&self) -> Option<mpsc::UnboundedReceiver<Vec<u8>>> {
+    pub async fn take_input_rx(&self) -> Option<mpsc::UnboundedReceiver<QueuedInput>> {
         self.input_rx.lock().await.take()
     }
 
@@ -477,6 +796,11 @@ impl SessionHandle {
     pub async fn handoff_parts(
         &self,
     ) -> Result<Option<SessionHandoffParts>, Box<dyn std::error::Error + Send + Sync>> {
+        // Accepted input identities are useful across handoff only after the
+        // whole message-plus-Enter sequence has reached the PTY. Wait for the
+        // writer to resolve every in-flight submission before snapshotting.
+        self.freeze_input_submissions().await;
+        self.wait_for_input_submissions().await;
         let pty = self.pty.lock().await;
         if !pty.is_alive() {
             return Ok(None);
@@ -533,6 +857,7 @@ pub struct SessionHandoffParts {
 pub struct SessionManager {
     pub sessions: HashMap<String, Arc<SessionHandle>>,
     lifecycle_locks: HashMap<String, Weak<Mutex<()>>>,
+    input_deliveries: Arc<InputDeliveryRegistry>,
     /// Ids whose outgoing incarnation is still being torn down. A same-id
     /// Spawn must not install while the old session's id-keyed state (fanout,
     /// terminal clients, sizes, recovery) is still being cleared, or that
@@ -581,6 +906,7 @@ impl SessionManager {
         SessionManager {
             sessions: HashMap::new(),
             lifecycle_locks: HashMap::new(),
+            input_deliveries: Arc::new(InputDeliveryRegistry::default()),
             teardown_tombstones: std::collections::HashSet::new(),
             handoff_epoch: 0,
             sealed_for_handoff: tokio::sync::watch::Sender::new(false),
@@ -606,6 +932,9 @@ impl SessionManager {
         // Wakes everyone parked in `seal_lifted` — the handoff aborted, so
         // this daemon keeps serving and owns its sessions again.
         self.sealed_for_handoff.send_replace(false);
+        for session in self.sessions.values() {
+            session.unfreeze_input_submissions();
+        }
     }
 
     pub fn is_sealed_for_handoff(&self) -> bool {
@@ -656,6 +985,7 @@ impl SessionManager {
         if self.is_sealed_for_handoff() || self.teardown_tombstones.contains(&session_id) {
             return false;
         }
+        session.bind_input_delivery_registry(Arc::clone(&self.input_deliveries));
         if let Some(previous) = self.sessions.insert(session_id, session) {
             previous.retire();
         }
@@ -681,6 +1011,7 @@ impl SessionManager {
     }
 
     pub fn insert(&mut self, session_id: String, session: Arc<SessionHandle>) {
+        session.bind_input_delivery_registry(Arc::clone(&self.input_deliveries));
         if let Some(previous) = self.sessions.insert(session_id, session) {
             previous.retire();
         }
@@ -731,6 +1062,10 @@ impl SessionManager {
             .iter()
             .map(|(id, session)| (id.clone(), Arc::clone(session)))
             .collect()
+    }
+
+    pub fn input_delivery_registry(&self) -> Arc<InputDeliveryRegistry> {
+        Arc::clone(&self.input_deliveries)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -977,6 +1312,7 @@ mod tests {
     use crate::headless_terminal::{initial_session_status, HeadlessTerminal};
     use crate::protocol::{AgentProvider, SessionStatus};
     use crate::pty::PtySession;
+    use tokio::sync::Mutex;
 
     fn spawn_test_record(
         provider: AgentProvider,
@@ -1011,6 +1347,312 @@ mod tests {
         Ok(Arc::new(SessionHandle::new(spawn_test_record(
             provider, status,
         )?)))
+    }
+
+    #[tokio::test]
+    async fn input_submission_enqueues_message_and_enter_once_under_delivery_identity() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+
+        let first_handle = Arc::clone(&handle);
+        let first = tokio::spawn(async move {
+            first_handle
+                .enqueue_input_submission(
+                    "action-1".to_string(),
+                    b"finish the post".to_vec(),
+                    Duration::from_millis(150),
+                )
+                .await
+        });
+        let queued = input_rx.recv().await.expect("atomic submission");
+        assert!(
+            !first.is_finished(),
+            "the daemon must not acknowledge before both queued chunks are written"
+        );
+        assert_eq!(queued.delivery_id.as_deref(), Some("action-1"));
+        assert_eq!(queued.chunks.len(), 2);
+        assert_eq!(queued.chunks[0].data, b"finish the post");
+        assert_eq!(queued.chunks[0].delay_after, Duration::from_millis(150));
+        assert_eq!(queued.chunks[1].data, vec![b'\r']);
+        assert!(queued.chunks[1].delay_after.is_zero());
+
+        let concurrent_retry_handle = Arc::clone(&handle);
+        let concurrent_retry = tokio::spawn(async move {
+            concurrent_retry_handle
+                .enqueue_input_submission(
+                    "action-1".to_string(),
+                    b"finish the post".to_vec(),
+                    Duration::from_millis(150),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(
+                input_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "a retry that joins an in-flight delivery must not enqueue a second batch"
+        );
+
+        handle.complete_input_submission("action-1", Ok(())).await;
+        first.await.unwrap().unwrap();
+        concurrent_retry.await.unwrap().unwrap();
+        handle
+            .enqueue_input_submission(
+                "action-1".to_string(),
+                b"finish the post".to_vec(),
+                Duration::from_millis(150),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                input_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "retrying the same durable delivery must not enqueue it twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_input_identity_survives_session_removal_and_replacement() {
+        let first = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut first_rx = first.take_input_rx().await.expect("first input queue");
+        let mut manager = SessionManager::new();
+        manager.insert("task-1".to_string(), Arc::clone(&first));
+
+        let submitting = {
+            let first = Arc::clone(&first);
+            tokio::spawn(async move {
+                first
+                    .enqueue_input_submission(
+                        "durable-action".to_string(),
+                        b"finish the post".to_vec(),
+                        Duration::from_millis(150),
+                    )
+                    .await
+            })
+        };
+        let queued = first_rx.recv().await.expect("first submission");
+        assert_eq!(queued.delivery_id.as_deref(), Some("durable-action"));
+        let registry = manager.input_delivery_registry();
+        assert!(
+            !registry.is_completed("durable-action").await,
+            "the retry's first completed-ID check races before writer acknowledgement"
+        );
+        let retry_wait = {
+            let registry = Arc::clone(&registry);
+            tokio::spawn(async move { registry.wait_for_existing("durable-action").await })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !retry_wait.is_finished(),
+            "a retry must join the daemon-scoped in-flight delivery"
+        );
+        manager.remove("task-1");
+        first
+            .complete_input_submission("durable-action", Ok(()))
+            .await;
+        assert!(
+            registry.is_completed("durable-action").await,
+            "a retry that sees the session missing must catch completion on its second check"
+        );
+        submitting.await.unwrap().unwrap();
+        assert_eq!(retry_wait.await.unwrap(), Some(Ok(())));
+
+        let replacement = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut replacement_rx = replacement
+            .take_input_rx()
+            .await
+            .expect("replacement input queue");
+        manager.insert("task-1".to_string(), Arc::clone(&replacement));
+        replacement
+            .enqueue_input_submission(
+                "durable-action".to_string(),
+                b"finish the post".to_vec(),
+                Duration::from_millis(150),
+            )
+            .await
+            .expect("replacement sees daemon-level completed identity");
+        assert!(
+            matches!(
+                replacement_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "lost-ack replay must not enqueue a second PTY sequence"
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_registry_barrier_includes_delivery_from_a_removed_session() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+        let mut manager = SessionManager::new();
+        manager.insert("task-1".to_string(), Arc::clone(&handle));
+
+        let submitting = {
+            let handle = Arc::clone(&handle);
+            tokio::spawn(async move {
+                handle
+                    .enqueue_input_submission(
+                        "removed-during-kill".to_string(),
+                        b"finish the post".to_vec(),
+                        Duration::ZERO,
+                    )
+                    .await
+            })
+        };
+        input_rx.recv().await.expect("queued submission");
+
+        let removed = manager.remove("task-1").expect("session claimed by kill");
+        manager.seal_for_handoff();
+        let registry = manager.input_delivery_registry();
+        let barrier = {
+            let registry = Arc::clone(&registry);
+            tokio::spawn(async move { registry.wait_for_all_in_flight().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !barrier.is_finished(),
+            "handoff must wait for a delivery owned by a just-removed session"
+        );
+
+        removed
+            .complete_input_submission("removed-during-kill", Ok(()))
+            .await;
+        submitting.await.unwrap().unwrap();
+        barrier.await.unwrap();
+        assert_eq!(
+            registry.completed_ids().await,
+            vec!["removed-during-kill"],
+            "the completed identity must be present before handoff snapshots it"
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_snapshot_freezes_new_submissions_until_abort_unseals() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+        let manager = Arc::new(Mutex::new(SessionManager::new()));
+        manager
+            .lock()
+            .await
+            .insert("task-1".to_string(), Arc::clone(&handle));
+
+        let first_submit = {
+            let handle = Arc::clone(&handle);
+            tokio::spawn(async move {
+                handle
+                    .enqueue_input_submission(
+                        "before-handoff".to_string(),
+                        b"first".to_vec(),
+                        Duration::ZERO,
+                    )
+                    .await
+            })
+        };
+        input_rx.recv().await.expect("first queued submission");
+
+        manager.lock().await.seal_for_handoff();
+        let snapshot = {
+            let handle = Arc::clone(&handle);
+            tokio::spawn(async move { handle.handoff_parts().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !snapshot.is_finished(),
+            "handoff must wait for an already admitted submission"
+        );
+        handle
+            .complete_input_submission("before-handoff", Ok(()))
+            .await;
+        first_submit.await.unwrap().unwrap();
+        assert!(snapshot.await.unwrap().unwrap().is_some());
+
+        let after_snapshot = {
+            let handle = Arc::clone(&handle);
+            tokio::spawn(async move {
+                handle
+                    .enqueue_input_submission(
+                        "after-snapshot".to_string(),
+                        b"second".to_vec(),
+                        Duration::ZERO,
+                    )
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !after_snapshot.is_finished(),
+            "a sealed handoff must not admit input after its identity snapshot"
+        );
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        manager.lock().await.unseal_for_handoff();
+        input_rx
+            .recv()
+            .await
+            .expect("submission queued after abort");
+        handle
+            .complete_input_submission("after-snapshot", Ok(()))
+            .await;
+        after_snapshot.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn input_submission_fails_if_the_writer_stops_between_message_and_enter() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+        let submit_handle = Arc::clone(&handle);
+        let submit = tokio::spawn(async move {
+            submit_handle
+                .enqueue_input_submission(
+                    "action-between".to_string(),
+                    b"finish the post".to_vec(),
+                    Duration::from_millis(150),
+                )
+                .await
+        });
+        let queued = input_rx.recv().await.expect("atomic submission");
+        assert_eq!(queued.chunks[0].data, b"finish the post");
+        assert_eq!(queued.chunks[1].data, vec![b'\r']);
+
+        handle
+            .complete_input_submission(
+                "action-between",
+                Err("PTY write failed before Enter".to_string()),
+            )
+            .await;
+        assert_eq!(
+            submit.await.unwrap().unwrap_err(),
+            "PTY write failed before Enter"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_writer_rejects_submissions_admitted_after_the_drain() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+        handle
+            .fail_all_input_submissions("PTY writer stopped")
+            .await;
+
+        assert!(handle
+            .enqueue_input_submission(
+                "after-writer-stop".to_string(),
+                b"must not queue".to_vec(),
+                Duration::ZERO,
+            )
+            .await
+            .is_err());
+        assert!(matches!(
+            input_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]
