@@ -22,10 +22,11 @@ use super::utils::{
     extract_request_id, load_or_create_identity, local_capabilities_json,
     pairing_verification_code, peer_store, prune_outgoing_transfers, prune_transfer_artifacts,
     remove_owned_artifact_paths, supports_authenticated_task_requests, take_transfer_artifacts,
-    write_json_line, ArtifactFraming,
+    write_bounded_legacy_json_line, write_json_line, ArtifactFraming,
 };
 use crate::crypto::{
-    artifact_stream_context, open_json, parse_public_key, seal_json, StreamSealer,
+    artifact_stream_context, open_json, parse_public_key, seal_json, seal_json_bounded,
+    StreamSealer,
 };
 use crate::peer_store::PeerRecord;
 use crate::protocol::{PairingPeer, PeerRequest, PeerResponse};
@@ -33,7 +34,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
 use rand_core::{OsRng, RngCore};
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -49,6 +50,25 @@ pub(super) struct LegacyArtifactMaterialization {
     _permit: OwnedSemaphorePermit,
 }
 
+#[derive(Serialize)]
+struct LegacyArtifactMetadataWire<'a> {
+    request_id: &'a str,
+    transfer_id: &'a str,
+    artifact_id: &'a str,
+    artifact_framing: &'a str,
+    filename: &'a str,
+    payload_b64: &'a str,
+}
+
+#[derive(Serialize)]
+struct LegacyArtifactResponseWire<'a> {
+    #[serde(rename = "type")]
+    response_type: &'static str,
+    request_id: &'a str,
+    transfer_id: &'a str,
+    sealed_payload: &'a str,
+}
+
 pub(super) async fn read_bounded_legacy_artifact<R>(
     reader: R,
     observed_size: u64,
@@ -58,11 +78,7 @@ pub(super) async fn read_bounded_legacy_artifact<R>(
 where
     R: AsyncRead + Unpin,
 {
-    let _permit = permits.try_acquire_owned().map_err(|_| {
-        RuntimeError::Backpressure(
-            "legacy artifact response materialization capacity is exhausted".into(),
-        )
-    })?;
+    let _permit = super::try_acquire_legacy_artifact_memory(permits, "serialization")?;
     if observed_size > maximum_size {
         return Err(RuntimeError::Protocol(format!(
             "transfer artifact exceeds maximum size of {maximum_size} bytes",
@@ -79,10 +95,7 @@ where
             "transfer artifact exceeds maximum size of {maximum_size} bytes",
         )));
     }
-    Ok(LegacyArtifactMaterialization {
-        payload,
-        _permit: _permit,
-    })
+    Ok(LegacyArtifactMaterialization { payload, _permit })
 }
 
 pub(super) async fn run_listener(listener: TcpListener, context: ListenerContext) {
@@ -815,31 +828,49 @@ async fn handle_connection(
                             file,
                             metadata.len(),
                             maximum_artifact_size,
-                            Arc::clone(&context.legacy_artifact_response_permits),
+                            Arc::clone(&context.legacy_artifact_memory_permits),
                         )
                         .await?;
                         let payload_b64 = URL_SAFE_NO_PAD.encode(&materialization.payload);
-                        let sealed_payload = seal_json(
-                            &identity,
-                            &requester_public_key,
-                            &serde_json::json!({
-                                "request_id": request_id,
-                                "transfer_id": transfer_id,
-                                "artifact_id": artifact_id,
-                                "artifact_framing": artifact_framing.name(),
-                                "filename": filename,
-                                "payload_b64": payload_b64,
-                            }),
-                        )?;
+                        let retained_input_capacity =
+                            super::legacy_artifact_retained_capacity(&[
+                                materialization.payload.capacity(),
+                                payload_b64.capacity(),
+                            ])?;
+                        let sealed_payload = {
+                            let metadata = LegacyArtifactMetadataWire {
+                                request_id: &request_id,
+                                transfer_id: &transfer_id,
+                                artifact_id,
+                                artifact_framing: artifact_framing.name(),
+                                filename: &filename,
+                                payload_b64: &payload_b64,
+                            };
+                            seal_json_bounded(
+                                &identity,
+                                &requester_public_key,
+                                &metadata,
+                                retained_input_capacity,
+                                super::MAX_LEGACY_ARTIFACT_METADATA_BYTES,
+                                super::LEGACY_ARTIFACT_ALLOCATION_BUDGET_BYTES,
+                            )?
+                        };
+                        drop(payload_b64);
                         legacy_response_write_started = true;
-                        write_json_line(
+                        let retained_response_capacity =
+                            super::legacy_artifact_retained_capacity(&[
+                                materialization.payload.capacity(),
+                                sealed_payload.capacity(),
+                            ])?;
+                        write_bounded_legacy_json_line(
                             &mut stream,
-                            &PeerResponse::FetchTransferArtifact {
-                                request_id: request_id.clone(),
-                                transfer_id,
-                                sealed_payload,
-                                stream_header: None,
+                            &LegacyArtifactResponseWire {
+                                response_type: "fetch_transfer_artifact",
+                                request_id: &request_id,
+                                transfer_id: &transfer_id,
+                                sealed_payload: &sealed_payload,
                             },
+                            retained_response_capacity,
                         )
                         .await
                     })

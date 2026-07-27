@@ -7211,6 +7211,113 @@ async fn authenticated_legacy_artifact_response_rejects_allocation_amplification
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bidirectional_legacy_fetches_share_each_process_memory_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-legacy-first",
+        "First",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let second = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-legacy-second",
+        "Second",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&first, &second, "peer-legacy-second").await;
+
+    for runtime in [&first, &second] {
+        let identity = runtime.local_identity();
+        let endpoint = runtime_endpoint(temp.path(), &identity.peer_id);
+        PeerRegistry::new(temp.path().to_path_buf())
+            .write_entry(&PeerRegistryEntry {
+                peer_id: identity.peer_id,
+                display_name: identity.display_name,
+                endpoint,
+                pid: std::process::id(),
+                public_key: identity.public_key,
+                protocol_version: 2,
+                accepting_transfers: true,
+            })
+            .unwrap();
+    }
+
+    let first_to_second = first
+        .prepare_transfer_preflight("peer-legacy-second", "task-first")
+        .await
+        .unwrap();
+    let second_to_first = second
+        .prepare_transfer_preflight("peer-legacy-first", "task-second")
+        .await
+        .unwrap();
+    let first_artifact = temp.path().join("first-legacy.bundle");
+    std::fs::write(&first_artifact, vec![b'a'; 4 * 1024 * 1024]).unwrap();
+    first
+        .stage_transfer_artifact(
+            &first_to_second.transfer_id,
+            "artifact-first",
+            first_artifact,
+            false,
+        )
+        .await
+        .unwrap();
+    let second_artifact = temp.path().join("second-legacy.bundle");
+    std::fs::write(&second_artifact, vec![b'b'; 4 * 1024 * 1024]).unwrap();
+    second
+        .stage_transfer_artifact(
+            &second_to_first.transfer_id,
+            "artifact-second",
+            second_artifact,
+            false,
+        )
+        .await
+        .unwrap();
+
+    first
+        .prepare_transfer_commit(
+            &first_to_second.transfer_id,
+            json!({
+                "target_peer_id": "peer-legacy-second",
+                "task": { "source_task_id": "task-first" }
+            }),
+        )
+        .await
+        .unwrap();
+    let _second_incoming = next_incoming_transfer_request(&second).await;
+    second
+        .prepare_transfer_commit(
+            &second_to_first.transfer_id,
+            json!({
+                "target_peer_id": "peer-legacy-first",
+                "task": { "source_task_id": "task-second" }
+            }),
+        )
+        .await
+        .unwrap();
+    let _first_incoming = next_incoming_transfer_request(&first).await;
+
+    let (first_receive, second_receive) = tokio::join!(
+        first.fetch_transfer_artifact(&second_to_first.transfer_id, "artifact-second"),
+        second.fetch_transfer_artifact(&first_to_second.transfer_id, "artifact-first"),
+    );
+    let results = [first_receive, second_receive];
+    assert!(
+        results.iter().any(|result| {
+            result.as_ref().is_err_and(|error| {
+                error.to_string().contains("legacy artifact")
+                    && error.to_string().contains("capacity is exhausted")
+            })
+        }),
+        "bidirectional legacy transfers both crossed the per-process aggregate memory gate",
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn destination_protocol_change_after_preflight_upgrades_artifact_framing_monotonically() {
     let temp = tempfile::tempdir().unwrap();

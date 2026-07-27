@@ -264,6 +264,88 @@ async fn legacy_artifact_materialization_admits_only_one_reader() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_artifact_sender_and_receiver_share_one_memory_admission() {
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let first_permits = std::sync::Arc::clone(&permits);
+    let (first_reader, mut first_writer) = tokio::io::duplex(16);
+    let sender = tokio::spawn(async move {
+        listener::read_bounded_legacy_artifact(first_reader, 4, 4, first_permits).await
+    });
+
+    while permits.available_permits() != 0 {
+        tokio::task::yield_now().await;
+    }
+
+    let receive_error =
+        super::try_acquire_legacy_artifact_memory(std::sync::Arc::clone(&permits), "receive")
+            .expect_err("legacy receive overlapped legacy response serialization");
+    assert!(matches!(receive_error, RuntimeError::Backpressure(_)));
+
+    use tokio::io::AsyncWriteExt as _;
+    first_writer.write_all(b"data").await.unwrap();
+    drop(first_writer);
+    let materialization = sender.await.unwrap().unwrap();
+    drop(materialization);
+
+    let receiver =
+        super::try_acquire_legacy_artifact_memory(std::sync::Arc::clone(&permits), "receive")
+            .expect("legacy receive should acquire the shared budget after serialization");
+    let send_error = listener::read_bounded_legacy_artifact(
+        std::io::Cursor::new(b"data".to_vec()),
+        4,
+        4,
+        permits,
+    )
+    .await
+    .expect_err("legacy serialization overlapped legacy receive");
+    assert!(matches!(send_error, RuntimeError::Backpressure(_)));
+    drop(receiver);
+}
+
+#[test]
+fn legacy_artifact_allocation_boundary_uses_retained_capacity() {
+    let response_line = String::with_capacity(4 * 1024);
+    let unescaped_envelope = String::with_capacity(2 * 1024);
+    let ciphertext = Vec::<u8>::with_capacity(1024);
+    assert_eq!(response_line.len(), 0);
+    assert_eq!(unescaped_envelope.len(), 0);
+    assert_eq!(ciphertext.len(), 0);
+
+    let capacities = [
+        response_line.capacity(),
+        unescaped_envelope.capacity(),
+        ciphertext.capacity(),
+    ];
+    let exact_budget = capacities.iter().sum();
+    super::ensure_legacy_artifact_allocation_capacity(&capacities, exact_budget)
+        .expect("the exact retained-capacity boundary must be admitted");
+    let error = super::ensure_legacy_artifact_allocation_capacity(&capacities, exact_budget - 1)
+        .expect_err("one retained byte above budget must be rejected");
+    assert!(
+        error.to_string().contains("memory budget"),
+        "unexpected retained-capacity error: {error}",
+    );
+}
+
+#[tokio::test]
+async fn legacy_artifact_line_growth_retains_no_capacity_above_its_wire_cap() {
+    let maximum = 32 * 1024;
+    let mut wire = vec![b'x'; maximum - 1];
+    wire.push(b'\n');
+    let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(wire));
+
+    let line = peer::read_bounded_artifact_response_line(&mut reader, maximum)
+        .await
+        .expect("the exact wire boundary must remain readable");
+    assert_eq!(line.len(), maximum);
+    assert!(
+        line.capacity() <= maximum,
+        "bounded line growth retained {} bytes for a {maximum}-byte wire cap",
+        line.capacity(),
+    );
+}
+
 #[tokio::test]
 async fn legacy_artifact_materialization_checks_bytes_read_after_metadata() {
     let temp = tempfile::tempdir().unwrap();
@@ -355,6 +437,11 @@ fn legacy_artifact_response_line_has_a_hard_memory_derived_cap() {
         super::MAX_LEGACY_ARTIFACT_RESPONSE_BYTES
             < super::LEGACY_ARTIFACT_TOTAL_MEMORY_BUDGET_BYTES as usize,
         "legacy line alone exhausted the total response memory budget",
+    );
+    assert_eq!(
+        super::MAX_LEGACY_ARTIFACT_PAYLOAD_B64_BYTES,
+        178_956_971,
+        "the wire cap must begin with the exact unpadded encoding of 128 MiB",
     );
 }
 

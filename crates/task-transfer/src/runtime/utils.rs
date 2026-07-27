@@ -136,6 +136,35 @@ where
     Ok(())
 }
 
+pub(super) async fn write_bounded_legacy_json_line<T>(
+    stream: &mut TcpStream,
+    value: &T,
+    retained_capacity_bytes: usize,
+) -> Result<(), RuntimeError>
+where
+    T: serde::Serialize,
+{
+    let encoded = serde_json::to_vec(value)?;
+    let wire_bytes = encoded
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| RuntimeError::Protocol("legacy artifact response size overflow".into()))?;
+    if wire_bytes > super::MAX_LEGACY_ARTIFACT_RESPONSE_BYTES {
+        return Err(RuntimeError::Protocol(format!(
+            "legacy artifact response exceeds maximum size of {} bytes",
+            super::MAX_LEGACY_ARTIFACT_RESPONSE_BYTES,
+        )));
+    }
+    super::ensure_legacy_artifact_allocation_capacity(
+        &[retained_capacity_bytes, encoded.capacity()],
+        super::LEGACY_ARTIFACT_ALLOCATION_BUDGET_BYTES,
+    )?;
+    stream.write_all(&encoded).await?;
+    stream.write_all(b"\n").await?;
+    stream.flush().await?;
+    Ok(())
+}
+
 pub(super) fn registry_entry_path(root: &Path, peer_id: &str) -> PathBuf {
     root.join(format!("{}.json", URL_SAFE_NO_PAD.encode(peer_id)))
 }

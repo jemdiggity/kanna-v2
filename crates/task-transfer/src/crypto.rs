@@ -1,6 +1,6 @@
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
-use chacha20poly1305::aead::{Aead, Payload};
+use chacha20poly1305::aead::{Aead, AeadInPlace, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use rand_core::{OsRng, RngCore};
@@ -33,8 +33,22 @@ pub enum CryptoError {
     InvalidNonceLength(usize),
     #[error("invalid ciphertext length: {0}")]
     InvalidCiphertextLength(usize),
+    #[error("ciphertext base64 encoding is {actual} bytes; maximum is {maximum}")]
+    CiphertextEncodingTooLarge { actual: usize, maximum: usize },
+    #[error("invalid padded base64 length: {0}")]
+    InvalidPaddedBase64Length(usize),
+    #[error("sealed payload plaintext is {actual} bytes; maximum is {maximum}")]
+    PlaintextTooLarge { actual: usize, maximum: usize },
+    #[error("sealed payload retained allocations exceed the {maximum}-byte memory budget")]
+    AllocationBudgetExceeded { maximum: usize },
+    #[error("could not reserve bounded sealed payload allocation")]
+    AllocationFailed,
     #[error("invalid public key length: expected 32 bytes, got {0}")]
     InvalidPublicKeyLength(usize),
+    #[error("invalid encoded public key length: expected 43 bytes, got {0}")]
+    InvalidEncodedPublicKeyLength(usize),
+    #[error("invalid encoded nonce length: expected 32 bytes, got {0}")]
+    InvalidEncodedNonceLength(usize),
     #[error("invalid secret key length: expected 32 bytes, got {0}")]
     InvalidSecretKeyLength(usize),
     #[error("shared key derivation failed")]
@@ -53,15 +67,8 @@ pub enum CryptoError {
     StreamSequenceExhausted,
 }
 
-#[derive(Debug, Serialize)]
-struct SealedJsonEnvelope {
-    version: u32,
-    ephemeral_public_key: String,
-    nonce_b64: String,
-    ciphertext_b64: String,
-}
-
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BorrowedSealedJsonEnvelope<'a> {
     version: u32,
     #[serde(borrow)]
@@ -158,6 +165,48 @@ pub fn seal_json(
     receiver_public: &PublicKey,
     payload: &Value,
 ) -> Result<String, CryptoError> {
+    seal_serializable_json(
+        sender,
+        receiver_public,
+        payload,
+        None,
+        usize::MAX,
+        usize::MAX,
+    )
+}
+
+pub(crate) fn seal_json_bounded<T>(
+    sender: &TransferIdentity,
+    receiver_public: &PublicKey,
+    payload: &T,
+    retained_capacity_bytes: usize,
+    max_plaintext_bytes: usize,
+    max_total_capacity_bytes: usize,
+) -> Result<String, CryptoError>
+where
+    T: Serialize + ?Sized,
+{
+    seal_serializable_json(
+        sender,
+        receiver_public,
+        payload,
+        Some(retained_capacity_bytes),
+        max_plaintext_bytes,
+        max_total_capacity_bytes,
+    )
+}
+
+fn seal_serializable_json<T>(
+    sender: &TransferIdentity,
+    receiver_public: &PublicKey,
+    payload: &T,
+    retained_capacity_bytes: Option<usize>,
+    max_plaintext_bytes: usize,
+    max_total_capacity_bytes: usize,
+) -> Result<String, CryptoError>
+where
+    T: Serialize + ?Sized,
+{
     let ephemeral_secret = generate_secret();
     let ephemeral_public_key = PublicKey::from(&ephemeral_secret);
     let cipher = build_cipher(
@@ -167,29 +216,66 @@ pub fn seal_json(
         receiver_public,
         &ephemeral_public_key,
     )?;
-    let plaintext = serde_json::to_vec(payload)?;
+    let mut ciphertext = serde_json::to_vec(payload)?;
+    if ciphertext.len() > max_plaintext_bytes {
+        return Err(CryptoError::PlaintextTooLarge {
+            actual: ciphertext.len(),
+            maximum: max_plaintext_bytes,
+        });
+    }
+    if let Some(retained) = retained_capacity_bytes {
+        ensure_allocation_budget(retained, ciphertext.capacity(), max_total_capacity_bytes)?;
+    }
     let mut nonce_bytes = [0u8; 24];
     OsRng.fill_bytes(&mut nonce_bytes);
     let aad = associated_data(&sender.public_key, receiver_public, &ephemeral_public_key);
 
-    let ciphertext = cipher
-        .encrypt(
+    ciphertext
+        .try_reserve_exact(16)
+        .map_err(|_| CryptoError::AllocationFailed)?;
+    if let Some(retained) = retained_capacity_bytes {
+        ensure_allocation_budget(retained, ciphertext.capacity(), max_total_capacity_bytes)?;
+    }
+    cipher
+        .encrypt_in_place(
             XNonce::from_slice(&nonce_bytes),
-            Payload {
-                msg: plaintext.as_ref(),
-                aad: aad.as_slice(),
-            },
+            aad.as_slice(),
+            &mut ciphertext,
         )
         .map_err(|_| CryptoError::Encrypt)?;
 
-    let envelope = SealedJsonEnvelope {
-        version: ENVELOPE_VERSION,
-        ephemeral_public_key: public_key_to_string(&ephemeral_public_key),
-        nonce_b64: STANDARD.encode(nonce_bytes),
-        ciphertext_b64: STANDARD.encode(ciphertext),
-    };
-
-    serde_json::to_string(&envelope).map_err(CryptoError::from)
+    let ephemeral_public_key = public_key_to_string(&ephemeral_public_key);
+    let nonce_b64 = STANDARD.encode(nonce_bytes);
+    let ciphertext_b64_bytes = ciphertext.len().saturating_add(2) / 3 * 4;
+    let envelope_bytes = 74usize
+        .checked_add(ephemeral_public_key.len())
+        .and_then(|size| size.checked_add(nonce_b64.len()))
+        .and_then(|size| size.checked_add(ciphertext_b64_bytes))
+        .ok_or(CryptoError::AllocationFailed)?;
+    let mut envelope = String::new();
+    envelope
+        .try_reserve_exact(envelope_bytes)
+        .map_err(|_| CryptoError::AllocationFailed)?;
+    if let Some(retained) = retained_capacity_bytes {
+        ensure_allocation_budget(
+            retained,
+            ciphertext
+                .capacity()
+                .checked_add(ephemeral_public_key.capacity())
+                .and_then(|size| size.checked_add(nonce_b64.capacity()))
+                .and_then(|size| size.checked_add(envelope.capacity()))
+                .ok_or(CryptoError::AllocationFailed)?,
+            max_total_capacity_bytes,
+        )?;
+    }
+    envelope.push_str("{\"version\":1,\"ephemeral_public_key\":\"");
+    envelope.push_str(&ephemeral_public_key);
+    envelope.push_str("\",\"nonce_b64\":\"");
+    envelope.push_str(&nonce_b64);
+    envelope.push_str("\",\"ciphertext_b64\":\"");
+    STANDARD.encode_string(&ciphertext, &mut envelope);
+    envelope.push_str("\"}");
+    Ok(envelope)
 }
 
 pub fn open_json(
@@ -244,6 +330,138 @@ pub fn open_json_bytes(
             },
         )
         .map_err(|_| CryptoError::Decrypt)
+}
+
+pub(crate) fn open_json_bytes_bounded(
+    receiver: &TransferIdentity,
+    sender_public: &PublicKey,
+    sealed: &str,
+    max_ciphertext_b64_bytes: usize,
+    max_plaintext_bytes: usize,
+    retained_capacity_bytes: usize,
+    max_total_capacity_bytes: usize,
+) -> Result<Vec<u8>, CryptoError> {
+    const ENCODED_PUBLIC_KEY_BYTES: usize = 43;
+    const ENCODED_NONCE_BYTES: usize = 32;
+    const AEAD_TAG_BYTES: usize = 16;
+
+    let envelope: BorrowedSealedJsonEnvelope<'_> = serde_json::from_str(sealed)?;
+    if envelope.version != ENVELOPE_VERSION {
+        return Err(CryptoError::UnsupportedVersion(envelope.version));
+    }
+    if envelope.ephemeral_public_key.len() != ENCODED_PUBLIC_KEY_BYTES {
+        return Err(CryptoError::InvalidEncodedPublicKeyLength(
+            envelope.ephemeral_public_key.len(),
+        ));
+    }
+    if envelope.nonce_b64.len() != ENCODED_NONCE_BYTES {
+        return Err(CryptoError::InvalidEncodedNonceLength(
+            envelope.nonce_b64.len(),
+        ));
+    }
+    if envelope.ciphertext_b64.len() > max_ciphertext_b64_bytes {
+        return Err(CryptoError::CiphertextEncodingTooLarge {
+            actual: envelope.ciphertext_b64.len(),
+            maximum: max_ciphertext_b64_bytes,
+        });
+    }
+
+    let ephemeral_public_key = parse_public_key(envelope.ephemeral_public_key)?;
+    let nonce_bytes = STANDARD.decode(envelope.nonce_b64)?;
+    if nonce_bytes.len() != 24 {
+        return Err(CryptoError::InvalidNonceLength(nonce_bytes.len()));
+    }
+
+    let ciphertext_len = padded_base64_decoded_len(envelope.ciphertext_b64)?;
+    if ciphertext_len < AEAD_TAG_BYTES {
+        return Err(CryptoError::InvalidCiphertextLength(ciphertext_len));
+    }
+    let plaintext_len = ciphertext_len - AEAD_TAG_BYTES;
+    if plaintext_len > max_plaintext_bytes {
+        return Err(CryptoError::PlaintextTooLarge {
+            actual: plaintext_len,
+            maximum: max_plaintext_bytes,
+        });
+    }
+
+    let mut ciphertext = Vec::new();
+    ciphertext
+        .try_reserve_exact(ciphertext_len)
+        .map_err(|_| CryptoError::AllocationFailed)?;
+    ensure_allocation_budget(
+        retained_capacity_bytes,
+        ciphertext.capacity(),
+        max_total_capacity_bytes,
+    )?;
+    ciphertext.resize(ciphertext_len, 0);
+    let decoded = STANDARD
+        .decode_slice(envelope.ciphertext_b64, &mut ciphertext)
+        .map_err(|error| match error {
+            base64::DecodeSliceError::DecodeError(error) => CryptoError::Base64(error),
+            base64::DecodeSliceError::OutputSliceTooSmall => CryptoError::AllocationFailed,
+        })?;
+    if decoded != ciphertext_len {
+        return Err(CryptoError::InvalidCiphertextLength(decoded));
+    }
+
+    let cipher = build_cipher(
+        receiver
+            .secret
+            .diffie_hellman(&ephemeral_public_key)
+            .as_bytes(),
+        receiver.secret.diffie_hellman(sender_public).as_bytes(),
+        sender_public,
+        &receiver.public_key,
+        &ephemeral_public_key,
+    )?;
+    let aad = associated_data(sender_public, &receiver.public_key, &ephemeral_public_key);
+    cipher
+        .decrypt_in_place(
+            XNonce::from_slice(nonce_bytes.as_slice()),
+            aad.as_slice(),
+            &mut ciphertext,
+        )
+        .map_err(|_| CryptoError::Decrypt)?;
+    if ciphertext.len() > max_plaintext_bytes {
+        return Err(CryptoError::PlaintextTooLarge {
+            actual: ciphertext.len(),
+            maximum: max_plaintext_bytes,
+        });
+    }
+    Ok(ciphertext)
+}
+
+fn padded_base64_decoded_len(encoded: &str) -> Result<usize, CryptoError> {
+    if !encoded.len().is_multiple_of(4) {
+        return Err(CryptoError::InvalidPaddedBase64Length(encoded.len()));
+    }
+    let padding = if encoded.ends_with("==") {
+        2
+    } else if encoded.ends_with('=') {
+        1
+    } else {
+        0
+    };
+    encoded
+        .len()
+        .checked_div(4)
+        .and_then(|quads| quads.checked_mul(3))
+        .and_then(|decoded| decoded.checked_sub(padding))
+        .ok_or(CryptoError::InvalidPaddedBase64Length(encoded.len()))
+}
+
+fn ensure_allocation_budget(
+    retained_capacity_bytes: usize,
+    additional_capacity_bytes: usize,
+    maximum: usize,
+) -> Result<(), CryptoError> {
+    if retained_capacity_bytes
+        .checked_add(additional_capacity_bytes)
+        .is_none_or(|retained| retained > maximum)
+    {
+        return Err(CryptoError::AllocationBudgetExceeded { maximum });
+    }
+    Ok(())
 }
 
 impl StreamSealer {
@@ -451,4 +669,84 @@ fn generate_secret() -> StaticSecret {
     let mut secret_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut secret_bytes);
     StaticSecret::from(secret_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_open_rejects_fixed_envelope_fields_before_decode() {
+        let sender = TransferIdentity::generate();
+        let receiver = TransferIdentity::generate();
+        let sealed = seal_json(
+            &sender,
+            &receiver.public_key,
+            &serde_json::json!({ "payload": "small" }),
+        )
+        .unwrap();
+        let mut envelope: serde_json::Value = serde_json::from_str(&sealed).unwrap();
+        envelope["ephemeral_public_key"] = serde_json::Value::String("oversized".repeat(8));
+        let malformed = serde_json::to_string(&envelope).unwrap();
+
+        let error = open_json_bytes_bounded(
+            &receiver,
+            &sender.public_key,
+            &malformed,
+            1024,
+            1024,
+            0,
+            4096,
+        )
+        .expect_err("an invalid fixed-size public key must be rejected before decode");
+        assert!(matches!(
+            error,
+            CryptoError::InvalidEncodedPublicKeyLength(_)
+        ));
+    }
+
+    #[test]
+    fn bounded_open_rejects_ciphertext_encoding_before_decode_allocation() {
+        let sender = TransferIdentity::generate();
+        let receiver = TransferIdentity::generate();
+        let sealed = seal_json(
+            &sender,
+            &receiver.public_key,
+            &serde_json::json!({ "payload": "small" }),
+        )
+        .unwrap();
+        let mut envelope: serde_json::Value = serde_json::from_str(&sealed).unwrap();
+        envelope["ciphertext_b64"] = serde_json::Value::String("A".repeat(68));
+        let malformed = serde_json::to_string(&envelope).unwrap();
+
+        let error =
+            open_json_bytes_bounded(&receiver, &sender.public_key, &malformed, 64, 48, 0, 4096)
+                .expect_err("ciphertext above the legitimate encoding bound must be rejected");
+        assert!(matches!(
+            error,
+            CryptoError::CiphertextEncodingTooLarge {
+                actual: 68,
+                maximum: 64
+            }
+        ));
+    }
+
+    #[test]
+    fn bounded_seal_counts_existing_retained_capacity() {
+        let sender = TransferIdentity::generate();
+        let receiver = TransferIdentity::generate();
+        let error = seal_json_bounded(
+            &sender,
+            &receiver.public_key,
+            &serde_json::json!({ "payload": "small" }),
+            4096,
+            1024,
+            4096,
+        )
+        .expect_err("serialization allocations must be aggregate with retained input buffers");
+        assert!(matches!(
+            error,
+            CryptoError::AllocationBudgetExceeded { maximum: 4096 }
+        ));
+    }
 }
