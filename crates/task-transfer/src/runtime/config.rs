@@ -149,6 +149,11 @@ impl RuntimeConfig {
         self
     }
 
+    pub fn with_max_incoming_connections(mut self, maximum: usize) -> Self {
+        self.max_incoming_connections = maximum.max(1);
+        self
+    }
+
     pub fn with_runtime_admission_limits(
         mut self,
         max_lifecycle_events: usize,

@@ -53,6 +53,10 @@ impl ArtifactFraming {
     pub(super) fn is_streamed(self) -> bool {
         matches!(self, Self::StreamedV3)
     }
+
+    pub(super) fn allows_authenticated_request(self, requested: Self) -> bool {
+        self == requested || matches!((self, requested), (Self::LegacySealedV1, Self::StreamedV3))
+    }
 }
 
 pub(super) fn parse_peer_response_line(

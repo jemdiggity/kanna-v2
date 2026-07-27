@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -6792,6 +6792,121 @@ async fn stalled_legacy_artifact_reader_releases_materialization_admission_for_r
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_stalled_legacy_readers_do_not_exhaust_listener_admission() {
+    let temp = tempfile::tempdir().unwrap();
+    let peer_timeout = Duration::from_secs(2);
+    let source = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-source-stalled-admission", "Source", temp.path(), 0)
+            .with_peer_request_timeout(peer_timeout)
+            .with_max_incoming_connections(2),
+    )
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination-stalled-admission",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination-stalled-admission").await;
+
+    let destination_identity = destination.local_identity();
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: destination_identity.peer_id,
+            display_name: destination_identity.display_name,
+            endpoint: runtime_endpoint(temp.path(), "peer-destination-stalled-admission"),
+            pid: std::process::id(),
+            public_key: destination_identity.public_key,
+            protocol_version: 2,
+            accepting_transfers: true,
+        })
+        .unwrap();
+
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination-stalled-admission", "task-source")
+        .await
+        .unwrap();
+    let artifact_path = temp.path().join("stalled-admission.bundle");
+    std::fs::write(&artifact_path, vec![b'x'; 8 * 1024 * 1024]).unwrap();
+    source
+        .stage_transfer_artifact(
+            &preflight.transfer_id,
+            "artifact-stalled-admission",
+            artifact_path,
+            false,
+        )
+        .await
+        .unwrap();
+
+    let destination_secret =
+        stored_runtime_identity(temp.path(), "peer-destination-stalled-admission");
+    let source_public_key = parse_public_key(&source.local_identity().public_key).unwrap();
+    let source_endpoint = runtime_endpoint(temp.path(), "peer-source-stalled-admission");
+    let make_request = |request_id: &str| PeerRequest::FetchTransferArtifact {
+        request_id: request_id.into(),
+        transfer_id: preflight.transfer_id.clone(),
+        requester_peer_id: "peer-destination-stalled-admission".into(),
+        sealed_payload: seal_json(
+            &destination_secret,
+            &source_public_key,
+            &json!({ "artifact_id": "artifact-stalled-admission" }),
+        )
+        .unwrap(),
+    };
+
+    let mut stalled_streams = Vec::new();
+    for index in 0..2 {
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(1024).unwrap();
+        let mut stream = socket
+            .connect(source_endpoint.parse().unwrap())
+            .await
+            .unwrap();
+        let request = make_request(&format!("stalled-admission-{index}"));
+        stream
+            .write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        stream.flush().await.unwrap();
+        stalled_streams.push(stream);
+        tokio::time::sleep(peer_timeout + Duration::from_millis(200)).await;
+    }
+
+    let mut probe = TcpStream::connect(&source_endpoint).await.unwrap();
+    let probe_request = PeerRequest::GetAuthenticatedRequestEpoch {
+        request_id: "stalled-admission-probe".into(),
+    };
+    probe
+        .write_all(format!("{}\n", serde_json::to_string(&probe_request).unwrap(),).as_bytes())
+        .await
+        .unwrap();
+    let mut response_line = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        BufReader::new(probe).read_line(&mut response_line),
+    )
+    .await
+    .expect("listener admission remained exhausted by timed-out legacy responses")
+    .unwrap();
+    let response: PeerResponse = serde_json::from_str(response_line.trim()).unwrap();
+    assert!(
+        matches!(
+            response,
+            PeerResponse::AuthenticatedRequestEpoch {
+                ref request_id,
+                ..
+            } if request_id == "stalled-admission-probe"
+        ),
+        "probe was not admitted after repeated stalled readers: {response:?}",
+    );
+
+    drop(stalled_streams);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_rejects_artifacts_above_the_legacy_materialization_limit() {
     let temp = tempfile::tempdir().unwrap();
     let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
@@ -6987,7 +7102,117 @@ async fn new_destination_fetches_a_legacy_sealed_artifact_from_an_older_source()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn destination_protocol_change_after_preflight_cannot_override_pinned_artifact_framing() {
+async fn authenticated_legacy_artifact_response_rejects_allocation_amplification() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source-amplification",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination-amplification",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination-amplification").await;
+
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination-amplification", "task-source")
+        .await
+        .unwrap();
+    source
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-destination-amplification",
+                "task": { "source_task_id": "task-source" }
+            }),
+        )
+        .await
+        .unwrap();
+    let _incoming = next_incoming_transfer_request(&destination).await;
+
+    let legacy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let legacy_port = legacy_listener.local_addr().unwrap().port();
+    let source_identity = stored_runtime_identity(temp.path(), "peer-source-amplification");
+    let source_public_key = source.local_identity().public_key;
+    let destination_public_key =
+        parse_public_key(&destination.local_identity().public_key).unwrap();
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-source-amplification".into(),
+            display_name: "Source".into(),
+            endpoint: format!("127.0.0.1:{legacy_port}"),
+            pid: std::process::id(),
+            public_key: source_public_key,
+            protocol_version: 2,
+            accepting_transfers: true,
+        })
+        .unwrap();
+
+    let transfer_id = preflight.transfer_id.clone();
+    let legacy_server = tokio::spawn(async move {
+        let (stream, _) = legacy_listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+        let PeerRequest::FetchTransferArtifact {
+            request_id,
+            transfer_id: requested_transfer_id,
+            ..
+        } = serde_json::from_str(request_line.trim()).unwrap()
+        else {
+            panic!("expected artifact fetch request");
+        };
+        assert_eq!(requested_transfer_id, transfer_id);
+        let allocation_amplifier = vec![json!([[], [], []]); 4_096];
+        let sealed_payload = seal_json(
+            &source_identity,
+            &destination_public_key,
+            &json!({
+                "request_id": request_id,
+                "transfer_id": requested_transfer_id,
+                "artifact_id": "artifact-amplification",
+                "filename": "amplification.bundle",
+                "payload_b64": "",
+                "allocation_amplifier": allocation_amplifier,
+            }),
+        )
+        .unwrap();
+        let response = PeerResponse::FetchTransferArtifact {
+            request_id,
+            transfer_id: requested_transfer_id,
+            sealed_payload,
+            stream_header: None,
+        };
+        writer
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .unwrap();
+    });
+
+    let result = destination
+        .fetch_transfer_artifact(&preflight.transfer_id, "artifact-amplification")
+        .await;
+    legacy_server.await.unwrap();
+    let error = result.expect_err(
+        "authenticated legacy metadata must reject unknown nested structures before Value allocation",
+    );
+    assert!(
+        error.to_string().contains("unknown field"),
+        "unexpected allocation-amplification rejection: {error}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destination_protocol_change_after_preflight_upgrades_artifact_framing_monotonically() {
     let temp = tempfile::tempdir().unwrap();
     let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
         "peer-source-framing",
@@ -7060,15 +7285,14 @@ async fn destination_protocol_change_after_preflight_cannot_override_pinned_arti
         .unwrap();
     let _incoming = next_incoming_transfer_request(&destination).await;
 
-    let error = destination
+    let fetched = destination
         .fetch_transfer_artifact(&preflight.transfer_id, "artifact-framing")
         .await
-        .expect_err("current discovery must not override the preflight-pinned framing");
-    assert!(
-        error
-            .to_string()
-            .contains("does not match negotiated legacy_sealed_v1 framing"),
-        "unexpected pinned-framing rejection: {error}",
+        .expect("a durable v2 preflight must allow the destination to upgrade to v3 framing");
+    assert_eq!(
+        std::fs::read(fetched.path).unwrap(),
+        b"framing-change-bundle",
+        "the monotonic framing upgrade changed the fetched artifact",
     );
 }
 

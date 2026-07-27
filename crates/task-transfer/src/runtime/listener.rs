@@ -702,6 +702,7 @@ async fn handle_connection(
             requester_peer_id,
             sealed_payload,
         }) => {
+            let mut legacy_response_write_started = false;
             match async {
                 let reservation = {
                     let mut transfers = context.outgoing_transfers.lock().await;
@@ -752,7 +753,9 @@ async fn handle_connection(
                 let artifact_framing = match request_payload.get("artifact_framing") {
                     Some(Value::String(name)) => {
                         let requested = ArtifactFraming::parse(name)?;
-                        if requested != negotiated_artifact_framing {
+                        if !negotiated_artifact_framing
+                            .allows_authenticated_request(requested)
+                        {
                             return Err(RuntimeError::Protocol(format!(
                                 "requested artifact framing {} does not match negotiated {} framing",
                                 requested.name(),
@@ -828,6 +831,7 @@ async fn handle_connection(
                                 "payload_b64": payload_b64,
                             }),
                         )?;
+                        legacy_response_write_started = true;
                         write_json_line(
                             &mut stream,
                             &PeerResponse::FetchTransferArtifact {
@@ -897,6 +901,12 @@ async fn handle_connection(
             .await
             {
                 Ok(()) => return Ok(()),
+                Err(error)
+                    if legacy_response_write_started
+                        || matches!(&error, RuntimeError::PeerRequestTimeout { .. }) =>
+                {
+                    return Err(error);
+                }
                 Err(error) => PeerResponse::Error {
                     request_id,
                     message: error.to_string(),

@@ -308,6 +308,40 @@ fn legacy_artifact_payload_size_is_rejected_before_decode() {
 }
 
 #[test]
+fn legacy_artifact_limit_preserves_the_protocol_v2_contract() {
+    assert_eq!(
+        super::MAX_LEGACY_TRANSFER_ARTIFACT_BYTES,
+        super::MAX_TRANSFER_ARTIFACT_BYTES,
+        "peers without an additive size capability retain the deployed 128 MiB contract",
+    );
+}
+
+#[test]
+fn legacy_artifact_receiver_checks_the_128_mib_boundary_before_decode() {
+    fn unpadded_base64_len(decoded_size: u64) -> u64 {
+        let complete_triples = decoded_size / 3;
+        complete_triples * 4
+            + match decoded_size % 3 {
+                0 => 0,
+                1 => 2,
+                2 => 3,
+                _ => unreachable!(),
+            }
+    }
+
+    let maximum = super::MAX_TRANSFER_ARTIFACT_BYTES;
+    peer::ensure_legacy_artifact_payload_length(unpadded_base64_len(maximum), maximum)
+        .expect("the deployed protocol-v2 maximum must remain receivable");
+    let error =
+        peer::ensure_legacy_artifact_payload_length(unpadded_base64_len(maximum + 1), maximum)
+            .expect_err("the first byte above the protocol-v2 maximum must be rejected");
+    assert!(
+        error.to_string().contains("exceeds maximum size"),
+        "unexpected receiver boundary error: {error}",
+    );
+}
+
+#[test]
 fn legacy_artifact_response_line_has_a_hard_memory_derived_cap() {
     assert_eq!(
         peer::artifact_response_line_limit(

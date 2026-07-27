@@ -27,18 +27,27 @@ pub use external_peers::{ExternalPeer, PeerRoutes, TransferTransport};
 pub use state::{StagedTransferArtifact, TransferRuntime};
 
 pub const MAX_TRANSFER_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
-const LEGACY_ARTIFACT_TOTAL_MEMORY_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
-const LEGACY_ARTIFACT_FIXED_MEMORY_ALLOWANCE_BYTES: u64 = 16 * 1024 * 1024;
-const LEGACY_ARTIFACT_MEMORY_BYTES_PER_PLAINTEXT_BYTE: u64 = 10;
-// A legacy response simultaneously materializes nested base64, JSON, encrypted,
-// response-line, and decoded buffers. Reserve fixed framing/allocation headroom,
-// then conservatively budget ten resident bytes per plaintext byte.
-pub const MAX_LEGACY_TRANSFER_ARTIFACT_BYTES: u64 = (LEGACY_ARTIFACT_TOTAL_MEMORY_BUDGET_BYTES
-    - LEGACY_ARTIFACT_FIXED_MEMORY_ALLOWANCE_BYTES)
-    / LEGACY_ARTIFACT_MEMORY_BYTES_PER_PLAINTEXT_BYTE;
+pub const MAX_LEGACY_TRANSFER_ARTIFACT_BYTES: u64 = MAX_TRANSFER_ARTIFACT_BYTES;
+// The deployed protocol-v2 contract is a whole-response 128 MiB artifact. A
+// strict borrowed parser keeps its response line, decoded ciphertext,
+// decrypted JSON, and decoded payload below this aggregate receiver budget.
+const LEGACY_ARTIFACT_TOTAL_MEMORY_BUDGET_BYTES: u64 = 1024 * 1024 * 1024;
 const LEGACY_ARTIFACT_RESPONSE_FIXED_ALLOWANCE_BYTES: u64 = 1024 * 1024;
 const LEGACY_ARTIFACT_RESPONSE_BYTES_PER_PLAINTEXT_BYTE: u64 = 2;
-pub(super) const MAX_LEGACY_ARTIFACT_RESPONSE_BYTES: usize =
-    (MAX_LEGACY_TRANSFER_ARTIFACT_BYTES * LEGACY_ARTIFACT_RESPONSE_BYTES_PER_PLAINTEXT_BYTE
-        + LEGACY_ARTIFACT_RESPONSE_FIXED_ALLOWANCE_BYTES) as usize;
+pub(super) const MAX_LEGACY_ARTIFACT_RESPONSE_BYTES: usize = {
+    let response_bytes = MAX_LEGACY_TRANSFER_ARTIFACT_BYTES
+        * LEGACY_ARTIFACT_RESPONSE_BYTES_PER_PLAINTEXT_BYTE
+        + LEGACY_ARTIFACT_RESPONSE_FIXED_ALLOWANCE_BYTES;
+    // The response line and its JSON-unescaped sealed envelope coexist. While
+    // opening the envelope, decoded ciphertext and decrypted metadata coexist
+    // too. Once opening returns, ciphertext has been released before the final
+    // artifact decode. Both bounded peaks must fit the aggregate budget.
+    let encrypted_metadata_bytes = response_bytes.div_ceil(4) * 3;
+    let envelope_open_peak = response_bytes * 2 + encrypted_metadata_bytes * 2;
+    let payload_decode_peak =
+        response_bytes * 2 + encrypted_metadata_bytes + MAX_LEGACY_TRANSFER_ARTIFACT_BYTES;
+    assert!(envelope_open_peak < LEGACY_ARTIFACT_TOTAL_MEMORY_BUDGET_BYTES);
+    assert!(payload_decode_peak < LEGACY_ARTIFACT_TOTAL_MEMORY_BUDGET_BYTES);
+    response_bytes as usize
+};
 pub(super) const TRANSFER_ARTIFACT_CHUNK_BYTES: usize = 64 * 1024;

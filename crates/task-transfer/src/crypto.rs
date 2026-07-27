@@ -53,12 +53,23 @@ pub enum CryptoError {
     StreamSequenceExhausted,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct SealedJsonEnvelope {
     version: u32,
     ephemeral_public_key: String,
     nonce_b64: String,
     ciphertext_b64: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BorrowedSealedJsonEnvelope<'a> {
+    version: u32,
+    #[serde(borrow)]
+    ephemeral_public_key: &'a str,
+    #[serde(borrow)]
+    nonce_b64: &'a str,
+    #[serde(borrow)]
+    ciphertext_b64: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,12 +197,21 @@ pub fn open_json(
     sender_public: &PublicKey,
     sealed: &str,
 ) -> Result<Value, CryptoError> {
-    let envelope: SealedJsonEnvelope = serde_json::from_str(sealed)?;
+    let plaintext = open_json_bytes(receiver, sender_public, sealed)?;
+    serde_json::from_slice(&plaintext).map_err(CryptoError::from)
+}
+
+pub fn open_json_bytes(
+    receiver: &TransferIdentity,
+    sender_public: &PublicKey,
+    sealed: &str,
+) -> Result<Vec<u8>, CryptoError> {
+    let envelope: BorrowedSealedJsonEnvelope<'_> = serde_json::from_str(sealed)?;
     if envelope.version != ENVELOPE_VERSION {
         return Err(CryptoError::UnsupportedVersion(envelope.version));
     }
 
-    let ephemeral_public_key = parse_public_key(&envelope.ephemeral_public_key)?;
+    let ephemeral_public_key = parse_public_key(envelope.ephemeral_public_key)?;
 
     let nonce_bytes = STANDARD.decode(envelope.nonce_b64)?;
     if nonce_bytes.len() != 24 {
@@ -215,7 +235,7 @@ pub fn open_json(
     )?;
     let aad = associated_data(sender_public, &receiver.public_key, &ephemeral_public_key);
 
-    let plaintext = cipher
+    cipher
         .decrypt(
             XNonce::from_slice(nonce_bytes.as_slice()),
             Payload {
@@ -223,9 +243,7 @@ pub fn open_json(
                 aad: aad.as_slice(),
             },
         )
-        .map_err(|_| CryptoError::Decrypt)?;
-
-    serde_json::from_slice(&plaintext).map_err(CryptoError::from)
+        .map_err(|_| CryptoError::Decrypt)
 }
 
 impl StreamSealer {

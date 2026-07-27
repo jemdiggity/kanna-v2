@@ -9,13 +9,15 @@ use super::utils::{
     prune_transfer_artifacts, sanitize_artifact_filename, supports_authenticated_task_requests,
     write_json_line, ArtifactFraming,
 };
-use crate::crypto::{artifact_stream_context, open_json, StreamOpener};
+use crate::crypto::{artifact_stream_context, open_json_bytes, SealedStreamHeader, StreamOpener};
 use crate::peer_store::PeerRecord;
 use crate::protocol::DiscoveredPeer;
 use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use rand_core::{OsRng, RngCore};
+use serde::Deserialize;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -23,6 +25,87 @@ use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
+
+const MAX_ARTIFACT_FILENAME_BYTES: usize = 255;
+const MAX_ARTIFACT_ERROR_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_STREAM_HEADER_FIELD_BYTES: usize = 64;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BorrowedStreamHeader<'a> {
+    version: u32,
+    #[serde(borrow)]
+    ephemeral_public_key: &'a str,
+    #[serde(borrow)]
+    nonce_prefix_b64: &'a str,
+}
+
+impl BorrowedStreamHeader<'_> {
+    fn to_owned_bounded(&self) -> Result<SealedStreamHeader, RuntimeError> {
+        if self.ephemeral_public_key.len() > MAX_STREAM_HEADER_FIELD_BYTES
+            || self.nonce_prefix_b64.len() > MAX_STREAM_HEADER_FIELD_BYTES
+        {
+            return Err(RuntimeError::Protocol(
+                "artifact stream header field exceeds maximum size".into(),
+            ));
+        }
+        Ok(SealedStreamHeader {
+            version: self.version,
+            ephemeral_public_key: self.ephemeral_public_key.to_owned(),
+            nonce_prefix_b64: self.nonce_prefix_b64.to_owned(),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactFetchWireResponse<'a> {
+    #[serde(rename = "type", borrow)]
+    response_type: &'a str,
+    #[serde(borrow)]
+    request_id: &'a str,
+    #[serde(default, borrow)]
+    transfer_id: Option<&'a str>,
+    #[serde(default, borrow)]
+    sealed_payload: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    stream_header: Option<BorrowedStreamHeader<'a>>,
+    #[serde(default, borrow)]
+    message: Option<Cow<'a, str>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyArtifactMetadata<'a> {
+    #[serde(default, borrow)]
+    request_id: Option<&'a str>,
+    #[serde(default, borrow)]
+    transfer_id: Option<&'a str>,
+    #[serde(borrow)]
+    artifact_id: Cow<'a, str>,
+    #[serde(default, borrow)]
+    artifact_framing: Option<&'a str>,
+    #[serde(borrow)]
+    filename: Cow<'a, str>,
+    #[serde(borrow)]
+    payload_b64: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StreamedArtifactMetadata<'a> {
+    #[serde(default, borrow)]
+    request_id: Option<&'a str>,
+    #[serde(default, borrow)]
+    transfer_id: Option<&'a str>,
+    #[serde(borrow)]
+    artifact_id: Cow<'a, str>,
+    #[serde(default, borrow)]
+    artifact_framing: Option<&'a str>,
+    #[serde(borrow)]
+    filename: Cow<'a, str>,
+    plaintext_size: u64,
+}
 
 pub(super) struct GuardedArtifactPart {
     path: PathBuf,
@@ -96,20 +179,11 @@ impl Drop for GuardedArtifactPart {
 }
 
 fn ensure_optional_artifact_metadata_match(
-    metadata: &serde_json::Value,
-    field: &str,
+    authenticated: Option<&str>,
     expected: &str,
     label: &str,
 ) -> Result<(), RuntimeError> {
-    let Some(value) = metadata.get(field) else {
-        return Ok(());
-    };
-    let authenticated = value.as_str().ok_or_else(|| {
-        RuntimeError::Protocol(format!(
-            "artifact response authenticated {label} is not a string",
-        ))
-    })?;
-    if authenticated != expected {
+    if authenticated.is_some_and(|value| value != expected) {
         return Err(RuntimeError::Protocol(format!(
             "artifact response authenticated {label} does not match request",
         )));
@@ -136,6 +210,13 @@ pub(super) fn ensure_legacy_artifact_payload_size(
     let encoded_size = u64::try_from(payload_b64.len()).map_err(|_| {
         RuntimeError::Protocol("legacy artifact payload size cannot be represented".into())
     })?;
+    ensure_legacy_artifact_payload_length(encoded_size, maximum_size)
+}
+
+pub(super) fn ensure_legacy_artifact_payload_length(
+    encoded_size: u64,
+    maximum_size: u64,
+) -> Result<(), RuntimeError> {
     let complete_quads = encoded_size / 4;
     let trailing_bytes = match encoded_size % 4 {
         0 => 0,
@@ -533,70 +614,121 @@ impl TransferRuntime {
                     ),
                 ));
             }
-            let response = parse_peer_response_line(
-                &peer.peer_id,
-                "artifact fetch",
-                &response_line,
-            )?;
-            let (sealed_payload, stream_header) = match response {
-                PeerResponse::FetchTransferArtifact {
-                    request_id: response_request_id,
-                    transfer_id: response_transfer_id,
-                    sealed_payload,
-                    stream_header,
-                } => {
-                    if response_request_id != request_id {
-                        return Err(RuntimeError::Protocol(format!(
-                            "mismatched request id in artifact fetch response: expected {request_id}, got {response_request_id}",
-                        )));
+            let response: ArtifactFetchWireResponse<'_> =
+                serde_json::from_str(response_line.trim()).map_err(|error| {
+                    RuntimeError::Protocol(format!(
+                        "peer {} returned an invalid artifact response: {error}",
+                        peer.peer_id,
+                    ))
+                })?;
+            let (sealed_payload, stream_header) = match response.response_type {
+                "fetch_transfer_artifact" => {
+                    if response.message.is_some() {
+                        return Err(RuntimeError::Protocol(
+                            "artifact fetch response included error-only fields".into(),
+                        ));
                     }
+                    if response.request_id != request_id {
+                        return Err(RuntimeError::Protocol(
+                            "mismatched request id in artifact fetch response".into(),
+                        ));
+                    }
+                    let response_transfer_id = response.transfer_id.ok_or_else(|| {
+                        RuntimeError::Protocol(
+                            "artifact fetch response missing transfer_id".into(),
+                        )
+                    })?;
                     if response_transfer_id != transfer_id {
-                        return Err(RuntimeError::Protocol(format!(
-                            "mismatched transfer id in artifact fetch response: expected {transfer_id}, got {response_transfer_id}",
-                        )));
+                        return Err(RuntimeError::Protocol(
+                            "mismatched transfer id in artifact fetch response".into(),
+                        ));
                     }
-                    (sealed_payload, stream_header)
+                    let sealed_payload = response.sealed_payload.as_deref().ok_or_else(|| {
+                        RuntimeError::Protocol(
+                            "artifact fetch response missing sealed_payload".into(),
+                        )
+                    })?;
+                    (sealed_payload, response.stream_header.as_ref())
                 }
-                PeerResponse::Error { message, .. } => {
-                    return Err(RuntimeError::Protocol(message));
+                "error" => {
+                    if response.transfer_id.is_some()
+                        || response.sealed_payload.is_some()
+                        || response.stream_header.is_some()
+                    {
+                        return Err(RuntimeError::Protocol(
+                            "artifact error response included fetch-only fields".into(),
+                        ));
+                    }
+                    let message = response.message.as_deref().ok_or_else(|| {
+                        RuntimeError::Protocol(
+                            "artifact error response missing message".into(),
+                        )
+                    })?;
+                    if message.len() > MAX_ARTIFACT_ERROR_MESSAGE_BYTES {
+                        return Err(RuntimeError::Protocol(
+                            "artifact error response message exceeds maximum size".into(),
+                        ));
+                    }
+                    return Err(RuntimeError::Protocol(message.to_owned()));
                 }
-                other => {
-                    return Err(RuntimeError::Protocol(format!(
-                        "unexpected response while fetching transfer artifact: {other:?}",
-                    )));
+                _ => {
+                    return Err(RuntimeError::Protocol(
+                        "unexpected response while fetching transfer artifact".into(),
+                    ));
                 }
             };
 
-            let metadata = open_json(&self.identity, source_public_key, &sealed_payload)?;
+            let metadata_json =
+                open_json_bytes(&self.identity, source_public_key, sealed_payload)?;
+            let (
+                metadata_request_id,
+                metadata_transfer_id,
+                response_artifact_id,
+                response_framing,
+                filename,
+                payload_b64,
+                plaintext_size,
+            ) = if artifact_framing.is_streamed() {
+                let metadata: StreamedArtifactMetadata<'_> =
+                    serde_json::from_slice(&metadata_json)?;
+                (
+                    metadata.request_id,
+                    metadata.transfer_id,
+                    metadata.artifact_id,
+                    metadata.artifact_framing,
+                    metadata.filename,
+                    None,
+                    Some(metadata.plaintext_size),
+                )
+            } else {
+                let metadata: LegacyArtifactMetadata<'_> =
+                    serde_json::from_slice(&metadata_json)?;
+                (
+                    metadata.request_id,
+                    metadata.transfer_id,
+                    metadata.artifact_id,
+                    metadata.artifact_framing,
+                    metadata.filename,
+                    Some(metadata.payload_b64),
+                    None,
+                )
+            };
             ensure_optional_artifact_metadata_match(
-                &metadata,
-                "request_id",
+                metadata_request_id,
                 request_id,
                 "request id",
             )?;
             ensure_optional_artifact_metadata_match(
-                &metadata,
-                "transfer_id",
+                metadata_transfer_id,
                 transfer_id,
                 "transfer id",
             )?;
-            let response_artifact_id = metadata
-                .get("artifact_id")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| RuntimeError::Protocol(
-                    "artifact fetch response missing artifact_id".into(),
-                ))?;
-            if response_artifact_id != artifact_id {
-                return Err(RuntimeError::Protocol(format!(
-                    "mismatched artifact id in artifact fetch response: expected {artifact_id}, got {response_artifact_id}",
-                )));
+            if response_artifact_id.as_ref() != artifact_id {
+                return Err(RuntimeError::Protocol(
+                    "mismatched artifact id in artifact fetch response".into(),
+                ));
             }
-            if let Some(response_framing) = metadata.get("artifact_framing") {
-                let response_framing = response_framing.as_str().ok_or_else(|| {
-                    RuntimeError::Protocol(
-                        "artifact response authenticated framing is not a string".into(),
-                    )
-                })?;
+            if let Some(response_framing) = response_framing {
                 if ArtifactFraming::parse(response_framing)? != artifact_framing {
                     return Err(RuntimeError::Protocol(format!(
                         "artifact response authenticated framing does not match requested {}",
@@ -604,12 +736,11 @@ impl TransferRuntime {
                     )));
                 }
             }
-            let filename = metadata
-                .get("filename")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| RuntimeError::Protocol(
-                    "artifact fetch response missing filename".into(),
-                ))?;
+            if filename.len() > MAX_ARTIFACT_FILENAME_BYTES {
+                return Err(RuntimeError::Protocol(
+                    "artifact filename exceeds maximum size".into(),
+                ));
+            }
             let artifact_dir = managed_artifact_dir(
                 &self.config.registry_dir,
                 &self.config.peer_id,
@@ -620,7 +751,7 @@ impl TransferRuntime {
             let destination_path = artifact_dir.join(format!(
                 "{}-{}",
                 safe_artifact_id,
-                sanitize_artifact_filename(filename),
+                sanitize_artifact_filename(filename.as_ref()),
             ));
 
             if !artifact_framing.is_streamed() {
@@ -630,14 +761,11 @@ impl TransferRuntime {
                         peer.peer_id,
                     )));
                 }
-                let payload_b64 = metadata
-                    .get("payload_b64")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| {
-                        RuntimeError::Protocol(
-                            "legacy artifact fetch response missing payload_b64".into(),
-                        )
-                    })?;
+                let payload_b64 = payload_b64.ok_or_else(|| {
+                    RuntimeError::Protocol(
+                        "legacy artifact fetch response missing payload_b64".into(),
+                    )
+                })?;
                 ensure_legacy_artifact_payload_size(payload_b64, permitted_size)?;
                 let payload = URL_SAFE_NO_PAD.decode(payload_b64).map_err(|error| {
                     RuntimeError::Protocol(format!("invalid artifact payload: {error}"))
@@ -654,12 +782,12 @@ impl TransferRuntime {
                     peer.peer_id,
                 ))
             })?;
-            let plaintext_size = metadata
-                .get("plaintext_size")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| RuntimeError::Protocol(
+            let stream_header = stream_header.to_owned_bounded()?;
+            let plaintext_size = plaintext_size.ok_or_else(|| {
+                RuntimeError::Protocol(
                     "artifact fetch response missing plaintext_size".into(),
-                ))?;
+                )
+            })?;
             if plaintext_size > permitted_size {
                 return Err(RuntimeError::Protocol(format!(
                     "transfer artifact exceeds maximum size of {permitted_size} bytes",
