@@ -26,6 +26,12 @@ const SPAWN_RECONCILIATION_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Dur
 #[cfg(test)]
 const SPAWN_RECONCILIATION_ATTEMPT_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(50);
+#[cfg(not(test))]
+const LIVE_SPAWN_RECONCILIATION_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(1);
+#[cfg(test)]
+const LIVE_SPAWN_RECONCILIATION_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(10);
 
 enum SpawnAcceptanceReconciliation {
     Accepted,
@@ -696,8 +702,13 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                     .into());
                 }
                 SpawnAcceptanceReconciliation::Indeterminate(reconcile_error) => {
+                    reconcile_indeterminate_spawn_in_background(
+                        db_path.to_string(),
+                        daemon.daemon_dir().to_string(),
+                        run_id.clone(),
+                    );
                     return Err(StageSpawnError::Indeterminate(format!(
-                    "{command_error}; {reconcile_error}; successor reservation retained for startup reconciliation"
+                    "{command_error}; {reconcile_error}; successor reservation retained for live reconciliation"
                 )));
                 }
             }
@@ -919,6 +930,102 @@ async fn reconcile_spawn_acceptance(
         "spawn reconciliation remained indeterminate after {SPAWN_RECONCILIATION_ATTEMPTS} attempts ({})",
         failures.join("; ")
     ))
+}
+
+fn reconcile_indeterminate_spawn_in_background(
+    db_path: String,
+    daemon_dir: String,
+    run_id: String,
+) {
+    tokio::spawn(async move {
+        loop {
+            let action = match Db::open(&db_path).and_then(|db| db.pending_stage_actions()) {
+                Ok(actions) => actions
+                    .into_iter()
+                    .find(|action| action.successor_run_id == run_id),
+                Err(error) => {
+                    log::warn!(
+                        "live spawn reconciliation could not read reservation {run_id}: {error}"
+                    );
+                    tokio::time::sleep(LIVE_SPAWN_RECONCILIATION_RETRY_DELAY).await;
+                    continue;
+                }
+            };
+            let Some(action) = action else {
+                return;
+            };
+            let connection = DaemonClient::connect(&daemon_dir)
+                .await
+                .map_err(|error| error.to_string());
+            let mut daemon = match connection {
+                Ok(daemon) => daemon,
+                Err(error) => {
+                    log::warn!(
+                        "live spawn reconciliation could not reach daemon for {run_id}: {error}"
+                    );
+                    tokio::time::sleep(LIVE_SPAWN_RECONCILIATION_RETRY_DELAY).await;
+                    continue;
+                }
+            };
+            match reconcile_spawn_acceptance(&mut daemon, &action.session_id, &run_id).await {
+                SpawnAcceptanceReconciliation::Accepted => {
+                    match Db::open(&db_path).and_then(|db| db.land_pending_stage_action(&action)) {
+                        Ok(()) => {
+                            log::info!(
+                                "landed late-confirmed successor {run_id} for task {}",
+                                action.task_id
+                            );
+                            return;
+                        }
+                        Err(error) => {
+                            log::warn!("live spawn reconciliation could not land {run_id}: {error}")
+                        }
+                    }
+                }
+                SpawnAcceptanceReconciliation::Rejected(reason) => {
+                    match Db::open(&db_path)
+                        .and_then(|db| db.rollback_pending_stage_action(&action))
+                    {
+                        Ok(()) => {
+                            if action.remove_worktree_on_rollback {
+                                match (
+                                    action.target_worktree_path.as_deref(),
+                                    action.target_worktree_branch.as_deref(),
+                                ) {
+                                    (Some(path), Some(branch)) => {
+                                        if let Err(error) = remove_prepared_worktree(path, branch) {
+                                            log::warn!(
+                                                "rolled back late-rejected successor {run_id} \
+                                                 but could not remove its workspace: {error}"
+                                            );
+                                        }
+                                    }
+                                    _ => log::warn!(
+                                        "rolled back late-rejected successor {run_id} with \
+                                         incomplete workspace cleanup metadata"
+                                    ),
+                                }
+                            }
+                            log::info!(
+                                "rolled back late-rejected successor {run_id} for task {}: {reason}",
+                                action.task_id
+                            );
+                            return;
+                        }
+                        Err(error) => log::warn!(
+                            "live spawn reconciliation could not roll back {run_id}: {error}"
+                        ),
+                    }
+                }
+                SpawnAcceptanceReconciliation::Indeterminate(reason) => {
+                    log::warn!(
+                        "live spawn reconciliation remains indeterminate for {run_id}: {reason}"
+                    );
+                }
+            }
+            tokio::time::sleep(LIVE_SPAWN_RECONCILIATION_RETRY_DELAY).await;
+        }
+    });
 }
 
 pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
@@ -1190,8 +1297,13 @@ pub(crate) async fn rerun_prepared_stage_for_api(
                     );
                 }
                 SpawnAcceptanceReconciliation::Indeterminate(reconcile_error) => {
+                    reconcile_indeterminate_spawn_in_background(
+                        db_path.to_string(),
+                        daemon.daemon_dir().to_string(),
+                        run_id.clone(),
+                    );
                     return Err(StageSpawnError::Indeterminate(format!(
-                    "{command_error}; {reconcile_error}; successor reservation retained for startup reconciliation"
+                    "{command_error}; {reconcile_error}; successor reservation retained for live reconciliation"
                 )));
                 }
             }

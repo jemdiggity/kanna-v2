@@ -140,6 +140,62 @@ impl Db {
         Ok(())
     }
 
+    pub fn park_exhausted_revision(
+        &self,
+        task_id: &str,
+        result: &str,
+        feedback: &str,
+        action_response: Option<(&str, u16, &str)>,
+    ) -> Result<(), rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
+            "UPDATE stage_run
+             SET status = 'failed',
+                 result = ?2,
+                 feedback = ?3,
+                 finished_at = datetime('now')
+             WHERE id = (
+               SELECT id
+               FROM stage_run
+               WHERE task_id = ?1 AND status = 'running'
+               ORDER BY datetime(started_at) DESC, rowid DESC
+               LIMIT 1
+             )",
+            (task_id, result, feedback),
+        )?;
+        transaction.execute(
+            "UPDATE pipeline_item
+             SET activity = 'unread',
+                 activity_changed_at = datetime('now'),
+                 activity_revision = activity_revision
+                   + CASE WHEN activity = 'unread' THEN 0 ELSE 1 END,
+                 unread_at = CASE
+                   WHEN activity = 'unread' THEN unread_at
+                   ELSE datetime('now')
+                 END,
+                 updated_at = datetime('now')
+             WHERE id = ?1 AND closed_at IS NULL",
+            [task_id],
+        )?;
+        if let Some((key, status, response_body)) = action_response {
+            let changed = transaction.execute(
+                "UPDATE task_action_request
+                 SET state = 'succeeded',
+                     http_status = ?3,
+                     response_body = ?4,
+                     updated_at = datetime('now')
+                 WHERE idempotency_key = ?1
+                   AND task_id = ?2
+                   AND state IN ('pending', 'succeeded')",
+                params![key, task_id, status, response_body],
+            )?;
+            if changed == 0 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+        }
+        transaction.commit()
+    }
+
     pub fn reconcile_task_action_request(
         &self,
         key: &str,
@@ -173,19 +229,8 @@ impl Db {
         }
 
         let Some(successor_run_id) = request.3 else {
-            let body = "revision request was interrupted before its successor was reserved";
-            transaction.execute(
-                "UPDATE task_action_request
-                 SET state = 'failed', http_status = 500, response_body = ?2,
-                     updated_at = datetime('now')
-                 WHERE idempotency_key = ?1 AND state = 'pending'",
-                (key, body),
-            )?;
             transaction.commit()?;
-            return Ok(TaskActionRequestClaim::Completed {
-                status: 500,
-                body: body.to_string(),
-            });
+            return Ok(TaskActionRequestClaim::Claimed);
         };
 
         let successor_status = transaction

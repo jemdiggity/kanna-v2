@@ -155,13 +155,7 @@ impl Db {
             .query_row(
                 "SELECT sr.id, sr.kind, sr.completion_transition, sr.status,
                         sr.resumed_from_run_id, sr.run_ownership_version,
-                        sr.completion_attempt,
-                        (
-                          SELECT owner.run_ownership_version
-                          FROM stage_run owner
-                          WHERE owner.id = sr.resumed_from_run_id
-                            AND owner.task_id = sr.task_id
-                        )
+                        sr.completion_attempt
                  FROM stage_run sr
                  WHERE sr.task_id = ?1
                  ORDER BY datetime(sr.started_at) DESC, sr.rowid DESC
@@ -176,7 +170,6 @@ impl Db {
                         row.get::<_, Option<String>>(4)?,
                         row.get::<_, i64>(5)?,
                         row.get::<_, Option<String>>(6)?,
-                        row.get::<_, Option<i64>>(7)?,
                     ))
                 },
             )
@@ -189,7 +182,6 @@ impl Db {
             completion_owner_run_id,
             run_ownership_version,
             required_completion_attempt,
-            completion_owner_ownership_version,
         )) = run
         else {
             return Ok(None);
@@ -207,10 +199,7 @@ impl Db {
                     .is_some_and(|required| {
                         completion_attempt.is_some_and(|provided| provided == required)
                     });
-            let pre_upgrade_owner_cannot_send_attempt = completion_attempt.is_none()
-                && completion_owner_ownership_version
-                    .is_some_and(|version| version < CURRENT_RUN_OWNERSHIP_VERSION);
-            scoped_attempt_matches || pre_upgrade_owner_cannot_send_attempt
+            scoped_attempt_matches
         });
         if run_ownership_version >= CURRENT_RUN_OWNERSHIP_VERSION && !ownership_matches {
             return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -670,6 +659,15 @@ impl Db {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
 
+        transaction.execute(
+            "UPDATE task_action_request
+             SET state = 'failed',
+                 http_status = 500,
+                 response_body = 'task action successor did not become active',
+                 updated_at = datetime('now')
+             WHERE successor_run_id = ?1 AND state = 'pending'",
+            [successor_run_id],
+        )?;
         let deleted = transaction.execute(
             "DELETE FROM stage_run
              WHERE id = ?1 AND task_id = ?2 AND status = 'pending'",

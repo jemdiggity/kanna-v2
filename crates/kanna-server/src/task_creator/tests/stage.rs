@@ -1306,6 +1306,151 @@ async fn accepted_spawn_with_stalled_reconciliation_list_keeps_reservation_durab
     .await;
 }
 
+async fn assert_late_spawn_probe_reconciles_without_restart(test_name: &str, accepted: bool) {
+    let config = test_config(test_name);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Reconcile an indeterminate Spawn in the live server",
+        Some("Live Spawn reconciliation"),
+        "in progress",
+        "2026-07-28 08:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-1", "task-1", "default", None, "codex")
+        .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-source",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp/task-1"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let action_request = r#"{"action":"advance"}"#;
+    assert_eq!(
+        db.claim_task_action_request(
+            "late-probe-action",
+            "task-1",
+            "advance-stage",
+            action_request,
+        )
+        .unwrap(),
+        crate::db::TaskActionRequestClaim::Claimed
+    );
+    let expected_source = db.task_action_state("task-1").unwrap();
+    let prepared = super::super::types::PreparedStageRunSpawn {
+        task_id: "task-1".to_string(),
+        source_session_id: "task-1".to_string(),
+        next_stage: "review".to_string(),
+        run_stage: "review".to_string(),
+        run_kind: "main",
+        workspace: super::super::types::PreparedRunWorkspace::Current,
+        workspace_teardown: None,
+        blocking_teardown_session_id: None,
+        stage_agent: Some("reviewer".to_string()),
+        agent_provider: "codex".to_string(),
+        model: None,
+        completion_transition: PipelineStageTransition::Manual,
+        feedback: None,
+        provider_session_id: None,
+        resumed_from_run_id: None,
+        cwd: "/tmp/task-1".to_string(),
+        env: HashMap::new(),
+        deferred_setup: Vec::new(),
+        terminal_prelude: None,
+        session: PreparedSessionSpawn::Pty {
+            executable: "/bin/sh".to_string(),
+            args: vec!["-lc".to_string(), "true".to_string()],
+            cols: 80,
+            rows: 24,
+            agent_provider: DaemonAgentProvider::Codex,
+        },
+        expected_source,
+        source_completion_status: "succeeded",
+        source_completion_result: None,
+        source_completion_feedback: None,
+        action_request_key: Some("late-probe-action".to_string()),
+        action_success_body: Some(r#"{"taskId":"task-1"}"#.to_string()),
+    };
+
+    let fake_daemon =
+        spawn_fake_daemon_resolves_spawn_after_initial_probes(config.daemon_dir.clone(), accepted)
+            .await;
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    daemon.set_command_timeout_for_test(std::time::Duration::from_millis(50));
+    let error = spawn_prepared_stage_run_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        prepared,
+    )
+    .await
+    .expect_err("the initial bounded probe must remain indeterminate");
+    assert!(error.is_indeterminate());
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if db.pending_stage_actions().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("same-process reconciliation did not resolve the reservation");
+    fake_daemon.await.unwrap();
+
+    let latest = db.latest_stage_run("task-1").unwrap().unwrap();
+    let replay = db
+        .claim_task_action_request(
+            "late-probe-action",
+            "task-1",
+            "advance-stage",
+            action_request,
+        )
+        .unwrap();
+    if accepted {
+        assert_eq!(latest.stage, "review");
+        assert_eq!(latest.status, "running");
+        assert_eq!(
+            replay,
+            crate::db::TaskActionRequestClaim::Completed {
+                status: 200,
+                body: r#"{"taskId":"task-1"}"#.to_string(),
+            }
+        );
+    } else {
+        assert_eq!(latest.id, "run-source");
+        assert_eq!(latest.status, "running");
+        assert!(matches!(
+            replay,
+            crate::db::TaskActionRequestClaim::Completed { status: 500, .. }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn accepted_spawn_is_landed_by_a_late_probe_without_server_restart() {
+    assert_late_spawn_probe_reconciles_without_restart("late-probe-accepted", true).await;
+}
+
+#[tokio::test]
+async fn rejected_spawn_is_rolled_back_by_a_late_probe_without_server_restart() {
+    assert_late_spawn_probe_reconciles_without_restart("late-probe-rejected", false).await;
+}
+
 async fn assert_ambiguous_accepted_rerun_spawn_preserves_reservation(
     test_name: &str,
     failure: SpawnReconciliationFailure,

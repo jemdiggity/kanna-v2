@@ -21,6 +21,7 @@ pub struct DaemonClient {
     /// arrive and would pair with the wrong request, so the connection is
     /// unusable.
     poisoned: bool,
+    daemon_dir: String,
     socket_path: PathBuf,
 }
 
@@ -103,8 +104,13 @@ impl DaemonClient {
             writer: write_half,
             command_timeout: COMMAND_TIMEOUT,
             poisoned: false,
+            daemon_dir: daemon_dir.to_string(),
             socket_path,
         })
+    }
+
+    pub(crate) fn daemon_dir(&self) -> &str {
+        &self.daemon_dir
     }
 
     /// Shrink the round-trip bound so tests can exercise the timeout path

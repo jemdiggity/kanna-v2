@@ -2768,7 +2768,7 @@ fn injected_post_completion_requires_its_scoped_attempt_from_the_live_main_proce
 }
 
 #[test]
-fn injected_post_accepts_missing_attempt_from_pre_upgrade_process_owner() {
+fn delayed_pre_upgrade_main_completion_cannot_finish_a_later_protected_post() {
     let path = Db::test_db_path("mixed-version-injected-post-completion");
     let db = Db::open_for_tests(&path).expect("open test db");
     db.insert_test_repo("repo-1", "Repo One").unwrap();
@@ -2826,16 +2826,32 @@ fn injected_post_accepts_missing_attempt_from_pre_upgrade_process_owner() {
     )
     .unwrap();
 
-    let finished = db
-        .finish_active_stage_run_with_completion_attempt(
+    assert!(matches!(
+        db.finish_active_stage_run_with_completion_attempt(
             "task-1",
             Some("pre-upgrade-main"),
             None,
             "succeeded",
             Some("{}"),
-            Some("completed by the preserved old peer"),
+            Some("delayed duplicate from the completed main run"),
+        ),
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    ));
+    assert_eq!(
+        db.latest_stage_run("task-1").unwrap().unwrap().status,
+        "running"
+    );
+
+    let finished = db
+        .finish_active_stage_run_with_completion_attempt(
+            "task-1",
+            Some("pre-upgrade-main"),
+            Some("post-attempt-current"),
+            "succeeded",
+            Some("{}"),
+            Some("completed through the mixed-version compatibility shim"),
         )
-        .expect("old process owner should negotiate missing completion_attempt")
+        .expect("the injected post's scoped attempt should remain authorized")
         .expect("protected post run");
     assert_eq!(finished.kind, "post");
 }

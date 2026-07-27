@@ -1528,6 +1528,107 @@ async fn agent_revision_request_parks_the_task_once_the_round_budget_is_spent() 
 }
 
 #[tokio::test]
+async fn exhausted_revision_replay_recovers_after_atomic_park_response_failure() {
+    let fixture = setup_revision_budget_fixture("park-crash-replay", 1);
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    db.connection_for_e2e_tests()
+        .execute_batch(
+            "CREATE TRIGGER fail_parked_action_response
+             BEFORE UPDATE OF state ON task_action_request
+             WHEN NEW.idempotency_key = 'park-crash-key'
+               AND NEW.state = 'succeeded'
+             BEGIN
+               SELECT RAISE(ABORT, 'simulated crash before parked response commit');
+             END;",
+        )
+        .unwrap();
+    drop(db);
+
+    let request_body = serde_json::json!({
+        "targetStage": "in progress",
+        "summary": "QA failed after the final allowed round",
+        "prompt": "Fix the remaining scoped review finding."
+    })
+    .to_string();
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let first = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/budget-1/actions/request-revision")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "park-crash-key")
+                .body(Body::from(request_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    assert_eq!(
+        db.latest_stage_run("budget-1").unwrap().unwrap().status,
+        "running",
+        "the run verdict must roll back when the idempotent response cannot commit"
+    );
+    assert_ne!(
+        db.get_pipeline_item("budget-1")
+            .unwrap()
+            .unwrap()
+            .activity
+            .as_deref(),
+        Some("unread"),
+        "unread parking must not commit without the matching final response"
+    );
+    db.connection_for_e2e_tests()
+        .execute_batch(
+            "DROP TRIGGER fail_parked_action_response;
+             UPDATE task_action_request
+             SET state = 'pending', http_status = NULL, response_body = NULL
+             WHERE idempotency_key = 'park-crash-key';",
+        )
+        .unwrap();
+    drop(db);
+
+    let replay = app
+        .oneshot(
+            Request::post("/v1/tasks/budget-1/actions/request-revision")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "park-crash-key")
+                .body(Body::from(request_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(replay.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let action: TaskActionResponse = from_slice(&body).unwrap();
+    assert!(
+        action
+            .revision_budget
+            .expect("parked budget response")
+            .exhausted
+    );
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    assert_eq!(
+        db.latest_stage_run("budget-1").unwrap().unwrap().status,
+        "failed"
+    );
+    assert_eq!(
+        db.get_pipeline_item("budget-1")
+            .unwrap()
+            .unwrap()
+            .activity
+            .as_deref(),
+        Some("unread")
+    );
+    drop(db);
+    cleanup_revision_budget_fixture(&fixture);
+}
+
+#[tokio::test]
 async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

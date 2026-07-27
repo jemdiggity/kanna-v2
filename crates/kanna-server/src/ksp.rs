@@ -642,6 +642,7 @@ async fn run_terminal_control(
     mut cancel_rx: watch::Receiver<bool>,
     frame_tx: mpsc::Sender<ServerFrame>,
 ) {
+    let mut state_changes = state.subscribe_state_changes();
     let direct_session_id = initial_session_id;
     let mut session_id = match direct_session_id.as_ref() {
         Some(session_id) => session_id.clone(),
@@ -685,31 +686,6 @@ async fn run_terminal_control(
     });
 
     loop {
-        if direct_session_id.is_none() {
-            let resolved = tokio::select! {
-                biased;
-                _ = terminal_control_cancelled(&mut cancel_rx) => return,
-                resolved = resolve_task_session_id(
-                    state.config().db_path.clone(),
-                    task_id.clone(),
-                ) => resolved,
-            };
-            match resolved {
-                Ok(current_session_id) => session_id = current_session_id,
-                Err(message) => {
-                    tokio::select! {
-                        biased;
-                        _ = terminal_control_cancelled(&mut cancel_rx) => return,
-                        _ = send_task_error(&frame_tx, &task_id, "no_session", message) => {}
-                    }
-                    if !terminal_control_retry_delay(retry_attempt, &mut cancel_rx).await {
-                        return;
-                    }
-                    retry_attempt += 1;
-                    continue;
-                }
-            }
-        }
         let connected = tokio::select! {
             biased;
             _ = terminal_control_cancelled(&mut cancel_rx) => return,
@@ -787,42 +763,38 @@ async fn run_terminal_control(
                         Ok(_) => {}
                     }
                 }
+                state_change = state_changes.recv(), if direct_session_id.is_none() => {
+                    let should_refresh = matches!(
+                        state_change,
+                        Ok(ServerFrame::StateChanged {
+                            scope: kanna_agent_protocol::StateChangeScope::Tasks,
+                        })
+                            | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    );
+                    if should_refresh {
+                        match resolve_task_session_id(
+                            state.config().db_path.clone(),
+                            task_id.clone(),
+                        )
+                        .await
+                        {
+                            Ok(current_session_id) => session_id = current_session_id,
+                            Err(message) => {
+                                send_task_error(
+                                    &frame_tx,
+                                    &task_id,
+                                    "no_session",
+                                    message,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
                 command = command_rx.recv() => {
                     let Some(command) = command else {
                         return;
                     };
-                    if direct_session_id.is_none() {
-                        let resolved = tokio::select! {
-                            biased;
-                            _ = terminal_control_cancelled(&mut cancel_rx) => return,
-                            resolved = resolve_task_session_id(
-                                state.config().db_path.clone(),
-                                task_id.clone(),
-                            ) => resolved,
-                        };
-                        match resolved {
-                            Ok(current_session_id) if current_session_id != session_id => {
-                                session_id = current_session_id;
-                                pending_command = Some(command);
-                                break;
-                            }
-                            Ok(_) => {}
-                            Err(message) => {
-                                tokio::select! {
-                                    biased;
-                                    _ = terminal_control_cancelled(&mut cancel_rx) => return,
-                                    _ = send_task_error(
-                                        &frame_tx,
-                                        &task_id,
-                                        "no_session",
-                                        message,
-                                    ) => {}
-                                }
-                                pending_command = Some(command);
-                                break;
-                            }
-                        }
-                    }
                     let daemon_command = command.into_daemon_command(session_id.clone());
                     let write_result = tokio::select! {
                         biased;
@@ -3578,6 +3550,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_task_terminal_commands_use_the_cached_session_route() {
+        let unique = format!(
+            "ksp-terminal-cached-route-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config("ksp-terminal-cached-route", "KSP Cached Route");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        let db = Db::open_for_tests(&config.db_path).expect("open test db");
+        db.insert_test_repo("repo-cached-route", "Cached Route Repo")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "task-cached-route",
+            "repo-cached-route",
+            "Keep terminal routing cached",
+            None,
+            "in progress",
+            "2026-07-28 00:00:00",
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-cached-route",
+            task_id: "task-cached-route",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("implement"),
+            agent_provider: Some("codex"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("daemon-session-cached"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+
+        let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 3).await;
+        let state = Arc::new(AppState::new(config));
+        let (frame_tx, companion_tx, _outbound_rx) = outbound_frame_channel(8);
+        let mut conn = StreamConn {
+            state: Arc::clone(&state),
+            frame_tx,
+            companion_tx,
+            attachments: HashMap::new(),
+            terminal_controls: HashMap::new(),
+            agent_commands: None,
+            requests: None,
+            companion_event_times: HashMap::new(),
+            authed: true,
+            auth_mode: AuthMode::AllowEmpty,
+        };
+
+        conn.ensure_live_terminal_control_route("task-cached-route")
+            .await;
+        conn.enqueue_terminal_control(
+            "task-cached-route".into(),
+            TerminalControlCommand::Input(b"first".to_vec()),
+        );
+        assert_command(
+            commands.recv().await,
+            DaemonCommand::InputNoReply {
+                session_id: "daemon-session-cached".into(),
+                data: b"first".to_vec(),
+            },
+        );
+
+        // Removing the lookup source makes any per-command database open
+        // observable: a fresh lookup would fall back to the durable task id.
+        db.connection_for_e2e_tests()
+            .execute("DELETE FROM stage_run WHERE id = 'run-cached-route'", [])
+            .unwrap();
+        conn.enqueue_terminal_control(
+            "task-cached-route".into(),
+            TerminalControlCommand::Resize {
+                cols: 120,
+                rows: 40,
+            },
+        );
+        conn.enqueue_terminal_control(
+            "task-cached-route".into(),
+            TerminalControlCommand::Input(b"third".to_vec()),
+        );
+        assert_command(
+            commands.recv().await,
+            DaemonCommand::ResizeNoReply {
+                session_id: "daemon-session-cached".into(),
+                cols: 120,
+                rows: 40,
+            },
+        );
+        assert_command(
+            commands.recv().await,
+            DaemonCommand::InputNoReply {
+                session_id: "daemon-session-cached".into(),
+                data: b"third".to_vec(),
+            },
+        );
+
+        daemon.await.expect("cached route daemon failed");
+        conn.shutdown().await;
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
+    #[tokio::test]
     async fn terminal_input_consumed_before_socket_close_is_not_replayed() {
         let unique = format!(
             "ksp-terminal-at-most-once-{}-{}",
@@ -4475,7 +4560,7 @@ mod tests {
         let state = Arc::new(AppState::new(config));
         let (frame_tx, companion_tx, _outbound_rx) = outbound_frame_channel(8);
         let mut conn = StreamConn {
-            state,
+            state: Arc::clone(&state),
             frame_tx,
             companion_tx,
             attachments: HashMap::new(),
@@ -4520,6 +4605,7 @@ mod tests {
             resumed_from_run_id: Some("run-old"),
         })
         .unwrap();
+        state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
         conn.enqueue_terminal_control(
             "task-live-route".into(),
             TerminalControlCommand::Input(b"after-revision".to_vec()),
@@ -4533,7 +4619,7 @@ mod tests {
                 data: b"after-revision".to_vec(),
             },
         );
-        assert_eq!(daemon.await.expect("live route daemon failed"), 2);
+        assert_eq!(daemon.await.expect("live route daemon failed"), 1);
         conn.shutdown().await;
 
         let _ = std::fs::remove_dir_all(&daemon_dir);

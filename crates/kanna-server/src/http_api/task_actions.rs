@@ -11,6 +11,42 @@ use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
 use std::sync::Arc;
 
+#[cfg(test)]
+struct TaskActionClaimPause {
+    reached: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(test)]
+static TASK_ACTION_CLAIM_PAUSES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, TaskActionClaimPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+pub(super) fn pause_next_task_action_after_durable_claim(
+    key: &str,
+) -> (Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>) {
+    let reached = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    TASK_ACTION_CLAIM_PAUSES.lock().unwrap().insert(
+        key.to_string(),
+        TaskActionClaimPause {
+            reached: Arc::clone(&reached),
+            release: Arc::clone(&release),
+        },
+    );
+    (reached, release)
+}
+
+#[cfg(test)]
+async fn pause_task_action_after_durable_claim(key: &str) {
+    let pause = TASK_ACTION_CLAIM_PAUSES.lock().unwrap().remove(key);
+    if let Some(pause) = pause {
+        pause.reached.add_permits(1);
+        let _ = pause.release.acquire().await;
+    }
+}
+
 fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
     if error.starts_with("task is blocked:")
         || error.starts_with("daemon does not support provider resume")
@@ -159,6 +195,11 @@ async fn claim_durable_task_action(
             key: None,
         });
     };
+    // Own the process-local task flight before creating or inspecting the
+    // durable claim. A same-process duplicate must never observe `pending`
+    // while the original is live and mistake that original for a crashed
+    // request that it is allowed to reconcile.
+    let flight = begin_task_action(state, task_id)?;
     let claim = {
         let state = Arc::clone(state);
         let key = key.clone();
@@ -178,16 +219,16 @@ async fn claim_durable_task_action(
         })
         .await?
     };
+    #[cfg(test)]
+    pause_task_action_after_durable_claim(&key).await;
     match claim {
-        TaskActionRequestClaim::Completed { status, body } => Ok(DurableTaskActionClaim::Respond(
-            task_action_replay_response(status, body)?,
-        )),
+        TaskActionRequestClaim::Completed { status, body } => {
+            drop(flight);
+            Ok(DurableTaskActionClaim::Respond(
+                task_action_replay_response(status, body)?,
+            ))
+        }
         TaskActionRequestClaim::Pending => {
-            let Some(flight) = state.begin_requested_task_revision(task_id) else {
-                return Ok(DurableTaskActionClaim::Respond(
-                    task_action_pending_response(),
-                ));
-            };
             let reconciled = {
                 let state = Arc::clone(state);
                 let key = key.clone();
@@ -202,30 +243,29 @@ async fn claim_durable_task_action(
                 )
                 .await?
             };
-            drop(flight);
             match reconciled {
-                TaskActionRequestClaim::Completed { status, body } => Ok(
-                    DurableTaskActionClaim::Respond(task_action_replay_response(status, body)?),
-                ),
-                TaskActionRequestClaim::Pending => Ok(DurableTaskActionClaim::Respond(
-                    task_action_pending_response(),
-                )),
-                TaskActionRequestClaim::Claimed => Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "invalid idempotency reconciliation state".to_string(),
-                )),
+                TaskActionRequestClaim::Completed { status, body } => {
+                    drop(flight);
+                    Ok(DurableTaskActionClaim::Respond(
+                        task_action_replay_response(status, body)?,
+                    ))
+                }
+                TaskActionRequestClaim::Pending => {
+                    drop(flight);
+                    Ok(DurableTaskActionClaim::Respond(
+                        task_action_pending_response(),
+                    ))
+                }
+                TaskActionRequestClaim::Claimed => Ok(DurableTaskActionClaim::Execute {
+                    flight,
+                    key: Some(key),
+                }),
             }
         }
-        TaskActionRequestClaim::Claimed => match begin_task_action(state, task_id) {
-            Ok(flight) => Ok(DurableTaskActionClaim::Execute {
-                flight,
-                key: Some(key),
-            }),
-            Err((status, message)) => {
-                finish_idempotent_task_action(state, &key, "failed", status, &message).await?;
-                Err((status, message))
-            }
-        },
+        TaskActionRequestClaim::Claimed => Ok(DurableTaskActionClaim::Execute {
+            flight,
+            key: Some(key),
+        }),
     }
 }
 
@@ -1664,6 +1704,7 @@ pub(super) async fn request_revision(
     let outcome_result = {
         let state = Arc::clone(&state);
         let source_task_id = source_task_id.clone();
+        let parked_action_key = idempotency_key.clone();
         super::blocking::run_handler_blocking("revision prepare", move || {
             let db = Db::open(&state.config.db_path).map_err(|e| {
                 (
@@ -1709,7 +1750,13 @@ pub(super) async fn request_revision(
                     // against a review agent driving a scoped task through
                     // endless revise/review rounds — only a human can hand out
                     // more rounds.
-                    return park_exhausted_revision(&db, source_task_id, &payload, budget);
+                    return park_exhausted_revision(
+                        &db,
+                        source_task_id,
+                        &payload,
+                        budget,
+                        parked_action_key.as_deref(),
+                    );
                 }
                 claimed
             } else {
@@ -1801,37 +1848,8 @@ pub(super) async fn request_revision(
     };
 
     match outcome {
-        RevisionOutcome::Parked {
-            source_task_id,
-            budget,
-        } => {
+        RevisionOutcome::Parked { response } => {
             state.publish_state_changed(StateChangeScope::Tasks);
-            let response = crate::mobile_api::TaskActionResponse {
-                task_id: source_task_id,
-                follow_task: None,
-                revision_budget: Some(crate::mobile_api::RevisionBudgetStatus {
-                    rounds: budget.rounds,
-                    limit: budget.limit,
-                    exhausted: true,
-                    message: format!(
-                        "No revision was started: this task has already used its \
-                         {limit} automatic revision round(s). The task is parked at its current \
-                         stage for its human, who decides whether to revise again. Do not retry \
-                         this request — report your findings and stop.",
-                        limit = budget.limit,
-                    ),
-                }),
-            };
-            if let Some(key) = idempotency_key.as_deref() {
-                let body = serde_json::to_string(&response).map_err(|error| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("failed to serialize revision response: {error}"),
-                    )
-                })?;
-                finish_idempotent_task_action(&state, key, "succeeded", StatusCode::OK, &body)
-                    .await?;
-            }
             drop(revision_in_flight);
             Ok(Json(response).into_response())
         }
@@ -1906,8 +1924,7 @@ pub(super) async fn request_revision(
 /// is spent.
 enum RevisionOutcome {
     Parked {
-        source_task_id: String,
-        budget: crate::task_creator::RevisionBudget,
+        response: crate::mobile_api::TaskActionResponse,
     },
     Started {
         source_task_id: String,
@@ -1923,6 +1940,7 @@ fn park_exhausted_revision(
     source_task_id: String,
     payload: &crate::mobile_api::RequestRevisionRequest,
     budget: crate::task_creator::RevisionBudget,
+    action_key: Option<&str>,
 ) -> Result<RevisionOutcome, (axum::http::StatusCode, String)> {
     let parked_summary = format!(
         "Parked for human review: this task's automatic revision budget \
@@ -1932,32 +1950,51 @@ fn park_exhausted_revision(
         summary = payload.summary,
     );
     let parked_result = revision_stage_result(&parked_summary, &payload.metadata)?;
+    let response = crate::mobile_api::TaskActionResponse {
+        task_id: source_task_id.clone(),
+        follow_task: None,
+        revision_budget: Some(crate::mobile_api::RevisionBudgetStatus {
+            rounds: budget.rounds,
+            limit: budget.limit,
+            exhausted: true,
+            message: format!(
+                "No revision was started: this task has already used its \
+                 {limit} automatic revision round(s). The task is parked at its current \
+                 stage for its human, who decides whether to revise again. Do not retry \
+                 this request — report your findings and stop.",
+                limit = budget.limit,
+            ),
+        }),
+    };
+    let action_response = action_key
+        .map(|key| {
+            serde_json::to_string(&response)
+                .map(|body| (key, StatusCode::OK.as_u16(), body))
+                .map_err(|error| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to serialize revision response: {error}"),
+                    )
+                })
+        })
+        .transpose()?;
     // The requested changes stay on the run as feedback so nothing the
     // reviewer found is lost when the loop stops.
-    let _ = db
-        .finish_latest_running_stage_run(
-            &source_task_id,
-            "failed",
-            Some(&parked_result),
-            Some(&payload.prompt),
+    db.park_exhausted_revision(
+        &source_task_id,
+        &parked_result,
+        &payload.prompt,
+        action_response
+            .as_ref()
+            .map(|(key, status, body)| (*key, *status, body.as_str())),
+    )
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
         )
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db error: {}", e),
-            )
-        })?;
-    db.update_pipeline_item_activity(&source_task_id, "unread")
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db error: {}", e),
-            )
-        })?;
-    Ok(RevisionOutcome::Parked {
-        source_task_id,
-        budget,
-    })
+    })?;
+    Ok(RevisionOutcome::Parked { response })
 }
 
 /// The `{status, summary, metadata}` verdict JSON a revision request records

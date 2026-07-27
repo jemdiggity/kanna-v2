@@ -510,6 +510,111 @@ async fn spawn_fake_daemon_accept_spawn_then_reconciliation_fails(
     })
 }
 
+async fn spawn_fake_daemon_resolves_spawn_after_initial_probes(
+    daemon_dir: String,
+    accepted: bool,
+) -> tokio::task::JoinHandle<()> {
+    let socket_path = test_daemon_socket_path(&daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let (session_id, run_id, cwd) = loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            match command {
+                kanna_daemon::protocol::Command::Kill { .. } => {
+                    write_half
+                        .write_all(
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                kanna_daemon::protocol::Command::Spawn {
+                    session_id,
+                    cwd,
+                    env,
+                    ..
+                } => {
+                    break (
+                        session_id,
+                        env.get("KANNA_STAGE_RUN_ID").cloned().unwrap(),
+                        cwd,
+                    );
+                }
+                kanna_daemon::protocol::Command::SpawnAgent { session_id, params } => {
+                    break (
+                        session_id,
+                        params.env.get("KANNA_STAGE_RUN_ID").cloned().unwrap(),
+                        params.cwd,
+                    );
+                }
+                other => panic!("unexpected command before ambiguous Spawn: {other:?}"),
+            }
+        };
+        drop(reader);
+        drop(write_half);
+
+        // The synchronous acceptance probe exhausts its bounded attempts.
+        for _ in 0..3 {
+            let (probe, _) = listener.accept().await.unwrap();
+            let (read_half, _write_half) = probe.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+                kanna_daemon::protocol::Command::List
+            ));
+        }
+
+        // A later same-process recovery probe receives a definitive answer.
+        let (mut write_half, line) = loop {
+            let (probe, _) = listener.accept().await.unwrap();
+            let (read_half, write_half) = probe.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.unwrap() > 0 {
+                break (write_half, line);
+            }
+        };
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::List
+        ));
+        let sessions = accepted
+            .then(|| kanna_daemon::protocol::SessionInfo {
+                session_id,
+                pid: 42,
+                cwd,
+                state: kanna_daemon::protocol::SessionState::Active,
+                idle_seconds: 0,
+                status: kanna_daemon::protocol::SessionStatus::Busy,
+                kind: Default::default(),
+                run_id: Some(run_id),
+            })
+            .into_iter()
+            .collect();
+        let response = kanna_daemon::protocol::Event::SessionList {
+            sessions,
+            capabilities: Some(kanna_daemon::protocol::DaemonCapabilities::current()),
+        };
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .unwrap();
+    })
+}
+
 /// Fake daemon for a transition out of a live injected post. The database's
 /// latest action row is the post, but the daemon process is still owned by
 /// the main run that received the injected prompt.

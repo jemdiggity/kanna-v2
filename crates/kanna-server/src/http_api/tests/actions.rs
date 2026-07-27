@@ -3573,6 +3573,68 @@ async fn advance_stage_replays_one_durable_result_for_a_retried_request_key() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_same_key_replay_cannot_reconcile_the_live_original_claim() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_handler = Arc::clone(&calls);
+    let app = super::test_router_with_stage_advancer(
+        "desktop-claim-order",
+        "Studio Mac",
+        Arc::new(move |task_id| {
+            calls_for_handler.fetch_add(1, Ordering::SeqCst);
+            Ok(TaskActionResponse {
+                task_id,
+                follow_task: None,
+                revision_budget: None,
+            })
+        }),
+    );
+    let (claim_reached, release_claim) =
+        crate::http_api::task_actions::pause_next_task_action_after_durable_claim(
+            "concurrent-duplicate-key",
+        );
+
+    let original_app = app.clone();
+    let original = tokio::spawn(async move {
+        original_app
+            .oneshot(
+                Request::post("/v1/tasks/task-1/actions/advance-stage")
+                    .header("idempotency-key", "concurrent-duplicate-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    });
+    claim_reached
+        .acquire()
+        .await
+        .expect("original claim pause disappeared")
+        .forget();
+
+    let duplicate = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/advance-stage")
+                .header("idempotency-key", "concurrent-duplicate-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the replay must not execute while the original owns the flight"
+    );
+
+    release_claim.add_permits(1);
+    assert_eq!(original.await.unwrap().status(), StatusCode::OK);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn rerun_stage_replays_one_durable_result_for_a_retried_request_key() {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4917,7 +4979,7 @@ async fn old_format_completion_finishes_pre_upgrade_running_row() {
 }
 
 #[tokio::test]
-async fn old_peer_can_complete_new_protected_post_injected_into_its_process() {
+async fn old_peer_can_complete_new_protected_post_with_its_scoped_attempt() {
     let repo_temp = tempfile::Builder::new()
         .prefix("kanna-http-old-peer-protected-post-")
         .tempdir()
@@ -4990,8 +5052,10 @@ async fn old_peer_can_complete_new_protected_post_injected_into_its_process() {
     });
     let db_path = state.config.db_path.clone();
 
-    // This is the payload shape emitted by the already-running old MCP/CLI:
-    // it knows its immutable run owner but predates completionAttempt.
+    // The already-running process still owns the post, while the server's
+    // hot-reloaded tool contract gives it the post's scoped attempt. Mixed
+    // versions remain executable without accepting an unscoped duplicate
+    // completion from the earlier main run.
     let response = super::router(state)
         .oneshot(
             Request::post("/v1/tasks/task-1/actions/complete-stage")
@@ -5000,7 +5064,8 @@ async fn old_peer_can_complete_new_protected_post_injected_into_its_process() {
                     serde_json::json!({
                         "status": "success",
                         "summary": "protected post completed by old peer",
-                        "runId": "pre-upgrade-main"
+                        "runId": "pre-upgrade-main",
+                        "completionAttempt": "attempt-new-server-only"
                     })
                     .to_string(),
                 ))
