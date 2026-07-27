@@ -191,6 +191,22 @@ pub(super) fn remove_managed_artifact_root(
     remove_managed_artifact_root_impl(registry_root, &URL_SAFE_NO_PAD.encode(peer_id.as_bytes()))
 }
 
+#[cfg(all(test, unix))]
+thread_local! {
+    static MANAGED_ARTIFACT_CLEANUP_DIRECTORY_OPENS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+pub(super) fn reset_managed_artifact_cleanup_directory_opens() {
+    MANAGED_ARTIFACT_CLEANUP_DIRECTORY_OPENS.set(Some(0));
+}
+
+#[cfg(all(test, unix))]
+pub(super) fn managed_artifact_cleanup_directory_opens() -> usize {
+    MANAGED_ARTIFACT_CLEANUP_DIRECTORY_OPENS.get().unwrap_or(0)
+}
+
 #[cfg(unix)]
 fn remove_managed_artifact_root_impl(
     registry_root: &Path,
@@ -226,6 +242,12 @@ fn remove_managed_artifact_root_impl(
     }
 
     fn open_child_directory(parent: RawFd, name: &OsStr) -> std::io::Result<OwnedFd> {
+        #[cfg(test)]
+        MANAGED_ARTIFACT_CLEANUP_DIRECTORY_OPENS.set(
+            MANAGED_ARTIFACT_CLEANUP_DIRECTORY_OPENS
+                .get()
+                .map(|count| count + 1),
+        );
         let name = CString::new(name.as_bytes())
             .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
         let descriptor = unsafe {
@@ -283,74 +305,172 @@ fn remove_managed_artifact_root_impl(
         Ok(None)
     }
 
-    fn open_relative_directory(
-        root: RawFd,
-        components: &[std::ffi::OsString],
-    ) -> std::io::Result<OwnedFd> {
-        let mut directory = duplicate_directory(root)?;
-        for component in components {
-            directory = open_child_directory(directory.as_raw_fd(), component)?;
+    fn child_is_directory(parent: RawFd, name: &OsStr) -> std::io::Result<bool> {
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe {
+            libc::fstatat(
+                parent,
+                name.as_ptr(),
+                metadata.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
         }
-        Ok(directory)
+        let metadata = unsafe { metadata.assume_init() };
+        Ok(metadata.st_mode & libc::S_IFMT == libc::S_IFDIR)
+    }
+
+    fn rename_child(
+        old_parent: RawFd,
+        old_name: &OsStr,
+        new_parent: RawFd,
+        new_name: &OsStr,
+    ) -> std::io::Result<()> {
+        let old_name = CString::new(old_name.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let new_name = CString::new(new_name.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        if unsafe { libc::renameat(old_parent, old_name.as_ptr(), new_parent, new_name.as_ptr()) }
+            != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn remove_directory_contents(
+        managed_root: RawFd,
+        directory: RawFd,
+        next_lifted_name: &mut u64,
+    ) -> std::io::Result<()> {
+        const MAX_LIFT_RENAME_ATTEMPTS: usize = 1_024;
+
+        while let Some(child) = first_directory_entry(directory)? {
+            match child_is_directory(directory, &child) {
+                Ok(true) => {
+                    let mut renamed = false;
+                    for _ in 0..MAX_LIFT_RENAME_ATTEMPTS {
+                        let lifted_name = std::ffi::OsString::from(format!(
+                            ".kanna-cleanup-{}-{}",
+                            std::process::id(),
+                            *next_lifted_name,
+                        ));
+                        *next_lifted_name = next_lifted_name.wrapping_add(1);
+                        match rename_child(directory, &child, managed_root, &lifted_name) {
+                            Ok(()) => {
+                                renamed = true;
+                                break;
+                            }
+                            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+                                renamed = true;
+                                break;
+                            }
+                            Err(error)
+                                if error.raw_os_error() == Some(libc::EEXIST)
+                                    || error.raw_os_error() == Some(libc::ENOTEMPTY) => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    if !renamed {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "managed artifact cleanup rename budget exhausted",
+                        ));
+                    }
+                }
+                Ok(false) => match unlink_child(directory, &child, 0) {
+                    Ok(()) => {}
+                    Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                    Err(error) => return Err(error),
+                },
+                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     fn remove_child_tree(parent: RawFd, name: &OsStr) -> std::io::Result<()> {
-        let mut current = vec![name.to_os_string()];
-        while !current.is_empty() {
-            let directory = match open_relative_directory(parent, &current) {
+        let mut next_lifted_name = 1_u64;
+        loop {
+            let managed_root = match open_child_directory(parent, name) {
                 Ok(directory) => directory,
-                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
-                    current.pop();
-                    continue;
-                }
+                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(()),
                 Err(error)
                     if error.raw_os_error() == Some(libc::ENOTDIR)
                         || error.raw_os_error() == Some(libc::ELOOP) =>
                 {
-                    let (leaf, ancestors) = current
-                        .split_last()
-                        .expect("non-empty cleanup path has a leaf");
-                    let ancestor = open_relative_directory(parent, ancestors)?;
-                    match unlink_child(ancestor.as_raw_fd(), leaf, 0) {
-                        Ok(()) => {}
-                        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                    match unlink_child(parent, name, 0) {
+                        Ok(()) => return Ok(()),
+                        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(()),
                         Err(error) => return Err(error),
                     }
-                    current.pop();
-                    continue;
                 }
                 Err(error) => return Err(error),
             };
-            let Some(child) = first_directory_entry(directory.as_raw_fd())? else {
-                let (leaf, ancestors) = current
-                    .split_last()
-                    .expect("non-empty cleanup path has a leaf");
-                let ancestor = open_relative_directory(parent, ancestors)?;
-                match unlink_child(ancestor.as_raw_fd(), leaf, libc::AT_REMOVEDIR) {
-                    Ok(()) => current.pop(),
-                    Err(error) if error.raw_os_error() == Some(libc::ENOENT) => current.pop(),
-                    Err(error) if error.raw_os_error() == Some(libc::ENOTEMPTY) => continue,
+
+            while let Some(child) = first_directory_entry(managed_root.as_raw_fd())? {
+                match open_child_directory(managed_root.as_raw_fd(), &child) {
+                    Ok(directory) => {
+                        remove_directory_contents(
+                            managed_root.as_raw_fd(),
+                            directory.as_raw_fd(),
+                            &mut next_lifted_name,
+                        )?;
+                        drop(directory);
+                        match unlink_child(managed_root.as_raw_fd(), &child, libc::AT_REMOVEDIR) {
+                            Ok(()) => {}
+                            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                            Err(error) if error.raw_os_error() == Some(libc::ENOTEMPTY) => {}
+                            Err(error)
+                                if error.raw_os_error() == Some(libc::ENOTDIR)
+                                    || error.raw_os_error() == Some(libc::ELOOP) =>
+                            {
+                                match unlink_child(managed_root.as_raw_fd(), &child, 0) {
+                                    Ok(()) => {}
+                                    Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                                    Err(error) => return Err(error),
+                                }
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                    Err(error)
+                        if error.raw_os_error() == Some(libc::ENOTDIR)
+                            || error.raw_os_error() == Some(libc::ELOOP) =>
+                    {
+                        match unlink_child(managed_root.as_raw_fd(), &child, 0) {
+                            Ok(()) => {}
+                            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
                     Err(error) => return Err(error),
-                };
-                continue;
-            };
-            match open_child_directory(directory.as_raw_fd(), &child) {
-                Ok(_) => current.push(child),
-                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                }
+            }
+            drop(managed_root);
+            match unlink_child(parent, name, libc::AT_REMOVEDIR) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(()),
+                Err(error) if error.raw_os_error() == Some(libc::ENOTEMPTY) => continue,
                 Err(error)
                     if error.raw_os_error() == Some(libc::ENOTDIR)
                         || error.raw_os_error() == Some(libc::ELOOP) =>
                 {
-                    match unlink_child(directory.as_raw_fd(), &child, 0) {
-                        Ok(()) => {}
-                        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                    match unlink_child(parent, name, 0) {
+                        Ok(()) => return Ok(()),
+                        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(()),
                         Err(error) => return Err(error),
                     }
                 }
                 Err(error) => return Err(error),
             }
         }
-        Ok(())
     }
 
     let registry = match open_path_directory(registry_root) {

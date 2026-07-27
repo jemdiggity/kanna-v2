@@ -347,9 +347,15 @@ fn managed_artifact_cleanup_handles_trees_deeper_than_the_process_fd_limit() {
     }
     drop(current);
 
+    utils::reset_managed_artifact_cleanup_directory_opens();
     utils::remove_managed_artifact_root(temp.path(), peer_id)
         .expect("cleanup should not retain one descriptor per depth");
+    let directory_opens = utils::managed_artifact_cleanup_directory_opens();
     assert!(!artifact_root.exists());
+    assert!(
+        directory_opens <= 4 * 512 + 16,
+        "depth-512 cleanup reopened directory prefixes quadratically: {directory_opens} opens",
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
