@@ -1,7 +1,7 @@
 use base64::Engine;
 use kanna_task_transfer::crypto::{
-    open_json, parse_public_key, public_key_to_string, seal_json, CryptoError, StreamOpener,
-    StreamSealer, TransferIdentity,
+    artifact_stream_context, open_json, parse_public_key, public_key_to_string, seal_json,
+    CryptoError, StreamOpener, StreamSealer, TransferIdentity,
 };
 use kanna_task_transfer::discovery::{decode_txt_record, encode_txt_record, DiscoveryError};
 use serde_json::{json, Value};
@@ -42,12 +42,13 @@ fn encrypted_payload_roundtrips() {
 fn artifact_stream_chunks_are_sequence_and_final_marker_authenticated() {
     let sender = TransferIdentity::generate();
     let receiver = TransferIdentity::generate();
-    let mut sealer = StreamSealer::new(&sender, &receiver.public_key).unwrap();
+    let context = b"request-1\0transfer-1\0artifact-1\0size-5";
+    let mut sealer = StreamSealer::new(&sender, &receiver.public_key, context).unwrap();
     let header = sealer.header();
     let first = sealer.seal_chunk(b"first", false).unwrap();
     let final_chunk = sealer.seal_chunk(&[], true).unwrap();
 
-    let mut opener = StreamOpener::new(&receiver, &sender.public_key, &header).unwrap();
+    let mut opener = StreamOpener::new(&receiver, &sender.public_key, &header, context).unwrap();
     assert_eq!(opener.open_chunk(0, &first, false).unwrap(), b"first");
     assert!(matches!(
         opener.open_chunk(2, &final_chunk, true),
@@ -57,7 +58,7 @@ fn artifact_stream_chunks_are_sequence_and_final_marker_authenticated() {
         }),
     ));
 
-    let mut opener = StreamOpener::new(&receiver, &sender.public_key, &header).unwrap();
+    let mut opener = StreamOpener::new(&receiver, &sender.public_key, &header, context).unwrap();
     let mut tampered = first;
     tampered[0] ^= 1;
     assert!(matches!(
@@ -65,12 +66,31 @@ fn artifact_stream_chunks_are_sequence_and_final_marker_authenticated() {
         Err(CryptoError::Decrypt),
     ));
 
-    let mut marker_sealer = StreamSealer::new(&sender, &receiver.public_key).unwrap();
+    let mut marker_sealer = StreamSealer::new(&sender, &receiver.public_key, context).unwrap();
     let marker_header = marker_sealer.header();
     let not_final = marker_sealer.seal_chunk(b"not-final", false).unwrap();
-    let mut opener = StreamOpener::new(&receiver, &sender.public_key, &marker_header).unwrap();
+    let mut opener =
+        StreamOpener::new(&receiver, &sender.public_key, &marker_header, context).unwrap();
     assert!(matches!(
         opener.open_chunk(0, &not_final, true),
+        Err(CryptoError::Decrypt),
+    ));
+}
+
+#[test]
+fn artifact_stream_rejects_cross_artifact_substitution_from_the_same_peer() {
+    let sender = TransferIdentity::generate();
+    let receiver = TransferIdentity::generate();
+    let artifact_a = artifact_stream_context("request-1", "transfer-1", "artifact-a", 7);
+    let artifact_b = artifact_stream_context("request-2", "transfer-1", "artifact-b", 7);
+    let mut sealer = StreamSealer::new(&sender, &receiver.public_key, &artifact_a).unwrap();
+    let header = sealer.header();
+    let captured_chunk = sealer.seal_chunk(b"payload", false).unwrap();
+
+    let mut substituted =
+        StreamOpener::new(&receiver, &sender.public_key, &header, &artifact_b).unwrap();
+    assert!(matches!(
+        substituted.open_chunk(0, &captured_chunk, false),
         Err(CryptoError::Decrypt),
     ));
 }

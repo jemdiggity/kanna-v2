@@ -439,7 +439,8 @@ pub enum PeerResponse {
         request_id: String,
         transfer_id: String,
         sealed_payload: String,
-        stream_header: crate::crypto::SealedStreamHeader,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream_header: Option<crate::crypto::SealedStreamHeader>,
     },
     ImportCommitted {
         request_id: String,

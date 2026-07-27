@@ -528,7 +528,7 @@ async fn finalize_transfer_authenticates_reserved_target_and_rejects_replay_befo
     let temp = tempfile::tempdir().unwrap();
     let source = TransferRuntime::spawn(
         RuntimeConfig::for_tests("peer-source", "Source", temp.path(), 0)
-            .with_peer_request_timeout(Duration::from_millis(100)),
+            .with_peer_request_timeout(Duration::from_millis(500)),
     )
     .await
     .unwrap();
@@ -6320,6 +6320,48 @@ async fn staged_transfer_artifacts_can_be_fetched_by_transfer_and_artifact_id() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_artifact_paths_encode_dot_dotdot_and_separator_transfer_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-safe-artifacts",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let peer_artifact_root = temp.path().join("artifacts").join("peer-safe-artifacts");
+    let mut misplaced = Vec::new();
+
+    for (index, transfer_id) in [".", "..", "nested/transfer", r"nested\transfer"]
+        .into_iter()
+        .enumerate()
+    {
+        let source_path = temp.path().join(format!("unsafe-{index}.bundle"));
+        std::fs::write(&source_path, format!("artifact-{index}")).unwrap();
+        let artifact_id = format!("artifact-{index}");
+        runtime
+            .stage_transfer_artifact(transfer_id, &artifact_id, source_path, true)
+            .await
+            .unwrap();
+        let fetched = runtime
+            .fetch_transfer_artifact(transfer_id, &artifact_id)
+            .await
+            .unwrap();
+        let expected_transfer_dir =
+            peer_artifact_root.join(URL_SAFE_NO_PAD.encode(transfer_id.as_bytes()));
+        if fetched.path.parent() != Some(expected_transfer_dir.as_path()) {
+            misplaced.push((transfer_id.to_owned(), fetched.path, expected_transfer_dir));
+        }
+    }
+
+    assert!(
+        misplaced.is_empty(),
+        "unsafe transfer IDs escaped or created non-canonical managed paths: {misplaced:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn destination_fetches_staged_transfer_artifacts_from_the_source_peer() {
     let temp = tempfile::tempdir().unwrap();
 
@@ -6392,6 +6434,210 @@ async fn destination_fetches_staged_transfer_artifacts_from_the_source_peer() {
         !fetched.path.exists(),
         "receiver staging artifact survived terminal success cleanup",
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn older_destination_fetches_a_legacy_sealed_artifact_from_a_new_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source-new",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination-old",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination-old").await;
+
+    let destination_identity = destination.local_identity();
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: destination_identity.peer_id,
+            display_name: destination_identity.display_name,
+            endpoint: runtime_endpoint(temp.path(), "peer-destination-old"),
+            pid: std::process::id(),
+            public_key: destination_identity.public_key,
+            protocol_version: 2,
+            accepting_transfers: true,
+        })
+        .unwrap();
+
+    let bundle_bytes = b"legacy-compatible-bundle";
+    let bundle_path = temp.path().join("legacy-source.bundle");
+    std::fs::write(&bundle_path, bundle_bytes).unwrap();
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination-old", "task-source")
+        .await
+        .unwrap();
+    source
+        .stage_transfer_artifact(
+            &preflight.transfer_id,
+            "artifact-legacy",
+            bundle_path,
+            false,
+        )
+        .await
+        .unwrap();
+
+    let destination_secret = stored_runtime_identity(temp.path(), "peer-destination-old");
+    let source_public_key = parse_public_key(&source.local_identity().public_key).unwrap();
+    let request_id = "legacy-fetch-request";
+    let request = PeerRequest::FetchTransferArtifact {
+        request_id: request_id.into(),
+        transfer_id: preflight.transfer_id.clone(),
+        requester_peer_id: "peer-destination-old".into(),
+        sealed_payload: seal_json(
+            &destination_secret,
+            &source_public_key,
+            &json!({ "artifact_id": "artifact-legacy" }),
+        )
+        .unwrap(),
+    };
+    let mut stream = TcpStream::connect(runtime_endpoint(temp.path(), "peer-source-new"))
+        .await
+        .unwrap();
+    stream
+        .write_all(format!("{}\n", serde_json::to_string(&request).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    stream.flush().await.unwrap();
+    let mut response_line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response_line)
+        .await
+        .unwrap();
+    let response: serde_json::Value = serde_json::from_str(response_line.trim()).unwrap();
+
+    assert_eq!(response["type"], "fetch_transfer_artifact");
+    assert!(
+        response.get("stream_header").is_none(),
+        "legacy response unexpectedly selected streamed framing: {response}",
+    );
+    let sealed_payload = response["sealed_payload"].as_str().unwrap();
+    let metadata = kanna_task_transfer::crypto::open_json(
+        &destination_secret,
+        &source_public_key,
+        sealed_payload,
+    )
+    .unwrap();
+    assert_eq!(
+        URL_SAFE_NO_PAD
+            .decode(metadata["payload_b64"].as_str().unwrap())
+            .unwrap(),
+        bundle_bytes,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_destination_fetches_a_legacy_sealed_artifact_from_an_older_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source-old",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination-new",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination-new").await;
+
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination-new", "task-source")
+        .await
+        .unwrap();
+    source
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-destination-new",
+                "task": { "source_task_id": "task-source" }
+            }),
+        )
+        .await
+        .unwrap();
+    let _incoming = next_incoming_transfer_request(&destination).await;
+
+    let legacy_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let legacy_port = legacy_listener.local_addr().unwrap().port();
+    let source_identity = stored_runtime_identity(temp.path(), "peer-source-old");
+    let source_public_key = source.local_identity().public_key;
+    let destination_public_key =
+        parse_public_key(&destination.local_identity().public_key).unwrap();
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-source-old".into(),
+            display_name: "Source".into(),
+            endpoint: format!("127.0.0.1:{legacy_port}"),
+            pid: std::process::id(),
+            public_key: source_public_key,
+            protocol_version: 2,
+            accepting_transfers: true,
+        })
+        .unwrap();
+
+    let transfer_id = preflight.transfer_id.clone();
+    let legacy_server = tokio::spawn(async move {
+        let (stream, _) = legacy_listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+        let PeerRequest::FetchTransferArtifact {
+            request_id,
+            transfer_id: requested_transfer_id,
+            ..
+        } = serde_json::from_str(request_line.trim()).unwrap()
+        else {
+            panic!("expected artifact fetch request");
+        };
+        assert_eq!(requested_transfer_id, transfer_id);
+        let sealed_payload = seal_json(
+            &source_identity,
+            &destination_public_key,
+            &json!({
+                "artifact_id": "artifact-legacy",
+                "filename": "legacy.bundle",
+                "payload_b64": URL_SAFE_NO_PAD.encode(b"legacy-source-bundle"),
+            }),
+        )
+        .unwrap();
+        let response = json!({
+            "type": "fetch_transfer_artifact",
+            "request_id": request_id,
+            "transfer_id": requested_transfer_id,
+            "sealed_payload": sealed_payload,
+        });
+        writer
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .unwrap();
+    });
+
+    let fetched = destination
+        .fetch_transfer_artifact(&preflight.transfer_id, "artifact-legacy")
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(fetched.path).unwrap(),
+        b"legacy-source-bundle",
+    );
+    legacy_server.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6476,6 +6722,61 @@ async fn owned_artifacts_are_deleted_on_ttl_shutdown_and_startup_while_borrowed_
     assert!(
         borrowed_path.exists(),
         "runtime shutdown deleted a borrowed source artifact",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplicate_owned_artifact_restaging_retains_the_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-restage",
+        "Restage",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let first_source = temp.path().join("first").join("bundle.tar");
+    let second_source = temp.path().join("second").join("bundle.tar");
+    std::fs::create_dir_all(first_source.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(second_source.parent().unwrap()).unwrap();
+    std::fs::write(&first_source, b"first-generation").unwrap();
+    std::fs::write(&second_source, b"second-generation").unwrap();
+
+    runtime
+        .stage_transfer_artifact(
+            "transfer-redelivery",
+            "artifact-redelivery",
+            first_source,
+            true,
+        )
+        .await
+        .unwrap();
+    let first_managed = runtime
+        .fetch_transfer_artifact("transfer-redelivery", "artifact-redelivery")
+        .await
+        .unwrap()
+        .path;
+    runtime
+        .stage_transfer_artifact(
+            "transfer-redelivery",
+            "artifact-redelivery",
+            second_source,
+            true,
+        )
+        .await
+        .unwrap();
+    let retained = runtime
+        .fetch_transfer_artifact("transfer-redelivery", "artifact-redelivery")
+        .await
+        .unwrap()
+        .path;
+
+    assert_eq!(retained, first_managed);
+    assert_eq!(
+        std::fs::read(retained).unwrap(),
+        b"second-generation",
+        "duplicate staging deleted or retained the stale managed artifact",
     );
 }
 
@@ -6805,7 +7106,7 @@ async fn fetch_transfer_artifact_does_not_leak_artifact_bytes_on_the_wire() {
             endpoint: format!("127.0.0.1:{proxy_port}"),
             pid: std::process::id(),
             public_key: source_peer.public_key,
-            protocol_version: 1,
+            protocol_version: 3,
             accepting_transfers: true,
         })
         .unwrap();
@@ -6918,7 +7219,7 @@ async fn timed_out_artifact_receive_removes_its_partial_staging_file() {
             endpoint: format!("127.0.0.1:{proxy_port}"),
             pid: std::process::id(),
             public_key: source_peer.public_key,
-            protocol_version: 1,
+            protocol_version: 3,
             accepting_transfers: true,
         })
         .unwrap();

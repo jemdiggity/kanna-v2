@@ -586,11 +586,11 @@ fn transfer_artifact_control_messages_roundtrip() {
         request_id: "req-peer-fetch".into(),
         transfer_id: "transfer-1".into(),
         sealed_payload: "sealed-response".into(),
-        stream_header: kanna_task_transfer::crypto::SealedStreamHeader {
+        stream_header: Some(kanna_task_transfer::crypto::SealedStreamHeader {
             version: 1,
             ephemeral_public_key: "ephemeral-key".into(),
             nonce_prefix_b64: "nonce-prefix".into(),
-        },
+        }),
     });
 
     assert_roundtrip(ControlRequest::FinalizeOutgoingTransfer {
@@ -954,11 +954,11 @@ fn remaining_protocol_variants_use_expected_json_shapes() {
         request_id: "req-14".into(),
         transfer_id: "transfer-13".into(),
         sealed_payload: "sealed-response".into(),
-        stream_header: kanna_task_transfer::crypto::SealedStreamHeader {
+        stream_header: Some(kanna_task_transfer::crypto::SealedStreamHeader {
             version: 1,
             ephemeral_public_key: "ephemeral-key".into(),
             nonce_prefix_b64: "nonce-prefix".into(),
-        },
+        }),
     };
     assert_eq!(
         serde_json::to_value(&peer_fetch_artifact_response).unwrap(),

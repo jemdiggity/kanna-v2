@@ -13,6 +13,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 const ENVELOPE_VERSION: u32 = 1;
 const ENCRYPTION_CONTEXT: &[u8] = b"kanna-task-transfer:sealed-json:v1";
 const STREAM_ENCRYPTION_CONTEXT: &[u8] = b"kanna-task-transfer:artifact-stream:v1";
+const ARTIFACT_RESPONSE_CONTEXT: &[u8] = b"kanna-task-transfer:artifact-response-metadata:v1";
 const KEY_DERIVATION_SALT: &[u8] = b"kanna-task-transfer:key-derivation:v1";
 
 pub struct TransferIdentity {
@@ -120,6 +121,27 @@ pub fn parse_public_key(encoded: &str) -> Result<PublicKey, CryptoError> {
     Ok(PublicKey::from(public_key_array))
 }
 
+pub fn artifact_stream_context(
+    request_id: &str,
+    transfer_id: &str,
+    artifact_id: &str,
+    plaintext_size: u64,
+) -> Vec<u8> {
+    let mut context = Vec::with_capacity(
+        ARTIFACT_RESPONSE_CONTEXT.len()
+            + request_id.len()
+            + transfer_id.len()
+            + artifact_id.len()
+            + 32,
+    );
+    context.extend_from_slice(ARTIFACT_RESPONSE_CONTEXT);
+    append_context_field(&mut context, request_id.as_bytes());
+    append_context_field(&mut context, transfer_id.as_bytes());
+    append_context_field(&mut context, artifact_id.as_bytes());
+    context.extend_from_slice(&plaintext_size.to_be_bytes());
+    context
+}
+
 pub fn seal_json(
     sender: &TransferIdentity,
     receiver_public: &PublicKey,
@@ -210,6 +232,7 @@ impl StreamSealer {
     pub fn new(
         sender: &TransferIdentity,
         receiver_public: &PublicKey,
+        response_context: &[u8],
     ) -> Result<Self, CryptoError> {
         let ephemeral_secret = generate_secret();
         let ephemeral_public_key = PublicKey::from(&ephemeral_secret);
@@ -222,8 +245,12 @@ impl StreamSealer {
         )?;
         let mut nonce_prefix = [0u8; 16];
         OsRng.fill_bytes(&mut nonce_prefix);
-        let aad =
-            stream_associated_data(&sender.public_key, receiver_public, &ephemeral_public_key);
+        let aad = stream_associated_data(
+            &sender.public_key,
+            receiver_public,
+            &ephemeral_public_key,
+            response_context,
+        );
         Ok(Self {
             cipher,
             aad,
@@ -269,6 +296,7 @@ impl StreamOpener {
         receiver: &TransferIdentity,
         sender_public: &PublicKey,
         header: &SealedStreamHeader,
+        response_context: &[u8],
     ) -> Result<Self, CryptoError> {
         if header.version != ENVELOPE_VERSION {
             return Err(CryptoError::UnsupportedStreamVersion(header.version));
@@ -290,7 +318,12 @@ impl StreamOpener {
         )?;
         Ok(Self {
             cipher,
-            aad: stream_associated_data(sender_public, &receiver.public_key, &ephemeral_public_key),
+            aad: stream_associated_data(
+                sender_public,
+                &receiver.public_key,
+                &ephemeral_public_key,
+                response_context,
+            ),
             nonce_prefix,
             next_sequence: 0,
         })
@@ -368,10 +401,17 @@ fn stream_associated_data(
     sender_public: &PublicKey,
     receiver_public: &PublicKey,
     ephemeral_public_key: &PublicKey,
+    response_context: &[u8],
 ) -> Vec<u8> {
     let mut aad = associated_data(sender_public, receiver_public, ephemeral_public_key);
     aad.extend_from_slice(STREAM_ENCRYPTION_CONTEXT);
+    append_context_field(&mut aad, response_context);
     aad
+}
+
+fn append_context_field(context: &mut Vec<u8>, field: &[u8]) {
+    context.extend_from_slice(&(field.len() as u64).to_be_bytes());
+    context.extend_from_slice(field);
 }
 
 fn stream_nonce(prefix: &[u8; 16], sequence: u64) -> [u8; 24] {

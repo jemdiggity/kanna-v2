@@ -13,8 +13,10 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-pub(super) const CURRENT_PROTOCOL_VERSION: u32 = 2;
+pub(super) const CURRENT_PROTOCOL_VERSION: u32 = 3;
+pub(super) const AUTHENTICATED_TASK_REQUEST_PROTOCOL_VERSION: u32 = 2;
 pub(super) const AUTHENTICATED_TASK_REQUEST_VERSION: u32 = 1;
+pub(super) const STREAMED_ARTIFACT_PROTOCOL_VERSION: u32 = 3;
 
 pub(super) fn parse_peer_response_line(
     peer_id: &str,
@@ -97,6 +99,17 @@ pub(super) fn registry_entry_path(root: &Path, peer_id: &str) -> PathBuf {
     root.join(format!("{}.json", URL_SAFE_NO_PAD.encode(peer_id)))
 }
 
+pub(super) fn managed_artifact_dir(
+    registry_root: &Path,
+    peer_id: &str,
+    transfer_id: &str,
+) -> PathBuf {
+    registry_root
+        .join("artifacts")
+        .join(peer_id)
+        .join(URL_SAFE_NO_PAD.encode(transfer_id.as_bytes()))
+}
+
 pub(super) fn peer_store(root: &Path, self_peer_id: &str) -> Result<PeerStore, RuntimeError> {
     Ok(PeerStore::new(root.join("trusted-peers").join(format!(
         "{}.json",
@@ -147,7 +160,7 @@ pub(super) fn supports_authenticated_task_requests(
     protocol_version: u32,
     capabilities_json: &str,
 ) -> bool {
-    if protocol_version < CURRENT_PROTOCOL_VERSION {
+    if protocol_version < AUTHENTICATED_TASK_REQUEST_PROTOCOL_VERSION {
         return false;
     }
     let Ok(capabilities) = serde_json::from_str::<Value>(capabilities_json) else {
@@ -161,6 +174,10 @@ pub(super) fn supports_authenticated_task_requests(
             .get("authenticatedTaskRequestVersion")
             .and_then(Value::as_u64)
             .is_some_and(|version| version >= AUTHENTICATED_TASK_REQUEST_VERSION as u64)
+}
+
+pub(super) fn supports_streamed_artifacts(protocol_version: u32) -> bool {
+    protocol_version >= STREAMED_ARTIFACT_PROTOCOL_VERSION
 }
 
 pub(super) fn ensure_peer_is_trusted_for(

@@ -2,8 +2,8 @@ use super::events::{FinalizedOutgoingTransfer, PreflightResult, RuntimeError, Ru
 use super::state::StagedTransferArtifact;
 use super::state::{OutgoingTransferReservation, TransferArtifactRecord, TransferRuntime};
 use super::utils::{
-    prune_outgoing_transfers, prune_transfer_artifacts, remove_owned_artifact_paths,
-    take_transfer_artifacts,
+    managed_artifact_dir, prune_outgoing_transfers, prune_transfer_artifacts,
+    remove_owned_artifact_paths, take_transfer_artifacts,
 };
 use super::TransferTransport;
 use crate::crypto::{open_json, parse_public_key, seal_json};
@@ -429,12 +429,8 @@ impl TransferRuntime {
         owned: bool,
     ) -> Result<(), RuntimeError> {
         if owned {
-            let artifact_dir = self
-                .config
-                .registry_dir
-                .join("artifacts")
-                .join(&self.config.peer_id)
-                .join(transfer_id);
+            let artifact_dir =
+                managed_artifact_dir(&self.config.registry_dir, &self.config.peer_id, transfer_id);
             tokio::fs::create_dir_all(&artifact_dir).await?;
             let safe_artifact_id = super::utils::sanitize_artifact_filename(artifact_id);
             let managed_path = artifact_dir.join(format!(
@@ -461,6 +457,7 @@ impl TransferRuntime {
         let mut transfer_artifacts = self.transfer_artifacts.lock().await;
         let expired =
             prune_transfer_artifacts(&mut transfer_artifacts, self.config.pending_transfer_ttl);
+        let retained_path = path.clone();
         let replaced = transfer_artifacts
             .entry(transfer_id.to_owned())
             .or_default()
@@ -479,6 +476,7 @@ impl TransferRuntime {
                 cleanup.push(replaced.path);
             }
         }
+        cleanup.retain(|path| path != &retained_path);
         remove_owned_artifact_paths(cleanup).await;
         Ok(())
     }

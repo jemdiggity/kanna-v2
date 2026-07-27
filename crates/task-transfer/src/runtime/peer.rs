@@ -5,13 +5,16 @@ use super::external_peers::{
 };
 use super::state::{TransferArtifactRecord, TransferRuntime};
 use super::utils::{
-    ensure_peer_is_trusted_for, parse_peer_response_line, peer_store, prune_transfer_artifacts,
-    sanitize_artifact_filename, supports_authenticated_task_requests, write_json_line,
+    ensure_peer_is_trusted_for, managed_artifact_dir, parse_peer_response_line, peer_store,
+    prune_transfer_artifacts, sanitize_artifact_filename, supports_authenticated_task_requests,
+    supports_streamed_artifacts, write_json_line,
 };
-use crate::crypto::{open_json, StreamOpener};
+use crate::crypto::{artifact_stream_context, open_json, StreamOpener};
 use crate::peer_store::PeerRecord;
 use crate::protocol::DiscoveredPeer;
 use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -438,6 +441,52 @@ impl TransferRuntime {
                 .ok_or_else(|| RuntimeError::Protocol(
                     "artifact fetch response missing filename".into(),
                 ))?;
+            let artifact_dir = managed_artifact_dir(
+                &self.config.registry_dir,
+                &self.config.peer_id,
+                transfer_id,
+            );
+            tokio::fs::create_dir_all(&artifact_dir).await?;
+            let safe_artifact_id = sanitize_artifact_filename(artifact_id);
+            let destination_path = artifact_dir.join(format!(
+                "{}-{}",
+                safe_artifact_id,
+                sanitize_artifact_filename(filename),
+            ));
+
+            if !supports_streamed_artifacts(peer.protocol_version) {
+                if stream_header.is_some() {
+                    return Err(RuntimeError::Protocol(format!(
+                        "peer {} selected streamed artifact framing while advertising protocol v{}",
+                        peer.peer_id, peer.protocol_version,
+                    )));
+                }
+                let payload_b64 = metadata
+                    .get("payload_b64")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        RuntimeError::Protocol(
+                            "legacy artifact fetch response missing payload_b64".into(),
+                        )
+                    })?;
+                let payload = URL_SAFE_NO_PAD.decode(payload_b64).map_err(|error| {
+                    RuntimeError::Protocol(format!("invalid artifact payload: {error}"))
+                })?;
+                if payload.len() as u64 > permitted_size {
+                    return Err(RuntimeError::Protocol(format!(
+                        "transfer artifact exceeds maximum size of {permitted_size} bytes",
+                    )));
+                }
+                tokio::fs::write(&destination_path, payload).await?;
+                return Ok::<PathBuf, RuntimeError>(destination_path);
+            }
+
+            let stream_header = stream_header.ok_or_else(|| {
+                RuntimeError::Protocol(format!(
+                    "peer {} omitted streamed artifact framing for protocol v{}",
+                    peer.peer_id, peer.protocol_version,
+                ))
+            })?;
             let plaintext_size = metadata
                 .get("plaintext_size")
                 .and_then(serde_json::Value::as_u64)
@@ -450,27 +499,20 @@ impl TransferRuntime {
                 )));
             }
 
-            let artifact_dir = self
-                .config
-                .registry_dir
-                .join("artifacts")
-                .join(&self.config.peer_id)
-                .join(transfer_id);
-            tokio::fs::create_dir_all(&artifact_dir).await?;
-            let safe_artifact_id = sanitize_artifact_filename(artifact_id);
-            let destination_path = artifact_dir.join(format!(
-                "{}-{}",
-                safe_artifact_id,
-                sanitize_artifact_filename(filename),
-            ));
             let partial_path = artifact_dir.join(format!(
                 ".{}-{}.part",
                 safe_artifact_id, self.request_namespace,
             ));
             partial_path_to_cleanup = Some(partial_path.clone());
             let mut file = tokio::fs::File::create(&partial_path).await?;
-            let mut opener =
-                StreamOpener::new(&self.identity, source_public_key, &stream_header)?;
+            let response_context =
+                artifact_stream_context(request_id, transfer_id, artifact_id, plaintext_size);
+            let mut opener = StreamOpener::new(
+                &self.identity,
+                source_public_key,
+                &stream_header,
+                &response_context,
+            )?;
             let mut sequence = 0u64;
             let mut written = 0u64;
             loop {

@@ -21,12 +21,16 @@ use super::state::{
 use super::utils::{
     extract_request_id, load_or_create_identity, local_capabilities_json,
     pairing_verification_code, peer_store, prune_outgoing_transfers, prune_transfer_artifacts,
-    remove_owned_artifact_paths, supports_authenticated_task_requests, take_transfer_artifacts,
-    write_json_line,
+    remove_owned_artifact_paths, supports_authenticated_task_requests, supports_streamed_artifacts,
+    take_transfer_artifacts, write_json_line,
 };
-use crate::crypto::{open_json, parse_public_key, seal_json, StreamSealer};
+use crate::crypto::{
+    artifact_stream_context, open_json, parse_public_key, seal_json, StreamSealer,
+};
 use crate::peer_store::PeerRecord;
 use crate::protocol::{PairingPeer, PeerRequest, PeerResponse};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use chrono::Utc;
 use rand_core::{OsRng, RngCore};
 use serde::de::DeserializeOwned;
@@ -721,6 +725,30 @@ async fn handle_connection(
                     .and_then(|value| value.to_str())
                     .unwrap_or("artifact")
                     .to_string();
+                if !supports_streamed_artifacts(requester_peer.protocol_version) {
+                    let payload_b64 =
+                        URL_SAFE_NO_PAD.encode(tokio::fs::read(&artifact.path).await?);
+                    let sealed_payload = seal_json(
+                        &identity,
+                        &requester_public_key,
+                        &serde_json::json!({
+                            "artifact_id": artifact_id,
+                            "filename": filename,
+                            "payload_b64": payload_b64,
+                        }),
+                    )?;
+                    write_json_line(
+                        &mut stream,
+                        &PeerResponse::FetchTransferArtifact {
+                            request_id: request_id.clone(),
+                            transfer_id,
+                            sealed_payload,
+                            stream_header: None,
+                        },
+                    )
+                    .await?;
+                    return Ok::<(), RuntimeError>(());
+                }
                 let sealed_payload = seal_json(
                     &identity,
                     &requester_public_key,
@@ -730,14 +758,21 @@ async fn handle_connection(
                         "plaintext_size": metadata.len(),
                     }),
                 )?;
-                let mut sealer = StreamSealer::new(&identity, &requester_public_key)?;
+                let response_context = artifact_stream_context(
+                    &request_id,
+                    &transfer_id,
+                    artifact_id,
+                    metadata.len(),
+                );
+                let mut sealer =
+                    StreamSealer::new(&identity, &requester_public_key, &response_context)?;
                 write_json_line(
                     &mut stream,
                     &PeerResponse::FetchTransferArtifact {
                         request_id: request_id.clone(),
                         transfer_id,
                         sealed_payload,
-                        stream_header: sealer.header(),
+                        stream_header: Some(sealer.header()),
                     },
                 )
                 .await?;
