@@ -58,6 +58,31 @@ pub(crate) fn resolve_tool_request(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let mut validated_args = args.clone();
+    let supports_completion_attempt = catalog
+        .tools
+        .iter()
+        .find(|tool| tool.name == name)
+        .map(|tool| {
+            tool.params
+                .iter()
+                .any(|param| param.name == "completion_attempt")
+        })
+        .unwrap_or(true);
+    let pre_upgrade_completion_attempt =
+        if name == "kanna_complete_stage" && !supports_completion_attempt {
+            validated_args
+                .as_object_mut()
+                .and_then(|args| args.remove("completion_attempt"))
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| "completion_attempt must be a string".to_string())
+                })
+                .transpose()?
+        } else {
+            None
+        };
     if name == "kanna_complete_stage" && trusted_run_id.is_some() {
         if let Some(args) = validated_args.as_object_mut() {
             // Validate caller data against the loaded catalog without letting
@@ -68,6 +93,16 @@ pub(crate) fn resolve_tool_request(
     }
     let mut request = resolve_request(catalog, name, &validated_args)?;
     if name == "kanna_complete_stage" {
+        if let Some(completion_attempt) = pre_upgrade_completion_attempt {
+            let body = request
+                .body
+                .as_object_mut()
+                .ok_or_else(|| "resolved tool request body must be a JSON object".to_string())?;
+            body.insert(
+                "completionAttempt".to_string(),
+                Value::String(completion_attempt),
+            );
+        }
         if let Some(run_id) = trusted_run_id {
             let body = request
                 .body

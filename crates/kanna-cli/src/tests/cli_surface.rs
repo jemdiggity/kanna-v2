@@ -349,7 +349,7 @@ fn generic_complete_stage_tool_call_resolves_old_override_before_binding_run_id(
         .find(|tool| tool.name == "kanna_complete_stage")
         .unwrap()
         .params
-        .retain(|param| param.name != "run_id");
+        .retain(|param| param.name != "run_id" && param.name != "completion_attempt");
 
     let request = resolve_tool_request(
         &catalog,
@@ -357,7 +357,9 @@ fn generic_complete_stage_tool_call_resolves_old_override_before_binding_run_id(
         &json!({
             "task_id": "task-current",
             "status": "success",
-            "summary": "old override"
+            "summary": "old override",
+            "run_id": "caller-supplied-current-run",
+            "completion_attempt": "attempt-current"
         }),
         Some("run-from-environment"),
     )
@@ -368,7 +370,8 @@ fn generic_complete_stage_tool_call_resolves_old_override_before_binding_run_id(
         json!({
             "status": "success",
             "summary": "old override",
-            "runId": "run-from-environment"
+            "runId": "run-from-environment",
+            "completionAttempt": "attempt-current"
         })
     );
 }
