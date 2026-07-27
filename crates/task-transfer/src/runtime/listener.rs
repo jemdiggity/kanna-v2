@@ -21,8 +21,8 @@ use super::state::{
 use super::utils::{
     extract_request_id, load_or_create_identity, local_capabilities_json,
     pairing_verification_code, peer_store, prune_outgoing_transfers, prune_transfer_artifacts,
-    remove_owned_artifact_paths, supports_authenticated_task_requests, supports_streamed_artifacts,
-    take_transfer_artifacts, write_json_line,
+    remove_owned_artifact_paths, supports_authenticated_task_requests, take_transfer_artifacts,
+    write_json_line, ArtifactFraming,
 };
 use crate::crypto::{
     artifact_stream_context, open_json, parse_public_key, seal_json, StreamSealer,
@@ -39,9 +39,51 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex, OwnedSemaphorePermit, Semaphore};
+
+#[derive(Debug)]
+pub(super) struct LegacyArtifactMaterialization {
+    pub(super) payload: Vec<u8>,
+    _permit: OwnedSemaphorePermit,
+}
+
+pub(super) async fn read_bounded_legacy_artifact<R>(
+    reader: R,
+    observed_size: u64,
+    maximum_size: u64,
+    permits: Arc<Semaphore>,
+) -> Result<LegacyArtifactMaterialization, RuntimeError>
+where
+    R: AsyncRead + Unpin,
+{
+    let _permit = permits.try_acquire_owned().map_err(|_| {
+        RuntimeError::Backpressure(
+            "legacy artifact response materialization capacity is exhausted".into(),
+        )
+    })?;
+    if observed_size > maximum_size {
+        return Err(RuntimeError::Protocol(format!(
+            "transfer artifact exceeds maximum size of {maximum_size} bytes",
+        )));
+    }
+    let initial_capacity = usize::try_from(observed_size.min(maximum_size)).map_err(|_| {
+        RuntimeError::Protocol("artifact size cannot be represented on this platform".into())
+    })?;
+    let mut payload = Vec::with_capacity(initial_capacity);
+    let mut bounded = reader.take(maximum_size.saturating_add(1));
+    bounded.read_to_end(&mut payload).await?;
+    if payload.len() as u64 > maximum_size {
+        return Err(RuntimeError::Protocol(format!(
+            "transfer artifact exceeds maximum size of {maximum_size} bytes",
+        )));
+    }
+    Ok(LegacyArtifactMaterialization {
+        payload,
+        _permit: _permit,
+    })
+}
 
 pub(super) async fn run_listener(listener: TcpListener, context: ListenerContext) {
     loop {
@@ -689,12 +731,31 @@ async fn handle_connection(
                 let identity =
                     load_or_create_identity(&context.registry_root, &context.self_peer_id)?;
                 let request_payload = open_json(&identity, &requester_public_key, &sealed_payload)?;
+                ensure_optional_authenticated_argument(
+                    &request_payload,
+                    "request_id",
+                    &request_id,
+                )?;
+                ensure_optional_authenticated_argument(
+                    &request_payload,
+                    "transfer_id",
+                    &transfer_id,
+                )?;
                 let artifact_id = request_payload
                     .get("artifact_id")
                     .and_then(Value::as_str)
                     .ok_or_else(|| {
                         RuntimeError::Protocol("artifact fetch request missing artifact_id".into())
                     })?;
+                let artifact_framing = match request_payload.get("artifact_framing") {
+                    Some(Value::String(name)) => ArtifactFraming::parse(name)?,
+                    Some(_) => {
+                        return Err(RuntimeError::Protocol(
+                            "artifact fetch request has invalid artifact_framing".into(),
+                        ));
+                    }
+                    None => ArtifactFraming::for_protocol(requester_peer.protocol_version),
+                };
 
                 let (artifact, expired_artifacts) = {
                     let mut artifacts = context.transfer_artifacts.lock().await;
@@ -725,14 +786,24 @@ async fn handle_connection(
                     .and_then(|value| value.to_str())
                     .unwrap_or("artifact")
                     .to_string();
-                if !supports_streamed_artifacts(requester_peer.protocol_version) {
-                    let payload_b64 =
-                        URL_SAFE_NO_PAD.encode(tokio::fs::read(&artifact.path).await?);
+                if !artifact_framing.is_streamed() {
+                    let file = tokio::fs::File::open(&artifact.path).await?;
+                    let materialization = read_bounded_legacy_artifact(
+                        file,
+                        metadata.len(),
+                        super::MAX_TRANSFER_ARTIFACT_BYTES,
+                        Arc::clone(&context.legacy_artifact_response_permits),
+                    )
+                    .await?;
+                    let payload_b64 = URL_SAFE_NO_PAD.encode(&materialization.payload);
                     let sealed_payload = seal_json(
                         &identity,
                         &requester_public_key,
                         &serde_json::json!({
+                            "request_id": request_id,
+                            "transfer_id": transfer_id,
                             "artifact_id": artifact_id,
+                            "artifact_framing": artifact_framing.name(),
                             "filename": filename,
                             "payload_b64": payload_b64,
                         }),
@@ -753,7 +824,10 @@ async fn handle_connection(
                     &identity,
                     &requester_public_key,
                     &serde_json::json!({
+                        "request_id": request_id,
+                        "transfer_id": transfer_id,
                         "artifact_id": artifact_id,
+                        "artifact_framing": artifact_framing.name(),
                         "filename": filename,
                         "plaintext_size": metadata.len(),
                     }),
@@ -1447,6 +1521,20 @@ where
             "{name} does not match authenticated payload"
         )))
     }
+}
+
+fn ensure_optional_authenticated_argument<T>(
+    payload: &Value,
+    name: &str,
+    outer: &T,
+) -> Result<(), RuntimeError>
+where
+    T: DeserializeOwned + PartialEq,
+{
+    if payload.get(name).is_none() {
+        return Ok(());
+    }
+    ensure_authenticated_argument(payload, name, outer)
 }
 
 async fn build_incoming_event(

@@ -1,7 +1,8 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use kanna_task_transfer::crypto::{
-    parse_public_key, public_key_to_string, seal_json, TransferIdentity,
+    artifact_stream_context, parse_public_key, public_key_to_string, seal_json, StreamSealer,
+    TransferIdentity,
 };
 use kanna_task_transfer::peer_store::{PeerRecord, PeerStore};
 use kanna_task_transfer::protocol::{PeerRequest, PeerResponse};
@@ -6528,6 +6529,9 @@ async fn older_destination_fetches_a_legacy_sealed_artifact_from_a_new_source() 
         sealed_payload,
     )
     .unwrap();
+    assert_eq!(metadata["request_id"], request_id);
+    assert_eq!(metadata["transfer_id"], preflight.transfer_id);
+    assert_eq!(metadata["artifact_framing"], "legacy_sealed_v1");
     assert_eq!(
         URL_SAFE_NO_PAD
             .decode(metadata["payload_b64"].as_str().unwrap())
@@ -6547,12 +6551,10 @@ async fn new_destination_fetches_a_legacy_sealed_artifact_from_an_older_source()
     ))
     .await
     .unwrap();
-    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
-        "peer-destination-new",
-        "Destination",
-        temp.path(),
-        0,
-    ))
+    let destination = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-destination-new", "Destination", temp.path(), 0)
+            .with_peer_response_limits(512, 32 * 1024),
+    )
     .await
     .unwrap();
     pair_peers(&source, &destination, "peer-destination-new").await;
@@ -6592,6 +6594,8 @@ async fn new_destination_fetches_a_legacy_sealed_artifact_from_an_older_source()
         .unwrap();
 
     let transfer_id = preflight.transfer_id.clone();
+    let bundle_bytes = vec![b'x'; 4 * 1024];
+    let served_bundle_bytes = bundle_bytes.clone();
     let legacy_server = tokio::spawn(async move {
         let (stream, _) = legacy_listener.accept().await.unwrap();
         let (reader, mut writer) = stream.into_split();
@@ -6613,7 +6617,7 @@ async fn new_destination_fetches_a_legacy_sealed_artifact_from_an_older_source()
             &json!({
                 "artifact_id": "artifact-legacy",
                 "filename": "legacy.bundle",
-                "payload_b64": URL_SAFE_NO_PAD.encode(b"legacy-source-bundle"),
+                "payload_b64": URL_SAFE_NO_PAD.encode(&served_bundle_bytes),
             }),
         )
         .unwrap();
@@ -6623,21 +6627,319 @@ async fn new_destination_fetches_a_legacy_sealed_artifact_from_an_older_source()
             "transfer_id": requested_transfer_id,
             "sealed_payload": sealed_payload,
         });
-        writer
-            .write_all(format!("{response}\n").as_bytes())
-            .await
-            .unwrap();
+        let response_line = format!("{response}\n");
+        assert!(
+            response_line.len() > 512,
+            "legacy fixture did not exceed the generic peer frame budget",
+        );
+        writer.write_all(response_line.as_bytes()).await.unwrap();
     });
 
     let fetched = destination
         .fetch_transfer_artifact(&preflight.transfer_id, "artifact-legacy")
         .await
         .unwrap();
+    assert_eq!(std::fs::read(fetched.path).unwrap(), bundle_bytes);
+    legacy_server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destination_protocol_change_after_preflight_keeps_artifact_framing_consistent() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source-framing",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination-framing",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination-framing").await;
+
+    let destination_identity = destination.local_identity();
+    let destination_endpoint = runtime_endpoint(temp.path(), "peer-destination-framing");
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: destination_identity.peer_id.clone(),
+            display_name: destination_identity.display_name.clone(),
+            endpoint: destination_endpoint.clone(),
+            pid: std::process::id(),
+            public_key: destination_identity.public_key.clone(),
+            protocol_version: 2,
+            accepting_transfers: true,
+        })
+        .unwrap();
+
+    let artifact_path = temp.path().join("framing-change.bundle");
+    std::fs::write(&artifact_path, b"framing-change-bundle").unwrap();
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination-framing", "task-source")
+        .await
+        .unwrap();
+    source
+        .stage_transfer_artifact(
+            &preflight.transfer_id,
+            "artifact-framing",
+            artifact_path,
+            false,
+        )
+        .await
+        .unwrap();
+
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: destination_identity.peer_id,
+            display_name: destination_identity.display_name,
+            endpoint: destination_endpoint,
+            pid: std::process::id(),
+            public_key: destination_identity.public_key,
+            protocol_version: 3,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    source
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-destination-framing",
+                "task": { "source_task_id": "task-source" }
+            }),
+        )
+        .await
+        .unwrap();
+    let _incoming = next_incoming_transfer_request(&destination).await;
+
+    let fetched = destination
+        .fetch_transfer_artifact(&preflight.transfer_id, "artifact-framing")
+        .await
+        .expect("authenticated request framing should survive destination version changes");
     assert_eq!(
         std::fs::read(fetched.path).unwrap(),
-        b"legacy-source-bundle",
+        b"framing-change-bundle",
     );
-    legacy_server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_artifact_response_replay_rejects_rewritten_outer_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source-replay",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination-replay",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination-replay").await;
+
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination-replay", "task-source")
+        .await
+        .unwrap();
+    source
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-destination-replay",
+                "task": { "source_task_id": "task-source" }
+            }),
+        )
+        .await
+        .unwrap();
+    let _incoming = next_incoming_transfer_request(&destination).await;
+
+    let replay_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let replay_port = replay_listener.local_addr().unwrap().port();
+    let source_identity = stored_runtime_identity(temp.path(), "peer-source-replay");
+    let source_public_key = source.local_identity().public_key;
+    let destination_public_key =
+        parse_public_key(&destination.local_identity().public_key).unwrap();
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-source-replay".into(),
+            display_name: "Source".into(),
+            endpoint: format!("127.0.0.1:{replay_port}"),
+            pid: std::process::id(),
+            public_key: source_public_key,
+            protocol_version: 2,
+            accepting_transfers: true,
+        })
+        .unwrap();
+
+    let replay_server = tokio::spawn(async move {
+        let (stream, _) = replay_listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+        let PeerRequest::FetchTransferArtifact {
+            request_id,
+            transfer_id,
+            ..
+        } = serde_json::from_str(request_line.trim()).unwrap()
+        else {
+            panic!("expected artifact fetch request");
+        };
+        let sealed_payload = seal_json(
+            &source_identity,
+            &destination_public_key,
+            &json!({
+                "request_id": "stale-fetch-request",
+                "transfer_id": "stale-transfer",
+                "artifact_id": "artifact-replay",
+                "artifact_framing": "legacy_sealed_v1",
+                "filename": "replayed.bundle",
+                "payload_b64": URL_SAFE_NO_PAD.encode(b"stale-bundle"),
+            }),
+        )
+        .unwrap();
+        let response = PeerResponse::FetchTransferArtifact {
+            request_id,
+            transfer_id,
+            sealed_payload,
+            stream_header: None,
+        };
+        writer
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .unwrap();
+    });
+
+    let error = destination
+        .fetch_transfer_artifact(&preflight.transfer_id, "artifact-replay")
+        .await
+        .expect_err("rewritten outer ids must not authenticate a stale sealed response");
+    assert!(
+        error.to_string().contains("authenticated request id"),
+        "unexpected replay rejection: {error}",
+    );
+    replay_server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamed_artifact_response_rejects_authenticated_framing_downgrade() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source-downgrade",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination-downgrade",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination-downgrade").await;
+
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination-downgrade", "task-source")
+        .await
+        .unwrap();
+    source
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-destination-downgrade",
+                "task": { "source_task_id": "task-source" }
+            }),
+        )
+        .await
+        .unwrap();
+    let _incoming = next_incoming_transfer_request(&destination).await;
+
+    let downgrade_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let downgrade_port = downgrade_listener.local_addr().unwrap().port();
+    let source_identity = stored_runtime_identity(temp.path(), "peer-source-downgrade");
+    let source_public_key = source.local_identity().public_key;
+    let destination_public_key =
+        parse_public_key(&destination.local_identity().public_key).unwrap();
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-source-downgrade".into(),
+            display_name: "Source".into(),
+            endpoint: format!("127.0.0.1:{downgrade_port}"),
+            pid: std::process::id(),
+            public_key: source_public_key,
+            protocol_version: 3,
+            accepting_transfers: true,
+        })
+        .unwrap();
+
+    let downgrade_server = tokio::spawn(async move {
+        let (stream, _) = downgrade_listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+        let PeerRequest::FetchTransferArtifact {
+            request_id,
+            transfer_id,
+            ..
+        } = serde_json::from_str(request_line.trim()).unwrap()
+        else {
+            panic!("expected artifact fetch request");
+        };
+        let sealed_payload = seal_json(
+            &source_identity,
+            &destination_public_key,
+            &json!({
+                "request_id": request_id,
+                "transfer_id": transfer_id,
+                "artifact_id": "artifact-downgrade",
+                "artifact_framing": "legacy_sealed_v1",
+                "filename": "downgraded.bundle",
+                "plaintext_size": 0,
+            }),
+        )
+        .unwrap();
+        let context = artifact_stream_context(&request_id, &transfer_id, "artifact-downgrade", 0);
+        let sealer =
+            StreamSealer::new(&source_identity, &destination_public_key, &context).unwrap();
+        let response = PeerResponse::FetchTransferArtifact {
+            request_id,
+            transfer_id,
+            sealed_payload,
+            stream_header: Some(sealer.header()),
+        };
+        writer
+            .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+            .await
+            .unwrap();
+    });
+
+    let error = destination
+        .fetch_transfer_artifact(&preflight.transfer_id, "artifact-downgrade")
+        .await
+        .expect_err("authenticated legacy framing must not downgrade a streamed request");
+    assert!(
+        error
+            .to_string()
+            .contains("authenticated framing does not match"),
+        "unexpected downgrade rejection: {error}",
+    );
+    downgrade_server.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

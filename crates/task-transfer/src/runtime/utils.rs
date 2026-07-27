@@ -18,6 +18,43 @@ pub(super) const AUTHENTICATED_TASK_REQUEST_PROTOCOL_VERSION: u32 = 2;
 pub(super) const AUTHENTICATED_TASK_REQUEST_VERSION: u32 = 1;
 pub(super) const STREAMED_ARTIFACT_PROTOCOL_VERSION: u32 = 3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ArtifactFraming {
+    LegacySealedV1,
+    StreamedV3,
+}
+
+impl ArtifactFraming {
+    pub(super) fn for_protocol(protocol_version: u32) -> Self {
+        if supports_streamed_artifacts(protocol_version) {
+            Self::StreamedV3
+        } else {
+            Self::LegacySealedV1
+        }
+    }
+
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::LegacySealedV1 => "legacy_sealed_v1",
+            Self::StreamedV3 => "streamed_v3",
+        }
+    }
+
+    pub(super) fn parse(name: &str) -> Result<Self, RuntimeError> {
+        match name {
+            "legacy_sealed_v1" => Ok(Self::LegacySealedV1),
+            "streamed_v3" => Ok(Self::StreamedV3),
+            other => Err(RuntimeError::Protocol(format!(
+                "unsupported artifact framing {other}",
+            ))),
+        }
+    }
+
+    pub(super) fn is_streamed(self) -> bool {
+        matches!(self, Self::StreamedV3)
+    }
+}
+
 pub(super) fn parse_peer_response_line(
     peer_id: &str,
     operation: &str,

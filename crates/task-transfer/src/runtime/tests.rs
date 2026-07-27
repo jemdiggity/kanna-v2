@@ -203,3 +203,148 @@ async fn closed_pairing_lifecycle_channel_does_not_retain_pending_admission() {
         "closed lifecycle enqueue retained pairing admission",
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_artifact_materialization_admits_only_one_reader() {
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let first_permits = std::sync::Arc::clone(&permits);
+    let (first_reader, mut first_writer) = tokio::io::duplex(16);
+    let first = tokio::spawn(async move {
+        listener::read_bounded_legacy_artifact(first_reader, 4, 4, first_permits).await
+    });
+
+    while permits.available_permits() != 0 {
+        tokio::task::yield_now().await;
+    }
+
+    let error = listener::read_bounded_legacy_artifact(
+        std::io::Cursor::new(b"next".to_vec()),
+        4,
+        4,
+        std::sync::Arc::clone(&permits),
+    )
+    .await
+    .expect_err("a concurrent legacy materialization must be rejected");
+    assert!(
+        matches!(error, RuntimeError::Backpressure(_)),
+        "unexpected admission error: {error}",
+    );
+
+    use tokio::io::AsyncWriteExt as _;
+    first_writer.write_all(b"data").await.unwrap();
+    drop(first_writer);
+    let materialization = first.await.unwrap().unwrap();
+    assert_eq!(materialization.payload, b"data");
+    assert_eq!(
+        permits.available_permits(),
+        0,
+        "admission was released before response serialization could finish",
+    );
+    let error = listener::read_bounded_legacy_artifact(
+        std::io::Cursor::new(b"later".to_vec()),
+        5,
+        5,
+        std::sync::Arc::clone(&permits),
+    )
+    .await
+    .expect_err("materialized response must retain admission until it is dropped");
+    assert!(matches!(error, RuntimeError::Backpressure(_)));
+    drop(materialization);
+    assert_eq!(
+        listener::read_bounded_legacy_artifact(
+            std::io::Cursor::new(b"later".to_vec()),
+            5,
+            5,
+            permits,
+        )
+        .await
+        .unwrap()
+        .payload,
+        b"later",
+    );
+}
+
+#[tokio::test]
+async fn legacy_artifact_materialization_checks_bytes_read_after_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("growing.bundle");
+    std::fs::write(&path, b"grew").unwrap();
+    let observed_size = std::fs::metadata(&path).unwrap().len();
+    use std::io::Write as _;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"!")
+        .unwrap();
+    let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let error = listener::read_bounded_legacy_artifact(
+        tokio::fs::File::open(path).await.unwrap(),
+        observed_size,
+        4,
+        permits,
+    )
+    .await
+    .expect_err("artifact growth after metadata must exceed the read limit");
+
+    assert!(
+        error.to_string().contains("maximum size of 4 bytes"),
+        "unexpected growth error: {error}",
+    );
+}
+
+#[tokio::test]
+async fn guarded_artifact_part_cleans_timeout_before_retry_commit() {
+    let temp = tempfile::tempdir().unwrap();
+    let destination = temp.path().join("artifact.bundle");
+    std::fs::write(&destination, b"original").unwrap();
+
+    let mut first = peer::GuardedArtifactPart::create(temp.path())
+        .await
+        .unwrap();
+    let first_path = first.path().to_path_buf();
+    first.write_all(b"incomplete").await.unwrap();
+    let timed_out_destination = destination.clone();
+    let timed_out = tokio::time::timeout(std::time::Duration::from_millis(5), async move {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        first.commit(&timed_out_destination).await
+    })
+    .await;
+    assert!(timed_out.is_err(), "guarded write unexpectedly completed");
+    assert!(!first_path.exists(), "timed-out partial file survived");
+    assert_eq!(std::fs::read(&destination).unwrap(), b"original");
+
+    let mut retry = peer::GuardedArtifactPart::create(temp.path())
+        .await
+        .unwrap();
+    retry.write_all(b"replacement").await.unwrap();
+    retry.commit(&destination).await.unwrap();
+    assert_eq!(std::fs::read(&destination).unwrap(), b"replacement");
+    assert_eq!(
+        std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".part"))
+            .count(),
+        0,
+    );
+}
+
+#[tokio::test]
+async fn guarded_artifact_part_cleans_failed_atomic_rename() {
+    let temp = tempfile::tempdir().unwrap();
+    let destination = temp.path().join("artifact.bundle");
+    std::fs::create_dir(&destination).unwrap();
+
+    let mut part = peer::GuardedArtifactPart::create(temp.path())
+        .await
+        .unwrap();
+    let part_path = part.path().to_path_buf();
+    part.write_all(b"complete").await.unwrap();
+    part.commit(&destination)
+        .await
+        .expect_err("renaming over a directory must fail");
+
+    assert!(!part_path.exists(), "failed rename retained partial file");
+    assert!(destination.is_dir(), "failed rename damaged destination");
+}

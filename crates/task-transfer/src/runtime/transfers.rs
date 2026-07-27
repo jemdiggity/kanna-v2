@@ -3,7 +3,7 @@ use super::state::StagedTransferArtifact;
 use super::state::{OutgoingTransferReservation, TransferArtifactRecord, TransferRuntime};
 use super::utils::{
     managed_artifact_dir, prune_outgoing_transfers, prune_transfer_artifacts,
-    remove_owned_artifact_paths, take_transfer_artifacts,
+    remove_owned_artifact_paths, take_transfer_artifacts, ArtifactFraming,
 };
 use super::TransferTransport;
 use crate::crypto::{open_json, parse_public_key, seal_json};
@@ -511,14 +511,18 @@ impl TransferRuntime {
         let source_peer = self.find_peer(&source_peer_id).await?;
         self.ensure_peer_is_trusted(&source_peer.peer_id, &source_peer.public_key)?;
         let source_public_key = parse_public_key(&source_peer.public_key)?;
+        let request_id = self.next_request_id("fetch-artifact");
+        let artifact_framing = ArtifactFraming::for_protocol(source_peer.protocol_version);
         let sealed_payload = seal_json(
             &self.identity,
             &source_public_key,
             &serde_json::json!({
+                "request_id": request_id,
+                "transfer_id": transfer_id,
                 "artifact_id": artifact_id,
+                "artifact_framing": artifact_framing.name(),
             }),
         )?;
-        let request_id = self.next_request_id("fetch-artifact");
         let path = self
             .fetch_peer_artifact_stream(
                 &source_peer,
@@ -531,6 +535,7 @@ impl TransferRuntime {
                 &request_id,
                 transfer_id,
                 artifact_id,
+                artifact_framing,
                 &source_public_key,
             )
             .await?;

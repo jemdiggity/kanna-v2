@@ -145,6 +145,7 @@ pub(super) struct ListenerContext {
     pub(super) pending_transfer_ttl: Duration,
     pub(super) peer_request_timeout: Duration,
     pub(super) incoming_connection_permits: Arc<Semaphore>,
+    pub(super) legacy_artifact_response_permits: Arc<Semaphore>,
     pub(super) max_peer_request_bytes: usize,
     pub(super) max_pending_pairing_requests: usize,
     pub(super) max_task_pull_requests: usize,

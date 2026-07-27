@@ -7,7 +7,7 @@ use super::state::{TransferArtifactRecord, TransferRuntime};
 use super::utils::{
     ensure_peer_is_trusted_for, managed_artifact_dir, parse_peer_response_line, peer_store,
     prune_transfer_artifacts, sanitize_artifact_filename, supports_authenticated_task_requests,
-    supports_streamed_artifacts, write_json_line,
+    write_json_line, ArtifactFraming,
 };
 use crate::crypto::{artifact_stream_context, open_json, StreamOpener};
 use crate::peer_store::PeerRecord;
@@ -15,13 +15,107 @@ use crate::protocol::DiscoveredPeer;
 use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use std::path::PathBuf;
+use rand_core::{OsRng, RngCore};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
+
+pub(super) struct GuardedArtifactPart {
+    path: PathBuf,
+    file: Option<tokio::fs::File>,
+    committed: bool,
+}
+
+impl GuardedArtifactPart {
+    pub(super) async fn create(directory: &Path) -> Result<Self, RuntimeError> {
+        for _ in 0..16 {
+            let mut nonce = [0u8; 16];
+            OsRng.fill_bytes(&mut nonce);
+            let path = directory.join(format!(".artifact-{}.part", URL_SAFE_NO_PAD.encode(nonce),));
+            match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .await
+            {
+                Ok(file) => {
+                    return Ok(Self {
+                        path,
+                        file: Some(file),
+                        committed: false,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(RuntimeError::Protocol(
+            "could not allocate a unique artifact partial file".into(),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(super) async fn write_all(&mut self, payload: &[u8]) -> Result<(), RuntimeError> {
+        self.file
+            .as_mut()
+            .ok_or_else(|| RuntimeError::Protocol("artifact partial file is closed".into()))?
+            .write_all(payload)
+            .await?;
+        Ok(())
+    }
+
+    pub(super) async fn commit(mut self, destination: &Path) -> Result<(), RuntimeError> {
+        let mut file = self
+            .file
+            .take()
+            .ok_or_else(|| RuntimeError::Protocol("artifact partial file is closed".into()))?;
+        file.flush().await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&self.path, destination).await?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for GuardedArtifactPart {
+    fn drop(&mut self) {
+        if !self.committed {
+            drop(self.file.take());
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn ensure_optional_artifact_metadata_match(
+    metadata: &serde_json::Value,
+    field: &str,
+    expected: &str,
+    label: &str,
+) -> Result<(), RuntimeError> {
+    let Some(value) = metadata.get(field) else {
+        return Ok(());
+    };
+    let authenticated = value.as_str().ok_or_else(|| {
+        RuntimeError::Protocol(format!(
+            "artifact response authenticated {label} is not a string",
+        ))
+    })?;
+    if authenticated != expected {
+        return Err(RuntimeError::Protocol(format!(
+            "artifact response authenticated {label} does not match request",
+        )));
+    }
+    Ok(())
+}
 
 impl TransferRuntime {
     pub async fn find_peer(&self, target_peer_id: &str) -> Result<PeerRegistryEntry, RuntimeError> {
@@ -362,6 +456,7 @@ impl TransferRuntime {
         request_id: &str,
         transfer_id: &str,
         artifact_id: &str,
+        artifact_framing: ArtifactFraming,
         source_public_key: &x25519_dalek::PublicKey,
     ) -> Result<PathBuf, RuntimeError> {
         let _permit = Arc::clone(&self.artifact_peer_request_permits)
@@ -370,23 +465,26 @@ impl TransferRuntime {
                 RuntimeError::Backpressure("artifact peer request capacity is exhausted".into())
             })?;
         let permitted_size = super::MAX_TRANSFER_ARTIFACT_BYTES;
-        let mut partial_path_to_cleanup = None;
         let fetch_result = tokio::time::timeout(self.config.peer_request_timeout, async {
             let mut stream = TcpStream::connect(&peer.endpoint).await?;
             write_json_line(&mut stream, &request).await?;
             let mut reader = BufReader::new(stream);
             let mut response_line = String::with_capacity(4096);
+            let response_line_limit = if artifact_framing.is_streamed() {
+                self.config.max_peer_response_bytes
+            } else {
+                self.config.max_artifact_response_bytes
+            };
             let read = {
                 let mut bounded =
-                    (&mut reader).take(self.config.max_peer_response_bytes as u64 + 1);
+                    (&mut reader).take(response_line_limit as u64 + 1);
                 bounded.read_line(&mut response_line).await?
             };
-            if read == 0
-                || read > self.config.max_peer_response_bytes
-                || !response_line.ends_with('\n')
-            {
+            if read == 0 || read > response_line_limit || !response_line.ends_with('\n') {
                 return Err(RuntimeError::Protocol(
-                    "artifact response header exceeded the peer response frame limit".into(),
+                    format!(
+                        "artifact response exceeded the negotiated framing limit of {response_line_limit} bytes",
+                    ),
                 ));
             }
             let response = parse_peer_response_line(
@@ -424,6 +522,18 @@ impl TransferRuntime {
             };
 
             let metadata = open_json(&self.identity, source_public_key, &sealed_payload)?;
+            ensure_optional_artifact_metadata_match(
+                &metadata,
+                "request_id",
+                request_id,
+                "request id",
+            )?;
+            ensure_optional_artifact_metadata_match(
+                &metadata,
+                "transfer_id",
+                transfer_id,
+                "transfer id",
+            )?;
             let response_artifact_id = metadata
                 .get("artifact_id")
                 .and_then(serde_json::Value::as_str)
@@ -434,6 +544,19 @@ impl TransferRuntime {
                 return Err(RuntimeError::Protocol(format!(
                     "mismatched artifact id in artifact fetch response: expected {artifact_id}, got {response_artifact_id}",
                 )));
+            }
+            if let Some(response_framing) = metadata.get("artifact_framing") {
+                let response_framing = response_framing.as_str().ok_or_else(|| {
+                    RuntimeError::Protocol(
+                        "artifact response authenticated framing is not a string".into(),
+                    )
+                })?;
+                if ArtifactFraming::parse(response_framing)? != artifact_framing {
+                    return Err(RuntimeError::Protocol(format!(
+                        "artifact response authenticated framing does not match requested {}",
+                        artifact_framing.name(),
+                    )));
+                }
             }
             let filename = metadata
                 .get("filename")
@@ -454,11 +577,11 @@ impl TransferRuntime {
                 sanitize_artifact_filename(filename),
             ));
 
-            if !supports_streamed_artifacts(peer.protocol_version) {
+            if !artifact_framing.is_streamed() {
                 if stream_header.is_some() {
                     return Err(RuntimeError::Protocol(format!(
-                        "peer {} selected streamed artifact framing while advertising protocol v{}",
-                        peer.peer_id, peer.protocol_version,
+                        "peer {} selected streamed artifact framing for a legacy request",
+                        peer.peer_id,
                     )));
                 }
                 let payload_b64 = metadata
@@ -477,14 +600,16 @@ impl TransferRuntime {
                         "transfer artifact exceeds maximum size of {permitted_size} bytes",
                     )));
                 }
-                tokio::fs::write(&destination_path, payload).await?;
+                let mut partial = GuardedArtifactPart::create(&artifact_dir).await?;
+                partial.write_all(&payload).await?;
+                partial.commit(&destination_path).await?;
                 return Ok::<PathBuf, RuntimeError>(destination_path);
             }
 
             let stream_header = stream_header.ok_or_else(|| {
                 RuntimeError::Protocol(format!(
-                    "peer {} omitted streamed artifact framing for protocol v{}",
-                    peer.peer_id, peer.protocol_version,
+                    "peer {} omitted negotiated streamed artifact framing",
+                    peer.peer_id,
                 ))
             })?;
             let plaintext_size = metadata
@@ -499,12 +624,7 @@ impl TransferRuntime {
                 )));
             }
 
-            let partial_path = artifact_dir.join(format!(
-                ".{}-{}.part",
-                safe_artifact_id, self.request_namespace,
-            ));
-            partial_path_to_cleanup = Some(partial_path.clone());
-            let mut file = tokio::fs::File::create(&partial_path).await?;
+            let mut partial = GuardedArtifactPart::create(&artifact_dir).await?;
             let response_context =
                 artifact_stream_context(request_id, transfer_id, artifact_id, plaintext_size);
             let mut opener = StreamOpener::new(
@@ -546,19 +666,12 @@ impl TransferRuntime {
                         "artifact stream exceeded its declared size".into(),
                     ));
                 }
-                file.write_all(&plaintext).await?;
+                partial.write_all(&plaintext).await?;
             }
-            file.flush().await?;
-            tokio::fs::rename(&partial_path, &destination_path).await?;
-            partial_path_to_cleanup = None;
+            partial.commit(&destination_path).await?;
             Ok::<PathBuf, RuntimeError>(destination_path)
         })
         .await;
-        if !matches!(&fetch_result, Ok(Ok(_))) {
-            if let Some(partial_path) = partial_path_to_cleanup.take() {
-                let _ = tokio::fs::remove_file(partial_path).await;
-            }
-        }
         let destination = fetch_result.map_err(|_| RuntimeError::PeerRequestTimeout {
             peer_id: peer.peer_id.clone(),
             timeout_ms: self.config.peer_request_timeout.as_millis(),

@@ -145,6 +145,10 @@ impl TransferRuntime {
         let task_snapshot = Arc::new(Mutex::new(Value::Null));
         let terminal_observers = Arc::new(Mutex::new(HashMap::new()));
         let incoming_connection_permits = Arc::new(Semaphore::new(config.max_incoming_connections));
+        // Legacy artifact replies materialize both raw and base64-encoded whole-file
+        // buffers. Keep that compatibility path single-flight so its bounded
+        // per-request allocation cannot be multiplied by connection concurrency.
+        let legacy_artifact_response_permits = Arc::new(Semaphore::new(1));
         let peer_request_permits = Arc::new(Semaphore::new(config.max_peer_requests));
         // Artifact responses use a deliberately larger frame budget than task
         // metadata. Keep them single-flight so that bound is not multiplied by
@@ -165,6 +169,7 @@ impl TransferRuntime {
             pending_transfer_ttl: config.pending_transfer_ttl,
             peer_request_timeout: config.peer_request_timeout,
             incoming_connection_permits,
+            legacy_artifact_response_permits,
             max_peer_request_bytes: config.max_peer_request_bytes,
             max_pending_pairing_requests: config.max_lifecycle_events,
             max_task_pull_requests: config.max_task_pull_requests,
