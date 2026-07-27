@@ -238,6 +238,18 @@ pub(crate) async fn handle_command(
             agent_provider,
             terminal_prelude,
         } => {
+            // A PTY id also reaches the recovery snapshot path. Reject before
+            // taking an id-keyed lifecycle lock or spawning any process.
+            if !kanna_daemon::session_id::is_safe(&session_id) {
+                log::warn!("[spawn] rejecting unsafe session id {session_id:?}");
+                let evt = error_event(
+                    Some(protocol::ErrorCode::PtySpawnFailed),
+                    format!("invalid session id: {session_id:?}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+
             let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
             let _lifecycle_guard = lifecycle.lock().await;
             log::info!(
@@ -954,6 +966,17 @@ pub(crate) async fn handle_command(
         }
 
         Command::Snapshot { session_id } => {
+            // A live-session miss falls through to a persisted snapshot read.
+            if !kanna_daemon::session_id::is_safe(&session_id) {
+                log::warn!("[snapshot] rejecting unsafe session id {session_id:?}");
+                let evt = error_event(
+                    Some(protocol::ErrorCode::SessionNotFound),
+                    format!("invalid session id: {session_id:?}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+
             let live_snapshot = {
                 match session_handle(&sessions, &session_id).await {
                     Some(session) => Some(session.snapshot(&session_id).await),
@@ -1012,6 +1035,13 @@ pub(crate) async fn handle_command(
             session_id,
             snapshot,
         } => {
+            if !kanna_daemon::session_id::is_safe(&session_id) {
+                log::warn!("[seed-snapshot] rejecting unsafe session id {session_id:?}");
+                let evt = error_event(None, format!("invalid session id: {session_id:?}"));
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+
             let evt = match recovery_manager.seed_snapshot_for_next_start(
                 &session_id,
                 &SeededRecoverySnapshot {

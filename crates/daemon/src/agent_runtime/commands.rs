@@ -23,6 +23,22 @@ pub async fn handle_spawn_agent(
     agents: AgentSessions,
     data_dir: std::path::PathBuf,
 ) {
+    // Reject before creating a provider process or registry entry. The journal
+    // check is a path-confinement backstop, not authorization to create a
+    // memory-only session under a hostile id.
+    if !kanna_daemon::session_id::is_safe(&session_id) {
+        log::warn!("[agent] rejecting spawn for unsafe session id {session_id:?}");
+        reply(
+            &writer,
+            &agent_error(
+                protocol::ErrorCode::AgentSpawnFailed,
+                format!("invalid session id: {session_id:?}"),
+            ),
+        )
+        .await;
+        return;
+    }
+
     let Some(adapter) = agent::make_adapter(params.agent_provider) else {
         reply(
             &writer,
