@@ -83,7 +83,8 @@ Always start end-to-end mobile runs from `./kd dev up --mobile` or
 `./kd mobile up` — launching Expo directly from `apps/mobile` does not start
 the desktop-side `kanna-server`, so the app boots but can't reach desktop
 data. Physical-device flows, staging installs, and the Buffy staging test
-identity are documented in detail in `AGENTS.md`.
+identity are documented in detail in
+[Physical iPhone development](#physical-iphone-development) below.
 
 ### Cloud & release
 

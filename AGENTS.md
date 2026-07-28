@@ -62,7 +62,10 @@ reconnect, `tests/cli-contract/` for agent CLI compatibility.
   (same id, run history, blockers), but **every stage transition forks a fresh
   workspace**: a new branch + worktree `task-{id}-{n}` cut from the previous
   stage's committed tip. N worktrees, N branches, one PR. **Only committed
-  work crosses a stage boundary.**
+  work crosses a stage boundary.** When a task leaves a workspace, that
+  workspace's repo-config `teardown` commands run best-effort in a detached
+  `td-{branch}` daemon session; open-task worktrees stay available for revision
+  resume until the task closes.
 - **Post** — tail work injected into the stage's *running* agent session before
   the transition. Stages fork workspaces and swap sessions; posts continue them.
 - **Daemon** — standalone process managing PTY sessions. Survives app restarts.
