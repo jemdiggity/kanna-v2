@@ -1,7 +1,7 @@
 ---
 name: config-factory
 description: Helps users create or update .kanna/config.json
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 

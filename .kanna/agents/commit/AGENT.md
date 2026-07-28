@@ -1,7 +1,7 @@
 ---
 name: commit
 description: Commits task work before PR creation
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 

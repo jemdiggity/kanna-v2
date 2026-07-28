@@ -1,7 +1,7 @@
 ---
 name: merge
 description: Git-first merge master for queued merge requests and safe stacked-branch merging
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 

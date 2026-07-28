@@ -1,7 +1,7 @@
 ---
 name: qa-dispatcher
 description: QA dispatcher that fans out specialty review child tasks and aggregates their verdicts
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 

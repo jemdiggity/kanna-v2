@@ -1,7 +1,7 @@
 ---
 name: merge@github
 description: Git-first merge master that merges approved GitHub pull requests
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 

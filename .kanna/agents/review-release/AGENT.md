@@ -1,7 +1,7 @@
 ---
 name: review-release
 description: Kanna repo-local specialty reviewer for packaging, vendoring, and release rules
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 

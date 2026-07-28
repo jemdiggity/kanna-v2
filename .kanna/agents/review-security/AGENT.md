@@ -1,7 +1,7 @@
 ---
 name: review-security
 description: Specialty reviewer for security-relevant changes and their safeguards
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 

@@ -1,7 +1,7 @@
 ---
 name: pr@draft-pr
 description: Creates a draft GitHub pull request for a completed task branch
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 
