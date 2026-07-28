@@ -22,7 +22,7 @@ semantics, and the MCP task-management rule — stay in the repo-root
 2. User selects task, presses Cmd+D → diff modal shows all branch changes
 3. Optionally Cmd+P → file picker → preview, Cmd+O → open in IDE, or Cmd+J → shell in worktree
 4. Cmd+S → advance the pipeline (commit post runs in-session; the pr-stage agent creates the GitHub PR and reports its URL)
-5. Human reviews the PR, then Cmd+S (or the diff modal's approve button) advances the pr stage: when the task's pinned pipeline ships the `approve` post, the button reads "Approve & Merge" and the post marks the PR ready and signals the merge master, which merges it; pinned pipelines without the post get a plain "Approve" that only advances. Approval is single-flight: while the post runs the button is disabled and repeated Cmd+S is ignored — only the post's completion closes the task. Shift+Cmd+S in the diff modal sends the task back to `in progress` for revisions instead.
+5. Human reviews the PR, then Cmd+S (or the diff modal's approve button) advances the pr stage: when the task's pinned pipeline ships the `approve` post, the button reads "Approve & Merge" and the post signals the merge master, which merges it; pinned pipelines without the post get a plain "Approve" that only advances. Approval is single-flight: while the post runs the button is disabled and repeated Cmd+S is ignored — only the post's completion closes the task. Shift+Cmd+S in the diff modal sends the task back to `in progress` for revisions instead.
 
 **Manual intervention:**
 1. Cmd+J → shell modal opens in the task's worktree

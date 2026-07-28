@@ -13,8 +13,10 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   diff (⌘D branch scope). `pr_url` is optional metadata a verdict may
   carry — never load-bearing.
 - **Forge behavior lives in user-space.** Agents and pipelines are
-  `.kanna/` files the user owns. A gh user's pr agent creates draft PRs and
-  their approve post runs `gh pr ready`; another forge means editing agent
+  `.kanna/` files the user owns. The stock flow opens an ordinary PR; a repo
+  that opts into `pr@draft-pr` also owns what readies the draft before the
+  merge master sees it — `gh pr ready` on approval belongs in
+  `.kanna/agents/approve/EXTEND.md`. Another forge means editing agent
   files, not the engine. The engine ships neutral primitives only.
 - **The merge master is a long-living singleton, per repo.** One resident
   agent session that receives merge requests over the task-input boundary,
@@ -34,8 +36,7 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
 2. Human reviews **in Kanna**: ⌘D branch diff. Verdicts are stage actions:
    - request changes → `request-revision` with feedback (exists);
    - approve → ⌘S, which dispatches the pr stage's **approve post** into
-     the live session: flip the PR ready if the user's convention says so,
-     then signal the merge master with a structured request
+     the live session: signal the merge master with a structured request
      (`MERGE <branch> → <target> [PR <url>]: <summary>`). Post success at
      the final stage closes the task (already works in the engine).
 3. The merge master folds the request into its picture, merges when safe
@@ -56,8 +57,9 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
 
 ## User-space work (reference implementations, all `.kanna/` files)
 
-- pr AGENT.md: create draft PRs (gh flavor); report `pr_url` metadata.
-- pr stage `post: approve` in the default/qa pipelines: ready-the-PR +
+- pr AGENT.md: create the PR (draft only via the opt-in `pr@draft-pr`
+  flavor); report `pr_url` metadata.
+- pr stage `post: approve` in the built-in pipelines (all three ship it):
   signal the merge master.
 - merge AGENT.md rewritten git-first: resolve target from runtime
   context/`base_ref`/`origin/HEAD`; detect stacks from branch topology

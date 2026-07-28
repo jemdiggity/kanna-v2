@@ -17,6 +17,12 @@ const requiredFlavors = [
 
 const requiredBuiltInAgents = ["setup"];
 
+// The user-facing pipeline lineup, in increasing review depth. `default` is
+// the fallback the server resolves when a repo names no pipeline, so its name
+// is load-bearing. `specialty-review` is excluded: it is the internal
+// single-stage pipeline qa-dispatcher gives its child tasks, not a choice.
+const BUILTIN_PIPELINES = ["default", "single-reviewer", "specialized-reviewers"];
+
 function read(path: string): string {
   return readFileSync(path, "utf8");
 }
@@ -129,46 +135,131 @@ describe("bundled agent flavor contracts", () => {
     });
   }
 
-  it("setup GitHub preset publishes a PR before native review approval", () => {
+  it("setup GitHub preset selects a built-in pipeline instead of authoring one", () => {
     const setupAgent = read(join(agentsRoot, "setup", "AGENT.md"));
     const setupContract = read(join(agentsRoot, "setup", "CONTRACT.md"));
     const setupConfig = parseJsonFenceAfter(
       setupAgent,
       "`.kanna/config.json` selects the pipeline and stock flavors",
-    ) as { flavors?: { pr?: unknown; merge?: unknown } };
-    const setupPipeline = parseJsonFenceAfter(
-      setupAgent,
-      "`.kanna/pipelines/github-flow.json` composes the built-in roles",
-    ) as {
-      stages?: Array<{
+    ) as { pipeline?: unknown; flavors?: { pr?: unknown; merge?: unknown } };
+
+    // A copied pipeline file would fossilize whatever the built-ins looked
+    // like on the day setup ran. Selecting one keeps the repo on the shipped
+    // definition, so the preset is a config selection, not a pipeline author.
+    expect(setupConfig.pipeline).toBe("default");
+    expect(BUILTIN_PIPELINES).toContain(setupConfig.pipeline);
+    expect(setupAgent).not.toContain("github-flow.json");
+    expect(setupContract).toContain("not author a pipeline file of its own");
+    for (const name of BUILTIN_PIPELINES) {
+      expect(setupAgent, `offers ${name}`).toContain(`\`${name}\``);
+    }
+
+    // No draft flavor by default: merge@github cannot merge a draft, so a
+    // stock preset that opened one would strand at the merge master.
+    expect(setupConfig.flavors).toMatchObject({ merge: "github" });
+    expect(setupConfig.flavors).not.toHaveProperty("pr");
+    expect(setupContract).toContain("must not select `pr@draft-pr`");
+  });
+
+  it("keeps every setup answer combination internally composable", () => {
+    const setupAgent = read(join(agentsRoot, "setup", "AGENT.md"));
+    const setupContract = read(join(agentsRoot, "setup", "CONTRACT.md"));
+    const approveAgent = read(join(agentsRoot, "approve", "AGENT.md"));
+
+    // The constraint every rule below derives from: approve resolves the PR
+    // with `gh pr view` and fails when there is none, and every built-in
+    // pipeline ends with a pr stage carrying an approve post. So the flavor
+    // answers are not independent of the pipeline selection.
+    expect(approveAgent).toContain("gh pr view");
+    expect(approveAgent).toContain("complete this stage as failure");
+    for (const name of BUILTIN_PIPELINES) {
+      const pipeline = JSON.parse(
+        read(join(repoRoot, ".kanna", "pipelines", `${name}.json`)),
+      ) as { stages?: Array<{ name?: unknown; post?: { agent?: unknown } }> };
+      const prStage = pipeline.stages?.find((stage) => stage.name === "pr");
+      expect(prStage?.post?.agent, `${name} pr stage post`).toBe("approve");
+    }
+
+    // push-only publishes no PR, so pairing it with a built-in would hand
+    // approve a PR that does not exist.
+    expect(setupAgent).toContain("Never select a built-in pipeline with push-only");
+    expect(setupContract).toContain("must never be paired with a built-in pipeline");
+
+    // Manual merge: nothing consumes the signal, so the post must go too.
+    expect(setupContract).toContain(
+      "Manual merge likewise requires omitting the `approve` post",
+    );
+
+    // Draft + merge agent is only coherent with the readying extension.
+    expect(setupAgent).toContain(".kanna/agents/approve/EXTEND.md");
+    expect(setupContract).toContain("readies the draft before signaling");
+
+    // The rule set must be closed, so an unlisted combination is a question
+    // for the user rather than an invented fourth shape.
+    expect(setupAgent).toContain("This list is closed");
+  });
+
+  it("ships the three built-in pipelines the setup interview offers", () => {
+    for (const name of BUILTIN_PIPELINES) {
+      const path = join(repoRoot, ".kanna", "pipelines", `${name}.json`);
+      expect(existsSync(path), `${path} must exist`).toBe(true);
+
+      const pipeline = JSON.parse(read(path)) as {
         name?: unknown;
-        agent?: unknown;
-        post?: { name?: unknown; agent?: unknown; prompt?: unknown };
-      }>;
+        stages?: Array<{ name?: unknown; agent?: unknown }>;
+      };
+      expect(pipeline.name, `${name} name matches its filename`).toBe(name);
+
+      // Review depth is the only axis that varies: every one of them
+      // implements, commits as a post, and ends at a pr stage.
+      const stageNames = pipeline.stages?.map((stage) => stage.name);
+      expect(stageNames?.[0], name).toBe("in progress");
+      expect(stageNames?.at(-1), name).toBe("pr");
+    }
+
+    const reviewAgentFor = (name: string) => {
+      const pipeline = JSON.parse(
+        read(join(repoRoot, ".kanna", "pipelines", `${name}.json`)),
+      ) as { stages?: Array<{ name?: unknown; agent?: unknown }> };
+      return pipeline.stages?.find((stage) => stage.name === "review")?.agent;
     };
 
-    expect(setupConfig.flavors).toMatchObject({
-      pr: "draft-pr",
-      merge: "github",
-    });
-    expect(setupPipeline.stages?.map((stage) => stage.name)).toEqual([
-      "in progress",
-      "pr",
-    ]);
+    expect(reviewAgentFor("default")).toBeUndefined();
+    expect(reviewAgentFor("single-reviewer")).toBe("review");
+    expect(reviewAgentFor("specialized-reviewers")).toBe("qa-dispatcher");
+  });
 
-    const prStage = setupPipeline.stages?.find((stage) => stage.name === "pr");
-    expect(prStage?.agent).toBe("pr");
-    expect(prStage?.post).toMatchObject({
-      name: "approve",
-      agent: "approve",
-    });
-    expect(prStage?.post?.prompt).toContain("$PREV_RESULT");
-    expect(setupAgent).toContain(
-      "This composes `pr@draft-pr -> review in Cmd+D -> approve post -> merge@github`",
-    );
-    expect(setupContract).toContain(
-      "must not insert an automatic `review` stage before the `pr` stage",
-    );
+  it("hands the draft-PR composition from approve to merge@github over one MERGE line", () => {
+    // The GitHub preset composes pr -> approve post -> merge@github across
+    // three separate agent sessions. Nothing type-checks the handoff: approve
+    // emits a MERGE line as free text and merge@github parses it, so the two
+    // spellings must stay identical or the approved flow silently strands at
+    // the merge master. Live coverage is blocked on the harness in
+    // docs/2026-07-08-setup-agent-live-e2e-gap.md.
+    const MERGE_LINE = "MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>";
+
+    const approveAgent = read(join(agentsRoot, "approve", "AGENT.md"));
+    const approveContract = read(join(agentsRoot, "approve", "CONTRACT.md"));
+    const mergeGithub = read(join(agentsRoot, "merge", "flavors", "github", "AGENT.md"));
+
+    for (const [label, content] of [
+      ["approve AGENT.md", approveAgent],
+      ["approve CONTRACT.md", approveContract],
+      ["merge@github AGENT.md", mergeGithub],
+    ] as const) {
+      expect(content, label).toContain(MERGE_LINE);
+    }
+
+    // approve addresses the merge master by role name, and merge@github is
+    // the flavor that role resolves to under the preset's config.
+    expect(approveAgent).toContain('`agent = "merge"`');
+    expect(approveContract).toContain('`agent = "merge"`');
+
+    // The stock preset opens an ordinary PR, so nothing needs readying. A
+    // repo that opts into pr@draft-pr still reaches this agent, and
+    // `gh pr merge` fails on a draft — merge@github must say so rather than
+    // running a command GitHub rejects.
+    expect(mergeGithub).toContain("GitHub refuses this while a PR is still a draft");
   });
 
   it("does not silently drop newly added flavor files from contract coverage", () => {

@@ -1,0 +1,39 @@
+{
+  "$schema": "./schema.json",
+  "name": "single-reviewer",
+  "description": "One review agent: implement (commit as post) -> review -> PR, with automatic revision requests for weak testing",
+  "revision_limit": 3,
+  "stages": [
+    {
+      "name": "in progress",
+      "description": "Agent implements the task, then commits as the stage's tail work",
+      "agent": "implement",
+      "prompt": "$TASK_PROMPT",
+      "policy": { "transition": "manual", "revision_transition": "auto" },
+      "post": {
+        "name": "commit",
+        "agent": "commit",
+        "prompt": "Commit the relevant work for this task before review. Original task: $TASK_PROMPT"
+      }
+    },
+    {
+      "name": "review",
+      "description": "Review agent checks quality and test coverage before PR creation",
+      "agent": "review",
+      "prompt": "Review branch $BRANCH for task quality and test coverage against base $BASE_REF. Original task: $TASK_PROMPT. Previous implementation result: $PREV_MAIN_RESULT",
+      "policy": { "transition": "auto" }
+    },
+    {
+      "name": "pr",
+      "description": "Agent creates a GitHub PR after review passes",
+      "agent": "pr",
+      "prompt": "Create a PR for the reviewed work on branch $BRANCH.",
+      "policy": { "transition": "manual" },
+      "post": {
+        "name": "approve",
+        "agent": "approve",
+        "prompt": "Approve the PR for branch $BRANCH after PR creation and signal the merge master. Previous result: $PREV_RESULT"
+      }
+    }
+  ]
+}

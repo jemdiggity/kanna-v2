@@ -5,9 +5,8 @@ The `approve` role runs as a post stage after PR review approval.
 Required behavior:
 
 - It must load task context with `kanna_get_task`.
-- It must resolve the PR URL from task metadata or the current branch.
-- If no PR exists, it must finish with `kanna_complete_stage` status `failure`.
-- When a draft PR exists, it must make the PR ready before signaling merge.
+- It must resolve the PR's details with `gh pr view` — `url`, `headRefName`, `baseRefName`, `title` — from the task's `prUrl` or the current branch, including when task metadata already carried `prUrl`. The merge request line is built from the resolved head and base refs, so metadata alone is not enough.
+- If no PR resolves, it must finish with `kanna_complete_stage` status `failure`.
 - It must build a merge request line in this format:
 
 ```text

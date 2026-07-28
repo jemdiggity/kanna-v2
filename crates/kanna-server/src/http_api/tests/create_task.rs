@@ -1280,7 +1280,7 @@ async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
                     serde_json::json!({
                         "repoId": "repo-1",
                         "prompt": "Ship safely",
-                        "pipelineName": "qa",
+                        "pipelineName": "single-reviewer",
                         "stage": "pr",
                         "agentProvider": "claude",
                         "agentType": "agent"

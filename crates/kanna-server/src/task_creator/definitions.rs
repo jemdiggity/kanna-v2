@@ -410,8 +410,8 @@ impl RepoDefinitions {
             .map_err(|error| definition_error(&self.snapshot, path, error))?;
         let mut names = BTreeSet::from([
             "default".to_string(),
-            "qa".to_string(),
-            "qa-dispatch".to_string(),
+            "single-reviewer".to_string(),
+            "specialized-reviewers".to_string(),
             "specialty-review".to_string(),
         ]);
         for entry in entries {
@@ -701,14 +701,50 @@ fn optional_builtin_agent_resource(selector: &AgentSelector) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Built-in pipelines that shipped under an earlier name, mapped to the
+/// definition each now resolves to. Single source of truth: the compiled
+/// resource fallback below and manifest canonicalization in
+/// `load_repo_kanna_definitions` both read this table, so a retired name never
+/// has its mapping written twice.
+///
+/// These are resolution aliases only. They stay out of `pipeline_names()`, so
+/// a retired name never returns as a user-facing choice, and they always lose
+/// to a repo that ships its own pipeline under the same name.
+pub(super) const LEGACY_BUILTIN_PIPELINES: &[(&str, &str)] = &[
+    ("qa", "single-reviewer"),
+    ("qa-dispatch", "specialized-reviewers"),
+];
+
+/// The current name a possibly-retired built-in pipeline resolves to, or
+/// `name` unchanged when it was never retired.
+pub(super) fn canonical_builtin_pipeline_name(name: &str) -> &str {
+    LEGACY_BUILTIN_PIPELINES
+        .iter()
+        .find_map(|(legacy, current)| (*legacy == name).then_some(*current))
+        .unwrap_or(name)
+}
+
 fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
+    // A retired built-in pipeline name serves its current definition.
+    if let Some(name) = relative_path
+        .strip_prefix(".kanna/pipelines/")
+        .and_then(|file| file.strip_suffix(".json"))
+    {
+        let canonical = canonical_builtin_pipeline_name(name);
+        if canonical != name {
+            return compiled_builtin_resource(&format!(".kanna/pipelines/{canonical}.json"));
+        }
+    }
+
     match relative_path {
         ".kanna/pipelines/default.json" => {
             Some(include_str!("../../../../.kanna/pipelines/default.json"))
         }
-        ".kanna/pipelines/qa.json" => Some(include_str!("../../../../.kanna/pipelines/qa.json")),
-        ".kanna/pipelines/qa-dispatch.json" => Some(include_str!(
-            "../../../../.kanna/pipelines/qa-dispatch.json"
+        ".kanna/pipelines/single-reviewer.json" => Some(include_str!(
+            "../../../../.kanna/pipelines/single-reviewer.json"
+        )),
+        ".kanna/pipelines/specialized-reviewers.json" => Some(include_str!(
+            "../../../../.kanna/pipelines/specialized-reviewers.json"
         )),
         ".kanna/pipelines/specialty-review.json" => Some(include_str!(
             "../../../../.kanna/pipelines/specialty-review.json"

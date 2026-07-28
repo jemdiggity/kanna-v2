@@ -4419,9 +4419,14 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
     daemon_server.await.unwrap();
 
     // The deferred transition executes on a detached task; wait for it.
+    // The stage landed on is the built-in `default` pipeline's second stage:
+    // this repo's `.kanna` fixture is committed but never published to
+    // origin/main, which is where definitions resolve from, so it never
+    // takes effect. What this test asserts is the transition itself, not
+    // which pipeline supplied the stage name.
     let db = Db::open(&config.db_path).unwrap();
-    let task = wait_for_task_stage(&db, "task-1", "review").await;
-    assert_eq!(task.stage.as_deref(), Some("review"));
+    let task = wait_for_task_stage(&db, "task-1", "pr").await;
+    assert_eq!(task.stage.as_deref(), Some("pr"));
     assert!(task.closed_at.is_none());
 
     let runs = db.list_stage_runs_for_task("task-1").unwrap();
@@ -4431,8 +4436,8 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
         post_run.feedback.as_deref(),
         Some("cleaned up and committed")
     );
-    let review_run = runs.iter().find(|run| run.stage == "review").unwrap();
-    assert_eq!(review_run.status, "running");
+    let next_stage_run = runs.iter().find(|run| run.stage == "pr").unwrap();
+    assert_eq!(next_stage_run.status, "running");
 
     if created_sidecar {
         let _ = std::fs::remove_file(&kanna_cli_path);

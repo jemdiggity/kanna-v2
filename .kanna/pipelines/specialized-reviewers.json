@@ -1,7 +1,7 @@
 {
   "$schema": "./schema.json",
-  "name": "qa-dispatch",
-  "description": "Implementation (commit as post) -> dispatched specialty reviews -> PR flow",
+  "name": "specialized-reviewers",
+  "description": "Specialty review panel: implement (commit as post) -> dispatched specialty reviews -> PR",
   "revision_limit": 3,
   "stages": [
     {
@@ -13,21 +13,21 @@
       "post": {
         "name": "commit",
         "agent": "commit",
-        "prompt": "Commit the relevant work for this task before QA review. Original task: $TASK_PROMPT"
+        "prompt": "Commit the relevant work for this task before review. Original task: $TASK_PROMPT"
       }
     },
     {
       "name": "review",
-      "description": "QA dispatcher selects the specialty reviews this branch needs, fans them out as child tasks, and aggregates their verdicts",
+      "description": "Dispatcher selects the specialty reviews this branch needs, fans them out as child tasks, and aggregates their verdicts",
       "agent": "qa-dispatcher",
       "prompt": "Dispatch the specialty reviews needed for branch $BRANCH against base $BASE_REF, then aggregate their verdicts into one review decision. On a later round, review what changed since the previous review round rather than the whole branch again. Original task: $TASK_PROMPT. Previous implementation result: $PREV_MAIN_RESULT",
       "policy": { "transition": "auto" }
     },
     {
       "name": "pr",
-      "description": "Agent creates a GitHub PR after dispatched QA passes",
+      "description": "Agent creates a GitHub PR after the specialty panel passes",
       "agent": "pr",
-      "prompt": "Create a PR for the QA-approved work on branch $BRANCH.",
+      "prompt": "Create a PR for the reviewed work on branch $BRANCH.",
       "policy": { "transition": "manual" },
       "post": {
         "name": "approve",

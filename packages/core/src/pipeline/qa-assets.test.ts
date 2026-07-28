@@ -76,7 +76,7 @@ describe("QA pipeline assets", () => {
 
   it("instructs the QA agent to request revision instead of changing the review branch", () => {
     const reviewAgent = readRepoFile(".kanna/agents/review/AGENT.md");
-    const qaPipeline = readRepoFile(".kanna/pipelines/qa.json");
+    const qaPipeline = readRepoFile(".kanna/pipelines/single-reviewer.json");
 
     expect(reviewAgent).toContain("You do not need to inspect the source task worktree");
     expect(reviewAgent).toContain("Do not make code, test, documentation, or configuration changes in the review worktree.");
@@ -88,7 +88,7 @@ describe("QA pipeline assets", () => {
   });
 
   it("ships the approve step as the pr stage's post instead of a legacy post_action", () => {
-    const qaPipeline = readRepoFile(".kanna/pipelines/qa.json");
+    const qaPipeline = readRepoFile(".kanna/pipelines/single-reviewer.json");
     // Legacy `post_action` still compiles at load time for pinned
     // pipeline_def snapshots, but shipped assets must use the current format.
     expect(qaPipeline).not.toContain("post_action");
@@ -152,6 +152,10 @@ describe("QA pipeline assets", () => {
       expect(agent, name).toContain("caused by this diff");
       expect(agent, name).toContain("Follow-ups (non-blocking):");
       expect(agent, name).toContain("at most five blocking findings");
+      // The bar is "did this diff break something", not "could this be
+      // better" — a reviewer that blocks on the design it would have chosen
+      // is how a scoped task turns into an open-ended project.
+      expect(agent, name).toMatch(/design (you|a reviewer) would have chosen/);
     }
   });
 
@@ -168,8 +172,8 @@ describe("QA pipeline assets", () => {
       // The blocking bar must not move with the budget. Relaxing it on the
       // last round would approve a branch that still has blocking findings —
       // the designed ending for those is the park, where a human decides.
-      expect(agent, name).toContain("The bar above does not move with the budget");
-      expect(agent, name).toContain("a finding that clears the bar still");
+      expect(agent, name).toContain("The bar does not move with the budget");
+      expect(agent, name).toContain("a finding that clears it on the last round");
       expect(agent, name).toContain("Do not approve a branch to avoid parking it");
       expect(agent, name).not.toMatch(/raise the bar as the budget shrinks/i);
       expect(agent, name).not.toMatch(/only for defects a user would hit/i);
@@ -216,7 +220,7 @@ describe("QA pipeline assets", () => {
 
     // The pipeline has to feed the dispatcher the previous stage result for
     // the declined-findings check to be possible at all.
-    expect(readRepoFile(".kanna/pipelines/qa-dispatch.json")).toContain("$PREV_RESULT");
+    expect(readRepoFile(".kanna/pipelines/specialized-reviewers.json")).toContain("$PREV_RESULT");
   });
 
   it("tells specialty reviewers to judge the review range their prompt names", () => {
@@ -227,7 +231,7 @@ describe("QA pipeline assets", () => {
 
     for (const name of specialties) {
       const agent = readRepoPhrases(`.kanna/agents/${name}/AGENT.md`);
-      expect(agent, name).toContain("Inspect the changes your prompt names");
+      expect(agent, name).toContain("Judge the review range your prompt names");
       expect(agent, name).toContain("what changed since the last review round");
       expect(agent, name).toContain("Read the full branch");
     }
@@ -241,11 +245,39 @@ describe("QA pipeline assets", () => {
   });
 
   it("bounds revision rounds on the dispatched QA pipeline and publishes the field", () => {
-    const parsed = parsePipelineJson(readRepoFile(".kanna/pipelines/qa-dispatch.json"));
+    const parsed = parsePipelineJson(readRepoFile(".kanna/pipelines/specialized-reviewers.json"));
     expect(parsed.revision_limit).toBe(3);
 
     const schema = JSON.parse(readRepoFile(".kanna/pipelines/schema.json"));
     expect(schema.properties.revision_limit).toMatchObject({ type: "integer", minimum: 0 });
+  });
+
+  it("resolves PR head/base refs with gh pr view even when task metadata has the URL", () => {
+    const approveAgent = readRepoPhrases(".kanna/agents/approve/AGENT.md");
+    const approveContract = readRepoPhrases(".kanna/agents/approve/CONTRACT.md");
+
+    // The MERGE line is built from headRefName/baseRefName, which task
+    // metadata never carries — it only has prUrl. Taking the metadata path
+    // and skipping `gh pr view` leaves both refs unresolved.
+    expect(approveAgent).toContain("gh pr view <prUrl-or-$BRANCH> --json url,isDraft,baseRefName,headRefName,title");
+    expect(approveAgent).toContain("Run it even when task context already gave you `prUrl`");
+    expect(approveAgent).toContain("If no PR resolves");
+    expect(approveContract).toContain("including when task metadata already carried `prUrl`");
+    expect(approveContract).toMatch(/headRefName.*baseRefName/);
+  });
+
+  it("does not build flipping draft PRs ready into the stock approve post", () => {
+    // The stock flow opens an ordinary PR, so approve never meets a draft and
+    // stays out of PR state entirely. Drafts exist only through the opt-in
+    // pr@draft-pr flavor, and a repo choosing it owns what readies them
+    // (approve/EXTEND.md) — which is why merge@github refuses to run a bare
+    // `gh pr merge` on one.
+    expect(readRepoPhrases(".kanna/agents/approve/AGENT.md")).not.toContain("gh pr ready");
+    expect(readRepoPhrases(".kanna/agents/approve/CONTRACT.md")).not.toContain("gh pr ready");
+    expect(readRepoPhrases(".kanna/agents/setup/AGENT.md")).not.toContain("mark this PR ready");
+    expect(readRepoPhrases(".kanna/agents/merge/flavors/github/AGENT.md")).toContain(
+      "GitHub refuses this while a PR is still a draft",
+    );
   });
 
   it("keeps the merge master git-first and safe for stacked branches", () => {
