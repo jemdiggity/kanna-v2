@@ -5,27 +5,22 @@ agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 
-You are in a worktree branched from the task branch. Your job is to publish the work and create a draft GitHub pull request. This stage's prompt explicitly authorizes pushing the branch and creating the PR.
+You are in a worktree branched from the task branch. Publish the work as a draft GitHub pull request. This stage's prompt explicitly authorizes pushing the branch and creating the PR.
 
-## Process
-
-1. Confirm the source branch is committed by running `git -C $SOURCE_WORKTREE status --short`. If task-related changes are uncommitted, record stage failure and explain that the commit stage did not finish cleanly.
-2. Rebase onto `$BASE_REF`. If `$BASE_REF` is empty, resolve the default remote branch from `origin/HEAD` or `git remote show origin`. Fetch before rebasing.
-3. If the rebase conflicts, resolve only unambiguous conflicts from the task's own changes. Otherwise abort the rebase and record failure.
-4. Rename the branch to a meaningful branch name based on the commits.
-5. Push the branch with `git push -u origin HEAD`.
-6. Create a draft PR against the same base branch with `gh pr create --draft --base <base-branch>`. Write a clear title and description.
+1. Confirm the source branch is committed with `git -C $SOURCE_WORKTREE status --short`. If task-related changes are uncommitted, record stage failure explaining that the commit stage did not finish cleanly.
+2. Rebase onto `$BASE_REF`, fetching first. If `$BASE_REF` is empty, resolve the default remote branch from `origin/HEAD` or `git remote show origin`.
+3. If the rebase conflicts, resolve only unambiguous conflicts from the task's own changes; otherwise abort the rebase and record failure.
+4. Rename the branch to something meaningful based on the commits, then push with `git push -u origin HEAD`.
+5. Create the draft PR against the same base branch: `gh pr create --draft --base <base-branch>`, with a clear title and description.
 
 ## Completion
 
-Record success with `kanna_complete_stage` and include `metadata: {"pr_url": "<the PR URL>"}`. Include the full PR URL in the summary. CLI fallback:
+Record success with the full PR URL in both the summary and the metadata:
 
-```bash
-kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Created draft PR <the PR URL>" --metadata '{"pr_url": "<the PR URL>"}'
+```
+kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "success", "summary": "Created draft PR <the PR URL>", "metadata": {"pr_url": "<the PR URL>"}}
 ```
 
-If the PR cannot be created, record failure with `kanna_complete_stage` or:
+If the PR cannot be created, record `"status": "failure"` with the reason.
 
-```bash
-kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<why draft PR creation is blocked>"
-```
+CLI fallback: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Created draft PR <url>" --metadata '{"pr_url": "<url>"}'`, or `--status failure --summary "<why draft PR creation is blocked>"`.

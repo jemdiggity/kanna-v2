@@ -152,6 +152,10 @@ describe("QA pipeline assets", () => {
       expect(agent, name).toContain("caused by this diff");
       expect(agent, name).toContain("Follow-ups (non-blocking):");
       expect(agent, name).toContain("at most five blocking findings");
+      // The bar is "did this diff break something", not "could this be
+      // better" — a reviewer that blocks on the design it would have chosen
+      // is how a scoped task turns into an open-ended project.
+      expect(agent, name).toMatch(/design (you|a reviewer) would have chosen/);
     }
   });
 
@@ -168,8 +172,8 @@ describe("QA pipeline assets", () => {
       // The blocking bar must not move with the budget. Relaxing it on the
       // last round would approve a branch that still has blocking findings —
       // the designed ending for those is the park, where a human decides.
-      expect(agent, name).toContain("The bar above does not move with the budget");
-      expect(agent, name).toContain("a finding that clears the bar still");
+      expect(agent, name).toContain("The bar does not move with the budget");
+      expect(agent, name).toContain("a finding that clears it on the last round");
       expect(agent, name).toContain("Do not approve a branch to avoid parking it");
       expect(agent, name).not.toMatch(/raise the bar as the budget shrinks/i);
       expect(agent, name).not.toMatch(/only for defects a user would hit/i);
@@ -227,7 +231,7 @@ describe("QA pipeline assets", () => {
 
     for (const name of specialties) {
       const agent = readRepoPhrases(`.kanna/agents/${name}/AGENT.md`);
-      expect(agent, name).toContain("Inspect the changes your prompt names");
+      expect(agent, name).toContain("Judge the review range your prompt names");
       expect(agent, name).toContain("what changed since the last review round");
       expect(agent, name).toContain("Read the full branch");
     }
@@ -246,6 +250,15 @@ describe("QA pipeline assets", () => {
 
     const schema = JSON.parse(readRepoFile(".kanna/pipelines/schema.json"));
     expect(schema.properties.revision_limit).toMatchObject({ type: "integer", minimum: 0 });
+  });
+
+  it("does not build flipping draft PRs ready into the stock approve post", () => {
+    // Flipping a draft ready is the human's approval to give. Stock approve
+    // signals the merge master and says nothing about PR state; a repo that
+    // wants it opts in through .kanna/agents/approve/EXTEND.md.
+    expect(readRepoPhrases(".kanna/agents/approve/AGENT.md")).not.toContain("gh pr ready");
+    expect(readRepoPhrases(".kanna/agents/approve/CONTRACT.md")).not.toContain("ready");
+    expect(readRepoPhrases(".kanna/agents/setup/AGENT.md")).not.toContain("mark this PR ready");
   });
 
   it("keeps the merge master git-first and safe for stacked branches", () => {
