@@ -52,7 +52,9 @@ that crosses component or system boundaries must have E2E coverage.
   --remote`, `kd dev up --remote`; staging-relay active-desktop verification
   helpers in `tools/kd`.
 - **Runner** — `./kd test remote-e2e` (Layer A + Layer B dev), run locally.
-  There is no hosted CI; the repo has no GitHub Actions workflows.
+  There is no hosted CI; the repo has no CI workflows. The only remaining
+  GitHub Actions workflow is `config-schema-pages.yml`, which is continuous
+  deployment of the config schema, not a check.
 - **E2E SQL route** — `KANNA_E2E_TEST_SQL=1`, loopback-only route in
   `kanna-server` for DB assertions from tests (with 404/403 regression
   coverage).
