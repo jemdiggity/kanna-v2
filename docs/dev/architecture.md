@@ -58,8 +58,10 @@ reattach coordinator, daemon spawning, and macOS integrations. A browser mock
 layer (`tauri-mock.ts` and friends) lets the frontend run in a plain browser
 without Tauri.
 
-See `AGENTS.md` for the detailed inventory of components, composables, stores,
-and Tauri commands.
+There is deliberately no prose inventory of components, composables, stores, or
+Tauri commands — the tree is the inventory, and a written copy goes stale.
+Read `src/components/`, `src/composables/`, `src/stores/kanna.ts`, and
+`src-tauri/src/commands/` directly.
 
 ### PTY daemon — `crates/daemon/`
 
@@ -174,8 +176,12 @@ Task creation and terminal streaming, end to end:
    committed tip) and respawn the session for the next stage's agent; only
    committed work crosses stage boundaries.
 
-Pipeline semantics (stages, posts, revisions, close) are specified in
-`AGENTS.md` under "Product Behavior" and "Common Pitfalls".
+Pipeline semantics are split across three places: task/pipeline/workspace/post
+definitions and close behavior are in [`AGENTS.md`](../../AGENTS.md) under
+"Core concepts"; the stage-advance, revision-budget, and revision-resume
+contracts are under its "Common Pitfalls"; and the user-facing task flows,
+close steps, and shortcuts are in
+[Product Behavior](product-behavior.md).
 
 ## Source-of-truth boundaries
 

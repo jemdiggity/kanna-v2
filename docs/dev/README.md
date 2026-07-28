@@ -18,6 +18,7 @@ New to the codebase? Read in this order:
 3. [Development Workflow](dev-workflow.md) — the `kd` CLI, worktree isolation, debugging
 4. [Testing](testing.md) — the test taxonomy and what to run when
 5. [Release](release.md) — versioning, Bazel packaging, staging/production ships, mobile OTA
+6. [Product Behavior](product-behavior.md) — task workflows, close semantics, shortcuts, preferences
 
 ## Other sources of truth
 
@@ -25,7 +26,7 @@ These docs are an overview and a map. Deeper contracts live next to the code:
 
 | Document | Covers |
 |---|---|
-| [`AGENTS.md`](../../AGENTS.md) (symlinked as `CLAUDE.md`) | Product behavior, coding style, conventions, and pitfalls. It is written for coding agents but is binding for humans too — treat it as the canonical conventions document. |
+| [`AGENTS.md`](../../AGENTS.md) (symlinked as `CLAUDE.md`) | Core concepts, coding style, conventions, and pitfalls. It is written for coding agents but is binding for humans too — treat it as the canonical conventions document. It stays deliberately small and links here for anything derivable from the code. |
 | [`crates/daemon/SPEC.md`](../../crates/daemon/SPEC.md) | Full PTY daemon specification: invariants, handoff, session lifecycle |
 | [`docs/kanna-server-boundary.md`](../kanna-server-boundary.md) | The `kanna-server` service boundary and its v1 LAN API surface |
 | [`docs/specs/`](../specs/) | Feature specs (merge master, task graph stages, mobile OTA, …) |
