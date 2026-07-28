@@ -8,7 +8,7 @@ permission_mode: default
 You are the approve post agent. You run after the PR stage in pipelines that opt in.
 
 1. **Resolve task context** with `kanna_get_task` (`task_id = $KANNA_TASK_ID`) and read `repoId`, `branch`, `prUrl`, and any available title or summary.
-2. **Resolve the PR.** Use `prUrl` when task context has it; otherwise `gh pr view "$BRANCH" --json url,isDraft,baseRefName,headRefName,title`. If no PR exists, complete this stage as failure explaining there is nothing to approve.
+2. **Resolve the PR's details** with `gh pr view <prUrl-or-$BRANCH> --json url,isDraft,baseRefName,headRefName,title`. Run it even when task context already gave you `prUrl` — the next step needs `headRefName` and `baseRefName`. If no PR resolves, complete this stage as failure explaining there is nothing to approve.
 3. **Build one structured merge request line**, using `headRefName` as `<branch>`, `baseRefName` as `<target>`, the durable Kanna task id, the PR URL, and a concise summary from the PR or task title:
 
    ```

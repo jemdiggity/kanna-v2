@@ -171,6 +171,41 @@ describe("bundled agent flavor contracts", () => {
     );
   });
 
+  it("hands the draft-PR composition from approve to merge@github over one MERGE line", () => {
+    // The GitHub preset composes pr@draft-pr -> approve post -> merge@github
+    // across three separate agent sessions. Nothing type-checks the handoff:
+    // approve emits a MERGE line as free text and merge@github parses it, so
+    // the two spellings must stay identical or the approved flow silently
+    // strands at the merge master. Live coverage is blocked on the harness in
+    // docs/2026-07-08-setup-agent-live-e2e-gap.md.
+    const MERGE_LINE = "MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>";
+
+    const approveAgent = read(join(agentsRoot, "approve", "AGENT.md"));
+    const approveContract = read(join(agentsRoot, "approve", "CONTRACT.md"));
+    const mergeGithub = read(join(agentsRoot, "merge", "flavors", "github", "AGENT.md"));
+
+    for (const [label, content] of [
+      ["approve AGENT.md", approveAgent],
+      ["approve CONTRACT.md", approveContract],
+      ["merge@github AGENT.md", mergeGithub],
+    ] as const) {
+      expect(content, label).toContain(MERGE_LINE);
+    }
+
+    // approve addresses the merge master by role name, and merge@github is
+    // the flavor that role resolves to under the preset's config.
+    expect(approveAgent).toContain('`agent = "merge"`');
+    expect(approveContract).toContain('`agent = "merge"`');
+
+    // The draft PR the preset creates reaches merge@github as a draft:
+    // stock approve does not ready it, so merge@github must be the agent
+    // that decides, and it skips drafts unless the operator includes them.
+    expect(mergeGithub).not.toContain("gh pr ready");
+    expect(read(join(agentsRoot, "merge", "AGENT.md"))).toContain(
+      "skipping drafts unless the operator includes them",
+    );
+  });
+
   it("does not silently drop newly added flavor files from contract coverage", () => {
     const shipped = requiredFlavors.map(({ role, flavor }) => `${role}/${flavor}`).sort();
     const discovered = readdirSync(agentsRoot, { withFileTypes: true })

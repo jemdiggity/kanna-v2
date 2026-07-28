@@ -252,12 +252,28 @@ describe("QA pipeline assets", () => {
     expect(schema.properties.revision_limit).toMatchObject({ type: "integer", minimum: 0 });
   });
 
+  it("resolves PR head/base refs with gh pr view even when task metadata has the URL", () => {
+    const approveAgent = readRepoPhrases(".kanna/agents/approve/AGENT.md");
+    const approveContract = readRepoPhrases(".kanna/agents/approve/CONTRACT.md");
+
+    // The MERGE line is built from headRefName/baseRefName, which task
+    // metadata never carries — it only has prUrl. Taking the metadata path
+    // and skipping `gh pr view` leaves both refs unresolved.
+    expect(approveAgent).toContain("gh pr view <prUrl-or-$BRANCH> --json url,isDraft,baseRefName,headRefName,title");
+    expect(approveAgent).toContain("Run it even when task context already gave you `prUrl`");
+    expect(approveAgent).toContain("If no PR resolves");
+    expect(approveContract).toContain("including when task metadata already carried `prUrl`");
+    expect(approveContract).toMatch(/headRefName.*baseRefName/);
+  });
+
   it("does not build flipping draft PRs ready into the stock approve post", () => {
-    // Flipping a draft ready is the human's approval to give. Stock approve
-    // signals the merge master and says nothing about PR state; a repo that
-    // wants it opts in through .kanna/agents/approve/EXTEND.md.
+    // Product decision: readying a draft is the human's approval to give, so
+    // stock approve signals the merge master and says nothing about PR state
+    // either way. `merge` already skips drafts unless the operator includes
+    // them, so a draft surfaces to the operator instead of merging itself.
+    // A repo whose convention differs opts in via approve/EXTEND.md.
     expect(readRepoPhrases(".kanna/agents/approve/AGENT.md")).not.toContain("gh pr ready");
-    expect(readRepoPhrases(".kanna/agents/approve/CONTRACT.md")).not.toContain("ready");
+    expect(readRepoPhrases(".kanna/agents/approve/CONTRACT.md")).not.toContain("gh pr ready");
     expect(readRepoPhrases(".kanna/agents/setup/AGENT.md")).not.toContain("mark this PR ready");
   });
 
