@@ -1,616 +1,208 @@
 # AGENTS.md
 
-## Project
-
-Kanna — Tauri v2 desktop app for managing coding agent tasks. Vue 3 frontend, Rust backend, SQLite database. Public repository hosted on GitHub.
-
-Kanna is a product distributed to end users as a signed macOS app. All dependencies must be vendored or statically linked — never depend on libraries installed on the build machine (e.g., Homebrew). Release builds must run on any Mac without developer tools installed.
-
-**Target user:** Software developers who use coding agents and want to run multiple agent tasks in parallel without juggling terminals and branches.
-
-## Product Behavior
-
-### Core concepts
-
-- **Task** — A unit of work. Has a prompt, a git worktree, an agent session, and a lifecycle stage. One task = one branch = one PR.
-- **Pipeline** — User-definable agentic pipeline: an ordered list of stages, each with an agent, an optional environment, a stage policy, and an optional post. Defined in `.kanna/pipelines/*.json`. Default: `in progress` (post: `commit`) `→ review → pr` (post: `approve`, which marks the PR ready and signals the merge master). Tasks are durable (same id, run history, blockers), but each stage transition forks a fresh workspace: a new branch + worktree named `task-{id}-{n}` (the durable task id plus a workspace counter; the creation workspace is plain `task-{id}`) cut from the previous branch's committed tip — N worktrees, N branches, one PR (the PR agent renames the final branch into something meaningful). A workspace is an ephemeral manifestation of the task. A stage's `post` (e.g. commit) is tail work injected into the stage's running agent session before the transition — stages fork workspaces and swap sessions, posts continue them. Only committed work crosses a stage boundary; when the task leaves a workspace, the workspace's repo-config `teardown` commands run best-effort in a detached `td-{branch}` daemon session, and open-task worktrees stay available for revision resume until the task closes. Advancing past the final stage closes the task; close snapshots dirty workspace state into local WIP commits, removes the task's worktrees, and keeps the branches. Built-in pipelines: `default`, `qa`, `qa-dispatch`, and `specialty-review`. In `qa-dispatch` the review stage runs the `qa-dispatcher` agent, which decides which specialty reviews the branch needs (every specialty whose surface the change touches — the roster is deliberately disjoint, so there is no cap — and on a later round only what changed since the previous round, located from the `task-{id}-{n}` workspace branch that round reviewed) and fans each out as a child task on the single-stage `specialty-review` pipeline (binding a built-in specialty — `review-ui`, `review-security`, `review-perf`, `review-concurrency`, `review-migration`, `review-compat` — or a repo-defined `review-*` agent such as this repo's `review-release`, via the create request's `agent` override), joins the children with `kanna_wait_task`, reads each verdict from the task detail's `latestRun`, and aggregates against a scope bar: only findings caused by this diff and genuinely blocking can fail the branch, and they go back as one closed list of at most five items; everything else is reported as non-blocking follow-ups and the branch advances to `pr`. Revision rounds are capped by the pipeline's `revision_limit` so a review cannot grow a scoped task into a project. See `docs/specs/qa-dispatch-review.md`.
-- **Daemon** — Standalone process that manages PTY sessions. Survives app restarts. Handles seamless upgrades via fd handoff.
-
-### Workflows
-
-**Create a task:**
-1. Cmd+N → enter prompt (choose an available agent provider)
-2. App creates git worktree (`{repo}/.kanna-worktrees/task-{uuid}`)
-3. Runs `.kanna/config.json` setup scripts if present (e.g., `pnpm install`)
-4. Spawns agent CLI in the worktree via daemon
-5. Agent starts working. User watches in real-time terminal.
-
-**Review and merge:**
-1. Agent finishes → task marked as unread (bold in sidebar)
-2. User selects task, presses Cmd+D → diff modal shows all branch changes
-3. Optionally Cmd+P → file picker → preview, Cmd+O → open in IDE, or Cmd+J → shell in worktree
-4. Cmd+S → advance the pipeline (commit post runs in-session; the pr-stage agent creates the GitHub PR and reports its URL)
-5. Human reviews the PR, then Cmd+S (or the diff modal's approve button) advances the pr stage: when the task's pinned pipeline ships the `approve` post, the button reads "Approve & Merge" and the post marks the PR ready and signals the merge master, which merges it; pinned pipelines without the post get a plain "Approve" that only advances. Approval is single-flight: while the post runs the button is disabled and repeated Cmd+S is ignored — only the post's completion closes the task. Shift+Cmd+S in the diff modal sends the task back to `in progress` for revisions instead.
-
-**Manual intervention:**
-1. Cmd+J → shell modal opens in the task's worktree
-2. Run tests, inspect files, debug
-3. Close shell → focus returns to agent terminal
-4. Type in agent terminal to send input to Claude
-
-**Multi-repo:** Import repos via sidebar. Each repo has its own task list. Cmd+Opt+Up/Down navigates tasks in sidebar order.
-
-### Closing a task (Cmd+Delete)
-
-1. Kills the agent PTY session and shell session in the daemon
-2. Runs workspace teardown commands best-effort when configured
-3. Sets `closed_at` in the DB
-4. Snapshots dirty state in each of the task's worktrees with a local `WIP at task close` commit, then removes those worktrees with `git worktree remove --force --force` and prunes worktree registrations
-5. Deletes the task's `worktree` table rows but keeps the task row and all branches. Branches are never deleted by close.
-6. Selects the next task in the sidebar
-7. Tasks with `closed_at` are hidden from the sidebar. The sidebar shows tasks whose `closed_at` is null.
-
-On server startup, Kanna reconciles leftovers across all repos, including hidden repos: closed-task worktrees are snapshotted and removed, stale registrations are pruned, and young orphan `task-*` directories without a task row are spared. This bounds registered worktrees by construction to roughly the number of open tasks. The bound matters because each registered git worktree expands sandboxed agent shell spawn profiles; unbounded worktrees can overflow macOS `ARG_MAX` and cause sandboxed shell launches to fail with `E2BIG`.
-
-### Task activity
-
-| State | Meaning | Sidebar display |
-|-------|---------|-----------------|
-| `idle` | No recent activity | normal |
-| `working` | Agent actively running (PostToolUse hook) | italic |
-| `unread` | Agent finished, user hasn't looked | bold |
-
-Sorted in sidebar: pinned (manual order) → merge → pr → active (by created_at desc) → blocked.
-
-### Pinned tasks
-
-Tasks can be pinned to the top of their repo's task list by dragging above the pin divider. Per-repo scope. Closed tasks disappear regardless of pin state.
-
-### Agent execution
-
-**PTY mode (default):** Agent CLI runs in a real terminal via the daemon. User sees full TUI output in real-time. Interactive — user can type. Hooks (`kanna-hook` binary) report lifecycle events: `Stop` (finished), `StopFailure` (error), `PostToolUse` (marks task as working).
-
-**SDK mode (alternate):** Agent CLI runs headless with `--output-format stream-json`. NDJSON on stdin/stdout. Non-interactive. Used for automation.
-
-**Sending input to a running task:** Use `kanna-cli task send-input --task-id <TASK_ID> --message "Please fix the failing typecheck"` to send feedback or instructions to an already-running agent task through the desktop-backed local API. The command posts to `/v1/tasks/{task_id}/input` and appends Enter to the message when needed.
-
-### MCP task management
-
-Project-scoped MCP servers are registered in `.mcp.json` so Claude Code, Codex, and other MCP-aware agent clients launched from this repo can discover both Kanna task tools and kd development tools.
-
-- **`kanna-mcp`** exposes `kanna_*` task-management tools backed by the desktop local API at `http://127.0.0.1:48120`. Prefer these tools for task management: create tasks, fetch task status/detail, list/search tasks, close tasks, send input, request revision, advance stage, and complete stage. Its tool surface comes from `crates/kanna-tool-catalog`, the single declarative source of truth shared with `kanna-cli`.
-- Kanna task sessions register the instance-local `kanna-mcp` server automatically for Claude (`--mcp-config`), Codex (`-c mcp_servers.kanna-mcp.*`), Copilot (`--additional-mcp-config`), and OpenCode (`OPENCODE_CONFIG_CONTENT`). Antigravity (`agy 1.0.14`) has no verified stable MCP registration flag or config surface, so Antigravity tasks use the `kanna-cli` fallback for Kanna task operations.
-- The MCP server hot-reloads an override catalog from `KANNA_MCP_CATALOG` or `<cwd>/.kanna/mcp-tools.json`. When the catalog changes, `kanna-mcp` swaps the active tools and emits the JSON-RPC notification `notifications/tools/list_changed`; clients should call `tools/list` again after receiving it. The shared CLI exposes the same catalog through `kanna-cli tool list` and can invoke any catalog tool with `kanna-cli tool call <name> --json '{...}'`.
-- Catalog manifests declare `{ "tools": [...] }`. Each tool includes `name`, `description`, `method`, `path` with `{param}` placeholders, `response` (`json`, `text`, or `wait`), and `params`. Params use snake_case names, `type` (`string`, `integer`, `string_array`, or `object`), `required`, `location` (`path`, `query`, or `body`), optional `description` (surfaced to agents in the generated MCP input schema alongside `enum`, `default`, and integer bounds), optional camelCase `key`, optional `enum`, optional `default`, and optional integer `min`/`max` clamps. GET tools advertise the MCP `readOnlyHint` annotation automatically.
-- **`kd-mcp`** exposes kd development workflow tools. Prefer these tools over shelling out when an MCP client has them available.
-
-Do not read or write the SQLite database directly for orchestration. Use `kanna-mcp` first, then `kanna-cli` as the fallback for clients without MCP support.
-
-### Diff viewer
-
-- Modal (Cmd+D), not a tab
-- Scopes: Branch (all changes since merge-base with default branch), Last Commit, Working (uncommitted)
-- Staged toggle to filter staged-only changes
-- Scope remembered per task
-- Rendered by `@pierre/diffs` with shadow DOM, syntax highlighting via worker pool
-
-### Keyboard shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| ⇧⌘N | New task |
-| ⌘D | Diff modal |
-| ⌘J | Shell modal |
-| ⇧⌘J | Shell at repo root |
-| ⌘P | File picker |
-| ⌘O | Open in IDE |
-| ⌘S | Advance stage / approve (runs the stage's post first; blocked while a post is running) |
-| ⇧⌘Delete | Close task |
-| ⌘Z | Undo close |
-| ⌘Opt+Up/Down | Navigate tasks |
-| ⌘B | Toggle sidebar |
-| ⇧⌘P | Command palette |
-| ⇧⌘E | Tree explorer |
-| ⇧⌘Enter | Toggle maximize |
-| ⇧⌘A | Analytics |
-| ⌘/ | Keyboard shortcuts |
-| ⌘, | Preferences |
-| Ctrl+- / Ctrl+Shift+- | Back / Forward |
-| Escape | Dismiss modal |
-
-All shortcuts work even when the terminal has focus.
-
-### Preferences
-
-| Setting | Default |
-|---------|---------|
-| Suspend After (minutes) | 5 |
-| Kill After (minutes) | 30 |
-| IDE Command | code |
-| Locale | en |
-| Default Agent Provider | claude |
-
-Stored in SQLite `settings` table.
-
-## Package Manager
-
-Use `pnpm` for all package management and script execution. Not npm.
-
-## Monorepo Layout
-
-- `apps/desktop/` — Tauri desktop app (Vue 3 + Rust)
-- `packages/core/` — shared TypeScript business logic (pipeline, GitHub, Slack, Discord, config)
-- `packages/db/` — database schema types and query helpers
-- `crates/claude-agent-sdk/` — Rust wrapper for Claude CLI (NDJSON streaming)
-- `crates/daemon/` — PTY daemon (Unix socket, session persistence)
-- `crates/kanna-cli/` — sidecar binary for agents to signal stage completion (`kanna-cli stage-complete`) and send input to running tasks (`kanna-cli task send-input`)
-- `crates/kanna-hook/` — lightweight binary that signals events to the daemon
-- `crates/tauri-plugin-delta-updater/` — self-updater plugin (stub)
-- `tests/` — CLI contract tests (`cli-contract/`), PTY test utility (`pty-test/`)
-- `scripts/` — build, release, setup, and maintenance scripts
-- `tools/kd/` — `kd` CLI and `kd-mcp` self-development workflow server
-- `docs/` — planning and spec documents
-- `.cargo/config.toml` — keeps each checkout's Rust outputs under its private `.build/` tree
-
-## Development Workflow
-
-We develop Kanna **in and on** Kanna — Claude Code agents run from one of three contexts:
-
-1. **Main branch** — the stable Kanna instance at the repo root, used to manage tasks and spawn worktrees
-2. **Release build** — installed to `/Applications/Kanna.app`, used when the main branch is being modified
-3. **Dev worktree** — a feature branch checked out at `{repoPath}/.kanna-worktrees/task-{uuid}`, running its own isolated dev server
-
-### Worktree isolation
-
-Worktrees are fully isolated from the main branch instance:
-
-- **Separate Vite port** — main uses `localhost:1420`, worktrees get a unique port automatically. The app reads base ports from `.kanna/config.json` `ports` field (e.g., `"KANNA_DEV_PORT": 1420`), picks the next unused offset (1, 2, 3…), and stores the computed port (e.g., `1421`) as `port_env` in the DB. When the worktree's agent session spawns, `KANNA_DEV_PORT` is passed as an env var — no manual editing of `config.json` is needed. `kd dev up` then writes `tauri.conf.local.json` with the port override and passes `--config` to Tauri — the committed `tauri.conf.json` is never modified. Vite also reads `KANNA_DEV_PORT` to set its server port.
-- **Separate daemon** — worktrees use `{worktree}/.kanna-daemon/` instead of `~/Library/Application Support/Kanna/`
-- **Separate database** — each instance uses its own SQLite DB
-- **Separate tmux server** — `kd dev up` uses a tmux server named `kanna-{worktree-dir}` instead of the default `kanna`, and creates the desktop/mobile windows inside a same-named session on that server
-
-This means the main Kanna app and a dev worktree can run simultaneously without port or data conflicts.
-
-### kd installation cache
-
-`./kd` and `kd-mcp` install a self-contained bundle under
-`~/Library/Caches/kanna/tools/kd/<input-hash>/`. Worktrees with identical
-`tools/kd` sources and resolved kd dependencies share that immutable bundle;
-committed or dirty kd source changes select a new hash. Parallel cold launches
-serialize on one build. The cached code still runs with the invoking
-worktree's cwd, ports, database, daemon directory, and tmux identity.
-
-### Rust build cache
-
-Kanache worktree warming is enabled by default for local macOS development. Kanna-managed worktree setup runs `./kd rust-cache warm` after environment sync. Kanache copies compatible Cargo intermediates from a clean worktree with the same Rust build-input identity into the destination's private `.build/cargo-build`, including across TypeScript/mobile/docs-only commits. Kd excludes the generated `apps/desktop/src-tauri/binaries` staging root identically when recording and warming exclusion-aware manifests so final sidecars remain private to the producing build. A true legacy manifest with neither the input hash nor exclusions field can still warm only an exact-HEAD worktree with an empty requested exclusion set; reseed it to gain exclusion-aware cross-commit matching. A missing, incompatible, or refused donor is a normal cache miss and falls back to a cold private build.
-
-Unset, blank, `KANNA_RUST_CACHE=on`, and `KANNA_RUST_CACHE=kanache` enable the cache on macOS outside CI. Set `KANNA_RUST_CACHE=off` for an immediate local rollback; CI and non-macOS environments remain disabled. A clean recent main checkout whose dev session is stopped can run `./kd test rust` once to seed both the implicit host and explicit Apple target layouts for every branch with unchanged Rust inputs. Use `./kd rust-cache status` to inspect the pinned revision, current manifest, matching mode, and recent local measurements. The rollout evidence and isolation boundaries are documented in `docs/superpowers/specs/2026-07-20-default-kanache-worktree-cache-design.md`.
-
-Kanache is development-only. Release builds remain Bazel-only and never install or execute Kanache.
-
-### Launching the dev environment
-
-Always use `./kd dev up` to start the dev environment — never run `pnpm run dev`, `pnpm exec tauri dev`, or `cargo tauri dev` directly. `kd` is the canonical self-development surface for agents and humans. It auto-detects the worktree context, sets `KANNA_WORKTREE=1`, derives the worktree DB/daemon/tmux server internally, writes local Tauri config, and runs the desktop/mobile/emulator processes in a background tmux session.
-
-When an MCP client has `kd-mcp` configured, prefer the matching MCP tool over shelling out. The MCP surface mirrors the `kd` tasks for dev up/down/status/log/seed, emulator control, daemon kill, mobile device smoke, and doctor checks. Use the CLI when MCP is unavailable or when the workflow needs an option not exposed through MCP yet.
-
-Prefer the most correct architecture over the shortest patch. If there is a tradeoff between a quick local fix and preserving the right long-term boundary or source of truth, choose the more correct design unless the user explicitly asks for a temporary stopgap. Treat tactical safety fallbacks as temporary, not as the desired end state.
-
-One concrete example: when changing the desktop sidecar build pipeline, preserve shared Rust intermediates when possible, but keep final sidecar binaries and staged `externalBin` inputs private to the current build. Do not let Tauri packaging, daemon launch, or staging read contested final binaries directly from a shared `CARGO_TARGET_DIR`. If a sidecar fix gives every worktree its own full target dir, treat that as a temporary safety fallback, not the preferred end state.
-
-For mobile development, the same rule applies at the app level: use `./kd dev up --mobile` or `./kd mobile up` for end-to-end testing instead of launching Expo directly from `apps/mobile`. The desktop app startup path is what spawns the desktop-side `kanna-server` LAN API on the resolved `KANNA_MOBILE_SERVER_PORT`. Running `pnpm run dev -- --ios` or `expo start` inside `apps/mobile` is only appropriate for UI-only work when the desktop-side mobile server is already running elsewhere; by itself it will not start `kanna-server`, so the mobile app will boot but fail to connect to desktop data.
-
-For physical iPhone dev-build launches, set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME`, then run `./kd mobile run --device` from a worktree. This is the canonical single-command flow: it starts or augments the worktree dev stack with Firebase emulators, relay, desktop, and a resilient dev-client Metro on `KANNA_MOBILE_PORT`; resolves the Mac LAN IP; prints the exact Metro URL (`http://<LAN-IP>:<KANNA_MOBILE_PORT>`); then runs `expo run:ios --device <udid> --port <KANNA_MOBILE_PORT>` with `REACT_NATIVE_PACKAGER_HOSTNAME=<LAN-IP>`. It reuses the kd-managed Metro and does not kill Metro after launch. Use `./kd mobile doctor --device` to run the same on-device preflight without building or launching.
-
-iOS requires a one-time Local Network permission grant for the dev build: Settings -> Privacy & Security -> Local Network -> Kanna = ON. If this permission is denied or dismissed, the app can show "Could not connect to development server" even when the Metro URL is correct. Troubleshooting map: "No script URL provided" means Metro is down or the app launched against the wrong port; "Could not connect to development server" means Metro is down, the phone cannot reach the printed LAN URL, or Local Network permission is off.
-
-Mobile native identity is keyed by `KANNA_APP_ENV` from `apps/mobile/src/mobileEnvironments.json`. The iOS bundle ids are `build.kanna.app.dev` for dev, `build.kanna.app.staging` for staging, and `build.kanna.app` for production; display names are `Kanna Dev`, `Kanna Staging`, and `Kanna`. `./kd mobile run --device` resolves the environment, then runs `expo prebuild --platform ios` with `KANNA_APP_ENV` before invoking `expo run:ios`. This is the standard Expo Continuous Native Generation path: `apps/mobile/app.config.ts` sets `ios.bundleIdentifier`, and `apps/mobile/plugins/withKannaNativeIdentity.js` applies the bundle id and display name to only the `KannaMobile` app target during prebuild. Because Expo config plugins make the Xcode changes during the same prebuild-sync path that `expo run:ios` uses before compiling, there is no runtime `project.pbxproj` patch for Expo to revert; test targets such as WebDriverAgentRunner keep their own bundle ids.
-
-Mobile OTA runtime compatibility is keyed by the `runtimeVersion` value in `apps/mobile/src/mobileEnvironments.json`. Bump this value whenever a change touches native code, native config, the Expo SDK, native dependencies, or `apps/mobile/plugins/withKannaNativeIdentity.js`; JS-only changes keep the same runtimeVersion and are OTA-deliverable.
-
-When asked to launch the mobile app against production, use `./kd mobile up --production`. Production desktop mobile API comes from the installed `/Applications/Kanna.app/Contents/MacOS/kanna-server`, not the current worktree desktop server. The production launch path verifies `curl http://127.0.0.1:48120/v1/status`, checks `~/Library/Application Support/build.kanna/Kanna/server.toml`, starts only the mobile Metro/Expo window, and uses production Firebase/relay defaults from the installed desktop status and mobile app defaults. Plain `./kd mobile up` remains a development workflow that starts the worktree desktop plus mobile; do not assume it targets production.
-
-When targeting staging on a physical iPhone, first distinguish a dev-client launch from a standalone install. Set `KANNA_IOS_DEVICE_UDID` or `KANNA_IOS_PHYSICAL_DEVICE_NAME` for both workflows. Use `./kd mobile run --device --staging` for live development: it starts staging dev-client Metro with `KANNA_APP_ENV=staging`, uses staging Firebase/relay defaults (`kanna-staging`, `wss://relay-staging.kanna.build`), prebuilds the staging native identity, and runs `expo run:ios` with both `--port <KANNA_MOBILE_PORT>` and `RCT_METRO_PORT=<KANNA_MOBILE_PORT>`. The resulting app requires Metro to keep running. Use `./kd mobile run --device --staging --install` when the operator asks to install staging without Metro or wants a self-contained app: it builds, installs, and launches the bundled Release app with `--no-bundler`, and it neither starts nor requires Metro. In both cases the installed `/Applications/Kanna Staging.app` desktop/server is the desktop owner; staging must not start a worktree desktop. Use `./kd mobile up --staging` only when a staging dev-client app is already installed and you only need staging Metro running; it does not install or relaunch a physical iPhone app. To use the committed persistent Buffy the Bug Slayer test identity, a human with `kanna-staging` credentials first provisions the real staging Firebase data with:
-
-```bash
-gcloud auth application-default login
-pnpm --dir services/firebase-functions exec node scripts/provision-staging-buffy-user.mjs
-KANNA_E2E_DEVICE_TOKEN=staging-buffy-device-token ./kd mobile up --staging
-```
-
-The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icloud.com` / `password123` with display name `Buffy the Bug Slayer`, stores the committed avatar reference `file://services/firebase/emulator-seed/assets/buffy-avatar.jpg`, and merges `devices/staging-buffy-device-token` in `kanna-staging` Firestore so the staging relay can authenticate the desktop when that token is supplied. Use `--dry-run` on the script to print the planned Auth user and Firestore document without writing staging data.
-
-```bash
-# Development (from repo root or worktree root)
-./kd dev up                  # start in tmux (auto-detects worktree)
-./kd dev up --mobile         # start desktop + Expo mobile app together
-./kd dev up --emulators      # start Firebase emulators + desktop
-./kd dev up --seed           # start with seed data (run from a worktree)
-./kd dev down                # stop the tmux session
-./kd dev down --kill-daemon  # stop tmux and kill workspace daemons
-./kd dev restart             # stop + start
-./kd dev status              # inspect tmux session status
-./kd dev log                 # print recent desktop tmux output
-./kd dev log mobile          # print recent mobile tmux output
-./kd mobile run --device     # start dev stack + install/launch on a physical iPhone
-./kd mobile run --device --staging # install/launch staging dev client; requires staging Metro
-./kd mobile run --device --staging --install # install/launch self-contained staging Release app; no Metro
-./kd mobile doctor --device  # check physical iPhone Metro reachability, install state, and Local Network guidance
-./kd mobile up --production  # start mobile with installed /Applications/Kanna.app production status/relay defaults
-./kd mobile up --staging     # start staging Metro only against installed Kanna Staging; does not install/launch a physical iPhone
-./kd mobile ota publish --staging     # publish a signed staging JS/asset OTA update
-./kd mobile ota publish --production  # publish a signed production JS/asset OTA update
-./kd mobile ota status --staging      # inspect the staging OTA channel pointer
-./kd mobile ota doctor --staging      # read-only OTA cloud/relay preflight before human device verification
-./kd mobile ota provision --staging   # idempotently create staging OTA storage and relay bucket IAM
-./kd mobile ota provision-secret --staging --key-path "$HOME/.kanna/secrets/kanna-mobile-ota-v1-private-key.pem"
-./kd dev up --attach         # start and attach to tmux session
-./kd env print               # print resolved ports, DB, daemon dir, transfer root
-./kd rust-cache status       # inspect Kanache pin, manifest, and recent cache events
-./kd doctor                  # check local prerequisites
-./kd setup --check           # check prerequisites without installing
-./kd clean --all             # remove generated artifacts
-
-# Build
-./kd build desktop           # workspace build
-./kd build sidecars          # sidecar-only build + staging
-
-# Release
-./kd release ship --dry-run  # build/sign release artifacts without publishing
-./kd release ship --release  # tag, publish, and upload updater manifest
-./kd release ship --staging --release  # publish immutable staging prerelease and repoint desktop-staging/latest-staging.json
-./kd release ship --staging --rollback-to 1.2.4-staging.3  # repoint staging channel to an existing prerelease manifest
-./kd release status          # show production release, staging pointer, release branch, and whether staging is promotable
-./kd release cut             # cut release/X.Y from origin/main to stabilize the next series (default --minor)
-./kd release promote 1.2.4-staging.3  # promote a soaked staging RC into the production release of the same commit
-
-# Cloud deploy
-./kd cloud deploy --staging     # deploy Firebase cloud services to staging
-./kd cloud deploy --production  # deploy Firebase cloud services to production
-
-# Canonical automated verification
-pnpm test
-./kd test rust
-
-# Package-specific unit tests
-cd packages/core && pnpm test
-
-# Explicit live/process-heavy suites
-# Requires installed and authenticated agent CLIs and may consume quota:
-pnpm test:agent-cli-compat
-pnpm test:remote-e2e
-pnpm test:tui-fidelity
-
-# Rust integration tests (needs claude in PATH)
-cd apps/desktop/src-tauri && cargo test --test agent_cli_integration -- --ignored --nocapture
-
-# E2E tests (needs app running in a worktree dev instance)
-# Terminal 1: cd {repo}/.kanna-worktrees/task-{uuid} && ./kd dev up --attach
-# Terminal 2: cd apps/desktop && pnpm test:e2e
-
-# Mobile Appium E2E (local only)
-# Simulator: pnpm --dir apps/mobile run test:e2e:preflight
-# Simulator: pnpm --dir apps/mobile run test:e2e:smoke
-# Physical device launch: ./kd mobile run --device
-# Physical device preflight only: ./kd mobile doctor --device
-# Physical device Appium smoke is local/human-only after the app is installed:
-# pnpm --dir apps/mobile run test:e2e:device:preflight
-# pnpm --dir apps/mobile run test:e2e:device:smoke
-# Device smoke reuses an existing kd-managed Metro on KANNA_MOBILE_PORT and
-# only stops Metro when the smoke runner started that Metro itself.
-# Use KANNA_IOS_DEVICE_UDID for an exact device, or KANNA_IOS_PHYSICAL_DEVICE_NAME
-# to target the visible phone name (for example "Jerome's iPhone 15").
-# Set one of them when more than one iPhone is attached.
-```
-
-### First build in a worktree
-
-The first `./kd dev up` in a fresh worktree reuses a Kanache donor with the same Rust build inputs and generated-output exclusion set when one is available, even when only TypeScript/mobile/docs commits differ. Older donors must be recorded again after an exact-commit build before they can seed the new exclusion-aware flow. Otherwise it compiles ~523 Rust crates into its private build tree (the daemon builds quickly, but the full Tauri app takes several minutes). Subsequent builds are incremental within that worktree.
-
-### Cloud deployment
-
-Always use `./kd cloud deploy --staging` or `./kd cloud deploy --production` for Firebase backend deployments. Do not run `firebase deploy`, `pnpm exec firebase deploy`, or other Firebase CLI deploy commands directly. If `kd cloud deploy` hangs, hides necessary output, or otherwise fails, fix the `kd` deployment workflow and rerun the deployment through `kd`.
-
-### Mobile OTA updates
-
-Self-hosted mobile OTA updates are served by the relay at `/ota/manifest` and `/ota/assets`, stored in the environment Firebase/GCS bucket under `ota/ios/<runtimeVersion>/`, and code-signed with key id `kanna-mobile-ota-v1`. The public certificate is committed at `apps/mobile/certs/ota-codesign.pem`; it must declare critical `digitalSignature` key usage and critical Code Signing extended key usage. Its reproducible OpenSSL profile is committed at `apps/mobile/certs/ota-codesign.cnf`. Replacing this embedded certificate is a native configuration change, so bump every environment's `runtimeVersion` before building or publishing. Never print or commit the private key.
-
-Provision the bucket and relay read access idempotently through `./kd mobile ota provision --staging|--production`, then provision the private key through `./kd mobile ota provision-secret --staging|--production --key-path <path>` into Secret Manager as `kanna-mobile-ota-private-key-pem`. Both commands require an explicit environment flag. `provision-secret` rejects a private key that does not match the committed certificate before any cloud write; `publish` rejects an incompatible or expired certificate before export or upload; and read-only `doctor` reports certificate compatibility alongside the cloud and relay checks. Live provisioning, deployment, publication, and rollback must continue through `./kd mobile ota ...` and `./kd cloud deploy ...`, never direct Firebase commands.
-
-Agents may publish or roll back the staging OTA channel through the canonical `./kd mobile ota publish --staging` workflow without additional human approval. Publishing or rolling back the production OTA channel requires explicit human approval for that operation. Read-only production `status` and `doctor` checks do not require approval.
-
-Deploy relay support through `./kd cloud deploy --staging|--production --relay`. Publish only through `./kd mobile ota publish --staging|--production`; publishing is separate from infrastructure provisioning. Check pointers with `./kd mobile ota status --staging|--production`. Run read-only cloud and relay preflight with `./kd mobile ota doctor --staging|--production` or the `preflight` alias; this requires Google Cloud credentials for the target project and performs no writes. Roll back by repointing the channel with `./kd mobile ota publish --staging|--production --rollback-to <updateId>`.
-
-## Architecture
-
-- **Tauri commands** in `apps/desktop/src-tauri/src/commands/` — agent, daemon, git, fs, shell
-- **Tauri app core** in `apps/desktop/src-tauri/src/lib.rs` — event bridge, reattach coordinator, daemon spawn, macOS integrations
-- **Vue composables** in `apps/desktop/src/composables/` — useTerminal, useKeyboardShortcuts, useBackup, etc.
-- **Daemon** in `crates/daemon/` — standalone PTY session manager. See `crates/daemon/SPEC.md` for full spec.
-- **Agent SDK** wraps Claude CLI via `--output-format stream-json`, communicates via NDJSON on stdin/stdout
-- **Agent providers** — the generated registry supports Claude (`"claude"`), GitHub Copilot (`"copilot"`), Codex (`"codex"`), OpenCode (`"opencode"`), and Antigravity (`"antigravity"`, executable `agy`). Claude, Codex, and OpenCode support headless agent sessions; Copilot and Antigravity are PTY-only.
-- **Permission mode flags** use camelCase: `dontAsk`, `acceptEdits`, `default` (not kebab-case)
-- **Browser mock layer** (`tauri-mock.ts`, `invoke.ts`, `listen.ts`, `dialog.ts`) enables running the frontend in a regular browser without Tauri APIs
-
-### Data flow
-
-```
-User creates task → worktree + DB record → daemon Spawn (start reader + headless terminal)
-  → daemon forks child (zsh -c "claude ...") → reads PTY output → headless terminal + live Output events
-  → frontend AttachSnapshot hydrates xterm.js from the headless terminal, then streams live output
-
-User types → xterm.js onData → invoke("send_input") → daemon Input → PTY write
-
-Claude finishes → PTY shows ❯ idle prompt → Tauri detects ClaudeIdle → app updates task activity
-
-User makes PR → GitHub API → DB update → stage transition
-```
-
-## Codebase Overview
-
-### Utilities (`apps/desktop/src/utils/`)
-
-- **`fuzzyMatch.ts`** — VSCode-inspired fuzzy file-path scorer. Multi-part queries (e.g., "comp btn"), bonuses for path separators, camelCase boundaries, consecutive matches, filename boost (+1000). Returns score + matched indices. **Use this instead of writing a new fuzzy search.**
-- **`parseRepoInput.ts`** — Parses repo input in any format: local paths, SSH URLs, HTTPS URLs, `owner/repo` shorthand, `gh repo clone` commands. Returns structured `ParsedInput` with normalized clone URL.
-
-### Composables (`apps/desktop/src/composables/`)
-
-| Composable | Purpose |
+Kanna is a distributed system, not a single program. It runs coding agent tasks
+in parallel — each task gets its own git worktree, branch, agent session, and
+pipeline stage — across parts that start, crash, upgrade, and ship
+independently:
+
+- a **macOS desktop app** (Tauri v2, Vue 3 + Rust) — the operator's UI
+- a **PTY daemon** that outlives the app, so agent sessions survive restarts
+  and upgrades
+- **`kanna-server`**, which owns SQLite and serves the local and LAN APIs
+- **agent CLIs** (`claude`, `codex`, `copilot`, `opencode`, `agy`) spawned per
+  task, each in its own worktree
+- a **mobile app** plus the **cloud services** (relay + Firebase) that let it
+  reach the desktop from off-network
+
+Separate processes mean separate lifecycles and separate failure modes. Most
+non-trivial changes cross at least one of these boundaries, so treat a change
+as a change to a system: find out who else consumes the surface you are
+touching, and never assume "the app" is one process.
+
+The desktop app ships to end users as a signed macOS app: **all dependencies
+must be vendored or statically linked** — never depend on anything installed on
+the build machine (e.g. Homebrew). Release builds must run on a Mac with no
+developer tools installed.
+
+This file is the canonical conventions document — binding for humans and
+agents alike. It deliberately holds only what you cannot get from the code:
+contracts, non-obvious conventions, and hard-won pitfalls. Everything else is
+a reference below.
+
+## Where to look
+
+| Need | Read |
 |---|---|
-| `useAnalytics` | Task analytics bucketing (daily/weekly/monthly), operator metrics (response time, dwell time, focus score, switches/hour) |
-| `useBackup` | Timestamped DB backups with WAL flush, 7-day retention, periodic interval (4h) |
-| `useClaudeUsage` | Regex parser for Claude CLI `/usage` output (session %, week %, dollar spend) |
-| `useCustomTasks` | Scans `.kanna/tasks/` for `agent.md` files, abortable via AbortController |
-| `useInlineSearch` | Search/filtering for task lists |
-| `useKeyboardShortcuts` | Central shortcut registry (30+ actions), context-aware, modifier matching, terminal passthrough filtering |
-| `useLessScroll` | Vim/less-style scroll navigation (j/k/f/b/d/u/g/G), skips input elements |
-| `useModalZIndex` | Z-index stacking for overlapping modals |
-| `useNavigationHistory` | Back/forward stacks (max 50), 1s dwell threshold to skip transient visits |
-| `useOperatorEvents` | Emits `app_blur`/`app_focus` on visibility change for analytics |
-| `useRestoreFocus` | Restores focus to previous element after modal close |
-| `useShortcutContext` | Singleton context manager — components set active context on mount, register supplementary shortcuts |
-| `useTerminal` | xterm.js lifecycle, WebGL fallback, Kitty keyboard mode, SIGWINCH redraw on reconnect, debounced fit |
-| `useToast` | Toast notifications (max 3 visible, auto-dismiss, configurable duration) |
-| `useTreeExplorer` | Miller-columns file browser with caching, vim navigation (j/k/h/l/gg/G), `/` filter mode, 50ms debounced preview, prefetch |
+| How the system fits together, components, data flow | `docs/dev/architecture.md` |
+| Running the app, `kd` commands, worktree isolation, debugging | `docs/dev/dev-workflow.md` |
+| First-time setup and prerequisites | `docs/dev/getting-started.md` |
+| Test taxonomy and what to run when | `docs/dev/testing.md` |
+| Versioning, staging/production ships, promotion, mobile OTA | `docs/dev/release.md` |
+| UI flows, close semantics, shortcuts, preferences | `docs/dev/product-behavior.md` |
+| PTY daemon contract — invariants, handoff, lifecycle | `crates/daemon/SPEC.md` |
+| Server boundary and v1 LAN API surface | `docs/kanna-server-boundary.md` |
+| Mobile app, OTA operations | `apps/mobile/`, `docs/specs/mobile-ota-updates.md` |
+| Feature specs (merge master, task graph, QA dispatch, RCs) | `docs/specs/` |
+| Every DB table and migration | `crates/kanna-server/src/db/mod.rs` |
+| Agent provider registry | `crates/kanna-agent-protocol/src/providers.rs` |
+| Built-in pipelines and agents | `.kanna/pipelines/*.json`, `.kanna/agents/*/AGENT.md` |
 
-### Components (`apps/desktop/src/components/`)
+Tests are executable specs — prefer reading them over prose: `tools/kd/tests/`
+for release and dev-CLI behavior, `crates/daemon/tests/` for handoff and
+reconnect, `tests/cli-contract/` for agent CLI compatibility.
 
-| Component | Purpose |
-|---|---|
-| `ActionBar` | PR creation button, conditional on task status |
-| `AddRepoModal` | Add repository (create or import tabs) |
-| `AgentView` | Claude agent message stream display |
-| `AnalyticsModal` | Task and operator analytics charts |
-| `BlockerSelectModal` | Task dependency/blocker editor |
-| `CommandPaletteModal` | Quick command launcher (`⇧⌘P`) |
-| `DiffModal` / `DiffView` | Git diff viewer using `@pierre/diffs` |
-| `FilePickerModal` | File open dialog from repo |
-| `FilePreviewModal` | File content preview pane |
-| `KeyboardShortcutsModal` | Shortcut reference display |
-| `MainPanel` | Central task view with terminal tabs or blocked placeholder |
-| `NewTaskModal` | Task creation with custom/predefined templates |
-| `PreferencesPanel` | Settings (IDE command, timeouts, locale) |
-| `ShellModal` | Standalone shell terminal |
-| `Sidebar` | Task list navigation (pinned/PR/merge/active/blocked sections) |
-| `TagBadges` | Task tag display |
-| `TaskHeader` | Task title, branch, PR link, stage |
-| `TerminalTabs` | Tab manager for multiple terminal/agent sessions |
-| `TerminalView` | xterm.js terminal renderer |
-| `ToastContainer` | Toast notification display |
-| `TreeExplorerModal` | Miller-columns file explorer |
+## Core concepts
 
-### Stores (`apps/desktop/src/stores/`)
+- **Task** — a unit of work: a prompt, a git worktree, an agent session, and a
+  lifecycle stage. One task = one branch = one PR.
+- **Pipeline** — an ordered list of stages, each with an agent, an optional
+  environment, a stage policy, and an optional `post`. Default:
+  `in progress` (post: `commit`) → `review` → `pr` (post: `approve`).
+- **Workspace** — the ephemeral manifestation of a task. Tasks are durable
+  (same id, run history, blockers), but **every stage transition forks a fresh
+  workspace**: a new branch + worktree `task-{id}-{n}` cut from the previous
+  stage's committed tip. N worktrees, N branches, one PR. **Only committed
+  work crosses a stage boundary.**
+- **Post** — tail work injected into the stage's *running* agent session before
+  the transition. Stages fork workspaces and swap sessions; posts continue them.
+- **Daemon** — standalone process managing PTY sessions. Survives app restarts.
 
-- **`kanna.ts`** (Pinia) — App state: repo/item selection, sorted items (pinned → merge → pr → active → blocked), debounced activity transitions (unread → idle after 1s), `generateId()` via `crypto.getRandomValues()`, operator event emission, undo support. Key interfaces: `PtySpawnOptions` (agentProvider, model, permissionMode, allowedTools, maxTurns, maxBudgetUsd, setupCmds, portEnv).
-- **`db.ts`** — Frontend database compatibility: resolves the database name and exposes the disabled/DEV-E2E `DbHandle` facade. The server owns the schema, migrations, and legacy file-location relocation.
+Advancing past the final stage closes the task. Close snapshots dirty state
+into local WIP commits, removes the task's worktrees, and **keeps the
+branches** — close never deletes a branch.
 
-### Tauri Commands (`apps/desktop/src-tauri/src/commands/`)
+Built-in pipelines: `default`, `qa`, `qa-dispatch`, `specialty-review`. The
+`qa-dispatch` review stage fans specialty reviews out as child tasks and
+aggregates their verdicts against a scope bar — see
+`docs/specs/qa-dispatch-review.md`.
 
-| Module | Commands |
-|---|---|
-| `agent.rs` | `create_agent_session` (background drainer), `agent_next_message` (poll buffer), `agent_send_message`, `agent_interrupt`, `agent_close_session`, `get_claude_usage` |
-| `daemon.rs` | `spawn_session`, `attach_session_with_snapshot`, `detach_session`, `send_input`, `resize_session`, `signal_session`, `kill_session`, `list_sessions` |
-| `fs.rs` | `get_app_data_dir`, `file_exists`, `read_text_file`, `write_text_file`, `copy_file`, `remove_file`, `list_dir`, `list_files` (gitignore-aware), `read_dir_entries`, `read_env_var`, `which_binary`, `ensure_directory`, `append_log` |
-| `git.rs` | `git_diff` (staged + unstaged + untracked), `git_diff_range`, `git_merge_base`, `git_worktree_list`, `git_worktree_add`, `git_worktree_remove`, `git_log`, `git_default_branch`, `git_remote_url`, `git_push`, `git_fetch`, `git_clone`, `git_init`, `git_app_info` |
-| `shell.rs` | `ensure_term_init` (ZDOTDIR proxy), `run_script` |
+## Task management: use the MCP tools
 
-### Tauri App Core (`apps/desktop/src-tauri/src/lib.rs`)
+**Do not read or write the SQLite database directly for orchestration.** Use
+`kanna-mcp` (`kanna_*` tools, backed by the local API on `127.0.0.1:48120`)
+first, and `kanna-cli` only as the fallback for clients without MCP support.
+`kd-mcp` exposes the dev workflow the same way — prefer it over shelling out.
 
-- **Event bridge** (`spawn_event_bridge`) — background task subscribing to daemon events, auto-reconnects with exponential backoff on daemon restart, emits Tauri events: `terminal_output`, `session_exit`, `hook_event`, `status_changed`, `daemon_ready`
-- **Reattach coordinator** (`spawn_reattach_coordinator`) — listens to `daemon_ready`, re-attaches all tracked sessions, sends Resize to trigger SIGWINCH for Claude TUI redraw
-- **Daemon spawn** (`ensure_daemon_running`) — searches for sidecar binary, spawns with `setsid`, waits for PID file match, handles worktree isolation
-- **macOS fn+F fullscreen** — native event monitor intercepts fn+F without Cmd/Ctrl/Option to toggle fullscreen
-- **PATH resolution** (`fix_path_from_shell`) — runs interactive login shell to capture real PATH (fixes Spotlight-launched app's minimal PATH)
-- **Terminal output patterns** — strips ANSI from PTY output to detect: "Interrupted", "Do you want to allow", Copilot idle/thinking states; broadcasts as hook events
-- **State:** `AgentState` (DashMap of buffered sessions), `DaemonState` (shared daemon connection), `AttachedSessions` (tracks active output streams)
+Both are registered in `.mcp.json`. Their tool surface is generated from
+`crates/kanna-tool-catalog`, the single declarative source of truth shared
+with `kanna-cli`; `kanna-mcp` hot-reloads an override catalog and emits
+`notifications/tools/list_changed` when it changes.
 
-### Packages
+## Agent execution
 
-**`@kanna/core`** (`packages/core/src/`):
-- `pipeline/types.ts` — `SYSTEM_TAGS`, `parseTags()`, `hasTag()` (safe JSON parse, never throws)
-- `config/repo-config.ts` — `parseRepoConfig()` from `.kanna/config.json`
-- `config/custom-tasks.ts` — `parseAgentMd()` frontmatter parser, slug-to-name conversion
-- `config/custom-tasks-scanner.ts` — Scans `.kanna/tasks/` with smart empty-file skipping
-- `slack/` — `SlackClient` (postMessage, fetchHistory)
-- `discord/` — `DiscordClient` (postMessage, fetchHistory)
+**PTY mode (default)** — the agent CLI runs in a real terminal via the daemon;
+the user sees the TUI and can type. Lifecycle events arrive as hooks.
+**SDK mode** — headless with `--output-format stream-json`, NDJSON on
+stdin/stdout, non-interactive.
 
-**`@kanna/db`** (`packages/db/src/`):
-- `schema.ts` — TypeScript types mirroring all SQLite tables
-- `queries.ts` — Abstracted query layer over `DbHandle` interface. Includes: CRUD for repos/items/sessions, JSON tag management, `hasCircularDependency()` (DFS cycle detection for task blockers), `getUnblockedItems()`, analytics aggregation, `getSetting`/`setSetting`
+To send input to a running task:
+`kanna-cli task send-input --task-id <TASK_ID> --message "..."`.
 
-### Rust Crates
+## Mobile
 
-- **`claude-agent-sdk`** — Session builder pattern, NDJSON stream parsing, permission callbacks, `find_claude_binary()`. Types: `PermissionMode` (`DontAsk`/`AcceptEdits`/`Default`), `ThinkingMode`, `Effort` levels. Bidirectional control protocol: app sends Interrupt/SetModel/SetPermissionMode, CLI sends CanUseTool for permission checks.
-- **`daemon`** — Raw libc PTY, Unix socket NDJSON protocol, SCM_RIGHTS fd transfer for handoff, session manager with spawn/attach/detach/resize/signal/kill.
-- **`tauri-plugin-delta-updater`** — Self-updater plugin (stub).
+`apps/mobile` is an Expo / React Native companion app — a first-class client,
+not an accessory. It reads desktop data from `kanna-server`: directly over the
+LAN (`KANNA_MOBILE_SERVER_PORT`) when on the same network, or through the
+relay (`services/relay`, Firebase-authenticated) when remote. Anything you add
+to the server's surface may have a mobile consumer.
 
-### Key Third-Party Libraries
+Two contracts that are easy to break:
 
-| Library | Usage | Notes |
-|---|---|---|
-| `@pierre/diffs` | Diff rendering | Use `containerWrapper` not `fileContainer`, `worker-portable.js` not `worker.js` |
-| `xterm.js` (6.x beta) | Terminal UI | With fit, image, serialize, web-links, webgl addons |
-| `shiki` | Syntax highlighting | Used for code preview |
-| `pinia` | State management | Single store in `kanna.ts` |
-| `markdown-it` | Markdown parsing | With strikethrough-alt, task-lists plugins |
-| `vue-chartjs` + `chart.js` | Charts | Analytics modal |
-| `vuedraggable` | Drag-drop | Task reordering |
-| `@vueuse/core` | Composable utilities | `computedAsync`, etc. |
-| `vue-i18n` | i18n | Locale support |
-| `git2` (Rust) | Git operations | Fully vendored (libgit2 + OpenSSL) |
+- **Bump `runtimeVersion` in `apps/mobile/src/mobileEnvironments.json` whenever
+  a change touches native code, native config, the Expo SDK, native
+  dependencies, or `apps/mobile/plugins/withKannaNativeIdentity.js`.** JS-only
+  changes keep the same `runtimeVersion` and are OTA-deliverable. Shipping an
+  OTA update against a stale `runtimeVersion` pushes JS to incompatible native
+  code. Replacing the embedded OTA signing certificate counts as native config
+  — bump *every* environment.
+- **Native identity is keyed by `KANNA_APP_ENV`**, applied during
+  `expo prebuild` by the config plugin above (dev / staging / production get
+  distinct bundle ids and display names). Don't hand-patch `project.pbxproj`;
+  Expo regenerates it.
 
-### Scripts (`scripts/`)
-
-| Script | Purpose |
-|---|---|
-| `install.sh` | Download and install latest release from GitHub (DMG, arch auto-detect) |
-| `app-update-full-bundle-e2e.sh` | Specialized full-bundle updater E2E helper, invoked through `./kd test app-update-bundle` |
-| `setup-worktree.sh` | Minimal task setup helper used as repo-config fixture/input |
-| `stage-terminal-recovery-runtime.sh` | Low-level runtime staging helper for terminal recovery assets |
-| `repo-config.test.sh` / `setup-worktree.sh.test.sh` | Shell-level fixture tests for shell-specific helpers |
-
-### Environment Variables
-
-| Variable | Where | Purpose |
-|---|---|---|
-| `KANNA_DEV_PORT` | vite.config.ts, kd | Dev server port (default 1420) |
-| `KANNA_WORKTREE` | kd → runtime | Flag: running in a worktree |
-| `KANNA_DB_NAME` | kd → stores/db.ts | Resolved SQLite filename for the current instance |
-| `KANNA_DAEMON_DIR` | kd → daemon | Resolved daemon data directory for the current instance |
-| `KANNA_GITHUB_TOKEN` | core/github | GitHub API auth |
-| `KANNA_SLACK_TOKEN` | core/slack | Slack API auth |
-| `KANNA_DISCORD_TOKEN` | core/discord | Discord API auth |
-| `KANNA_VERSION` | daemon build.rs | Compile-time version from git |
-
-### Database Tables
-
-| Table | Key Columns |
-|---|---|
-| `repo` | id, path, name, default_branch, hidden |
-| `pipeline_item` | id, repo_id, prompt, pipeline, stage, pr_number/url, branch, activity, port_env (JSON), pinned, pin_order, display_name, agent_type, agent_provider, base_ref, issue_number, issue_title, closed_at, notify_task_id, notified_at, parent_task_id, pipeline_def, port_offset, revision_rounds |
-| `task_blocker` | blocked_item_id, blocker_item_id |
-| `worktree` | id, pipeline_item_id, path, branch |
-| `terminal_session` | id, repo_id, pipeline_item_id, label, cwd, daemon_session_id |
-| `agent_run` | id, repo_id, agent_type, status, started_at, finished_at |
-| `settings` | key, value |
-| `activity_log` | id, pipeline_item_id, activity, started_at |
-| `operator_events` | id, event_type, pipeline_item_id, repo_id |
-
-## Daemon
-
-- Raw libc PTY (not portable-pty) — needed for `SCM_RIGHTS` fd handoff
-- Always spawned fresh on app start, handoff from old daemon preserves sessions
-- Handoff v3 is the transactional guarantee epoch. A new daemon requests v3 first and retries legacy v2 exactly once only after an explicit version mismatch; ambiguous failures are fail-closed.
-- Legacy v2 preserves stable PTYs and resumable/live agent state during the one-time protocol upgrade, but concurrent Spawn/Kill against a deployed v2 sender has unspecified ordering. Receiver peer, FD-shape, ancillary-data, and descriptor-provenance checks still apply.
-- App waits for new daemon's PID file before connecting (prevents stale connections)
-- One reader per session. Newly spawned sessions start the reader at Spawn; adopted handoff sessions start it immediately after the old-daemon release barrier.
-- **Headless terminal authority** — detached PTY output is interpreted into the per-session headless terminal. There is no pre-attach raw byte buffer.
-- **Broadcast output** — all attached clients receive output simultaneously; AttachSnapshot adds a live writer without creating new readers
-- **Terminal size coordination** — effective PTY dimensions are `min(cols)` × `min(rows)` across all attached clients
-- No raw scrollback replay — reconnection hydrates xterm.js from the headless terminal snapshot, then streams live output
-- Logs to `~/Library/Application Support/Kanna/kanna-daemon_*.log` via flexi_logger
-- `KANNA_DAEMON_DIR` env var overrides data directory (used by tests)
-- Protocol: line-delimited JSON over Unix socket. Commands include Spawn, AttachSnapshot, Detach, Input, Resize, Signal, Kill, List, Subscribe, Handoff, HookEvent
-
-### Daemon invariants
-
-1. **One daemon at a time.** New daemon always replaces the old one.
-2. **Always handoff.** New daemon transfers sessions from old daemon via SCM_RIGHTS.
-3. **Always spawn.** App always starts a fresh daemon. Never reuses existing.
-4. **Always wait.** App waits for the new daemon's PID before connecting.
-5. **Sessions survive upgrades.** Child processes are unaware of daemon restarts.
-6. **One reader per session.** Single `stream_output` task; spawned sessions start it immediately, and adopted sessions start it immediately after the old-daemon release barrier.
-7. **Headless terminal is authoritative while detached.** AttachSnapshot atomically snapshots that state and joins the live output stream.
-8. **Transactional guarantees require v3.** A v3 sender seals lifecycle mutation around its exact snapshot and retains owned descriptors until `HandoffAdopted`; legacy v2 is explicitly degraded and never mislabeled transactional.
-9. **Ambiguity is fail-closed.** Only an explicit pre-transfer v3 version mismatch permits the one legacy-v2 retry. A newcomer never publishes alongside a live incumbent after a timeout, disconnect, malformed response, partial FD transfer, or failed ACK.
-
-### App startup sequence
-
-1. App spawns new daemon binary (detached via `setsid`)
-2. New daemon detects the old daemon, performs handoff (fd transfer), and waits for EOF on the dedicated handoff connection, which proves the old daemon released its readers
-3. New daemon writes PID file and binds socket
-4. App polls PID file until it matches the spawned child
-5. App clears stale command connection (`DaemonState`)
-6. App connects to new daemon (event bridge + on-demand command connection)
-7. Frontend mounts terminals, calls AttachSnapshot → Resize → live stream resumes
-
-## Database
-
-`kanna-server` owns SQLite through bundled `rusqlite`, with all schema definitions and schema migrations in `crates/kanna-server/src/db/mod.rs`. Server startup owns legacy file-location relocation and completes it before calling `Db::open_migrated` and serving requests. Desktop `stores/db.ts` only resolves the database name and provides the disabled/DEV-E2E `DbHandle` facade for compatibility. See the Database Tables inventory in the Codebase Overview section for the full table list.
-
-DB name is resolved by `kd` from the current context: main instances use `kanna-v2.db`, and worktrees auto-name their DB `kanna-wt-{worktree-dir}.db` (for example `kanna-wt-task-10720bf8.db`). In the current checked-in dev build, Tauri's app identifier is `build.kanna`, so the default DB directory is `~/Library/Application Support/build.kanna/`. If the app identifier changes for another build flavor, the enclosing Application Support directory changes with it.
-
-## Testing
-
-- **Unit tests:** vitest in `packages/core/`, `packages/db/`, and `apps/desktop/src/composables/` (useBackup, useInlineSearch, useNavigationHistory, useShortcutContext have `.test.ts` files)
-- **Integration tests:** Rust tests in `apps/desktop/src-tauri/tests/` (real Claude CLI)
-- **Daemon tests:** `crates/daemon/tests/` — handoff and reconnect tests with real daemon processes
-- **CLI contract tests:** `tests/cli-contract/tests/offline/` runs under canonical `pnpm test`; real Claude, Copilot, Codex, and OpenCode compatibility lives in `tests/cli-contract/tests/live/` and runs only through `pnpm test:agent-cli-compat` because it requires installed/authenticated CLIs and may consume quota
-- **E2E tests:** `pnpm test:e2e` + W3C WebDriver via `tauri-plugin-webdriver` on port 4445
-  - Mock tests (`apps/desktop/tests/e2e/mock/`): action-bar, app-launch, diff-view, import-repo, keyboard-shortcuts, preferences, task-lifecycle
-  - Real tests (`apps/desktop/tests/e2e/real/`): claude-session, diff-after-claude (requires Claude CLI)
-- E2E tests access Vue internals via `__vue_app__._instance.setupState` — dev builds only
-- WebDriver is only available in debug builds (`#[cfg(debug_assertions)]`)
-
-### E2E coverage expectation
-
-Any behavior that crosses component or system boundaries should add or update at least one E2E test.
-
-Typical triggers include:
-
-- UI flows, navigation, and interactive user journeys
-- frontend or mobile client interactions with server or backend APIs
-- daemon, PTY, process, filesystem, git, or network behavior
-- persistence, reload, reconnect, or recovery behavior
-- asynchronous coordination where isolated tests do not prove the real wiring
-
-Unit and integration tests remain important, but they are not a substitute when the risk is in the wiring between systems.
-
-If a behavior should have E2E coverage but cannot reasonably get it yet, the change must explicitly document:
-
-- why it is not yet testable end to end
-- what would be needed to make it testable
-- what narrower tests were added in the meantime
+Run it through `kd` (`./kd dev up --mobile`, `./kd mobile run --device`) — bare
+`expo start` does not start the desktop-side `kanna-server`. Details and device
+troubleshooting: `docs/dev/dev-workflow.md`; OTA operations:
+`docs/specs/mobile-ota-updates.md`.
 
 ## Conventions
 
-- Task stage is tracked via `pipeline_item.stage` (e.g., `'in progress'`, `'commit'`, `'pr'`). Visibility is governed by `closed_at`; closed tasks keep their last stage. Blocked display state derives from `task_blocker`, not tags.
-- Git worktrees created at `{repoPath}/.kanna-worktrees/task-{uuid}`
-- Branch names: `task-{id}` at creation; stage forks append a workspace counter (`task-{id}-2`, `task-{id}-3`, …)
-- GitHub labels: `kn:wip`, `kn:pr-ready`, `kn:claimed`
-- API tokens from env: `KANNA_GITHUB_TOKEN`, `KANNA_SLACK_TOKEN`, `KANNA_DISCORD_TOKEN`
-- Agent provider IDs: `"claude"`, `"copilot"`, `"codex"`, `"opencode"`, and `"antigravity"` — generated from `crates/kanna-agent-protocol/src/providers.rs` and stored in `pipeline_item.agent_provider`
-- i18n locales: English (`en`), Japanese (`ja`), Korean (`ko`) in `apps/desktop/src/i18n/locales/`
-- Keyboard shortcut contexts: `"main"`, `"diff"`, `"file"`, `"shell"`, `"tree"` — managed by `useShortcutContext`
-- `.kanna/` per repo — project-level Kanna config:
-  - `config.json` — `setup` (commands run in each new worktree), `teardown` (cleanup commands run best-effort in a workspace whenever the task leaves it: stage-transition forks, advancing past the final stage, and task close), `test` (test commands), `ports` (env var → base port mapping), `pipeline` (default pipeline name)
-  - `agents/{name}/AGENT.md` — agent definitions (YAML frontmatter + markdown body). Built-in agents ship as Tauri resources; per-repo files override built-ins by name.
-  - `agents/{name}/EXTEND.md` — repo-local agent extension layered onto the resolved agent (repo override or built-in): the body is appended to the agent prompt and optional frontmatter fields (`description`, `model`, `permission_mode`, `allowed_tools`, `agent_provider`) replace the base's. Lets a repo customize a default agent without rewriting it (e.g. this repo's `review/EXTEND.md` requires the full unit & integration suites). Extensions are read only from the open repo, never from bundled resources.
-  - `pipelines/{name}.json` — pipeline definitions (stages, environments, stage policies). Built-in `default.json` ships as Tauri resource.
-  - `tasks/{slug}/agent.md` — custom task templates with YAML frontmatter (prompt, model, permissions, allowed tools)
+- Task stage lives in `pipeline_item.stage`. **Visibility is governed by
+  `closed_at`, not stage** — closed tasks keep their last stage. Blocked
+  display state derives from `task_blocker`, not tags.
+- Worktrees at `{repoPath}/.kanna-worktrees/task-{uuid}`; branches `task-{id}`,
+  with stage forks appending a counter (`task-{id}-2`, …).
+- GitHub labels: `kn:wip`, `kn:pr-ready`, `kn:claimed`.
+- Tokens from env: `KANNA_GITHUB_TOKEN`, `KANNA_SLACK_TOKEN`,
+  `KANNA_DISCORD_TOKEN`.
+- Rust build artifacts go to `.build/`, not `target/` (`.cargo/config.toml`).
+- Use `pnpm`. Not npm.
+- **Always start the dev environment with `./kd dev up`** — never `pnpm run dev`,
+  `pnpm exec tauri dev`, or `cargo tauri dev`. `kd` is the canonical
+  self-development surface: it derives the worktree's ports, DB, daemon dir,
+  and tmux identity. Same rule for deploys (`./kd cloud deploy`, never
+  `firebase deploy`) and mobile (`./kd dev up --mobile` / `./kd mobile up`,
+  never bare `expo start` — it won't start the desktop-side `kanna-server`).
+  If a `kd` workflow is broken, fix `kd` rather than working around it.
+- Production promotions and production mobile OTA publishes require an explicit
+  human request. Staging is free for agents.
+- Use `apps/desktop/src/utils/fuzzyMatch.ts` instead of writing a new fuzzy
+  search.
+- `.kanna/` is per-repo config: `config.json` (`setup`, `teardown`, `test`,
+  `ports`, `pipeline`), `pipelines/{name}.json`, `agents/{name}/AGENT.md`
+  (repo files override built-ins by name), `agents/{name}/EXTEND.md` (layers
+  onto the resolved agent without rewriting it — read only from the open repo,
+  never from bundled resources), and `tasks/{slug}/agent.md` templates.
+- Built-in agent/pipeline definitions must ship as Tauri bundled resources,
+  **not** as TypeScript string constants.
 
-## Working on the Codebase
+## Database
 
-### Trace before you touch
+`kanna-server` owns SQLite through bundled `rusqlite`; schema and migrations
+live in `crates/kanna-server/src/db/mod.rs`, and server startup completes
+legacy file relocation before serving. Desktop `stores/db.ts` only resolves the
+database name and provides the disabled/DEV-E2E `DbHandle` facade.
 
-Before fixing a bug or adding a feature, trace the complete data flow for the affected feature: DB → store → component → composable → daemon. Read all files in the path before proposing changes. A fix that only looks at one layer will break another.
+`kd` resolves the DB name from context: main instances use `kanna-v2.db`;
+worktrees auto-name theirs `kanna-wt-{worktree-dir}.db`. The dev build's Tauri
+identifier is `build.kanna`, so the default directory is
+`~/Library/Application Support/build.kanna/`.
 
-For example, a task close/undo touches: `queries.ts` (DB), `kanna.ts` (store), `Sidebar.vue` (visibility), `TerminalTabs.vue` (component lifecycle), `useTerminal.ts` (attach/detach), and the daemon (PTY sessions). Changing one without understanding the others leads to piecemeal hacks.
+## Working on the codebase
 
-### Improve the architecture
+**Trace before you touch.** Before changing a feature, trace its complete data
+flow — DB → server → store → component → composable → daemon — and read every
+file in the path. A fix that only looks at one layer breaks another. A task
+close/undo, for example, touches the DB layer, the store, `Sidebar.vue`,
+`TerminalTabs.vue`, `useTerminal.ts`, and the daemon.
 
-Changes should leave the architecture cleaner than you found it. Adding a hack to work around a design problem is not acceptable — fix the design instead. If a fix requires a polling loop, a retry timer, or duplicating logic that already exists elsewhere, that's a signal the approach is wrong.
+**Fix designs, not symptoms.** Leave the architecture cleaner than you found
+it. If a fix needs a polling loop, a retry timer, or logic that already exists
+elsewhere, the approach is wrong. When two systems disagree on the source of
+truth, pick one and make everything use it. Clean up resources where the
+lifecycle owns them. Prefer the most correct architecture over the shortest
+patch; treat tactical safety fallbacks as temporary and label them as such.
 
-When something doesn't work, find the architectural reason and fix it at the right layer:
-- If a component needs to react to a state change, make sure the lifecycle handles it (mount/unmount/watch) — don't add manual triggers from the store.
-- If two systems disagree on the source of truth (e.g., `stage` vs `closed_at` for visibility), pick one and make everything use it.
-- If a resource needs cleanup, clean it up where the lifecycle owns it — don't leave stale state for another layer to work around.
+**Server-side completion notify boundary.** `kanna-server` subscribes directly
+to daemon terminal-state events and treats daemon `Exit` for a task session as
+the completion signal — updating activity to `unread`, claiming
+`pipeline_item.notify_task_id` via `notified_at`, and delivering
+`TASK <child-id> DONE [success|failure]: <title>` through the same two-step
+input helper as `/v1/tasks/{task_id}/input`. Keep this server/daemon-side; it
+must not depend on the desktop frontend event bridge being open.
 
-### Server-side completion notify boundary
+## E2E coverage expectation
 
-`kanna-server` subscribes directly to daemon terminal-state events and treats daemon `Exit` for a task session as the headless completion signal. That path updates task activity to `unread`, claims `pipeline_item.notify_task_id` by setting `notified_at`, and delivers `TASK <child-id> DONE [success|failure]: <title>` through the same two-step input submission helper used by `/v1/tasks/{task_id}/input`. Keep this boundary server/daemon-side; do not depend on the desktop frontend event bridge being open for completion notifications.
+Any behavior that crosses component or system boundaries should add or update
+at least one E2E test — UI flows, client↔server interactions, daemon/PTY/git/
+filesystem behavior, persistence and reconnect, and async coordination where
+isolated tests do not prove the real wiring. Unit and integration tests are not
+a substitute when the risk is in the wiring.
 
-Current E2E status: notify has server boundary coverage with a fake daemon asserting the exact two `Input` writes and the once-only DB guard. A full desktop E2E would require a runnable daemon plus agent task that exits under the packaged app/WebDriver harness; add that when the E2E harness can deterministically drive agent completion without external Claude/Copilot credentials.
+If a behavior should have E2E coverage but cannot get it yet, land a dated note
+in `docs/` (`YYYY-MM-DD-<topic>-e2e-gap.md` / `-e2e-note.md`) saying why it is
+not yet testable, what would make it testable, and what narrower tests were
+added meanwhile.
 
 ## Coding Style
 
@@ -642,12 +234,6 @@ Current E2E status: notify has server boundary coverage with a fake daemon asser
 ## UI
 
 - **Keyboard shortcuts** use one `<kbd>` per key: `<kbd>⇧</kbd><kbd>⌘</kbd><kbd>N</kbd>`, not `<kbd>⇧⌘N</kbd>`. Use `kbd + kbd { margin-left: 2px }` for spacing.
-
-## Versioning
-
-Single `VERSION` file is the source of truth for packaged app versioning. Production `kd release ship --release` updates `VERSION`, `tauri.conf.json`, and Rust package metadata, commits them, tags `vX.Y.Z`, and publishes a per-version GitHub release. Staging ships do not persist version bumps: each `--staging` ship builds with `X.Y.Z-staging.N`, publishes an immutable prerelease tagged `vX.Y.Z-staging.N`, uploads a manifest copy there, and then clobbers only `latest-staging.json` on the pointer release tagged `desktop-staging`. Development builds may include separate branch/worktree metadata in the UI, but that metadata is not the packaged version. Package.json versions are all `0.0.0` (meaningless). The desktop app reads `VERSION` at compile time via `build.rs`.
-
-Staging prereleases double as release candidates: `X.Y.Z-staging.N` is candidate `N` for production `X.Y.Z`, and soaking it as a daily driver is the validation step. `kd release status` shows the production release, the staging channel pointer, the series release branch when one is cut, and how far each lags `origin/main`; `kd release promote X.Y.Z-staging.N` rebuilds the soaked candidate's exact commit with production identity and publishes it as `vX.Y.Z` (it refuses if the prerelease is missing, `vX.Y.Z` already exists, or HEAD/the promotion base no longer match the candidate's commit). Stabilization uses trunk-based short-lived release branches: `kd release cut` derives the series from `origin/main:VERSION` and pushes `release/X.Y` at `origin/main`; staging RCs for the branch (shipped from a `release/X.Y` checkout, or from a task worktree with `--branch release/X.Y`) derive their versions from the branch series instead of `VERSION` bump flags and record their source branch as a `Source-Branch:` trailer on the prerelease; bugfixes land on main first and are cherry-picked onto the branch; promotion pushes the version bump to the RC's resolved base — its release branch when the branch tip is still the RC commit, otherwise main for main RCs (a dormant release branch from an earlier release does not block later main RCs in the same series) — and is followed by merging the branch back into main. While a release branch is being soaked, do not ship staging from main — the single staging channel is the soak channel. Promoting to production requires an explicit human request, like the mobile OTA production rule. See `docs/specs/release-candidates.md`.
 
 ## Common Pitfalls
 
