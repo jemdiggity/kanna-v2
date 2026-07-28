@@ -1221,6 +1221,95 @@ fn builtin_dispatch_definitions_resolve_from_compiled_resources() {
 }
 
 #[test]
+fn legacy_builtin_pipeline_names_still_resolve_for_committed_repo_config() {
+    // `qa` and `qa-dispatch` shipped as built-ins before the lineup was
+    // reorganized by review depth. A repo that committed a config selecting
+    // one of them must keep resolving after upgrading, without the retired
+    // name reappearing as a choice.
+    for (legacy, current, review_agent) in [
+        ("qa", "single-reviewer", "review"),
+        ("qa-dispatch", "specialized-reviewers", "qa-dispatcher"),
+    ] {
+        let repo_root =
+            init_git_repo_without_provider_fixtures(&format!("definitions-legacy-{legacy}"));
+        std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
+        std::fs::write(
+            repo_root.join(".kanna/config.json"),
+            serde_json::json!({ "pipeline": legacy }).to_string(),
+        )
+        .unwrap();
+        publish_origin_main(&repo_root, "publish legacy pipeline selection");
+
+        let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+        // The repo's committed selection still resolves...
+        assert_eq!(definitions.config().pipeline.as_deref(), Some(legacy));
+        let resolved = definitions
+            .pipeline(legacy)
+            .unwrap_or_else(|error| panic!("legacy `{legacy}` must resolve: {error}"));
+
+        // ...to the current definition, which reports its own current name so
+        // the task records which pipeline it actually got.
+        assert_eq!(resolved.name.as_deref(), Some(current));
+        let review = resolved
+            .stages
+            .iter()
+            .find(|stage| stage.name == "review")
+            .unwrap_or_else(|| panic!("`{current}` must have a review stage"));
+        assert_eq!(review.agent.as_deref(), Some(review_agent));
+
+        // The retired name stays out of the user-facing manifest.
+        let names = definitions.pipeline_names().unwrap();
+        assert!(
+            !names.contains(&legacy.to_string()),
+            "`{legacy}` must not be offered as a choice; got {names:?}"
+        );
+        assert_eq!(
+            names,
+            vec![
+                "default",
+                "single-reviewer",
+                "specialized-reviewers",
+                "specialty-review"
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(repo_root);
+    }
+}
+
+#[test]
+fn legacy_builtin_pipeline_alias_yields_to_a_repo_authored_pipeline_of_the_same_name() {
+    // The alias is a compiled fallback, not an override: a repo that ships its
+    // own `qa.json` must keep getting its own definition.
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-legacy-repo-authored");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/qa.json"),
+        serde_json::json!({
+            "name": "qa",
+            "stages": [
+                { "name": "in progress", "agent": "implement", "policy": { "transition": "manual" } }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish repo-authored qa pipeline");
+
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+    let resolved = definitions.pipeline("qa").unwrap();
+
+    assert_eq!(resolved.name.as_deref(), Some("qa"));
+    assert_eq!(resolved.stages.len(), 1, "repo definition wins over the alias");
+
+    // A repo-authored pipeline IS a user-facing choice, unlike the alias.
+    assert!(definitions.pipeline_names().unwrap().contains(&"qa".to_string()));
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[test]
 fn remote_pipeline_tree_read_error_does_not_fall_back_to_compiled_default() {
     let repo_root = init_git_repo_without_provider_fixtures("definitions-pipeline-tree");
     let pipeline_path = repo_root.join(".kanna/pipelines/default.json");

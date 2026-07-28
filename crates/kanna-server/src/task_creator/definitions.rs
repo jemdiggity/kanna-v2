@@ -715,6 +715,19 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
         ".kanna/pipelines/specialty-review.json" => Some(include_str!(
             "../../../../.kanna/pipelines/specialty-review.json"
         )),
+        // Resolution-only aliases for the names these two shipped under before
+        // the lineup was reorganized by review depth. A repo whose committed
+        // `.kanna/config.json` still selects `qa` or `qa-dispatch` keeps
+        // working. They are deliberately absent from `pipeline_names()`, so
+        // they never reappear as user-facing choices, and a repo that ships
+        // its own `.kanna/pipelines/qa.json` still wins because the snapshot
+        // is read before this fallback.
+        ".kanna/pipelines/qa.json" => Some(include_str!(
+            "../../../../.kanna/pipelines/single-reviewer.json"
+        )),
+        ".kanna/pipelines/qa-dispatch.json" => Some(include_str!(
+            "../../../../.kanna/pipelines/specialized-reviewers.json"
+        )),
         ".kanna/agents/agent-factory/AGENT.md" => Some(include_str!(
             "../../../../.kanna/agents/agent-factory/AGENT.md"
         )),

@@ -182,12 +182,25 @@ the hot path:
 A `setup` factory agent (composing the existing `agent-factory` /
 `pipeline-factory` / `config-factory`) runs at repo import or on demand:
 inspects the repo to pre-answer what it can (remote URL, `gh auth
-status`, CI config), asks only what it must ("draft PRs or push-only?
-merge yourself or a merge agent?"), then writes the `.kanna/` files —
-pipeline JSON, flavor selections, an EXTEND.md where an answer doesn't
-match a stock flavor. It composes tested flavors; it does not author
-agents from scratch. The first stock preset is the GitHub flow:
-`pr@draft-pr` → review in ⌘D → approve post → `merge@github`.
+status`, CI config), asks only what it must ("how much review? ordinary
+PRs, drafts, or push-only? merge yourself or a merge agent?"), then
+writes the `.kanna/` files — flavor selections, an EXTEND.md where an
+answer doesn't match a stock flavor, and a pipeline JSON only when the
+built-ins do not already cover the shape. It composes tested flavors; it
+does not author agents from scratch. The stock preset is the GitHub
+flow, which *selects* a built-in pipeline (`default`, `single-reviewer`,
+or `specialized-reviewers`) and attaches `merge@github`:
+`pr` → review in ⌘D → approve post → `merge@github`.
+
+The answers are not independent, and the setup agent enforces a closed
+composition rule. Every built-in ends with a `pr` stage plus an `approve`
+post, and `approve` resolves the PR with `gh pr view` and fails when none
+exists — so direct built-in selection is valid only for the ordinary-PR
+flow. `pr@push-only` publishes no PR and therefore implies manual merge
+plus a repo-local pipeline with the `approve` post dropped; manual merge
+alone drops it too; `pr@draft-pr` with a merge agent additionally needs a
+repo-local `approve` EXTEND.md that readies the draft, because
+`merge@github` cannot merge a draft.
 
 ## Phasing
 

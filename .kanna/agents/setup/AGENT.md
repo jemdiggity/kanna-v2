@@ -19,8 +19,8 @@ You compose tested built-in agents and flavors. Do not author new agents from sc
 ## Questions To Ask
 
 1. **Review depth** — which built-in pipeline? `default` (no review stage), `single-reviewer` (one review agent), or `specialized-reviewers` (a dispatched specialty panel). All three end with `pr` plus an `approve` post.
-2. **PR publishing** — ordinary PRs (stock `pr`, the default), draft PRs (`pr@draft-pr`), or push-only (`pr@push-only`)? Only offer drafts if the user asks: a draft cannot be merged, so choosing it also means deciding what readies it before the merge master sees it.
-3. **Merge handling** — a GitHub merge agent (`merge@github`), a git-only merge agent (`merge@git`), or manual merge (omit the approve post that signals merge)?
+2. **PR publishing** — ordinary PRs (stock `pr`, the default), draft PRs (`pr@draft-pr`), or push-only (`pr@push-only`)? Only offer drafts if the user asks. Answers other than ordinary change what you write — see **Composition Rules**.
+3. **Merge handling** — a GitHub merge agent (`merge@github`), a git-only merge agent (`merge@git`), or manual merge?
 4. **Merge timing** — merge as soon as the approved request is safe (stock), or queue for explicit operator release (needs a small `.kanna/agents/merge/EXTEND.md`)?
 
 ## Stock Preset: GitHub Flow
@@ -39,9 +39,20 @@ When the repository is on GitHub, `gh auth status` succeeds, and the user accept
 }
 ```
 
-This composes `implement -> commit post -> pr -> approve post -> merge@github`. Swap `pipeline` for `single-reviewer` or `specialized-reviewers` when the user wants review before the PR; nothing else changes. The stock preset opens an ordinary PR — do not select `pr@draft-pr` here. A draft PR would arrive at `merge@github` unmergeable, and readying it is a separate decision the repo has to make deliberately.
+This composes `implement -> commit post -> pr -> approve post -> merge@github`. Swap `pipeline` for `single-reviewer` or `specialized-reviewers` when the user wants review before the PR; nothing else changes.
 
-Write a pipeline file of your own only when the user wants stages the built-ins do not offer.
+## Composition Rules
+
+The answers are not independent. Every built-in pipeline ends with a `pr` stage plus an `approve` post, and `approve` resolves the PR with `gh pr view` and fails when none exists. So selecting a built-in directly is only valid for the ordinary-PR flow. This list is closed — if an answer combination is not below, do not invent a fourth shape; ask the user which of these they want.
+
+| Answers | What to write |
+|---|---|
+| **Ordinary PR + merge agent** | Select the built-in pipeline for the chosen review depth and set `flavors.merge`. Write no pipeline file. |
+| **Push-only** (`pr@push-only`) | No PR is created, so `approve` would fail. Merge is manual. Write a repo-local pipeline that matches the chosen review depth but has **no** `approve` post, and set `flavors.pr` to `push-only`. Never select a built-in pipeline with push-only. |
+| **Manual merge** (no merge agent) | Same shape: a repo-local pipeline matching the review depth with the `approve` post omitted, since nothing consumes the merge signal. |
+| **Draft PR + merge agent** (`pr@draft-pr`) | Select the built-in pipeline as usual, set `flavors.pr` to `draft-pr`, and write `.kanna/agents/approve/EXTEND.md` that runs `gh pr ready` on the resolved PR before signaling. `merge@github` cannot merge a draft, so without that extension the flow strands. |
+
+To build a repo-local pipeline for the push-only or manual-merge shapes, copy the built-in of the chosen review depth and drop the `approve` post — keep its stages, agents, and policies otherwise.
 
 ## Writing Rules
 
