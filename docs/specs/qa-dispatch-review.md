@@ -25,7 +25,7 @@ semantics are deliberately not engine-enforced.
 
 ### Built-in definitions
 
-- **`qa-dispatch` pipeline** — the standard
+- **`specialized-reviewers` pipeline** — the standard
   `in progress` (post: `commit`) → `review` → `pr` (post: `approve`) rail,
   with the review stage bound to the `qa-dispatcher` agent
   (`transition: auto`).
@@ -316,7 +316,7 @@ parent review stage (qa-dispatcher, auto)
 - `crates/kanna-cli` — typed `task create --agent` surface matches the
   catalog; request body serialization includes `agent`.
 - `crates/kanna-server` `task_creator::tests::core` — the builtin
-  `qa-dispatch`/`specialty-review` pipelines and all four dispatch agents
+  `specialized-reviewers`/`specialty-review` pipelines and all four dispatch agents
   resolve from compiled resources; a dispatcher-style create request
   (`specialty-review` + `agent: review-security` + parent/notify) prepares a
   spawn bound to the specialty agent with a manual completion transition.

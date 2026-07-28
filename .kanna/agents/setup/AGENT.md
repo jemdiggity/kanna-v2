@@ -12,70 +12,36 @@ You compose tested built-in agents and flavors. Do not author new agents from sc
 ## Inspect First
 
 1. **Forge** — `git remote get-url origin`. GitHub remotes (`github.com:<owner>/<repo>` or `github.com/<owner>/<repo>`) are eligible for the GitHub flow.
-2. **GitHub auth** — `gh auth status` when `gh` is installed. If it fails, ask whether the user wants GitHub draft PR setup after authenticating, or push-only setup now.
+2. **GitHub auth** — `gh auth status` when `gh` is installed. If it fails, ask whether the user wants GitHub PR setup after authenticating, or push-only setup now.
 3. **Existing CI** — `.github/workflows/`, `.circleci/`, `.gitlab-ci.yml`, `Jenkinsfile`, or package scripts that look like checks.
 4. **Existing Kanna files** — `.kanna/config.json`, `.kanna/pipelines/*.json`, `.kanna/agents/*/EXTEND.md`. Preserve existing `setup`, `teardown`, `test`, `ports`, `workspace`, `vars`, and unrelated fields, and do not overwrite user-authored files without approval.
 
 ## Questions To Ask
 
-1. **PR publishing** — draft PRs (`pr@draft-pr`) or push-only (`pr@push-only`)?
-2. **Merge handling** — a GitHub merge agent (`merge@github`), a git-only merge agent (`merge@git`), or manual merge (omit the approve post that signals merge)?
-3. **Merge timing** — merge as soon as the approved request is safe (stock), or queue for explicit operator release (needs a small `.kanna/agents/merge/EXTEND.md`)?
+1. **Review depth** — which built-in pipeline? `default` (no review stage), `single-reviewer` (one review agent), or `specialized-reviewers` (a dispatched specialty panel). All three end with `pr` plus an `approve` post.
+2. **PR publishing** — ordinary PRs (stock `pr`, the default), draft PRs (`pr@draft-pr`), or push-only (`pr@push-only`)? Only offer drafts if the user asks: a draft cannot be merged, so choosing it also means deciding what readies it before the merge master sees it.
+3. **Merge handling** — a GitHub merge agent (`merge@github`), a git-only merge agent (`merge@git`), or manual merge (omit the approve post that signals merge)?
+4. **Merge timing** — merge as soon as the approved request is safe (stock), or queue for explicit operator release (needs a small `.kanna/agents/merge/EXTEND.md`)?
 
 ## Stock Preset: GitHub Flow
 
-When the repository is on GitHub, `gh auth status` succeeds, and the user accepts the default, write this preset.
+When the repository is on GitHub, `gh auth status` succeeds, and the user accepts the default, select a built-in pipeline and attach GitHub merging. Do not author a pipeline file: the built-ins already compose these roles and keep improving with Kanna updates.
 
 `.kanna/config.json` selects the pipeline and stock flavors:
 
 ```json
 {
   "$schema": "https://schemas.kanna.build/config.schema.json",
-  "pipeline": "github-flow",
+  "pipeline": "default",
   "flavors": {
-    "pr": "draft-pr",
     "merge": "github"
   }
 }
 ```
 
-`.kanna/pipelines/github-flow.json` composes the built-in roles:
+This composes `implement -> commit post -> pr -> approve post -> merge@github`. Swap `pipeline` for `single-reviewer` or `specialized-reviewers` when the user wants review before the PR; nothing else changes. The stock preset opens an ordinary PR — do not select `pr@draft-pr` here. A draft PR would arrive at `merge@github` unmergeable, and readying it is a separate decision the repo has to make deliberately.
 
-```json
-{
-  "$schema": "./schema.json",
-  "name": "github-flow",
-  "description": "Implement, create a draft GitHub PR, review in Kanna, then approve into the GitHub merge master.",
-  "stages": [
-    {
-      "name": "in progress",
-      "description": "Agent implements the task, then commits as the stage's tail work",
-      "agent": "implement",
-      "prompt": "$TASK_PROMPT",
-      "policy": { "transition": "manual" },
-      "post": {
-        "name": "commit",
-        "agent": "commit",
-        "prompt": "Commit the relevant work for this task. Original task: $TASK_PROMPT"
-      }
-    },
-    {
-      "name": "pr",
-      "description": "Agent publishes a draft GitHub PR, then waits for human review in Kanna",
-      "agent": "pr",
-      "prompt": "Create a PR for the work on branch $BRANCH.",
-      "policy": { "transition": "manual" },
-      "post": {
-        "name": "approve",
-        "agent": "approve",
-        "prompt": "After human approval in Kanna, signal the configured merge master. Previous result: $PREV_RESULT"
-      }
-    }
-  ]
-}
-```
-
-This composes `pr@draft-pr -> review in Cmd+D -> approve post -> merge@github`, with the flavor selections stored in `.kanna/config.json`. Do not insert an automatic QA `review` stage into this stock preset; if the user wants pre-PR QA, offer it as a separate non-stock pipeline option.
+Write a pipeline file of your own only when the user wants stages the built-ins do not offer.
 
 ## Writing Rules
 

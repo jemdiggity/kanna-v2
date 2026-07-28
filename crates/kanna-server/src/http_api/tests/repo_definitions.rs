@@ -340,9 +340,10 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
         json!([
             "default",
             "qa",
-            "qa-dispatch",
             "release.v2",
             "remote-qa",
+            "single-reviewer",
+            "specialized-reviewers",
             "specialty-review",
             "zeta"
         ])
@@ -467,7 +468,7 @@ async fn repo_definition_routes_use_bundled_only_values_without_a_remote_ref() {
     assert_eq!(manifest["defaultPipeline"], "default");
     assert_eq!(
         manifest["pipelines"],
-        json!(["default", "qa", "qa-dispatch", "specialty-review"])
+        json!(["default", "single-reviewer", "specialized-reviewers", "specialty-review"])
     );
 
     let (status, pipeline) =

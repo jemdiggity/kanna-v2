@@ -1175,13 +1175,13 @@ fn builtin_dispatch_definitions_resolve_from_compiled_resources() {
     publish_origin_main(&repo_root, "publish empty dispatch definition source");
     let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
 
-    let dispatch = definitions.pipeline("qa-dispatch").unwrap();
-    assert_eq!(dispatch.name.as_deref(), Some("qa-dispatch"));
+    let dispatch = definitions.pipeline("specialized-reviewers").unwrap();
+    assert_eq!(dispatch.name.as_deref(), Some("specialized-reviewers"));
     let review = dispatch
         .stages
         .iter()
         .find(|stage| stage.name == "review")
-        .expect("qa-dispatch review stage");
+        .expect("specialized-reviewers review stage");
     assert_eq!(review.agent.as_deref(), Some("qa-dispatcher"));
     assert_eq!(review.policy.transition, PipelineStageTransition::Auto);
 
@@ -1509,7 +1509,8 @@ fn pipeline_names_are_sorted_deduped_remote_and_compiled_union() {
             "alpha",
             "default",
             "qa",
-            "qa-dispatch",
+            "single-reviewer",
+            "specialized-reviewers",
             "specialty-review",
             "zeta"
         ]

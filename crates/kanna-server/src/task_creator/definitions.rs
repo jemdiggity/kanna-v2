@@ -410,8 +410,8 @@ impl RepoDefinitions {
             .map_err(|error| definition_error(&self.snapshot, path, error))?;
         let mut names = BTreeSet::from([
             "default".to_string(),
-            "qa".to_string(),
-            "qa-dispatch".to_string(),
+            "single-reviewer".to_string(),
+            "specialized-reviewers".to_string(),
             "specialty-review".to_string(),
         ]);
         for entry in entries {
@@ -706,9 +706,11 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
         ".kanna/pipelines/default.json" => {
             Some(include_str!("../../../../.kanna/pipelines/default.json"))
         }
-        ".kanna/pipelines/qa.json" => Some(include_str!("../../../../.kanna/pipelines/qa.json")),
-        ".kanna/pipelines/qa-dispatch.json" => Some(include_str!(
-            "../../../../.kanna/pipelines/qa-dispatch.json"
+        ".kanna/pipelines/single-reviewer.json" => Some(include_str!(
+            "../../../../.kanna/pipelines/single-reviewer.json"
+        )),
+        ".kanna/pipelines/specialized-reviewers.json" => Some(include_str!(
+            "../../../../.kanna/pipelines/specialized-reviewers.json"
         )),
         ".kanna/pipelines/specialty-review.json" => Some(include_str!(
             "../../../../.kanna/pipelines/specialty-review.json"

@@ -21,7 +21,7 @@ or as natural language (`merge all open`, `merge open PRs`, `merge PR 123`) — 
 4. Present the planned merge order and material risks.
 5. Rebase each branch onto the resolved target or stack parent, resolving only clear conflicts.
 6. Run the repo's configured checks from `.kanna/config.json` when present; otherwise run the most relevant discovered checks.
-7. Merge PRs with `gh pr merge <PR> --merge`. Do not push directly to the target branch when a PR URL exists.
+7. Merge PRs with `gh pr merge <PR> --merge`. GitHub refuses this while a PR is still a draft, so settle that first — ready it or report the PR as unmerged, per the repo's convention. Do not push directly to the target branch when a PR URL exists.
 8. Before deleting a merged remote branch for a Kanna task, call `kanna_is_dependent_tasks_exist`. Keep the branch when dependent tasks still exist.
 
 ## Completion

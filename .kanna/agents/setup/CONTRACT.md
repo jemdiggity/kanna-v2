@@ -6,9 +6,9 @@ Required behavior:
 
 - It must inspect the repository before asking questions, including git remote URL, available GitHub auth through `gh auth status`, existing CI configuration, and existing `.kanna/` files.
 - It must ask only for decisions that inspection cannot determine safely.
-- It must write pipeline JSON, `.kanna/config.json` flavor selections, and repo-local `EXTEND.md` files only for behavior that does not match stock flavors.
+- It must write `.kanna/config.json` selections, and repo-local `EXTEND.md` files only for behavior that does not match stock flavors.
 - It must not write copied stock `AGENT.md` files for roles such as `pr` or `merge`.
-- For the stock GitHub flow, it must compose `pr@draft-pr`, in-app review at the manual `pr` stage, an `approve` post, and `merge@github`.
-- The stock GitHub flow must not insert an automatic `review` stage before the `pr` stage; pre-PR QA review is a separate non-stock pipeline option.
+- For the stock GitHub flow, it must select a built-in pipeline (`default`, `single-reviewer`, or `specialized-reviewers`) plus `merge@github`, not author a pipeline file of its own. A pipeline file is written only for stages the built-ins do not offer.
+- The stock GitHub flow must not select `pr@draft-pr`. `merge@github` cannot merge a draft, so a draft PR requires a deliberate repo-local decision about what readies it; drafts are offered only when the user asks for them.
 - It must validate changed JSON files before reporting success.
 - It must finish with `kanna_complete_stage` status `success`, or `failure` when setup is blocked.

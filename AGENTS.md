@@ -74,8 +74,11 @@ Advancing past the final stage closes the task. Close snapshots dirty state
 into local WIP commits, removes the task's worktrees, and **keeps the
 branches** — close never deletes a branch.
 
-Built-in pipelines: `default`, `qa`, `qa-dispatch`, `specialty-review`. The
-`qa-dispatch` review stage fans specialty reviews out as child tasks and
+Built-in pipelines, by review depth: `default` (no review stage — the fallback
+when a repo names none), `single-reviewer` (one `review` agent), and
+`specialized-reviewers` (a dispatched specialty panel). `specialty-review` is
+not a choice: it is the single-stage pipeline the dispatcher gives its child
+tasks. The `specialized-reviewers` review stage fans specialty reviews out as child tasks and
 aggregates their verdicts against a scope bar — see
 `docs/specs/qa-dispatch-review.md`.
 

@@ -76,7 +76,7 @@ describe("QA pipeline assets", () => {
 
   it("instructs the QA agent to request revision instead of changing the review branch", () => {
     const reviewAgent = readRepoFile(".kanna/agents/review/AGENT.md");
-    const qaPipeline = readRepoFile(".kanna/pipelines/qa.json");
+    const qaPipeline = readRepoFile(".kanna/pipelines/single-reviewer.json");
 
     expect(reviewAgent).toContain("You do not need to inspect the source task worktree");
     expect(reviewAgent).toContain("Do not make code, test, documentation, or configuration changes in the review worktree.");
@@ -88,7 +88,7 @@ describe("QA pipeline assets", () => {
   });
 
   it("ships the approve step as the pr stage's post instead of a legacy post_action", () => {
-    const qaPipeline = readRepoFile(".kanna/pipelines/qa.json");
+    const qaPipeline = readRepoFile(".kanna/pipelines/single-reviewer.json");
     // Legacy `post_action` still compiles at load time for pinned
     // pipeline_def snapshots, but shipped assets must use the current format.
     expect(qaPipeline).not.toContain("post_action");
@@ -220,7 +220,7 @@ describe("QA pipeline assets", () => {
 
     // The pipeline has to feed the dispatcher the previous stage result for
     // the declined-findings check to be possible at all.
-    expect(readRepoFile(".kanna/pipelines/qa-dispatch.json")).toContain("$PREV_RESULT");
+    expect(readRepoFile(".kanna/pipelines/specialized-reviewers.json")).toContain("$PREV_RESULT");
   });
 
   it("tells specialty reviewers to judge the review range their prompt names", () => {
@@ -245,7 +245,7 @@ describe("QA pipeline assets", () => {
   });
 
   it("bounds revision rounds on the dispatched QA pipeline and publishes the field", () => {
-    const parsed = parsePipelineJson(readRepoFile(".kanna/pipelines/qa-dispatch.json"));
+    const parsed = parsePipelineJson(readRepoFile(".kanna/pipelines/specialized-reviewers.json"));
     expect(parsed.revision_limit).toBe(3);
 
     const schema = JSON.parse(readRepoFile(".kanna/pipelines/schema.json"));
@@ -267,14 +267,17 @@ describe("QA pipeline assets", () => {
   });
 
   it("does not build flipping draft PRs ready into the stock approve post", () => {
-    // Product decision: readying a draft is the human's approval to give, so
-    // stock approve signals the merge master and says nothing about PR state
-    // either way. `merge` already skips drafts unless the operator includes
-    // them, so a draft surfaces to the operator instead of merging itself.
-    // A repo whose convention differs opts in via approve/EXTEND.md.
+    // The stock flow opens an ordinary PR, so approve never meets a draft and
+    // stays out of PR state entirely. Drafts exist only through the opt-in
+    // pr@draft-pr flavor, and a repo choosing it owns what readies them
+    // (approve/EXTEND.md) — which is why merge@github refuses to run a bare
+    // `gh pr merge` on one.
     expect(readRepoPhrases(".kanna/agents/approve/AGENT.md")).not.toContain("gh pr ready");
     expect(readRepoPhrases(".kanna/agents/approve/CONTRACT.md")).not.toContain("gh pr ready");
     expect(readRepoPhrases(".kanna/agents/setup/AGENT.md")).not.toContain("mark this PR ready");
+    expect(readRepoPhrases(".kanna/agents/merge/flavors/github/AGENT.md")).toContain(
+      "GitHub refuses this while a PR is still a draft",
+    );
   });
 
   it("keeps the merge master git-first and safe for stacked branches", () => {

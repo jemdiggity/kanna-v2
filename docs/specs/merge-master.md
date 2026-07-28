@@ -13,8 +13,9 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   diff (⌘D branch scope). `pr_url` is optional metadata a verdict may
   carry — never load-bearing.
 - **Forge behavior lives in user-space.** Agents and pipelines are
-  `.kanna/` files the user owns. A gh user's pr agent creates draft PRs; a
-  repo whose convention is to run `gh pr ready` on approval adds that in
+  `.kanna/` files the user owns. The stock flow opens an ordinary PR; a repo
+  that opts into `pr@draft-pr` also owns what readies the draft before the
+  merge master sees it — `gh pr ready` on approval belongs in
   `.kanna/agents/approve/EXTEND.md`. Another forge means editing agent
   files, not the engine. The engine ships neutral primitives only.
 - **The merge master is a long-living singleton, per repo.** One resident
@@ -56,7 +57,8 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
 
 ## User-space work (reference implementations, all `.kanna/` files)
 
-- pr AGENT.md: create draft PRs (gh flavor); report `pr_url` metadata.
+- pr AGENT.md: create the PR (draft only via the opt-in `pr@draft-pr`
+  flavor); report `pr_url` metadata.
 - pr stage `post: approve` in the default/qa pipelines: signal the merge
   master.
 - merge AGENT.md rewritten git-first: resolve target from runtime

@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn builtin_qa_pipeline_ships_approve_as_pr_stage_post() {
+fn builtin_single_reviewer_pipeline_ships_approve_as_pr_stage_post() {
     let repo_root = init_git_repo_without_provider_fixtures("builtin-qa-pipeline");
     let repo = crate::db::Repo {
         id: "repo-builtin-qa".to_string(),
@@ -16,14 +16,14 @@ fn builtin_qa_pipeline_ships_approve_as_pr_stage_post() {
     };
     let pipeline = super::super::definitions::RepoDefinitions::resolve(&repo)
         .unwrap()
-        .pipeline("qa")
+        .pipeline("single-reviewer")
         .unwrap();
 
     let pr_stage = pipeline
         .stages
         .iter()
         .find(|stage| stage.name == "pr")
-        .expect("qa pipeline should have a pr stage");
+        .expect("single-reviewer pipeline should have a pr stage");
     let post = pr_stage.post.as_ref().expect("pr stage should have a post");
     assert_eq!(post.name, "approve");
     assert_eq!(post.agent.as_deref(), Some("approve"));
