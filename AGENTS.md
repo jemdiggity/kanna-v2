@@ -56,8 +56,9 @@ reconnect, `tests/cli-contract/` for agent CLI compatibility.
 - **Task** — a unit of work: a prompt, a git worktree, an agent session, and a
   lifecycle stage. One task = one branch = one PR.
 - **Pipeline** — an ordered list of stages, each with an agent, an optional
-  environment, a stage policy, and an optional `post`. Default:
-  `in progress` (post: `commit`) → `review` → `pr` (post: `approve`).
+  environment, a stage policy, and an optional `post`. Every built-in runs
+  `in progress` (post: `commit`) → … → `pr` (post: `approve`); what varies is
+  the review stage between them (see "Built-in pipelines" below).
 - **Workspace** — the ephemeral manifestation of a task. Tasks are durable
   (same id, run history, blockers), but **every stage transition forks a fresh
   workspace**: a new branch + worktree `task-{id}-{n}` cut from the previous

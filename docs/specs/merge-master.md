@@ -59,8 +59,8 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
 
 - pr AGENT.md: create the PR (draft only via the opt-in `pr@draft-pr`
   flavor); report `pr_url` metadata.
-- pr stage `post: approve` in the default/qa pipelines: signal the merge
-  master.
+- pr stage `post: approve` in the built-in pipelines (all three ship it):
+  signal the merge master.
 - merge AGENT.md rewritten git-first: resolve target from runtime
   context/`base_ref`/`origin/HEAD`; detect stacks from branch topology
   (merge-bases), not PR descriptions; treat `gh` as enrichment when a PR
