@@ -7,9 +7,24 @@ pub struct RecoverySnapshot {
     pub serialized: String,
     pub cols: u16,
     pub rows: u16,
-    pub cursor_row: u16,
-    pub cursor_col: u16,
-    pub cursor_visible: bool,
+    /// Cursor state, absent in snapshots written by v0.0.30 and earlier.
+    ///
+    /// `None` means UNKNOWN, not `(0, 0)`. `SessionMirror::restore` replays
+    /// `serialized` and then emits an explicit `ESC[row;colH`; before these fields
+    /// existed there was no such escape, so the cursor simply stayed where the
+    /// replay left it. A plain `#[serde(default)]` to `0` would therefore be a
+    /// behaviour change disguised as compatibility — it would yank every upgraded
+    /// session's cursor to the top-left. Absence is modelled so `restore` can skip
+    /// repositioning.
+    ///
+    /// `skip_serializing_if` keeps newly written files byte-identical: a live
+    /// mirror always knows its own cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_row: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_col: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_visible: Option<bool>,
     pub saved_at: u64,
     pub sequence: u64,
 }
@@ -91,9 +106,12 @@ impl RecoveryResponse {
             serialized: snapshot.serialized,
             cols: snapshot.cols,
             rows: snapshot.rows,
-            cursor_row: snapshot.cursor_row,
-            cursor_col: snapshot.cursor_col,
-            cursor_visible: snapshot.cursor_visible,
+            // A live mirror always knows its cursor (see `SessionMirror::snapshot`),
+            // so these are `Some` in practice; the fallbacks only make the
+            // conversion total.
+            cursor_row: snapshot.cursor_row.unwrap_or(0),
+            cursor_col: snapshot.cursor_col.unwrap_or(0),
+            cursor_visible: snapshot.cursor_visible.unwrap_or(true),
             saved_at: snapshot.saved_at,
             sequence: snapshot.sequence,
         }

@@ -70,9 +70,9 @@ fn mirror_restores_cursor_state_from_snapshot() {
         serialized: "hello".to_string(),
         cols: 80,
         rows: 24,
-        cursor_row: 1,
-        cursor_col: 2,
-        cursor_visible: true,
+        cursor_row: Some(1),
+        cursor_col: Some(2),
+        cursor_visible: Some(true),
         saved_at: 1,
         sequence: 7,
     };
@@ -82,7 +82,7 @@ fn mirror_restores_cursor_state_from_snapshot() {
 
     let restored = mirror.snapshot().expect("snapshot should succeed");
     assert!(restored.serialized.contains("hello"));
-    assert_eq!(restored.cursor_row, 1);
-    assert_eq!(restored.cursor_col, 2);
+    assert_eq!(restored.cursor_row, Some(1));
+    assert_eq!(restored.cursor_col, Some(2));
     assert_eq!(restored.sequence, 7);
 }

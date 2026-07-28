@@ -173,3 +173,64 @@ fn now_millis() -> u64 {
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod legacy_compat_tests {
+    use super::*;
+
+    /// The exact JSON v0.0.30 wrote: no cursor fields at all.
+    const V0_0_30_SNAPSHOT: &str = r#"{"sessionId":"legacy-v0030","serialized":"LEGACY_SCROLLBACK\r\n","cols":80,"rows":24,"savedAt":1700000000000,"sequence":7}"#;
+
+    /// The worker's loader must accept a released v0.0.30 snapshot and report its
+    /// cursor as UNKNOWN, not (0, 0): `SessionMirror::restore` emits an explicit
+    /// reposition, so defaulting to 0 would yank an upgraded cursor to top-left.
+    #[test]
+    fn a_v0_0_30_snapshot_loads_with_an_unknown_cursor() {
+        let dir = std::env::temp_dir().join(format!(
+            "kanna-legacy-snap-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("legacy-v0030.json"), V0_0_30_SNAPSHOT).expect("fixture");
+
+        // Self-validating guard: prove the fixture is one the PRE-FIX shape
+        // rejects, or this test could pass for the wrong reason. `Option<T>` is
+        // implicitly optional in serde, so deleting the `#[serde(default)]`
+        // attributes is a no-op — the mechanism is the TYPE, and a type-level
+        // mutation does not compile. This assertion is the mutation check.
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        #[allow(dead_code)]
+        struct RequiredCursorShape {
+            session_id: String,
+            serialized: String,
+            cols: u16,
+            rows: u16,
+            cursor_row: u16,
+            cursor_col: u16,
+            cursor_visible: bool,
+            saved_at: u64,
+            sequence: u64,
+        }
+        assert!(
+            serde_json::from_str::<RequiredCursorShape>(V0_0_30_SNAPSHOT).is_err(),
+            "fixture must be rejected by the old required-cursor shape, else this test \
+             proves nothing about v0.0.30 compatibility"
+        );
+
+        let store = SnapshotStore::new(dir.clone());
+        let snapshot = store
+            .require("legacy-v0030")
+            .expect("a released v0.0.30 snapshot must still load");
+        assert_eq!(snapshot.serialized, "LEGACY_SCROLLBACK\r\n");
+        assert!(
+            snapshot.cursor_row.is_none()
+                && snapshot.cursor_col.is_none()
+                && snapshot.cursor_visible.is_none(),
+            "absent cursor state must stay unknown, not default to the origin"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -58,17 +58,22 @@ impl SessionMirror {
         self.sequence = snapshot.sequence;
         self.terminal.vt_write(snapshot.serialized.as_bytes());
 
-        let cursor = format!(
-            "\u{1b}[{};{}H{}",
-            snapshot.cursor_row + 1,
-            snapshot.cursor_col + 1,
-            if snapshot.cursor_visible {
-                "\u{1b}[?25h"
+        // Reposition ONLY when the snapshot carried cursor state. Snapshots from
+        // v0.0.30 and earlier omit it, and for those the legacy behaviour is to
+        // leave the cursor wherever replaying `serialized` put it — which is what
+        // this code did before the fields existed. Emitting `ESC[1;1H` for them
+        // instead would move the cursor to the top-left on upgrade.
+        if let (Some(row), Some(col)) = (snapshot.cursor_row, snapshot.cursor_col) {
+            let position = format!("\u{1b}[{};{}H", row + 1, col + 1);
+            self.terminal.vt_write(position.as_bytes());
+        }
+        if let Some(visible) = snapshot.cursor_visible {
+            self.terminal.vt_write(if visible {
+                b"\x1b[?25h".as_slice()
             } else {
-                "\u{1b}[?25l"
-            }
-        );
-        self.terminal.vt_write(cursor.as_bytes());
+                b"\x1b[?25l".as_slice()
+            });
+        }
         Ok(())
     }
 
@@ -81,12 +86,13 @@ impl SessionMirror {
             serialized: serialized.serialized_candidate,
             cols: self.cols,
             rows: self.rows,
-            cursor_row: serialized.cursor_y,
-            cursor_col: serialized.cursor_x,
-            cursor_visible: self
-                .terminal
-                .is_cursor_visible()
-                .map_err(|error| format!("failed to inspect cursor visibility: {}", error))?,
+            cursor_row: Some(serialized.cursor_y),
+            cursor_col: Some(serialized.cursor_x),
+            cursor_visible: Some(
+                self.terminal
+                    .is_cursor_visible()
+                    .map_err(|error| format!("failed to inspect cursor visibility: {}", error))?,
+            ),
             saved_at: now_millis(),
             sequence: self.sequence,
         })
