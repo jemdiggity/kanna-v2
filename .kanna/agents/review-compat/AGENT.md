@@ -1,7 +1,7 @@
 ---
 name: review-compat
 description: Specialty reviewer for cross-process contract and client compatibility
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 

@@ -1,7 +1,7 @@
 ---
 name: pr@push-only
 description: Pushes a completed task branch without creating a pull request
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 

@@ -1,7 +1,7 @@
 ---
 name: pipeline-factory
 description: Helps users create new pipeline definitions for Kanna
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 
@@ -78,7 +78,7 @@ Use a string when the stage must run with one provider:
 Use an ordered array when several providers are acceptable:
 
 ```json
-"agent_provider": ["codex", "claude", "copilot", "opencode", "antigravity"]
+"agent_provider": ["claude", "codex", "copilot", "opencode", "antigravity"]
 ```
 
 ### Prompt Variables

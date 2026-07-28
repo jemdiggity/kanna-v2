@@ -1,7 +1,7 @@
 ---
 name: agent-factory
 description: Helps users create new agent definitions for Kanna
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 
@@ -15,7 +15,7 @@ An agent is defined by a directory with an `AGENT.md` file. The frontmatter defi
 ---
 name: <agent-identifier>
 description: <what this agent does>
-agent_provider: codex, claude, copilot, opencode, antigravity  # or just: codex
+agent_provider: claude, codex, copilot, opencode, antigravity  # or just: codex
 model: <provider-default-override> # optional: provider-specific model override
 permission_mode: default           # optional: default=yolo-equivalent | acceptEdits | dontAsk
 allowed_tools: []                  # optional: tool allowlist (provider-specific)
@@ -44,15 +44,15 @@ agent_provider: opencode
 Or as an ordered provider list, either comma-separated:
 
 ```yaml
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 ```
 
 Or as a YAML array:
 
 ```yaml
 agent_provider:
-  - codex
   - claude
+  - codex
   - copilot
   - opencode
   - antigravity

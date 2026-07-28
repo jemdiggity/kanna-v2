@@ -1,7 +1,7 @@
 ---
 name: review-perf
 description: Specialty reviewer for network and runtime performance of changed paths
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 

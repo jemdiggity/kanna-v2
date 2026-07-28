@@ -1,7 +1,7 @@
 ---
 name: setup
 description: Configures a repository's Kanna pipeline and stock agent flavor selections
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 

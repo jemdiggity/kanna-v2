@@ -1,7 +1,7 @@
 ---
 name: approve
 description: Marks a task PR ready, signals the merge master, and completes the post stage
-agent_provider: codex, claude, copilot
+agent_provider: claude, codex, copilot
 permission_mode: default
 ---
 

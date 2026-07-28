@@ -1,7 +1,7 @@
 ---
 name: merge@git
 description: Git-only merge master for branch merge requests without forge operations
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 

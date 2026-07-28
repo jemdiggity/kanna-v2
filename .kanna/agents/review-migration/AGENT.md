@@ -1,7 +1,7 @@
 ---
 name: review-migration
 description: Specialty reviewer for persisted-data compatibility and migration safety
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 

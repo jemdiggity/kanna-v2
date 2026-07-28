@@ -1,7 +1,7 @@
 ---
 name: implement
 description: Default task agent that implements work and returns control to Kanna
-agent_provider: codex, claude, copilot, opencode, antigravity
+agent_provider: claude, codex, copilot, opencode, antigravity
 permission_mode: default
 ---
 
