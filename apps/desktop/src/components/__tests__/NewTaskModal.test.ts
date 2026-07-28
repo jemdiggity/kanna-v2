@@ -94,6 +94,51 @@ describe("NewTaskModal", () => {
     ]);
   });
 
+  it("drops a default pipeline the server did not offer, so the manifest must send a selectable one", async () => {
+    // The server canonicalizes retired built-in names (qa -> single-reviewer)
+    // before putting them in `defaultPipeline`, precisely because this
+    // component silently falls back when the default is not an option. If that
+    // canonicalization regresses, a repo configured for review depth is
+    // created on the first option instead, with no error — so pin both halves
+    // of the contract here: selectable defaults win, unselectable ones do not.
+    const wrapper = mount(NewTaskModal, {
+      props: {
+        optionsLoading: false,
+        availableAgentProviders: ["claude"],
+        baseBranches: ["origin/main"],
+        defaultBaseBranch: "origin/main",
+        pipelines: ["default", "single-reviewer", "specialized-reviewers"],
+        defaultPipeline: "single-reviewer",
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+    await flushPromises();
+
+    // A default that is a member of `pipelines` is preselected and submitted.
+    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toBe("single-reviewer");
+    await wrapper.get("textarea").setValue("Use the configured review depth");
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
+    expect(wrapper.emitted("submit")?.[0]?.[2]).toBe("single-reviewer");
+
+    // A default absent from `pipelines` — what an uncanonicalized retired
+    // name would be — is dropped for the first option instead.
+    const stale = mount(NewTaskModal, {
+      props: {
+        optionsLoading: false,
+        availableAgentProviders: ["claude"],
+        baseBranches: ["origin/main"],
+        defaultBaseBranch: "origin/main",
+        pipelines: ["default", "single-reviewer", "specialized-reviewers"],
+        defaultPipeline: "qa",
+      },
+      global: { mocks: { $t: (key: string) => key } },
+    });
+    await flushPromises();
+
+    expect(stale.get('[data-testid="pipeline-value"]').text()).toBe("default");
+    expect(stale.get('[data-testid="pipeline-value"]').text()).not.toBe("qa");
+  });
+
   it("keeps a valid user-selected pipeline when options hydrate again", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {

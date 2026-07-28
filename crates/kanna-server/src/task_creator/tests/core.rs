@@ -1301,10 +1301,17 @@ fn legacy_builtin_pipeline_alias_yields_to_a_repo_authored_pipeline_of_the_same_
     let resolved = definitions.pipeline("qa").unwrap();
 
     assert_eq!(resolved.name.as_deref(), Some("qa"));
-    assert_eq!(resolved.stages.len(), 1, "repo definition wins over the alias");
+    assert_eq!(
+        resolved.stages.len(),
+        1,
+        "repo definition wins over the alias"
+    );
 
     // A repo-authored pipeline IS a user-facing choice, unlike the alias.
-    assert!(definitions.pipeline_names().unwrap().contains(&"qa".to_string()));
+    assert!(definitions
+        .pipeline_names()
+        .unwrap()
+        .contains(&"qa".to_string()));
 
     let _ = std::fs::remove_dir_all(repo_root);
 }

@@ -260,6 +260,148 @@ fn local_only_repo() -> (TempDir, PathBuf) {
     (temp, repo)
 }
 
+/// Publishes `files` to `origin/main` and returns a consumer clone.
+/// Definitions resolve from the remote ref, so a fixture that only commits
+/// locally is never read — its config comes back empty.
+fn published_definitions_repo(label: &str, files: &[(&str, String)]) -> (TempDir, PathBuf) {
+    let temp = tempfile::Builder::new()
+        .prefix(&format!("kanna-http-definitions-{label}-"))
+        .tempdir()
+        .unwrap();
+    let origin = temp.path().join("origin.git");
+    let publisher = temp.path().join("publisher");
+    let consumer = temp.path().join("consumer");
+    std::fs::create_dir_all(&publisher).unwrap();
+    run_git(temp.path(), &["init", "--bare", origin.to_str().unwrap()]);
+    run_git(&publisher, &["init", "--initial-branch", "main"]);
+    run_git(&publisher, &["config", "user.email", "test@example.com"]);
+    run_git(&publisher, &["config", "user.name", "Kanna Test"]);
+    for (path, contents) in files {
+        let full = publisher.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, contents).unwrap();
+    }
+    run_git(&publisher, &["add", "."]);
+    run_git(&publisher, &["commit", "-m", "publish definitions"]);
+    run_git(
+        &publisher,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    run_git(&publisher, &["push", "-u", "origin", "main"]);
+    run_git(
+        temp.path(),
+        &[
+            "clone",
+            "--branch",
+            "main",
+            origin.to_str().unwrap(),
+            consumer.to_str().unwrap(),
+        ],
+    );
+    (temp, consumer)
+}
+
+fn manifest_router(seed: &str, repo: &Path) -> axum::Router {
+    let repo_path = repo.to_string_lossy().to_string();
+    super::test_router_with_seed(seed, "Studio Mac", move |db| {
+        db.insert_repo(NewRepo {
+            id: "repo-1",
+            path: &repo_path,
+            name: "Manifest Repo",
+            default_branch: Some("main"),
+        })
+        .unwrap();
+    })
+}
+
+#[tokio::test]
+async fn repo_definition_manifest_reports_retired_pipeline_names_as_their_current_name() {
+    // The desktop's new-task picker preselects `defaultPipeline` only when it
+    // is a member of `pipelines`, and otherwise silently falls back to the
+    // first option. Retired names are deliberately absent from `pipelines`,
+    // so reporting the committed name verbatim would drop an upgraded repo
+    // onto `default` — losing the review depth it configured, with no error.
+    for (legacy, current) in [
+        ("qa", "single-reviewer"),
+        ("qa-dispatch", "specialized-reviewers"),
+    ] {
+        let (_temp, repo) = published_definitions_repo(
+            legacy,
+            &[(
+                ".kanna/config.json",
+                json!({ "pipeline": legacy }).to_string(),
+            )],
+        );
+        let app = manifest_router(&format!("definitions-legacy-{legacy}"), &repo);
+
+        let (status, manifest) = json_response(&app, "/v1/repos/repo-1/kanna-definitions").await;
+        assert_eq!(status, StatusCode::OK);
+
+        // The manifest advertises the name the repo actually resolves to...
+        assert_eq!(manifest["defaultPipeline"], current, "legacy `{legacy}`");
+
+        // ...and that name is selectable, which is the whole point.
+        let pipelines = manifest["pipelines"].as_array().unwrap();
+        assert!(
+            pipelines.iter().any(|name| name == current),
+            "`{current}` must be selectable; got {pipelines:?}"
+        );
+
+        // The retired name stays out of the user-facing choices.
+        assert!(
+            !pipelines.iter().any(|name| name == legacy),
+            "`{legacy}` must not be offered; got {pipelines:?}"
+        );
+
+        // `config` still reports what the repo committed — only the field the
+        // UI preselects from is canonicalized.
+        assert_eq!(manifest["config"]["pipeline"], legacy);
+
+        // The retired name still resolves on the definition route, for
+        // callers that ask for it directly.
+        let (status, pipeline) = json_response(
+            &app,
+            &format!("/v1/repos/repo-1/kanna-definitions/pipelines/{legacy}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(pipeline["definition"]["name"], current);
+    }
+}
+
+#[tokio::test]
+async fn repo_definition_manifest_keeps_a_repo_authored_pipeline_name_verbatim() {
+    // A repo shipping its own `qa.json` makes `qa` a real choice, so it
+    // appears in `pipelines` and must not be canonicalized away.
+    let (_temp, repo) = published_definitions_repo(
+        "authored-qa",
+        &[
+            (
+                ".kanna/config.json",
+                json!({ "pipeline": "qa" }).to_string(),
+            ),
+            (
+                ".kanna/pipelines/qa.json",
+                json!({
+                    "name": "qa",
+                    "stages": [{"name": "local", "policy": {"transition": "manual"}}]
+                })
+                .to_string(),
+            ),
+        ],
+    );
+    let app = manifest_router("definitions-authored-qa", &repo);
+
+    let (status, manifest) = json_response(&app, "/v1/repos/repo-1/kanna-definitions").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(manifest["defaultPipeline"], "qa");
+    assert!(manifest["pipelines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|name| name == "qa"));
+}
+
 fn run_git(repo: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
@@ -468,7 +610,12 @@ async fn repo_definition_routes_use_bundled_only_values_without_a_remote_ref() {
     assert_eq!(manifest["defaultPipeline"], "default");
     assert_eq!(
         manifest["pipelines"],
-        json!(["default", "single-reviewer", "specialized-reviewers", "specialty-review"])
+        json!([
+            "default",
+            "single-reviewer",
+            "specialized-reviewers",
+            "specialty-review"
+        ])
     );
 
     let (status, pipeline) =

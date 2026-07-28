@@ -701,7 +701,41 @@ fn optional_builtin_agent_resource(selector: &AgentSelector) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Built-in pipelines that shipped under an earlier name, mapped to the
+/// definition each now resolves to. Single source of truth: the compiled
+/// resource fallback below and manifest canonicalization in
+/// `load_repo_kanna_definitions` both read this table, so a retired name never
+/// has its mapping written twice.
+///
+/// These are resolution aliases only. They stay out of `pipeline_names()`, so
+/// a retired name never returns as a user-facing choice, and they always lose
+/// to a repo that ships its own pipeline under the same name.
+pub(super) const LEGACY_BUILTIN_PIPELINES: &[(&str, &str)] = &[
+    ("qa", "single-reviewer"),
+    ("qa-dispatch", "specialized-reviewers"),
+];
+
+/// The current name a possibly-retired built-in pipeline resolves to, or
+/// `name` unchanged when it was never retired.
+pub(super) fn canonical_builtin_pipeline_name(name: &str) -> &str {
+    LEGACY_BUILTIN_PIPELINES
+        .iter()
+        .find_map(|(legacy, current)| (*legacy == name).then_some(*current))
+        .unwrap_or(name)
+}
+
 fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
+    // A retired built-in pipeline name serves its current definition.
+    if let Some(name) = relative_path
+        .strip_prefix(".kanna/pipelines/")
+        .and_then(|file| file.strip_suffix(".json"))
+    {
+        let canonical = canonical_builtin_pipeline_name(name);
+        if canonical != name {
+            return compiled_builtin_resource(&format!(".kanna/pipelines/{canonical}.json"));
+        }
+    }
+
     match relative_path {
         ".kanna/pipelines/default.json" => {
             Some(include_str!("../../../../.kanna/pipelines/default.json"))
@@ -714,19 +748,6 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
         )),
         ".kanna/pipelines/specialty-review.json" => Some(include_str!(
             "../../../../.kanna/pipelines/specialty-review.json"
-        )),
-        // Resolution-only aliases for the names these two shipped under before
-        // the lineup was reorganized by review depth. A repo whose committed
-        // `.kanna/config.json` still selects `qa` or `qa-dispatch` keeps
-        // working. They are deliberately absent from `pipeline_names()`, so
-        // they never reappear as user-facing choices, and a repo that ships
-        // its own `.kanna/pipelines/qa.json` still wins because the snapshot
-        // is read before this fallback.
-        ".kanna/pipelines/qa.json" => Some(include_str!(
-            "../../../../.kanna/pipelines/single-reviewer.json"
-        )),
-        ".kanna/pipelines/qa-dispatch.json" => Some(include_str!(
-            "../../../../.kanna/pipelines/specialized-reviewers.json"
         )),
         ".kanna/agents/agent-factory/AGENT.md" => Some(include_str!(
             "../../../../.kanna/agents/agent-factory/AGENT.md"

@@ -125,12 +125,25 @@ pub(crate) fn load_repo_kanna_definitions(
             .map_err(DefinitionLookupError::Other)?
             .into_iter()
             .filter(|name| validate_definition_component(name, "pipeline name").is_ok())
-            .collect();
-        let default_pipeline = definitions
+            .collect::<Vec<String>>();
+        let configured_pipeline = definitions
             .config()
             .pipeline
             .clone()
             .unwrap_or_else(|| "default".to_string());
+        // The manifest's default must be a name the caller can select from
+        // `pipelines`. A repo whose committed config still names a retired
+        // built-in (`qa`, `qa-dispatch`) resolves to the current definition,
+        // but the retired name is deliberately absent from `pipelines` — so
+        // report the current name here or the desktop's picker silently falls
+        // back to its first option and the repo loses its configured review
+        // depth. A repo shipping its own pipeline under that name keeps it:
+        // then the name is a real choice and appears in `pipelines`.
+        let default_pipeline = if pipelines.contains(&configured_pipeline) {
+            configured_pipeline
+        } else {
+            definitions::canonical_builtin_pipeline_name(&configured_pipeline).to_string()
+        };
         Ok(RepoKannaDefinitions {
             revision: definitions.revision().map(str::to_string),
             ref_name: definitions.ref_name().to_string(),
