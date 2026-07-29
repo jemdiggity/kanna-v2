@@ -490,6 +490,37 @@ describe("remote transport", () => {
     });
   });
 
+  it("parses status from legacy desktops that omit writePathHealth", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      state: "running",
+      desktopId: "desktop-1",
+      desktopName: "Studio Mac",
+      version: "0.0.68",
+      environment: "production",
+      serverVersion: "0.0.68",
+      lanHost: "10.0.0.2",
+      lanPort: 48120,
+      pairingCode: null
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-1",
+      invokeDesktop
+    });
+
+    await expect(transport.getStatus()).resolves.toEqual({
+      state: "running",
+      desktopId: "desktop-1",
+      desktopName: "Studio Mac",
+      version: "0.0.68",
+      environment: "production",
+      serverVersion: "0.0.68",
+      lanHost: "10.0.0.2",
+      lanPort: 48120,
+      pairingCode: null
+    });
+  });
+
   it("throws a typed error when status is requested without a selected desktop", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>();
     const transport = createRemoteTransport({

@@ -24,6 +24,7 @@ import type {
   TaskFileMentionResolution,
   TaskDetail,
   TaskSummary,
+  WritePathHealth,
 } from "../api/types";
 import {
   buildCloudTaskId,
@@ -1131,19 +1132,7 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
   const lanHost = getStringField(response, "lanHost");
   const lanPort = getNumberField(response, "lanPort");
   const pairingCode = getNullableStringField(response, "pairingCode");
-  const writePathHealthValue = response.writePathHealth;
-  const writePathHealth = isRecord(writePathHealthValue)
-    ? {
-        healthy: writePathHealthValue.healthy,
-        status: writePathHealthValue.status,
-        activeWorkspaceCommands: writePathHealthValue.activeWorkspaceCommands,
-        maxWorkspaceCommands: writePathHealthValue.maxWorkspaceCommands,
-        longRunningWorkspaceCommands:
-          writePathHealthValue.longRunningWorkspaceCommands,
-        oldestWorkspaceCommandSeconds:
-          writePathHealthValue.oldestWorkspaceCommandSeconds
-      }
-    : null;
+  const writePathHealth = mapWritePathHealth(response.writePathHealth);
 
   if (
     state === null ||
@@ -1152,15 +1141,7 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
     version === null ||
     environment === null ||
     lanHost === null ||
-    lanPort === null ||
-    writePathHealth === null ||
-    typeof writePathHealth.healthy !== "boolean" ||
-    typeof writePathHealth.status !== "string" ||
-    typeof writePathHealth.activeWorkspaceCommands !== "number" ||
-    typeof writePathHealth.maxWorkspaceCommands !== "number" ||
-    typeof writePathHealth.longRunningWorkspaceCommands !== "number" ||
-    (writePathHealth.oldestWorkspaceCommandSeconds !== null &&
-      typeof writePathHealth.oldestWorkspaceCommandSeconds !== "number")
+    lanPort === null
   ) {
     throw new RemoteTransportError(
       "invalid_status_response",
@@ -1178,15 +1159,40 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
     lanHost,
     lanPort,
     pairingCode,
-    writePathHealth: {
-      healthy: writePathHealth.healthy,
-      status: writePathHealth.status,
-      activeWorkspaceCommands: writePathHealth.activeWorkspaceCommands,
-      maxWorkspaceCommands: writePathHealth.maxWorkspaceCommands,
-      longRunningWorkspaceCommands: writePathHealth.longRunningWorkspaceCommands,
-      oldestWorkspaceCommandSeconds:
-        writePathHealth.oldestWorkspaceCommandSeconds
-    }
+    ...(writePathHealth ? { writePathHealth } : {})
+  };
+}
+
+/** Desktops that predate write-path health reporting omit the field entirely;
+ * absence means unknown (mirroring the optional `kspStreamVersion`), so only a
+ * present-but-malformed payload is rejected. */
+function mapWritePathHealth(value: unknown): WritePathHealth | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (
+    !isRecord(value) ||
+    typeof value.healthy !== "boolean" ||
+    typeof value.status !== "string" ||
+    typeof value.activeWorkspaceCommands !== "number" ||
+    typeof value.maxWorkspaceCommands !== "number" ||
+    typeof value.longRunningWorkspaceCommands !== "number" ||
+    (value.oldestWorkspaceCommandSeconds !== null &&
+      typeof value.oldestWorkspaceCommandSeconds !== "number")
+  ) {
+    throw new RemoteTransportError(
+      "invalid_status_response",
+      "Remote desktop returned an invalid status response."
+    );
+  }
+
+  return {
+    healthy: value.healthy,
+    status: value.status,
+    activeWorkspaceCommands: value.activeWorkspaceCommands,
+    maxWorkspaceCommands: value.maxWorkspaceCommands,
+    longRunningWorkspaceCommands: value.longRunningWorkspaceCommands,
+    oldestWorkspaceCommandSeconds: value.oldestWorkspaceCommandSeconds
   };
 }
 

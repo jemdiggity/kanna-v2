@@ -13,7 +13,9 @@ export interface MobileServerStatus {
   /** Optional direct-stream epoch. Absence identifies desktops that expose
    * only the legacy `/v1/stream` endpoint. */
   kspStreamVersion?: number;
-  writePathHealth: WritePathHealth;
+  /** Absent from desktops that predate write-path health reporting; absence
+   * means the health is unknown, not unhealthy. */
+  writePathHealth?: WritePathHealth;
 }
 
 export interface WritePathHealth {
