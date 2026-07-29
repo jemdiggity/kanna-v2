@@ -720,30 +720,29 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        for input_index in 0..2 {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
-            match command {
-                DaemonCommand::Input { session_id, data } => {
-                    assert_eq!(session_id, revision_session_id);
-                    if input_index == 0 {
-                        let message = String::from_utf8(data).unwrap();
-                        assert!(message.contains("Commit changes for"));
-                        assert!(message.contains("record stage completion"));
-                    } else {
-                        assert_eq!(data, vec![b'\r']);
-                    }
-                }
-                other => panic!("expected commit post input, got {other:?}"),
+        // The post is one atomic submission under a delivery identity — the
+        // daemon writes the message and the discrete Enter itself.
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
+            DaemonCommand::SubmitInput {
+                session_id,
+                message,
+                submit_delay_ms,
+                ..
+            } => {
+                assert_eq!(session_id, revision_session_id);
+                assert_eq!(submit_delay_ms, 150);
+                let message = String::from_utf8(message).unwrap();
+                assert!(message.contains("Commit changes for"));
+                assert!(message.contains("record stage completion"));
             }
-            write_half
-                .write_all(
-                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
-                )
-                .await
-                .unwrap();
+            other => panic!("expected atomic commit post input, got {other:?}"),
         }
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes())
+            .await
+            .unwrap();
         sync_tx.send("commit dispatched").unwrap();
     });
 
@@ -1951,7 +1950,8 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
                 .body(Body::from(
                     serde_json::json!({
                         "status": "success",
-                        "summary": format!("Implemented the fix. {DECLINED_MARKER}")
+                        "summary": format!("Implemented the fix. {DECLINED_MARKER}"),
+                        "runId": "prevmain-impl-run"
                     })
                     .to_string(),
                 ))
@@ -1975,18 +1975,23 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(post_run.is_some(), "the commit post was not dispatched");
+    let post_run = post_run.expect("the commit post was not dispatched");
 
     // 2. The commit post reports its own, different result and finishes,
-    //    which performs the transition into the review stage.
+    //    which performs the transition into the review stage. Completion is
+    //    run-scoped: the reporter names the run it owns.
     let response = app
         .clone()
         .oneshot(
             Request::post("/v1/tasks/prevmain-1/actions/complete-stage")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::json!({ "status": "success", "summary": COMMIT_SUMMARY })
-                        .to_string(),
+                    serde_json::json!({
+                        "status": "success",
+                        "summary": COMMIT_SUMMARY,
+                        "runId": post_run.id
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )

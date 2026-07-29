@@ -1688,14 +1688,19 @@ pub(crate) async fn dispatch_prepared_post_for_api(
     #[cfg(test)]
     pause_live_post_after_reservation(prepared.action_request_key.as_deref()).await;
 
-    let delivery_id = prepared
-        .action_request_key
-        .as_deref()
-        .unwrap_or(prepared.completion_attempt.as_str());
+    // The daemon keys its completed-delivery tombstones by this id. An
+    // externally supplied action request key identifies the durable request
+    // row, not a daemon delivery: it is caller-chosen, reusable, and bounded
+    // retention prunes its replay row, so a later reuse could match a stale
+    // tombstone and be silently swallowed. Derive the identity from the
+    // server-owned reservation instead — stable across retries of the same
+    // reservation (a replayed request resolves to the same reserved run) and
+    // distinct for every other submission.
+    let delivery_id = format!("live-post:{task_id}:{run_id}");
     match try_submit_task_input_idempotently(
         daemon,
         &prepared.session_id,
-        delivery_id,
+        &delivery_id,
         &prepared.message,
     )
     .await

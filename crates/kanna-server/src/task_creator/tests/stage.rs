@@ -3835,7 +3835,13 @@ async fn lost_live_post_ack_retries_the_same_complete_delivery_identity() {
     .await
     .expect("retry recovers the lost acknowledgement");
     let deliveries = fake_daemon.await.unwrap();
-    assert_eq!(deliveries, vec!["ambiguous-post-key", "ambiguous-post-key"]);
+    // Both attempts replay one identity so the daemon deduplicates them, and
+    // that identity is the server-owned reservation — never the caller's
+    // reusable HTTP action key.
+    assert_eq!(deliveries.len(), 2);
+    assert_eq!(deliveries[0], deliveries[1]);
+    assert!(deliveries[0].starts_with("live-post:task-1:"));
+    assert_ne!(deliveries[0], "ambiguous-post-key");
     assert!(matches!(
         db.claim_task_action_request("ambiguous-post-key", "task-1", "advance-stage", "{}")
             .unwrap(),
@@ -4046,7 +4052,8 @@ async fn live_post_write_failed_ack_rolls_back_before_fresh_session_fallback() {
     assert!(matches!(
         commands.first(),
         Some(kanna_daemon::protocol::Command::SubmitInput { delivery_id, .. })
-            if delivery_id == "write-failed-post"
+            if delivery_id.starts_with("live-post:task-1:")
+                && delivery_id != "write-failed-post"
     ));
     assert!(commands
         .iter()
