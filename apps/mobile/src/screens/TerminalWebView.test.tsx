@@ -7,6 +7,7 @@ import {
   buildTerminalReplaceScript,
   buildTerminalResizeScript
 } from "./buildTerminalDocument";
+import { getTerminalSelectionToolbarTop } from "./terminalSafeArea";
 import type { TerminalFileMentionHistory } from "./terminalFileMentions";
 
 interface EffectRecord {
@@ -149,6 +150,7 @@ async function renderTerminalWebView(input: {
   rows?: number | null;
   fullscreen?: boolean;
   bottomInset?: number;
+  selectionToolbarTop?: number;
   onConsolePress?: () => void;
   onMentionedFilesChange?: (history: TerminalFileMentionHistory) => void;
   onOpenFile?: (path: string, line?: number) => void;
@@ -166,6 +168,7 @@ async function renderTerminalWebView(input: {
     rows: input.rows ?? null,
     fullscreen: input.fullscreen,
     bottomInset: input.bottomInset,
+    selectionToolbarTop: input.selectionToolbarTop,
     onConsolePress: input.onConsolePress,
     onMentionedFilesChange: input.onMentionedFilesChange,
     onOpenFile: input.onOpenFile,
@@ -190,6 +193,27 @@ async function renderTerminalWebView(input: {
 
 function bottomInsetScript(bottomInset: number): string {
   return `window.__setTerminalBottomInset(${JSON.stringify({ bottomInset })}); true;`;
+}
+
+function resolvedSelectionToolbarTop(tree: ElementNode | null): number | null {
+  const toolbar = findByAccessibilityLabel(
+    tree,
+    "Terminal text selection controls"
+  );
+  if (!toolbar) return null;
+  const style = toolbar.props.style;
+  const entries = Array.isArray(style) ? style : [style];
+  let top: number | null = null;
+  for (const entry of entries) {
+    if (
+      entry &&
+      typeof entry === "object" &&
+      typeof (entry as { top?: unknown }).top === "number"
+    ) {
+      top = (entry as { top: number }).top;
+    }
+  }
+  return top;
 }
 
 describe("TerminalWebView", () => {
@@ -399,6 +423,59 @@ describe("TerminalWebView", () => {
     expect(
       findByAccessibilityLabel(lastTree, "Cancel terminal text selection")
     ).not.toBeNull();
+  });
+
+  it("positions the selection toolbar at the owner-measured chrome clearance", async () => {
+    const webView = await renderTerminalWebView({
+      fullscreen: true,
+      selectionToolbarTop: 96
+    });
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-selection-change",
+          text: "selected output"
+        })
+      }
+    } as WebViewMessageEvent);
+
+    await renderTerminalWebView({ fullscreen: true, selectionToolbarTop: 96 });
+
+    expect(resolvedSelectionToolbarTop(lastTree)).toBe(96);
+  });
+
+  it("keeps the fullscreen toolbar clear of unmeasured floating chrome", async () => {
+    const webView = await renderTerminalWebView({ fullscreen: true });
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-selection-change",
+          text: "selected output"
+        })
+      }
+    } as WebViewMessageEvent);
+
+    await renderTerminalWebView({ fullscreen: true });
+
+    expect(resolvedSelectionToolbarTop(lastTree)).toBe(
+      getTerminalSelectionToolbarTop(null)
+    );
+  });
+
+  it("hugs the top of non-fullscreen cards that have no floating chrome", async () => {
+    const webView = await renderTerminalWebView({});
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-selection-change",
+          text: "selected output"
+        })
+      }
+    } as WebViewMessageEvent);
+
+    await renderTerminalWebView({});
+
+    expect(resolvedSelectionToolbarTop(lastTree)).toBe(12);
   });
 
   it("ignores malformed and oversized terminal selections", async () => {
