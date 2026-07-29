@@ -76,6 +76,10 @@ fn generated_schema_preserves_required_order_types_and_enums() {
             .is_some_and(|description| description.contains("kanna_list_agents")),
         "create-task must point orchestrators at resolved agent discovery"
     );
+    assert_eq!(
+        create_task["inputSchema"]["properties"]["model"]["description"],
+        json!("Model id passed verbatim to the selected agent CLI: Claude uses '--model <id>', Copilot uses '--model=<id>', and Codex/OpenCode use '-m <id>'; Antigravity rejects model overrides. An explicit value overrides agent-definition frontmatter; omit it to use the provider default. Kanna does not maintain a model-id allowlist.")
+    );
 
     let list_agents = tools
         .as_array()
@@ -252,6 +256,8 @@ fn resolves_expected_requests_for_every_bundled_tool() {
                 "prompt": "Blocked work",
                 "display_name": "Short task title",
                 "agent_type": "agent",
+                "agent_provider": "codex",
+                "model": "gpt-5.6-codex",
                 "blocker_task_ids": ["blocker-1", "blocker-2"]
             }),
             Method::Post,
@@ -262,6 +268,8 @@ fn resolves_expected_requests_for_every_bundled_tool() {
                 "prompt": "Blocked work",
                 "displayName": "Short task title",
                 "agentType": "agent",
+                "agentProvider": "codex",
+                "model": "gpt-5.6-codex",
                 "blockerTaskIds": ["blocker-1", "blocker-2"]
             }),
         ),

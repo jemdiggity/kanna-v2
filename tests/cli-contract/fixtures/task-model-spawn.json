@@ -1,0 +1,12 @@
+[
+  {
+    "provider": "claude",
+    "model": "claude-fable-5",
+    "ptyFlag": "--model 'claude-fable-5'"
+  },
+  {
+    "provider": "codex",
+    "model": "gpt-5.6-codex",
+    "ptyFlag": "-m 'gpt-5.6-codex'"
+  }
+]

@@ -67,6 +67,18 @@ impl AgentProvider {
     pub const fn supports_headless(self) -> bool {
         matches!(self, Self::Claude | Self::Codex | Self::Opencode)
     }
+
+    /// Stable CLI flag used for an initial model override. The value itself is
+    /// intentionally not validated here: provider CLIs own their model
+    /// catalogs, so newly released model ids work without a Kanna update.
+    pub const fn model_override_flag(self) -> Option<&'static str> {
+        match self {
+            Self::Claude | Self::Copilot => Some("--model"),
+            Self::Codex | Self::Opencode => Some("-m"),
+            // No supported `agy` model-selection flag has been established.
+            Self::Antigravity => None,
+        }
+    }
 }
 
 impl AgentSessionType {

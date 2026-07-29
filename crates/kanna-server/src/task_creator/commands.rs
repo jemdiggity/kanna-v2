@@ -49,7 +49,7 @@ pub(super) fn build_agent_command(
         AgentProvider::Claude => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
             if let Some(model) = model {
-                flags.push(format!("--model {}", model));
+                flags.push(format!("--model '{}'", shell_single_quote(model)));
             }
             if !allowed_tools.is_empty() {
                 flags.push(format!("--allowedTools {}", allowed_tools.join(",")));
@@ -99,7 +99,7 @@ pub(super) fn build_agent_command(
                 ));
             }
             if let Some(model) = model {
-                flags.push(format!("--model={}", model));
+                flags.push(format!("--model='{}'", shell_single_quote(model)));
             }
             if !allowed_tools.is_empty() {
                 for tool in allowed_tools {
@@ -117,14 +117,14 @@ pub(super) fn build_agent_command(
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
             extend_codex_mcp_flags(&mut flags, mcp_config_path);
             if let Some(model) = model {
-                flags.push(format!("-m {}", model));
+                flags.push(format!("-m '{}'", shell_single_quote(model)));
             }
             format!("{executable} {} '{}'", flags.join(" "), escaped_prompt)
         }
         AgentProvider::Opencode => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
             if let Some(model) = model {
-                flags.push(format!("-m {}", model));
+                flags.push(format!("-m '{}'", shell_single_quote(model)));
             }
             let mut parts = vec![
                 executable.clone(),
@@ -142,9 +142,10 @@ pub(super) fn build_agent_command(
         }
         AgentProvider::Antigravity => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
-            if let Some(model) = model {
-                flags.push(format!("--model {}", model));
-            }
+            debug_assert!(
+                model.is_none(),
+                "antigravity model override was not rejected"
+            );
             let mut setup = Vec::new();
             if let Some(worktree_path) = worktree_path {
                 let alias_base = "/tmp/kanna-antigravity-workspaces";

@@ -609,6 +609,9 @@ pub(super) fn resolve_create_task_prepare_error(
                 )
             })
         }
+        crate::task_creator::PrepareTaskError::InvalidRequest(error) => {
+            Err((axum::http::StatusCode::BAD_REQUEST, error))
+        }
         crate::task_creator::PrepareTaskError::Other(error) => {
             Err((axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))
         }
