@@ -6,7 +6,7 @@ use kanna_agent_protocol::{AgentEvent, SessionEndReason, TurnModel};
 use kanna_daemon::agent::{self, AgentClientWriter, AgentSessions, AgentShared};
 use kanna_daemon::protocol::{self, Event, SessionState, SessionStatus};
 
-use super::{broadcast_event, fan_out};
+use super::{broadcast_event, publish_terminal_exit};
 
 /// Outcome of a Kill against the agent registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +46,11 @@ pub async fn kill_agent_session(
         if super::agent_handoff_sealed() {
             Err(())
         } else {
-            Ok(registry.remove(session_id))
+            let record = registry.remove(session_id);
+            if record.is_some() {
+                let _ = registry.begin_teardown(session_id);
+            }
+            Ok(record)
         }
     };
     let record = match claim {
@@ -56,47 +60,24 @@ pub async fn kill_agent_session(
     let Some(mut record) = record else {
         return AgentKillOutcome::NotFound;
     };
-    // Every successful termination must broadcast exactly one Exit —
-    // consume-once kill orchestration (SessionReplacements) depends on it.
-    // The predicate is "has a terminal Exit been PUBLISHED", never "has the
-    // process exited": two states carry `exited: true` while having announced
-    // nothing at all — an INITIAL SpawnAgent reservation (no child, no reader)
-    // and an idle PER-TURN session (its child exits cleanly after every turn
-    // and the reader deliberately publishes no Exit for that churn). Gating on
-    // `exited` emitted zero Exits for both, leaving any consumer awaiting the
-    // Exit to wait forever. A session that already published its Exit from the
-    // reader must not publish a second one.
-    let must_announce_exit = !record.exit_published;
     if !record.exited {
-        // Group-kill only through a verified identity; the direct
-        // `child.kill()` below is safe regardless (std tracks our own child).
-        if let Err(error) = agent::kill_agent_group_verified(record.pid, record.child_start) {
-            super::log_info(format_args!(
+        match agent::kill_agent_group_batched(record.pid, record.child_start).await {
+            Some(Err(error)) => super::log_info(format_args!(
                 "[agent] kill {}: group signal refused: {}",
                 session_id, error
-            ));
+            )),
+            None => super::log_info(format_args!(
+                "[agent] kill {}: lifecycle executor stopped before group teardown completed",
+                session_id
+            )),
+            Some(Ok(())) => {}
         }
         if let Some(mut child) = record.child.take() {
             let _ = child.kill();
-            // Hand the child to the central reaper instead of blocking this
-            // task on `wait()`: a child stuck exiting in the kernel must not
-            // wedge the caller (Kill is issued from a client connection).
-            kanna_daemon::reaper::reap_detached(child, record.child_start);
+            if let Err(error) = kanna_daemon::reaper::try_reap_child(child, record.child_start) {
+                kanna_daemon::reaper::reap(error.into_ownership()).await;
+            }
         }
-    }
-    if must_announce_exit {
-        // A live session killed here never reaches the reader's exit path, and
-        // a cancelled reservation has no reader at all: announce the death now
-        // so exactly one Exit is emitted per successful Kill.
-        broadcast_event(
-            broadcast_tx,
-            &Event::Exit {
-                session_id: session_id.to_string(),
-                code: -1,
-                resume_session_id: None,
-                killed: true,
-            },
-        );
     }
     if let Some(fds) = record.handoff_fds.take() {
         fds.close();
@@ -106,23 +87,28 @@ pub async fn kill_agent_session(
     // and its whole descendant tree with it, so the read ends see EOF and the
     // reader tasks exit instead of lingering on inherited descriptors.
     drop(record.stdin.take());
-    let mut sh = record.shared.lock().await;
-    let entry = sh.journal.append(AgentEvent::SessionEnded {
-        reason: SessionEndReason::Interrupted,
-        exit_code: None,
-        message: Some("session killed".to_string()),
-    });
-    let wire = Event::AgentEvent {
-        session_id: session_id.to_string(),
-        seq: entry.seq,
-        event: entry.event,
-    };
-    fan_out(&mut sh.writers, &wire).await;
-    // Deliver the final event, then detach every writer: the session is gone,
-    // so retaining client sockets here would hold them (and the shared state)
-    // alive across session churn.
-    sh.writers.clear();
-    drop(sh);
+    let published_here = publish_terminal_exit(
+        session_id,
+        &record.shared,
+        &record.exit_publication,
+        AgentEvent::SessionEnded {
+            reason: SessionEndReason::Interrupted,
+            exit_code: None,
+            message: Some("session killed".to_string()),
+        },
+        Event::Exit {
+            session_id: session_id.to_string(),
+            code: -1,
+            resume_session_id: None,
+            killed: true,
+        },
+        broadcast_tx,
+    )
+    .await;
+    if !published_here {
+        record.exit_publication.wait_until_published().await;
+    }
+    record.shared.lock().await.writers.clear();
     broadcast_event(
         broadcast_tx,
         &Event::StatusChanged {
@@ -131,6 +117,7 @@ pub async fn kill_agent_session(
             waiting_prompt_snippet: None,
         },
     );
+    agents.lock().await.end_teardown(session_id);
     AgentKillOutcome::Killed
 }
 

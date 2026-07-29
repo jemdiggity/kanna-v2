@@ -387,6 +387,168 @@ fn live_terminal_transitions_do_not_rebuild_recovery_sessions() {
     assert!(!should_rebuild_recovery_session_on_live_terminal_transition());
 }
 
+#[tokio::test]
+async fn concurrent_agent_kills_share_one_lifecycle_job_and_snapshot_batch() {
+    let dir = std::env::temp_dir().join(format!(
+        "kanna-agent-kill-batch-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir).expect("create agent journal dir");
+
+    let agents: kanna_daemon::agent::AgentSessions =
+        Arc::new(Mutex::new(kanna_daemon::agent::AgentRegistry::default()));
+    let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(256);
+    const SESSIONS: usize = 24;
+
+    for index in 0..SESSIONS {
+        let session_id = format!("batched-kill-{index}");
+        let spec = kanna_agent_protocol::SpawnSpec {
+            executable: "/bin/sleep".to_string(),
+            args: vec!["300".to_string()],
+            env: Vec::new(),
+            initial_stdin: None,
+        };
+        let mut spawned = kanna_daemon::agent::spawn_agent_child(&spec, "/tmp", &HashMap::new())
+            .expect("spawn agent child");
+        let provider = protocol::AgentProvider::Claude;
+        let adapter = kanna_daemon::agent::make_adapter(provider).expect("claude adapter");
+        let turn_model = adapter.turn_model();
+        let params = protocol::AgentSpawnParams {
+            agent_provider: provider,
+            prompt: "wait".to_string(),
+            cwd: "/tmp".to_string(),
+            env: HashMap::new(),
+            model: None,
+            permission_mode: None,
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+            max_turns: None,
+            max_budget_usd: None,
+            system_prompt: None,
+            mcp_config_path: None,
+            executable: Some("/bin/sleep".to_string()),
+        };
+        let record = kanna_daemon::agent::AgentSessionRecord {
+            provider,
+            params,
+            adapter: Arc::new(std::sync::Mutex::new(adapter)),
+            shared: Arc::new(Mutex::new(kanna_daemon::agent::AgentShared {
+                journal: kanna_daemon::agent::AgentJournal::open(&dir, &session_id),
+                writers: Vec::new(),
+            })),
+            child: Some(spawned.child),
+            stdin: spawned.stdin,
+            pid: spawned.pid,
+            child_start: spawned.child_start,
+            incarnation: kanna_daemon::agent::next_agent_incarnation(),
+            spawning: false,
+            reservation_is_initial: false,
+            provider_session_id: None,
+            status: protocol::SessionStatus::Busy,
+            last_assistant_prompt: None,
+            session_allowed_tools: std::collections::HashSet::new(),
+            pending_permissions: std::collections::HashSet::new(),
+            exited: false,
+            exit_publication: kanna_daemon::agent::ExitPublication::new(),
+            interrupt_requested: false,
+            turn_model,
+            created_at: Instant::now(),
+            last_activity_at: Instant::now(),
+            handoff_fds: spawned.handoff_fds.take(),
+        };
+        agents.lock().await.insert(session_id, record);
+    }
+
+    let gate_entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let gate_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let gate_entered = Arc::clone(&gate_entered);
+        let gate_released = Arc::clone(&gate_released);
+        kanna_daemon::reaper::run_teardown(Box::new(move || {
+            gate_entered.store(true, std::sync::atomic::Ordering::Release);
+            while !gate_released.load(std::sync::atomic::Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }))
+        .await;
+    }
+    while !gate_entered.load(std::sync::atomic::Ordering::Acquire) {
+        tokio::task::yield_now().await;
+    }
+
+    let (requests_before, batches_before, jobs_before) =
+        kanna_daemon::agent::agent_teardown_stats();
+    let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let heartbeat = {
+        let ticks = Arc::clone(&ticks);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        })
+    };
+
+    let mut kills = Vec::new();
+    for index in 0..SESSIONS {
+        let agents = Arc::clone(&agents);
+        let broadcast_tx = broadcast_tx.clone();
+        kills.push(tokio::spawn(async move {
+            crate::agent_runtime::kill_agent_session(
+                &format!("batched-kill-{index}"),
+                &agents,
+                &broadcast_tx,
+            )
+            .await
+        }));
+    }
+
+    let admission_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (requests, _, _) = kanna_daemon::agent::agent_teardown_stats();
+        if requests - requests_before == SESSIONS as u64 {
+            break;
+        }
+        if Instant::now() >= admission_deadline {
+            gate_released.store(true, std::sync::atomic::Ordering::Release);
+            panic!("all concurrent agent kills must reach batched lifecycle admission");
+        }
+        tokio::task::yield_now().await;
+    }
+    gate_released.store(true, std::sync::atomic::Ordering::Release);
+
+    for kill in kills {
+        assert_eq!(
+            kill.await.expect("kill task"),
+            crate::agent_runtime::AgentKillOutcome::Killed,
+            "session should be killed"
+        );
+    }
+    heartbeat.abort();
+
+    assert!(
+        ticks.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "agent teardown must not pin the Tokio worker"
+    );
+    let (requests_after, batches_after, jobs_after) = kanna_daemon::agent::agent_teardown_stats();
+    assert_eq!(requests_after - requests_before, SESSIONS as u64);
+    assert_eq!(
+        jobs_after - jobs_before,
+        1,
+        "one concurrent kill burst must admit one lifecycle job"
+    );
+    assert_eq!(
+        batches_after - batches_before,
+        1,
+        "one concurrent kill burst must share one process snapshot batch"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn handoff_protocol_epochs_are_distinct() {
     assert_eq!(protocol::HANDOFF_PROTOCOL_VERSION, 3);
@@ -713,7 +875,7 @@ pub(crate) fn agent_record_fixture(
         session_allowed_tools: std::collections::HashSet::new(),
         pending_permissions: std::collections::HashSet::new(),
         exited: true,
-        exit_published: false,
+        exit_publication: kanna_daemon::agent::ExitPublication::new(),
         interrupt_requested: false,
         turn_model,
         created_at: Instant::now(),
@@ -745,7 +907,7 @@ async fn install_respawned_child_kills_orphan_when_session_was_removed() {
     // consult it: a test that expects either to SUCCEED must not overlap a
     // test that arms the seal.
     let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let spawned = sleeper_spawned_child();
     let orphan_pid = spawned.pid as libc::pid_t;
 
@@ -772,7 +934,7 @@ async fn install_respawned_child_kills_orphan_when_session_was_removed() {
 async fn install_respawned_child_installs_only_matching_generations() {
     let _serial = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("agent-install");
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let mut record = agent_record_fixture(&dir, "sess");
     let reservation = kanna_daemon::agent::next_agent_incarnation();
     record.incarnation = reservation;
@@ -842,7 +1004,7 @@ async fn install_respawned_child_installs_only_matching_generations() {
 #[tokio::test]
 async fn agent_input_rejects_resume_while_reservation_is_held() {
     let dir = temp_daemon_dir("agent-reserve");
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let mut record = agent_record_fixture(&dir, "sess");
     record.spawning = true; // a respawn is in flight
     agents.lock().await.insert("sess".to_string(), record);
@@ -933,7 +1095,7 @@ fn sleeper_spawn_params(session_id: &str) -> protocol::AgentSpawnParams {
 async fn concurrent_spawn_agent_creates_exactly_one_session() {
     let _serial = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("agent-create-race");
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(64);
 
     let (writer_a, mut reader_a) = agent_client_writer();
@@ -1009,7 +1171,7 @@ async fn kill_during_initial_spawn_cleans_up_the_loser() {
     // test that arms the seal.
     let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("agent-create-kill");
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
 
     // Reservation exactly as handle_spawn_agent creates it.
@@ -1061,7 +1223,7 @@ async fn stale_installer_from_previous_life_cannot_take_over_recreated_session()
     // test that arms the seal.
     let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("agent-aba");
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
 
     // Life 1 reserves a respawn...
@@ -1108,7 +1270,7 @@ async fn stale_installer_from_previous_life_cannot_take_over_recreated_session()
 async fn sealed_registry_rejects_in_flight_installs_until_unsealed() {
     let _serial = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("agent-seal");
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
 
     let mut record = agent_record_fixture(&dir, "sealsess");
     let incarnation = kanna_daemon::agent::next_agent_incarnation();
@@ -1175,7 +1337,7 @@ async fn forged_agent_handoff_cannot_target_unrelated_processes() {
     // test that arms the seal.
     let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("agent-forged");
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
 
     let mut victim = std::process::Command::new("/bin/sleep")
@@ -1254,7 +1416,7 @@ async fn legacy_handoff_without_identity_keeps_live_agents_killable() {
     // test that arms the seal.
     let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("agent-legacy");
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
 
     // A real agent-shaped child: setsid'd, pipes to us.
@@ -1322,7 +1484,7 @@ async fn stale_reader_from_previous_life_cannot_touch_the_recreated_session() {
     use kanna_agent_protocol::AgentEvent;
 
     let dir = temp_daemon_dir("reader-life");
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(32);
 
     // Life 1, with a reader bound to it.
@@ -1330,12 +1492,12 @@ async fn stale_reader_from_previous_life_cannot_touch_the_recreated_session() {
     let first_incarnation = kanna_daemon::agent::next_agent_incarnation();
     first.incarnation = first_incarnation;
     first.status = SessionStatus::Busy;
-    let stale_life = crate::agent_runtime::readers::ReaderLife {
-        session_id: "life".to_string(),
-        incarnation: first_incarnation,
-        adapter: first.adapter.clone(),
-        shared: first.shared.clone(),
-    };
+    let stale_life = crate::agent_runtime::readers::ReaderLife::new(
+        "life".to_string(),
+        first_incarnation,
+        first.adapter.clone(),
+        first.shared.clone(),
+    );
     agents.lock().await.insert("life".to_string(), first);
 
     // Life 1 is killed and the id recreated with its own adapter/journal.
@@ -1414,7 +1576,7 @@ async fn stale_reader_from_previous_life_cannot_touch_the_recreated_session() {
 #[tokio::test]
 async fn agent_input_planned_before_recreate_does_not_touch_the_replacement() {
     let dir = temp_daemon_dir("input-interleave");
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(32);
 
     // A live persistent session whose stdin we can observe.
@@ -1477,7 +1639,7 @@ async fn agent_input_planned_before_recreate_does_not_touch_the_replacement() {
 async fn seal_rejected_install_rolls_back_the_reservation() {
     let dir = temp_daemon_dir("seal-rollback");
     let _serial = crate::agent_runtime::seal_test_serializer().lock().await;
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
 
     let mut record = agent_record_fixture(&dir, "rb");
     let incarnation = kanna_daemon::agent::next_agent_incarnation();
@@ -1636,7 +1798,7 @@ async fn concurrent_lives_of_one_session_id_share_one_sequence_space() {
 async fn seal_rejected_initial_reservation_is_removed_not_rolled_back() {
     let dir = temp_daemon_dir("ghost-removal");
     let _serial = crate::agent_runtime::seal_test_serializer().lock().await;
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
 
     let mut record = agent_record_fixture(&dir, "ghost");
     let incarnation = kanna_daemon::agent::next_agent_incarnation();
@@ -1732,7 +1894,7 @@ async fn rejected_duplicate_spawn_does_not_contaminate_the_winners_journal() {
 
     let dir = temp_daemon_dir("spawn-journal");
     let _serial = crate::agent_runtime::seal_test_serializer().lock().await;
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(64);
 
     let (writer_a, mut reader_a) = agent_client_writer();
@@ -1857,7 +2019,7 @@ async fn killing_an_initial_reservation_emits_exactly_one_exit() {
     // test that arms the seal.
     let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("reservation-exit");
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, mut rx) = tokio::sync::broadcast::channel(32);
 
     let mut reservation = agent_record_fixture(&dir, "resv");
@@ -1905,7 +2067,7 @@ async fn killing_a_live_agent_session_still_emits_exactly_one_exit() {
     // test that arms the seal.
     let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("live-exit");
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, mut rx) = tokio::sync::broadcast::channel(32);
 
     let mut spawned = sleeper_spawned_child();
@@ -1950,7 +2112,7 @@ async fn killing_an_idle_per_turn_session_emits_exactly_one_exit() {
     // test that arms the seal.
     let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("per-turn-idle-exit");
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, mut rx) = tokio::sync::broadcast::channel(32);
 
     // Drive the REAL reader exit path so the test proves the reader's silence,
@@ -1967,12 +2129,12 @@ async fn killing_an_idle_per_turn_session_emits_exactly_one_exit() {
             .spawn()
             .expect("spawn a child that exits 0"),
     );
-    let life = crate::agent_runtime::readers::ReaderLife {
-        session_id: "perturn".to_string(),
+    let life = crate::agent_runtime::readers::ReaderLife::new(
+        "perturn".to_string(),
         incarnation,
-        adapter: record.adapter.clone(),
-        shared: record.shared.clone(),
-    };
+        record.adapter.clone(),
+        record.shared.clone(),
+    );
     agents.lock().await.insert("perturn".to_string(), record);
 
     crate::agent_runtime::readers::handle_child_exit_for_test(&life, &agents, &broadcast_tx).await;
@@ -1981,7 +2143,7 @@ async fn killing_an_idle_per_turn_session_emits_exactly_one_exit() {
         let record = registry.get("perturn").expect("session survives its turn");
         assert!(record.exited, "the per-turn child did exit");
         assert!(
-            !record.exit_published,
+            !record.exit_publication.is_published(),
             "per-turn turn churn must publish no terminal Exit"
         );
     }
@@ -2014,7 +2176,7 @@ async fn killing_an_already_announced_session_does_not_double_announce() {
     // test that arms the seal.
     let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("announced-exit");
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, mut rx) = tokio::sync::broadcast::channel(32);
 
     let mut record = agent_record_fixture(&dir, "persistent");
@@ -2027,12 +2189,12 @@ async fn killing_an_already_announced_session_does_not_double_announce() {
             .spawn()
             .expect("spawn a child that exits 0"),
     );
-    let life = crate::agent_runtime::readers::ReaderLife {
-        session_id: "persistent".to_string(),
+    let life = crate::agent_runtime::readers::ReaderLife::new(
+        "persistent".to_string(),
         incarnation,
-        adapter: record.adapter.clone(),
-        shared: record.shared.clone(),
-    };
+        record.adapter.clone(),
+        record.shared.clone(),
+    );
     agents.lock().await.insert("persistent".to_string(), record);
 
     crate::agent_runtime::readers::handle_child_exit_for_test(&life, &agents, &broadcast_tx).await;
@@ -2047,7 +2209,8 @@ async fn killing_an_already_announced_session_does_not_double_announce() {
             .await
             .get("persistent")
             .expect("record retained")
-            .exit_published,
+            .exit_publication
+            .is_published(),
         "the reader recorded that it published the Exit"
     );
 
@@ -2167,7 +2330,7 @@ async fn a_pty_exit_during_a_sealed_handoff_defers_to_the_transfer_outcome() {
 async fn a_kill_after_the_handoff_snapshot_is_refused_not_acknowledged() {
     let _serializer = crate::agent_runtime::seal_test_serializer().lock().await;
     let dir = temp_daemon_dir("sealed-kill");
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, mut rx) = tokio::sync::broadcast::channel(32);
 
     let mut record = agent_record_fixture(&dir, "sealed");
@@ -2213,7 +2376,7 @@ async fn a_kill_for_an_unknown_agent_session_reports_not_found() {
     // consult it: a test that expects either to SUCCEED must not overlap a
     // test that arms the seal.
     let _seal_serializer = crate::agent_runtime::seal_test_serializer().lock().await;
-    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(HashMap::new()));
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(8);
     assert_eq!(
         crate::agent_runtime::kill_agent_session("nope", &agents, &broadcast_tx).await,

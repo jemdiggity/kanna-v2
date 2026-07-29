@@ -7,7 +7,7 @@
 //! of the headless terminal: authoritative while detached, snapshot + live
 //! stream on attach, persisted to disk so it survives daemon handoff.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write as IoWrite;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -36,7 +36,45 @@ fn fill_random(buf: &mut [u8]) -> std::io::Result<()> {
 }
 
 /// Registry of agent sessions, separate from the PTY `SessionManager`.
-pub type AgentSessions = Arc<Mutex<HashMap<String, AgentSessionRecord>>>;
+pub type AgentSessions = Arc<Mutex<AgentRegistry>>;
+
+#[derive(Default)]
+pub struct AgentRegistry {
+    sessions: HashMap<String, AgentSessionRecord>,
+    teardown_tombstones: HashSet<String>,
+}
+
+impl AgentRegistry {
+    pub fn can_create(&self, session_id: &str) -> bool {
+        !self.sessions.contains_key(session_id) && !self.teardown_tombstones.contains(session_id)
+    }
+
+    pub fn begin_teardown(&mut self, session_id: &str) -> bool {
+        self.teardown_tombstones.insert(session_id.to_string())
+    }
+
+    pub fn end_teardown(&mut self, session_id: &str) {
+        self.teardown_tombstones.remove(session_id);
+    }
+
+    pub fn is_tearing_down(&self, session_id: &str) -> bool {
+        self.teardown_tombstones.contains(session_id)
+    }
+}
+
+impl std::ops::Deref for AgentRegistry {
+    type Target = HashMap<String, AgentSessionRecord>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.sessions
+    }
+}
+
+impl std::ops::DerefMut for AgentRegistry {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.sessions
+    }
+}
 
 pub fn make_adapter(provider: AgentProvider) -> Option<Box<dyn ProviderAdapter + Send>> {
     match provider {
@@ -682,6 +720,74 @@ pub fn live_shared_agent_states() -> usize {
         .count()
 }
 
+const EXIT_UNPUBLISHED: u8 = 0;
+const EXIT_PUBLISHING: u8 = 1;
+const EXIT_PUBLISHED: u8 = 2;
+
+struct ExitPublicationInner {
+    state: std::sync::atomic::AtomicU8,
+    published: tokio::sync::Notify,
+}
+
+/// Single-owner terminal Exit publication state for one incarnation.
+///
+/// Claiming and completion are distinct: publication becomes complete only
+/// after the terminal journal entry, fan-out, and Exit broadcast finish.
+#[derive(Clone)]
+pub struct ExitPublication {
+    inner: Arc<ExitPublicationInner>,
+}
+
+impl ExitPublication {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(ExitPublicationInner {
+                state: std::sync::atomic::AtomicU8::new(EXIT_UNPUBLISHED),
+                published: tokio::sync::Notify::new(),
+            }),
+        }
+    }
+
+    pub fn try_claim(&self) -> bool {
+        self.inner
+            .state
+            .compare_exchange(
+                EXIT_UNPUBLISHED,
+                EXIT_PUBLISHING,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub fn is_published(&self) -> bool {
+        self.inner.state.load(std::sync::atomic::Ordering::Acquire) == EXIT_PUBLISHED
+    }
+
+    pub fn complete(&self) {
+        self.inner
+            .state
+            .store(EXIT_PUBLISHED, std::sync::atomic::Ordering::Release);
+        self.inner.published.notify_waiters();
+    }
+
+    pub async fn wait_until_published(&self) {
+        loop {
+            let notified = self.inner.published.notified();
+            if self.is_published() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Default for ExitPublication {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct AgentSessionRecord {
     pub provider: AgentProvider,
     pub params: AgentSpawnParams,
@@ -720,12 +826,7 @@ pub struct AgentSessionRecord {
     /// Permission request ids awaiting a decision.
     pub pending_permissions: HashSet<String>,
     pub exited: bool,
-    /// Whether a TERMINAL `Event::Exit` has actually been published for this
-    /// session. Distinct from `exited`: a per-turn provider exits cleanly
-    /// after every turn by design and deliberately publishes NO Exit, so
-    /// `exited` alone would make a later Kill of that idle session emit none
-    /// at all. Kill announces exactly when this is still false.
-    pub exit_published: bool,
+    pub exit_publication: ExitPublication,
     /// Set when the user asks to stop the agent. The child's resulting exit is
     /// then surfaced as an interruption rather than a crash.
     pub interrupt_requested: bool,
@@ -736,11 +837,16 @@ pub struct AgentSessionRecord {
     pub handoff_fds: Option<AgentHandoffFds>,
 }
 
-/// Draw a process-globally unique incarnation token (never zero, never
-/// reused). See `AgentSessionRecord::incarnation`.
+/// Draw a process-global, never-reused incarnation token. Exhaustion is a
+/// fatal invariant violation rather than wrapping into an old token.
 pub fn next_agent_incarnation() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    NEXT.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |current| current.checked_add(1),
+    )
+    .expect("agent incarnation space exhausted")
 }
 
 pub struct SpawnedAgentChild {
@@ -964,50 +1070,218 @@ pub fn spawn_agent_child(
 /// group leader, keeps its pgid allocated) between the post-stop verification
 /// and the kill. If the freeze cannot be established the pid is NOT signaled —
 /// fail closed — because an unowned pid offers no other way to pin identity.
+#[derive(Debug, Clone, Copy)]
+struct AgentKillPlan {
+    pid: libc::pid_t,
+    target: crate::proc_info::SessionTarget,
+}
+
+impl AgentKillPlan {
+    fn prepare(
+        raw_pid: u32,
+        child_start: Option<crate::proc_info::StartTime>,
+    ) -> std::io::Result<Self> {
+        let refuse = |reason: String| std::io::Error::new(std::io::ErrorKind::NotFound, reason);
+        let Some(pid) = crate::pty::validated_child_pid(raw_pid) else {
+            return Err(refuse(format!(
+                "agent pid {raw_pid} is out of range; refusing to signal"
+            )));
+        };
+        let Some(start) = child_start else {
+            return Err(refuse(format!(
+                "agent pid {pid} has no start-time identity; refusing to signal"
+            )));
+        };
+        let target = crate::proc_info::SessionTarget { pid, start };
+        if !crate::proc_info::stop_verified(target) {
+            return Err(refuse(format!(
+                "agent pid {pid} could not be frozen under a verified identity; refusing to signal"
+            )));
+        }
+        // Freeze the whole process group while the shared parent-chain
+        // snapshot is taken so no descendant can fork or reparent away.
+        unsafe {
+            libc::kill(-pid, libc::SIGSTOP);
+        }
+        Ok(Self { pid, target })
+    }
+
+    fn strike(self, descendants: Vec<crate::proc_info::SessionTarget>) -> std::io::Result<()> {
+        let group = unsafe { libc::kill(-self.pid, libc::SIGKILL) };
+        let direct_needed = group != 0;
+        for descendant in descendants {
+            crate::proc_info::signal_verified(descendant, libc::SIGKILL);
+        }
+        if direct_needed {
+            let direct = unsafe { libc::kill(self.pid, libc::SIGKILL) };
+            if direct != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Kill multiple verified agent groups while sharing each process-table
+/// discovery round across the batch. Invalid or stale requests fail
+/// independently and results preserve input order.
+pub fn kill_agent_groups_verified(
+    requests: &[(u32, Option<crate::proc_info::StartTime>)],
+) -> Vec<std::io::Result<()>> {
+    let prepared: Vec<_> = requests
+        .iter()
+        .map(|(pid, start)| AgentKillPlan::prepare(*pid, *start))
+        .collect();
+    let specs: Vec<_> = prepared
+        .iter()
+        .filter_map(|result| result.as_ref().ok())
+        .map(|plan| (Some(plan.target), None))
+        .collect();
+    let mut frozen = crate::proc_info::freeze_many(&specs).into_iter();
+
+    prepared
+        .into_iter()
+        .map(|result| match result {
+            Ok(plan) => plan.strike(frozen.next().unwrap_or_default()),
+            Err(error) => Err(error),
+        })
+        .collect()
+}
+
 pub fn kill_agent_group_verified(
     pid: u32,
     child_start: Option<crate::proc_info::StartTime>,
 ) -> std::io::Result<()> {
-    let refuse = |reason: String| std::io::Error::new(std::io::ErrorKind::NotFound, reason);
-    let Some(pid) = crate::pty::validated_child_pid(pid) else {
-        return Err(refuse(format!(
-            "agent pid {pid} is out of range; refusing to signal"
-        )));
-    };
-    let Some(start) = child_start else {
-        return Err(refuse(format!(
-            "agent pid {pid} has no start-time identity; refusing to signal"
-        )));
-    };
-    let target = crate::proc_info::SessionTarget { pid, start };
-    if !crate::proc_info::stop_verified(target) {
-        return Err(refuse(format!(
-            "agent pid {pid} could not be frozen under a verified identity; refusing to signal"
-        )));
-    }
-    // The leader is frozen, so nothing under it can fork or reparent away.
-    // Tear down the whole DESCENDANT TREE before releasing the leader: an
-    // agent CLI spawns helpers, and a helper that called setsid() has left the
-    // leader's process group, so `kill(-pid)` alone would leave it running —
-    // holding the child's pipes open (blocking reader EOF) and any pty or
-    // other descriptor it inherited. The parent-chain walk finds it; each
-    // target is frozen and identity-verified before being signalled.
-    //
-    // Agents have no controlling terminal of their own, so there is no tty
-    // device to sweep — the parent chain is the whole boundary here.
-    let descendants = crate::proc_info::freeze_session_processes(Some(target), None);
-    let group = unsafe { libc::kill(-pid, libc::SIGKILL) };
-    let direct_needed = group != 0;
-    for descendant in descendants {
-        crate::proc_info::signal_verified(descendant, libc::SIGKILL);
-    }
-    if direct_needed {
-        let direct = unsafe { libc::kill(pid, libc::SIGKILL) };
-        if direct != 0 {
-            return Err(std::io::Error::last_os_error());
+    kill_agent_groups_verified(&[(pid, child_start)])
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| {
+            Err(std::io::Error::other(
+                "agent kill batch returned no result for one request",
+            ))
+        })
+}
+
+struct AgentTeardownRequest {
+    pid: u32,
+    child_start: Option<crate::proc_info::StartTime>,
+    completion: tokio::sync::oneshot::Sender<std::io::Result<()>>,
+}
+
+#[derive(Default)]
+struct AgentTeardownState {
+    pending: VecDeque<AgentTeardownRequest>,
+    scheduled: bool,
+}
+
+#[derive(Default)]
+struct AgentTeardownBatcher {
+    state: std::sync::Mutex<AgentTeardownState>,
+    requests: std::sync::atomic::AtomicU64,
+    batches: std::sync::atomic::AtomicU64,
+    lifecycle_jobs: std::sync::atomic::AtomicU64,
+}
+
+fn agent_teardown_batcher() -> &'static AgentTeardownBatcher {
+    static BATCHER: std::sync::OnceLock<AgentTeardownBatcher> = std::sync::OnceLock::new();
+    BATCHER.get_or_init(AgentTeardownBatcher::default)
+}
+
+fn run_agent_teardown_batches() {
+    let batcher = agent_teardown_batcher();
+    // Let one concurrent close burst collect before taking the shared process
+    // snapshot. This runs on the lifecycle owner, never a Tokio worker.
+    std::thread::sleep(std::time::Duration::from_millis(1));
+
+    loop {
+        let batch: Vec<_> = {
+            let mut state = batcher
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.pending.is_empty() {
+                state.scheduled = false;
+                return;
+            }
+            state.pending.drain(..).collect()
+        };
+        batcher
+            .batches
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let requests: Vec<_> = batch
+            .iter()
+            .map(|request| (request.pid, request.child_start))
+            .collect();
+        let mut results = kill_agent_groups_verified(&requests).into_iter();
+        for request in batch {
+            let result = results.next().unwrap_or_else(|| {
+                Err(std::io::Error::other(
+                    "agent kill batch returned fewer results than requests",
+                ))
+            });
+            let _ = request.completion.send(result);
         }
     }
-    Ok(())
+}
+
+/// Route one verified agent teardown through the central bounded lifecycle
+/// executor. Concurrent requests share one lifecycle job and process-table
+/// snapshot batch; each caller still receives its own ordered result.
+pub async fn kill_agent_group_batched(
+    pid: u32,
+    child_start: Option<crate::proc_info::StartTime>,
+) -> Option<std::io::Result<()>> {
+    let (completion, result) = tokio::sync::oneshot::channel();
+    let batcher = agent_teardown_batcher();
+    let should_schedule = {
+        let mut state = batcher
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.pending.push_back(AgentTeardownRequest {
+            pid,
+            child_start,
+            completion,
+        });
+        batcher
+            .requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if state.scheduled {
+            false
+        } else {
+            state.scheduled = true;
+            true
+        }
+    };
+
+    if should_schedule {
+        batcher
+            .lifecycle_jobs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let job: crate::reaper::TeardownJob = Box::new(run_agent_teardown_batches);
+        match crate::reaper::try_run_teardown(job) {
+            crate::reaper::TeardownAdmission::Accepted => {}
+            crate::reaper::TeardownAdmission::Full(job) => {
+                crate::reaper::run_teardown(job).await;
+            }
+        }
+    }
+
+    result.await.ok()
+}
+
+/// `(requests, shared process-snapshot batches, lifecycle jobs)` since daemon
+/// startup. Used for diagnostics and concurrency regression coverage.
+pub fn agent_teardown_stats() -> (u64, u64, u64) {
+    let batcher = agent_teardown_batcher();
+    (
+        batcher.requests.load(std::sync::atomic::Ordering::Relaxed),
+        batcher.batches.load(std::sync::atomic::Ordering::Relaxed),
+        batcher
+            .lifecycle_jobs
+            .load(std::sync::atomic::Ordering::Relaxed),
+    )
 }
 
 /// Signal the agent child's process group, but only when the pid can still
@@ -1282,6 +1556,38 @@ mod tests {
     }
 
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn verified_group_kill_batch_keeps_results_ordered_and_independent() {
+        let spec = SpawnSpec {
+            executable: "/bin/sleep".to_string(),
+            args: vec!["300".to_string()],
+            env: Vec::new(),
+            initial_stdin: None,
+        };
+        let mut spawned =
+            spawn_agent_child(&spec, "/tmp", &HashMap::new()).expect("spawn agent child");
+
+        let results =
+            kill_agent_groups_verified(&[(0, Some((1, 1))), (spawned.pid, spawned.child_start)]);
+        assert_eq!(results.len(), 2);
+        assert!(
+            results[0].is_err(),
+            "invalid first request must fail in place"
+        );
+        assert!(
+            results[1].is_ok(),
+            "valid second request must still execute"
+        );
+        assert!(
+            !spawned.child.wait().expect("wait killed child").success(),
+            "the valid child must be killed"
+        );
+        if let Some(fds) = spawned.handoff_fds.take() {
+            fds.close();
+        }
+    }
     use std::io::Read;
 
     #[test]
@@ -1911,5 +2217,37 @@ mod tests {
 
         let passthrough = resolve_executable("/opt/custom/claude", &env);
         assert_eq!(passthrough, PathBuf::from("/opt/custom/claude"));
+    }
+
+    #[test]
+    fn agent_incarnations_are_never_zero_or_reused() {
+        let mut seen = HashSet::new();
+        for _ in 0..10_000 {
+            let incarnation = next_agent_incarnation();
+            assert_ne!(incarnation, 0);
+            assert!(seen.insert(incarnation), "incarnation token was reused");
+        }
+    }
+
+    #[tokio::test]
+    async fn exit_publication_is_single_owner_and_completes_last() {
+        let publication = ExitPublication::new();
+        assert!(publication.try_claim());
+        assert!(!publication.try_claim());
+        assert!(!publication.is_published());
+
+        publication.complete();
+        publication.wait_until_published().await;
+        assert!(publication.is_published());
+    }
+
+    #[test]
+    fn teardown_tombstone_reserves_the_session_id_until_cleanup_finishes() {
+        let mut registry = AgentRegistry::default();
+        assert!(registry.can_create("same-id"));
+        assert!(registry.begin_teardown("same-id"));
+        assert!(!registry.can_create("same-id"));
+        registry.end_teardown("same-id");
+        assert!(registry.can_create("same-id"));
     }
 }

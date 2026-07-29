@@ -196,7 +196,7 @@ pub async fn adopt_agent_session(
         session_allowed_tools,
         pending_permissions,
         exited: !alive,
-        exit_published: false,
+        exit_publication: agent::ExitPublication::new(),
         interrupt_requested: false,
         turn_model,
         created_at: std::time::Instant::now(),
@@ -246,12 +246,12 @@ pub async fn adopt_agent_session(
     let session_id = info.session_id.clone();
     // Capture the reader's own identity before the record moves into the
     // registry: readers must never resolve these by session id.
-    let life = super::readers::ReaderLife {
+    let life = super::readers::ReaderLife::new(
         session_id,
-        incarnation: record.incarnation,
-        adapter: record.adapter.clone(),
-        shared: record.shared.clone(),
-    };
+        record.incarnation,
+        record.adapter.clone(),
+        record.shared.clone(),
+    );
     agents.lock().await.insert(info.session_id, record);
     start_agent_readers(life, stdout, stderr, agents, broadcast_tx);
 }
