@@ -269,6 +269,9 @@ The script is idempotent: it upserts the Firebase Auth user `upvote.sieve.7t@icl
 ./kd cloud deploy --production  # deploy Firebase cloud services to production
 
 # Canonical automated verification
+./kd test all
+
+# Individual automated verification lanes
 pnpm test
 ./kd test rust
 

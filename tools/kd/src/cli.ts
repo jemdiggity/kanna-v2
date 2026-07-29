@@ -536,6 +536,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "pages" && command === "build-schema") {
     return { taskId: "pages.build-schema", input: parseFlagInput(rest, {}) };
   }
+  if (group === "test" && command === "all") {
+    return { taskId: "test.all", input: {} };
+  }
   if (group === "test" && command === "rust") {
     return { taskId: "test.rust", input: {} };
   }
@@ -1024,6 +1027,7 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd test <command>",
     "",
     "Commands:",
+    "  test all",
     "  test rust",
     "  test app-update-bundle",
     "  test cloud-emulator",
@@ -1031,6 +1035,11 @@ const helpTopics: Record<string, string[]> = {
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
     "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing]"
+  ],
+  "test all": [
+    "Usage: kd test all",
+    "",
+    "Run all canonical local verification lanes."
   ],
   "test rust": [
     "Usage: kd test rust",
