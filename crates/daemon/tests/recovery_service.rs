@@ -6,6 +6,7 @@ use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use kanna_daemon::protocol::ErrorCode;
 use kanna_daemon::recovery::{RecoveryManager, SeededRecoverySnapshot};
 use serde::{Deserialize, Serialize};
 
@@ -161,6 +162,7 @@ enum Cmd {
         session_id: String,
         snapshot: SeedSnapshotPayload,
     },
+    List,
 }
 
 #[allow(dead_code)]
@@ -195,12 +197,21 @@ enum Evt {
         session_id: String,
         status: SessionStatus,
     },
+    SessionList {
+        sessions: Vec<SessionListEntry>,
+    },
     Ok,
     Error {
+        code: Option<ErrorCode>,
         message: String,
     },
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionListEntry {
+    session_id: String,
 }
 
 #[allow(dead_code)]
@@ -300,6 +311,24 @@ impl DaemonHandle {
             writer: stream,
         }
     }
+
+    fn journal_path(&self, session_id: &str) -> PathBuf {
+        self._dir
+            .join("agent-journals")
+            .join(format!("{session_id}.ndjson"))
+    }
+
+    fn journal_metadata_path(&self, session_id: &str) -> PathBuf {
+        self._dir
+            .join("agent-journals")
+            .join(format!("{session_id}.meta.json"))
+    }
+
+    fn recovery_snapshot_path(&self, session_id: &str) -> PathBuf {
+        self._dir
+            .join("terminal-recovery")
+            .join(format!("{session_id}.json"))
+    }
 }
 
 impl Drop for DaemonHandle {
@@ -347,6 +376,181 @@ impl ClientConn {
     }
 }
 
+fn write_executable(path: &Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::write(path, contents).expect("should write sentinel executable");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .expect("should make sentinel executable");
+}
+
+fn snapshot_payload(vt: &str) -> SeedSnapshotPayload {
+    SeedSnapshotPayload {
+        version: 1,
+        rows: 24,
+        cols: 80,
+        cursor_row: 0,
+        cursor_col: 0,
+        cursor_visible: true,
+        vt: vt.to_string(),
+    }
+}
+
+fn persisted_snapshot(session_id: &str, vt: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "sessionId": session_id,
+        "serialized": vt,
+        "cols": 80,
+        "rows": 24,
+        "cursorRow": 0,
+        "cursorCol": 0,
+        "cursorVisible": true,
+        "savedAt": 1,
+        "sequence": 1
+    }))
+    .expect("should serialize planted snapshot")
+}
+
+#[test]
+fn hostile_pty_session_ids_are_rejected_before_spawn_or_persistence() {
+    let daemon = DaemonHandle::start();
+    std::fs::create_dir_all(daemon._dir.join("agent-journals")).unwrap();
+    std::fs::create_dir_all(daemon._dir.join("terminal-recovery")).unwrap();
+    let executable = daemon._dir.join("pty-spawn-sentinel.sh");
+    write_executable(
+        &executable,
+        "#!/bin/sh\nprintf 'pty child ran' > \"$SENTINEL_FILE\"\nprintf 'output'\nsleep 1\n",
+    );
+
+    for (index, session_id) in ["../outside-pty", "Pty", "caf\u{e9}"]
+        .into_iter()
+        .enumerate()
+    {
+        let sentinel = daemon._dir.join(format!("pty-sentinel-{index}"));
+        let mut env = HashMap::new();
+        env.insert(
+            "SENTINEL_FILE".to_string(),
+            sentinel.to_string_lossy().to_string(),
+        );
+        let mut conn = daemon.connect();
+        conn.send(&Cmd::Spawn {
+            session_id: session_id.to_string(),
+            executable: executable.to_string_lossy().to_string(),
+            args: Vec::new(),
+            cwd: daemon._dir.to_string_lossy().to_string(),
+            env,
+            cols: 80,
+            rows: 24,
+        });
+
+        match conn.recv() {
+            Evt::Error { code, message } => {
+                assert_eq!(code, Some(ErrorCode::PtySpawnFailed));
+                assert!(
+                    message.contains("invalid session id"),
+                    "unexpected spawn error for {session_id:?}: {message}"
+                );
+            }
+            other => panic!("expected PtySpawnFailed for {session_id:?}, got {other:?}"),
+        }
+
+        conn.send(&Cmd::List);
+        match conn.recv() {
+            Evt::SessionList { sessions } => assert!(
+                sessions
+                    .iter()
+                    .all(|session| session.session_id != session_id),
+                "hostile PTY id {session_id:?} entered the registry"
+            ),
+            other => panic!("expected SessionList after rejected spawn, got {other:?}"),
+        }
+
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !sentinel.exists(),
+            "PTY executable ran for hostile id {session_id:?}"
+        );
+        assert!(
+            !daemon.journal_path(session_id).exists(),
+            "journal created for hostile id {session_id:?}"
+        );
+        assert!(
+            !daemon.journal_metadata_path(session_id).exists(),
+            "journal metadata created for hostile id {session_id:?}"
+        );
+        assert!(
+            !daemon.recovery_snapshot_path(session_id).exists(),
+            "recovery snapshot created for hostile id {session_id:?}"
+        );
+    }
+}
+
+#[test]
+fn hostile_snapshot_ids_cannot_disclose_planted_snapshot_files() {
+    const SECRET: &str = "outside snapshot secret";
+    let daemon = DaemonHandle::start();
+    std::fs::create_dir_all(daemon._dir.join("terminal-recovery")).unwrap();
+
+    for session_id in ["../outside-snapshot", "Snapshot", "caf\u{e9}"] {
+        let planted_path = daemon.recovery_snapshot_path(session_id);
+        std::fs::write(&planted_path, persisted_snapshot(session_id, SECRET))
+            .expect("should plant snapshot at vulnerable path");
+
+        let mut conn = daemon.connect();
+        conn.send(&Cmd::Snapshot {
+            session_id: session_id.to_string(),
+        });
+        match conn.recv() {
+            Evt::Error { code, message } => {
+                assert_eq!(code, Some(ErrorCode::SessionNotFound));
+                assert!(
+                    message.contains("invalid session id"),
+                    "unexpected snapshot error for {session_id:?}: {message}"
+                );
+                assert!(
+                    !message.contains(SECRET),
+                    "snapshot contents leaked in rejection"
+                );
+            }
+            Evt::Snapshot { .. } => {
+                panic!("hostile id {session_id:?} disclosed a planted snapshot")
+            }
+            other => panic!("expected invalid-session error for {session_id:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn hostile_seed_snapshot_ids_cannot_overwrite_planted_files() {
+    let daemon = DaemonHandle::start();
+    std::fs::create_dir_all(daemon._dir.join("terminal-recovery")).unwrap();
+
+    for session_id in ["../outside-seed", "Seed", "caf\u{e9}"] {
+        let planted_path = daemon.recovery_snapshot_path(session_id);
+        let sentinel = persisted_snapshot(session_id, "sentinel snapshot contents");
+        std::fs::write(&planted_path, &sentinel).expect("should plant file at vulnerable path");
+
+        let mut conn = daemon.connect();
+        conn.send(&Cmd::SeedSnapshot {
+            session_id: session_id.to_string(),
+            snapshot: snapshot_payload("overwrite attempt"),
+        });
+        match conn.recv() {
+            Evt::Error { message, .. } => assert!(
+                message.contains("invalid session id"),
+                "unexpected seed error for {session_id:?}: {message}"
+            ),
+            other => panic!("expected invalid-session error for {session_id:?}, got {other:?}"),
+        }
+
+        assert_eq!(
+            std::fs::read(&planted_path).expect("planted file should remain readable"),
+            sentinel,
+            "seeding hostile id {session_id:?} changed the planted file"
+        );
+    }
+}
+
 #[test]
 fn daemon_does_not_serve_snapshot_after_session_exit() {
     let daemon = DaemonHandle::start();
@@ -388,7 +592,7 @@ fn daemon_does_not_serve_snapshot_after_session_exit() {
         session_id: session_id.to_string(),
     });
     match conn.recv() {
-        Evt::Error { message } => assert!(
+        Evt::Error { message, .. } => assert!(
             message.contains("session not found"),
             "unexpected snapshot error: {}",
             message

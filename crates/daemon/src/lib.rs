@@ -10,5 +10,6 @@ pub mod pty;
 pub mod reaper;
 pub mod recovery;
 pub mod session;
+pub mod session_id;
 pub mod subprocess_env;
 pub mod terminal_perf;
