@@ -16,7 +16,8 @@ use crate::fanout::{
     existing_session_fanout, EnqueueReport, EventLine, SessionFanout, SessionFanouts,
 };
 use crate::session::{
-    MirrorResult, SessionHandle, SessionManager, StreamControl, STATUS_DETECTION_THROTTLE_MS,
+    MirrorResult, PendingInput, SessionHandle, SessionManager, StreamControl,
+    STATUS_DETECTION_THROTTLE_MS,
 };
 
 const STATUS_IDLE_FLUSH_MS: u64 = STATUS_DETECTION_THROTTLE_MS;
@@ -97,7 +98,7 @@ pub(crate) fn should_rebuild_recovery_session_on_live_terminal_transition() -> b
 pub(crate) async fn stream_output(
     session_id: String,
     io_fd: std::os::fd::OwnedFd,
-    mut input_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut input_rx: mpsc::UnboundedReceiver<PendingInput>,
     stream_control: StreamControl,
     broadcast_tx: broadcast::Sender<String>,
     fanouts: SessionFanouts,
@@ -123,7 +124,7 @@ pub(crate) async fn stream_output(
     let mut chunk_count: usize = 0;
     let mut previous_read_at = None;
     let mut previous_slow_stage = None;
-    let mut pending_input: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut pending_input: VecDeque<PendingInput> = VecDeque::new();
     let mut pending_offset = 0usize;
     let mut status_interval =
         tokio::time::interval(std::time::Duration::from_millis(STATUS_IDLE_FLUSH_MS));
@@ -141,7 +142,11 @@ pub(crate) async fn stream_output(
 
             maybe_input = input_rx.recv() => {
                 if let Some(input) = maybe_input {
-                    pending_input.push_back(input);
+                    if input.data.is_empty() {
+                        input.acknowledge_written();
+                    } else {
+                        pending_input.push_back(input);
+                    }
                 }
             }
 
@@ -160,7 +165,7 @@ pub(crate) async fn stream_output(
                 };
                 let result = guard.try_io(|inner| {
                     let fd = inner.get_ref().as_raw_fd();
-                    let slice = &front[pending_offset..];
+                    let slice = &front.data[pending_offset..];
                     let n = unsafe {
                         libc::write(fd, slice.as_ptr().cast::<libc::c_void>(), slice.len())
                     };
@@ -175,8 +180,11 @@ pub(crate) async fn stream_output(
                     Ok(Ok(n)) => {
                         session.mark_active().await;
                         pending_offset += n;
-                        if pending_offset >= front.len() {
-                            pending_input.pop_front();
+                        if pending_offset >= front.data.len() {
+                            let completed = pending_input
+                                .pop_front()
+                                .expect("pending input disappeared before completion");
+                            completed.acknowledge_written();
                             pending_offset = 0;
                         }
                     }

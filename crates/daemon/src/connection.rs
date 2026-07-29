@@ -531,8 +531,14 @@ pub(crate) async fn handle_command(
                 return;
             };
 
-            let evt = match session.enqueue_input(data) {
-                Ok(()) => Event::Ok,
+            let evt = match session.enqueue_acknowledged_input(data) {
+                Ok(written) => match written.await {
+                    Ok(()) => Event::Ok,
+                    Err(_) => error_event(
+                        Some(protocol::ErrorCode::WriteFailed),
+                        format!("input write failed for session: {}", session_id),
+                    ),
+                },
                 Err(_) => error_event(
                     Some(protocol::ErrorCode::WriteFailed),
                     format!("input queue closed for session: {}", session_id),

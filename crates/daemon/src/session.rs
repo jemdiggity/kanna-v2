@@ -9,7 +9,7 @@ use crate::headless_terminal::HeadlessTerminal;
 use crate::protocol::{AgentProvider, SessionInfo, SessionState, SessionStatus};
 use crate::pty::PtySession;
 use kanna_daemon::terminal_perf::{self, TerminalPerfContext};
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 pub const STATUS_DETECTION_THROTTLE_MS: u64 = 500;
 
@@ -87,6 +87,37 @@ pub struct SessionRuntimeState {
     pub last_status_check_at: Option<Instant>,
 }
 
+pub struct PendingInput {
+    pub data: Vec<u8>,
+    written: Option<oneshot::Sender<()>>,
+}
+
+impl PendingInput {
+    fn unacknowledged(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            written: None,
+        }
+    }
+
+    fn acknowledged(data: Vec<u8>) -> (Self, oneshot::Receiver<()>) {
+        let (written, receiver) = oneshot::channel();
+        (
+            Self {
+                data,
+                written: Some(written),
+            },
+            receiver,
+        )
+    }
+
+    pub fn acknowledge_written(mut self) {
+        if let Some(written) = self.written.take() {
+            let _ = written.send(());
+        }
+    }
+}
+
 pub struct MirrorResult {
     pub status: Option<SessionStatus>,
     pub replies: Vec<Vec<u8>>,
@@ -99,8 +130,8 @@ pub struct SessionHandle {
     /// enqueue unbounded whole-table sweep jobs.
     teardown_claimed: std::sync::atomic::AtomicBool,
     state: Mutex<SessionRuntimeState>,
-    input_tx: mpsc::UnboundedSender<Vec<u8>>,
-    input_rx: Mutex<Option<mpsc::UnboundedReceiver<Vec<u8>>>>,
+    input_tx: mpsc::UnboundedSender<PendingInput>,
+    input_rx: Mutex<Option<mpsc::UnboundedReceiver<PendingInput>>>,
     /// Permanently fences an outgoing incarnation from publishing output or
     /// mutating id-keyed state after a same-id replacement is allowed.
     retired: AtomicBool,
@@ -135,14 +166,27 @@ impl SessionHandle {
     }
 
     pub fn enqueue_input(&self, data: Vec<u8>) -> Result<(), mpsc::error::SendError<Vec<u8>>> {
-        self.input_tx.send(data)
+        self.input_tx
+            .send(PendingInput::unacknowledged(data))
+            .map_err(|error| mpsc::error::SendError(error.0.data))
+    }
+
+    pub fn enqueue_acknowledged_input(
+        &self,
+        data: Vec<u8>,
+    ) -> Result<oneshot::Receiver<()>, mpsc::error::SendError<Vec<u8>>> {
+        let (input, written) = PendingInput::acknowledged(data);
+        self.input_tx
+            .send(input)
+            .map_err(|error| mpsc::error::SendError(error.0.data))?;
+        Ok(written)
     }
 
     pub async fn try_clone_io_fd(&self) -> std::io::Result<std::os::fd::OwnedFd> {
         self.pty.lock().await.try_clone_io_fd()
     }
 
-    pub async fn take_input_rx(&self) -> Option<mpsc::UnboundedReceiver<Vec<u8>>> {
+    pub async fn take_input_rx(&self) -> Option<mpsc::UnboundedReceiver<PendingInput>> {
         self.input_rx.lock().await.take()
     }
 
@@ -920,6 +964,30 @@ mod tests {
         // The pty mutex must be free as soon as kill returns; the old code
         // held it through a blocking reap of the child.
         assert!(handle.pty.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn acknowledged_input_completes_only_after_the_writer_accepts_it() {
+        let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        let mut input_rx = handle.take_input_rx().await.expect("input queue");
+        let mut written = handle
+            .enqueue_acknowledged_input(b"merge request".to_vec())
+            .expect("enqueue input");
+
+        assert!(
+            written.try_recv().is_err(),
+            "enqueueing alone must not acknowledge the input"
+        );
+        let pending = input_rx.recv().await.expect("pending input");
+        assert_eq!(pending.data, b"merge request");
+        assert!(
+            written.try_recv().is_err(),
+            "dequeueing alone must not acknowledge the input"
+        );
+
+        pending.acknowledge_written();
+        written.await.expect("PTY writer acknowledgement");
+        handle.kill().await.unwrap();
     }
 
     #[tokio::test]
