@@ -808,3 +808,33 @@ fn catalog_types_are_deserialized_from_manifest_values() {
         Some("parentTaskId"),
     )));
 }
+
+#[test]
+fn display_name_documents_the_prompt_fallback_rather_than_a_derivation() {
+    // Nothing derives a title from the prompt: an omitted display_name leaves
+    // the task titled by the prompt text itself. Describing it as a derivation
+    // is what made template-driven fan-outs (the QA dispatcher's specialty
+    // children) safe-looking to dispatch unnamed, and they all rendered alike.
+    let catalog = bundled_catalog();
+    let description = catalog
+        .tools
+        .iter()
+        .find(|tool| tool.name == "kanna_create_task")
+        .expect("create task")
+        .params
+        .iter()
+        .find(|param| param.name == "display_name")
+        .expect("display_name param")
+        .description
+        .clone()
+        .expect("display_name description");
+
+    assert!(
+        description.contains("falls back to the prompt text"),
+        "display_name must document the prompt fallback: {description}"
+    );
+    assert!(
+        !description.contains("derived from the prompt"),
+        "display_name must not promise a derivation: {description}"
+    );
+}
