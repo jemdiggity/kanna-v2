@@ -546,6 +546,7 @@ mod tests {
                 "kanna_task_logs",
                 "kanna_search_tasks",
                 "kanna_list_repo_tasks",
+                "kanna_list_agents",
                 "kanna_create_task",
                 "kanna_signal_agent",
                 "kanna_send_task_input",

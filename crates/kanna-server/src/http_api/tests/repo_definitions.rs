@@ -404,6 +404,70 @@ async fn repo_definition_manifest_keeps_a_repo_authored_pipeline_name_verbatim()
         .any(|name| name == "qa"));
 }
 
+#[tokio::test]
+async fn list_agents_reports_the_resolved_repo_override_that_task_creation_uses() {
+    let (_temp, repo) = published_definitions_repo(
+        "agent-list-override",
+        &[
+            (
+                ".kanna/agents/commit/AGENT.md",
+                "---\nname: commit\ndescription: Repo commit base\nagent_provider: codex\nmodel: repo-base-model\n---\nRepo commit prompt."
+                    .to_string(),
+            ),
+            (
+                ".kanna/agents/commit/EXTEND.md",
+                "---\ndescription: Repo commit after extension\nagent_provider: copilot\nmodel: repo-extended-model\n---\nRepo extension."
+                    .to_string(),
+            ),
+            (
+                ".kanna/agents/ship/AGENT.md",
+                "---\nname: ship\ndescription: Ships the product\nagent_provider: claude\n---\nShip it."
+                    .to_string(),
+            ),
+            (
+                ".kanna/agents/review/EXTEND.md",
+                "---\ndescription: Repo-extended review\n---\nReview repo rules.".to_string(),
+            ),
+        ],
+    );
+    let app = manifest_router("definitions-agent-list-override", &repo);
+
+    let (status, agents) = json_response(&app, "/v1/repos/repo-1/agents").await;
+    assert_eq!(status, StatusCode::OK);
+    let agents = agents.as_array().expect("agent list response");
+
+    let commit = agents
+        .iter()
+        .find(|agent| agent["name"] == "commit")
+        .expect("resolved commit agent");
+    assert_eq!(commit["description"], "Repo commit after extension");
+    assert_eq!(commit["defaultProvider"], "copilot");
+    assert_eq!(commit["defaultModel"], "repo-extended-model");
+    assert_eq!(commit["source"], "repo_override");
+
+    let ship = agents
+        .iter()
+        .find(|agent| agent["name"] == "ship")
+        .expect("repo-authored ship agent");
+    assert_eq!(ship["description"], "Ships the product");
+    assert_eq!(ship["defaultProvider"], "claude");
+    assert!(ship["defaultModel"].is_null());
+    assert_eq!(ship["source"], "repo_authored");
+
+    let review = agents
+        .iter()
+        .find(|agent| agent["name"] == "review")
+        .expect("repo-extended built-in review agent");
+    assert_eq!(review["description"], "Repo-extended review");
+    assert_eq!(review["source"], "repo_override");
+
+    let implement = agents
+        .iter()
+        .find(|agent| agent["name"] == "implement")
+        .expect("built-in implement agent");
+    assert_eq!(implement["source"], "built_in");
+}
+
 fn run_git(repo: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)

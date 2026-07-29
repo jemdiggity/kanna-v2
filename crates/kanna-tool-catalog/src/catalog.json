@@ -107,8 +107,18 @@
       ]
     },
     {
+      "name": "kanna_list_agents",
+      "description": "List every resolved named agent definition available to task creation for a repository. Each result includes the invokable name, resolved frontmatter description, definition default provider and model, and source (built_in, repo_override, or repo_authored). A null defaultProvider means task creation falls back to the configured user default. Repo AGENT.md files win over built-ins by name, and repo EXTEND.md files are already layered into the reported defaults.",
+      "method": "GET",
+      "path": "/v1/repos/{repo_id}/agents",
+      "response": "json",
+      "params": [
+        { "name": "repo_id", "description": "Repository id from kanna_list_repos.", "type": "string", "required": true, "location": "path" }
+      ]
+    },
+    {
       "name": "kanna_create_task",
-      "description": "Create a new Kanna task: forks a worktree and starts the pipeline's first stage agent with the prompt. When called from a Kanna task session, repo_id defaults to the current task's repo. `agent` optionally names an agent definition (e.g. a specialty review agent) to run the task's first stage with, overriding the pipeline stage's own agent binding.",
+      "description": "Create a new Kanna task: forks a worktree and starts the pipeline's first stage agent with the prompt. When called from a Kanna task session, repo_id defaults to the current task's repo. `agent` optionally names any resolved agent definition returned by kanna_list_agents to run the task's first stage with, overriding the pipeline stage's own agent binding.",
       "method": "POST",
       "path": "/v1/tasks",
       "response": "json",
@@ -117,9 +127,9 @@
         { "name": "prompt", "description": "Task prompt given to the first stage's agent.", "type": "string", "required": true, "location": "body" },
         { "name": "display_name", "description": "Short human-readable task title shown in the sidebar. Omitting it does not derive a title: the task falls back to the prompt text itself, clipped to fit, so tasks whose prompts share an opening line become indistinguishable. Always pass one when creating several tasks from a template.", "type": "string", "required": false, "location": "body", "key": "displayName" },
         { "name": "pipeline_name", "description": "Pipeline to run (e.g. 'no-review', 'single-reviewer', 'specialty-review'). Defaults to the repo's configured pipeline.", "type": "string", "required": false, "location": "body", "key": "pipelineName" },
-        { "name": "agent", "description": "Agent definition name (e.g. a 'review-*' specialty agent) that runs the first stage instead of the stage's own agent binding.", "type": "string", "required": false, "location": "body" },
+        { "name": "agent", "description": "Any resolved agent definition name returned by kanna_list_agents. It runs the first stage instead of the stage's own agent binding; repo overrides and EXTEND.md layering are honored.", "type": "string", "required": false, "location": "body" },
         { "name": "base_ref", "description": "Git ref to fork the task's branch and worktree from. Defaults to the repo's default branch.", "type": "string", "required": false, "location": "body", "key": "baseRef" },
-        { "name": "agent_provider", "description": "Agent provider id: 'claude', 'copilot', 'codex', 'opencode', or 'antigravity'. Defaults to the configured default provider.", "type": "string", "required": false, "location": "body", "key": "agentProvider" },
+        { "name": "agent_provider", "description": "Explicit agent provider id: 'claude', 'copilot', 'codex', 'opencode', or 'antigravity'. When omitted, Kanna uses the selected stage or agent definition's provider candidates, then the configured user default.", "type": "string", "required": false, "location": "body", "key": "agentProvider" },
         { "name": "agent_type", "description": "'pty' runs the agent CLI in an interactive terminal session; 'agent' runs it headless via the SDK.", "type": "string", "required": false, "location": "body", "key": "agentType", "default": "pty" },
         { "name": "model", "description": "Model override passed to the agent CLI.", "type": "string", "required": false, "location": "body" },
         { "name": "permission_mode", "description": "Permission mode passed to the agent CLI, in camelCase: 'dontAsk', 'acceptEdits', or 'default'.", "type": "string", "required": false, "location": "body", "key": "permissionMode" },

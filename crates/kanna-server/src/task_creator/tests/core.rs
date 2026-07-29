@@ -3089,6 +3089,69 @@ fn prepare_task_uses_create_request_agent_selector() {
 }
 
 #[test]
+fn prepare_task_named_agent_without_provider_uses_configured_default() {
+    let repo_root = init_git_repo("create-request-agent-default-provider");
+    let config = test_config("create-request-agent-default-provider");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.set_test_setting("defaultAgentProvider", "copilot")
+        .unwrap();
+
+    let agent_dir = repo_root.join(".kanna/agents/ship");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("AGENT.md"),
+        "---\nname: ship\ndescription: Ships the product\n---\nship agent prompt",
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish provider-neutral named agent");
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Ship this repository.".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: Some("ship".to_string()),
+            agent_provider: None,
+            agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: None,
+            recovery_snapshot: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(prepared.stage_agent.as_deref(), Some("ship"));
+    assert_eq!(prepared.agent_provider, "copilot");
+    match prepared.session {
+        PreparedSessionSpawn::Pty { args, .. } => {
+            assert!(args.join(" ").contains("ship agent prompt"));
+        }
+        _ => panic!("expected pty session"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn prepare_task_binds_specialty_agent_on_specialty_review_pipeline() {
     // The QA dispatcher's fan-out path: a child task created on the builtin
     // single-stage `specialty-review` pipeline, with the specialty agent

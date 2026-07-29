@@ -8,9 +8,9 @@ use serde_json::Value;
 use crate::models::{
     AddRepoRequest, BlockTaskRequest, CompleteStageRequest, CreateTaskRequest, CreateTaskResponse,
     DependentTasksExistResponse, RepoDetail, RepoSummary, RequestRevisionRequest,
-    SetTaskNotifyRequest, SetTaskParentRequest, SignalAgentRequest, SignalAgentResponse,
-    TaskActionResponse, TaskDetail, TaskInputRequest, TaskInputResponse, TaskRenameRequest,
-    TaskSummary, WaitUntil,
+    ResolvedAgentDefinition, SetTaskNotifyRequest, SetTaskParentRequest, SignalAgentRequest,
+    SignalAgentResponse, TaskActionResponse, TaskDetail, TaskInputRequest, TaskInputResponse,
+    TaskRenameRequest, TaskSummary, WaitUntil,
 };
 
 pub(crate) fn join_server_url(base_url: &str, path: &str) -> String {
@@ -35,6 +35,10 @@ pub(crate) fn task_list_path() -> &'static str {
 
 pub(crate) fn repo_task_list_path(repo_id: &str) -> String {
     format!("/v1/repos/{}/tasks", encode_path_segment(repo_id))
+}
+
+pub(crate) fn repo_agent_list_path(repo_id: &str) -> String {
+    format!("/v1/repos/{}/agents", encode_path_segment(repo_id))
 }
 
 pub(crate) fn signal_agent_path(repo_id: &str, agent: &str) -> String {
@@ -250,6 +254,13 @@ pub(crate) async fn signal_agent_via_api(
     request: &SignalAgentRequest,
 ) -> Result<SignalAgentResponse, String> {
     post_json(base_url, &signal_agent_path(repo_id, agent), request).await
+}
+
+pub(crate) async fn list_repo_agents_via_api(
+    base_url: &str,
+    repo_id: &str,
+) -> Result<Vec<ResolvedAgentDefinition>, String> {
+    get_json(base_url, &repo_agent_list_path(repo_id)).await
 }
 
 pub(crate) async fn list_tasks_via_api(base_url: &str) -> Result<Vec<TaskSummary>, String> {

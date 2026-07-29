@@ -28,6 +28,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_task_logs",
             "kanna_search_tasks",
             "kanna_list_repo_tasks",
+            "kanna_list_agents",
             "kanna_create_task",
             "kanna_signal_agent",
             "kanna_send_task_input",
@@ -67,8 +68,30 @@ fn generated_schema_preserves_required_order_types_and_enums() {
     assert_eq!(
         agent["type"],
         json!("string"),
-        "create-task must expose the agent override so dispatchers can bind specialty agents"
+        "create-task must expose the agent override so orchestrators can bind any resolved agent"
     );
+    assert!(
+        agent["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("kanna_list_agents")),
+        "create-task must point orchestrators at resolved agent discovery"
+    );
+
+    let list_agents = tools
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|tool| tool["name"] == "kanna_list_agents")
+        .expect("list agents tool");
+    let list_description = list_agents["description"]
+        .as_str()
+        .expect("list agents description");
+    for source in ["built_in", "repo_override", "repo_authored"] {
+        assert!(
+            list_description.contains(source),
+            "list-agents must document source value `{source}`"
+        );
+    }
 
     let wait = tools
         .as_array()
@@ -199,6 +222,14 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             Method::Get,
             ResponseKind::Json,
             "/v1/repos/repo-1/tasks",
+            json!({}),
+        ),
+        (
+            "kanna_list_agents",
+            json!({ "repo_id": "repo-1" }),
+            Method::Get,
+            ResponseKind::Json,
+            "/v1/repos/repo-1/agents",
             json!({}),
         ),
         (

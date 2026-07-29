@@ -294,6 +294,24 @@ pub(super) struct AgentDefinition {
     pub(super) allowed_tools: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum AgentDefinitionSource {
+    BuiltIn,
+    RepoOverride,
+    RepoAuthored,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResolvedAgentDefinition {
+    pub(super) name: String,
+    pub(super) description: String,
+    pub(super) default_provider: Option<String>,
+    pub(super) default_model: Option<String>,
+    pub(super) source: AgentDefinitionSource,
+}
+
 struct AgentExtension {
     prompt: String,
     description: Option<String>,
@@ -423,6 +441,55 @@ impl RepoDefinitions {
             }
         }
         Ok(names.into_iter().collect())
+    }
+
+    /// Every named agent selector that can be passed to task creation, after
+    /// applying the same repo override, configured-flavor, and EXTEND.md
+    /// resolution as `agent()`.
+    pub(super) fn agents(&self) -> Result<Vec<ResolvedAgentDefinition>, String> {
+        let mut names = builtin_agent_names();
+        let entries = self
+            .snapshot
+            .list_direct_entries(".kanna/agents")
+            .map_err(|error| definition_error(&self.snapshot, ".kanna/agents", error))?;
+
+        for name in entries {
+            let agent_path = format!(".kanna/agents/{name}/AGENT.md");
+            if read_snapshot_utf8(&self.snapshot, &agent_path)?.is_some() {
+                names.insert(name);
+            }
+        }
+
+        names
+            .into_iter()
+            .map(|name| {
+                let repo_agent_path = format!(".kanna/agents/{name}/AGENT.md");
+                let repo_has_agent =
+                    read_snapshot_utf8(&self.snapshot, &repo_agent_path)?.is_some();
+                let repo_extension_path = format!(".kanna/agents/{name}/EXTEND.md");
+                let repo_has_extension =
+                    read_snapshot_utf8(&self.snapshot, &repo_extension_path)?.is_some();
+                let builtin = is_builtin_agent_name(&name);
+                let source = match (repo_has_agent, repo_has_extension, builtin) {
+                    (true, _, true) | (false, true, true) => AgentDefinitionSource::RepoOverride,
+                    (false, false, true) => AgentDefinitionSource::BuiltIn,
+                    (true, _, false) => AgentDefinitionSource::RepoAuthored,
+                    (false, _, false) => {
+                        return Err(format!(
+                            "agent `{name}` disappeared while resolving repository definitions"
+                        ));
+                    }
+                };
+                let definition = self.agent(&name)?;
+                Ok(ResolvedAgentDefinition {
+                    name,
+                    description: definition.description,
+                    default_provider: definition.agent_providers.into_iter().next(),
+                    default_model: definition.model,
+                    source,
+                })
+            })
+            .collect()
     }
 }
 
@@ -701,6 +768,112 @@ fn optional_builtin_agent_resource(selector: &AgentSelector) -> Option<String> {
         .map(str::to_string)
 }
 
+const BUILTIN_AGENT_RESOURCES: &[(&str, &str)] = &[
+    (
+        ".kanna/agents/agent-factory/AGENT.md",
+        include_str!("../../../../.kanna/agents/agent-factory/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/approve/AGENT.md",
+        include_str!("../../../../.kanna/agents/approve/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/commit/AGENT.md",
+        include_str!("../../../../.kanna/agents/commit/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/config-factory/AGENT.md",
+        include_str!("../../../../.kanna/agents/config-factory/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/implement/AGENT.md",
+        include_str!("../../../../.kanna/agents/implement/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/merge/AGENT.md",
+        include_str!("../../../../.kanna/agents/merge/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/merge/flavors/git/AGENT.md",
+        include_str!("../../../../.kanna/agents/merge/flavors/git/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/merge/flavors/github/AGENT.md",
+        include_str!("../../../../.kanna/agents/merge/flavors/github/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/pipeline-factory/AGENT.md",
+        include_str!("../../../../.kanna/agents/pipeline-factory/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/pr/AGENT.md",
+        include_str!("../../../../.kanna/agents/pr/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/pr/flavors/draft-pr/AGENT.md",
+        include_str!("../../../../.kanna/agents/pr/flavors/draft-pr/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/pr/flavors/push-only/AGENT.md",
+        include_str!("../../../../.kanna/agents/pr/flavors/push-only/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/qa-dispatcher/AGENT.md",
+        include_str!("../../../../.kanna/agents/qa-dispatcher/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/review/AGENT.md",
+        include_str!("../../../../.kanna/agents/review/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/review-compat/AGENT.md",
+        include_str!("../../../../.kanna/agents/review-compat/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/review-concurrency/AGENT.md",
+        include_str!("../../../../.kanna/agents/review-concurrency/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/review-migration/AGENT.md",
+        include_str!("../../../../.kanna/agents/review-migration/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/review-perf/AGENT.md",
+        include_str!("../../../../.kanna/agents/review-perf/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/review-security/AGENT.md",
+        include_str!("../../../../.kanna/agents/review-security/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/review-ui/AGENT.md",
+        include_str!("../../../../.kanna/agents/review-ui/AGENT.md"),
+    ),
+    (
+        ".kanna/agents/setup/AGENT.md",
+        include_str!("../../../../.kanna/agents/setup/AGENT.md"),
+    ),
+];
+
+fn builtin_agent_names() -> BTreeSet<String> {
+    BUILTIN_AGENT_RESOURCES
+        .iter()
+        .filter_map(|(path, _)| {
+            path.strip_prefix(".kanna/agents/")?
+                .strip_suffix("/AGENT.md")
+                .filter(|name| !name.contains('/'))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn is_builtin_agent_name(name: &str) -> bool {
+    let path = format!(".kanna/agents/{name}/AGENT.md");
+    BUILTIN_AGENT_RESOURCES
+        .iter()
+        .any(|(resource_path, _)| *resource_path == path)
+}
+
 /// Built-in pipelines that shipped under an earlier name, mapped to the
 /// definition each now resolves to. Single source of truth: the compiled
 /// resource fallback below and manifest canonicalization in
@@ -737,7 +910,7 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
         }
     }
 
-    match relative_path {
+    let pipeline = match relative_path {
         ".kanna/pipelines/no-review.json" => {
             Some(include_str!("../../../../.kanna/pipelines/no-review.json"))
         }
@@ -750,69 +923,13 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
         ".kanna/pipelines/specialty-review.json" => Some(include_str!(
             "../../../../.kanna/pipelines/specialty-review.json"
         )),
-        ".kanna/agents/agent-factory/AGENT.md" => Some(include_str!(
-            "../../../../.kanna/agents/agent-factory/AGENT.md"
-        )),
-        ".kanna/agents/approve/AGENT.md" => {
-            Some(include_str!("../../../../.kanna/agents/approve/AGENT.md"))
-        }
-        ".kanna/agents/commit/AGENT.md" => {
-            Some(include_str!("../../../../.kanna/agents/commit/AGENT.md"))
-        }
-        ".kanna/agents/config-factory/AGENT.md" => Some(include_str!(
-            "../../../../.kanna/agents/config-factory/AGENT.md"
-        )),
-        ".kanna/agents/implement/AGENT.md" => {
-            Some(include_str!("../../../../.kanna/agents/implement/AGENT.md"))
-        }
-        ".kanna/agents/merge/AGENT.md" => {
-            Some(include_str!("../../../../.kanna/agents/merge/AGENT.md"))
-        }
-        ".kanna/agents/merge/flavors/git/AGENT.md" => Some(include_str!(
-            "../../../../.kanna/agents/merge/flavors/git/AGENT.md"
-        )),
-        ".kanna/agents/merge/flavors/github/AGENT.md" => Some(include_str!(
-            "../../../../.kanna/agents/merge/flavors/github/AGENT.md"
-        )),
-        ".kanna/agents/pipeline-factory/AGENT.md" => Some(include_str!(
-            "../../../../.kanna/agents/pipeline-factory/AGENT.md"
-        )),
-        ".kanna/agents/pr/AGENT.md" => Some(include_str!("../../../../.kanna/agents/pr/AGENT.md")),
-        ".kanna/agents/qa-dispatcher/AGENT.md" => Some(include_str!(
-            "../../../../.kanna/agents/qa-dispatcher/AGENT.md"
-        )),
-        ".kanna/agents/pr/flavors/draft-pr/AGENT.md" => Some(include_str!(
-            "../../../../.kanna/agents/pr/flavors/draft-pr/AGENT.md"
-        )),
-        ".kanna/agents/pr/flavors/push-only/AGENT.md" => Some(include_str!(
-            "../../../../.kanna/agents/pr/flavors/push-only/AGENT.md"
-        )),
-        ".kanna/agents/review/AGENT.md" => {
-            Some(include_str!("../../../../.kanna/agents/review/AGENT.md"))
-        }
-        ".kanna/agents/review-compat/AGENT.md" => Some(include_str!(
-            "../../../../.kanna/agents/review-compat/AGENT.md"
-        )),
-        ".kanna/agents/review-concurrency/AGENT.md" => Some(include_str!(
-            "../../../../.kanna/agents/review-concurrency/AGENT.md"
-        )),
-        ".kanna/agents/review-migration/AGENT.md" => Some(include_str!(
-            "../../../../.kanna/agents/review-migration/AGENT.md"
-        )),
-        ".kanna/agents/review-perf/AGENT.md" => Some(include_str!(
-            "../../../../.kanna/agents/review-perf/AGENT.md"
-        )),
-        ".kanna/agents/review-security/AGENT.md" => Some(include_str!(
-            "../../../../.kanna/agents/review-security/AGENT.md"
-        )),
-        ".kanna/agents/review-ui/AGENT.md" => {
-            Some(include_str!("../../../../.kanna/agents/review-ui/AGENT.md"))
-        }
-        ".kanna/agents/setup/AGENT.md" => {
-            Some(include_str!("../../../../.kanna/agents/setup/AGENT.md"))
-        }
         _ => None,
-    }
+    };
+    pipeline.or_else(|| {
+        BUILTIN_AGENT_RESOURCES
+            .iter()
+            .find_map(|(path, content)| (*path == relative_path).then_some(*content))
+    })
 }
 
 /// Merge an `EXTEND.md` document into a resolved agent definition: the body

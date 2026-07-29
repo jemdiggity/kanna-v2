@@ -51,6 +51,7 @@ use worktree::{
     remove_prepared_worktree, MergeBranchesError,
 };
 
+pub(crate) use definitions::ResolvedAgentDefinition;
 pub(crate) use definitions::DEFAULT_REVISION_LIMIT;
 pub(crate) use environment::warm_login_shell_path;
 pub(crate) use lifecycle::{
@@ -115,6 +116,15 @@ pub(crate) struct RevisionedPipelineDefinition {
 pub(crate) struct RevisionedAgentDefinition {
     revision: Option<String>,
     definition: definitions::AgentDefinition,
+}
+
+pub(crate) fn list_repo_agents(
+    cache: &RepoDefinitionsCache,
+    repo: &Repo,
+) -> Result<Vec<ResolvedAgentDefinition>, DefinitionLookupError> {
+    cache.with_definitions(repo, |definitions| {
+        definitions.agents().map_err(DefinitionLookupError::Other)
+    })
 }
 
 pub(crate) fn load_repo_kanna_definitions(
@@ -2465,11 +2475,7 @@ fn resolve_task_spawn(
             stage.agent_provider.as_deref()
         },
         agent.as_ref(),
-        if request.agent.is_some() {
-            None
-        } else {
-            request.default_provider.as_deref()
-        },
+        request.default_provider.as_deref(),
     )?;
     if provider_candidates.len() == 1 {
         resolve_agent_type(request.agent_type.as_deref(), provider_candidates[0])?;

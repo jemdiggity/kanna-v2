@@ -14,7 +14,8 @@ use super::repo_commands::{list_repo_commands, run_repo_command};
 use super::repos::{
     add_repo, dependent_tasks_exist, get_repo_agent_definition, get_repo_by_path,
     get_repo_kanna_definitions, get_repo_pipeline_definition, list_available_agent_providers,
-    list_recent_repo_pipelines, list_repo_tasks, list_repos, patch_repo, reorder_repos,
+    list_recent_repo_pipelines, list_repo_agents, list_repo_tasks, list_repos, patch_repo,
+    reorder_repos,
 };
 use super::settings::{delete_setting, get_setting, put_cloud_transfer_identity, put_setting};
 use super::signal_agent::signal_agent;
@@ -89,6 +90,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/repos/actions/reorder", post(reorder_repos))
         .route("/v1/repos/{repo_id}", axum::routing::patch(patch_repo))
         .route("/v1/repos/{repo_id}/tasks", get(list_repo_tasks))
+        .route("/v1/repos/{repo_id}/agents", get(list_repo_agents))
         .route("/v1/repos/{repo_id}/commands", get(list_repo_commands))
         .route(
             "/v1/repos/{repo_id}/commands/{command_id}/run",
