@@ -52,6 +52,7 @@ import {
 } from "../runtime/mobile-ota";
 import { buildConfigSchemaPages } from "../runtime/pages";
 import { getPortStatuses } from "../runtime/port-status";
+import { executeRemoteE2e } from "../runtime/remote-e2e";
 import { nodeCommandRunner, type CommandResult, type CommandRunner } from "../runtime/process";
 import { readDevDesktopAuth, readStagingDesktopAuth } from "../runtime/developer-config";
 import {
@@ -234,7 +235,8 @@ const remoteE2eInputSchema = z.object({
   dev: z.boolean().default(true),
   staging: z.boolean().default(false),
   mobileRelay: z.boolean().default(false),
-  desktopPairing: z.boolean().default(false)
+  desktopPairing: z.boolean().default(false),
+  ifChanged: z.boolean().default(false)
 });
 
 const remoteDoctorInputSchema = z.object({
@@ -2341,15 +2343,17 @@ export const taskDefinitions = [
         };
       }
       const context = await resolveDefaultContext(process.env);
-      const args = ["--dir", "tests/remote-e2e", "exec", "tsx", "src/run.ts", parsed.staging ? "--staging" : "--dev"];
-      if (parsed.mobileRelay) args.push("--mobile-relay");
-      if (parsed.desktopPairing) args.push("--desktop-pairing");
-      return runBuiltCommand(
-        "pnpm",
-        args,
-        context.repoRoot,
-        context.env
-      );
+      return executeRemoteE2e({
+        repoRoot: context.repoRoot,
+        env: context.env,
+        runner: nodeCommandRunner,
+        options: {
+          staging: parsed.staging,
+          mobileRelay: parsed.mobileRelay,
+          desktopPairing: parsed.desktopPairing,
+          ifChanged: parsed.ifChanged
+        }
+      });
     }
   },
   {
