@@ -16,7 +16,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -47,6 +50,12 @@ enum Cmd {
     Input {
         session_id: String,
         data: Vec<u8>,
+    },
+    SubmitInput {
+        session_id: String,
+        delivery_id: String,
+        message: Vec<u8>,
+        submit_delay_ms: u64,
     },
     Snapshot {
         session_id: String,
@@ -804,6 +813,107 @@ fn previous_daemon_fixture_is_the_shipped_v2_binary() {
         .expect("run previous daemon");
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("kanna-daemon"));
+}
+
+/// The sender's pre-snapshot barrier runs under the manager seal. A child
+/// that has stopped draining its PTY leaves an admitted `SubmitInput` blocked
+/// on backpressure forever, so the barrier must be bounded: the adopter gives
+/// up, and the incumbent unseals and keeps serving Spawn/Kill.
+#[test]
+fn handoff_aborts_and_unseals_when_pty_backpressure_blocks_submit_input() {
+    let dir = test_dir("submit-input-backpressure-timeout");
+    cleanup(&dir);
+    std::fs::create_dir_all(&dir).expect("create handoff directory");
+    let mut incumbent = DaemonHandle::start_in_with_env(
+        &dir,
+        &[("KANNA_TEST_HANDOFF_QUIESCENCE_TIMEOUT_MS", "250")],
+    );
+    let session_id = "backpressured-input";
+
+    let mut spawn = incumbent.connect();
+    spawn.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec!["-c".to_string(), "stty -echo -icanon; sleep 30".to_string()],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        agent_provider: None,
+    });
+    assert!(matches!(spawn.recv(), Evt::SessionCreated { .. }));
+    std::thread::sleep(Duration::from_millis(200));
+
+    let socket_path = incumbent.socket_path.clone();
+    let submission_finished = Arc::new(AtomicBool::new(false));
+    let submission_finished_in_thread = Arc::clone(&submission_finished);
+    let submitter = std::thread::spawn(move || {
+        let stream = UnixStream::connect(&socket_path).expect("connect submitter");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut connection = ClientConn {
+            reader: BufReader::new(stream.try_clone().unwrap()),
+            writer: stream,
+        };
+        connection.send(&Cmd::SubmitInput {
+            session_id: session_id.to_string(),
+            delivery_id: "backpressured-delivery".to_string(),
+            message: vec![b'x'; 2 * 1024 * 1024],
+            submit_delay_ms: 0,
+        });
+        let _ = connection.recv();
+        submission_finished_in_thread.store(true, Ordering::SeqCst);
+    });
+    std::thread::sleep(Duration::from_millis(250));
+    assert!(
+        !submission_finished.load(Ordering::SeqCst),
+        "the PTY writer must still have an in-flight SubmitInput"
+    );
+
+    let mut adopter = Command::new(env!("CARGO_BIN_EXE_kanna-daemon"))
+        .env("KANNA_DAEMON_DIR", dir.to_str().unwrap())
+        .env("KANNA_TEST_HANDOFF_QUIESCENCE_TIMEOUT_MS", "250")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start adopting daemon");
+    assert!(
+        wait_for_child_exit(&mut adopter, Duration::from_secs(5)).is_some(),
+        "the adopter must abort promptly instead of waiting forever for PTY quiescence"
+    );
+    assert!(
+        incumbent.child.try_wait().unwrap().is_none(),
+        "the incumbent must retain ownership after the aborted handoff"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("daemon.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap(),
+        incumbent.child.id()
+    );
+
+    // The seal lifted: lifecycle commands still work on the incumbent.
+    let mut control = incumbent.connect();
+    control.send(&Cmd::Kill {
+        session_id: session_id.to_string(),
+    });
+    loop {
+        match control.recv() {
+            Evt::Ok => break,
+            Evt::StatusChanged { .. } | Evt::Output { .. } => {}
+            other => panic!("expected incumbent Kill acknowledgement, got {other:?}"),
+        }
+    }
+    spawn_echo(&mut control, "after-aborted-handoff");
+
+    let _ = submitter.join();
+    drop(control);
+    drop(spawn);
+    drop(incumbent);
+    cleanup(&dir);
 }
 
 #[test]

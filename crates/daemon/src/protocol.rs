@@ -174,6 +174,14 @@ pub enum SessionStatus {
 pub const CURRENT_DAEMON_PROTOCOL_VERSION: u32 = 2;
 pub const CURRENT_EVENT_STREAM_VERSION: u32 = 2;
 
+/// How many completed `SubmitInput` delivery identities the daemon keeps as
+/// tombstones. A submitter replays a delivery only while its own request is
+/// still outstanding, so the window only has to outlive in-flight retries —
+/// but it must be bounded: the set is daemon-scoped and survives handoff, so
+/// an unbounded one grows for the daemon's whole lifetime and is carried
+/// wholesale into every replacement daemon.
+pub const INPUT_DELIVERY_REPLAY_WINDOW: usize = 128;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonCapabilities {
     pub protocol_version: u32,

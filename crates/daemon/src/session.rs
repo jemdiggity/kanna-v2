@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, RwLock, Weak,
@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use crate::codex_session::CodexSessionLocator;
 use crate::headless_terminal::HeadlessTerminal;
-use crate::protocol::{AgentProvider, SessionInfo, SessionState, SessionStatus};
+use crate::protocol::{
+    AgentProvider, SessionInfo, SessionState, SessionStatus, INPUT_DELIVERY_REPLAY_WINDOW,
+};
 use crate::pty::PtySession;
 use kanna_daemon::terminal_perf::{self, TerminalPerfContext};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
@@ -162,7 +164,11 @@ struct InFlightInputDelivery {
 
 #[derive(Default)]
 struct InputDeliveryTracker {
-    completed: VecDeque<String>,
+    /// Insertion order of `completed`, oldest first, so the window evicts by
+    /// age. Kept alongside the set rather than scanned: every submission and
+    /// every retry probes membership.
+    completed_order: VecDeque<String>,
+    completed: HashSet<String>,
     in_flight: HashMap<String, InFlightInputDelivery>,
 }
 
@@ -177,16 +183,17 @@ pub struct InputDeliveryRegistry {
 #[allow(dead_code)]
 impl InputDeliveryRegistry {
     pub(crate) async fn is_completed(&self, delivery_id: &str) -> bool {
-        self.state
-            .lock()
-            .await
-            .completed
-            .iter()
-            .any(|existing| existing == delivery_id)
+        self.state.lock().await.completed.contains(delivery_id)
     }
 
     pub(crate) async fn completed_ids(&self) -> Vec<String> {
-        self.state.lock().await.completed.iter().cloned().collect()
+        self.state
+            .lock()
+            .await
+            .completed_order
+            .iter()
+            .cloned()
+            .collect()
     }
 
     pub(crate) async fn wait_for_all_in_flight(&self) {
@@ -204,11 +211,7 @@ impl InputDeliveryRegistry {
     pub(crate) async fn wait_for_existing(&self, delivery_id: &str) -> Option<Result<(), String>> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let mut state = self.state.lock().await;
-        if state
-            .completed
-            .iter()
-            .any(|existing| existing == delivery_id)
-        {
+        if state.completed.contains(delivery_id) {
             return Some(Ok(()));
         }
         let in_flight = state.in_flight.get_mut(delivery_id)?;
@@ -221,16 +224,23 @@ impl InputDeliveryRegistry {
         )
     }
 
+    /// Record a completed delivery, evicting the oldest identities beyond the
+    /// replay window.
+    fn record_completed(state: &mut InputDeliveryTracker, delivery_id: String) {
+        if state.completed.insert(delivery_id.clone()) {
+            state.completed_order.push_back(delivery_id);
+        }
+        while state.completed_order.len() > INPUT_DELIVERY_REPLAY_WINDOW {
+            if let Some(evicted) = state.completed_order.pop_front() {
+                state.completed.remove(&evicted);
+            }
+        }
+    }
+
     pub(crate) async fn restore_completed_ids(&self, delivery_ids: Vec<String>) {
         let mut state = self.state.lock().await;
         for delivery_id in delivery_ids {
-            if !state
-                .completed
-                .iter()
-                .any(|existing| existing == &delivery_id)
-            {
-                state.completed.push_back(delivery_id);
-            }
+            Self::record_completed(&mut state, delivery_id);
         }
     }
 }
@@ -370,11 +380,7 @@ impl SessionHandle {
             if !self.input_submissions_accepting.load(Ordering::SeqCst) {
                 return Err("input writer is no longer accepting submissions".to_string());
             }
-            if deliveries
-                .completed
-                .iter()
-                .any(|existing| existing == &delivery_id)
-            {
+            if deliveries.completed.contains(&delivery_id) {
                 return Ok(());
             }
             if let Some(in_flight) = deliveries.in_flight.get_mut(&delivery_id) {
@@ -423,14 +429,8 @@ impl SessionHandle {
                 .unwrap_or_default(),
             _ => Vec::new(),
         };
-        if result.is_ok()
-            && !waiters.is_empty()
-            && !deliveries
-                .completed
-                .iter()
-                .any(|existing| existing == delivery_id)
-        {
-            deliveries.completed.push_back(delivery_id.to_string());
+        if result.is_ok() && !waiters.is_empty() {
+            InputDeliveryRegistry::record_completed(&mut deliveries, delivery_id.to_string());
         }
         drop(deliveries);
         for waiter in waiters {
@@ -469,26 +469,6 @@ impl SessionHandle {
         self.input_submissions_changed.notify_waiters();
     }
 
-    async fn wait_for_input_submissions(&self) {
-        loop {
-            let registry = self.input_delivery_registry();
-            let notified = registry.changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            let has_owned_delivery = registry
-                .state
-                .lock()
-                .await
-                .in_flight
-                .values()
-                .any(|in_flight| in_flight.owner == self.input_delivery_owner);
-            if !has_owned_delivery {
-                return;
-            }
-            notified.await;
-        }
-    }
-
     fn input_delivery_registry(&self) -> Arc<InputDeliveryRegistry> {
         self.input_deliveries
             .read()
@@ -503,7 +483,11 @@ impl SessionHandle {
             .expect("input delivery registry poisoned") = registry;
     }
 
-    async fn freeze_input_submissions(&self) {
+    /// Stop admitting new input submissions. The handoff orchestrator in the
+    /// daemon binary owns the freeze so it can bound the barrier that follows;
+    /// the library-only target does not compile that module.
+    #[allow(dead_code)]
+    pub(crate) async fn freeze_input_submissions(&self) {
         self.input_submissions_frozen.store(true, Ordering::SeqCst);
         // Synchronize with a submitter that passed the first atomic check.
         let registry = self.input_delivery_registry();
@@ -796,11 +780,9 @@ impl SessionHandle {
     pub async fn handoff_parts(
         &self,
     ) -> Result<Option<SessionHandoffParts>, Box<dyn std::error::Error + Send + Sync>> {
-        // Accepted input identities are useful across handoff only after the
-        // whole message-plus-Enter sequence has reached the PTY. Wait for the
-        // writer to resolve every in-flight submission before snapshotting.
-        self.freeze_input_submissions().await;
-        self.wait_for_input_submissions().await;
+        // The caller freezes input submissions and waits out the registry
+        // barrier before snapshotting any handle — bounded, so PTY
+        // backpressure on one session cannot wedge the whole transfer.
         let pty = self.pty.lock().await;
         if !pty.is_alive() {
             return Ok(None);
@@ -1305,12 +1287,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        replay_headless_terminal_for_benchmark, BenchmarkStatusState, SessionHandle,
-        SessionManager, SessionRecord, StreamControl,
+        replay_headless_terminal_for_benchmark, BenchmarkStatusState, InputDeliveryRegistry,
+        SessionHandle, SessionManager, SessionRecord, StreamControl,
     };
     use crate::bench::transcript::{BenchmarkMode, BenchmarkProvider, TranscriptSpec};
     use crate::headless_terminal::{initial_session_status, HeadlessTerminal};
-    use crate::protocol::{AgentProvider, SessionStatus};
+    use crate::protocol::{AgentProvider, SessionStatus, INPUT_DELIVERY_REPLAY_WINDOW};
     use crate::pty::PtySession;
     use tokio::sync::Mutex;
 
@@ -1485,6 +1467,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_input_identities_evict_beyond_the_replay_window() {
+        let registry = InputDeliveryRegistry::default();
+        registry
+            .restore_completed_ids(
+                (0..=INPUT_DELIVERY_REPLAY_WINDOW)
+                    .map(|index| format!("delivery-{index:03}"))
+                    .collect(),
+            )
+            .await;
+
+        let restored = registry.completed_ids().await;
+        assert_eq!(
+            restored.len(),
+            INPUT_DELIVERY_REPLAY_WINDOW,
+            "the daemon-scoped tombstone set must stay bounded across handoffs"
+        );
+        assert_eq!(restored.first().map(String::as_str), Some("delivery-001"));
+        assert_eq!(restored.last().map(String::as_str), Some("delivery-128"));
+        assert!(!registry.is_completed("delivery-000").await);
+        assert!(registry.is_completed("delivery-128").await);
+    }
+
+    #[tokio::test]
     async fn handoff_registry_barrier_includes_delivery_from_a_removed_session() {
         let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
         let mut input_rx = handle.take_input_rx().await.expect("input queue");
@@ -1555,20 +1560,24 @@ mod tests {
         input_rx.recv().await.expect("first queued submission");
 
         manager.lock().await.seal_for_handoff();
-        let snapshot = {
-            let handle = Arc::clone(&handle);
-            tokio::spawn(async move { handle.handoff_parts().await })
+        // The orchestrator's barrier: freeze every handle, then wait out the
+        // daemon-wide registry before snapshotting any of them.
+        handle.freeze_input_submissions().await;
+        let snapshot_barrier = {
+            let registry = manager.lock().await.input_delivery_registry();
+            tokio::spawn(async move { registry.wait_for_all_in_flight().await })
         };
         tokio::task::yield_now().await;
         assert!(
-            !snapshot.is_finished(),
+            !snapshot_barrier.is_finished(),
             "handoff must wait for an already admitted submission"
         );
         handle
             .complete_input_submission("before-handoff", Ok(()))
             .await;
         first_submit.await.unwrap().unwrap();
-        assert!(snapshot.await.unwrap().unwrap().is_some());
+        snapshot_barrier.await.unwrap();
+        assert!(handle.handoff_parts().await.unwrap().is_some());
 
         let after_snapshot = {
             let handle = Arc::clone(&handle);
