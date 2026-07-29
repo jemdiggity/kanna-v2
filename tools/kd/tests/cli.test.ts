@@ -958,12 +958,19 @@ describe("kd CLI", () => {
     });
     expect(parseCliArgs(["test", "remote-e2e"])).toEqual({
       taskId: "test.remote-e2e",
-      input: { dev: true, staging: false, mobileRelay: false, desktopPairing: false },
+      input: { dev: true, staging: false, mobileRelay: false, desktopPairing: false, ifChanged: false },
     });
     expect(parseCliArgs(["test", "remote-e2e", "--staging"])).toEqual({
       taskId: "test.remote-e2e",
-      input: { dev: false, staging: true, mobileRelay: false, desktopPairing: false },
+      input: { dev: false, staging: true, mobileRelay: false, desktopPairing: false, ifChanged: false },
     });
+    expect(parseCliArgs(["test", "remote-e2e", "--if-changed"])).toEqual({
+      taskId: "test.remote-e2e",
+      input: { dev: true, staging: false, mobileRelay: false, desktopPairing: false, ifChanged: true },
+    });
+    expect(() => parseCliArgs(["test", "remote-e2e", "--staging", "--if-changed"])).toThrow(
+      "remote-e2e --if-changed applies to the dev lane only"
+    );
   });
 
   it("parses rust-cache commands", () => {

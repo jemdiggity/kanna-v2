@@ -201,12 +201,26 @@ Status key: ✅ landed.
 ## 6. kd
 
 All entry points stay on the canonical `kd` surface: `kd test remote-e2e
-[--dev|--staging]`, `kd doctor --remote [--staging]`, `kd dev up --remote`.
-There is no hosted CI: dev Layer A and Layer B run locally through `kd test
-remote-e2e`, and the staging smoke runs through `kd test remote-e2e
+[--dev|--staging] [--if-changed]`, `kd doctor --remote [--staging]`, `kd dev up
+--remote`. There is no hosted CI: dev Layer A and Layer B run locally through
+`kd test remote-e2e`, and the staging smoke runs through `kd test remote-e2e
 --staging` when credentials are available. Layer C and Layer D remain
 optional runner lanes, not part of the default verification pass;
 physical-device execution remains human-gated.
+
+`kd test remote-e2e --if-changed` is the local replacement for the pull-request
+path filter of the deleted `.github/workflows/remote-e2e.yml`. It computes the
+branch's changed paths against the merge-base with the repo's default branch
+(committed, uncommitted, and untracked) and runs the dev lane only when one of
+them touches a remote E2E surface: `services/relay/`, `crates/kanna-server/`,
+`services/firebase-functions/`, `apps/mobile/src/lib/`, `tests/remote-e2e/`, or
+`tools/kd/`. That trigger list lives as the single constant
+`REMOTE_E2E_TRIGGER_PATHS` in `tools/kd/src/runtime/remote-e2e.ts`; update it
+there when the remote surface moves. On no match the command exits 0 with a
+"remote E2E not required for this branch" message and starts no emulators and
+runs no tests; on a match it runs the dev lane completely unchanged. The flag
+applies to the dev lane only — it is refused with `--staging` — and the remote
+lane stays out of `./kd test all` because it needs Firebase emulators.
 
 ## 7. Acceptance criteria (v2)
 

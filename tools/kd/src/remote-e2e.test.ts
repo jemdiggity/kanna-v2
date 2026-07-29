@@ -9,7 +9,8 @@ describe("kd remote-e2e test command", () => {
         dev: true,
         staging: false,
         mobileRelay: false,
-        desktopPairing: false
+        desktopPairing: false,
+        ifChanged: false
       }
     });
   });
@@ -21,7 +22,8 @@ describe("kd remote-e2e test command", () => {
         dev: true,
         staging: false,
         mobileRelay: true,
-        desktopPairing: false
+        desktopPairing: false,
+        ifChanged: false
       }
     });
     expect(parseCliArgs(["test", "remote-e2e", "--desktop-pairing"])).toEqual({
@@ -30,8 +32,25 @@ describe("kd remote-e2e test command", () => {
         dev: true,
         staging: false,
         mobileRelay: false,
-        desktopPairing: true
+        desktopPairing: true,
+        ifChanged: false
       }
     });
+  });
+
+  it("parses the path-aware selection flag for the dev lane only", () => {
+    expect(parseCliArgs(["test", "remote-e2e", "--if-changed"])).toEqual({
+      taskId: "test.remote-e2e",
+      input: {
+        dev: true,
+        staging: false,
+        mobileRelay: false,
+        desktopPairing: false,
+        ifChanged: true
+      }
+    });
+    expect(() => parseCliArgs(["test", "remote-e2e", "--staging", "--if-changed"])).toThrow(
+      "remote-e2e --if-changed applies to the dev lane only"
+    );
   });
 });
