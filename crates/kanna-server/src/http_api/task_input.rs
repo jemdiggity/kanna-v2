@@ -17,9 +17,11 @@ pub(super) struct TaskInputRequest {
 /// The agent CLI coalesces a single bulk write (message text plus a trailing
 /// carriage return) as a *paste*, where the CR is folded into the buffer as a
 /// literal newline and the message is never submitted. Writing the text and the
-/// carriage return as two Input commands separated by a short pause makes the CR
-/// register as a discrete Enter keystroke — exactly how a human types then
-/// presses Enter. 150ms was validated against the live Claude CLI.
+/// carriage return as two acknowledged Input commands separated by a short
+/// pause makes the CR register as a discrete Enter keystroke — exactly how a
+/// human types then presses Enter. The daemon acknowledges Input only after it
+/// reaches the PTY, so this delay cannot begin while the message is still
+/// queued. 150ms was validated against the live Claude CLI.
 const SUBMIT_ENTER_DELAY_MS: u64 = 150;
 
 /// The message portion of a `/v1/tasks/{id}/input` payload: the caller's text

@@ -171,6 +171,9 @@ pub enum Command {
     Detach {
         session_id: String,
     },
+    /// Terminal input whose success response is sent only after every byte has
+    /// been written to the PTY. Callers can use the acknowledgement as an
+    /// ordering barrier before sending a later, discrete keystroke.
     Input {
         session_id: String,
         data: Vec<u8>,
