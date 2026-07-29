@@ -43,7 +43,7 @@ async fn wait_for_stage_run(db: &Db, task_id: &str, expected_stage: &str) -> cra
 async fn recv_state_change_scope(
     rx: &mut tokio::sync::broadcast::Receiver<kanna_agent_protocol::ServerFrame>,
 ) -> kanna_agent_protocol::StateChangeScope {
-    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
         .await
         .expect("timed out waiting for state change")
         .expect("state change channel closed");
@@ -4075,8 +4075,19 @@ async fn advance_stage_route_notifies_after_detached_setup_failure_is_persisted(
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
     let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    // Accept (and immediately EOF) connections for the whole test: a
+    // single-accept fake would strand later connections in the closed
+    // listener's backlog, hanging the detached worker until the daemon
+    // command timeout instead of failing fast.
+    let (first_contact_tx, first_contact_rx) = tokio::sync::oneshot::channel();
     let daemon_server = tokio::spawn(async move {
         let (_stream, _) = daemon_listener.accept().await.unwrap();
+        let _ = first_contact_tx.send(());
+        loop {
+            let Ok((_stream, _)) = daemon_listener.accept().await else {
+                break;
+            };
+        }
     });
 
     let config = Config {
@@ -4160,7 +4171,11 @@ async fn advance_stage_route_notifies_after_detached_setup_failure_is_persisted(
         failed.result
     );
 
-    daemon_server.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), first_contact_rx)
+        .await
+        .expect("the detached worker should contact the daemon")
+        .unwrap();
+    daemon_server.abort();
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir_all(&daemon_dir);
     let _ = std::fs::remove_dir_all(&repo_root);

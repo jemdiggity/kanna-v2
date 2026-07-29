@@ -735,44 +735,76 @@ mod tests {
 
     #[test]
     fn concurrent_hangs_never_exceed_the_configured_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let release_flag = root.path().join("release");
+        // Winners hold their permit until the test creates the release flag,
+        // so the saturated state is observed deterministically instead of
+        // racing fixed sleeps against thread scheduling.
+        let command = format!(
+            "while [ ! -e '{}' ]; do sleep 0.05; done",
+            release_flag.display()
+        );
         let supervisor = Arc::new(WorkspaceCommandSupervisor::new(test_policy(
-            Duration::from_millis(300),
+            Duration::from_secs(30),
             4,
         )));
+        let (results_tx, results_rx) = std::sync::mpsc::channel();
         let barrier = Arc::new(Barrier::new(9));
         let joins = (0..8)
             .map(|_| {
                 let supervisor = Arc::clone(&supervisor);
                 let barrier = Arc::clone(&barrier);
+                let command = command.clone();
+                let cwd = root.path().to_path_buf();
+                let results_tx = results_tx.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    supervisor.run(
-                        "workspace setup",
-                        "sleep 30",
-                        std::path::Path::new("/tmp"),
-                        &HashMap::new(),
-                    )
+                    let result = supervisor.run("workspace setup", &command, &cwd, &HashMap::new());
+                    results_tx.send(result.clone()).unwrap();
+                    result
                 })
             })
             .collect::<Vec<_>>();
         barrier.wait();
-        std::thread::sleep(Duration::from_millis(50));
 
-        let health = supervisor.snapshot();
+        // Until the flag exists exactly four commands hold permits, so every
+        // other acquire must fail fast; collect those four capacity errors.
+        for _ in 0..4 {
+            let result = results_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("over-capacity commands should fail fast");
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.contains("capacity")),
+                "pre-release completion must be a capacity refusal: {result:?}"
+            );
+        }
+
+        // The four winners stay active until released; wait for them to cross
+        // the soft threshold and be reported as degraded.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let health = loop {
+            let health = supervisor.snapshot();
+            if health.long_running_workspace_commands == 4 {
+                break health;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "hung commands never became long-running: {health:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
         assert_eq!(health.active_workspace_commands, 4);
         assert!(!health.healthy);
         assert_eq!(health.status, "degraded");
         assert_eq!(health.long_running_workspace_commands, 4);
-        let capacity_errors = joins
-            .into_iter()
-            .map(|join| join.join().unwrap())
-            .filter(|result| {
-                result
-                    .as_ref()
-                    .is_err_and(|error| error.contains("capacity"))
-            })
-            .count();
-        assert_eq!(capacity_errors, 4);
+
+        std::fs::write(&release_flag, b"go").unwrap();
+        for join in joins {
+            let _ = join.join().unwrap();
+        }
+        assert_eq!(supervisor.snapshot().status, "healthy");
     }
 
     #[test]

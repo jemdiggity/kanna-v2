@@ -1291,7 +1291,7 @@ async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
     assert_eq!(budget.limit, 1);
 
     let db = Db::open(&fixture.config.db_path).unwrap();
-    let task = super::actions::wait_for_task_stage(&db, "budget-1", "in progress").await;
+    let task = super::actions::wait_for_running_task_stage(&db, "budget-1", "in progress").await;
     assert_eq!(task.stage.as_deref(), Some("in progress"));
     assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 0);
 
