@@ -95,6 +95,9 @@ identity are documented in detail in
 ./kd release ship --dry-run            # build/sign without publishing
 ./kd release ship --release            # tag, publish, upload manifest
 ./kd release ship --staging --release  # staging channel prerelease
+./kd pages build-schema --out-dir <dir>  # build the config-schema Pages artifact
+./kd pages publish-schema --dry-run      # report the publish plan, without touching origin
+./kd pages publish-schema                # publish the artifact to gh-pages on origin
 ```
 
 See [Release](release.md). Never run `firebase deploy` or `pnpm exec tauri`
@@ -111,9 +114,34 @@ repo (and dogfooded by this repo on itself):
   repo-local extensions.
 - `pipelines/{name}.json` — pipeline definitions.
 - `tasks/{slug}/agent.md` — custom task templates.
+- `config.schema.json` — the public JSON Schema for `config.json`, served at
+  `https://schemas.kanna.build/config.schema.json`. This checked-in file is the
+  single maintained copy.
 
 Built-in agents/pipelines ship as Tauri bundled resources; per-repo files
 override them by name.
+
+### Publishing the config schema
+
+`./kd pages build-schema --out-dir <dir>` stages `config.schema.json` plus the
+`schemas.kanna.build` `CNAME` into a Pages artifact directory;
+`./kd pages publish-schema` publishes it. Publication is branch-based, not
+artifact-based, because artifact deploys require GitHub Actions: the command
+commits the built artifact as a single orphan commit in a throwaway git
+worktree on a uniquely named temporary branch, then force-pushes it to
+`gh-pages` on `origin`. The caller's worktree, index, branches, and stash
+namespace are never touched, and each publish replaces the branch's content
+rather than stacking history.
+
+It refuses to run while `config.schema.json` has uncommitted changes, so what is
+published always matches a committed revision. Verify with
+`./kd pages publish-schema --dry-run`, which builds and reports exactly what
+would be committed and pushed without contacting `origin`.
+
+Publishing only becomes visible after a human applies the one-time repository
+setting the command cannot: GitHub repo Settings → Pages → Source must change
+from "GitHub Actions" to "Deploy from a branch", branch `gh-pages`, folder
+`/ (root)`.
 
 ## Debugging map
 

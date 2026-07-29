@@ -50,7 +50,11 @@ import {
   executeMobileOtaPublishWithContext,
   executeMobileOtaStatusWithContext
 } from "../runtime/mobile-ota";
-import { buildConfigSchemaPages } from "../runtime/pages";
+import {
+  buildConfigSchemaPages,
+  formatPublishConfigSchemaPagesResult,
+  publishConfigSchemaPages
+} from "../runtime/pages";
 import { getPortStatuses } from "../runtime/port-status";
 import { executeRemoteE2e } from "../runtime/remote-e2e";
 import { nodeCommandRunner, type CommandResult, type CommandRunner } from "../runtime/process";
@@ -255,6 +259,10 @@ const cleanInputSchema = z.object({
 
 const pagesBuildSchemaInputSchema = z.object({
   outDir: z.string()
+});
+
+const pagesPublishSchemaInputSchema = z.object({
+  dryRun: z.boolean().default(false)
 });
 
 const releaseShipInputSchema = z.object({
@@ -2000,6 +2008,25 @@ export const taskDefinitions = [
       const context = await resolveDefaultContext(process.env);
       const outputs = buildConfigSchemaPages({ repoRoot: context.repoRoot, outDir: resolve(context.repoRoot, parsed.outDir) });
       return { ok: true, message: outputs.join("\n"), data: { outputs } };
+    }
+  },
+  {
+    id: "pages.publish-schema",
+    description: "Publish the config-schema Pages artifact to the gh-pages branch.",
+    inputSchema: pagesPublishSchemaInputSchema,
+    execute: async (_context, input) => {
+      const parsed = pagesPublishSchemaInputSchema.parse(input);
+      const context = await resolveDefaultContext(process.env);
+      try {
+        const result = await publishConfigSchemaPages({
+          repoRoot: context.repoRoot,
+          runner: nodeCommandRunner,
+          dryRun: parsed.dryRun
+        });
+        return { ok: true, message: formatPublishConfigSchemaPagesResult(result), data: result };
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : String(error) };
+      }
     }
   },
   {

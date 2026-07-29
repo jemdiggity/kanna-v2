@@ -497,6 +497,14 @@ describe("kd CLI", () => {
     await expect(runCli(["rust-cache", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd rust-cache <command>"));
 
+    await expect(runCli(["pages", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("pages build-schema"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("pages publish-schema"));
+
+    await expect(runCli(["pages", "publish-schema", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd pages publish-schema"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Deploy from a branch"));
+
     await expect(runCli(["not-a-command", "--help"])).resolves.toBe(1);
     expect(error).toHaveBeenLastCalledWith("Unknown help topic: not-a-command");
   });
@@ -1025,6 +1033,14 @@ describe("kd CLI", () => {
     expect(parseCliArgs(["pages", "build-schema", "--out-dir", ".build/pages-schema"])).toEqual({
       taskId: "pages.build-schema",
       input: { outDir: ".build/pages-schema" }
+    });
+    expect(parseCliArgs(["pages", "publish-schema"])).toEqual({
+      taskId: "pages.publish-schema",
+      input: { dryRun: false }
+    });
+    expect(parseCliArgs(["pages", "publish-schema", "--dry-run"])).toEqual({
+      taskId: "pages.publish-schema",
+      input: { dryRun: true }
     });
     expect(parseCliArgs(["release", "ship", "--dry-run", "--minor", "--arm64", "--staging"])).toEqual({
       taskId: "release.ship",

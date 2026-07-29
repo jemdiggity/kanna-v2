@@ -542,6 +542,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "pages" && command === "build-schema") {
     return { taskId: "pages.build-schema", input: parseFlagInput(rest, {}) };
   }
+  if (group === "pages" && command === "publish-schema") {
+    return { taskId: "pages.publish-schema", input: parseFlagInput(rest, { dryRun: false }) };
+  }
   if (group === "test" && command === "all") {
     return { taskId: "test.all", input: {} };
   }
@@ -658,6 +661,7 @@ const helpTopics: Record<string, string[]> = {
     "  cloud deploy --staging|--production [--relay]",
     "  cloud relay-provision --staging|--production",
     "  pages build-schema --out-dir <dir>",
+    "  pages publish-schema [--dry-run]",
     "  test rust",
     "  test app-update-bundle",
     "  test cloud-emulator",
@@ -1022,12 +1026,24 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd pages <command>",
     "",
     "Commands:",
-    "  pages build-schema --out-dir <dir>"
+    "  pages build-schema --out-dir <dir>",
+    "  pages publish-schema [--dry-run]"
   ],
   "pages build-schema": [
     "Usage: kd pages build-schema --out-dir <dir>",
     "",
     "Build the static config-schema Pages artifact."
+  ],
+  "pages publish-schema": [
+    "Usage: kd pages publish-schema [--dry-run]",
+    "",
+    "Build the config-schema Pages artifact and publish it to the gh-pages branch on origin.",
+    "The commit is made in a throwaway git worktree, so the current worktree is never touched.",
+    "",
+    "  --dry-run                 Build and report what would be committed and pushed, without touching origin.",
+    "",
+    "Publishing only becomes visible after a human changes GitHub repo Settings → Pages → Source",
+    "from \"GitHub Actions\" to \"Deploy from a branch\", branch `gh-pages`, folder `/ (root)`."
   ],
   test: [
     "Usage: kd test <command>",
