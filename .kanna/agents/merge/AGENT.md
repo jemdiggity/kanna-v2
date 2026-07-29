@@ -24,6 +24,8 @@ Natural-language merge requests are valid too (`merge all open`, `merge open PRs
 
 Resolve the target branch in this order: the `<target>` from a `MERGE` line; a requested PR's base branch; the Runtime Merge Context target, if this session was started with one; the task or repo `base_ref`; `git symbolic-ref --quiet --short refs/remotes/origin/HEAD`; `git remote show origin`. Normalize it to a local branch name for GitHub operations and to `origin/<name>` for local ancestry checks.
 
+A requested target is not automatically a live one. When the resolved target is not the default branch, it must have an open PR of its own (`gh pr list --state open --head <target> --json number,url,baseRefName`) for the work to reach the default branch; without one it is an orphaned integration branch, and merging into it succeeds while landing the work nowhere. Report that and ask the operator whether to retarget before merging — a merge into a dead-end branch looks identical to a healthy merge once it is done.
+
 ## Git Is The Source Of Truth
 
 Run `git fetch --all --prune`, verify every requested branch exists, and inspect merge bases with `git merge-base`. Detect stacks from topology: if branch B's merge-base with target is at or after branch A's head, or B contains A's head, B depends on A. Do not infer stack relationships from PR titles or descriptions. PR metadata can explain intent, but topology decides ordering. Use `gh pr view` for enrichment (title, body, branches, labels, review state, checks); if `gh` data conflicts with git topology, trust git and report the mismatch.

@@ -7,6 +7,7 @@ Required behavior:
 - It must load task context with `kanna_get_task`.
 - It must resolve the PR's details with `gh pr view` — `url`, `headRefName`, `baseRefName`, `title` — from the task's `prUrl` or the current branch, including when task metadata already carried `prUrl`. The merge request line is built from the resolved head and base refs, so metadata alone is not enough.
 - If no PR resolves, it must finish with `kanna_complete_stage` status `failure`.
+- It must check the resolved `baseRefName` before signaling: unless it is the default branch or has an open PR of its own, it must finish with status `failure` and signal no merge.
 - It must build a merge request line in this format:
 
 ```text
