@@ -87,6 +87,40 @@ mod imp {
             buffer: *mut libc::c_void,
             buffersize: libc::c_int,
         ) -> libc::c_int;
+        fn proc_pidpath(
+            pid: libc::c_int,
+            buffer: *mut libc::c_void,
+            buffersize: u32,
+        ) -> libc::c_int;
+    }
+
+    pub fn process_executable_path(pid: libc::pid_t) -> Option<std::path::PathBuf> {
+        use std::os::unix::ffi::OsStringExt;
+
+        if pid <= 1 {
+            return None;
+        }
+        const PROC_PIDPATHINFO_MAXSIZE: usize = 4096;
+        let mut path = vec![0u8; PROC_PIDPATHINFO_MAXSIZE];
+        let read = unsafe {
+            proc_pidpath(
+                pid,
+                path.as_mut_ptr().cast(),
+                PROC_PIDPATHINFO_MAXSIZE as u32,
+            )
+        };
+        if read <= 0 {
+            return None;
+        }
+        let path_len = path[..read as usize]
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(read as usize);
+        if path_len == 0 {
+            return None;
+        }
+        path.truncate(path_len);
+        Some(std::path::PathBuf::from(std::ffi::OsString::from_vec(path)))
     }
 
     pub fn process_info(pid: libc::pid_t) -> Option<ProcessInfo> {
@@ -342,6 +376,20 @@ mod imp {
 mod imp {
     use super::ProcessInfo;
 
+    pub fn process_executable_path(pid: libc::pid_t) -> Option<std::path::PathBuf> {
+        if pid <= 1 {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            return std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
     pub fn process_info(_pid: libc::pid_t) -> Option<ProcessInfo> {
         None
     }
@@ -381,7 +429,8 @@ mod imp {
 // [`pipe_end_belongs_to`], which also proves the fd is a pipe and is open in
 // the direction its role requires.
 pub use imp::{
-    all_process_info, pipe_end_belongs_to, process_info, slave_device_of_master, socket_peer_pid,
+    all_process_info, pipe_end_belongs_to, process_executable_path, process_info,
+    slave_device_of_master, socket_peer_pid,
 };
 
 /// Which end of a pipe WE hold, and therefore which access mode a genuine

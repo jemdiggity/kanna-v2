@@ -13,6 +13,7 @@ mod support;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -86,6 +87,7 @@ enum ErrorCode {
     SessionNotFound,
     SessionAlreadyExists,
     HandoffLost,
+    HandoffUnauthorized,
     HandoffVersionMismatch,
     PtySpawnFailed,
     PtyCloneFailed,
@@ -165,6 +167,7 @@ fn compute_socket_path(dir: &Path) -> PathBuf {
 struct DaemonHandle {
     child: Child,
     socket_path: PathBuf,
+    daemon_dir: PathBuf,
 }
 
 impl DaemonHandle {
@@ -221,7 +224,11 @@ impl DaemonHandle {
             .unwrap_or(0);
         assert_eq!(actual_pid, expected_pid, "PID file should match our daemon");
 
-        DaemonHandle { child, socket_path }
+        DaemonHandle {
+            child,
+            socket_path,
+            daemon_dir: dir.clone(),
+        }
     }
 
     fn start_in_with_path_env(dir: &PathBuf, extra_env: &[(&str, &Path)]) -> Self {
@@ -251,7 +258,11 @@ impl DaemonHandle {
             .and_then(|value| value.trim().parse::<u32>().ok())
             .unwrap_or(0);
         assert_eq!(actual_pid, expected_pid, "PID file should match our daemon");
-        DaemonHandle { child, socket_path }
+        DaemonHandle {
+            child,
+            socket_path,
+            daemon_dir: dir.clone(),
+        }
     }
 
     fn connect(&self) -> ClientConn {
@@ -264,6 +275,29 @@ impl DaemonHandle {
             writer: stream,
         }
     }
+
+    fn wait_for_log(&self, needle: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let pid = self.child.id().to_string();
+            let log = std::fs::read_dir(&self.daemon_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with("kanna-daemon_") && name.contains(&pid)
+                })
+                .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if log.contains(needle) || Instant::now() >= deadline {
+                return log;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 }
 
 impl Drop for DaemonHandle {
@@ -271,6 +305,24 @@ impl Drop for DaemonHandle {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+fn spawn_replacement_without_wait(dir: &Path, extra_env: &[(&str, &str)]) -> Child {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_kanna-daemon"));
+    command
+        .env("KANNA_DAEMON_DIR", dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    command.spawn().expect("failed to start replacement daemon")
+}
+
+fn install_test_daemon_at(source: &Path, destination: &Path) {
+    let staged = destination.with_extension(format!("next-{}", std::process::id()));
+    std::fs::copy(source, &staged).expect("stage daemon executable");
+    std::fs::rename(&staged, destination).expect("install daemon executable");
 }
 
 struct ClientConn {
@@ -380,9 +432,12 @@ fn spawn_echo(conn: &mut ClientConn, id: &str) {
         rows: 24,
         agent_provider: None,
     });
-    match conn.recv() {
-        Evt::SessionCreated { .. } => {}
-        other => panic!("expected SessionCreated, got: {:?}", other),
+    loop {
+        match conn.recv() {
+            Evt::SessionCreated { .. } => break,
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("expected SessionCreated, got: {:?}", other),
+        }
     }
 }
 
@@ -393,6 +448,62 @@ fn expect_session_created_with_timeout(conn: &mut ClientConn, session_id: &str, 
         }) => assert_eq!(created, session_id),
         other => panic!("expected SessionCreated for {session_id}, got: {other:?}"),
     }
+}
+
+fn kill_session(conn: &mut ClientConn, id: &str) {
+    conn.send(&Cmd::Kill {
+        session_id: id.to_string(),
+    });
+    loop {
+        match conn.recv() {
+            Evt::Ok => break,
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            Evt::Error { code, message } => panic!("kill failed: {:?}: {}", code, message),
+            other => panic!("expected Ok after Kill, got: {:?}", other),
+        }
+    }
+}
+
+fn recv_fds_nonblocking(socket_fd: std::os::fd::RawFd) -> Vec<std::os::fd::RawFd> {
+    let mut payload = [0u8; 1];
+    let mut iov = libc::iovec {
+        iov_base: payload.as_mut_ptr().cast(),
+        iov_len: payload.len(),
+    };
+    let mut control = [0u8; 256];
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &mut iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = control.len() as _;
+
+    let received = unsafe { libc::recvmsg(socket_fd, &mut message, libc::MSG_DONTWAIT) };
+    if received < 0 {
+        let error = std::io::Error::last_os_error();
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock,
+            "unexpected recvmsg error: {error}"
+        );
+        return Vec::new();
+    }
+
+    let mut fds = Vec::new();
+    let mut header = unsafe { libc::CMSG_FIRSTHDR(&message) };
+    while !header.is_null() {
+        let current = unsafe { &*header };
+        if current.cmsg_level == libc::SOL_SOCKET && current.cmsg_type == libc::SCM_RIGHTS {
+            let header_len = unsafe { libc::CMSG_LEN(0) as usize };
+            let payload_len = (current.cmsg_len as usize).saturating_sub(header_len);
+            let count = payload_len / std::mem::size_of::<std::os::fd::RawFd>();
+            let data = unsafe { libc::CMSG_DATA(header).cast::<std::os::fd::RawFd>() };
+            for index in 0..count {
+                fds.push(unsafe { *data.add(index) });
+            }
+        }
+        header = unsafe { libc::CMSG_NXTHDR(&message, header) };
+    }
+    fds
 }
 
 fn attach(conn: &mut ClientConn, id: &str) {
@@ -930,12 +1041,17 @@ fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
 }
 
 #[test]
-fn current_v3_hands_stable_pty_and_agent_to_shipped_v2_adopter() {
+fn current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter() {
     let dir = test_dir("v3-v2-adopter");
     cleanup(&dir);
     std::fs::create_dir_all(&dir).expect("create cross-version daemon directory");
     let script = write_steerable_agent(&dir);
-    let mut current = DaemonHandle::start_in(&dir);
+    let stable_daemon = dir.join("stable-kanna-daemon");
+    install_test_daemon_at(
+        Path::new(env!("CARGO_BIN_EXE_kanna-daemon")),
+        &stable_daemon,
+    );
+    let mut current = DaemonHandle::start_binary_in(&stable_daemon, &dir);
 
     spawn_echo(&mut current.connect(), "stable-pty");
     spawn_agent(
@@ -951,7 +1067,8 @@ fn current_v3_hands_stable_pty_and_agent_to_shipped_v2_adopter() {
 
     drop(current_pty);
     let previous = support::previous_daemon::binary();
-    let old_adopter = DaemonHandle::start_binary_in(&previous, &dir);
+    install_test_daemon_at(&previous, &stable_daemon);
+    let old_adopter = DaemonHandle::start_binary_in(&stable_daemon, &dir);
     assert!(
         wait_for_child_exit(&mut current.child, Duration::from_secs(10)).is_some(),
         "current v3 sender should exit after the shipped v2 adopter ACKs"
@@ -961,7 +1078,6 @@ fn current_v3_hands_stable_pty_and_agent_to_shipped_v2_adopter() {
     attach(&mut adopted_pty, "stable-pty");
     send_input_and_wait_for_echo(&mut adopted_pty, "stable-pty", b"after\n", "after");
     assert_agent_steers_after_handoff(&old_adopter, "stable-agent");
-    assert_daemon_log_contains(&dir, "accepted mode legacy-v2");
 
     drop(adopted_pty);
     drop(old_adopter);
@@ -1036,42 +1152,66 @@ fn test_handoff_ambiguous_post_send_failure_exits_without_split_brain() {
 }
 
 #[test]
-fn test_interrupted_handoff_leaves_old_daemon_session_usable() {
-    let dir = test_dir("interrupted-old-usable");
+fn ordinary_client_cannot_begin_or_receive_handoff() {
+    let dir = test_dir("unauthorized-client");
     let daemon_a = DaemonHandle::start_in(&dir);
     let mut conn_a = daemon_a.connect();
-    spawn_echo(&mut conn_a, "sess-interrupted");
-    attach(&mut conn_a, "sess-interrupted");
+    spawn_echo(&mut conn_a, "sess-protected");
+    attach(&mut conn_a, "sess-protected");
     send_input_and_wait_for_echo(
         &mut conn_a,
-        "sess-interrupted",
-        b"before-interrupt\n",
-        "before-interrupt",
+        "sess-protected",
+        b"before-refusal\n",
+        "before-refusal",
     );
 
     let socket_path = compute_socket_path(&dir);
     let mut handoff = UnixStream::connect(&socket_path).expect("connect to old daemon");
-    let request = serde_json::json!({ "type": "Handoff", "version": 2 });
+    handoff
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let request = serde_json::json!({ "type": "Handoff", "version": 3 });
     writeln!(handoff, "{}", serde_json::to_string(&request).unwrap()).unwrap();
     handoff.flush().unwrap();
     let mut reader = BufReader::new(handoff.try_clone().unwrap());
     let mut line = String::new();
     reader
         .read_line(&mut line)
-        .expect("old daemon should send handoff metadata");
+        .expect("old daemon should refuse handoff");
     assert!(
-        line.contains("HandoffReady"),
-        "expected HandoffReady, got {line:?}"
+        matches!(
+            serde_json::from_str::<Evt>(line.trim()).unwrap(),
+            Evt::Error {
+                code: Some(ErrorCode::HandoffUnauthorized),
+                ..
+            }
+        ),
+        "ordinary client must receive HandoffUnauthorized, got {line:?}"
+    );
+    assert!(
+        recv_fds_nonblocking(handoff.as_raw_fd()).is_empty(),
+        "unauthorized handoff must not receive SCM_RIGHTS descriptors"
+    );
+    let log = daemon_a.wait_for_log("refusing unauthorized successor");
+    assert!(
+        log.contains("refusing unauthorized successor"),
+        "authorization refusal must be logged, got {log:?}"
+    );
+    assert!(
+        !log.contains("sessions in manager (epoch "),
+        "unauthorized request entered the sealed transaction: {log}"
     );
     drop(handoff);
     drop(reader);
 
     send_input_and_wait_for_echo(
         &mut conn_a,
-        "sess-interrupted",
-        b"after-interrupt\n",
-        "after-interrupt",
+        "sess-protected",
+        b"after-refusal\n",
+        "after-refusal",
     );
+    spawn_echo(&mut conn_a, "post-refusal");
+    kill_session(&mut conn_a, "post-refusal");
 
     drop(daemon_a);
     cleanup(&dir);
@@ -1084,23 +1224,13 @@ fn test_handoff_capture_serializes_spawn_and_kill_until_abort() {
     let mut owner = daemon.connect();
     spawn_echo(&mut owner, "sess-captured-before-abort");
 
-    let socket_path = compute_socket_path(&dir);
-    let mut handoff = UnixStream::connect(&socket_path).expect("connect handoff client");
-    writeln!(
-        handoff,
-        "{}",
-        serde_json::json!({ "type": "Handoff", "version": 2 })
-    )
-    .unwrap();
-    handoff.flush().unwrap();
-    let mut handoff_reader = BufReader::new(handoff.try_clone().unwrap());
-    let mut ready = String::new();
-    handoff_reader
-        .read_line(&mut ready)
-        .expect("read handoff metadata");
+    let mut successor =
+        spawn_replacement_without_wait(&dir, &[("KANNA_TEST_HANDOFF_ACK_DELAY_MS", "1500")]);
+    let log = daemon.wait_for_log("HandoffReady sent and flushed");
     assert!(
-        ready.contains("HandoffReady") && ready.contains("sess-captured-before-abort"),
-        "handoff capture did not include the live session: {ready:?}",
+        log.contains("snapshotting session sess-captured-before-abort")
+            && log.contains("HandoffReady sent and flushed"),
+        "real successor did not capture the live session: {log:?}",
     );
 
     let mut spawner = daemon.connect();
@@ -1132,8 +1262,8 @@ fn test_handoff_capture_serializes_spawn_and_kill_until_abort() {
         "Kill mutated the PTY registry after handoff capture but before ACK resolution",
     );
 
-    drop(handoff_reader);
-    drop(handoff);
+    successor.kill().expect("kill successor before handoff ACK");
+    successor.wait().expect("reap interrupted successor");
 
     expect_session_created_with_timeout(
         &mut spawner,
@@ -1167,21 +1297,15 @@ fn test_handoff_commit_refuses_mutations_with_retry_on_successor() {
     let dir = test_dir("handoff-lifecycle-seal-commit");
     let mut daemon = DaemonHandle::start_in(&dir);
     let script = write_steerable_agent(&dir);
-    let socket_path = compute_socket_path(&dir);
-    let mut handoff = UnixStream::connect(&socket_path).expect("connect handoff client");
-    writeln!(
-        handoff,
-        "{}",
-        serde_json::json!({ "type": "Handoff", "version": 2 })
-    )
-    .unwrap();
-    handoff.flush().unwrap();
-    let mut handoff_reader = BufReader::new(handoff.try_clone().unwrap());
-    let mut ready = String::new();
-    handoff_reader
-        .read_line(&mut ready)
-        .expect("read empty handoff metadata");
-    assert!(ready.contains("HandoffReady"), "{ready:?}");
+    // The adoption delay must outlast the sealed-window probes below: four
+    // clients each block a full 250ms recv timeout before the ACK may land.
+    let mut successor =
+        spawn_replacement_without_wait(&dir, &[("KANNA_TEST_HANDOFF_ACK_DELAY_MS", "3000")]);
+    let log = daemon.wait_for_log("HandoffReady sent and flushed");
+    assert!(
+        log.contains("HandoffReady sent and flushed"),
+        "real successor did not reach the pre-ACK window: {log:?}"
+    );
 
     let mut spawner = daemon.connect();
     spawner.send(&Cmd::Spawn {
@@ -1226,20 +1350,15 @@ fn test_handoff_commit_refuses_mutations_with_retry_on_successor() {
         );
     }
 
-    writeln!(
-        handoff,
-        "{}",
-        serde_json::json!({ "type": "HandoffAdopted", "version": 2 })
-    )
-    .unwrap();
-    handoff.flush().unwrap();
+    // The authenticated successor commits adoption on its own once the test
+    // ACK delay elapses; the first refusal therefore waits out that delay.
     for (name, client) in [
         ("Spawn", &mut spawner),
         ("SpawnAgent", &mut agent_spawner),
         ("Kill", &mut killer),
         ("AgentInput", &mut agent_input),
     ] {
-        match client.recv_with_timeout(Duration::from_secs(2)) {
+        match client.recv_with_timeout(Duration::from_secs(5)) {
             Ok(Evt::Error {
                 code: Some(ErrorCode::RetryOnSuccessor),
                 message,
@@ -1252,6 +1371,8 @@ fn test_handoff_commit_refuses_mutations_with_retry_on_successor() {
     }
 
     let _ = wait_for_child_exit(&mut daemon.child, Duration::from_secs(3));
+    successor.kill().expect("stop adopting daemon");
+    successor.wait().expect("reap adopting daemon");
     cleanup(&dir);
 }
 

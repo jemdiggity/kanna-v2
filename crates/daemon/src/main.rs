@@ -16,6 +16,7 @@ mod pty;
 mod session;
 mod socket;
 mod startup;
+mod successor_auth;
 #[cfg(test)]
 mod tests;
 mod util;

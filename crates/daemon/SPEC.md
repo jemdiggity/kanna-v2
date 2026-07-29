@@ -16,22 +16,33 @@ kanna-daemon manages persistent PTY sessions for Claude CLI agents. It runs as a
 8. **Multiple clients per session.** Attached clients receive output via broadcast. Smallest terminal dimensions are used for the PTY.
 9. **Always broadcast.** Before exiting during handoff, the old daemon broadcasts `ShuttingDown` to all subscribers.
 10. **Always reconnect.** Apps detect daemon restart (via `ShuttingDown` or EOF) and automatically reconnect + re-attach all tracked sessions.
+11. **Authorize the successor before handoff state.** For every supported handoff version, the sender authenticates the peer as a daemon directly spawned by the trusted app-launcher executable before it acquires daemon-lifecycle ownership, seals a registry, snapshots a session, writes `HandoffReady`, or transfers a descriptor.
 
 ## Startup Sequence
 
-Every daemon startup follows this sequence:
+Every daemon startup follows this sequence. Before step 1, while the spawning
+app is still the daemon's live direct parent, the daemon captures its own
+kernel-derived executable path and the parent's kernel-derived executable path.
+The parent path remains the successor trust root after the app exits and the
+daemon is reparented.
 
 ```
 1. Read PID file
 2. If old daemon alive:
    a. Connect to old daemon's socket
    b. Request transactional handoff v3
-   c. Only after an explicit version mismatch, reconnect and request legacy v2
-   d. Receive HandoffReady{sessions} + session fds (SCM_RIGHTS)
-   e. Authenticate the peer and validate the descriptor transfer
-   f. Send HandoffAdopted{version} to commit the transfer
-   g. Wait for EOF on the dedicated handoff connection, proving that the old daemon released its readers
-   h. Adopt sessions from the transferred fds
+   c. Old daemon pins LOCAL_PEERPID + start identity and the peer's live
+      direct-parent PID + start identity, matches their kernel executable
+      paths to the recorded daemon and app-launcher paths, and rechecks them
+   d. Only after an explicit version mismatch, reconnect and request legacy v2
+      (the old daemon applies the same successor check)
+   e. Only after successor authorization does the old daemon acquire lifecycle
+      ownership and seal its registries
+   f. Receive HandoffReady{sessions} + session fds (SCM_RIGHTS)
+   g. Authenticate the old-daemon peer and validate the descriptor transfer
+   h. Send HandoffAdopted{version} to commit the transfer
+   i. Wait for EOF on the dedicated handoff connection, proving that the old daemon released its readers
+   j. Adopt sessions from the transferred fds
 3. Write our PID file
 4. Bind socket (removes stale socket file first)
 5. Accept connections
@@ -118,6 +129,8 @@ descriptor ownership when a deployed v2 adopter requests v2.
 New daemon                              Old daemon
     │                                        │
     ├──► {"type":"Handoff","version":3} ────►│
+    │                                        ├── authenticate peer + parent
+    │                                        ├── final identity/path recheck
     │                                        ├── seal PTY + agent registries
     │                                        ├── snapshot exact incarnations
     │                                        ├── duplicate owned session fds
@@ -135,6 +148,31 @@ New daemon                              Old daemon
     ├── bind socket
     ├── ready
 ```
+
+### Successor Authorization
+
+The Unix socket is a public local command surface, not a handoff capability.
+For both supported handoff modes, the sending daemon authorizes the connected
+process before entering the transactional lifecycle boundary:
+
+- `LOCAL_PEERPID` identifies and pins the successor PID/start identity.
+- The successor's live direct-parent PID/start identity is pinned.
+- The successor executable path must equal the sender's kernel-derived daemon
+  path captured at startup.
+- The direct-parent executable path must equal the trusted app-launcher path
+  captured when the sender itself started.
+- Both identities, the direct-parent relationship, and both executable paths
+  are re-read immediately before authorization succeeds.
+
+Any missing or changed identity or path is refused with
+`handoff_unauthorized`. Refusal occurs before the daemon-lifecycle write guard,
+registry seals, snapshots, `HandoffReady`, and `SCM_RIGHTS`. Unsupported
+versions retain the metadata-free version-mismatch response.
+
+The wire request is unchanged. Installed releases and kd worktrees launch
+successive daemon versions from stable instance-local executable paths, so
+rolling and development upgrades keep sessions alive. Starting a replacement
+from an unrelated shell or helper is intentionally unauthorized.
 
 Before the acknowledgement, the adopter pins the daemon process identity,
 checks Unix-socket peer credentials, validates every metadata-declared FD

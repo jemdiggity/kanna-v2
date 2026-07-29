@@ -16,6 +16,7 @@ use crate::daemon_lifecycle::{DaemonLifecycle, DaemonLifecycleState};
 use crate::fanout::SessionFanouts;
 use crate::session::{SessionManager, StreamControl};
 use crate::socket::{read_command, write_event};
+use crate::successor_auth::SuccessorAuthorizer;
 use crate::util::error_event;
 use crate::{fd_transfer, pty};
 
@@ -775,6 +776,7 @@ pub(crate) async fn handle_handoff(
     recovery_manager: RecoveryManager,
     agent_sessions: kanna_daemon::agent::AgentSessions,
     daemon_lifecycle: DaemonLifecycle,
+    successor_authorizer: Arc<SuccessorAuthorizer>,
 ) -> bool {
     log::info!(
         "[handoff] received Handoff request (version={}, current_version={})",
@@ -800,6 +802,29 @@ pub(crate) async fn handle_handoff(
         "[handoff] accepted mode {} (version={})",
         mode.label(),
         mode.version()
+    );
+
+    // Authentication is intentionally before lifecycle ownership acquisition
+    // and registry sealing. A connection that merely possesses the public
+    // daemon socket must never fence mutations, snapshot a session, or receive
+    // a descriptor.
+    let authorized_successor =
+        match successor_authorizer.authorize_then(socket_fd, |authorized| authorized) {
+            Ok(authorized) => authorized,
+            Err(error) => {
+                log::warn!("[handoff] refusing unauthorized successor: {}", error);
+                let evt = error_event(
+                    Some(protocol::ErrorCode::HandoffUnauthorized),
+                    format!("handoff successor is not authorized: {error}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return false;
+            }
+        };
+    log::info!(
+        "[handoff] authorized successor peer={} parent={}",
+        authorized_successor.peer.pid,
+        authorized_successor.parent.pid
     );
 
     // Seal both live registries from snapshot capture through ACK resolution.
