@@ -8,9 +8,20 @@ handoff. A refused command waits for successor publication and is replayed
 byte-for-byte at most once, without weakening session-incarnation ownership or
 publishing duplicate terminal events.
 
+## Currency After Rebase
+
+This design was re-audited after rebasing onto `origin/main` at `bba54a4a`.
+It is **amended, not superseded**. Main now provides a stronger transactional
+foundation than the original draft assumed: `DaemonLifecycle` serializes
+handoff commit against public mutation handlers, the PTY manager has a
+handoff epoch, and agent/PTY cleanup is exact-incarnation and single
+publication. Main did not yet provide a typed retry refusal, successor-aware
+desktop or server replay, or producer/consumer contract tests. Those remaining
+pieces are the scope of this design.
+
 ## Scope
 
-This change is rebased onto `origin/main` at `7add2d07`. It consumes the
+This change is rebased onto `origin/main` at `bba54a4a`. It consumes the
 existing daemon-wide `DaemonLifecycle` read/write fence, the PTY manager's
 handoff epoch, and the agent runtime's process-global handoff seal. It does not
 change lifecycle ownership, handoff epochs, descriptor authentication or
@@ -21,9 +32,10 @@ The commands covered are:
 
 - PTY `Spawn`
 - PTY and agent `Kill`
-- `SpawnAgent`, including an initial child whose installer loses to the seal
-- `AgentInput`, including a per-turn resume child whose installer loses to the
-  seal
+- `SpawnAgent`, with pre-reservation seal refusal retryable and a later
+  initial-child installer loss explicitly non-retryable
+- `AgentInput`, with lifecycle refusal retryable and a per-turn resume-child
+  installer loss explicitly non-retryable
 
 ## Protocol Contract
 
@@ -103,9 +115,10 @@ command once, preserves those bytes for both sends, clears the stale client on
 `retry_on_successor`, waits for publication, reconnects, and replays once.
 
 `kanna-server` retains the daemon directory and connected PID in
-`DaemonClient`. Its task lifecycle Spawn and replacement Kill paths use the
-same policy: on `retry_on_successor`, wait for publication, reconnect the
-existing mutable client, and replay the same `DaemonCommand` once.
+`DaemonClient`. Its task lifecycle Spawn, replacement Kill, and KSP AgentInput
+paths use the same policy: on `retry_on_successor`, wait for publication,
+reconnect the existing mutable client, and replay the same serialized
+`DaemonCommand` once.
 
 `SessionReplacements::begin` remains active across a sealed Kill refusal and
 its retry. It is cancelled only when the final outcome is not-found or a
@@ -133,10 +146,10 @@ same serialized command exactly once to each daemon. Tests also prove that
 ambiguous read failures are not replayed and that a second retryable response
 is surfaced.
 
-`kanna-server` task lifecycle tests use sequential fake daemons around the same
-PID publication boundary. Spawn tests assert one refused attempt and one
-successful `SessionCreated`. Kill tests assert the replacement registration
-survives the refusal, the identical Kill is replayed once, and final
-not-found/error paths cancel bookkeeping correctly.
+`kanna-server` client and task lifecycle tests use sequential fake daemons
+around the same PID publication boundary. Spawn and AgentInput tests assert one
+refused attempt and one successful successor response. Kill tests assert the
+replacement registration survives the refusal, the identical Kill is replayed
+once, and final not-found/error paths cancel bookkeeping correctly.
 
 Focused Rust tests run before the canonical `./kd test rust` suite.

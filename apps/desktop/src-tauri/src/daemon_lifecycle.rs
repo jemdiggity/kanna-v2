@@ -4,10 +4,55 @@ use crate::commands::daemon::DaemonState;
 use crate::daemon_client::DaemonClient;
 use crate::{commands, daemon_data_dir, daemon_socket_path, subprocess_env};
 
-/// Try to connect to the daemon. Returns None if not available.
-async fn try_connect_daemon() -> Option<DaemonClient> {
-    let socket_path = daemon_socket_path();
-    DaemonClient::connect(&socket_path).await.ok()
+#[derive(Clone, Copy)]
+enum PublishedPid {
+    Exact(u32),
+    SuccessorOf(u32),
+}
+
+impl PublishedPid {
+    fn accepts(self, pid: u32) -> bool {
+        match self {
+            Self::Exact(expected) => pid == expected,
+            Self::SuccessorOf(previous) => pid != previous,
+        }
+    }
+}
+
+async fn wait_for_published_daemon_at(
+    daemon_dir: &std::path::Path,
+    socket_path: &std::path::Path,
+    expected: PublishedPid,
+) -> Option<DaemonClient> {
+    let pid_path = daemon_dir.join("daemon.pid");
+    let mut delay = std::time::Duration::from_millis(50);
+    for _ in 0..20 {
+        tokio::time::sleep(delay).await;
+        let published_pid = std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|pid| pid.trim().parse::<u32>().ok());
+        if let Some(published_pid) = published_pid.filter(|pid| expected.accepts(*pid)) {
+            if let Ok(client) = DaemonClient::connect(socket_path).await {
+                if client.connected_pid() == published_pid {
+                    return Some(client);
+                }
+            }
+        }
+        delay = std::cmp::min(delay * 2, std::time::Duration::from_secs(1));
+    }
+    None
+}
+
+pub(crate) async fn wait_for_successor(previous_pid: u32) -> Result<DaemonClient, String> {
+    wait_for_published_daemon_at(
+        &daemon_data_dir(),
+        &daemon_socket_path(),
+        PublishedPid::SuccessorOf(previous_pid),
+    )
+    .await
+    .ok_or_else(|| {
+        format!("successor daemon was not published and connectable after pid {previous_pid}")
+    })
 }
 
 /// Always spawn a new daemon. If an old one is running, the new daemon
@@ -65,22 +110,21 @@ pub(crate) async fn ensure_daemon_running() {
         .spawn()
     } {
         Ok(child) => {
-            let expected_pid = child.id().to_string();
-            let pid_path = daemon_dir.join("daemon.pid");
+            let expected_pid = child.id();
 
             // Wait for the NEW daemon to be ready:
             // PID file must match our child AND socket must be connectable.
             // This ensures we don't connect to the old daemon during handoff.
-            let mut delay = std::time::Duration::from_millis(50);
-            for _ in 0..20 {
-                tokio::time::sleep(delay).await;
-                if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
-                    if pid_str.trim() == expected_pid && try_connect_daemon().await.is_some() {
-                        eprintln!("[daemon] spawned and connected (pid={})", expected_pid);
-                        return;
-                    }
-                }
-                delay = std::cmp::min(delay * 2, std::time::Duration::from_secs(1));
+            if wait_for_published_daemon_at(
+                &daemon_dir,
+                &daemon_socket_path(),
+                PublishedPid::Exact(expected_pid),
+            )
+            .await
+            .is_some()
+            {
+                eprintln!("[daemon] spawned and connected (pid={})", expected_pid);
+                return;
             }
             eprintln!("[daemon] spawned but could not connect after retries");
         }
@@ -184,4 +228,39 @@ pub(crate) fn spawn_event_bridge(app: tauri::AppHandle, daemon_state: DaemonStat
             *daemon_state.lock().await = None;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{wait_for_published_daemon_at, PublishedPid};
+    use tokio::net::UnixListener;
+
+    #[tokio::test]
+    async fn successor_boundary_requires_a_different_published_connectable_peer() {
+        let dir = std::path::PathBuf::from("/tmp").join(format!(
+            "kd-dl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket_path = dir.join("d.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        std::fs::write(dir.join("daemon.pid"), format!("{}\n", std::process::id())).unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+
+        let client = wait_for_published_daemon_at(
+            &dir,
+            &socket_path,
+            PublishedPid::SuccessorOf(std::process::id() + 1),
+        )
+        .await
+        .expect("different published daemon should become ready");
+
+        assert_eq!(client.connected_pid(), std::process::id());
+        let _ = accept.await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

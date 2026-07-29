@@ -26,6 +26,7 @@ pub enum ErrorCode {
     AgentSpawnFailed,
     NotAgentSession,
     UnknownPermissionRequest,
+    RetryOnSuccessor,
 }
 
 /// Whether a session is a PTY terminal or a headless agent (NDJSON pipes).
@@ -802,44 +803,20 @@ mod tests {
     }
 
     #[test]
-    fn handoff_retry_error_decodes_with_previous_error_code_schema() {
-        #[derive(Debug, Deserialize, PartialEq, Eq)]
-        #[serde(rename_all = "snake_case")]
-        enum PreviousErrorCode {
-            SessionNotFound,
-            SessionAlreadyExists,
-            HandoffLost,
-            HandoffVersionMismatch,
-            PtySpawnFailed,
-            PtyCloneFailed,
-            HeadlessTerminalInitFailed,
-            WriteFailed,
-            UnknownSignal,
-            AgentSpawnFailed,
-            NotAgentSession,
-            UnknownPermissionRequest,
-        }
-
-        #[derive(Debug, Deserialize)]
-        #[serde(tag = "type")]
-        enum PreviousEvent {
-            Error {
-                code: Option<PreviousErrorCode>,
-                message: String,
-            },
-        }
-
+    fn retry_on_successor_error_roundtrips_with_its_stable_wire_name() {
         let json = serde_json::to_string(&Event::Error {
-            code: None,
+            code: Some(ErrorCode::RetryOnSuccessor),
             message: "daemon handoff already committed; retry against the adopting daemon"
                 .to_string(),
         })
         .unwrap();
-        match serde_json::from_str::<PreviousEvent>(&json).unwrap() {
-            PreviousEvent::Error { code, message } => {
-                assert_eq!(code, None);
+        assert!(json.contains(r#""code":"retry_on_successor""#));
+        match serde_json::from_str::<Event>(&json).unwrap() {
+            Event::Error { code, message } => {
+                assert_eq!(code, Some(ErrorCode::RetryOnSuccessor));
                 assert!(message.contains("retry against the adopting daemon"));
             }
+            other => panic!("expected Error, got {other:?}"),
         }
     }
 

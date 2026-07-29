@@ -14,6 +14,8 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct DaemonClient {
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: tokio::net::unix::OwnedWriteHalf,
+    daemon_dir: String,
+    connected_pid: u32,
     /// Per-round-trip bound; `COMMAND_TIMEOUT` in production, shrinkable in
     /// tests so timeout behavior is verifiable without a 30s stall.
     command_timeout: Duration,
@@ -41,10 +43,13 @@ impl DaemonClient {
                 e
             )
         })?;
+        let connected_pid = peer_pid(&stream)?;
         let (read_half, write_half) = stream.into_split();
         Ok(Self {
             reader: BufReader::new(read_half),
             writer: write_half,
+            daemon_dir: daemon_dir.to_string(),
+            connected_pid,
             command_timeout: COMMAND_TIMEOUT,
             poisoned: false,
         })
@@ -57,16 +62,53 @@ impl DaemonClient {
         self.command_timeout = timeout;
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_connected_pid_for_test(&mut self, pid: u32) {
+        self.connected_pid = pid;
+    }
+
     pub async fn send_command(
         &mut self,
         cmd: &Command,
+    ) -> Result<Event, Box<dyn std::error::Error>> {
+        let json = serde_json::to_string(cmd)?;
+        self.send_serialized_command(&json).await
+    }
+
+    /// Retry one daemon lifecycle command only when the daemon explicitly
+    /// proves it refused before side effects. The command is serialized once,
+    /// then replayed byte-for-byte against a different published daemon PID.
+    pub async fn send_command_retrying_successor(
+        &mut self,
+        cmd: &Command,
+    ) -> Result<Event, Box<dyn std::error::Error>> {
+        let json = serde_json::to_string(cmd)?;
+        let first = self.send_serialized_command(&json).await?;
+        if !matches!(
+            first,
+            Event::Error {
+                code: Some(kanna_daemon::protocol::ErrorCode::RetryOnSuccessor),
+                ..
+            }
+        ) {
+            return Ok(first);
+        }
+
+        let previous_pid = self.connected_pid;
+        let successor = wait_for_successor(&self.daemon_dir, previous_pid).await?;
+        *self = successor;
+        self.send_serialized_command(&json).await
+    }
+
+    async fn send_serialized_command(
+        &mut self,
+        json: &str,
     ) -> Result<Event, Box<dyn std::error::Error>> {
         if self.poisoned {
             return Err(
                 "daemon connection unusable after an earlier command timeout; reconnect".into(),
             );
         }
-        let json = serde_json::to_string(cmd)?;
         let round_trip = async {
             self.writer.write_all(json.as_bytes()).await?;
             self.writer.write_all(b"\n").await?;
@@ -106,6 +148,89 @@ impl DaemonClient {
             },
         )
     }
+}
+
+async fn wait_for_successor(
+    daemon_dir: &str,
+    previous_pid: u32,
+) -> Result<DaemonClient, Box<dyn std::error::Error>> {
+    let pid_path = Path::new(daemon_dir).join("daemon.pid");
+    let mut delay = Duration::from_millis(50);
+    for _ in 0..20 {
+        tokio::time::sleep(delay).await;
+        let published_pid = std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|pid| pid.trim().parse::<u32>().ok());
+        if let Some(published_pid) = published_pid.filter(|pid| *pid != previous_pid) {
+            if let Ok(client) = DaemonClient::connect(daemon_dir).await {
+                if client.connected_pid == published_pid {
+                    return Ok(client);
+                }
+            }
+        }
+        delay = std::cmp::min(delay * 2, Duration::from_secs(1));
+    }
+    Err(
+        format!("successor daemon was not published and connectable after pid {previous_pid}")
+            .into(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn peer_pid(stream: &UnixStream) -> Result<u32, Box<dyn std::error::Error>> {
+    use std::os::fd::AsRawFd;
+
+    let mut pid: libc::pid_t = 0;
+    let mut length = std::mem::size_of_val(&pid) as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            std::ptr::addr_of_mut!(pid).cast(),
+            &mut length,
+        )
+    };
+    if result == 0 && pid > 0 {
+        Ok(pid as u32)
+    } else {
+        Err(format!(
+            "failed to identify connected daemon pid: {}",
+            std::io::Error::last_os_error()
+        )
+        .into())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn peer_pid(stream: &UnixStream) -> Result<u32, Box<dyn std::error::Error>> {
+    use std::os::fd::AsRawFd;
+
+    let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut length = std::mem::size_of_val(&credentials) as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            std::ptr::addr_of_mut!(credentials).cast(),
+            &mut length,
+        )
+    };
+    if result == 0 && credentials.pid > 0 {
+        Ok(credentials.pid as u32)
+    } else {
+        Err(format!(
+            "failed to identify connected daemon pid: {}",
+            std::io::Error::last_os_error()
+        )
+        .into())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn peer_pid(_stream: &UnixStream) -> Result<u32, Box<dyn std::error::Error>> {
+    Err("connected daemon pid lookup is unsupported on this platform".into())
 }
 
 impl DaemonClientReader {
@@ -209,5 +334,112 @@ mod tests {
 
         server.abort();
         let _ = std::fs::remove_file(&socket_path);
+    }
+
+    async fn run_successor_retry(label: &str, command: Command, success: Event) -> Event {
+        let daemon_dir = temp_daemon_dir(label);
+        let socket_path = kanna_runtime_defaults::socket_path(Path::new(&daemon_dir));
+        let pid_path = Path::new(&daemon_dir).join("daemon.pid");
+        let _ = std::fs::remove_file(&socket_path);
+        std::fs::write(&pid_path, "41\n").unwrap();
+        let old_listener = UnixListener::bind(&socket_path).unwrap();
+        let expected_json = serde_json::to_string(&command).unwrap();
+        let socket_for_server = socket_path.clone();
+        let pid_for_server = pid_path.clone();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = old_listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut first = String::new();
+            BufReader::new(read_half)
+                .read_line(&mut first)
+                .await
+                .unwrap();
+            let refusal = Event::Error {
+                code: Some(kanna_daemon::protocol::ErrorCode::RetryOnSuccessor),
+                message: "retry".to_string(),
+            };
+            write_half
+                .write_all(serde_json::to_string(&refusal).unwrap().as_bytes())
+                .await
+                .unwrap();
+            write_half.write_all(b"\n").await.unwrap();
+            write_half.flush().await.unwrap();
+            drop(write_half);
+            let _ = std::fs::remove_file(&socket_for_server);
+
+            let successor = UnixListener::bind(&socket_for_server).unwrap();
+            std::fs::write(&pid_for_server, format!("{}\n", std::process::id())).unwrap();
+            let (stream, _) = successor.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut second = String::new();
+            BufReader::new(read_half)
+                .read_line(&mut second)
+                .await
+                .unwrap();
+            write_half
+                .write_all(serde_json::to_string(&success).unwrap().as_bytes())
+                .await
+                .unwrap();
+            write_half.write_all(b"\n").await.unwrap();
+            write_half.flush().await.unwrap();
+            (first, second)
+        });
+
+        let mut client = DaemonClient::connect(&daemon_dir).await.unwrap();
+        client.set_connected_pid_for_test(41);
+        let event = client
+            .send_command_retrying_successor(&command)
+            .await
+            .unwrap();
+
+        let (first, second) = server.await.unwrap();
+        assert_eq!(first, format!("{expected_json}\n"));
+        assert_eq!(second, format!("{expected_json}\n"));
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+        event
+    }
+
+    #[tokio::test]
+    async fn agent_input_refusal_waits_for_new_pid_and_replays_identically_once() {
+        let event = run_successor_retry(
+            "successor-agent-input",
+            Command::AgentInput {
+                session_id: "exact-incarnation".to_string(),
+                text: "resume exactly once".to_string(),
+            },
+            Event::Ok,
+        )
+        .await;
+
+        assert!(matches!(event, Event::Ok));
+    }
+
+    #[tokio::test]
+    async fn spawn_refusal_waits_for_new_pid_and_creates_one_successor_session() {
+        let event = run_successor_retry(
+            "successor-spawn",
+            Command::Spawn {
+                session_id: "spawn-on-successor".to_string(),
+                executable: "/bin/cat".to_string(),
+                args: Vec::new(),
+                cwd: "/tmp".to_string(),
+                env: std::collections::HashMap::new(),
+                cols: 80,
+                rows: 24,
+                agent_provider: None,
+                terminal_prelude: None,
+            },
+            Event::SessionCreated {
+                session_id: "spawn-on-successor".to_string(),
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            event,
+            Event::SessionCreated { session_id } if session_id == "spawn-on-successor"
+        ));
     }
 }

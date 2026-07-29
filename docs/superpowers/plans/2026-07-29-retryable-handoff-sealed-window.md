@@ -23,6 +23,7 @@
 - `apps/desktop/src-tauri/src/commands/daemon.rs` — routes Spawn and SpawnAgent through the shared executor.
 - `crates/kanna-server/src/daemon_client.rs` — retains daemon directory/PID and implements byte-stable one-replay successor retry.
 - `crates/kanna-server/src/task_creator/lifecycle.rs` — uses successor retry for task Spawn and replacement Kill while preserving replacement bookkeeping.
+- `crates/kanna-server/src/ksp.rs` — routes AgentInput through the same explicit successor-retry contract.
 - `crates/kanna-server/src/task_creator/tests/mod.rs` and `spawn.rs` — sequential fake-daemon producer/consumer fixtures and Spawn assertions.
 - `crates/kanna-server/src/task_creator/tests/stage.rs` — replacement Kill retry/bookkeeping assertions.
 
@@ -67,7 +68,7 @@ the daemon lifecycle refusal must occur before command-specific work.
 Run:
 
 ```bash
-cargo test --manifest-path Cargo.daemon.toml --test handoff \
+cargo test -p kanna-daemon --test handoff \
   test_handoff_commit_refuses_mutations_with_retry_on_successor -- --nocapture
 ```
 
@@ -108,9 +109,9 @@ or `SessionNotFound` (replaced/removed record), never `RetryOnSuccessor`.
 Run:
 
 ```bash
-cargo test --manifest-path Cargo.daemon.toml --test handoff \
+cargo test -p kanna-daemon --test handoff \
   test_handoff_commit_refuses_mutations_with_retry_on_successor -- --nocapture
-cargo test --manifest-path Cargo.daemon.toml protocol::tests --lib
+cargo test -p kanna-daemon protocol::tests --lib
 ```
 
 Expected: PASS.
@@ -141,7 +142,7 @@ resulting error code is `AgentSpawnFailed`, not `RetryOnSuccessor`.
 Run:
 
 ```bash
-cargo test --manifest-path Cargo.daemon.toml --lib
+cargo test -p kanna-daemon --lib
 ```
 
 Expected: PASS.
@@ -293,7 +294,7 @@ Keep ack commands on `send_command_expect_ack`.
 Run:
 
 ```bash
-cargo test --manifest-path Cargo.desktop.toml commands::daemon
+cargo test -p kanna-desktop commands::daemon
 ```
 
 Expected: PASS.
@@ -309,12 +310,13 @@ git add apps/desktop/src-tauri/src/daemon_client.rs \
 git commit -m "fix(desktop): retry sealed commands on successor"
 ```
 
-### Task 3: Retry kanna-server Spawn and replacement Kill
+### Task 3: Retry kanna-server Spawn, replacement Kill, and AgentInput
 
 **Files:**
 
 - Modify: `crates/kanna-server/src/daemon_client.rs`
 - Modify: `crates/kanna-server/src/task_creator/lifecycle.rs`
+- Modify: `crates/kanna-server/src/ksp.rs`
 - Modify: `crates/kanna-server/src/task_creator/tests/mod.rs`
 - Modify: `crates/kanna-server/src/task_creator/tests/spawn.rs`
 - Modify: `crates/kanna-server/src/task_creator/tests/stage.rs`
@@ -386,7 +388,7 @@ once more.
 
 - [ ] **Step 4: Use the retry API without resetting bookkeeping**
 
-Change only task Spawn and replacement Kill:
+Change task Spawn and replacement Kill:
 
 ```rust
 daemon.send_command_retrying_successor(&command).await
@@ -396,13 +398,17 @@ Call `replacements.begin(session_id)` before the first Kill and leave it active
 inside the retry method. Preserve existing cancellation for transport errors,
 final not-found, unexpected response, and the successor's final error.
 
+Route KSP agent commands through the same method. Only `AgentInput` can receive
+`retry_on_successor`; permission, interrupt, and model commands retain their
+existing behavior because the producer never emits that code for them.
+
 - [ ] **Step 5: Run server tests and commit**
 
 Run:
 
 ```bash
-cargo test --manifest-path Cargo.server.toml task_creator
-cargo test --manifest-path Cargo.server.toml daemon_client
+cargo test -p kanna-server task_creator
+cargo test -p kanna-server daemon_client
 ```
 
 Expected: PASS.
@@ -412,6 +418,7 @@ Commit:
 ```bash
 git add crates/kanna-server/src/daemon_client.rs \
   crates/kanna-server/src/task_creator/lifecycle.rs \
+  crates/kanna-server/src/ksp.rs \
   crates/kanna-server/src/task_creator/tests/mod.rs \
   crates/kanna-server/src/task_creator/tests/spawn.rs \
   crates/kanna-server/src/task_creator/tests/stage.rs
@@ -445,7 +452,7 @@ assert exactly one matching session and one `SessionCreated`.
 Run:
 
 ```bash
-cargo test --manifest-path Cargo.daemon.toml --test handoff \
+cargo test -p kanna-daemon --test handoff \
   retry_on_successor -- --nocapture
 ```
 
@@ -491,8 +498,8 @@ Expected: exit 0.
 Run:
 
 ```bash
-cargo test --manifest-path Cargo.daemon.toml
-cargo test --manifest-path Cargo.server.toml
+cargo test -p kanna-daemon
+cargo test -p kanna-server
 ```
 
 Expected: all tests pass.

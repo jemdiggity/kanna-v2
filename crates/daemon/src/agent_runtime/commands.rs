@@ -15,6 +15,16 @@ use super::{agent_error, broadcast_event, journal_and_fan_out, log_info, reply, 
 use crate::daemon_lifecycle::DaemonLifecycle;
 use crate::socket::write_event;
 
+pub(super) fn post_spawn_install_failure(session_id: &str, operation: &str) -> Event {
+    agent_error(
+        protocol::ErrorCode::AgentSpawnFailed,
+        format!(
+            "agent session {session_id} could not install its {operation} child; \
+             the command was not accepted"
+        ),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_spawn_agent(
     session_id: String,
@@ -88,7 +98,7 @@ pub async fn handle_spawn_agent(
             reply(
                 &writer,
                 &agent_error(
-                    protocol::ErrorCode::AgentSpawnFailed,
+                    protocol::ErrorCode::RetryOnSuccessor,
                     format!(
                         "daemon handoff in progress; retry agent session {session_id} against the new daemon"
                     ),
@@ -181,14 +191,7 @@ pub async fn handle_spawn_agent(
     else {
         // The session was killed (or the registry sealed for handoff) while
         // the child was spawning; the loser has been cleaned up.
-        reply(
-            &writer,
-            &agent_error(
-                protocol::ErrorCode::SessionNotFound,
-                format!("agent session {session_id} was closed during spawn"),
-            ),
-        )
-        .await;
+        reply(&writer, &post_spawn_install_failure(&session_id, "initial")).await;
         return;
     };
 
@@ -613,29 +616,12 @@ pub async fn handle_agent_input(
                     let Some((life, stdout, stderr)) =
                         install_respawned_child(&session_id, generation, spawned, &agents).await
                     else {
-                        // The install lost to a kill/recreate or to the
-                        // handoff seal. Both are retryable and both must be
-                        // reported: silently returning leaves the client
-                        // waiting for a reply that never comes.
-                        let sealed = super::agent_handoff_sealed();
-                        let (code, message) = if sealed {
-                            (
-                                protocol::ErrorCode::HandoffLost,
-                                format!(
-                                    "daemon handoff in progress; retry input for agent session \
-                                     {session_id} against the new daemon"
-                                ),
-                            )
-                        } else {
-                            (
-                                protocol::ErrorCode::SessionNotFound,
-                                format!(
-                                    "agent session {session_id} was replaced while resuming; \
-                                     retry against the current session"
-                                ),
-                            )
-                        };
-                        reply(&writer, &agent_error(code, message)).await;
+                        // A provider child was already spawned. Even though a
+                        // rejected installer cleans that child up and does not
+                        // journal the input, this is beyond the verified
+                        // pre-side-effect boundary and must never trigger a
+                        // transparent replay.
+                        reply(&writer, &post_spawn_install_failure(&session_id, "resumed")).await;
                         return;
                     };
                     start_agent_readers(

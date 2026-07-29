@@ -50,7 +50,7 @@ pub(super) async fn spawn_prepared_task(
     );
 
     let event = daemon
-        .send_command(&command)
+        .send_command_retrying_successor(&command)
         .await
         .map_err(|e| format!("daemon error: {}", e))?;
 
@@ -210,7 +210,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         prepared.terminal_prelude.clone(),
         prepared.session.clone(),
     );
-    let event = match daemon.send_command(&command).await {
+    let event = match daemon.send_command_retrying_successor(&command).await {
         Ok(event) => event,
         Err(e) => {
             return Err(rollback_prepared_stage_fork(
@@ -358,7 +358,7 @@ pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
         None,
         prepared.session,
     );
-    match daemon.send_command(&command).await {
+    match daemon.send_command_retrying_successor(&command).await {
         Ok(DaemonEvent::SessionCreated { .. }) => {}
         Ok(DaemonEvent::Error { message, .. }) => {
             log::warn!("workspace teardown session {session_id} failed to start: {message}");
@@ -508,7 +508,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
         prepared.session,
     );
 
-    let event = match daemon.send_command(&command).await {
+    let event = match daemon.send_command_retrying_successor(&command).await {
         Ok(event) => event,
         Err(error) => return Err(record_failure(format!("daemon error: {error}"))),
     };
@@ -575,7 +575,7 @@ pub(crate) async fn kill_session_replacing(
 ) -> Result<(), String> {
     replacements.begin(session_id);
     let kill = daemon
-        .send_command(&DaemonCommand::Kill {
+        .send_command_retrying_successor(&DaemonCommand::Kill {
             session_id: session_id.to_string(),
         })
         .await
@@ -824,4 +824,163 @@ fn generate_stage_run_id(task_id: &str) -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     format!("run-{task_id}-{nanos}")
+}
+
+#[cfg(test)]
+mod successor_retry_tests {
+    use super::kill_session_replacing;
+    use crate::daemon_client::DaemonClient;
+    use crate::session_replacements::SessionReplacements;
+    use kanna_daemon::protocol::{ErrorCode, Event};
+    use std::path::Path;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    #[tokio::test]
+    async fn replacement_bookkeeping_survives_successor_retry_until_the_single_exit() {
+        let daemon_dir = std::env::temp_dir().join(format!(
+            "kanna-replacement-successor-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(&daemon_dir);
+        let pid_path = daemon_dir.join("daemon.pid");
+        let _ = std::fs::remove_file(&socket_path);
+        std::fs::write(&pid_path, "41\n").unwrap();
+        let old_listener = UnixListener::bind(&socket_path).unwrap();
+        let socket_for_server = socket_path.clone();
+        let pid_for_server = pid_path.clone();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = old_listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut first = String::new();
+            BufReader::new(read_half)
+                .read_line(&mut first)
+                .await
+                .unwrap();
+            let refusal = Event::Error {
+                code: Some(ErrorCode::RetryOnSuccessor),
+                message: "retry".to_string(),
+            };
+            write_half
+                .write_all(serde_json::to_string(&refusal).unwrap().as_bytes())
+                .await
+                .unwrap();
+            write_half.write_all(b"\n").await.unwrap();
+            write_half.flush().await.unwrap();
+            drop(write_half);
+            let _ = std::fs::remove_file(&socket_for_server);
+
+            let successor = UnixListener::bind(&socket_for_server).unwrap();
+            std::fs::write(&pid_for_server, format!("{}\n", std::process::id())).unwrap();
+            let (stream, _) = successor.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut second = String::new();
+            BufReader::new(read_half)
+                .read_line(&mut second)
+                .await
+                .unwrap();
+            write_half
+                .write_all(serde_json::to_string(&Event::Ok).unwrap().as_bytes())
+                .await
+                .unwrap();
+            write_half.write_all(b"\n").await.unwrap();
+            write_half.flush().await.unwrap();
+            (first, second)
+        });
+
+        let mut daemon = DaemonClient::connect(daemon_dir.to_str().unwrap())
+            .await
+            .unwrap();
+        daemon.set_connected_pid_for_test(41);
+        let replacements = SessionReplacements::default();
+
+        kill_session_replacing(&mut daemon, &replacements, "replace-me")
+            .await
+            .unwrap();
+
+        assert!(
+            replacements.consume("replace-me"),
+            "the one replacement marker must remain for the daemon's one Exit"
+        );
+        assert!(
+            !replacements.consume("replace-me"),
+            "a duplicate Exit must not be classified as another replacement"
+        );
+        let (first, second) = server.await.unwrap();
+        assert_eq!(first, second, "Kill must be replayed byte-for-byte");
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(Path::new(&daemon_dir));
+    }
+
+    #[tokio::test]
+    async fn replacement_bookkeeping_cancels_when_successor_refuses_the_single_replay() {
+        let daemon_dir = std::env::temp_dir().join(format!(
+            "kanna-replacement-successor-cap-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(&daemon_dir);
+        let pid_path = daemon_dir.join("daemon.pid");
+        let _ = std::fs::remove_file(&socket_path);
+        std::fs::write(&pid_path, "41\n").unwrap();
+        let old_listener = UnixListener::bind(&socket_path).unwrap();
+        let socket_for_server = socket_path.clone();
+        let pid_for_server = pid_path.clone();
+
+        let server = tokio::spawn(async move {
+            let refusal = serde_json::to_string(&Event::Error {
+                code: Some(ErrorCode::RetryOnSuccessor),
+                message: "retry".to_string(),
+            })
+            .unwrap();
+            let (stream, _) = old_listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut first = String::new();
+            BufReader::new(read_half)
+                .read_line(&mut first)
+                .await
+                .unwrap();
+            write_half.write_all(refusal.as_bytes()).await.unwrap();
+            write_half.write_all(b"\n").await.unwrap();
+            write_half.flush().await.unwrap();
+            drop(write_half);
+            let _ = std::fs::remove_file(&socket_for_server);
+
+            let successor = UnixListener::bind(&socket_for_server).unwrap();
+            std::fs::write(&pid_for_server, format!("{}\n", std::process::id())).unwrap();
+            let (stream, _) = successor.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut second = String::new();
+            BufReader::new(read_half)
+                .read_line(&mut second)
+                .await
+                .unwrap();
+            write_half.write_all(refusal.as_bytes()).await.unwrap();
+            write_half.write_all(b"\n").await.unwrap();
+            write_half.flush().await.unwrap();
+            (first, second)
+        });
+
+        let mut daemon = DaemonClient::connect(daemon_dir.to_str().unwrap())
+            .await
+            .unwrap();
+        daemon.set_connected_pid_for_test(41);
+        let replacements = SessionReplacements::default();
+
+        let error = kill_session_replacing(&mut daemon, &replacements, "replace-once")
+            .await
+            .expect_err("a second refusal must be surfaced");
+
+        assert!(error.contains("daemon error: retry"));
+        assert!(
+            !replacements.consume("replace-once"),
+            "terminal retry exhaustion must cancel replacement bookkeeping"
+        );
+        let (first, second) = server.await.unwrap();
+        assert_eq!(first, second, "the one replay must stay byte-for-byte");
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(Path::new(&daemon_dir));
+    }
 }

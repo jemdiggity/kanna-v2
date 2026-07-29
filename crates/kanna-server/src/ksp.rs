@@ -821,7 +821,7 @@ async fn run_agent_commands(
                 .await
                 .map_err(|error| format!("daemon error: {error}"))?;
             client
-                .send_command(&daemon_command)
+                .send_command_retrying_successor(&daemon_command)
                 .await
                 .map_err(|error| format!("daemon error: {error}"))
         }

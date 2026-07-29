@@ -18,6 +18,7 @@ use attachment::{
 };
 use connection::{
     daemon_socket_path, ensure_connected, require_option_mut, send_command_expect_ack,
+    send_command_expect_session_created,
 };
 #[allow(unused_imports)]
 pub use protocol::TerminalSnapshotPayload;
@@ -55,23 +56,7 @@ pub async fn spawn_session(
         "agent_provider": agent_provider,
     });
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
-    ensure_connected(&state).await?;
-    let mut guard = state.lock().await;
-    let client = require_option_mut(&mut guard, "daemon client")?;
-    client.send_command(&json).await?;
-
-    // Read response — expect SessionCreated or Error
-    let response = client.read_event().await?;
-    let event: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("bad response: {}", e))?;
-    match event.get("type").and_then(|t| t.as_str()) {
-        Some("SessionCreated") => Ok(()),
-        Some("Error") => Err(parse_error_event(&event)),
-        _ => Err(DaemonCommandError {
-            message: format!("unexpected spawn response: {}", response),
-            code: None,
-        }),
-    }
+    send_command_expect_session_created(&state, &json).await
 }
 
 /// Spawn a headless agent session (themed task) in the daemon. The daemon
@@ -118,22 +103,7 @@ pub async fn spawn_agent_session(
         },
     });
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
-    ensure_connected(&state).await?;
-    let mut guard = state.lock().await;
-    let client = require_option_mut(&mut guard, "daemon client")?;
-    client.send_command(&json).await?;
-
-    let response = client.read_event().await?;
-    let event: serde_json::Value =
-        serde_json::from_str(&response).map_err(|e| format!("bad response: {}", e))?;
-    match event.get("type").and_then(|t| t.as_str()) {
-        Some("SessionCreated") => Ok(()),
-        Some("Error") => Err(parse_error_event(&event)),
-        _ => Err(DaemonCommandError {
-            message: format!("unexpected spawn response: {}", response),
-            code: None,
-        }),
-    }
+    send_command_expect_session_created(&state, &json).await
 }
 
 fn resolve_mcp_config_path(env: &HashMap<String, String>, cwd: &str) -> Option<String> {
