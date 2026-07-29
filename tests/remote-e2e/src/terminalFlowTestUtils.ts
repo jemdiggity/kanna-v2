@@ -219,6 +219,34 @@ export function decodedOutput(payload: Record<string, unknown>): string {
   return Buffer.from(dataB64, "base64").toString("utf8");
 }
 
+const SINGLE_STAGE_PIPELINE = "remote-single-stage";
+
+/// Pin the task to a one-stage pipeline with no post, so advancing the stage
+/// moves straight past the final stage and closes the task. The built-in
+/// pipelines interpose commit/approve posts that would need real agents to
+/// satisfy; the scripted agent only echoes.
+export async function pinSingleStagePipeline(
+  harness: RemoteHarness,
+  taskId: string
+): Promise<void> {
+  const definition = JSON.stringify({
+    name: SINGLE_STAGE_PIPELINE,
+    stages: [{ name: "in progress", transition: "manual", prompt: "$TASK_PROMPT" }]
+  });
+  const sql = [
+    "PRAGMA busy_timeout=5000;",
+    "UPDATE pipeline_item",
+    `SET pipeline = ${sqliteString(SINGLE_STAGE_PIPELINE)}, pipeline_def = ${sqliteString(definition)}`,
+    `WHERE id = ${sqliteString(taskId)};`,
+    "UPDATE stage_run SET completion_transition = 'manual'",
+    `WHERE task_id = ${sqliteString(taskId)} AND kind = 'main' AND status = 'running';`
+  ].join(" ");
+  await execFileAsync("sqlite3", [harness.paths.dbPath, sql], {
+    cwd: harness.repoRoot,
+    env: process.env
+  });
+}
+
 export async function readPipelineItem(
   harness: RemoteHarness,
   taskId: string

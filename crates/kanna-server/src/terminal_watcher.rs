@@ -306,14 +306,17 @@ async fn terminal_state_watcher_once(
                         error
                     );
                 }
-                let success = code == 0;
+                // The exit code alone does not decide the reported outcome —
+                // an agent that exits 0 after reporting failure still failed.
+                // handle_task_terminal_state derives that from the task's
+                // terminating run; this only says how the session ended.
                 if let Err(error) =
-                    http_api::handle_task_terminal_state(state, &session_id, success).await
+                    http_api::handle_task_terminal_state(state, &session_id, code).await
                 {
                     log::warn!(
-                        "failed to handle terminal state for {} (success={}): {}",
+                        "failed to handle terminal state for {} (exit code {}): {}",
                         session_id,
-                        success,
+                        code,
                         error
                     );
                 }

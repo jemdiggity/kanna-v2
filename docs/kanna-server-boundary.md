@@ -54,6 +54,38 @@ polling each child. It is cursor-based, not snapshot-diffed:
   never inferred from a session going quiet; see
   [2026-07-29-awaiting-input-detection-e2e-gap.md](2026-07-29-awaiting-input-detection-e2e-gap.md).
 
+## Task Completion Notification
+
+A task with `notify_task_id` set delivers exactly one message into that task's
+terminal when it ends:
+
+```
+TASK <child-id> DONE [success|failure|closed]: <title>
+```
+
+The status vocabulary is closed — three words, matched exactly. The receiving
+agent is expected to act on the payload without re-reading task state, which is
+the entire point of `notify_task_id`, so the word has to carry the real outcome:
+
+- `success` — the task ended cleanly: it advanced past its final pipeline stage,
+  or its session ended with no failing verdict recorded against it.
+- `failure` — its terminating `stage_run` reported failure, or the agent process
+  itself died (non-zero exit). A verdict of failure wins even when the PTY then
+  exits 0, because an agent that reports failure and quits still failed.
+- `closed` — the task was closed before finishing its pipeline (sidebar ⇧⌘⌫ or
+  `POST /v1/tasks/{task_id}/actions/close`). No verdict was ever reached; this is
+  not a failure and must not be diagnosed as one.
+
+The status is derived server-side from the *trigger* plus the task's terminating
+run, never from the daemon `Exit` alone: the agent erroring, the task advancing
+past its final stage, and a human closing the task all end the same PTY the same
+way. Deriving it from the exit code alone is what made every clean completion —
+and every direct close — report `DONE [failure]`.
+
+Delivery is claimed once via `pipeline_item.notified_at` and goes through the
+same two-step input helper as `POST /v1/tasks/{task_id}/input`. All of it is
+server/daemon-side; it must not depend on the desktop event bridge being open.
+
 ## Local Consumer Model
 
 The desktop app starts `kanna-server` and supplies its config.

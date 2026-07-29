@@ -7,6 +7,7 @@ import {
   createScriptedTask,
   decodedOutput,
   expectNoRelayEvent,
+  pinSingleStagePipeline,
   readPipelineItem,
   waitForRelayEvent,
   waitForTerminalOutput
@@ -243,6 +244,117 @@ describe("remote task terminal flow E2E", () => {
       childEvents.close();
     }
   }, 45_000);
+
+  // `TASK <id> DONE [<status>]` is acted on by the receiving agent without
+  // re-reading task state, so each way a task can end has to be tellable from
+  // the payload alone. Daemon Exit cannot do that on its own — a clean finish,
+  // a direct close, and a real failure all end the same PTY the same way — so
+  // these drive the three endings through the real server, daemon, and PTY.
+  it("reports a normal pipeline completion as DONE [success]", async () => {
+    const parent = await createScriptedTask(harness, {
+      displayName: "Completion notification parent"
+    });
+    const parentEvents = collectTerminalEvents(harness, parent.taskId);
+    const child = await createScriptedTask(harness, {
+      displayName: "Cleanly completed child",
+      notifyTaskId: parent.taskId
+    });
+    const childEvents = collectTerminalEvents(harness, child.taskId);
+
+    try {
+      await waitForTerminalOutput(parentEvents, "SCRIPT_READY");
+      await waitForTerminalOutput(childEvents, "SCRIPT_READY");
+      await pinSingleStagePipeline(harness, child.taskId);
+      // The agent succeeds on its only stage, then the stage is advanced —
+      // which, past the final stage, closes the task. That close used to
+      // hardcode [failure] no matter how the run finished.
+      await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "POST",
+        path: `/v1/tasks/${child.taskId}/actions/complete-stage`,
+        body: { status: "success", summary: "Approved PR and signaled merge master" }
+      });
+      await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "POST",
+        path: `/v1/tasks/${child.taskId}/actions/advance-stage`,
+        body: null
+      });
+
+      await waitForTerminalOutput(parentEvents, `TASK ${child.taskId} DONE [success]`, 20_000);
+      expect(parentEvents.outputText()).not.toContain(`TASK ${child.taskId} DONE [failure]`);
+    } finally {
+      parentEvents.close();
+      childEvents.close();
+    }
+  }, 60_000);
+
+  it("reports a direct close as DONE [closed], not as a failure", async () => {
+    const parent = await createScriptedTask(harness, {
+      displayName: "Close notification parent"
+    });
+    const parentEvents = collectTerminalEvents(harness, parent.taskId);
+    const child = await createScriptedTask(harness, {
+      displayName: "Directly closed child",
+      notifyTaskId: parent.taskId
+    });
+    const childEvents = collectTerminalEvents(harness, child.taskId);
+
+    try {
+      await waitForTerminalOutput(parentEvents, "SCRIPT_READY");
+      await waitForTerminalOutput(childEvents, "SCRIPT_READY");
+      await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "POST",
+        path: `/v1/tasks/${child.taskId}/actions/close`,
+        body: null
+      });
+
+      await waitForTerminalOutput(parentEvents, `TASK ${child.taskId} DONE [closed]`, 20_000);
+      expect(parentEvents.outputText()).not.toContain(`TASK ${child.taskId} DONE [failure]`);
+    } finally {
+      parentEvents.close();
+      childEvents.close();
+    }
+  }, 60_000);
+
+  it("reports a failing verdict as DONE [failure] even when the session exits 0", async () => {
+    const parent = await createScriptedTask(harness, {
+      displayName: "Failure notification parent"
+    });
+    const parentEvents = collectTerminalEvents(harness, parent.taskId);
+    const child = await createScriptedTask(harness, {
+      displayName: "Genuinely failed child",
+      notifyTaskId: parent.taskId
+    });
+    const childEvents = collectTerminalEvents(harness, child.taskId);
+
+    try {
+      await waitForTerminalOutput(parentEvents, "SCRIPT_READY");
+      await waitForTerminalOutput(childEvents, "SCRIPT_READY");
+      await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "POST",
+        path: `/v1/tasks/${child.taskId}/actions/complete-stage`,
+        body: { status: "failure", summary: "could not build the feed" }
+      });
+      // The agent then quits cleanly. The exit code says 0; the verdict on
+      // record says failed, and the verdict is what the payload must report.
+      await harness.client.invokeDesktop({
+        desktopId: harness.desktopId,
+        method: "POST",
+        path: `/v1/tasks/${child.taskId}/input`,
+        body: { input: "exit-zero" }
+      });
+      await childEvents.waitForExit(0);
+
+      await waitForTerminalOutput(parentEvents, `TASK ${child.taskId} DONE [failure]`, 20_000);
+      expect(parentEvents.outputText()).not.toContain(`TASK ${child.taskId} DONE [success]`);
+    } finally {
+      parentEvents.close();
+      childEvents.close();
+    }
+  }, 60_000);
 
   it("recovers invokes and active terminal observation after relay reconnect", async () => {
     const task = await createScriptedTask(harness, {

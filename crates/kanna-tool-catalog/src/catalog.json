@@ -66,7 +66,7 @@
     },
     {
       "name": "kanna_set_task_notify",
-      "description": "Set or clear the task that is notified when this task finishes: that task's terminal receives 'TASK <id> DONE [success|failure]: <title>' as input. Unlike the creation-time notify_task_id this works on an already-running task, so an orchestrator can adopt tasks it did not create. Omit notify_task_id to stop notifying. For watching many tasks at once, prefer kanna_wait_events.",
+      "description": "Set or clear the task that is notified when this task finishes: that task's terminal receives 'TASK <id> DONE [success|failure|closed]: <title>' as input. The status is one of exactly three words: success (ended cleanly), failure (its terminating run reported failure, or its agent process died), closed (closed before finishing its pipeline \u2014 not a failure). Unlike the creation-time notify_task_id this works on an already-running task, so an orchestrator can adopt tasks it did not create. Omit notify_task_id to stop notifying. For watching many tasks at once, prefer kanna_wait_events.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/set-notify",
       "response": "json",
@@ -124,7 +124,7 @@
         { "name": "model", "description": "Model override passed to the agent CLI.", "type": "string", "required": false, "location": "body" },
         { "name": "permission_mode", "description": "Permission mode passed to the agent CLI, in camelCase: 'dontAsk', 'acceptEdits', or 'default'.", "type": "string", "required": false, "location": "body", "key": "permissionMode" },
         { "name": "parent_task_id", "description": "Existing task id to nest this task under as a subtask in the sidebar.", "type": "string", "required": false, "location": "body", "key": "parentTaskId" },
-        { "name": "notify_task_id", "description": "Task id to notify when this task finishes: that task's terminal receives 'TASK <id> DONE [success|failure]: <title>' as input.", "type": "string", "required": false, "location": "body", "key": "notifyTaskId" },
+        { "name": "notify_task_id", "description": "Task id to notify when this task finishes: that task's terminal receives 'TASK <id> DONE [success|failure|closed]: <title>' as input. The status is one of exactly three words: success (ended cleanly), failure (its terminating run reported failure, or its agent process died), closed (closed before finishing its pipeline \u2014 not a failure).", "type": "string", "required": false, "location": "body", "key": "notifyTaskId" },
         { "name": "allowed_tools", "description": "Allow-listed tool names passed to the agent CLI.", "type": "string_array", "required": false, "location": "body", "key": "allowedTools" },
         { "name": "blocker_task_ids", "description": "Task ids that must finish before this task; it shows as blocked until they do.", "type": "string_array", "required": false, "location": "body", "key": "blockerTaskIds" }
       ]

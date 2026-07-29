@@ -192,12 +192,24 @@ patch; treat tactical safety fallbacks as temporary and label them as such.
 
 **Server-side completion notify boundary.** `kanna-server` subscribes directly
 to daemon terminal-state events and treats daemon `Exit` for a task session as
-the completion signal — updating activity to `unread`, claiming
+one completion signal — updating activity to `unread`, claiming
 `pipeline_item.notify_task_id` via `notified_at`, and delivering
-`TASK <child-id> DONE [success|failure]: <title>` through the same two-step
-input helper as `/v1/tasks/{task_id}/input`. Keep this server/daemon-side; it
-must not depend on the desktop frontend event bridge being open.
-`kanna_set_task_notify` retargets that notification on an already-running task.
+`TASK <child-id> DONE [success|failure|closed]: <title>` through the same
+two-step input helper as `/v1/tasks/{task_id}/input`. Keep this
+server/daemon-side; it must not depend on the desktop frontend event bridge
+being open. `kanna_set_task_notify` retargets that notification on an
+already-running task.
+
+The status word is a **closed three-word vocabulary** derived from the
+`TaskCompletionTrigger` plus the task's terminating `stage_run` — never from the
+daemon `Exit` alone, which cannot tell an agent erroring from a task advancing
+past its final stage from a human closing the task, because all three end the
+same PTY. `success` = ended cleanly (pipeline finished, or session ended with no
+failing verdict); `failure` = the terminating run reported failure, or the agent
+process died non-zero; `closed` = closed before finishing its pipeline, which is
+not a failure. Receiving agents match these words exactly and act without
+re-reading task state, so any new ending must map onto one of the three rather
+than widen the payload. See `docs/kanna-server-boundary.md`.
 
 **Task event feed.** `GET /v1/task-events` (`kanna_wait_events`) is how an agent
 watches *several* tasks — `kanna_wait_task` blocks on one id and resolves only
