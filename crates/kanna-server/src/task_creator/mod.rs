@@ -68,6 +68,8 @@ pub(crate) use stages::{
 };
 pub(crate) use worktree::resolve_current_source_worktree_branch;
 
+const FALLBACK_PIPELINE_NAME: &str = "no-review";
+
 #[derive(Clone, Debug)]
 pub(crate) enum DefinitionLookupError {
     InvalidName(String),
@@ -130,7 +132,7 @@ pub(crate) fn load_repo_kanna_definitions(
             .config()
             .pipeline
             .clone()
-            .unwrap_or_else(|| "no-review".to_string());
+            .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
         // The manifest's default must be a name the caller can select from
         // `pipelines`. A repo whose committed config still names a retired
         // built-in (`default`, `qa`, `qa-dispatch`) resolves to the current definition,
@@ -342,7 +344,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
     let pipeline_name = source_task
         .pipeline
         .clone()
-        .unwrap_or_else(|| "no-review".to_string());
+        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
     let stage_name = source_task
         .stage
         .clone()
@@ -1111,7 +1113,7 @@ fn try_prepare_workspace_teardown_for_close(
     let pipeline_name = source_task
         .pipeline
         .clone()
-        .unwrap_or_else(|| "no-review".to_string());
+        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
     let pipeline =
         definitions.task_pipeline(&pipeline_name, source_task.pipeline_def.as_deref())?;
     Ok(prepare_workspace_teardown_for_transition_close(
@@ -1757,7 +1759,7 @@ pub(crate) fn create_dormant_task_for_api_with_error(
     let pipeline_name = request
         .pipeline_name
         .or(repo_config.pipeline.clone())
-        .unwrap_or_else(|| "no-review".to_string());
+        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
     let pipeline = definitions.pipeline(&pipeline_name)?;
     let pipeline_def_json =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
@@ -1886,7 +1888,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
     let pipeline_name = item
         .pipeline
         .clone()
-        .unwrap_or_else(|| "no-review".to_string());
+        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
     let pipeline = definitions.task_pipeline(&pipeline_name, item.pipeline_def.as_deref())?;
     let stage_name = item
         .stage
@@ -2405,7 +2407,7 @@ fn resolve_task_spawn(
         .pipeline_name
         .clone()
         .or(repo_config.pipeline.clone())
-        .unwrap_or_else(|| "no-review".to_string());
+        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
     let pipeline = definitions.task_pipeline(&pipeline_name, request.pipeline_def.as_deref())?;
     let pipeline_def_json =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;

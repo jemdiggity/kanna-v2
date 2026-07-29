@@ -2093,6 +2093,67 @@ fn seed_post_pipeline_task(config: &Config, db: &Db, repo_root: &std::path::Path
 }
 
 #[test]
+fn pipeline_null_task_uses_no_review_across_lifecycle_paths_when_repo_defines_default() {
+    let repo_root = init_git_repo("pipeline-null-fallback");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        serde_json::json!({
+            "name": "default",
+            "revision_limit": 17,
+            "stages": [{
+                "name": "in progress",
+                "agent": "review",
+                "prompt": "Repo-authored default $TASK_PROMPT",
+                "environment": "repo-default",
+                "policy": { "transition": "manual" }
+            }],
+            "environments": {
+                "repo-default": {
+                    "teardown": ["printf REPO_DEFAULT_TEARDOWN"]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish shadowing default pipeline");
+
+    let config = test_config("pipeline-null-fallback");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_pipeline_task(&config, &db, &repo_root);
+    Connection::open(&config.db_path)
+        .unwrap()
+        .execute(
+            "UPDATE pipeline_item SET pipeline = NULL WHERE id = ?",
+            ["task-1"],
+        )
+        .unwrap();
+
+    let post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Post(post) => post,
+        PreparedStageTransition::Run(_) => panic!("no-review advance should dispatch its post"),
+        PreparedStageTransition::Close { .. } => {
+            panic!("repo-authored default must not close a pipeline-null task")
+        }
+    };
+    assert_eq!(post.run_stage, "commit");
+
+    let revision_budget = super::super::resolve_revision_budget(&db, "task-1").unwrap();
+    assert_eq!(revision_budget.limit, super::super::DEFAULT_REVISION_LIMIT);
+
+    let rerun = prepare_rerun_stage_for_api(&db, &config, "task-1").unwrap();
+    assert_eq!(rerun.stage_agent.as_deref(), Some("implement"));
+
+    assert!(
+        super::super::prepare_workspace_teardown_for_close(&db, &config, "task-1").is_none(),
+        "repo-authored default teardown must not apply to a pipeline-null task"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn prepare_advance_stage_dispatches_post_into_running_session() {
     let repo_root = init_git_repo("advance-dispatches-post");
     write_post_pipeline_fixtures(&repo_root);

@@ -17,6 +17,7 @@ use super::types::{
 };
 use super::worktree::next_fork_branch;
 use super::worktree::resolve_current_source_worktree_branch;
+use super::FALLBACK_PIPELINE_NAME;
 use crate::db::Repo;
 
 /// Everything stage routing needs about the task being transitioned.
@@ -64,7 +65,7 @@ fn load_stage_transition_source(
     let pipeline_name = source_task
         .pipeline
         .clone()
-        .unwrap_or_else(|| "default".to_string());
+        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
     let current_stage_name = source_task
         .stage
         .clone()
@@ -718,7 +719,7 @@ pub(crate) fn resolve_revision_budget(
         .source_task
         .pipeline
         .clone()
-        .unwrap_or_else(|| "default".to_string());
+        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
     let limit = resolve_revision_limit(
         &identity.repo,
         &pipeline_name,
