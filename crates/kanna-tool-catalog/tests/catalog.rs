@@ -838,3 +838,139 @@ fn display_name_documents_the_prompt_fallback_rather_than_a_derivation() {
         "display_name must not promise a derivation: {description}"
     );
 }
+
+/// The catalog, not the shape of the text, decides a command-line argument's
+/// type. Every declared parameter must round-trip its own CLI spelling: a
+/// string stays a string however numeric it looks, and an integer is still an
+/// integer when it arrives as text.
+#[test]
+fn declared_types_decide_cli_argument_parsing_not_the_text() {
+    let catalog = bundled_catalog();
+
+    let task_id = catalog
+        .find_param("kanna_get_task", "task_id")
+        .expect("task_id param");
+    assert_eq!(task_id.param_type, ParamType::String);
+    assert_eq!(
+        task_id.parse_cli_value("57808275").unwrap(),
+        json!("57808275")
+    );
+    assert_eq!(
+        task_id.parse_cli_value("5ad2bc89").unwrap(),
+        json!("5ad2bc89")
+    );
+    // A value that parses as JSON of another type is still just text.
+    assert_eq!(task_id.parse_cli_value("true").unwrap(), json!("true"));
+    assert_eq!(
+        task_id.parse_cli_value("{\"a\":1}").unwrap(),
+        json!("{\"a\":1}")
+    );
+
+    let timeout = catalog
+        .find_param("kanna_wait_task", "timeout_secs")
+        .expect("timeout_secs param");
+    assert_eq!(timeout.param_type, ParamType::Integer);
+    assert_eq!(timeout.parse_cli_value("30").unwrap(), json!(30));
+    assert_eq!(
+        timeout.parse_cli_value("soon").unwrap_err(),
+        "timeout_secs must be an unsigned integer, got soon"
+    );
+
+    let blockers = catalog
+        .find_param("kanna_block_task", "blocker_task_ids")
+        .expect("blocker_task_ids param");
+    assert_eq!(blockers.param_type, ParamType::StringArray);
+    assert_eq!(
+        blockers.parse_cli_value("1234, ab12cd").unwrap(),
+        json!(["1234", "ab12cd"])
+    );
+    assert_eq!(
+        blockers.parse_cli_value(r#"["1234","ab12cd"]"#).unwrap(),
+        json!(["1234", "ab12cd"])
+    );
+    assert!(blockers
+        .parse_cli_value("[1234]")
+        .unwrap_err()
+        .contains("array of strings"));
+
+    let metadata = catalog
+        .find_param("kanna_complete_stage", "metadata")
+        .expect("metadata param");
+    assert_eq!(metadata.param_type, ParamType::Object);
+    assert_eq!(
+        metadata
+            .parse_cli_value(r#"{"pr_url":"https://example.invalid/pull/1"}"#)
+            .unwrap(),
+        json!({ "pr_url": "https://example.invalid/pull/1" })
+    );
+    assert!(metadata
+        .parse_cli_value("nope")
+        .unwrap_err()
+        .contains("must be a JSON object"));
+
+    assert!(catalog.find_param("kanna_get_task", "depth").is_none());
+    assert!(catalog
+        .find_param("kanna_no_such_tool", "task_id")
+        .is_none());
+}
+
+/// Every parameter the catalog declares must survive its own CLI spelling and
+/// then pass `resolve_request` — the check that failed for all-digit task ids.
+#[test]
+fn every_declared_parameter_round_trips_a_cli_spelling() {
+    for tool in bundled_catalog().tools {
+        for param in &tool.params {
+            let raw = match param.param_type {
+                ParamType::String => param
+                    .enum_values
+                    .as_ref()
+                    .and_then(|values| values.first().cloned())
+                    .unwrap_or_else(|| "57808275".to_string()),
+                ParamType::Integer => "7".to_string(),
+                ParamType::StringArray => "57808275".to_string(),
+                ParamType::Object => "{}".to_string(),
+            };
+            let value = param
+                .parse_cli_value(&raw)
+                .unwrap_or_else(|e| panic!("{}.{} rejected {raw}: {e}", tool.name, param.name));
+            let expected_type_ok = match param.param_type {
+                ParamType::String => value.is_string(),
+                ParamType::Integer => value.is_u64(),
+                ParamType::StringArray => value.is_array(),
+                ParamType::Object => value.is_object(),
+            };
+            assert!(
+                expected_type_ok,
+                "{}.{} parsed {raw} as {value}",
+                tool.name, param.name
+            );
+        }
+
+        let args = tool
+            .params
+            .iter()
+            .map(|param| {
+                let raw = match param.param_type {
+                    ParamType::String => param
+                        .enum_values
+                        .as_ref()
+                        .and_then(|values| values.first().cloned())
+                        .unwrap_or_else(|| "57808275".to_string()),
+                    ParamType::Integer => "7".to_string(),
+                    ParamType::StringArray => "57808275".to_string(),
+                    ParamType::Object => "{}".to_string(),
+                };
+                (
+                    param.name.clone(),
+                    param.parse_cli_value(&raw).expect("cli value"),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        resolve_request(
+            &bundled_catalog(),
+            &tool.name,
+            &serde_json::Value::Object(args),
+        )
+        .unwrap_or_else(|e| panic!("{} rejected its own CLI spelling: {e}", tool.name));
+    }
+}

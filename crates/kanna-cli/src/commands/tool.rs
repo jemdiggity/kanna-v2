@@ -23,6 +23,8 @@ pub(crate) fn load_tool_catalog_from_current_dir() -> Result<Catalog, String> {
 }
 
 pub(crate) fn build_tool_call_args(
+    catalog: &Catalog,
+    tool_name: &str,
     json_arg: &Option<String>,
     repeated_args: &[String],
 ) -> Result<Value, String> {
@@ -40,8 +42,14 @@ pub(crate) fn build_tool_call_args(
         let Some((key, raw_value)) = raw_arg.split_once('=') else {
             return Err(format!("--arg must be key=value, got {raw_arg}"));
         };
-        let value = serde_json::from_str::<Value>(raw_value)
-            .unwrap_or_else(|_| Value::String(raw_value.to_string()));
+        // The catalog declares the type; the text is never allowed to guess
+        // it. An argument the tool does not declare stays a string so
+        // `resolve_request` reports it as an unknown argument, which is the
+        // real problem, rather than as a parse failure.
+        let value = match catalog.find_param(tool_name, key) {
+            Some(param) => param.parse_cli_value(raw_value)?,
+            None => Value::String(raw_value.to_string()),
+        };
         args_object.insert(key.to_string(), value);
     }
 
@@ -113,11 +121,12 @@ pub(crate) async fn run(command: ToolCommands) {
             arg,
             server_url,
         } => {
-            let args = build_tool_call_args(&json, &arg).unwrap_or_else(|e| {
+            // The catalog is loaded first: it is what types `--arg` values.
+            let catalog = load_tool_catalog_from_current_dir().unwrap_or_else(|e| {
                 eprintln!("Error: {e}");
                 process::exit(1);
             });
-            let catalog = load_tool_catalog_from_current_dir().unwrap_or_else(|e| {
+            let args = build_tool_call_args(&catalog, &name, &json, &arg).unwrap_or_else(|e| {
                 eprintln!("Error: {e}");
                 process::exit(1);
             });

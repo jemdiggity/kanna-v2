@@ -304,9 +304,12 @@ fn parses_generic_tool_subcommands() {
 
 #[test]
 fn tool_call_args_merge_json_and_repeated_args() {
+    let catalog = kanna_tool_catalog::bundled_catalog();
     let args = build_tool_call_args(
+        &catalog,
+        "kanna_create_task",
         &Some(r#"{"repo_id":"repo-1","prompt":"Ship","allowed_tools":["Read"]}"#.to_string()),
-        &["stage=pr".to_string(), "timeout_secs=5".to_string()],
+        &["stage=pr".to_string()],
     )
     .unwrap();
 
@@ -316,10 +319,141 @@ fn tool_call_args_merge_json_and_repeated_args() {
             "repo_id": "repo-1",
             "prompt": "Ship",
             "allowed_tools": ["Read"],
-            "stage": "pr",
-            "timeout_secs": 5
+            "stage": "pr"
         })
     );
+}
+
+/// Task ids are hex, so roughly one in 16^8 is all digits. Guessing the type
+/// from the text turned those into numbers and the catalog rejected them with
+/// `task_id must be a string`, which reads like a bad id rather than a CLI bug.
+#[test]
+fn tool_call_args_keep_all_digit_ids_as_strings() {
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let args = build_tool_call_args(
+        &catalog,
+        "kanna_get_task",
+        &None,
+        &["task_id=57808275".to_string()],
+    )
+    .unwrap();
+
+    assert_eq!(args, json!({ "task_id": "57808275" }));
+    assert!(kanna_tool_catalog::resolve_request(&catalog, "kanna_get_task", &args).is_ok());
+}
+
+/// The inverse of the same bug: a declared integer must not arrive as a string
+/// just because `--arg` hands every value over as text.
+#[test]
+fn tool_call_args_type_declared_integers_from_text() {
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let args = build_tool_call_args(
+        &catalog,
+        "kanna_wait_task",
+        &None,
+        &[
+            "task_id=57808275".to_string(),
+            "timeout_secs=30".to_string(),
+            "poll_secs=3".to_string(),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(
+        args,
+        json!({ "task_id": "57808275", "timeout_secs": 30, "poll_secs": 3 })
+    );
+    let request = kanna_tool_catalog::resolve_request(&catalog, "kanna_wait_task", &args).unwrap();
+    let wait = request.wait.expect("wait spec");
+    assert_eq!(wait.task_id, "57808275");
+    assert_eq!(wait.timeout_secs, 30);
+    assert_eq!(wait.poll_secs, 3);
+}
+
+#[test]
+fn tool_call_args_reject_non_numeric_text_for_declared_integers() {
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let error = build_tool_call_args(
+        &catalog,
+        "kanna_wait_task",
+        &None,
+        &["timeout_secs=soon".to_string()],
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "timeout_secs must be an unsigned integer, got soon");
+}
+
+#[test]
+fn tool_call_args_accept_json_and_comma_lists_for_declared_string_arrays() {
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let comma = build_tool_call_args(
+        &catalog,
+        "kanna_block_task",
+        &None,
+        &[
+            "task_id=57808275".to_string(),
+            "blocker_task_ids=1234,ab12cd".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        comma,
+        json!({ "task_id": "57808275", "blocker_task_ids": ["1234", "ab12cd"] })
+    );
+
+    let json_spelled = build_tool_call_args(
+        &catalog,
+        "kanna_block_task",
+        &None,
+        &[
+            "task_id=57808275".to_string(),
+            r#"blocker_task_ids=["1234","ab12cd"]"#.to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(json_spelled, comma);
+}
+
+#[test]
+fn tool_call_args_parse_declared_objects_as_json() {
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let args = build_tool_call_args(
+        &catalog,
+        "kanna_complete_stage",
+        &None,
+        &[
+            "task_id=57808275".to_string(),
+            "status=success".to_string(),
+            "summary=Shipped".to_string(),
+            r#"metadata={"pr_url":"https://example.invalid/pull/1"}"#.to_string(),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(
+        args["metadata"],
+        json!({ "pr_url": "https://example.invalid/pull/1" })
+    );
+    assert_eq!(args["task_id"], json!("57808275"));
+}
+
+/// An argument the tool does not declare stays text so the resolver reports the
+/// unknown argument — the real problem — instead of a parse failure.
+#[test]
+fn tool_call_args_leave_undeclared_arguments_as_strings() {
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let args = build_tool_call_args(
+        &catalog,
+        "kanna_get_task",
+        &None,
+        &["task_id=57808275".to_string(), "depth=2".to_string()],
+    )
+    .unwrap();
+
+    assert_eq!(args["depth"], json!("2"));
+    let error = kanna_tool_catalog::resolve_request(&catalog, "kanna_get_task", &args).unwrap_err();
+    assert!(error.contains("unknown argument: depth"), "{error}");
 }
 
 #[test]

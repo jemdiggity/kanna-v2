@@ -208,6 +208,67 @@ impl Catalog {
     fn find_tool(&self, name: &str) -> Option<&ToolDef> {
         self.tools.iter().find(|tool| tool.name == name)
     }
+
+    /// The declaration for one parameter, so a surface that receives arguments
+    /// as untyped text can coerce them by declaration instead of guessing.
+    pub fn find_param(&self, tool_name: &str, param_name: &str) -> Option<&ParamDef> {
+        self.find_tool(tool_name)?
+            .params
+            .iter()
+            .find(|param| param.name == param_name)
+    }
+}
+
+impl ParamDef {
+    /// Parse the `value` half of a `key=value` command-line argument into the
+    /// JSON value this parameter declares.
+    ///
+    /// The declaration decides the type; the shape of the text never does.
+    /// Guessing from the text (JSON-parsing the value and falling back to a
+    /// string) silently retyped every all-digit string: task ids are hex, so
+    /// roughly one in 16^8 became a number and the catalog then rejected it
+    /// with `task_id must be a string` — an error that reads like a bad id
+    /// rather than the CLI bug it was.
+    pub fn parse_cli_value(&self, raw: &str) -> Result<Value, String> {
+        match self.param_type {
+            ParamType::String => Ok(Value::String(raw.to_string())),
+            ParamType::Integer => raw
+                .trim()
+                .parse::<u64>()
+                .map(|number| Value::Number(number.into()))
+                .map_err(|_| format!("{} must be an unsigned integer, got {raw}", self.name)),
+            ParamType::StringArray => parse_cli_string_array(&self.name, raw),
+            ParamType::Object => {
+                let parsed = serde_json::from_str::<Value>(raw)
+                    .map_err(|e| format!("{} must be a JSON object: {e}", self.name))?;
+                if !parsed.is_object() {
+                    return Err(format!("{} must be a JSON object", self.name));
+                }
+                Ok(parsed)
+            }
+        }
+    }
+}
+
+/// A JSON array when the value is spelled as one, otherwise the plain-CLI
+/// comma-separated list — the same spelling `query_value` emits on the way out.
+fn parse_cli_string_array(name: &str, raw: &str) -> Result<Value, String> {
+    let trimmed = raw.trim();
+    let values = if trimmed.starts_with('[') {
+        let parsed = serde_json::from_str::<Value>(trimmed)
+            .map_err(|e| format!("{name} must be an array of strings: {e}"))?;
+        string_array_value(&parsed, name)?
+    } else {
+        trimmed
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    Ok(Value::Array(
+        values.into_iter().map(Value::String).collect(),
+    ))
 }
 
 fn input_schema(tool: &ToolDef) -> Value {
