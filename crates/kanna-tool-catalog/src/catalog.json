@@ -39,13 +39,13 @@
     },
     {
       "name": "kanna_wait_task",
-      "description": "Block until a Kanna task finishes (agent stopped, activity 'unread') or closes, polling its detail. Returns the final task detail; times out with an error, in which case calling again keeps waiting.",
+      "description": "Block until a Kanna task finishes (agent stopped, activity 'unread') or closes, polling its detail. Returns the task detail plus waitOutcome 'resolved'. If the wait window elapses first it returns the latest detail with waitOutcome 'timeout' instead of failing — that is a normal result, so call it again in a loop to keep waiting.",
       "method": "GET",
       "path": "/v1/tasks/{task_id}",
       "response": "wait",
       "params": [
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" },
-        { "name": "timeout_secs", "description": "Seconds to wait before returning a timeout error (clamped to at most 600).", "type": "integer", "required": false, "location": "body", "default": 600, "max": 600 },
+        { "name": "timeout_secs", "description": "Seconds to wait before returning the latest detail with waitOutcome 'timeout' (clamped to at most 240, so the call returns inside the 300s tools/call timeout MCP clients enforce).", "type": "integer", "required": false, "location": "body", "default": 240, "max": 240 },
         { "name": "poll_secs", "description": "Seconds between polls (minimum 1).", "type": "integer", "required": false, "location": "body", "default": 3, "min": 1 },
         { "name": "until", "description": "'finished' resolves when the task's agent stops or the task closes; 'closed' resolves only when the task closes.", "type": "string", "required": false, "location": "body", "enum": ["finished", "closed"], "default": "finished" }
       ]

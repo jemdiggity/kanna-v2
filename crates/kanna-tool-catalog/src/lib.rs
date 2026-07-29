@@ -6,6 +6,36 @@ use std::path::{Path, PathBuf};
 
 const BUNDLED_CATALOG: &str = include_str!("catalog.json");
 
+/// MCP clients abort a `tools/call` on their own timer — Codex and Claude Code
+/// both cut at 300s — and when they do the calling agent loses the result
+/// entirely, including the tool's own "still running" answer.
+pub const CLIENT_TOOL_CALL_BUDGET_SECS: u64 = 300;
+
+/// Hard ceiling on a single `kanna_wait_task` window, enforced here rather than
+/// only in `catalog.json` so an override catalog cannot reintroduce a wait the
+/// client is guaranteed to kill. The gap to `CLIENT_TOOL_CALL_BUDGET_SECS`
+/// leaves room for the final poll and the response render.
+pub const MAX_WAIT_TIMEOUT_SECS: u64 = 240;
+
+/// Waits are designed to be called in a loop, so the default is the full
+/// (bounded) window: a wait that hands back the task's current state at 240s is
+/// strictly better than one the client kills at 300s.
+pub const DEFAULT_WAIT_TIMEOUT_SECS: u64 = MAX_WAIT_TIMEOUT_SECS;
+
+/// Seconds between polls when the caller does not choose.
+pub const DEFAULT_WAIT_POLL_SECS: u64 = 3;
+
+const _: () = assert!(
+    MAX_WAIT_TIMEOUT_SECS + 60 <= CLIENT_TOOL_CALL_BUDGET_SECS,
+    "a wait window must leave the client room to receive the answer, or the \
+     call is killed and the agent loses the result"
+);
+const _: () = assert!(DEFAULT_WAIT_TIMEOUT_SECS <= MAX_WAIT_TIMEOUT_SECS);
+
+pub fn clamp_wait_timeout_secs(timeout_secs: u64) -> u64 {
+    timeout_secs.min(MAX_WAIT_TIMEOUT_SECS)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Catalog {
     pub tools: Vec<ToolDef>,
@@ -427,8 +457,8 @@ fn query_value(value: &Value, name: &str) -> Result<String, String> {
 
 fn wait_spec(tool: &ToolDef, args: &Value) -> Result<WaitSpec, String> {
     let mut task_id = None;
-    let mut timeout_secs = 600;
-    let mut poll_secs = 3;
+    let mut timeout_secs = DEFAULT_WAIT_TIMEOUT_SECS;
+    let mut poll_secs = DEFAULT_WAIT_POLL_SECS;
     let mut until = WaitUntil::Finished;
 
     for param in &tool.params {
@@ -452,10 +482,57 @@ fn wait_spec(tool: &ToolDef, args: &Value) -> Result<WaitSpec, String> {
 
     Ok(WaitSpec {
         task_id: task_id.ok_or_else(|| "missing required argument: task_id".to_string())?,
-        timeout_secs,
+        timeout_secs: clamp_wait_timeout_secs(timeout_secs),
         poll_secs,
         until,
     })
+}
+
+/// A wait that reaches the requested state. Callers get the task detail they
+/// already read, plus the discriminator that tells them not to loop again.
+pub fn wait_resolved_result(task: Value) -> Value {
+    let mut object = wait_result_object(task);
+    object.insert(
+        "waitOutcome".to_string(),
+        Value::String("resolved".to_string()),
+    );
+    Value::Object(object)
+}
+
+/// A wait that runs out its window. This is a normal result, not an error: the
+/// caller keeps the task's latest detail and the instruction to call again, and
+/// both kanna-mcp and kanna-cli render it here so agents see one shape whichever
+/// surface they use.
+pub fn wait_timeout_result(task: Value, task_id: &str, timeout_secs: u64) -> Value {
+    let mut object = wait_result_object(task);
+    object.insert(
+        "waitOutcome".to_string(),
+        Value::String("timeout".to_string()),
+    );
+    object.insert(
+        "waitTimeoutSecs".to_string(),
+        Value::Number(timeout_secs.into()),
+    );
+    object.insert(
+        "waitHint".to_string(),
+        Value::String(format!(
+            "task {task_id} has not reached the requested state within {timeout_secs}s. \
+             This is not an error and the task is untouched — call kanna_wait_task again \
+             with the same arguments to keep waiting."
+        )),
+    );
+    Value::Object(object)
+}
+
+fn wait_result_object(task: Value) -> Map<String, Value> {
+    match task {
+        Value::Object(object) => object,
+        other => {
+            let mut wrapper = Map::new();
+            wrapper.insert("task".to_string(), other);
+            wrapper
+        }
+    }
 }
 
 pub fn encode_path_segment(value: &str) -> String {

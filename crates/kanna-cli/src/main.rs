@@ -174,12 +174,14 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         task_id: String,
 
-        /// Maximum seconds to wait
-        #[arg(long, default_value_t = 600)]
+        /// Maximum seconds to wait, clamped to 240 so the wait returns inside
+        /// the tools/call timeout MCP clients enforce; a wait that runs out
+        /// reports waitOutcome 'timeout' and can simply be called again
+        #[arg(long, default_value_t = kanna_tool_catalog::DEFAULT_WAIT_TIMEOUT_SECS)]
         timeout_secs: u64,
 
         /// Poll interval in seconds
-        #[arg(long, default_value_t = 3)]
+        #[arg(long, default_value_t = kanna_tool_catalog::DEFAULT_WAIT_POLL_SECS)]
         poll_secs: u64,
 
         /// Condition to wait for: finished or closed

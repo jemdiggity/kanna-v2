@@ -1,4 +1,7 @@
-use kanna_tool_catalog::WaitUntil as CatalogWaitUntil;
+use kanna_tool_catalog::{
+    clamp_wait_timeout_secs, wait_resolved_result, wait_timeout_result,
+    WaitUntil as CatalogWaitUntil,
+};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 
@@ -271,24 +274,34 @@ pub(crate) fn task_matches_wait_until(task: &TaskDetail, until: WaitUntil) -> bo
     }
 }
 
+/// The typed CLI mirrors the MCP tool: a wait that runs out its (bounded)
+/// window reports the task's latest detail rather than failing, so an agent
+/// without MCP support loops on the same discriminator.
+pub(crate) enum WaitTaskOutcome {
+    Resolved(TaskDetail),
+    TimedOut { task: TaskDetail, timeout_secs: u64 },
+}
+
 pub(crate) async fn wait_task_via_api(
     base_url: &str,
     task_id: &str,
     timeout_secs: u64,
     poll_secs: u64,
     until: WaitUntil,
-) -> Result<TaskDetail, String> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+) -> Result<WaitTaskOutcome, String> {
+    let timeout_secs = clamp_wait_timeout_secs(timeout_secs);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let poll_interval = std::time::Duration::from_secs(poll_secs.max(1));
     loop {
         let task = get_task_via_api(base_url, task_id).await?;
         if task_matches_wait_until(&task, until) {
-            return Ok(task);
+            return Ok(WaitTaskOutcome::Resolved(task));
         }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!("timed out waiting for task {task_id}"));
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Ok(WaitTaskOutcome::TimedOut { task, timeout_secs });
         }
-        tokio::time::sleep(poll_interval).await;
+        tokio::time::sleep(poll_interval.min(deadline - now)).await;
     }
 }
 
@@ -309,18 +322,20 @@ pub(crate) async fn wait_catalog_task_via_api(
     poll_secs: u64,
     until: CatalogWaitUntil,
 ) -> Result<Value, String> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let timeout_secs = clamp_wait_timeout_secs(timeout_secs);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let poll_interval = std::time::Duration::from_secs(poll_secs.max(1));
     let path = task_get_path(task_id);
     loop {
         let task: Value = get_json(base_url, &path).await?;
         if catalog_task_matches_wait_until(&task, until) {
-            return Ok(task);
+            return Ok(wait_resolved_result(task));
         }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!("timed out waiting for task {task_id}"));
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Ok(wait_timeout_result(task, task_id, timeout_secs));
         }
-        tokio::time::sleep(poll_interval).await;
+        tokio::time::sleep(poll_interval.min(deadline - now)).await;
     }
 }
 

@@ -1,7 +1,8 @@
 use clap::{Parser, Subcommand};
 use kanna_tool_catalog::{
-    encode_path_segment, load_catalog, resolve_request, Catalog, Method, ResolvedRequest,
-    ResponseKind, WaitUntil,
+    clamp_wait_timeout_secs, encode_path_segment, load_catalog, resolve_request,
+    wait_resolved_result, wait_timeout_result, Catalog, Method, ResolvedRequest, ResponseKind,
+    WaitUntil,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -203,6 +204,9 @@ async fn get_text(base_url: &str, path: &str) -> Result<String, String> {
         .map_err(|e| format!("GET {path} returned invalid text: {e}"))
 }
 
+/// Waits are bounded by `clamp_wait_timeout_secs` and hand back the task's
+/// latest detail when the window elapses, so the answer always reaches the
+/// agent inside its client's tools/call budget instead of being killed there.
 async fn wait_task(
     base_url: &str,
     task_id: &str,
@@ -210,18 +214,22 @@ async fn wait_task(
     poll_secs: u64,
     until: WaitUntil,
 ) -> Result<Value, String> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    let poll_interval = std::time::Duration::from_secs(poll_secs.max(1));
+    let timeout_secs = clamp_wait_timeout_secs(timeout_secs);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let poll_interval = Duration::from_secs(poll_secs.max(1));
     let path = format!("/v1/tasks/{}", encode_path_segment(task_id));
     loop {
         let task: Value = get_json(base_url, &path).await?;
         if task_matches_wait_until(&task, until) {
-            return Ok(task);
+            return Ok(wait_resolved_result(task));
         }
-        if std::time::Instant::now() >= deadline {
-            return Err(format!("timed out waiting for task {task_id}"));
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Ok(wait_timeout_result(task, task_id, timeout_secs));
         }
-        tokio::time::sleep(poll_interval).await;
+        // Never sleep past the deadline: the window is a promise to the client,
+        // not a floor rounded up to the next poll.
+        tokio::time::sleep(poll_interval.min(deadline - now)).await;
     }
 }
 
@@ -707,6 +715,175 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// Waiting crosses the agent → MCP client → kanna-mcp → desktop server
+/// boundary, and the failure it is guarded against is client-side: a wait
+/// longer than the client's tools/call budget is killed before it can answer,
+/// and the agent loses the result. These tests drive the real stdio JSON-RPC
+/// surface against a real HTTP server so the catalog defaults, the wait loop,
+/// and the tool-result envelope are all exercised together.
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+    use kanna_tool_catalog::{CLIENT_TOOL_CALL_BUDGET_SECS, DEFAULT_WAIT_TIMEOUT_SECS};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn running_task() -> Value {
+        json!({
+            "id": "child-1",
+            "repoId": "repo-1",
+            "title": "Specialty review",
+            "stage": "review",
+            "branch": "task-child-1",
+            "activity": "running",
+            "closedAt": null
+        })
+    }
+
+    fn finished_task() -> Value {
+        let mut task = running_task();
+        task["activity"] = json!("unread");
+        task
+    }
+
+    /// Serves `GET /v1/tasks/{id}` from a mutable body, so a test can flip a
+    /// child task from running to finished between waits the way the desktop
+    /// server does.
+    async fn spawn_task_detail_server(state: Arc<Mutex<Value>>) -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind task detail server");
+        let addr = listener.local_addr().expect("local addr");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let served = polls.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buffer = vec![0u8; 4096];
+                if socket.read(&mut buffer).await.is_err() {
+                    continue;
+                }
+                served.fetch_add(1, Ordering::SeqCst);
+                let body = match state.lock() {
+                    Ok(state) => state.to_string(),
+                    Err(_) => return,
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        (format!("http://{addr}"), polls)
+    }
+
+    fn wait_call_line(arguments: Value) -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "kanna_wait_task", "arguments": arguments }
+        })
+        .to_string()
+    }
+
+    async fn call_wait(base_url: &str, catalog: &SharedCatalog, arguments: Value) -> Value {
+        let line = handle_mcp_line(&wait_call_line(arguments), base_url, catalog)
+            .await
+            .expect("wait call handled")
+            .expect("wait call response line");
+        let parsed: Value = serde_json::from_str(&line).expect("json-rpc response");
+        assert!(parsed.get("error").is_none(), "{parsed}");
+        let text = parsed["result"]["content"][0]["text"]
+            .as_str()
+            .expect("tool result text")
+            .to_string();
+        assert!(
+            parsed["result"]["isError"] != json!(true),
+            "wait should not be an error tool result: {text}"
+        );
+        serde_json::from_str(&text).expect("tool result json")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn default_wait_answers_inside_the_client_tool_call_budget() {
+        let (base_url, polls) =
+            spawn_task_detail_server(Arc::new(Mutex::new(running_task()))).await;
+        let catalog = shared_bundled_catalog();
+
+        let started = tokio::time::Instant::now();
+        let result = call_wait(&base_url, &catalog, json!({ "task_id": "child-1" })).await;
+        let waited = started.elapsed();
+
+        assert!(
+            waited.as_secs() <= CLIENT_TOOL_CALL_BUDGET_SECS,
+            "a default wait ran {}s; MCP clients abort tools/call at {CLIENT_TOOL_CALL_BUDGET_SECS}s and the agent loses the result",
+            waited.as_secs()
+        );
+        assert_eq!(result["waitOutcome"], json!("timeout"));
+        assert_eq!(result["waitTimeoutSecs"], json!(DEFAULT_WAIT_TIMEOUT_SECS));
+        assert_eq!(result["id"], json!("child-1"));
+        assert!(
+            polls.load(Ordering::SeqCst) >= 2,
+            "the wait should keep polling the task while it waits"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_wait_resumes_on_the_next_call_without_losing_task_state() {
+        let state = Arc::new(Mutex::new(running_task()));
+        let (base_url, _) = spawn_task_detail_server(state.clone()).await;
+        let catalog = shared_bundled_catalog();
+        let arguments = json!({ "task_id": "child-1", "timeout_secs": 5, "poll_secs": 1 });
+
+        let first = call_wait(&base_url, &catalog, arguments.clone()).await;
+
+        assert_eq!(first["waitOutcome"], json!("timeout"));
+        assert_eq!(first["waitTimeoutSecs"], json!(5));
+        assert_eq!(first["stage"], json!("review"));
+        assert_eq!(first["branch"], json!("task-child-1"));
+        assert_eq!(first["activity"], json!("running"));
+        assert!(first["waitHint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("call kanna_wait_task again")));
+
+        *state.lock().expect("state lock") = finished_task();
+        let second = call_wait(&base_url, &catalog, arguments).await;
+
+        assert_eq!(second["waitOutcome"], json!("resolved"));
+        assert_eq!(second["id"], json!("child-1"));
+        assert_eq!(second["stage"], json!("review"));
+        assert_eq!(second["activity"], json!("unread"));
+        assert!(second["waitHint"].is_null());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oversized_timeout_arguments_are_clamped_to_the_survivable_window() {
+        let (base_url, _) = spawn_task_detail_server(Arc::new(Mutex::new(running_task()))).await;
+        let catalog = shared_bundled_catalog();
+
+        let started = tokio::time::Instant::now();
+        let result = call_wait(
+            &base_url,
+            &catalog,
+            json!({ "task_id": "child-1", "timeout_secs": 600, "poll_secs": 3 }),
+        )
+        .await;
+        let waited = started.elapsed();
+
+        assert_eq!(result["waitOutcome"], json!("timeout"));
+        assert_eq!(result["waitTimeoutSecs"], json!(DEFAULT_WAIT_TIMEOUT_SECS));
+        assert!(
+            waited.as_secs() <= CLIENT_TOOL_CALL_BUDGET_SECS,
+            "an agent asking for 600s must still get an answer inside its client's budget"
+        );
     }
 }
 
