@@ -27,6 +27,8 @@ export interface DesktopCloudTaskSnapshot {
   stage: string;
   activity?: string;
   activityRevision?: number;
+  blockerRevision?: number;
+  transitionRevision?: string | null;
   status: string;
   hasRunningPost?: boolean;
   blockedByTaskIds?: string[];
@@ -48,6 +50,12 @@ export interface DesktopCloudTaskSnapshot {
   createdAt: string;
   updatedAt: string;
   closedAt?: string | null;
+  transfer?: {
+    state: "none" | "outgoing" | "incoming" | "finalization_pending";
+    transferId?: string | null;
+    sourceDesktopId?: string | null;
+    destinationDesktopId?: string | null;
+  };
 }
 
 export interface DesktopCloudDesktopSnapshot {
@@ -199,8 +207,10 @@ export function subscribeDesktopCloudTasks(
     string,
     { documentId: string; snapshot: DesktopCloudDesktopSnapshot }
   >();
+  let requestedEmission = 0;
 
   const emit = async () => {
+    const emission = ++requestedEmission;
     const base = options.getOptions();
     const [activeDesktopIds, currentDesktopId] = await Promise.all([
       base.activeDesktopIds === undefined
@@ -208,7 +218,7 @@ export function subscribeDesktopCloudTasks(
         : Promise.resolve(base.activeDesktopIds),
       base.currentDesktopId === undefined ? resolveDesktopId() : Promise.resolve(base.currentDesktopId),
     ]);
-    if (cancelled) return;
+    if (cancelled || emission !== requestedEmission) return;
     const snapshots = [...tasksByDesktop.values()].flat();
     onUpdate(mapDesktopCloudTasks(
       snapshots,
@@ -316,7 +326,7 @@ export function mapDesktopCloudTasks(
       ...(options.localClosedItems ?? []).map((item) => `${item.repo_id}:${item.id}`),
     ],
   );
-  for (const snapshot of sortByUpdatedAt(snapshots)) {
+  for (const snapshot of authoritativeTaskSnapshots(snapshots)) {
     const snapshotLocalRepoId = snapshot.localRepoId ?? snapshot.repo.cloudRepoId;
     const exactLocalRepo = localRepoById.get(snapshotLocalRepoId);
     const localRepo = exactLocalRepo ?? (snapshot.repo.remoteUrlHash
@@ -383,6 +393,15 @@ export function mapDesktopCloudTasks(
         && snapshot.activityRevision >= 0
         ? snapshot.activityRevision
         : undefined,
+      blocker_revision: typeof snapshot.blockerRevision === "number"
+        && Number.isSafeInteger(snapshot.blockerRevision)
+        && snapshot.blockerRevision >= 0
+        ? snapshot.blockerRevision
+        : undefined,
+      transition_revision: typeof snapshot.transitionRevision === "string"
+        && snapshot.transitionRevision.trim().length > 0
+        ? snapshot.transitionRevision
+        : null,
       activity_changed_at: snapshot.updatedAt,
       has_running_post: snapshot.hasRunningPost ? 1 : 0,
       unread_at: null,
@@ -466,6 +485,46 @@ function ownerDesktopIsReachable(ownerDesktopId: string, activeDesktopIds: Set<s
 
 function sortByUpdatedAt<T extends { updatedAt: string }>(snapshots: T[]): T[] {
   return [...snapshots].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function authoritativeTaskSnapshots(
+  snapshots: DesktopCloudTaskSnapshot[],
+): DesktopCloudTaskSnapshot[] {
+  const winners = new Map<string, DesktopCloudTaskSnapshot>();
+  for (const snapshot of snapshots) {
+    const identity = snapshot.cloudTaskId
+      ?? `${snapshot.ownerDesktopId}:${snapshot.localRepoId ?? snapshot.repo.cloudRepoId}:${snapshot.ownerLocalTaskId}`;
+    const current = winners.get(identity);
+    if (!current || compareTaskAuthority(snapshot, current) > 0) {
+      winners.set(identity, snapshot);
+    }
+  }
+  return sortByUpdatedAt([...winners.values()]);
+}
+
+function compareTaskAuthority(
+  left: DesktopCloudTaskSnapshot,
+  right: DesktopCloudTaskSnapshot,
+): number {
+  const transferRank = (snapshot: DesktopCloudTaskSnapshot): number => {
+    switch (snapshot.transfer?.state ?? "none") {
+      case "finalization_pending":
+        return 4;
+      case "incoming":
+        return 3;
+      case "none":
+        return 2;
+      case "outgoing":
+        return 1;
+    }
+  };
+  return transferRank(left) - transferRank(right)
+    || left.updatedAt.localeCompare(right.updatedAt)
+    || (left.activityRevision ?? -1) - (right.activityRevision ?? -1)
+    || (left.blockerRevision ?? -1) - (right.blockerRevision ?? -1)
+    || (left.transitionRevision ?? "").localeCompare(right.transitionRevision ?? "")
+    || left.ownerDesktopId.localeCompare(right.ownerDesktopId)
+    || left.ownerLocalTaskId.localeCompare(right.ownerLocalTaskId);
 }
 
 function cloudRepoId(id: string): string {

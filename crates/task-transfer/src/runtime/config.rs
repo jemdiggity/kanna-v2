@@ -1,6 +1,8 @@
 use super::events::RuntimeError;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // Two seconds keeps crash recovery responsive without flooding the renderer when
@@ -15,6 +17,18 @@ const DEFAULT_MAX_APPLIED_RECEIPTS: usize = 4096;
 // Incoming reservations are active work until destination acknowledgment
 // completes. Bound admission rather than evicting committed user-pending work.
 const DEFAULT_MAX_INCOMING_RESERVATIONS: usize = 256;
+const DEFAULT_MAX_INCOMING_CONNECTIONS: usize = 32;
+const DEFAULT_MAX_LIFECYCLE_EVENTS: usize = 256;
+const DEFAULT_MAX_TASK_PULL_REQUESTS: usize = 256;
+const DEFAULT_MAX_FINALIZATION_WAITERS: usize = 8;
+const DEFAULT_MAX_PEER_REQUEST_BYTES: usize = 64 * 1024;
+const DEFAULT_MAX_PEER_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_MAX_ARTIFACT_RESPONSE_BYTES: usize = super::MAX_LEGACY_ARTIFACT_RESPONSE_BYTES;
+const DEFAULT_MAX_PEER_REQUESTS: usize = 32;
+const DEFAULT_MAX_MARK_READ_PEER_REQUESTS: usize = 4;
+const DEFAULT_MAX_AUTHENTICATED_REQUEST_REPLAYS: usize = 8_192;
+const DEFAULT_TERMINAL_OBSERVER_TOMBSTONE_TTL: Duration = Duration::from_secs(5 * 60);
+const DEFAULT_MAX_TERMINAL_OBSERVER_TOMBSTONES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoveryMode {
@@ -22,7 +36,7 @@ pub enum DiscoveryMode {
     Mdns,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub peer_id: String,
     pub display_name: String,
@@ -39,6 +53,20 @@ pub struct RuntimeConfig {
     pub(super) max_unapplied_receipts: usize,
     pub(super) max_applied_receipts: usize,
     pub(super) max_incoming_reservations: usize,
+    pub(super) max_incoming_connections: usize,
+    pub(super) max_lifecycle_events: usize,
+    pub(super) max_task_pull_requests: usize,
+    pub(super) max_finalization_waiters: usize,
+    pub(super) max_peer_request_bytes: usize,
+    pub(super) max_peer_response_bytes: usize,
+    pub(super) max_artifact_response_bytes: usize,
+    pub(super) mark_read_timeout: Duration,
+    pub(super) max_peer_requests: usize,
+    pub(super) max_mark_read_peer_requests: usize,
+    pub(super) max_authenticated_request_replays: usize,
+    pub(super) terminal_observer_tombstone_ttl: Duration,
+    pub(super) max_terminal_observer_tombstones: usize,
+    pub(super) peer_discovery_delays: Arc<Mutex<VecDeque<Duration>>>,
 }
 
 impl RuntimeConfig {
@@ -64,6 +92,20 @@ impl RuntimeConfig {
             max_unapplied_receipts: DEFAULT_MAX_UNAPPLIED_RECEIPTS,
             max_applied_receipts: DEFAULT_MAX_APPLIED_RECEIPTS,
             max_incoming_reservations: DEFAULT_MAX_INCOMING_RESERVATIONS,
+            max_incoming_connections: DEFAULT_MAX_INCOMING_CONNECTIONS,
+            max_lifecycle_events: DEFAULT_MAX_LIFECYCLE_EVENTS,
+            max_task_pull_requests: DEFAULT_MAX_TASK_PULL_REQUESTS,
+            max_finalization_waiters: DEFAULT_MAX_FINALIZATION_WAITERS,
+            max_peer_request_bytes: DEFAULT_MAX_PEER_REQUEST_BYTES,
+            max_peer_response_bytes: DEFAULT_MAX_PEER_RESPONSE_BYTES,
+            max_artifact_response_bytes: DEFAULT_MAX_ARTIFACT_RESPONSE_BYTES,
+            mark_read_timeout: Duration::from_secs(2),
+            max_peer_requests: DEFAULT_MAX_PEER_REQUESTS,
+            max_mark_read_peer_requests: DEFAULT_MAX_MARK_READ_PEER_REQUESTS,
+            max_authenticated_request_replays: DEFAULT_MAX_AUTHENTICATED_REQUEST_REPLAYS,
+            terminal_observer_tombstone_ttl: DEFAULT_TERMINAL_OBSERVER_TOMBSTONE_TTL,
+            max_terminal_observer_tombstones: DEFAULT_MAX_TERMINAL_OBSERVER_TOMBSTONES,
+            peer_discovery_delays: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -104,6 +146,71 @@ impl RuntimeConfig {
 
     pub fn with_max_incoming_reservations(mut self, maximum: usize) -> Self {
         self.max_incoming_reservations = maximum;
+        self
+    }
+
+    pub fn with_max_incoming_connections(mut self, maximum: usize) -> Self {
+        self.max_incoming_connections = maximum.max(1);
+        self
+    }
+
+    pub fn with_runtime_admission_limits(
+        mut self,
+        max_lifecycle_events: usize,
+        max_task_pull_requests: usize,
+        max_finalization_waiters: usize,
+    ) -> Self {
+        self.max_lifecycle_events = max_lifecycle_events.max(1);
+        self.max_task_pull_requests = max_task_pull_requests.max(1);
+        self.max_finalization_waiters = max_finalization_waiters.max(1);
+        self
+    }
+
+    pub fn with_mark_read_timeout(mut self, mark_read_timeout: Duration) -> Self {
+        self.mark_read_timeout = mark_read_timeout;
+        self
+    }
+
+    pub fn with_peer_request_limits(
+        mut self,
+        max_peer_requests: usize,
+        max_mark_read_peer_requests: usize,
+    ) -> Self {
+        self.max_peer_requests = max_peer_requests.max(1);
+        self.max_mark_read_peer_requests = max_mark_read_peer_requests.max(1);
+        self
+    }
+
+    pub fn with_peer_response_limits(
+        mut self,
+        max_peer_response_bytes: usize,
+        max_artifact_response_bytes: usize,
+    ) -> Self {
+        self.max_peer_response_bytes = max_peer_response_bytes.max(1);
+        self.max_artifact_response_bytes = max_artifact_response_bytes.max(1);
+        self
+    }
+
+    pub fn with_authenticated_request_replay_limit(mut self, maximum: usize) -> Self {
+        self.max_authenticated_request_replays = maximum.max(1);
+        self
+    }
+
+    pub fn with_terminal_observer_tombstone_policy(
+        mut self,
+        ttl: Duration,
+        maximum: usize,
+    ) -> Self {
+        self.terminal_observer_tombstone_ttl = ttl;
+        self.max_terminal_observer_tombstones = maximum.max(1);
+        self
+    }
+
+    pub fn with_peer_discovery_delays(self, delays: impl IntoIterator<Item = Duration>) -> Self {
+        *self
+            .peer_discovery_delays
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = delays.into_iter().collect();
         self
     }
 
@@ -199,6 +306,20 @@ impl RuntimeConfig {
             max_unapplied_receipts: DEFAULT_MAX_UNAPPLIED_RECEIPTS,
             max_applied_receipts: DEFAULT_MAX_APPLIED_RECEIPTS,
             max_incoming_reservations: DEFAULT_MAX_INCOMING_RESERVATIONS,
+            max_incoming_connections: DEFAULT_MAX_INCOMING_CONNECTIONS,
+            max_lifecycle_events: DEFAULT_MAX_LIFECYCLE_EVENTS,
+            max_task_pull_requests: DEFAULT_MAX_TASK_PULL_REQUESTS,
+            max_finalization_waiters: DEFAULT_MAX_FINALIZATION_WAITERS,
+            max_peer_request_bytes: DEFAULT_MAX_PEER_REQUEST_BYTES,
+            max_peer_response_bytes: DEFAULT_MAX_PEER_RESPONSE_BYTES,
+            max_artifact_response_bytes: DEFAULT_MAX_ARTIFACT_RESPONSE_BYTES,
+            mark_read_timeout: Duration::from_secs(2),
+            max_peer_requests: DEFAULT_MAX_PEER_REQUESTS,
+            max_mark_read_peer_requests: DEFAULT_MAX_MARK_READ_PEER_REQUESTS,
+            max_authenticated_request_replays: DEFAULT_MAX_AUTHENTICATED_REQUEST_REPLAYS,
+            terminal_observer_tombstone_ttl: DEFAULT_TERMINAL_OBSERVER_TOMBSTONE_TTL,
+            max_terminal_observer_tombstones: DEFAULT_MAX_TERMINAL_OBSERVER_TOMBSTONES,
+            peer_discovery_delays: Arc::new(Mutex::new(VecDeque::new())),
         })
     }
 

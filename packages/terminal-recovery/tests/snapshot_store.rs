@@ -26,6 +26,25 @@ fn snapshot_store_roundtrips_snapshot_files() {
 }
 
 #[test]
+fn snapshot_store_loads_v0_0_30_snapshot_with_unknown_cursor() {
+    let tempdir = tempfile::tempdir().expect("tempdir should exist");
+    let store = SnapshotStore::new(tempdir.path());
+    std::fs::write(
+        tempdir.path().join("v0.0.30-session.json"),
+        include_bytes!("fixtures/v0.0.30-snapshot.json"),
+    )
+    .expect("seed exact v0.0.30 fixture");
+
+    let restored = store
+        .require("v0.0.30-session")
+        .expect("v0.0.30 snapshot should load");
+
+    assert_eq!(restored.cursor_row, None);
+    assert_eq!(restored.cursor_col, None);
+    assert_eq!(restored.cursor_visible, None);
+}
+
+#[test]
 fn snapshot_store_rejects_invalid_payloads() {
     let tempdir = tempfile::tempdir().expect("tempdir should exist");
     let store = SnapshotStore::new(tempdir.path());

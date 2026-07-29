@@ -14,7 +14,6 @@ import {
 } from "./windowWorkspace";
 import type { DesktopCloudSnapshot } from "./services/desktopCloudTaskIndex";
 import { updateDesktopServerClientHandlersForTests } from "./services/desktopServerClient";
-import type { DesktopCloudSnapshot } from "./services/desktopCloudTaskIndex";
 
 async function flushPromises() {
   await Promise.resolve();
@@ -22,7 +21,7 @@ async function flushPromises() {
 }
 
 async function waitForNativeCloseRequestedHandler() {
-  for (let attempt = 0; attempt < 10; attempt++) {
+  for (let attempt = 0; attempt < 20; attempt++) {
     if (closeRequestedHandler) return closeRequestedHandler;
     await flushPromises();
   }
@@ -120,6 +119,7 @@ const relayAdvanceStageMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayCloseTaskMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayMarkTaskReadMock = vi.hoisted(() => vi.fn(async () => {}));
 const relayCloseMock = vi.hoisted(() => vi.fn());
+const lanAdvanceStageMock = vi.hoisted(() => vi.fn(async () => {}));
 const lanMarkTaskReadMock = vi.hoisted(() => vi.fn(async () => {}));
 const lanCloseMock = vi.hoisted(() => vi.fn());
 const relayTerminalClientFactoryMock = vi.hoisted(() => vi.fn());
@@ -415,6 +415,7 @@ vi.mock("./composables/terminalFileLinkRegistry", () => ({
 vi.mock("./services/desktopAuthSdk", () => ({
   getConfiguredDesktopAuthSession: vi.fn(async () => ({
     initialize: vi.fn(async () => {}),
+    getIdToken: vi.fn(async () => "desktop-id-token"),
     subscribe: vi.fn((handler: (state: unknown) => void) => {
       desktopAuthStateListeners.add(handler);
       handler({
@@ -698,6 +699,8 @@ function buildOutgoingTransferCommittedEvent() {
       transfer_id: "transfer-1",
       source_task_id: "task-source",
       destination_local_task_id: "task-imported",
+      __kannaLifecycleDeliveryId: "lifecycle-commit-1",
+      __kannaLifecycleConsumerIncarnation: "consumer-incarnation-test",
     },
   };
 }
@@ -707,6 +710,22 @@ function buildOutgoingTransferFinalizationRequestedEvent() {
     payload: {
       type: "outgoing_transfer_finalization_requested",
       transfer_id: "transfer-1",
+      __kannaLifecycleDeliveryId: "lifecycle-finalization-1",
+      __kannaLifecycleConsumerIncarnation: "consumer-incarnation-test",
+    },
+  };
+}
+
+function buildTaskPullRequestedEvent() {
+  return {
+    payload: {
+      type: "task_pull_requested",
+      request_id: "pull-failover-1",
+      requester_peer_id: "peer-requester",
+      source_task_id: "task-source",
+      __kannaLifecycleDeliveryId: "lifecycle-pull-failover-1",
+      __kannaLifecycleConsumerIncarnation: "consumer-incarnation-test",
+      __kannaLifecycleRecovery: true,
     },
   };
 }
@@ -719,9 +738,15 @@ function emitDesktopCloudSnapshot(snapshot: DesktopCloudSnapshot): void {
 
 function buildRemoteBlockedWorkflowSnapshot({
   blocked,
+  hasRunningPost = false,
+  transport = "cloud",
+  transitionRevision = "run-blocked-1",
   updatedAt,
 }: {
   blocked: boolean;
+  hasRunningPost?: boolean;
+  transport?: "cloud" | "lan";
+  transitionRevision?: string | null;
   updatedAt: string;
 }): DesktopCloudSnapshot {
   const repoId = "cloud:repo-remote";
@@ -753,6 +778,8 @@ function buildRemoteBlockedWorkflowSnapshot({
     base_ref: "origin/main",
     agent_session_id: null,
     previous_stage: null,
+    transition_revision: transitionRevision,
+    has_running_post: hasRunningPost ? 1 : 0,
     teardown_started_at: null,
     parent_task_id: null,
     notify_task_id: null,
@@ -795,18 +822,63 @@ function buildRemoteBlockedWorkflowSnapshot({
         ownerDesktopId: "desktop-owner",
         ownerLocalRepoId: "repo-owner",
         ownerLocalTaskId: "task-blocked",
-        transport: "cloud",
+        transport,
       },
       [blockerTaskId]: {
         ownerDesktopId: "desktop-owner",
         ownerLocalRepoId: "repo-owner",
         ownerLocalTaskId: "task-blocker",
-        transport: "cloud",
+        transport,
       },
     },
     blockedByTaskIds: blocked
       ? { [blockedTaskId]: ["task-blocker"] }
       : {},
+  };
+}
+
+function buildCrossRepoCollidingBlockerSnapshot(): DesktopCloudSnapshot {
+  const snapshot = buildRemoteBlockedWorkflowSnapshot({
+    blocked: true,
+    updatedAt: "2026-07-27T00:00:00.000Z",
+  });
+  const blockedTask = snapshot.items[0];
+  const collidingTask = {
+    ...snapshot.items[1],
+    id: "cloud:repo-collision:task-blocker",
+    repo_id: "cloud:repo-collision",
+    display_name: "Resolved task from another repo",
+    stage: "pr",
+    pr_number: 999,
+    pr_url: "https://github.com/kanna/kanna/pull/999",
+  };
+  return {
+    ...snapshot,
+    repos: [
+      ...snapshot.repos,
+      {
+        ...snapshot.repos[0],
+        id: "cloud:repo-collision",
+        name: "Collision Repo",
+        remote_url: "git@github.com:owner/collision-repo.git",
+        remoteUrlHash: "collision-repo-hash",
+      },
+    ],
+    items: [blockedTask, collidingTask],
+    terminalRefs: {
+      [blockedTask.id]: {
+        ownerDesktopId: "desktop-owner",
+        ownerLocalRepoId: "repo-owner",
+        ownerLocalTaskId: "task-blocked",
+        transport: "cloud",
+      },
+      [collidingTask.id]: {
+        ownerDesktopId: "desktop-collision",
+        ownerLocalRepoId: "repo-collision",
+        ownerLocalTaskId: "task-blocker",
+        transport: "cloud",
+      },
+    },
   };
 }
 
@@ -843,7 +915,7 @@ async function mountApp(sidebarStub: typeof SidebarWithRepoStub | typeof Sidebar
       },
     },
   });
-  for (let attempt = 0; attempt < 10; attempt++) {
+  for (let attempt = 0; attempt < 20; attempt++) {
     await flushPromises();
   }
   return wrapper;
@@ -926,6 +998,8 @@ describe("App", () => {
     relayCloseMock.mockImplementation(() => {});
     lanMarkTaskReadMock.mockReset();
     lanMarkTaskReadMock.mockResolvedValue(undefined);
+    lanAdvanceStageMock.mockReset();
+    lanAdvanceStageMock.mockResolvedValue(undefined);
     lanCloseMock.mockReset();
     lanCloseMock.mockImplementation(() => {});
     relayTerminalClientFactoryMock.mockReset();
@@ -937,7 +1011,7 @@ describe("App", () => {
     });
     lanTerminalClientFactoryMock.mockReset();
     lanTerminalClientFactoryMock.mockResolvedValue({
-      advanceStage: relayAdvanceStageMock,
+      advanceStage: lanAdvanceStageMock,
       closeTask: relayCloseTaskMock,
       markTaskRead: lanMarkTaskReadMock,
       close: lanCloseMock,
@@ -1000,6 +1074,7 @@ describe("App", () => {
     dbMock.execute.mockReset();
     dbMock.execute.mockResolvedValue({ rowsAffected: 0 });
     updateDesktopServerClientHandlersForTests({
+      ensureMobileServer: async () => {},
       fetchRepoKannaDefinitions: async () => ({
         revision: "remote-rev",
         refName: "origin/main",
@@ -1027,13 +1102,15 @@ describe("App", () => {
         return true;
       },
       fetchPendingIncomingTransfers: async () => await dbSelectMock(),
-      claimPendingIncomingTransfer: async (transferId) => {
+      getTaskTransfer: async () => null,
+      claimPendingIncomingTransfer: async (transferId, ownerToken, recovery) => {
         const result = await dbMock.execute(
-          "UPDATE task_transfer SET status = 'streaming' WHERE id = ? AND status = 'pending'",
-          [transferId],
+          "UPDATE task_transfer SET status = 'claimed', claim_owner_token = ? WHERE id = ? AND (status = 'pending' OR ? = 1)",
+          [ownerToken, transferId, recovery ? 1 : 0],
         );
         return result.rowsAffected > 0;
       },
+      renewIncomingTransferClaim: async () => true,
       failPendingIncomingTransfer: async (transferId, reason) => {
         await dbMock.execute(
           "UPDATE task_transfer SET status = 'failed', error = ? WHERE id = ?",
@@ -1069,6 +1146,18 @@ describe("App", () => {
       if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
       if (command === "mark_incoming_transfer_ack_completed") return null;
       if (command === "mark_incoming_transfer_event_recorded") return null;
+      if (command === "claim_transfer_event_consumer") {
+        return { authoritative: true, consumerIncarnation: "consumer-incarnation-test" };
+      }
+      if (command === "release_transfer_event_consumer") return null;
+      if (command === "renew_transfer_lifecycle_event") return true;
+      if (command === "claim_transfer_lifecycle_phase") return true;
+      if (command === "acknowledge_transfer_lifecycle_event") return true;
+      if (command === "nack_transfer_lifecycle_event") return true;
+      if (command === "nack_outgoing_transfer_commit") return null;
+      if (command === "complete_outgoing_transfer_finalization") {
+        return { transferId: (args as Record<string, unknown> | undefined)?.transferId ?? "transfer-1" };
+      }
       throw new Error(`unexpected invoke: ${command}`);
     });
   });
@@ -1599,6 +1688,7 @@ describe("App", () => {
         agent_provider: "codex",
         agent_type: "pty",
         previous_stage: null,
+        transition_revision: "run-owner-1",
         stage_result: null,
         teardown_started_at: null,
         last_output_preview: null,
@@ -2098,6 +2188,31 @@ describe("App", () => {
     wrapper.unmount();
   });
 
+  it("keeps LAN snapshot refresh single-flight while a peer request is stalled", async () => {
+    vi.useFakeTimers();
+    const firstRefresh = createDeferred<DesktopCloudSnapshot>();
+    const secondRefresh = createDeferred<DesktopCloudSnapshot>();
+    lanTasksMock
+      .mockImplementationOnce(() => firstRefresh.promise)
+      .mockImplementationOnce(() => secondRefresh.promise);
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    await waitForCondition(() => lanTasksMock.mock.calls.length === 1);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(lanTasksMock).toHaveBeenCalledOnce();
+
+    firstRefresh.resolve({ repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} });
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(lanTasksMock).toHaveBeenCalledTimes(2);
+
+    wrapper.unmount();
+    secondRefresh.resolve({ repos: [], items: [], terminalRefs: {}, blockedByTaskIds: {} });
+    await flushPromises();
+  });
+
   it("preserves dwell and uses a preferred LAN route added while the task stays selected", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
@@ -2182,7 +2297,7 @@ describe("App", () => {
     wrapper.unmount();
   });
 
-  it("removes unread presentation after coherent cloud and LAN owner snapshots publish idle", async () => {
+  it("selects the newer cloud activity authority before the older LAN duplicate refreshes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-25T01:00:00.000Z"));
     const cloudSnapshot = remoteTaskSnapshot("cloud", "duplicate-owner", "duplicate-owner-task");
@@ -2222,7 +2337,7 @@ describe("App", () => {
     }
     await nextTick();
 
-    expect(wrapper.get('[data-testid="remote-task-activity"]').text()).toBe("unread");
+    expect(wrapper.get('[data-testid="remote-task-activity"]').text()).toBe("idle");
 
     const lanReadSnapshot = remoteTaskSnapshot(
       "lan",
@@ -2981,6 +3096,8 @@ describe("App", () => {
   });
 
   it("routes Cmd+S to the owner when a reachable remote workspace task is selected", async () => {
+    const advanceDeferred = createDeferred<void>();
+    relayAdvanceStageMock.mockImplementationOnce(() => advanceDeferred.promise);
     const localFallbackItem = {
       id: "task-local",
       repo_id: "repo-1",
@@ -3056,6 +3173,7 @@ describe("App", () => {
         agent_provider: "codex",
         agent_type: "pty",
         previous_stage: null,
+        transition_revision: "run-owner-1",
         stage_result: null,
         teardown_started_at: null,
         last_output_preview: null,
@@ -3113,76 +3231,51 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="main-item-id"]').text()).toBe("cloud:repo-1:task-remote");
 
     capturedKeyboardActions?.advanceStage();
-    await flushPromises();
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => relayAdvanceStageMock.mock.calls.length > 0);
 
     expect(store.advanceStage).not.toHaveBeenCalled();
+    expect(relayAdvanceStageMock).toHaveBeenCalledOnce();
     expect(relayAdvanceStageMock).toHaveBeenCalledWith({
       desktopId: "desktop-owner",
       taskId: "task-owner",
+      expectedTransitionRevision: "run-owner-1",
     });
+    expect(relayCloseMock).not.toHaveBeenCalled();
+
+    advanceDeferred.resolve();
+    await waitForCondition(() => relayCloseMock.mock.calls.length === 1);
     expect(relayCloseMock).toHaveBeenCalled();
+
+    capturedKeyboardActions?.advanceStage();
+    await flushPromises();
+    expect(relayAdvanceStageMock).toHaveBeenCalledOnce();
 
     wrapper.unmount();
   });
 
   it("integrates remote blocker snapshots with presentation and owner stage actions", async () => {
-    const SidebarRemoteBlockerStub = defineComponent({
-      name: "Sidebar",
+    const CloudTerminalStub = defineComponent({
+      name: "CloudTerminalView",
       props: {
-        taskSlots: { type: Array, default: () => [] },
-        taskBlockers: { type: Array, default: () => [] },
-        blockerNames: { type: Object, default: () => ({}) },
-      },
-      emits: ["select-item"],
-      methods: {
-        isBlocked(taskId: string) {
-          return (this.taskBlockers as Array<{ blocked_item_id: string }>)
-            .some((blocker) => blocker.blocked_item_id === taskId);
-        },
+        ownerDesktopId: String,
+        ownerTaskId: String,
       },
       template: `
-        <div data-testid="remote-blocker-sidebar">
-          <button
-            v-for="item in taskSlots"
-            :key="item.slot_id"
-            :data-testid="\`remote-blocker-task-\${item.task_id}\`"
-            :data-blocked="String(isBlocked(item.task_id))"
-            :data-blocker-name="blockerNames[item.task_id] || ''"
-            type="button"
-            @click="$emit('select-item', item.slot_id)"
-          >
-            {{ item.display_name }}
-          </button>
-        </div>
-      `,
-    });
-    const MainPanelRemoteBlockerStub = defineComponent({
-      name: "MainPanel",
-      props: {
-        uiSlot: Object,
-        blocked: Boolean,
-        blockers: { type: Array, default: () => [] },
-        cloudTask: Boolean,
-        cloudTerminalRef: Object,
-      },
-      template: `
-        <div data-testid="remote-blocker-main-panel">
-          <span data-testid="remote-main-blocked">{{ String(blocked) }}</span>
-          <span data-testid="remote-main-blockers">
-            {{ blockers.map((blocker) => blocker.display_name).join("|") }}
-          </span>
-          <span data-testid="remote-main-cloud-task">{{ String(cloudTask) }}</span>
-          <span data-testid="remote-main-stage">{{ uiSlot?.task?.stage || "" }}</span>
-          <span data-testid="remote-main-updated-at">{{ uiSlot?.task?.updated_at || "" }}</span>
-          <span data-testid="remote-main-terminal-task-id">
-            {{ cloudTerminalRef?.ownerLocalTaskId || "" }}
-          </span>
-        </div>
+        <div
+          data-testid="remote-cloud-terminal"
+          :data-owner-desktop-id="ownerDesktopId"
+          :data-owner-task-id="ownerTaskId"
+        />
       `,
     });
 
-    const wrapper = await mountAppWithOverrides(SidebarRemoteBlockerStub, {
-      MainPanel: MainPanelRemoteBlockerStub,
+    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      Sidebar: false,
+      MainPanel: false,
+      TaskHeader: true,
+      TerminalTabs: true,
+      CloudTerminalView: CloudTerminalStub,
     });
     emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
       blocked: true,
@@ -3191,20 +3284,21 @@ describe("App", () => {
     await flushPromises();
     await flushPromises();
 
+    expect(wrapper.text()).toContain("sidebar.sectionBlocked");
     const blockedTask = wrapper.get(
-      '[data-testid="remote-blocker-task-cloud:repo-remote:task-blocked"]',
+      '[data-task-id="cloud:repo-remote:task-blocked"]',
     );
-    expect(blockedTask.attributes("data-blocked")).toBe("true");
-    expect(blockedTask.attributes("data-blocker-name")).toBe("Remote blocker");
+    expect(blockedTask.text()).toContain("Blocked remote task");
+    expect(blockedTask.get(".blocked-by-text").text()).toBe(
+      "sidebar.blockedBy Remote blocker",
+    );
 
     await blockedTask.trigger("click");
     await flushPromises();
 
-    expect(wrapper.get('[data-testid="remote-main-blocked"]').text()).toBe("true");
-    expect(wrapper.get('[data-testid="remote-main-blockers"]').text()).toBe("Remote blocker");
-    expect(wrapper.get('[data-testid="remote-main-cloud-task"]').text()).toBe("true");
-    expect(wrapper.get('[data-testid="remote-main-stage"]').text()).toBe("in progress");
-    expect(wrapper.get('[data-testid="remote-main-terminal-task-id"]').text()).toBe("task-blocked");
+    expect(wrapper.get(".blocked-placeholder").text()).toContain("mainPanel.taskBlocked");
+    expect(wrapper.get(".blocker-name").text()).toBe("Remote blocker");
+    expect(wrapper.find('[data-testid="remote-cloud-terminal"]').exists()).toBe(false);
 
     capturedKeyboardActions?.advanceStage();
     await flushPromises();
@@ -3219,8 +3313,9 @@ describe("App", () => {
       updatedAt: "2026-07-25T01:01:00.000Z",
     }));
     await flushPromises();
-    expect(blockedTask.attributes("data-blocked")).toBe("false");
-    expect(wrapper.get('[data-testid="remote-main-blocked"]').text()).toBe("false");
+    expect(wrapper.find(".blocked-placeholder").exists()).toBe(false);
+    expect(wrapper.get('[data-testid="remote-cloud-terminal"]').attributes("data-owner-task-id"))
+      .toBe("task-blocked");
     relayAdvanceStageMock.mockRejectedValueOnce(
       Object.assign(new Error("task is blocked: task-blocked"), { status: 409 }),
     );
@@ -3232,6 +3327,7 @@ describe("App", () => {
     expect(relayAdvanceStageMock).toHaveBeenCalledWith({
       desktopId: "desktop-owner",
       taskId: "task-blocked",
+      expectedTransitionRevision: "run-blocked-1",
     });
     expect(toastErrorMock).toHaveBeenCalledWith("task is blocked: task-blocked");
     expect(relayCloseMock).toHaveBeenCalledTimes(1);
@@ -3241,20 +3337,29 @@ describe("App", () => {
     toastErrorMock.mockClear();
     emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
       blocked: false,
+      hasRunningPost: true,
+      updatedAt: "2026-07-25T01:01:30.000Z",
+    }));
+    await flushPromises();
+
+    capturedKeyboardActions?.advanceStage();
+    await flushPromises();
+
+    expect(relayAdvanceStageMock).not.toHaveBeenCalled();
+    expect(relayCloseMock).not.toHaveBeenCalled();
+
+    emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
       updatedAt: "2026-07-25T01:02:00.000Z",
     }));
     await flushPromises();
     await flushPromises();
 
-    expect(blockedTask.attributes("data-blocked")).toBe("false");
-    expect(blockedTask.attributes("data-blocker-name")).toBe("");
-    expect(wrapper.get('[data-testid="remote-main-blocked"]').text()).toBe("false");
-    expect(wrapper.get('[data-testid="remote-main-blockers"]').text()).toBe("");
-    expect(wrapper.get('[data-testid="remote-main-stage"]').text()).toBe("in progress");
-    expect(wrapper.get('[data-testid="remote-main-updated-at"]').text()).toBe(
-      "2026-07-25T01:02:00.000Z",
-    );
-    expect(wrapper.get('[data-testid="remote-main-terminal-task-id"]').text()).toBe("task-blocked");
+    expect(wrapper.find(".blocked-placeholder").exists()).toBe(false);
+    expect(wrapper.find(".blocked-by-text").exists()).toBe(false);
+    const restoredTerminal = wrapper.get('[data-testid="remote-cloud-terminal"]');
+    expect(restoredTerminal.attributes("data-owner-desktop-id")).toBe("desktop-owner");
+    expect(restoredTerminal.attributes("data-owner-task-id")).toBe("task-blocked");
 
     capturedKeyboardActions?.advanceStage();
     await waitForCondition(() => relayCloseMock.mock.calls.length === 1);
@@ -3262,13 +3367,320 @@ describe("App", () => {
     expect(relayAdvanceStageMock).toHaveBeenCalledWith({
       desktopId: "desktop-owner",
       taskId: "task-blocked",
+      expectedTransitionRevision: "run-blocked-1",
     });
     expect(toastErrorMock).not.toHaveBeenCalled();
     expect(relayCloseMock).toHaveBeenCalledTimes(1);
     expect(store.advanceStage).not.toHaveBeenCalled();
 
+    capturedKeyboardActions?.advanceStage();
+    await flushPromises();
+    expect(relayAdvanceStageMock).toHaveBeenCalledTimes(1);
+
+    emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
+      transitionRevision: "run-blocked-2",
+      updatedAt: "2026-07-25T01:03:00.000Z",
+    }));
+    await flushPromises();
+
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => relayAdvanceStageMock.mock.calls.length === 2);
+    expect(relayAdvanceStageMock).toHaveBeenLastCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-blocked",
+      expectedTransitionRevision: "run-blocked-2",
+    });
+
     wrapper.unmount();
   });
+
+  it("keeps a raw blocker blocked across Sidebar, MainPanel, and Cmd+S when another repo has a resolved identity collision", async () => {
+    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      Sidebar: false,
+      MainPanel: false,
+      TaskHeader: true,
+      TerminalTabs: true,
+      CloudTerminalView: true,
+    });
+    emitDesktopCloudSnapshot(buildCrossRepoCollidingBlockerSnapshot());
+    await flushPromises();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("sidebar.sectionBlocked");
+    const blockedTask = wrapper.get(
+      '[data-task-id="cloud:repo-remote:task-blocked"]',
+    );
+    expect(blockedTask.get(".blocked-by-text").text()).toBe(
+      "sidebar.blockedBy tasks.taskId",
+    );
+    expect(blockedTask.text()).not.toContain("Resolved task from another repo");
+
+    await blockedTask.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get(".blocked-placeholder").text()).toContain("mainPanel.taskBlocked");
+    expect(wrapper.get(".blocker-name").text()).toBe("tasks.taskId");
+    expect(wrapper.text()).not.toContain("https://github.com/kanna/kanna/pull/999");
+
+    capturedKeyboardActions?.advanceStage();
+    await flushPromises();
+
+    expect(toastWarningMock).toHaveBeenCalledWith("mainPanel.taskBlocked");
+    expect(relayAdvanceStageMock).not.toHaveBeenCalled();
+    expect(lanAdvanceStageMock).not.toHaveBeenCalled();
+    expect(store.advanceStage).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("integrates authoritative LAN blocker changes with Sidebar, MainPanel, and owner stage actions", async () => {
+    vi.useFakeTimers();
+    const blockedSnapshot = buildRemoteBlockedWorkflowSnapshot({
+      blocked: true,
+      transport: "lan",
+      updatedAt: "2026-07-26T03:00:00.000Z",
+    });
+    const unblockedSnapshot = buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
+      transport: "lan",
+      updatedAt: "2026-07-26T03:01:00.000Z",
+    });
+    lanTasksMock.mockResolvedValue(blockedSnapshot);
+
+    const LanTerminalStub = defineComponent({
+      name: "CloudTerminalView",
+      props: {
+        ownerDesktopId: String,
+        ownerTaskId: String,
+        transport: String,
+      },
+      template: `
+        <div
+          data-testid="remote-lan-terminal"
+          :data-owner-desktop-id="ownerDesktopId"
+          :data-owner-task-id="ownerTaskId"
+          :data-transport="transport"
+        />
+      `,
+    });
+    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      Sidebar: false,
+      MainPanel: false,
+      TaskHeader: true,
+      TerminalTabs: true,
+      CloudTerminalView: LanTerminalStub,
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("sidebar.sectionBlocked");
+    const blockedTask = wrapper.get(
+      '[data-task-id="cloud:repo-remote:task-blocked"]',
+    );
+    expect(blockedTask.get(".blocked-by-text").text()).toBe(
+      "sidebar.blockedBy Remote blocker",
+    );
+
+    await blockedTask.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get(".blocked-placeholder").text()).toContain("mainPanel.taskBlocked");
+    expect(wrapper.get(".blocker-name").text()).toBe("Remote blocker");
+    expect(wrapper.find('[data-testid="remote-lan-terminal"]').exists()).toBe(false);
+
+    capturedKeyboardActions?.advanceStage();
+    await flushPromises();
+
+    expect(toastWarningMock).toHaveBeenCalledWith("mainPanel.taskBlocked");
+    expect(lanAdvanceStageMock).not.toHaveBeenCalled();
+    expect(relayAdvanceStageMock).not.toHaveBeenCalled();
+    expect(store.advanceStage).not.toHaveBeenCalled();
+
+    lanTasksMock.mockResolvedValue(unblockedSnapshot);
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+
+    expect(wrapper.find(".blocked-placeholder").exists()).toBe(false);
+    const terminal = wrapper.get('[data-testid="remote-lan-terminal"]');
+    expect(terminal.attributes("data-owner-task-id")).toBe("task-blocked");
+    expect(terminal.attributes("data-transport")).toBe("lan");
+
+    lanAdvanceStageMock.mockRejectedValueOnce(
+      Object.assign(new Error("task is blocked again: task-blocked"), { status: 409 }),
+    );
+    toastErrorMock.mockClear();
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => lanCloseMock.mock.calls.length === 1);
+
+    expect(lanTerminalClientFactoryMock).toHaveBeenCalled();
+    expect(lanAdvanceStageMock).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-blocked",
+      expectedTransitionRevision: "run-blocked-1",
+    });
+    expect(toastErrorMock).toHaveBeenCalledWith("task is blocked again: task-blocked");
+    expect(relayTerminalClientFactoryMock).not.toHaveBeenCalled();
+    expect(relayAdvanceStageMock).not.toHaveBeenCalled();
+    expect(store.advanceStage).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+  });
+
+  it("releases an accepted remote advance after a later authoritative snapshot keeps the same revision", async () => {
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
+      transitionRevision: "run-detached-failure",
+      updatedAt: "2026-07-26T02:00:00.000Z",
+    }));
+    await flushPromises();
+
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await flushPromises();
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => relayAdvanceStageMock.mock.calls.length === 1);
+
+    emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
+      transitionRevision: "run-detached-failure",
+      updatedAt: "2026-07-26T02:00:00.000Z",
+    }));
+    await flushPromises();
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => relayAdvanceStageMock.mock.calls.length === 2);
+
+    expect(relayAdvanceStageMock).toHaveBeenCalledTimes(2);
+    expect(relayAdvanceStageMock).toHaveBeenLastCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-blocked",
+      expectedTransitionRevision: "run-detached-failure",
+    });
+    wrapper.unmount();
+  });
+
+  it("releases remote advance state when a task disappears and reappears at the same revision", async () => {
+    const snapshot = buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
+      transitionRevision: "run-reappears",
+      updatedAt: "2026-07-26T03:00:00.000Z",
+    });
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    emitDesktopCloudSnapshot(snapshot);
+    await flushPromises();
+
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await flushPromises();
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => relayAdvanceStageMock.mock.calls.length === 1);
+
+    emitDesktopCloudSnapshot({
+      repos: [],
+      items: [],
+      terminalRefs: {},
+      blockedByTaskIds: {},
+    });
+    await flushPromises();
+    emitDesktopCloudSnapshot(snapshot);
+    await flushPromises();
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await flushPromises();
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => relayAdvanceStageMock.mock.calls.length === 2);
+
+    expect(relayAdvanceStageMock).toHaveBeenCalledTimes(2);
+    expect(relayAdvanceStageMock).toHaveBeenLastCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-blocked",
+      expectedTransitionRevision: "run-reappears",
+    });
+    wrapper.unmount();
+  });
+
+  it("advances an authenticated legacy remote snapshot without a CAS revision", async () => {
+    const wrapper = await mountApp(RemoteTaskSelectionStub);
+    emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
+      transitionRevision: null,
+      updatedAt: "2026-07-26T04:00:00.000Z",
+    }));
+    await flushPromises();
+
+    await wrapper.get('[data-testid="remote-task"]').trigger("click");
+    await flushPromises();
+    capturedKeyboardActions?.advanceStage();
+    await waitForCondition(() => relayAdvanceStageMock.mock.calls.length === 1);
+
+    expect(relayAdvanceStageMock).toHaveBeenCalledWith({
+      desktopId: "desktop-owner",
+      taskId: "task-blocked",
+    });
+    expect(toastErrorMock).not.toHaveBeenCalledWith(
+      "Remote task snapshot is missing its transition revision.",
+    );
+    wrapper.unmount();
+  });
+
+  it.each([
+    {
+      label: "revisioned snapshot",
+      initialRevision: "run-before-route-replacement",
+      replacementRevision: "run-after-route-replacement",
+    },
+    {
+      label: "legacy snapshot without transition revisions",
+      initialRevision: null,
+      replacementRevision: null,
+    },
+  ])(
+    "does not send through a delayed client after replacing a $label",
+    async ({ initialRevision, replacementRevision }) => {
+      const firstClient = createDeferred<{
+        advanceStage: typeof relayAdvanceStageMock;
+        close: typeof relayCloseMock;
+      }>();
+      const replacementClient = createDeferred<{
+        advanceStage: typeof relayAdvanceStageMock;
+        close: typeof relayCloseMock;
+      }>();
+      const staleAdvance = vi.fn(async () => {});
+      const staleClose = vi.fn();
+      relayTerminalClientFactoryMock
+        .mockImplementationOnce(() => firstClient.promise)
+        .mockImplementationOnce(() => replacementClient.promise);
+      const wrapper = await mountApp(RemoteTaskSelectionStub);
+      emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+        blocked: false,
+        transitionRevision: initialRevision,
+        updatedAt: "2026-07-26T05:00:00.000Z",
+      }));
+      await flushPromises();
+
+      await wrapper.get('[data-testid="remote-task"]').trigger("click");
+      await flushPromises();
+      capturedKeyboardActions?.advanceStage();
+      await waitForCondition(() => relayTerminalClientFactoryMock.mock.calls.length === 1);
+
+      emitDesktopCloudSnapshot(buildRemoteBlockedWorkflowSnapshot({
+        blocked: false,
+        transitionRevision: replacementRevision,
+        updatedAt: "2026-07-26T05:01:00.000Z",
+      }));
+      await flushPromises();
+      capturedKeyboardActions?.advanceStage();
+      await waitForCondition(() => relayTerminalClientFactoryMock.mock.calls.length === 2);
+
+      firstClient.resolve({
+        advanceStage: staleAdvance,
+        close: staleClose,
+      });
+      await flushPromises();
+
+      expect(staleAdvance).not.toHaveBeenCalled();
+      expect(staleClose).toHaveBeenCalledOnce();
+      wrapper.unmount();
+    },
+    15_000,
+  );
 
   it("renders the modal with the preferred existing base branch selected", async () => {
     const wrapper = await mountApp(SidebarWithRepoStub);
@@ -4760,6 +5172,7 @@ describe("App", () => {
   });
   it("auto-imports an incoming transfer as soon as it is received", async () => {
     dbSelectMock.mockResolvedValue([]);
+    dbMock.execute.mockResolvedValueOnce({ rowsAffected: 1 });
     const wrapper = await mountApp(SidebarWithRepoStub);
 
     await flushPromises();
@@ -4787,20 +5200,531 @@ describe("App", () => {
     expect(invokeMock.mock.invocationCallOrder[recordedCallIndex]).toBeLessThan(
       store.approveIncomingTransfer.mock.invocationCallOrder[0],
     );
-    expect(store.approveIncomingTransfer).toHaveBeenCalledWith("transfer-1");
+    expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
+      "transfer-1",
+      expect.any(String),
+      expect.objectContaining({ assertOwnership: expect.any(Function) }),
+    );
     expect(wrapper.text()).not.toContain("peer-source");
   });
 
-  it("registers transfer replay handling before LAN sync can spawn the sidecar", async () => {
+  it("takes over and acknowledges a retained transfer when its owner closes mid-import", async () => {
+    const recoveryClaims: boolean[] = [];
+    updateDesktopServerClientHandlersForTests({
+      claimPendingIncomingTransfer: async (_transferId, _ownerToken, recovery) => {
+        recoveryClaims.push(recovery);
+        return recovery;
+      },
+    });
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "acknowledge_transfer_lifecycle_event") return true;
+      return await defaultInvoke?.(command, args);
+    });
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    const handler = listenHandlers.get("transfer-request");
+    const event = buildIncomingTransferEvent();
+    Object.assign(event.payload, {
+      __kannaLifecycleDeliveryId: "lifecycle-owner-close",
+      __kannaLifecycleConsumerIncarnation: "consumer-incarnation-test",
+      __kannaLifecycleRecovery: true,
+    });
+
+    await handler?.(event);
+    await flushPromises();
+
+    expect(recoveryClaims).toEqual([true]);
+    expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
+      "transfer-1",
+      expect.any(String),
+      expect.objectContaining({ assertOwnership: expect.any(Function) }),
+    );
+    expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-owner-close",
+      consumerIncarnation: "consumer-incarnation-test",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "nack_transfer_lifecycle_event",
+      expect.anything(),
+    );
+    wrapper.unmount();
+  });
+
+  it("claims transfer event authority only after every lifecycle listener is ready and before LAN sync", async () => {
     lanTasksMock.mockImplementationOnce(async () => {
       expect(listenHandlers.has("transfer-request")).toBe(true);
+      expect(listenHandlers.has("task-pull-requested")).toBe(true);
+      expect(listenHandlers.has("outgoing-transfer-committed")).toBe(true);
+      expect(listenHandlers.has("outgoing-transfer-finalization-requested")).toBe(true);
       return { repos: [], items: [], terminalRefs: {}, transferMachines: [] };
     });
 
     const wrapper = await mountApp(SidebarWithRepoStub);
     await waitForCondition(() => lanTasksMock.mock.calls.length > 0);
 
+    const claimCallIndex = invokeMock.mock.calls.findIndex(
+      ([command]) => command === "claim_transfer_event_consumer",
+    );
+    expect(claimCallIndex).toBeGreaterThanOrEqual(0);
+    expect(invokeMock.mock.invocationCallOrder[claimCallIndex]).toBeLessThan(
+      lanTasksMock.mock.invocationCallOrder[0],
+    );
+    wrapper.unmount();
+  });
+
+  it("keeps standby task sync without running single-owner transfer import", async () => {
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command: string, args?: { name?: string; repoPath?: string }) => {
+      if (command === "claim_transfer_event_consumer") {
+        return { authoritative: false, consumerIncarnation: "consumer-incarnation-standby" };
+      }
+      return await defaultInvoke?.(command, args);
+    });
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    expect(listenHandlers.has("transfer-request")).toBe(true);
+    expect(listenHandlers.has("task-pull-requested")).toBe(true);
+    expect(listenHandlers.has("outgoing-transfer-committed")).toBe(true);
+    expect(listenHandlers.has("outgoing-transfer-finalization-requested")).toBe(true);
     expect(lanTasksMock).toHaveBeenCalled();
+    expect(store.approveIncomingTransfer).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("acknowledges a terminal task pull instead of requeueing it to the same owner", async () => {
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    const handler = listenHandlers.get("task-pull-requested");
+
+    await handler?.(buildTaskPullRequestedEvent());
+
+    expect(store.pushTaskToPeer).not.toHaveBeenCalled();
+    expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
+    });
+    wrapper.unmount();
+  });
+
+  it("ACKs and reports a non-idempotent push rejection that races with unmount", async () => {
+    store.items = [{
+      id: "task-source",
+      repo_id: "repo-1",
+      closed_at: null,
+      stage: "in progress",
+      branch: "task-source",
+      prompt: "Return this task",
+      tags: "[]",
+    }];
+    const push = createDeferred<void>();
+    store.pushTaskToPeer.mockImplementationOnce(async () => push.promise);
+    const defaultInvoke = invokeMock.getMockImplementation();
+    let terminalSettlementAccepted = false;
+    let prematureRedeliveries = 0;
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "list_transfer_peers") {
+        return [{
+          peer_id: "peer-requester",
+          display_name: "Requester",
+          public_key: "requester-key",
+          endpoint: "127.0.0.1:43100",
+          pid: 42,
+          trusted: true,
+          accepting_transfers: true,
+        }];
+      }
+      if (command === "acknowledge_transfer_lifecycle_event") {
+        terminalSettlementAccepted = true;
+        return true;
+      }
+      if (command === "release_transfer_event_consumer") {
+        if (!terminalSettlementAccepted) {
+          prematureRedeliveries += 1;
+        }
+        return true;
+      }
+      return await defaultInvoke?.(command, args);
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    const handler = listenHandlers.get("task-pull-requested");
+
+    const delivery = handler?.(buildTaskPullRequestedEvent());
+    await waitForCondition(() => store.pushTaskToPeer.mock.calls.length === 1);
+    wrapper.unmount();
+    push.reject(new Error("preflight failed after reserving a transfer"));
+    await delivery;
+    await waitForCondition(() => invokeMock.mock.calls.some(
+      ([command]) => command === "release_transfer_event_consumer",
+    ));
+
+    expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
+    });
+    const ackCallIndex = invokeMock.mock.calls.findIndex(
+      ([command]) => command === "acknowledge_transfer_lifecycle_event",
+    );
+    const releaseCallIndex = invokeMock.mock.calls.findIndex(
+      ([command]) => command === "release_transfer_event_consumer",
+    );
+    expect(ackCallIndex).toBeLessThan(releaseCallIndex);
+    expect(prematureRedeliveries).toBe(0);
+    expect(store.pushTaskToPeer).toHaveBeenCalledTimes(1);
+    expect(toastErrorMock).toHaveBeenCalledWith(
+      "preflight failed after reserving a transfer",
+    );
+    errorSpy.mockRestore();
+  });
+
+  it("acknowledges a malformed terminal task pull instead of re-emitting it", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    const handler = listenHandlers.get("task-pull-requested");
+    const malformed = buildTaskPullRequestedEvent();
+    malformed.payload.requester_peer_id = "";
+
+    await handler?.(malformed);
+
+    expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
+    });
+    errorSpy.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("settles an overlapping task-pull redelivery only after the primary push", async () => {
+    store.items = [{
+      id: "task-source",
+      repo_id: "repo-1",
+      closed_at: null,
+      stage: "in progress",
+      branch: "task-source",
+      prompt: "Return this task",
+      tags: "[]",
+    }];
+    const push = createDeferred<void>();
+    store.pushTaskToPeer.mockImplementationOnce(async () => push.promise);
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "list_transfer_peers") {
+        return [{
+          peer_id: "peer-requester",
+          display_name: "Requester",
+          public_key: "requester-key",
+          endpoint: "127.0.0.1:43100",
+          pid: 42,
+          trusted: true,
+          accepting_transfers: true,
+        }];
+      }
+      return await defaultInvoke?.(command, args);
+    });
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    const handler = listenHandlers.get("task-pull-requested");
+    const primaryEvent = buildTaskPullRequestedEvent();
+    const duplicateEvent = buildTaskPullRequestedEvent();
+    duplicateEvent.payload.__kannaLifecycleDeliveryId = "lifecycle-pull-failover-2";
+
+    const primary = handler?.(primaryEvent);
+    await waitForCondition(() => store.pushTaskToPeer.mock.calls.length === 1);
+    const duplicate = handler?.(duplicateEvent);
+    await flushPromises();
+
+    expect(invokeMock.mock.calls.filter(([command]) =>
+      command === "acknowledge_transfer_lifecycle_event"
+      || command === "nack_transfer_lifecycle_event")).toEqual([]);
+
+    push.resolve();
+    await Promise.all([primary, duplicate]);
+
+    expect(invokeMock.mock.calls.filter(([command]) =>
+      command === "acknowledge_transfer_lifecycle_event"
+      || command === "nack_transfer_lifecycle_event")).toEqual([
+      ["acknowledge_transfer_lifecycle_event", {
+        deliveryId: "lifecycle-pull-failover-1",
+        consumerIncarnation: "consumer-incarnation-test",
+      }],
+      ["acknowledge_transfer_lifecycle_event", {
+        deliveryId: "lifecycle-pull-failover-2",
+        consumerIncarnation: "consumer-incarnation-test",
+      }],
+    ]);
+    expect(store.pushTaskToPeer).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("requeues an aborted task pull so a standby performs exactly one push after release", async () => {
+    store.items = [{
+      id: "task-source",
+      repo_id: "repo-1",
+      closed_at: null,
+      stage: "in progress",
+      branch: "task-source",
+      prompt: "Return this task",
+      tags: "[]",
+    }];
+    store.pushTaskToPeer.mockReset();
+    store.pushTaskToPeer.mockResolvedValue(undefined);
+    const event = buildTaskPullRequestedEvent();
+    let standbyReady = false;
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "list_transfer_peers") {
+        return standbyReady
+          ? [{
+              peer_id: "peer-requester",
+              display_name: "Requester",
+              public_key: "requester-key",
+              endpoint: "127.0.0.1:43100",
+              pid: 42,
+              trusted: true,
+              accepting_transfers: true,
+            }]
+          : [];
+      }
+      return await defaultInvoke?.(command, args);
+    });
+
+    const owner = await mountApp(SidebarWithRepoStub);
+    const ownerHandler = listenHandlers.get("task-pull-requested");
+    expect(ownerHandler).toBeTypeOf("function");
+    const ownerDelivery = ownerHandler?.(event);
+    owner.unmount();
+    await ownerDelivery;
+    await waitForCondition(() => invokeMock.mock.calls.some(
+      ([command]) => command === "release_transfer_event_consumer",
+    ));
+
+    expect(invokeMock).toHaveBeenCalledWith("release_transfer_event_consumer", {
+      consumerIncarnation: "consumer-incarnation-test",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
+    });
+    // The consumer is released only once its interrupted delivery is settled, so
+    // the requeued pull can never be redelivered before the NACK lands.
+    expect(invokeMock.mock.calls.findIndex(
+      ([command]) => command === "nack_transfer_lifecycle_event",
+    )).toBeLessThan(invokeMock.mock.calls.findIndex(
+      ([command]) => command === "release_transfer_event_consumer",
+    ));
+    expect(store.pushTaskToPeer).not.toHaveBeenCalled();
+
+    standbyReady = true;
+    const standby = await mountApp(SidebarWithRepoStub);
+    const standbyHandler = listenHandlers.get("task-pull-requested");
+    await standbyHandler?.(event);
+
+    expect(store.pushTaskToPeer).toHaveBeenCalledTimes(1);
+    expect(store.pushTaskToPeer).toHaveBeenCalledWith(
+      "task-source",
+      "peer-requester",
+      {
+        transport: "lan",
+        cloudFallback: false,
+        targetDesktopId: null,
+      },
+    );
+    expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
+      deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
+    });
+    standby.unmount();
+  });
+
+  it("NACKs without another push or toast when unmount occurs during a push retry delay", async () => {
+    store.items = [{
+      id: "task-source",
+      repo_id: "repo-1",
+      closed_at: null,
+      stage: "in progress",
+      branch: "task-source",
+      prompt: "Return this task",
+      tags: "[]",
+    }];
+    const retryable = Object.assign(new Error("source desktop identity unavailable"), {
+      retryableTaskPush: true,
+    });
+    store.pushTaskToPeer.mockReset();
+    store.pushTaskToPeer.mockRejectedValue(retryable);
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "list_transfer_peers") {
+        return [{
+          peer_id: "peer-requester",
+          display_name: "Requester",
+          public_key: "requester-key",
+          endpoint: "127.0.0.1:43100",
+          pid: 42,
+          trusted: true,
+          accepting_transfers: true,
+        }];
+      }
+      return await defaultInvoke?.(command, args);
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const owner = await mountApp(SidebarWithRepoStub);
+    try {
+      const handler = listenHandlers.get("task-pull-requested");
+      const delivery = handler?.(buildTaskPullRequestedEvent());
+      await waitForCondition(() => store.pushTaskToPeer.mock.calls.length === 1);
+      await flushPromises();
+
+      owner.unmount();
+      await delivery;
+
+      expect(store.pushTaskToPeer).toHaveBeenCalledTimes(1);
+      expect(toastErrorMock).not.toHaveBeenCalled();
+      expect(invokeMock).toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
+        deliveryId: "lifecycle-pull-failover-1",
+        consumerIncarnation: "consumer-incarnation-test",
+      });
+      expect(invokeMock).not.toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
+        deliveryId: "lifecycle-pull-failover-1",
+        consumerIncarnation: "consumer-incarnation-test",
+      });
+    } finally {
+      owner.unmount();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("NACKs without another refresh, push, or toast when unmount occurs during a route retry delay", async () => {
+    store.items = [{
+      id: "task-source",
+      repo_id: "repo-1",
+      closed_at: null,
+      stage: "in progress",
+      branch: "task-source",
+      prompt: "Return this task",
+      tags: "[]",
+    }];
+    store.pushTaskToPeer.mockReset();
+    let rejectNextRouteRefresh = false;
+    let rejectedRefreshes = 0;
+    const defaultInvoke = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "mobile_server_status") {
+        return { desktopId: "desktop-local", lanPort: 48120 };
+      }
+      if (command === "read_env_var") {
+        return args?.name === "KANNA_RELAY_URL" ? "ws://127.0.0.1:48200" : "/Users/test";
+      }
+      if (command === "get_transfer_identity") {
+        return {
+          peerId: "peer-local",
+          displayName: "Local Mac",
+          publicKey: "local-key",
+          protocolVersion: 1,
+          acceptingTransfers: true,
+        };
+      }
+      if (command === "ensure_cloud_transfer_proxy") {
+        if (rejectNextRouteRefresh) {
+          rejectedRefreshes += 1;
+          throw new Error("route refresh unavailable");
+        }
+        return { endpoint: "127.0.0.1:48201" };
+      }
+      if (
+        command === "upsert_external_transfer_peer"
+        || command === "remove_external_transfer_peer"
+        || command === "remove_cloud_transfer_proxy"
+        || command === "clear_external_transfer_peers"
+        || command === "clear_cloud_transfer_proxies"
+      ) {
+        return null;
+      }
+      if (command === "list_transfer_peers") return [];
+      return await defaultInvoke?.(command, args);
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => new Response(null, { status: 204 })) as typeof fetch;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const owner = await mountApp(SidebarWithRepoStub);
+    try {
+      emitDesktopCloudSnapshot({
+        repos: [],
+        items: [],
+        terminalRefs: {},
+        blockedByTaskIds: {},
+        transferMachines: [{
+          desktopId: "desktop-requester",
+          displayName: "Requester",
+          online: true,
+          peerId: "peer-requester",
+          publicKey: "requester-key",
+          protocolVersion: 1,
+          acceptingTransfers: true,
+        }],
+      });
+      await waitForCondition(() =>
+        invokeMock.mock.calls.some(([command]) => command === "upsert_external_transfer_peer"),
+        30,
+      );
+      const initialRefreshes = invokeMock.mock.calls.filter(
+        ([command]) => command === "ensure_cloud_transfer_proxy",
+      ).length;
+      expect(initialRefreshes).toBeGreaterThan(0);
+      rejectNextRouteRefresh = true;
+      const handler = listenHandlers.get("task-pull-requested");
+      const delivery = handler?.(buildTaskPullRequestedEvent());
+      await waitForCondition(() =>
+        invokeMock.mock.calls.filter(
+          ([command]) => command === "ensure_cloud_transfer_proxy",
+        ).length > initialRefreshes,
+        30,
+      );
+      await flushPromises();
+
+      owner.unmount();
+      await delivery;
+
+      expect(rejectedRefreshes).toBe(1);
+      expect(store.pushTaskToPeer).not.toHaveBeenCalled();
+      expect(toastErrorMock).not.toHaveBeenCalled();
+      expect(invokeMock).toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
+        deliveryId: "lifecycle-pull-failover-1",
+        consumerIncarnation: "consumer-incarnation-test",
+      });
+      expect(invokeMock).not.toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
+        deliveryId: "lifecycle-pull-failover-1",
+        consumerIncarnation: "consumer-incarnation-test",
+      });
+    } finally {
+      owner.unmount();
+      errorSpy.mockRestore();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("does not start transfer services when a mutating listener is not ready", async () => {
+    const { listen } = await import("./listen");
+    vi.mocked(listen).mockRejectedValueOnce(new Error("listener unavailable"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+
+    expect(invokeMock).not.toHaveBeenCalledWith("claim_transfer_event_consumer");
+    expect(lanTasksMock).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
     wrapper.unmount();
   });
 
@@ -4835,12 +5759,42 @@ describe("App", () => {
     const wrapper = await mountApp(SidebarWithRepoStub);
     await flushPromises();
 
-    expect(store.approveIncomingTransfer).toHaveBeenCalledWith("transfer-db-1");
+    expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
+      "transfer-db-1",
+      expect.any(String),
+      expect.objectContaining({ assertOwnership: expect.any(Function) }),
+    );
     expect(dbMock.execute).toHaveBeenCalledWith(
-      expect.stringContaining("status = 'streaming'"),
-      ["transfer-db-1"],
+      expect.stringContaining("status = 'claimed'"),
+      [expect.any(String), "transfer-db-1", 1],
     );
     expect(wrapper.text()).not.toContain("peer-source");
+  });
+
+  it("does not finalize twice when startup recovery overlaps the live transfer event", async () => {
+    dbSelectMock.mockResolvedValue([
+      {
+        ...buildPendingIncomingTransferRow(),
+        id: "transfer-1",
+      },
+    ]);
+    dbMock.execute
+      .mockResolvedValueOnce({ rowsAffected: 1 })
+      .mockResolvedValueOnce({ rowsAffected: 0 });
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+    const handler = listenHandlers.get("transfer-request");
+    await handler?.(buildIncomingTransferEvent());
+    await flushPromises();
+
+    expect(store.approveIncomingTransfer).toHaveBeenCalledTimes(1);
+    expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
+      "transfer-1",
+      expect.any(String),
+      expect.objectContaining({ assertOwnership: expect.any(Function) }),
+    );
+    wrapper.unmount();
   });
 
   it("cleans up completed, rejected, and failed incoming sidecar reservations on restart", async () => {
@@ -4930,7 +5884,11 @@ describe("App", () => {
     await flushPromises();
 
     expect(store.approveIncomingTransfer).toHaveBeenCalledTimes(1);
-    expect(store.approveIncomingTransfer).toHaveBeenCalledWith("transfer-db-1");
+    expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
+      "transfer-db-1",
+      expect.any(String),
+      expect.objectContaining({ assertOwnership: expect.any(Function) }),
+    );
 
     first.unmount();
     second.unmount();
@@ -5045,7 +6003,11 @@ describe("App", () => {
         transferId === "transfer-stale"),
     );
 
-    expect(store.approveIncomingTransfer).toHaveBeenCalledWith("transfer-stale");
+    expect(store.approveIncomingTransfer).toHaveBeenCalledWith(
+      "transfer-stale",
+      expect.any(String),
+      expect.objectContaining({ assertOwnership: expect.any(Function) }),
+    );
     expect(dbMock.execute).toHaveBeenCalledWith(
       expect.stringContaining("status = 'failed'"),
       [
@@ -5071,11 +6033,37 @@ describe("App", () => {
     await handler?.(buildOutgoingTransferCommittedEvent());
     await flushPromises();
 
-    expect(store.handleOutgoingTransferCommitted).toHaveBeenCalledWith({
+    expect(store.handleOutgoingTransferCommitted).toHaveBeenCalledWith(
+      {
+        transferId: "transfer-1",
+        sourceTaskId: "task-source",
+        destinationLocalTaskId: "task-imported",
+      },
+      expect.objectContaining({
+        deliveryId: "lifecycle-commit-1",
+        consumerIncarnation: "consumer-incarnation-test",
+        assertOwnership: expect.any(Function),
+      }),
+    );
+  });
+
+  it("nacks an outgoing transfer commit when delayed desktop application fails", async () => {
+    store.handleOutgoingTransferCommitted.mockRejectedValueOnce(new Error("close still in flight"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await mountApp(SidebarWithRepoStub);
+    await flushPromises();
+    await flushPromises();
+
+    const handler = listenHandlers.get("outgoing-transfer-committed");
+    await handler?.(buildOutgoingTransferCommittedEvent());
+    await flushPromises();
+
+    expect(invokeMock).toHaveBeenCalledWith("nack_outgoing_transfer_commit", {
       transferId: "transfer-1",
-      sourceTaskId: "task-source",
-      destinationLocalTaskId: "task-imported",
+      deliveryId: "lifecycle-commit-1",
+      consumerIncarnation: "consumer-incarnation-test",
     });
+    errorSpy.mockRestore();
   });
 
   it("forwards outgoing transfer finalization requests to the store and completes them", async () => {
@@ -5089,12 +6077,21 @@ describe("App", () => {
     await handler?.(buildOutgoingTransferFinalizationRequestedEvent());
     await flushPromises();
 
-    expect(store.finalizeOutgoingTransfer).toHaveBeenCalledWith("transfer-1");
+    expect(store.finalizeOutgoingTransfer).toHaveBeenCalledWith(
+      "transfer-1",
+      expect.objectContaining({
+        deliveryId: "lifecycle-finalization-1",
+        consumerIncarnation: "consumer-incarnation-test",
+        assertOwnership: expect.any(Function),
+      }),
+    );
     expect(invokeMock).toHaveBeenCalledWith("complete_outgoing_transfer_finalization", {
       transferId: "transfer-1",
       payload: expect.any(Object),
       finalizedCleanly: true,
       error: null,
+      deliveryId: "lifecycle-finalization-1",
+      consumerIncarnation: "consumer-incarnation-test",
     });
   });
 

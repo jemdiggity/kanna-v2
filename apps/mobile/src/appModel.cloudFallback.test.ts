@@ -118,7 +118,8 @@ function createTrustedPersistence() {
 
 function createLanFixture(
   listRecentTasks: () => Promise<TaskSummary[]>,
-  displayName = "LAN Mac"
+  displayName = "LAN Mac",
+  kspStreamVersion?: 1 | 2
 ): { bonjourBrowser: ReturnType<typeof createStaticBonjourBrowser>; fetchImpl: FetchLike } {
   const bonjourBrowser = createStaticBonjourBrowser([
     {
@@ -141,7 +142,8 @@ function createLanFixture(
         desktopName: displayName,
         lanHost: "0.0.0.0",
         lanPort: 48120,
-        pairingCode: null
+        pairingCode: null,
+        ...(kspStreamVersion ? { kspStreamVersion } : {})
       });
     }
     if (url.endsWith("/v1/desktops")) {
@@ -398,6 +400,49 @@ async function rejectCloudRecovery(
 }
 
 describe("createAppModel cloud routing", () => {
+  it.each([
+    ["current", 2 as const, "ws://desktop.lan:48120/v2/stream"],
+    ["previous", undefined, "ws://desktop.lan:48120/v1/stream"],
+  ])("reuses the %s server KSP negotiation for app-model LAN streams", async (
+    _server,
+    kspStreamVersion,
+    expectedUrl,
+  ) => {
+    const lan = createLanFixture(async () => [], "LAN Mac", kspStreamVersion);
+    const { authSession } = createMutableAuthSession({ status: "signedOut" });
+    const socketUrls: string[] = [];
+    class TestWebSocket {
+      close = vi.fn();
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onopen: (() => void) | null = null;
+      send = vi.fn();
+
+      constructor(url: string) {
+        socketUrls.push(url);
+      }
+    }
+    vi.stubGlobal("WebSocket", TestWebSocket);
+    const app = createAppModel({
+      authSession,
+      fetchImpl: lan.fetchImpl,
+      persistence: createTrustedPersistence(),
+      options: {
+        forceCloud: false,
+        bonjourBrowser: lan.bonjourBrowser,
+      },
+    });
+
+    await app.initialize();
+    await app.client.getStatus();
+    const subscription = app.client.observeTaskTerminal("task-1", () => {});
+
+    expect(socketUrls.at(-1)).toBe(expectedUrl);
+    subscription.close();
+    app.controller.dispose();
+  });
+
   it("uses account-known machines over LAN without a manual trust record", async () => {
     const { authSession } = createMutableAuthSession(signedInState());
     let pushCloudTasks: ((tasks: CloudTaskSummary[]) => void) | null = null;

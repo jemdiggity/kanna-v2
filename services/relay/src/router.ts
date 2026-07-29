@@ -13,6 +13,7 @@ interface PendingTunnel {
   client: WebSocket;
   desktopId: string;
   service: TunnelService;
+  expiry: ReturnType<typeof setTimeout>;
 }
 
 export type TunnelService = "ksp" | "task-transfer";
@@ -32,7 +33,29 @@ interface RelayMessage {
 const connections = new Map<string, ConnectionPair>();
 const tunnelPeers = new WeakMap<WebSocket, WebSocket>();
 const tunnelLabels = new WeakMap<WebSocket, "client" | "desktop">();
+const tunnelServices = new WeakMap<WebSocket, TunnelService>();
 const tunnelSockets = new WeakSet<WebSocket>();
+const pausedTunnelSources = new WeakSet<WebSocket>();
+const tunnelPeakBufferedBytes = new WeakMap<WebSocket, number>();
+
+export const TASK_TRANSFER_TUNNEL_HIGH_WATER_BYTES = 512 * 1024;
+export const TASK_TRANSFER_TUNNEL_LOW_WATER_BYTES = 256 * 1024;
+export const TASK_TRANSFER_TUNNEL_MAX_BUFFERED_BYTES = 1024 * 1024;
+export const TASK_TRANSFER_PENDING_TUNNEL_TIMEOUT_MS = 10_000;
+
+export function pendingTunnelCountForTests(userId: string): number {
+  return connections.get(userId)?.pendingTunnels.size ?? 0;
+}
+
+export function taskTransferTunnelFlowStateForTests(ws: WebSocket): {
+  paused: boolean;
+  peakBufferedBytes: number;
+} {
+  return {
+    paused: pausedTunnelSources.has(ws),
+    peakBufferedBytes: tunnelPeakBufferedBytes.get(ws) ?? 0,
+  };
+}
 
 function parseRelayMessage(data: string): RelayMessage | null {
   try {
@@ -192,13 +215,52 @@ function removeClient(pair: ConnectionPair, ws: WebSocket): void {
   }
 }
 
+function removePendingTunnel(pair: ConnectionPair, tunnelId: string): PendingTunnel | undefined {
+  const tunnel = pair.pendingTunnels.get(tunnelId);
+  if (!tunnel) return undefined;
+  clearTimeout(tunnel.expiry);
+  pair.pendingTunnels.delete(tunnelId);
+  return tunnel;
+}
+
+function storePendingTunnel(
+  pair: ConnectionPair,
+  tunnelId: string,
+  client: WebSocket,
+  desktopId: string,
+  service: TunnelService,
+): void {
+  const expiry = setTimeout(() => {
+    const current = pair.pendingTunnels.get(tunnelId);
+    if (!current || current.client !== client) return;
+    pair.pendingTunnels.delete(tunnelId);
+    if (client.readyState <= 1) {
+      client.close(4408, "Tunnel setup timed out");
+    }
+  }, TASK_TRANSFER_PENDING_TUNNEL_TIMEOUT_MS);
+  expiry.unref?.();
+  pair.pendingTunnels.set(tunnelId, { client, desktopId, service, expiry });
+}
+
 function closeTunnelPeer(ws: WebSocket): void {
   const peer = tunnelPeers.get(ws);
+  if (pausedTunnelSources.has(ws)) {
+    pausedTunnelSources.delete(ws);
+    ws.resume();
+  }
   tunnelPeers.delete(ws);
   tunnelLabels.delete(ws);
+  tunnelServices.delete(ws);
+  tunnelPeakBufferedBytes.delete(ws);
   if (peer) {
+    if (pausedTunnelSources.has(peer)) {
+      pausedTunnelSources.delete(peer);
+      peer.resume();
+    }
     tunnelPeers.delete(peer);
     tunnelLabels.delete(peer);
+    tunnelServices.delete(peer);
+    tunnelPeakBufferedBytes.delete(peer);
     if (peer.readyState <= 1) {
       peer.close(1000, "Tunnel peer closed");
     }
@@ -237,7 +299,7 @@ export function setPhoneConnection(userId: string, ws: WebSocket): void {
       removeClient(current, ws);
       for (const [tunnelId, tunnel] of current.pendingTunnels.entries()) {
         if (tunnel.client === ws) {
-          current.pendingTunnels.delete(tunnelId);
+          removePendingTunnel(current, tunnelId);
         }
       }
       if (current.desktops.size === 0) {
@@ -282,7 +344,7 @@ export function setServerConnection(
       for (const [tunnelId, tunnel] of current.pendingTunnels.entries()) {
         if (tunnel.desktopId === desktopId) {
           tunnel.client.close(1011, "Desktop disconnected before tunnel opened");
-          current.pendingTunnels.delete(tunnelId);
+          removePendingTunnel(current, tunnelId);
         }
       }
       // Clean up map entry if both sides are gone
@@ -303,6 +365,40 @@ export function forwardTunnelData(source: WebSocket, data: RawData, isBinary = f
     return;
   }
   const payload = isBinary ? data : rawDataToString(data);
+  const service = tunnelServices.get(source);
+  if (service === "task-transfer" && isBinary) {
+    const byteLength = rawDataByteLength(data);
+    if (peer.bufferedAmount + byteLength > TASK_TRANSFER_TUNNEL_MAX_BUFFERED_BYTES) {
+      source.close(1013, "Task-transfer backpressure limit exceeded");
+      peer.close(1013, "Task-transfer backpressure limit exceeded");
+      return;
+    }
+    peer.send(payload, { binary: true }, (error) => {
+      if (error && source.readyState <= 1) {
+        source.close(1011, "Task-transfer forwarding failed");
+        return;
+      }
+      if (
+        pausedTunnelSources.has(source)
+        && peer.bufferedAmount <= TASK_TRANSFER_TUNNEL_LOW_WATER_BYTES
+      ) {
+        pausedTunnelSources.delete(source);
+        source.resume();
+      }
+    });
+    tunnelPeakBufferedBytes.set(
+      source,
+      Math.max(tunnelPeakBufferedBytes.get(source) ?? 0, peer.bufferedAmount),
+    );
+    if (
+      peer.bufferedAmount >= TASK_TRANSFER_TUNNEL_HIGH_WATER_BYTES
+      && !pausedTunnelSources.has(source)
+    ) {
+      pausedTunnelSources.add(source);
+      source.pause();
+    }
+    return;
+  }
   if (process.env.KANNA_RELAY_DEBUG_TUNNEL === "1") {
     const direction = tunnelLabels.get(source) === "client" ? "client->desktop" : "desktop->client";
     let summary = `<${rawDataByteLength(data)} bytes>`;
@@ -332,13 +428,17 @@ export function attachDesktopTunnel(
     return false;
   }
 
-  pair.pendingTunnels.delete(tunnelId);
+  removePendingTunnel(pair, tunnelId);
   tunnelSockets.add(tunnel.client);
   tunnelSockets.add(ws);
   tunnelPeers.set(tunnel.client, ws);
   tunnelPeers.set(ws, tunnel.client);
   tunnelLabels.set(tunnel.client, "client");
   tunnelLabels.set(ws, "desktop");
+  tunnelServices.set(tunnel.client, tunnel.service);
+  tunnelServices.set(ws, tunnel.service);
+  tunnelPeakBufferedBytes.set(tunnel.client, 0);
+  tunnelPeakBufferedBytes.set(ws, 0);
   ws.on("close", () => closeTunnelPeer(ws));
   tunnel.client.on("close", () => closeTunnelPeer(tunnel.client));
 
@@ -394,7 +494,7 @@ export function routeMessage(
       }
 
       const tunnelId = randomUUID();
-      pair.pendingTunnels.set(tunnelId, { client: source, desktopId, service });
+      storePendingTunnel(pair, tunnelId, source, desktopId, service);
       tunnelSockets.add(source);
       target.send(
         JSON.stringify({

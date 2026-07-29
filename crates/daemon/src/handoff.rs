@@ -12,6 +12,7 @@ use tokio::io::BufReader;
 use tokio::sync::{broadcast, Mutex};
 
 use crate::client::SessionSizes;
+use crate::daemon_lifecycle::{DaemonLifecycle, DaemonLifecycleState};
 use crate::fanout::SessionFanouts;
 use crate::session::{SessionManager, StreamControl};
 use crate::socket::{read_command, write_event};
@@ -773,6 +774,7 @@ pub(crate) async fn handle_handoff(
     broadcast_tx: broadcast::Sender<String>,
     recovery_manager: RecoveryManager,
     agent_sessions: kanna_daemon::agent::AgentSessions,
+    daemon_lifecycle: DaemonLifecycle,
 ) -> bool {
     log::info!(
         "[handoff] received Handoff request (version={}, current_version={})",
@@ -800,6 +802,17 @@ pub(crate) async fn handle_handoff(
         mode.version()
     );
 
+    // Seal both live registries from snapshot capture through ACK resolution.
+    // Spawn/Kill/natural-exit hold read guards around their mutations, so an
+    // adopted snapshot cannot omit a new session or retain a killed/replaced
+    // incarnation.
+    let mut daemon_lifecycle_guard = daemon_lifecycle.write().await;
+    if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+        let evt = error_event(None, "daemon handoff already committed");
+        let _ = write_event(&mut *writer.lock().await, &evt).await;
+        return false;
+    }
+
     // Snapshot and clone fds without removing ownership. The old daemon keeps
     // serving sessions unless the adopting daemon explicitly ACKs success.
     // Fence concurrent PTY Spawn/Kill for the duration of the transfer: a
@@ -819,6 +832,28 @@ pub(crate) async fn handle_handoff(
         if let Some(control) = handle.stream_control().await {
             controls.push(control);
         }
+    }
+    for control in &controls {
+        control.request_quiesce();
+    }
+    let quiesce_started = std::time::Instant::now();
+    while quiesce_started.elapsed() < std::time::Duration::from_secs(2)
+        && controls
+            .iter()
+            .any(|control| !control.is_quiesced() && !control.is_stopped())
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    if controls
+        .iter()
+        .any(|control| !control.is_quiesced() && !control.is_stopped())
+    {
+        log::warn!("[handoff] timed out quiescing PTY readers; rolling back");
+        for control in &controls {
+            control.resume();
+        }
+        sessions.lock().await.unseal_for_handoff();
+        return false;
     }
 
     let mut infos = Vec::new();
@@ -1000,6 +1035,25 @@ pub(crate) async fn handle_handoff(
         dead_count
     );
 
+    #[cfg(debug_assertions)]
+    if let Ok(marker_path) = std::env::var("KANNA_DAEMON_TEST_HANDOFF_SNAPSHOT_MARKER") {
+        if let Err(error) = std::fs::write(&marker_path, b"snapshot-complete") {
+            log::warn!(
+                "[handoff] failed to write snapshot-window marker {}: {}",
+                marker_path,
+                error
+            );
+        }
+        if let Ok(release_path) = std::env::var("KANNA_DAEMON_TEST_HANDOFF_SNAPSHOT_RELEASE") {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !std::path::Path::new(&release_path).exists()
+                && std::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+    }
+
     log::info!(
         "[handoff] sending HandoffReady with {} sessions",
         infos.len()
@@ -1010,6 +1064,14 @@ pub(crate) async fn handle_handoff(
     let evt = Event::HandoffReady { sessions: infos };
     if let Err(error) = write_event(&mut *writer.lock().await, &evt).await {
         log::error!("[handoff] failed to write HandoffReady: {}", error);
+        for control in &controls {
+            control.resume();
+        }
+        for fd in cloned_pty_fds.drain(..) {
+            unsafe { libc::close(fd) };
+        }
+        sessions.lock().await.unseal_for_handoff();
+        return false;
     }
 
     // Flush the writer before sending fds
@@ -1017,6 +1079,14 @@ pub(crate) async fn handle_handoff(
         use tokio::io::AsyncWriteExt;
         if let Err(error) = writer.lock().await.flush().await {
             log::error!("[handoff] failed to flush HandoffReady: {}", error);
+            for control in &controls {
+                control.resume();
+            }
+            for fd in cloned_pty_fds.drain(..) {
+                unsafe { libc::close(fd) };
+            }
+            sessions.lock().await.unseal_for_handoff();
+            return false;
         }
     }
     log::info!("[handoff] HandoffReady sent and flushed");
@@ -1033,7 +1103,10 @@ pub(crate) async fn handle_handoff(
             Ok(()) => log::info!("[handoff] fds sent successfully"),
             Err(e) => {
                 log::info!("[handoff] failed to send fds: {} (kind={:?})", e, e.kind());
-                for fd in cloned_pty_fds {
+                for control in &controls {
+                    control.resume();
+                }
+                for fd in cloned_pty_fds.drain(..) {
                     unsafe { libc::close(fd) };
                 }
                 sessions.lock().await.unseal_for_handoff();
@@ -1058,7 +1131,10 @@ pub(crate) async fn handle_handoff(
         }
         Ok(Some(other)) => {
             log::warn!("[handoff] expected HandoffAdopted, got {:?}", other);
-            for fd in cloned_pty_fds {
+            for control in &controls {
+                control.resume();
+            }
+            for fd in cloned_pty_fds.drain(..) {
                 unsafe { libc::close(fd) };
             }
             sessions.lock().await.unseal_for_handoff();
@@ -1066,7 +1142,10 @@ pub(crate) async fn handle_handoff(
         }
         Ok(None) => {
             log::warn!("[handoff] adopting daemon disconnected before ack");
-            for fd in cloned_pty_fds {
+            for control in &controls {
+                control.resume();
+            }
+            for fd in cloned_pty_fds.drain(..) {
                 unsafe { libc::close(fd) };
             }
             sessions.lock().await.unseal_for_handoff();
@@ -1074,13 +1153,19 @@ pub(crate) async fn handle_handoff(
         }
         Err(_) => {
             log::warn!("[handoff] timed out waiting for adoption ack");
-            for fd in cloned_pty_fds {
+            for control in &controls {
+                control.resume();
+            }
+            for fd in cloned_pty_fds.drain(..) {
                 unsafe { libc::close(fd) };
             }
             sessions.lock().await.unseal_for_handoff();
             return false;
         }
     }
+
+    *daemon_lifecycle_guard = DaemonLifecycleState::HandoffCommitted;
+    drop(daemon_lifecycle_guard);
 
     // Fault-injection hook for the delayed-old-reader regression: simulate a
     // daemon that is slow to relinquish its PTY readers after acknowledging
@@ -1098,7 +1183,6 @@ pub(crate) async fn handle_handoff(
         );
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
     }
-
     for control in &controls {
         control.request_stop();
     }
@@ -1116,7 +1200,7 @@ pub(crate) async fn handle_handoff(
     fanouts.lock().await.clear();
     session_sizes.lock().await.clear();
 
-    for fd in cloned_pty_fds {
+    for fd in cloned_pty_fds.drain(..) {
         let ret = unsafe { libc::close(fd) };
         if ret != 0 {
             log::warn!(

@@ -7,6 +7,7 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::client::{LostHandoffSessions, SessionSizes, TerminalEmulatorClients};
 use crate::connection::handle_connection;
+use crate::daemon_lifecycle::new_daemon_lifecycle;
 use crate::fanout::{session_fanout, SessionFanouts};
 use crate::handoff::attempt_handoff;
 use crate::output::stream_output;
@@ -165,6 +166,7 @@ pub(crate) async fn run_daemon() {
     let lost_handoff_sessions: LostHandoffSessions = Arc::new(Mutex::new(handoff_result.lost));
     let agent_sessions: kanna_daemon::agent::AgentSessions =
         Arc::new(Mutex::new(Default::default()));
+    let daemon_lifecycle = new_daemon_lifecycle();
     let recovery_manager = RecoveryManager::start().await;
     let (broadcast_tx, _) = broadcast::channel::<String>(256);
     let mut adopted_pty_readers = Vec::new();
@@ -320,6 +322,7 @@ pub(crate) async fn run_daemon() {
         let sizes_for_stream = session_sizes.clone();
         let recovery_for_stream = recovery_manager.clone();
         let broadcast_for_stream = broadcast_tx.clone();
+        let daemon_lifecycle_for_stream = daemon_lifecycle.clone();
         tokio::spawn(async move {
             stream_output(
                 reader.session_id,
@@ -332,6 +335,7 @@ pub(crate) async fn run_daemon() {
                 sessions_for_stream,
                 sizes_for_stream,
                 recovery_for_stream,
+                daemon_lifecycle_for_stream,
                 reader.handle,
             )
             .await;
@@ -350,6 +354,7 @@ pub(crate) async fn run_daemon() {
                 agent_sessions.clone(),
                 broadcast_tx.clone(),
                 daemon_data_dir(),
+                daemon_lifecycle.clone(),
             )
             .await;
         }
@@ -412,6 +417,7 @@ pub(crate) async fn run_daemon() {
                 let lost_handoff_clone = lost_handoff_sessions.clone();
                 let recovery_clone = recovery_manager.clone();
                 let agent_sessions_clone = agent_sessions.clone();
+                let daemon_lifecycle_clone = daemon_lifecycle.clone();
                 tokio::spawn(async move {
                     handle_connection(
                         stream,
@@ -423,6 +429,7 @@ pub(crate) async fn run_daemon() {
                         lost_handoff_clone,
                         recovery_clone,
                         agent_sessions_clone,
+                        daemon_lifecycle_clone,
                     )
                     .await;
                 });

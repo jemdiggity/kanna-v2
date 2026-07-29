@@ -6,7 +6,9 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   unlinkSync,
+  utimesSync,
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,9 +16,12 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   computeKdIdentity,
+  createKdInstallationLease,
   ensureKdInstallation,
   formatKdCacheEvent,
+  initializeKdCacheRoot,
   kdDependencyProjection,
+  pruneKdInstallations,
   resolveKdCacheRoot,
   validateKdInstallation,
   writeKdManifest
@@ -93,6 +98,24 @@ async function successfulFakeBuild({ outputDir, identity }) {
   writeFileSync(join(outputDir, "bin/kd.js"), "#!/usr/bin/env node\n");
   writeFileSync(join(outputDir, "bin/kd-mcp.js"), "#!/usr/bin/env node\n");
   writeKdManifest(outputDir, identity, runtime);
+}
+
+function createCachedInstallation(cacheRoot, identity, bytes, usedAtMs) {
+  initializeKdCacheRoot({ cacheRoot });
+  const entryRoot = join(cacheRoot, identity);
+  mkdirSync(join(entryRoot, "bin"), { recursive: true });
+  writeFileSync(join(entryRoot, "bin/kd.js"), "x".repeat(bytes));
+  writeFileSync(join(entryRoot, "bin/kd-mcp.js"), "#!/usr/bin/env node\n");
+  writeKdManifest(entryRoot, identity, runtime);
+  const usedPath = join(cacheRoot, `.${identity}.used`);
+  writeFileSync(usedPath, `${usedAtMs}\n`);
+  const usedAt = new Date(usedAtMs);
+  utimesSync(usedPath, usedAt, usedAt);
+  return entryRoot;
+}
+
+function cacheIdentity(label) {
+  return Buffer.from(label).toString("hex").padEnd(64, "0").slice(0, 64);
 }
 
 describe("kd installation identity", () => {
@@ -242,6 +265,7 @@ describe("kd installation publication", () => {
 
   it("repairs an invalid final entry under the installation lock", async () => {
     const cacheRoot = join(createRepoFixture(), "cache");
+    initializeKdCacheRoot({ cacheRoot });
     const entryRoot = join(cacheRoot, "corrupt");
     mkdirSync(entryRoot, { recursive: true });
     writeFileSync(join(entryRoot, "manifest.json"), "{broken");
@@ -261,6 +285,7 @@ describe("kd installation publication", () => {
 
   it("rebuilds a valid-manifest installation with a missing entrypoint", async () => {
     const cacheRoot = join(createRepoFixture(), "cache");
+    initializeKdCacheRoot({ cacheRoot });
     const entryRoot = join(cacheRoot, "missing-entrypoint");
     await successfulFakeBuild({
       outputDir: entryRoot,
@@ -288,6 +313,7 @@ describe("kd installation publication", () => {
 
   it("reports cache miss and corrupt-entry recovery with full context", async () => {
     const cacheRoot = join(createRepoFixture(), "cache");
+    initializeKdCacheRoot({ cacheRoot });
     const entryRoot = join(cacheRoot, "corrupt-events");
     mkdirSync(entryRoot, { recursive: true });
     writeFileSync(join(entryRoot, "manifest.json"), "{broken");
@@ -310,6 +336,7 @@ describe("kd installation publication", () => {
 
   it("recovers a lock whose recorded owner is dead", async () => {
     const cacheRoot = join(createRepoFixture(), "cache");
+    initializeKdCacheRoot({ cacheRoot });
     const lockRoot = join(cacheRoot, ".dead.lock");
     mkdirSync(lockRoot, { recursive: true });
     writeFileSync(
@@ -337,6 +364,7 @@ describe("kd installation publication", () => {
 
   it("recovers an ownerless lock after it remains unchanged for one poll", async () => {
     const cacheRoot = join(createRepoFixture(), "cache");
+    initializeKdCacheRoot({ cacheRoot });
     const lockRoot = join(cacheRoot, ".ownerless.lock");
     mkdirSync(lockRoot, { recursive: true });
 
@@ -356,6 +384,7 @@ describe("kd installation publication", () => {
 
   it("recovers a malformed lock after it remains unchanged for one poll", async () => {
     const cacheRoot = join(createRepoFixture(), "cache");
+    initializeKdCacheRoot({ cacheRoot });
     const lockRoot = join(cacheRoot, ".malformed.lock");
     mkdirSync(lockRoot, { recursive: true });
     writeFileSync(join(lockRoot, "owner.json"), "{not-json");
@@ -399,6 +428,7 @@ describe("kd installation publication", () => {
 
   it("never removes a lock whose recorded owner is alive", async () => {
     const cacheRoot = join(createRepoFixture(), "cache");
+    initializeKdCacheRoot({ cacheRoot });
     const lockRoot = join(cacheRoot, ".live.lock");
     mkdirSync(lockRoot, { recursive: true });
     writeFileSync(
@@ -464,6 +494,216 @@ describe("kd installation publication", () => {
     expect(events.at(-1)).toBe(
       `kd installation failed: identity=${identity} cache=${entryRoot} phase=build: synthetic command failure`
     );
+  });
+});
+
+describe("kd installation reclamation", () => {
+  it("retries an incomplete marker won by a concurrent initializer", () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    let markerReadCount = 0;
+    const markerRace = (path, _value, options) => {
+      writeFileSync(path, "{", options);
+      const error = new Error("marker already exists");
+      error.code = "EEXIST";
+      throw error;
+    };
+    const readMarker = (path, encoding) => {
+      markerReadCount += 1;
+      const value = readFileSync(path, encoding);
+      if (markerReadCount === 1) {
+        writeFileSync(
+          path,
+          `${JSON.stringify({ kind: "kanna-kd-cache", schema: 1 })}\n`
+        );
+      }
+      return value;
+    };
+
+    expect(initializeKdCacheRoot({
+      cacheRoot,
+      writeMarker: markerRace,
+      readMarker,
+      waitForMarkerPublication: () => {},
+    })).toBe(cacheRoot);
+    expect(markerReadCount).toBe(2);
+    expect(() => initializeKdCacheRoot({ cacheRoot })).not.toThrow();
+  });
+
+  it("rejects the filesystem root before inspecting or changing children", () => {
+    expect(() => initializeKdCacheRoot({ cacheRoot: resolve("/") }))
+      .toThrow(/unsafe kd cache root/i);
+  });
+
+  it("preserves unrelated and manifest-invalid child directories", () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    mkdirSync(cacheRoot, { recursive: true });
+    const now = Date.parse("2026-07-26T12:00:00.000Z");
+    const ownedIdentity = "a".repeat(64);
+    const invalidIdentity = "b".repeat(64);
+    createCachedInstallation(cacheRoot, ownedIdentity, 16, now - 60_000);
+    mkdirSync(join(cacheRoot, "unrelated-project"), { recursive: true });
+    writeFileSync(join(cacheRoot, "unrelated-project/keep.txt"), "keep");
+    mkdirSync(join(cacheRoot, invalidIdentity), { recursive: true });
+    writeFileSync(join(cacheRoot, invalidIdentity, "manifest.json"), "{broken");
+
+    const result = pruneKdInstallations({
+      cacheRoot,
+      currentIdentity: "c".repeat(64),
+      now,
+      maxAgeMs: 1,
+      maxEntries: 0,
+      maxBytes: 0,
+      isProcessAlive: () => false,
+    });
+
+    expect(result.removedIdentities).toEqual([ownedIdentity]);
+    expect(existsSync(join(cacheRoot, "unrelated-project/keep.txt"))).toBe(true);
+    expect(existsSync(join(cacheRoot, invalidIdentity, "manifest.json"))).toBe(true);
+  });
+
+  it.each([
+    ["home directory", "home"],
+    ["temporary directory", "tempRoot"],
+  ])("rejects a cache root equal to the injected %s", (_label, broadRootOption) => {
+    const broadRoot = join(createRepoFixture(), "broad-root");
+    mkdirSync(broadRoot, { recursive: true });
+    const identity = "d".repeat(64);
+    createCachedInstallation(broadRoot, identity, 16, Date.now() - 60_000);
+
+    expect(() => pruneKdInstallations({
+      cacheRoot: broadRoot,
+      currentIdentity: "e".repeat(64),
+      maxAgeMs: 1,
+      maxEntries: 0,
+      maxBytes: 0,
+      isProcessAlive: () => false,
+      [broadRootOption]: broadRoot,
+    })).toThrow(/unsafe kd cache root/i);
+    expect(existsSync(join(broadRoot, identity))).toBe(true);
+  });
+
+  it("rejects a non-empty unowned cache root before recursive deletion", () => {
+    const cacheRoot = join(createRepoFixture(), "unowned-cache");
+    mkdirSync(join(cacheRoot, "unrelated-project"), { recursive: true });
+    writeFileSync(join(cacheRoot, "unrelated-project/keep.txt"), "keep");
+
+    expect(() => pruneKdInstallations({
+      cacheRoot,
+      currentIdentity: "f".repeat(64),
+      maxAgeMs: 1,
+      maxEntries: 0,
+      maxBytes: 0,
+      isProcessAlive: () => false,
+    })).toThrow(/not owned by kd/i);
+    expect(existsSync(join(cacheRoot, "unrelated-project/keep.txt"))).toBe(true);
+  });
+
+  it("prunes expired entries and then enforces oldest-first count and byte limits", () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    mkdirSync(cacheRoot, { recursive: true });
+    const now = Date.parse("2026-07-26T12:00:00.000Z");
+    const expired = cacheIdentity("expired");
+    const oldest = cacheIdentity("oldest");
+    const middle = cacheIdentity("middle");
+    const current = cacheIdentity("current");
+    createCachedInstallation(cacheRoot, expired, 16, now - 31 * 24 * 60 * 60 * 1000);
+    createCachedInstallation(cacheRoot, oldest, 32, now - 3_000);
+    createCachedInstallation(cacheRoot, middle, 32, now - 2_000);
+    createCachedInstallation(cacheRoot, current, 32, now - 1_000);
+
+    const result = pruneKdInstallations({
+      cacheRoot,
+      currentIdentity: current,
+      now,
+      maxAgeMs: 30 * 24 * 60 * 60 * 1000,
+      maxEntries: 2,
+      maxBytes: 10_000,
+      isProcessAlive: () => false,
+    });
+
+    expect(result.removedIdentities).toEqual([expired, oldest]);
+    expect(readdirSync(cacheRoot).filter((name) => !name.startsWith(".")))
+      .toEqual([current, middle]);
+
+    const middleBytes = statSync(join(cacheRoot, middle, "bin/kd.js")).size;
+    const currentBytes = statSync(join(cacheRoot, current, "bin/kd.js")).size;
+    pruneKdInstallations({
+      cacheRoot,
+      currentIdentity: current,
+      now,
+      maxAgeMs: Number.POSITIVE_INFINITY,
+      maxEntries: 10,
+      maxBytes: middleBytes + currentBytes,
+      isProcessAlive: () => false,
+    });
+    expect(existsSync(join(cacheRoot, middle))).toBe(false);
+    expect(existsSync(join(cacheRoot, current))).toBe(true);
+  });
+
+  it("fences live leases, installation locks, and the current identity", () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    mkdirSync(cacheRoot, { recursive: true });
+    const now = Date.parse("2026-07-26T12:00:00.000Z");
+    const leased = cacheIdentity("leased");
+    const installing = cacheIdentity("installing");
+    const current = cacheIdentity("current");
+    const deletable = cacheIdentity("deletable");
+    for (const identity of [leased, installing, current, deletable]) {
+      createCachedInstallation(cacheRoot, identity, 16, now - 60_000);
+    }
+    createKdInstallationLease({
+      cacheRoot,
+      identity: leased,
+      pid: 101,
+      now,
+    });
+    writeFileSync(
+      join(cacheRoot, `.${installing}.lock`),
+      `${JSON.stringify({ pid: 202, token: "installing", startedAt: now })}\n`,
+    );
+
+    const result = pruneKdInstallations({
+      cacheRoot,
+      currentIdentity: current,
+      now,
+      maxAgeMs: 1,
+      maxEntries: 0,
+      maxBytes: 0,
+      isProcessAlive: (pid) => pid === 101 || pid === 202,
+    });
+
+    expect(result.removedIdentities).toEqual([deletable]);
+    expect(existsSync(join(cacheRoot, leased))).toBe(true);
+    expect(existsSync(join(cacheRoot, installing))).toBe(true);
+    expect(existsSync(join(cacheRoot, current))).toBe(true);
+  });
+
+  it("cleans stale leases and allows their installation to be reclaimed", () => {
+    const cacheRoot = join(createRepoFixture(), "cache");
+    mkdirSync(cacheRoot, { recursive: true });
+    const now = Date.parse("2026-07-26T12:00:00.000Z");
+    const stale = cacheIdentity("stale");
+    createCachedInstallation(cacheRoot, stale, 16, now - 60_000);
+    const leasePath = createKdInstallationLease({
+      cacheRoot,
+      identity: stale,
+      pid: 303,
+      now,
+    });
+
+    const result = pruneKdInstallations({
+      cacheRoot,
+      currentIdentity: "other",
+      now,
+      maxAgeMs: 1,
+      maxEntries: 0,
+      maxBytes: 0,
+      isProcessAlive: () => false,
+    });
+
+    expect(result.removedIdentities).toEqual([stale]);
+    expect(existsSync(leasePath)).toBe(false);
+    expect(existsSync(join(cacheRoot, stale))).toBe(false);
   });
 });
 

@@ -18,6 +18,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 
+static PROCESS_FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn unique_test_root(label: &str) -> PathBuf {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -63,12 +65,29 @@ impl Drop for DurableTestCleanup {
     }
 }
 
-fn free_loopback_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback port should be available");
-    listener
-        .local_addr()
-        .expect("loopback listener should have an address")
-        .port()
+struct ServerPortReservations {
+    lan: TcpListener,
+    transfer: TcpListener,
+}
+
+impl ServerPortReservations {
+    fn new() -> Self {
+        let lan = TcpListener::bind("127.0.0.1:0").expect("LAN port should be available");
+        let transfer = TcpListener::bind("127.0.0.1:0").expect("transfer port should be available");
+        assert_ne!(
+            lan.local_addr().unwrap().port(),
+            transfer.local_addr().unwrap().port()
+        );
+        Self { lan, transfer }
+    }
+
+    fn lan_port(&self) -> u16 {
+        self.lan.local_addr().unwrap().port()
+    }
+
+    fn transfer_port(&self) -> u16 {
+        self.transfer.local_addr().unwrap().port()
+    }
 }
 
 fn write_executable(path: &Path) {
@@ -178,7 +197,7 @@ fn init_provider_repo(root: &Path) -> PathBuf {
     repo
 }
 
-fn write_server_config(root: &Path, port: u16) -> (PathBuf, PathBuf, PathBuf) {
+fn write_server_config(root: &Path, port: u16, transfer_port: u16) -> (PathBuf, PathBuf, PathBuf) {
     let config_path = root.join("server.toml");
     let daemon_dir = root.join("daemon");
     let db_path = root.join("kanna.db");
@@ -198,7 +217,7 @@ fn write_server_config(root: &Path, port: u16) -> (PathBuf, PathBuf, PathBuf) {
          environment = \"development\"\n\
          lan_host = \"127.0.0.1\"\n\
          lan_port = {port}\n\
-         transfer_port = 4455\n\
+         transfer_port = {transfer_port}\n\
          pairing_store_path = \"{}\"\n",
         daemon_dir.display(),
         db_path.display(),
@@ -209,7 +228,13 @@ fn write_server_config(root: &Path, port: u16) -> (PathBuf, PathBuf, PathBuf) {
     (config_path, daemon_dir, db_path)
 }
 
-async fn start_server(config_path: &Path, root: &Path, port: u16) -> Child {
+async fn start_server(
+    config_path: &Path,
+    root: &Path,
+    port: u16,
+    lan_port_reservation: TcpListener,
+    transfer_port_reservation: TcpListener,
+) -> Child {
     let home = root.join("home");
     let data_root = root.join("xdg-data");
     let runtime_bin = root.join("runtime-bin");
@@ -243,6 +268,8 @@ async fn start_server(config_path: &Path, root: &Path, port: u16) -> Child {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    drop(lan_port_reservation);
+    drop(transfer_port_reservation);
     let mut child = command.spawn().expect("kanna-server should spawn");
     let status_url = format!("http://127.0.0.1:{port}/v1/status");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -475,13 +502,16 @@ async fn wait_for_task_stage(client: &Client, port: u16, task_id: &str, stage: &
 
 #[tokio::test(flavor = "current_thread")]
 async fn ordered_agent_candidates_fall_back_through_the_http_task_creation_path() {
+    let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
     let root = unique_test_root("ordered-fallback");
     std::fs::create_dir_all(&root).expect("test root should be created");
     let repo = init_provider_repo(&root);
-    let port = free_loopback_port();
-    let (config_path, daemon_dir, _) = write_server_config(&root, port);
+    let ports = ServerPortReservations::new();
+    let port = ports.lan_port();
+    let (config_path, daemon_dir, _) = write_server_config(&root, port, ports.transfer_port());
+    let ServerPortReservations { lan, transfer } = ports;
     let daemon = tokio::spawn(fake_daemon_until_spawn(daemon_dir));
-    let mut server = start_server(&config_path, &root, port).await;
+    let mut server = start_server(&config_path, &root, port, lan, transfer).await;
     let client = Client::new();
     let repo_id = register_repo(&client, port, &repo).await;
 
@@ -561,17 +591,21 @@ async fn ordered_agent_candidates_fall_back_through_the_http_task_creation_path(
 
 #[tokio::test(flavor = "current_thread")]
 async fn durable_pipeline_provider_lists_fall_back_for_reloaded_stages_and_posts() {
+    let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
     let root = unique_test_root("durable-ordered-fallback");
     std::fs::create_dir_all(&root).expect("test root should be created");
     // Declared before the server so unwind/drop order first kills the child,
     // then aborts the fake daemon, and only then removes its filesystem root.
     let mut cleanup = DurableTestCleanup::new(root.clone());
     let repo = init_provider_repo(&root);
-    let port = free_loopback_port();
-    let (config_path, daemon_dir, db_path) = write_server_config(&root, port);
+    let ports = ServerPortReservations::new();
+    let port = ports.lan_port();
+    let (config_path, daemon_dir, db_path) =
+        write_server_config(&root, port, ports.transfer_port());
+    let ServerPortReservations { lan, transfer } = ports;
     let (command_tx, mut commands) = mpsc::unbounded_channel();
     cleanup.track_daemon(tokio::spawn(fake_daemon_persistent(daemon_dir, command_tx)));
-    let mut server = start_server(&config_path, &root, port).await;
+    let mut server = start_server(&config_path, &root, port, lan, transfer).await;
     let client = Client::new();
     let repo_id = register_repo(&client, port, &repo).await;
 
@@ -671,13 +705,16 @@ async fn durable_pipeline_provider_lists_fall_back_for_reloaded_stages_and_posts
 
 #[tokio::test(flavor = "current_thread")]
 async fn unsupported_headless_provider_is_rejected_before_durable_state_through_http() {
+    let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
     let root = unique_test_root("headless-rejection");
     std::fs::create_dir_all(&root).expect("test root should be created");
     let repo = init_provider_repo(&root);
     write_executable(&repo.join(".kanna/provider-bin/copilot"));
-    let port = free_loopback_port();
-    let (config_path, _, _) = write_server_config(&root, port);
-    let mut server = start_server(&config_path, &root, port).await;
+    let ports = ServerPortReservations::new();
+    let port = ports.lan_port();
+    let (config_path, _, _) = write_server_config(&root, port, ports.transfer_port());
+    let ServerPortReservations { lan, transfer } = ports;
+    let mut server = start_server(&config_path, &root, port, lan, transfer).await;
     let client = Client::new();
     let repo_id = register_repo(&client, port, &repo).await;
 

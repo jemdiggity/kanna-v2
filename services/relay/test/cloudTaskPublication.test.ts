@@ -19,6 +19,8 @@ function task(overrides: Record<string, unknown> = {}): Record<string, unknown> 
     stage: "in progress",
     activity: "idle",
     activityRevision: 4,
+    blockerRevision: 6,
+    transitionRevision: "run-4",
     status: "active",
     repo: {
       cloudRepoId: "repo-1",
@@ -57,9 +59,10 @@ function publication(
       acceptingTransfers: true,
     },
   },
+  schemaVersion: 1 | 2 = 2,
 ): Record<string, unknown> {
   return {
-    schemaVersion: 1,
+    schemaVersion,
     desktop,
     tasks,
   };
@@ -80,6 +83,8 @@ describe("cloud task publication validation", () => {
       cloudTaskId: "cloud-stable",
       activity: "idle",
       activityRevision: 4,
+      blockerRevision: 6,
+      transitionRevision: "run-4",
       waitingPromptSnippet: "Ready for review",
       agent: { provider: "codex", type: "pty" },
       repo: { remoteUrlHash: "remote-hash" },
@@ -88,11 +93,25 @@ describe("cloud task publication validation", () => {
 
   it("accepts older publishers without desktop transfer metadata", () => {
     const parsed = validateCloudTaskPublication(
-      publication([], { displayName: "Studio Mac" }),
+      publication([], { displayName: "Studio Mac" }, 1),
       "desktop-1",
     );
 
     expect(parsed.transfer).toBeNull();
+  });
+
+  it("requires schema v1 publishers to down-convert widened transfer states", () => {
+    expect(() => validateCloudTaskPublication(
+      publication([task({
+        transfer: {
+          state: "outgoing",
+          transferId: "transfer-1",
+          sourceDesktopId: "desktop-1",
+          destinationDesktopId: "desktop-b",
+        },
+      })], { displayName: "Studio Mac" }, 1),
+      "desktop-1",
+    )).toThrow(/must be none for schemaVersion 1/);
   });
 
   it.each([
@@ -218,6 +237,26 @@ describe("cloud task publication validation", () => {
     )).toThrow(new RegExp(`transfer\\.${field}`));
   });
 
+  it("accepts legacy missing transition revisions but rejects malformed values", () => {
+    const legacy = validateCloudTaskPublication(
+      publication([task({ transitionRevision: undefined })]),
+      "desktop-1",
+    );
+    expect(legacy.tasks[0]?.transitionRevision).toBeNull();
+
+    expect(validateCloudTaskPublication(
+      publication([task({ transitionRevision: null })]),
+      "desktop-1",
+    ).tasks[0]?.transitionRevision).toBeNull();
+
+    for (const transitionRevision of ["", "r".repeat(129), 4]) {
+      expect(() => validateCloudTaskPublication(
+        publication([task({ transitionRevision })]),
+        "desktop-1",
+      )).toThrow(/transitionRevision/);
+    }
+  });
+
   it("accepts legacy missing revisions but rejects malformed activity revisions", () => {
     const legacy = validateCloudTaskPublication(
       publication([task({ activityRevision: undefined })]),
@@ -230,6 +269,21 @@ describe("cloud task publication validation", () => {
         publication([task({ activityRevision })]),
         "desktop-1",
       )).toThrow(/activityRevision/);
+    }
+  });
+
+  it("accepts legacy missing blocker revisions but preserves and validates present revisions", () => {
+    const legacy = validateCloudTaskPublication(
+      publication([task({ blockerRevision: undefined })]),
+      "desktop-1",
+    );
+    expect(legacy.tasks[0]?.blockerRevision).toBeUndefined();
+
+    for (const blockerRevision of [-1, 1.5, "6"]) {
+      expect(() => validateCloudTaskPublication(
+        publication([task({ blockerRevision })]),
+        "desktop-1",
+      )).toThrow(/blockerRevision/);
     }
   });
 

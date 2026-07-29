@@ -13,6 +13,52 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
+pub(super) const CURRENT_PROTOCOL_VERSION: u32 = 3;
+pub(super) const AUTHENTICATED_TASK_REQUEST_PROTOCOL_VERSION: u32 = 2;
+pub(super) const AUTHENTICATED_TASK_REQUEST_VERSION: u32 = 1;
+pub(super) const STREAMED_ARTIFACT_PROTOCOL_VERSION: u32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ArtifactFraming {
+    LegacySealedV1,
+    StreamedV3,
+}
+
+impl ArtifactFraming {
+    pub(super) fn for_protocol(protocol_version: u32) -> Self {
+        if supports_streamed_artifacts(protocol_version) {
+            Self::StreamedV3
+        } else {
+            Self::LegacySealedV1
+        }
+    }
+
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::LegacySealedV1 => "legacy_sealed_v1",
+            Self::StreamedV3 => "streamed_v3",
+        }
+    }
+
+    pub(super) fn parse(name: &str) -> Result<Self, RuntimeError> {
+        match name {
+            "legacy_sealed_v1" => Ok(Self::LegacySealedV1),
+            "streamed_v3" => Ok(Self::StreamedV3),
+            other => Err(RuntimeError::Protocol(format!(
+                "unsupported artifact framing {other}",
+            ))),
+        }
+    }
+
+    pub(super) fn is_streamed(self) -> bool {
+        matches!(self, Self::StreamedV3)
+    }
+
+    pub(super) fn allows_authenticated_request(self, requested: Self) -> bool {
+        self == requested || matches!((self, requested), (Self::LegacySealedV1, Self::StreamedV3))
+    }
+}
+
 pub(super) fn parse_peer_response_line(
     peer_id: &str,
     operation: &str,
@@ -90,8 +136,375 @@ where
     Ok(())
 }
 
+pub(super) async fn write_bounded_legacy_json_line<T>(
+    stream: &mut TcpStream,
+    value: &T,
+    retained_capacity_bytes: usize,
+) -> Result<(), RuntimeError>
+where
+    T: serde::Serialize,
+{
+    let encoded = serde_json::to_vec(value)?;
+    let wire_bytes = encoded
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| RuntimeError::Protocol("legacy artifact response size overflow".into()))?;
+    if wire_bytes > super::MAX_LEGACY_ARTIFACT_RESPONSE_BYTES {
+        return Err(RuntimeError::Protocol(format!(
+            "legacy artifact response exceeds maximum size of {} bytes",
+            super::MAX_LEGACY_ARTIFACT_RESPONSE_BYTES,
+        )));
+    }
+    super::ensure_legacy_artifact_allocation_capacity(
+        &[retained_capacity_bytes, encoded.capacity()],
+        super::LEGACY_ARTIFACT_ALLOCATION_BUDGET_BYTES,
+    )?;
+    stream.write_all(&encoded).await?;
+    stream.write_all(b"\n").await?;
+    stream.flush().await?;
+    Ok(())
+}
+
 pub(super) fn registry_entry_path(root: &Path, peer_id: &str) -> PathBuf {
     root.join(format!("{}.json", URL_SAFE_NO_PAD.encode(peer_id)))
+}
+
+pub(super) fn managed_artifact_dir(
+    registry_root: &Path,
+    peer_id: &str,
+    transfer_id: &str,
+) -> PathBuf {
+    managed_artifact_root(registry_root, peer_id)
+        .join(URL_SAFE_NO_PAD.encode(transfer_id.as_bytes()))
+}
+
+pub(super) fn managed_artifact_root(registry_root: &Path, peer_id: &str) -> PathBuf {
+    registry_root
+        .join("artifacts")
+        .join(URL_SAFE_NO_PAD.encode(peer_id.as_bytes()))
+}
+
+pub(super) fn remove_managed_artifact_root(
+    registry_root: &Path,
+    peer_id: &str,
+) -> std::io::Result<()> {
+    remove_managed_artifact_root_impl(registry_root, &URL_SAFE_NO_PAD.encode(peer_id.as_bytes()))
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static MANAGED_ARTIFACT_CLEANUP_DIRECTORY_OPENS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+pub(super) fn reset_managed_artifact_cleanup_directory_opens() {
+    MANAGED_ARTIFACT_CLEANUP_DIRECTORY_OPENS.set(Some(0));
+}
+
+#[cfg(all(test, unix))]
+pub(super) fn managed_artifact_cleanup_directory_opens() -> usize {
+    MANAGED_ARTIFACT_CLEANUP_DIRECTORY_OPENS.get().unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn remove_managed_artifact_root_impl(
+    registry_root: &Path,
+    encoded_peer_id: &str,
+) -> std::io::Result<()> {
+    use std::ffi::{CStr, CString, OsStr};
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    struct DirectoryStream(*mut libc::DIR);
+
+    impl Drop for DirectoryStream {
+        fn drop(&mut self) {
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
+    }
+
+    fn open_path_directory(path: &Path) -> std::io::Result<OwnedFd> {
+        let path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let descriptor = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
+    }
+
+    fn open_child_directory(parent: RawFd, name: &OsStr) -> std::io::Result<OwnedFd> {
+        #[cfg(test)]
+        MANAGED_ARTIFACT_CLEANUP_DIRECTORY_OPENS.set(
+            MANAGED_ARTIFACT_CLEANUP_DIRECTORY_OPENS
+                .get()
+                .map(|count| count + 1),
+        );
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let descriptor = unsafe {
+            libc::openat(
+                parent,
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
+    }
+
+    fn unlink_child(parent: RawFd, name: &OsStr, flags: libc::c_int) -> std::io::Result<()> {
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        if unsafe { libc::unlinkat(parent, name.as_ptr(), flags) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn duplicate_directory(directory: RawFd) -> std::io::Result<OwnedFd> {
+        let duplicate = unsafe { libc::fcntl(directory, libc::F_DUPFD_CLOEXEC, 0) };
+        if duplicate < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
+    }
+
+    fn first_directory_entry(directory: RawFd) -> std::io::Result<Option<std::ffi::OsString>> {
+        let duplicate = duplicate_directory(directory)?;
+        let duplicate = duplicate.into_raw_fd();
+        let stream = unsafe { libc::fdopendir(duplicate) };
+        if stream.is_null() {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(duplicate);
+            }
+            return Err(error);
+        }
+        let stream = DirectoryStream(stream);
+        loop {
+            let entry = unsafe { libc::readdir(stream.0) };
+            if entry.is_null() {
+                break;
+            }
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+            if name != b"." && name != b".." {
+                return Ok(Some(std::ffi::OsString::from_vec(name.to_vec())));
+            }
+        }
+        Ok(None)
+    }
+
+    fn child_is_directory(parent: RawFd, name: &OsStr) -> std::io::Result<bool> {
+        let name = CString::new(name.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe {
+            libc::fstatat(
+                parent,
+                name.as_ptr(),
+                metadata.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let metadata = unsafe { metadata.assume_init() };
+        Ok(metadata.st_mode & libc::S_IFMT == libc::S_IFDIR)
+    }
+
+    fn rename_child(
+        old_parent: RawFd,
+        old_name: &OsStr,
+        new_parent: RawFd,
+        new_name: &OsStr,
+    ) -> std::io::Result<()> {
+        let old_name = CString::new(old_name.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        let new_name = CString::new(new_name.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        if unsafe { libc::renameat(old_parent, old_name.as_ptr(), new_parent, new_name.as_ptr()) }
+            != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn remove_directory_contents(
+        managed_root: RawFd,
+        directory: RawFd,
+        next_lifted_name: &mut u64,
+    ) -> std::io::Result<()> {
+        const MAX_LIFT_RENAME_ATTEMPTS: usize = 1_024;
+
+        while let Some(child) = first_directory_entry(directory)? {
+            match child_is_directory(directory, &child) {
+                Ok(true) => {
+                    let mut renamed = false;
+                    for _ in 0..MAX_LIFT_RENAME_ATTEMPTS {
+                        let lifted_name = std::ffi::OsString::from(format!(
+                            ".kanna-cleanup-{}-{}",
+                            std::process::id(),
+                            *next_lifted_name,
+                        ));
+                        *next_lifted_name = next_lifted_name.wrapping_add(1);
+                        match rename_child(directory, &child, managed_root, &lifted_name) {
+                            Ok(()) => {
+                                renamed = true;
+                                break;
+                            }
+                            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+                                renamed = true;
+                                break;
+                            }
+                            Err(error)
+                                if error.raw_os_error() == Some(libc::EEXIST)
+                                    || error.raw_os_error() == Some(libc::ENOTEMPTY)
+                                    || error.raw_os_error() == Some(libc::ENOTDIR) => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    if !renamed {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "managed artifact cleanup rename budget exhausted",
+                        ));
+                    }
+                }
+                Ok(false) => match unlink_child(directory, &child, 0) {
+                    Ok(()) => {}
+                    Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                    Err(error) => return Err(error),
+                },
+                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_child_tree(parent: RawFd, name: &OsStr) -> std::io::Result<()> {
+        let mut next_lifted_name = 1_u64;
+        loop {
+            let managed_root = match open_child_directory(parent, name) {
+                Ok(directory) => directory,
+                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(()),
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ENOTDIR)
+                        || error.raw_os_error() == Some(libc::ELOOP) =>
+                {
+                    match unlink_child(parent, name, 0) {
+                        Ok(()) => return Ok(()),
+                        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(()),
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            };
+
+            while let Some(child) = first_directory_entry(managed_root.as_raw_fd())? {
+                match open_child_directory(managed_root.as_raw_fd(), &child) {
+                    Ok(directory) => {
+                        remove_directory_contents(
+                            managed_root.as_raw_fd(),
+                            directory.as_raw_fd(),
+                            &mut next_lifted_name,
+                        )?;
+                        drop(directory);
+                        match unlink_child(managed_root.as_raw_fd(), &child, libc::AT_REMOVEDIR) {
+                            Ok(()) => {}
+                            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                            Err(error) if error.raw_os_error() == Some(libc::ENOTEMPTY) => {}
+                            Err(error)
+                                if error.raw_os_error() == Some(libc::ENOTDIR)
+                                    || error.raw_os_error() == Some(libc::ELOOP) =>
+                            {
+                                match unlink_child(managed_root.as_raw_fd(), &child, 0) {
+                                    Ok(()) => {}
+                                    Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                                    Err(error) => return Err(error),
+                                }
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                    Err(error)
+                        if error.raw_os_error() == Some(libc::ENOTDIR)
+                            || error.raw_os_error() == Some(libc::ELOOP) =>
+                    {
+                        match unlink_child(managed_root.as_raw_fd(), &child, 0) {
+                            Ok(()) => {}
+                            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            drop(managed_root);
+            match unlink_child(parent, name, libc::AT_REMOVEDIR) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(()),
+                Err(error) if error.raw_os_error() == Some(libc::ENOTEMPTY) => continue,
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ENOTDIR)
+                        || error.raw_os_error() == Some(libc::ELOOP) =>
+                {
+                    match unlink_child(parent, name, 0) {
+                        Ok(()) => return Ok(()),
+                        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(()),
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    let registry = match open_path_directory(registry_root) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let artifacts = match open_child_directory(registry.as_raw_fd(), OsStr::new("artifacts")) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    remove_child_tree(artifacts.as_raw_fd(), OsStr::new(encoded_peer_id))
+}
+
+#[cfg(not(unix))]
+fn remove_managed_artifact_root_impl(
+    registry_root: &Path,
+    encoded_peer_id: &str,
+) -> std::io::Result<()> {
+    let artifacts = registry_root.join("artifacts");
+    if std::fs::symlink_metadata(&artifacts).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "managed artifact ancestor is a symlink",
+        ));
+    }
+    match std::fs::remove_dir_all(artifacts.join(encoded_peer_id)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) fn peer_store(root: &Path, self_peer_id: &str) -> Result<PeerStore, RuntimeError> {
@@ -132,10 +545,36 @@ pub(super) fn load_or_create_identity(
 
 pub(super) fn local_capabilities_json() -> String {
     serde_json::json!({
-        "protocolVersion": 1,
+        "protocolVersion": CURRENT_PROTOCOL_VERSION,
         "transferCapabilityVersion": 1,
+        "authenticatedTaskRequests": true,
+        "authenticatedTaskRequestVersion": AUTHENTICATED_TASK_REQUEST_VERSION,
     })
     .to_string()
+}
+
+pub(super) fn supports_authenticated_task_requests(
+    protocol_version: u32,
+    capabilities_json: &str,
+) -> bool {
+    if protocol_version < AUTHENTICATED_TASK_REQUEST_PROTOCOL_VERSION {
+        return false;
+    }
+    let Ok(capabilities) = serde_json::from_str::<Value>(capabilities_json) else {
+        return false;
+    };
+    capabilities
+        .get("authenticatedTaskRequests")
+        .and_then(Value::as_bool)
+        == Some(true)
+        && capabilities
+            .get("authenticatedTaskRequestVersion")
+            .and_then(Value::as_u64)
+            .is_some_and(|version| version >= AUTHENTICATED_TASK_REQUEST_VERSION as u64)
+}
+
+pub(super) fn supports_streamed_artifacts(protocol_version: u32) -> bool {
+    protocol_version >= STREAMED_ARTIFACT_PROTOCOL_VERSION
 }
 
 pub(super) fn ensure_peer_is_trusted_for(
@@ -210,13 +649,42 @@ pub(super) fn prune_outgoing_transfers(
 pub(super) fn prune_transfer_artifacts(
     transfer_artifacts: &mut HashMap<String, HashMap<String, TransferArtifactRecord>>,
     pending_transfer_ttl: Duration,
-) {
+) -> Vec<std::path::PathBuf> {
     let now = Instant::now();
+    let mut owned_paths = Vec::new();
     transfer_artifacts.retain(|_, artifacts| {
-        artifacts
-            .retain(|_, artifact| now.duration_since(artifact.created_at) < pending_transfer_ttl);
+        artifacts.retain(|_, artifact| {
+            let keep = now.duration_since(artifact.created_at) < pending_transfer_ttl;
+            if !keep && artifact.owned {
+                owned_paths.push(artifact.path.clone());
+            }
+            keep
+        });
         !artifacts.is_empty()
     });
+    owned_paths
+}
+
+pub(super) fn take_transfer_artifacts(
+    transfer_artifacts: &mut HashMap<String, HashMap<String, TransferArtifactRecord>>,
+    transfer_id: &str,
+) -> Vec<std::path::PathBuf> {
+    transfer_artifacts
+        .remove(transfer_id)
+        .into_iter()
+        .flat_map(|artifacts| artifacts.into_values())
+        .filter(|artifact| artifact.owned)
+        .map(|artifact| artifact.path)
+        .collect()
+}
+
+pub(super) async fn remove_owned_artifact_paths(paths: Vec<std::path::PathBuf>) {
+    for path in paths {
+        let _ = tokio::fs::remove_file(&path).await;
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::remove_dir(parent).await;
+        }
+    }
 }
 
 pub(super) fn sanitize_artifact_filename(filename: &str) -> String {

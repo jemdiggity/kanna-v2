@@ -1704,6 +1704,13 @@ pub(crate) fn prepare_start_dormant_task_for_api(
     blocker_branches: Vec<String>,
 ) -> Result<Option<PreparedTaskSpawn>, DormantStartError> {
     if db
+        .count_open_task_blockers(task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        > 0
+    {
+        return Ok(None);
+    }
+    if db
         .get_task_worktree_path(task_id)
         .map_err(|e| format!("db error: {}", e))?
         .is_some()

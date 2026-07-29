@@ -31,6 +31,7 @@ pub enum ControlRequest {
         request_id: String,
         target_peer_id: String,
         session_id: String,
+        observer_lease_id: String,
     },
     SendPeerSessionInput {
         request_id: String,
@@ -54,6 +55,8 @@ pub enum ControlRequest {
         request_id: String,
         target_peer_id: String,
         task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_transition_revision: Option<String>,
     },
     ReadPeerTaskFile {
         request_id: String,
@@ -71,6 +74,7 @@ pub enum ControlRequest {
         request_id: String,
         target_peer_id: String,
         session_id: String,
+        observer_lease_id: String,
     },
     StartPairing {
         request_id: String,
@@ -90,6 +94,8 @@ pub enum ControlRequest {
         transfer_id: String,
         artifact_id: String,
         path: String,
+        #[serde(default)]
+        owned: bool,
     },
     FetchTransferArtifact {
         request_id: String,
@@ -140,6 +146,10 @@ pub enum ControlRequest {
         request_id: String,
         transfer_id: String,
     },
+    NackImportCommit {
+        request_id: String,
+        transfer_id: String,
+    },
     MarkImportAckCompleted {
         request_id: String,
         transfer_id: String,
@@ -176,6 +186,8 @@ pub enum ControlResponse {
     ListPeerTaskSnapshots {
         request_id: String,
         snapshots: Vec<PeerTaskSnapshot>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        issues: Vec<PeerTaskSnapshotIssue>,
     },
     ObservePeerSession {
         request_id: String,
@@ -263,6 +275,10 @@ pub enum ControlResponse {
         request_id: String,
         transfer_id: String,
     },
+    NackImportCommit {
+        request_id: String,
+        transfer_id: String,
+    },
     MarkImportAckCompleted {
         request_id: String,
         transfer_id: String,
@@ -285,6 +301,9 @@ pub struct LocalTransferIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PeerRequest {
+    GetAuthenticatedRequestEpoch {
+        request_id: String,
+    },
     StartPairing {
         request_id: String,
         source_peer_id: String,
@@ -311,6 +330,7 @@ pub enum PeerRequest {
         request_id: String,
         transfer_id: String,
         requester_peer_id: String,
+        sealed_payload: String,
     },
     FetchTransferArtifact {
         request_id: String,
@@ -327,17 +347,23 @@ pub enum PeerRequest {
     GetTaskSnapshot {
         request_id: String,
         requester_peer_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
     },
     ObserveSession {
         request_id: String,
         requester_peer_id: String,
         session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
     },
     SendSessionInput {
         request_id: String,
         requester_peer_id: String,
         session_id: String,
         data: Vec<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
     },
     ResizeSession {
         request_id: String,
@@ -345,22 +371,32 @@ pub enum PeerRequest {
         session_id: String,
         cols: u16,
         rows: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
     },
     CloseTask {
         request_id: String,
         requester_peer_id: String,
         task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
     },
     AdvanceTaskStage {
         request_id: String,
         requester_peer_id: String,
         task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_transition_revision: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
     },
     ReadTaskFile {
         request_id: String,
         requester_peer_id: String,
         task_id: String,
         path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
     },
     MarkTaskRead {
         request_id: String,
@@ -372,6 +408,10 @@ pub enum PeerRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PeerResponse {
+    AuthenticatedRequestEpoch {
+        request_id: String,
+        epoch: String,
+    },
     StartPairing {
         request_id: String,
         peer: PairingPeer,
@@ -399,6 +439,8 @@ pub enum PeerResponse {
         request_id: String,
         transfer_id: String,
         sealed_payload: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream_header: Option<crate::crypto::SealedStreamHeader>,
     },
     ImportCommitted {
         request_id: String,
@@ -492,6 +534,19 @@ pub struct PeerTaskSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerTaskSnapshotIssue {
+    pub peer_id: String,
+    pub display_name: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerTaskSnapshotListing {
+    pub snapshots: Vec<PeerTaskSnapshot>,
+    pub issues: Vec<PeerTaskSnapshotIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingPeer {
     pub peer_id: String,
     pub display_name: String,
@@ -541,6 +596,7 @@ pub enum SidecarEvent {
     TerminalEvent {
         peer_id: String,
         session_id: String,
+        observer_lease_id: String,
         event: PeerTerminalEvent,
     },
 }

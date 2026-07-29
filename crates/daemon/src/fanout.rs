@@ -9,10 +9,11 @@
 //!
 //! A subscriber whose undelivered backlog exceeds its byte budget is marked
 //! lagged: further output is dropped for it (bounded memory) while everyone
-//! else streams on. Once its backlog fully drains, the next chunk resyncs it
-//! in place with a fresh authoritative headless-terminal snapshot — the same
-//! snapshot-first contract every consumer already implements for attach and
-//! reattach — instead of disconnecting it and forcing reconnect churn.
+//! else streams on. Once its backlog fully drains, the writer wakes the
+//! session reader to resync it in place with a fresh authoritative
+//! headless-terminal snapshot — the same snapshot-first contract every
+//! consumer already implements for attach and reattach — instead of
+//! disconnecting it and forcing reconnect churn.
 //!
 //! Memory bound: a subscriber's queued bytes never exceed
 //! `max(budget, one authoritative snapshot + initial status events)`.
@@ -25,7 +26,7 @@
 //! snapshot) without the exemption ever accumulating.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -108,6 +109,9 @@ pub(crate) struct Subscriber {
     /// Serialized bytes enqueued but not yet written to the socket. Shared
     /// with the writer task, which subtracts after each completed write.
     pending_bytes: Arc<AtomicUsize>,
+    /// Shared with the writer task so draining the retained backlog can wake
+    /// the session recovery path without waiting for another PTY chunk.
+    lagged: Arc<AtomicBool>,
     /// Set when this registration is replaced or removed. The writer task
     /// checks it under the socket writer lock before every write, so once a
     /// replacement registration has written anything (e.g. its fresh
@@ -180,6 +184,7 @@ pub(crate) struct FanoutState {
     /// Per-subscriber byte budget for live output; see the module docs for
     /// the exact bound and the snapshot exemption.
     budget: usize,
+    recovery_notify: Arc<tokio::sync::Notify>,
     streaming: bool,
     attached: Vec<Subscriber>,
     observers: Vec<Subscriber>,
@@ -189,6 +194,7 @@ impl Default for FanoutState {
     fn default() -> Self {
         Self {
             budget: mailbox_max_bytes(),
+            recovery_notify: Arc::new(tokio::sync::Notify::new()),
             streaming: false,
             attached: Vec::new(),
             observers: Vec::new(),
@@ -222,6 +228,7 @@ impl FanoutState {
 
         let (tx, rx) = mpsc::unbounded_channel();
         let pending_bytes = Arc::new(AtomicUsize::new(0));
+        let lagged = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let writer_task = spawn_writer_task(
             session_id.to_string(),
@@ -229,6 +236,8 @@ impl FanoutState {
             writer.clone(),
             rx,
             pending_bytes.clone(),
+            lagged.clone(),
+            self.recovery_notify.clone(),
             cancelled.clone(),
         );
         let subscriber = Subscriber {
@@ -237,6 +246,7 @@ impl FanoutState {
             session_id: session_id.to_string(),
             tx,
             pending_bytes,
+            lagged,
             cancelled,
             lagged_since: None,
             writer: writer.clone(),
@@ -282,6 +292,14 @@ impl FanoutState {
                 let pending = subscriber.pending_bytes.load(Ordering::Relaxed);
                 if pending + line.line.len() > budget {
                     subscriber.lagged_since = Some(Instant::now());
+                    subscriber.lagged.store(true, Ordering::Release);
+                    // Close the race where the writer drained `pending`
+                    // between the load above and publishing the lagged flag:
+                    // that writer could not have notified because it still
+                    // observed `lagged == false`.
+                    if subscriber.pending_bytes.load(Ordering::Acquire) == 0 {
+                        report.resync_ready = true;
+                    }
                     report.newly_lagged.push(TerminalPerfEvent {
                         context: subscriber.perf_context(line, budget),
                         kind: terminal_perf::TerminalPerfEventKind::Lag,
@@ -349,6 +367,7 @@ impl FanoutState {
                     continue;
                 }
                 subscriber.lagged_since = None;
+                subscriber.lagged.store(false, Ordering::Release);
                 recovered.push(TerminalPerfEvent {
                     context: subscriber.perf_context(perf_line, budget),
                     kind: terminal_perf::TerminalPerfEventKind::Recovered,
@@ -402,6 +421,18 @@ impl FanoutState {
     }
 
     #[cfg(test)]
+    fn with_budget_and_recovery_notify_for_test(
+        budget: usize,
+        recovery_notify: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            budget,
+            recovery_notify,
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
     fn pending_bytes_for_test(&self, kind: SubscriberKind, writer_id: usize) -> usize {
         let list = match kind {
             SubscriberKind::Attached => &self.attached,
@@ -443,12 +474,20 @@ pub(crate) struct EnqueueReport {
 
 pub(crate) struct SessionFanout {
     pub(crate) state: Mutex<FanoutState>,
+    pub(crate) recovery_notify: Arc<tokio::sync::Notify>,
+    pub(crate) recovery_retry_scheduled: AtomicBool,
 }
 
 impl SessionFanout {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
+        let recovery_notify = Arc::new(tokio::sync::Notify::new());
         Self {
-            state: Mutex::new(FanoutState::default()),
+            state: Mutex::new(FanoutState {
+                recovery_notify: recovery_notify.clone(),
+                ..FanoutState::default()
+            }),
+            recovery_notify,
+            recovery_retry_scheduled: AtomicBool::new(false),
         }
     }
 }
@@ -483,6 +522,8 @@ fn spawn_writer_task(
     writer: SessionWriter,
     mut rx: mpsc::UnboundedReceiver<EventLine>,
     pending_bytes: Arc<AtomicUsize>,
+    lagged: Arc<AtomicBool>,
+    recovery_notify: Arc<tokio::sync::Notify>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -510,7 +551,10 @@ fn spawn_writer_task(
                 }
             };
             operation.finish();
-            pending_bytes.fetch_sub(item.line.len(), Ordering::Relaxed);
+            let pending_before = pending_bytes.fetch_sub(item.line.len(), Ordering::AcqRel);
+            if pending_before == item.line.len() && lagged.load(Ordering::Acquire) {
+                recovery_notify.notify_one();
+            }
             if result.is_err() {
                 return;
             }
@@ -669,5 +713,29 @@ mod tests {
             expected,
             "over-budget live output must never queue on top of the snapshot"
         );
+    }
+
+    #[tokio::test]
+    async fn lagged_writer_notifies_when_mailbox_drains() {
+        let (writer, _client) = test_writer();
+        let writer_guard = writer.lock().await;
+        let recovery_notify = Arc::new(tokio::sync::Notify::new());
+        let mut state =
+            FanoutState::with_budget_and_recovery_notify_for_test(2_048, recovery_notify.clone());
+        state.register("sess-budget", SubscriberKind::Attached, &writer, &[]);
+
+        let retained = output_line(256);
+        assert!(retained.line.len() < 2_048);
+        assert!(state.enqueue(&retained).newly_lagged.is_empty());
+
+        let overflow = output_line(2_048);
+        assert_eq!(state.enqueue(&overflow).newly_lagged.len(), 1);
+        assert!(!state.has_drained_lagged());
+
+        drop(writer_guard);
+        tokio::time::timeout(Duration::from_secs(1), recovery_notify.notified())
+            .await
+            .expect("lag recovery should be notified as soon as the retained mailbox drains");
+        assert!(state.has_drained_lagged());
     }
 }

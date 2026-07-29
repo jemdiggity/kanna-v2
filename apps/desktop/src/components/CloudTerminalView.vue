@@ -34,6 +34,22 @@ let relayClient: DesktopRelayTerminalClient | null = null;
 let subscription: DesktopRelayTerminalSubscription | null = null;
 let unregisterE2ETerminalBuffer: (() => void) | null = null;
 let fileLinkProvider: RemoteTerminalFileLinkProvider | null = null;
+const MAX_PENDING_REMOTE_INPUT_CHARS = 64 * 1024;
+// LAN input is repeated in the authenticated peer envelope. A 4 KiB UTF-8
+// chunk stays below the task-transfer runtime's 64 KiB request-frame limit.
+const MAX_REMOTE_INPUT_FRAME_BYTES = 4 * 1024;
+let startGeneration = 0;
+
+interface RemoteInputQueue {
+  client: DesktopRelayTerminalClient;
+  desktopId: string;
+  taskId: string;
+  pending: string;
+  inFlight: boolean;
+  closed: boolean;
+}
+
+let inputQueue: RemoteInputQueue | null = null;
 
 async function readRemoteTaskFile(path: string): Promise<string | null> {
   const client = relayClient;
@@ -52,6 +68,68 @@ function writeRemoteTerminalError(message: string) {
   terminal?.write(`\r\n[Remote terminal error: ${message}]\r\n`);
 }
 
+function closeInputQueue() {
+  if (!inputQueue) return;
+  inputQueue.closed = true;
+  inputQueue.pending = "";
+  inputQueue = null;
+}
+
+function drainRemoteInput(queue: RemoteInputQueue) {
+  if (queue.closed || queue.inFlight || queue.pending.length === 0) return;
+  const [data, remaining] = takeRemoteInputChunk(queue.pending);
+  queue.pending = remaining;
+  queue.inFlight = true;
+  void queue.client.sendInput({
+    desktopId: queue.desktopId,
+    taskId: queue.taskId,
+    data,
+  }).catch((error: unknown) => {
+    if (inputQueue !== queue || queue.closed) return;
+    queue.closed = true;
+    queue.pending = "";
+    const message = error instanceof Error ? error.message : "Failed to send remote input.";
+    writeRemoteTerminalError(message);
+  }).finally(() => {
+    queue.inFlight = false;
+    if (inputQueue === queue && !queue.closed) {
+      drainRemoteInput(queue);
+    }
+  });
+}
+
+function takeRemoteInputChunk(data: string): [string, string] {
+  let end = 0;
+  let bytes = 0;
+  for (const character of data) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    const characterBytes = codePoint <= 0x7f
+      ? 1
+      : codePoint <= 0x7ff
+        ? 2
+        : codePoint <= 0xffff
+          ? 3
+          : 4;
+    if (bytes + characterBytes > MAX_REMOTE_INPUT_FRAME_BYTES) break;
+    bytes += characterBytes;
+    end += character.length;
+  }
+  return [data.slice(0, end), data.slice(end)];
+}
+
+function enqueueRemoteInput(data: string) {
+  const queue = inputQueue;
+  if (!queue || queue.closed) return;
+  if (queue.pending.length + data.length > MAX_PENDING_REMOTE_INPUT_CHARS) {
+    queue.closed = true;
+    queue.pending = "";
+    writeRemoteTerminalError("Remote terminal input buffer is full.");
+    return;
+  }
+  queue.pending += data;
+  drainRemoteInput(queue);
+}
+
 function fitAndResizeRemote() {
   fitAddon?.fit();
   if (!terminal || !relayClient || status.value !== "live") return;
@@ -67,31 +145,59 @@ function fitAndResizeRemote() {
 
 async function start() {
   stopSubscription();
+  const generation = startGeneration;
+  const desktopId = props.ownerDesktopId;
+  const taskId = props.ownerTaskId;
+  const transport = props.transport;
   fileLinkProvider?.clearFileCache();
   status.value = "connecting";
   errorMessage.value = null;
   terminal?.reset();
   terminal?.write("Connecting to remote terminal...\r\n");
 
+  let acquiredClient: DesktopRelayTerminalClient | null = null;
   try {
-    relayClient = props.transport === "lan"
+    acquiredClient = transport === "lan"
       ? await createConfiguredDesktopLanTerminalClient()
       : await createConfiguredDesktopRelayTerminalClient();
-    if (!relayClient) {
-      throw new Error(props.transport === "lan" ? "LAN terminal is unavailable." : "Cloud transport is not configured for this desktop.");
+    if (generation !== startGeneration) {
+      acquiredClient?.close();
+      return;
     }
-    subscription = relayClient.observeTerminal({
-      desktopId: props.ownerDesktopId,
-      taskId: props.ownerTaskId,
+    if (!acquiredClient) {
+      throw new Error(transport === "lan" ? "LAN terminal is unavailable." : "Cloud transport is not configured for this desktop.");
+    }
+    const client = acquiredClient;
+    relayClient = client;
+    const queue: RemoteInputQueue = {
+      client,
+      desktopId,
+      taskId,
+      pending: "",
+      inFlight: false,
+      closed: false,
+    };
+    inputQueue = queue;
+    subscription = client.observeTerminal({
+      desktopId,
+      taskId,
       listener(event) {
-        if (event.taskId !== props.ownerTaskId) return;
+        if (
+          generation !== startGeneration
+          || relayClient !== client
+          || event.taskId !== taskId
+        ) return;
         if (event.type === "ready") {
-          status.value = "live";
-          fitAndResizeRemote();
+          if (inputQueue === queue && !queue.closed) {
+            status.value = "live";
+            fitAndResizeRemote();
+          }
           return;
         }
         if (event.type === "output") {
-          status.value = "live";
+          if (inputQueue === queue && !queue.closed) {
+            status.value = "live";
+          }
           terminal?.write(event.text);
           return;
         }
@@ -104,12 +210,25 @@ async function start() {
       },
     });
   } catch (error) {
+    if (generation !== startGeneration) {
+      acquiredClient?.close();
+      return;
+    }
+    closeInputQueue();
+    subscription?.close();
+    subscription = null;
+    if (relayClient === acquiredClient) {
+      relayClient = null;
+    }
+    acquiredClient?.close();
     const message = error instanceof Error ? error.message : "Remote terminal failed.";
     writeRemoteTerminalError(message);
   }
 }
 
 function stopSubscription() {
+  startGeneration += 1;
+  closeInputQueue();
   subscription?.close();
   subscription = null;
   relayClient?.close();
@@ -134,16 +253,8 @@ onMounted(() => {
     theme: getTerminalTheme(effectiveCodeTheme.value),
   });
   terminal.onData((data) => {
-    const client = relayClient;
-    if (!client || status.value !== "live") return;
-    void client.sendInput({
-      desktopId: props.ownerDesktopId,
-      taskId: props.ownerTaskId,
-      data,
-    }).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : "Failed to send remote input.";
-      writeRemoteTerminalError(message);
-    });
+    if (!relayClient || status.value !== "live") return;
+    enqueueRemoteInput(data);
   });
   fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);

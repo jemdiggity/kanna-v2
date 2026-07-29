@@ -1,12 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DesktopCloudTaskSnapshot } from "./desktopCloudTaskIndex";
+import {
+  mapDesktopCloudTasks,
+  type DesktopCloudTaskSnapshot,
+} from "./desktopCloudTaskIndex";
 import {
   listDesktopLanTasks,
   publishDesktopLanTaskSnapshot,
 } from "./desktopLanTaskIndex";
 import { setDesktopSnapshotFetcherForTests } from "./desktopServerClient";
 import { __resetRepoRemoteUrlCacheForTests } from "./repoRemoteUrl";
+import { buildWorkspace } from "../workspace/buildWorkspace";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -46,6 +50,8 @@ function openItem(id: string) {
     stage: "in progress",
     activity: "working",
     activity_revision: 5,
+    blocker_revision: 11,
+    transition_revision: "run-owner-5",
     branch: id,
     base_ref: "main",
     pr_number: null,
@@ -74,6 +80,7 @@ function remoteLanTaskSnapshot(
     stage: "in progress",
     activity: "working",
     activityRevision: 4,
+    transitionRevision: "run-peer-4",
     status: "active",
     repo: {
       cloudRepoId: "repo-1",
@@ -147,6 +154,8 @@ describe("desktop LAN task index publisher", () => {
       ([command]) => command === "set_transfer_task_snapshot",
     );
     expect(publishCall?.[1].snapshot.tasks[0].activityRevision).toBe(5);
+    expect(publishCall?.[1].snapshot.tasks[0].blockerRevision).toBe(11);
+    expect(publishCall?.[1].snapshot.tasks[0].transitionRevision).toBe("run-owner-5");
   });
 
   it("omits resolved blockers from the published task snapshot", async () => {
@@ -203,6 +212,56 @@ describe("desktop LAN task index publisher", () => {
 });
 
 describe("desktop LAN task index reader", () => {
+  it("lets a newer cleared LAN blocker revision supersede an equal-updatedAt stale cloud snapshot", async () => {
+    const staleCloudTask = {
+      ...remoteLanTaskSnapshot({
+        cloudTaskId: "cloud-stale-task",
+        ownerDesktopId: "peer-owner",
+        blockedByTaskIds: ["task-blocker"],
+        updatedAt: "2026-06-13T00:01:00.000Z",
+      }),
+      blockerRevision: 4,
+    } as DesktopCloudTaskSnapshot;
+    const newerLanTask = {
+      ...remoteLanTaskSnapshot({
+        blockedByTaskIds: [],
+        updatedAt: staleCloudTask.updatedAt,
+      }),
+      blockerRevision: 5,
+    } as DesktopCloudTaskSnapshot;
+
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_transfer_task_snapshots") {
+        return [{
+          peer_id: "peer-owner",
+          snapshot: {
+            schemaVersion: 1,
+            tasks: [newerLanTask],
+            publishedAt: "2026-06-13T00:05:00.000Z",
+          },
+        }];
+      }
+      return null;
+    });
+
+    const cloudSnapshot = mapDesktopCloudTasks([staleCloudTask], {
+      currentDesktopId: "peer-local",
+    });
+    const lanSnapshot = await listDesktopLanTasks({
+      currentDesktopId: "peer-local",
+    });
+    const workspace = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot,
+      lanSnapshot,
+    });
+
+    expect(workspace.tasks).toHaveLength(1);
+    expect(workspace.tasks[0].item.updated_at).toBe(staleCloudTask.updatedAt);
+    expect(workspace.tasks[0].blockedByTaskIds).toEqual([]);
+  });
+
   it("keeps arbitrary canonical task identities paired with their terminal refs and activity revisions", async () => {
     const fallbackRepoTask = remoteLanTaskSnapshot({
       ownerDesktopId: "fourth-spoofed-peer",
@@ -300,5 +359,42 @@ describe("desktop LAN task index reader", () => {
         preferredTransferTransport: "lan",
       });
     }
+  });
+
+  it("keeps compatible peer snapshots when another peer requires upgrade and re-pair", async () => {
+    const onPeerIssue = vi.fn();
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_transfer_task_snapshots") {
+        return [
+          {
+            peer_id: "peer-v1",
+            display_name: "Old Mac",
+            error: "peer peer-v1 uses protocol v1 without authenticated task requests; upgrade and re-pair the peer",
+          },
+          {
+            peer_id: "peer-v2",
+            display_name: "Current Mac",
+            snapshot: {
+              schemaVersion: 1,
+              tasks: [remoteLanTaskSnapshot()],
+            },
+          },
+        ];
+      }
+      return null;
+    });
+
+    const snapshot = await listDesktopLanTasks({
+      currentDesktopId: "peer-local",
+      onPeerIssue,
+    });
+
+    expect(snapshot.items).toHaveLength(1);
+    expect(snapshot.terminalRefs[snapshot.items[0].id]?.ownerDesktopId).toBe("peer-v2");
+    expect(onPeerIssue).toHaveBeenCalledWith({
+      peerId: "peer-v1",
+      displayName: "Old Mac",
+      message: expect.stringContaining("upgrade and re-pair"),
+    });
   });
 });

@@ -1,3 +1,4 @@
+use super::lan_trust::PrivilegedTaskAccess;
 use super::state::{db_write_error, AppState};
 use super::task_blockers::{
     resolve_existing_task_id, start_dependents_unblocked_by_close_with_daemon,
@@ -7,6 +8,7 @@ use crate::db::Db;
 use axum::extract::State;
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
+use serde::Deserialize;
 use std::sync::Arc;
 
 fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
@@ -15,6 +17,32 @@ fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
     } else {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AdvanceStageRequest {
+    expected_transition_revision: Option<String>,
+}
+
+pub(super) async fn resolve_task_id_for_mutation(
+    state: &Arc<AppState>,
+    task_or_branch_id: &str,
+) -> Result<String, (axum::http::StatusCode, String)> {
+    let state = Arc::clone(state);
+    let task_or_branch_id = task_or_branch_id.to_string();
+    Ok(
+        super::blocking::run_handler_blocking("task mutation identity", move || {
+            let db = Db::open(&state.config.db_path).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?;
+            resolve_existing_task_id(&db, &task_or_branch_id)
+        })
+        .await?,
+    )
 }
 
 pub(super) async fn run_merge_agent(
@@ -326,9 +354,13 @@ fn collect_blocker_resolution_instructions(
 }
 
 pub(super) async fn close_task(
+    _access: PrivilegedTaskAccess,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
+    let _task_mutation = state.begin_requested_task_mutation(&task_id).await;
+
     #[cfg(test)]
     if let Some(task_closer) = state.task_closer.clone() {
         return task_closer(task_id)
@@ -517,7 +549,12 @@ pub(super) async fn abort_task_creation(
         return Ok(axum::http::StatusCode::NO_CONTENT);
     }
 
-    close_task(State(state), axum::extract::Path(task_id)).await
+    close_task(
+        PrivilegedTaskAccess,
+        State(state),
+        axum::extract::Path(task_id),
+    )
+    .await
 }
 
 pub(super) async fn reopen_task(
@@ -639,9 +676,56 @@ async fn close_task_after_final_stage(
 }
 
 pub(super) async fn advance_stage(
+    _access: PrivilegedTaskAccess,
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
+    payload: Option<Json<AdvanceStageRequest>>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
+    let response = crate::mobile_api::TaskActionResponse {
+        task_id: task_id.clone(),
+        follow_task: None,
+        revision_budget: None,
+    };
+    let Some(stage_advance) = state.begin_requested_stage_advance(&task_id).await else {
+        return Ok(Json(response));
+    };
+
+    if let Some(expected_transition_revision) =
+        payload.and_then(|Json(payload)| payload.expected_transition_revision)
+    {
+        let current_transition_revision = {
+            let state = Arc::clone(&state);
+            let task_id = task_id.clone();
+            super::blocking::run_handler_blocking("stage advance revision check", move || {
+                let db = Db::open(&state.config.db_path).map_err(|e| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("db error: {}", e),
+                    )
+                })?;
+                db.latest_stage_run(&task_id)
+                    .map(|run| run.map(|run| run.id))
+                    .map_err(|e| {
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("db error: {}", e),
+                        )
+                    })
+            })
+            .await?
+        };
+        if current_transition_revision.as_deref() != Some(expected_transition_revision.as_str()) {
+            return Err((
+                axum::http::StatusCode::CONFLICT,
+                format!(
+                    "stale stage advance for {task_id}: expected transition revision \
+                     {expected_transition_revision}"
+                ),
+            ));
+        }
+    }
+
     #[cfg(test)]
     if let Some(stage_advancer) = state.stage_advancer.clone() {
         return stage_advancer(task_id)
@@ -659,17 +743,36 @@ pub(super) async fn advance_stage(
                     format!("db error: {}", e),
                 )
             })?;
+            let latest = db.latest_stage_run(&task_id).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {}", e),
+                )
+            })?;
+            if latest
+                .as_ref()
+                .is_some_and(|run| run.kind == "post" && run.status == "running")
+            {
+                return Ok(None);
+            }
             crate::task_creator::prepare_advance_stage_for_api(&db, &state.config, &task_id)
+                .map(Some)
                 .map_err(|e| (stage_action_error_status(&e), e))
         })
         .await?
     };
-    let response = crate::mobile_api::TaskActionResponse {
-        task_id: task_id.clone(),
-        follow_task: None,
-        revision_budget: None,
+    let Some(transition) = transition else {
+        return Ok(Json(response));
     };
-    execute_stage_transition_detached(Arc::clone(&state), task_id, transition);
+    execute_stage_transition_detached_holding(
+        Arc::clone(&state),
+        task_id,
+        transition,
+        StageTransitionOwnership {
+            task_mutation: Some(stage_advance),
+            requested_operation: None,
+        },
+    );
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(response))
 }
@@ -732,12 +835,17 @@ async fn execute_stage_transition(
 /// the kill and the respawn. Detaching makes the transition immune to the
 /// caller's death; failures are logged since the caller may not outlive the
 /// work it triggered.
-fn execute_stage_transition_detached(
-    state: Arc<AppState>,
-    task_id: String,
-    transition: crate::task_creator::PreparedStageTransition,
-) {
-    execute_stage_transition_detached_holding(state, task_id, transition, None);
+#[derive(Default)]
+struct StageTransitionOwnership {
+    task_mutation: Option<super::state::RequestedTaskMutation>,
+    requested_operation: Option<super::state::RequestedTaskOperation>,
+}
+
+impl StageTransitionOwnership {
+    fn release(self) {
+        drop(self.task_mutation);
+        drop(self.requested_operation);
+    }
 }
 
 /// Same, but the detached worker takes ownership of a per-task operation
@@ -754,7 +862,7 @@ fn execute_stage_transition_detached_holding(
     state: Arc<AppState>,
     task_id: String,
     transition: crate::task_creator::PreparedStageTransition,
-    in_flight: Option<super::state::RequestedTaskOperation>,
+    ownership: StageTransitionOwnership,
 ) {
     // Stage execution interleaves async daemon I/O with synchronous git,
     // filesystem, and SQLite work (run records, fork rollback, teardown
@@ -765,7 +873,6 @@ fn execute_stage_transition_detached_holding(
         // Bound to the worker's own scope: every exit path below — daemon
         // connect failure, transition error, success, join error, or the task
         // being dropped at runtime shutdown — releases the task.
-        let _in_flight = in_flight;
         let handle = tokio::runtime::Handle::current();
         let joined = tokio::task::spawn_blocking(move || {
             handle.block_on(async move {
@@ -791,6 +898,7 @@ fn execute_stage_transition_detached_holding(
             })
         })
         .await;
+        ownership.release();
         if let Err(join_error) = joined {
             log::error!(
                 "stage transition worker for {} failed: {}",
@@ -805,6 +913,9 @@ pub(super) async fn rerun_stage(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
+    let task_mutation = state.begin_requested_task_mutation(&task_id).await;
+
     #[cfg(test)]
     if let Some(stage_rerunner) = state.stage_rerunner.clone() {
         return stage_rerunner(task_id)
@@ -834,6 +945,7 @@ pub(super) async fn rerun_stage(
     let rerun_state = Arc::clone(&state);
     let rerun_task_id = task_id.clone();
     tokio::spawn(async move {
+        let _task_mutation = task_mutation;
         let handle = tokio::runtime::Handle::current();
         let worker_task_id = rerun_task_id.clone();
         let joined = tokio::task::spawn_blocking(move || {
@@ -919,6 +1031,9 @@ pub(super) async fn complete_stage(
     axum::extract::Path(task_id): axum::extract::Path<String>,
     Json(payload): Json<crate::mobile_api::CompleteStageRequest>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
+    let task_mutation = state.begin_requested_task_mutation(&task_id).await;
+
     #[cfg(test)]
     if let Some(stage_completer) = state.stage_completer.clone() {
         return stage_completer(task_id, payload)
@@ -1061,7 +1176,15 @@ pub(super) async fn complete_stage(
         follow_task: None,
         revision_budget: None,
     };
-    execute_stage_transition_detached(Arc::clone(&state), task_id, transition);
+    execute_stage_transition_detached_holding(
+        Arc::clone(&state),
+        task_id,
+        transition,
+        StageTransitionOwnership {
+            task_mutation: Some(task_mutation),
+            requested_operation: None,
+        },
+    );
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(response))
 }
@@ -1155,6 +1278,15 @@ pub(super) async fn request_revision(
     axum::extract::Path(task_id): axum::extract::Path<String>,
     Json(payload): Json<crate::mobile_api::RequestRevisionRequest>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
+    let Some(revision_in_flight) = state.begin_requested_task_revision(&task_id) else {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            format!("a revision is already in progress for task {task_id}"),
+        ));
+    };
+    let task_mutation = state.begin_requested_task_mutation(&task_id).await;
+
     #[cfg(test)]
     if let Some(revision_requester) = state.revision_requester.clone() {
         return revision_requester(task_id, payload)
@@ -1163,47 +1295,12 @@ pub(super) async fn request_revision(
     }
 
     let origin = payload.origin.unwrap_or_default();
-    // Resolve first, so the single-flight key below is the durable task id
-    // rather than whichever alias (id or branch name) the caller used.
-    let source_task_id = {
-        let state = Arc::clone(&state);
-        let task_id = task_id.clone();
-        super::blocking::run_handler_blocking("revision resolve", move || {
-            let db = Db::open(&state.config.db_path).map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("db error: {}", e),
-                )
-            })?;
-            db.resolve_pipeline_item_id(&task_id)
-                .map_err(|e| {
-                    (
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("db error: {}", e),
-                    )
-                })?
-                .ok_or_else(|| {
-                    (
-                        axum::http::StatusCode::NOT_FOUND,
-                        format!("task not found: {}", task_id),
-                    )
-                })
-        })
-        .await?
-    };
-
-    // One revision action per task at a time. Budget admission, workspace
-    // preparation, and the round accounting are one decision: overlapping
-    // requests would otherwise both see the last free slot, both start a
-    // revision, and spend the task past its cap — defeating the bound this
-    // endpoint exists to enforce. The guard releases on drop, including on
-    // every error path below.
-    let Some(revision_in_flight) = state.begin_requested_task_revision(&source_task_id) else {
-        return Err((
-            axum::http::StatusCode::CONFLICT,
-            format!("a revision is already in progress for task {source_task_id}"),
-        ));
-    };
+    // `resolve_task_id_for_mutation` returned the durable id before either
+    // ownership guard was acquired. The nonblocking revision guard is taken
+    // before waiting for the broader mutation lease so a duplicate revision
+    // is refused immediately instead of sleeping until the first transition
+    // lands and then spending another round.
+    let source_task_id = task_id;
 
     let outcome = {
         let state = Arc::clone(&state);
@@ -1368,7 +1465,10 @@ pub(super) async fn request_revision(
                 Arc::clone(&state),
                 source_task_id.clone(),
                 crate::task_creator::PreparedStageTransition::Run(prepared),
-                Some(revision_in_flight),
+                StageTransitionOwnership {
+                    task_mutation: Some(task_mutation),
+                    requested_operation: Some(revision_in_flight),
+                },
             );
             state.publish_state_changed(StateChangeScope::Tasks);
 

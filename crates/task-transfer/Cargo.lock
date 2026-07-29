@@ -820,6 +820,7 @@ dependencies = [
  "if-addrs",
  "kanna-daemon",
  "kanna-runtime-defaults",
+ "libc",
  "mdns-sd",
  "rand_core",
  "rusqlite",

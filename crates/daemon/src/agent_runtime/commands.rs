@@ -12,6 +12,7 @@ use kanna_daemon::protocol::{self, AgentSpawnParams, Event, SessionStatus};
 
 use super::readers::start_agent_readers;
 use super::{agent_error, broadcast_event, journal_and_fan_out, log_info, reply, set_status};
+use crate::daemon_lifecycle::DaemonLifecycle;
 use crate::socket::write_event;
 
 #[allow(clippy::too_many_arguments)]
@@ -22,6 +23,7 @@ pub async fn handle_spawn_agent(
     broadcast_tx: broadcast::Sender<String>,
     agents: AgentSessions,
     data_dir: std::path::PathBuf,
+    daemon_lifecycle: DaemonLifecycle,
 ) {
     let Some(adapter) = agent::make_adapter(params.agent_provider) else {
         reply(
@@ -174,7 +176,14 @@ pub async fn handle_spawn_agent(
         return;
     };
 
-    start_agent_readers(life, stdout, stderr, agents, broadcast_tx.clone());
+    start_agent_readers(
+        life,
+        stdout,
+        stderr,
+        agents,
+        broadcast_tx.clone(),
+        daemon_lifecycle,
+    );
 
     let created = Event::SessionCreated {
         session_id: session_id.clone(),
@@ -408,6 +417,7 @@ pub async fn handle_agent_input(
     writer: AgentClientWriter,
     broadcast_tx: broadcast::Sender<String>,
     agents: AgentSessions,
+    daemon_lifecycle: DaemonLifecycle,
 ) {
     enum Plan {
         StdinLine(String),
@@ -612,7 +622,14 @@ pub async fn handle_agent_input(
                         reply(&writer, &agent_error(code, message)).await;
                         return;
                     };
-                    start_agent_readers(life, stdout, stderr, agents.clone(), broadcast_tx.clone());
+                    start_agent_readers(
+                        life,
+                        stdout,
+                        stderr,
+                        agents.clone(),
+                        broadcast_tx.clone(),
+                        daemon_lifecycle.clone(),
+                    );
                 }
                 Err(error) => {
                     // Release the reservation so later inputs can retry.

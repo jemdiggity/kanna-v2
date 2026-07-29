@@ -8,6 +8,23 @@ use crate::db::Db;
 use axum::Router;
 use std::sync::Arc;
 
+fn seed_test_mutation_tasks(config: &Config, task_ids: &[&str]) {
+    let db = Db::open_for_tests(&config.db_path).expect("open test db");
+    db.insert_test_repo("repo-test-mutation", "Mutation Test Repo")
+        .expect("insert mutation test repo");
+    for task_id in task_ids {
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-test-mutation",
+            "mutation test task",
+            Some("Mutation Test Task"),
+            "in progress",
+            "2026-07-26 00:00:00",
+        )
+        .expect("insert mutation test task");
+    }
+}
+
 pub(crate) fn test_router(desktop_id: &str, desktop_name: &str) -> Router {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -300,7 +317,7 @@ pub(super) fn test_router_with_task_closer(
         transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
-    let _ = Db::open_for_tests(&config.db_path).expect("open test db");
+    seed_test_mutation_tasks(&config, &["task-1", "a1b2c3d4"]);
     router(Arc::new(AppState::with_task_closer(config, task_closer)))
 }
 
@@ -332,7 +349,7 @@ pub(super) fn test_router_with_stage_advancer(
         transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
-    let _ = Db::open_for_tests(&config.db_path).expect("open test db");
+    seed_test_mutation_tasks(&config, &["task-1"]);
     router(Arc::new(AppState::with_stage_advancer(
         config,
         stage_advancer,
@@ -367,7 +384,7 @@ pub(super) fn test_router_with_stage_rerunner(
         transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-rerun-{desktop_id}-{test_db_id}.json"),
     };
-    let _ = Db::open_for_tests(&config.db_path).expect("open test db");
+    seed_test_mutation_tasks(&config, &["task-1"]);
     router(Arc::new(AppState::with_stage_rerunner(
         config,
         stage_rerunner,
@@ -402,7 +419,7 @@ pub(super) fn test_router_with_stage_completer(
         transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
-    let _ = Db::open_for_tests(&config.db_path).expect("open test db");
+    seed_test_mutation_tasks(&config, &["task-1"]);
     router(Arc::new(AppState::with_stage_completer(
         config,
         stage_completer,
@@ -437,7 +454,7 @@ pub(super) fn test_router_with_revision_requester(
         transfer_port: 4455,
         pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
     };
-    let _ = Db::open_for_tests(&config.db_path).expect("open test db");
+    seed_test_mutation_tasks(&config, &["review-task"]);
     router(Arc::new(AppState::with_revision_requester(
         config,
         revision_requester,

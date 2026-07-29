@@ -3438,6 +3438,78 @@ fn create_dormant_task_for_api_uses_requested_task_id() {
 }
 
 #[test]
+fn dormant_start_preparation_rechecks_open_blockers() {
+    let repo_root = init_git_repo("dormant-start-rechecks-blockers");
+    let config = test_config("dormant-start-rechecks-blockers");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "blocker-1",
+        "repo-1",
+        "Unresolved blocker",
+        Some("Unresolved blocker"),
+        "in progress",
+        "2026-07-26 00:00:00",
+    )
+    .unwrap();
+
+    let created = create_dormant_task_for_api_with_error(
+        &db,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Do not prepare while blocked".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("agent".to_string()),
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: None,
+            recovery_snapshot: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+            terminal_cols: None,
+            terminal_rows: None,
+        },
+        Some("dependent-blocked".to_string()),
+    )
+    .unwrap();
+    db.insert_task_blocker(&created.task_id, "blocker-1")
+        .unwrap();
+
+    let prepared = prepare_start_dormant_task_for_api(
+        &db,
+        &config,
+        &created.task_id,
+        vec!["main".to_string()],
+    )
+    .unwrap();
+
+    assert!(
+        prepared.is_none(),
+        "a durable unresolved blocker must prevent worktree preparation"
+    );
+    assert!(db
+        .get_task_worktree_path(&created.task_id)
+        .unwrap()
+        .is_none());
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+#[test]
 fn prepare_task_for_api_classifies_requested_task_id_primary_key_collision() {
     let task_id = "c1d2e3f4a5b60718";
     let repo_root = init_git_repo("requested-task-id-collision");

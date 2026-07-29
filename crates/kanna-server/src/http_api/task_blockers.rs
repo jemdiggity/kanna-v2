@@ -1,6 +1,6 @@
 use super::state::{db_write_error, AppState};
 use crate::daemon_client::DaemonClient;
-use crate::db::Db;
+use crate::db::{Db, ReplaceTaskBlockersError};
 use axum::extract::State;
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
@@ -70,28 +70,22 @@ pub(super) fn apply_task_blockers(
         ));
     }
 
-    let task_id = resolve_existing_task_id(db, task_or_branch_id)?;
-    let resolved_blocker_ids = resolve_task_blocker_ids(db, blocker_task_ids)?;
-    for blocker_id in &resolved_blocker_ids {
-        if blocker_id == &task_id {
-            return Err((
-                axum::http::StatusCode::BAD_REQUEST,
-                "task cannot block itself".to_string(),
-            ));
-        }
-        if db
-            .task_dependency_has_path_to(blocker_id, &task_id)
-            .map_err(|e| db_write_error("db error", e))?
-        {
-            return Err((
-                axum::http::StatusCode::BAD_REQUEST,
-                "cannot add blocker because it would create a circular dependency".to_string(),
-            ));
-        }
-    }
+    db.replace_task_blockers_atomically(task_or_branch_id, blocker_task_ids)
+        .map_err(task_blocker_replacement_error)
+}
 
-    persist_resolved_task_blockers(db, &task_id, &resolved_blocker_ids)?;
-    Ok(task_id)
+fn task_blocker_replacement_error(
+    error: ReplaceTaskBlockersError,
+) -> (axum::http::StatusCode, String) {
+    let status = match error {
+        ReplaceTaskBlockersError::TaskNotFound(_)
+        | ReplaceTaskBlockersError::BlockerNotFound(_) => axum::http::StatusCode::NOT_FOUND,
+        ReplaceTaskBlockersError::SelfDependency | ReplaceTaskBlockersError::CircularDependency => {
+            axum::http::StatusCode::BAD_REQUEST
+        }
+        ReplaceTaskBlockersError::Database(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, error.to_string())
 }
 
 fn blocker_branches_for_task(
@@ -281,11 +275,11 @@ async fn create_integration_task_for_conflict(
             )
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
             let integration_task_id = prepared.task_id().to_string();
-            db.replace_task_blockers(
+            db.replace_task_blockers_atomically(
                 &dependent_task_id,
                 std::slice::from_ref(&integration_task_id),
             )
-            .map_err(|e| db_write_error("db error", e))?;
+            .map_err(task_blocker_replacement_error)?;
             log::info!(
                 "inserted integration task {integration_task_id} for dependent {dependent_task_id} after blocker branch merge conflict on {}",
                 conflict.conflicting_branch
@@ -310,7 +304,7 @@ async fn create_integration_task_for_conflict(
             let restored = tokio::task::spawn_blocking(move || {
                 if let Ok(db) = Db::open(&restore_state.config.db_path) {
                     if let Err(restore_error) =
-                        db.replace_task_blockers(&restore_task_id, &previous_blockers)
+                        db.replace_task_blockers_atomically(&restore_task_id, &previous_blockers)
                     {
                         log::error!(
                             "failed to restore blockers for {restore_task_id} after integration spawn failure: {restore_error}"
@@ -337,9 +331,10 @@ pub(super) async fn start_dependents_unblocked_by_close_with_daemon(
     daemon: &mut DaemonClient,
     blocker_task_id: &str,
 ) {
-    // Dependent discovery reads SQLite and resolves blocker worktree
-    // branches with git — synchronous work behind the blocking boundary.
-    let ready_dependents = {
+    // Discover durable dependent ids first. Readiness is deliberately not
+    // decided here: a concurrent re-block or another last-blocker close may
+    // commit before this dependent acquires its shared mutation lease.
+    let dependent_ids = {
         let state = Arc::clone(state);
         let gather_blocker_task_id = blocker_task_id.to_string();
         let gathered = tokio::task::spawn_blocking(move || {
@@ -353,38 +348,19 @@ pub(super) async fn start_dependents_unblocked_by_close_with_daemon(
                     return Vec::new();
                 }
             };
-            let blocked_ids = match db.list_tasks_blocked_by(&blocker_task_id) {
-                Ok(blocked_ids) => blocked_ids,
+            match db.list_tasks_blocked_by(&blocker_task_id) {
+                Ok(dependent_ids) => dependent_ids,
                 Err(error) => {
                     log::error!(
                         "cannot list dependents of closed blocker {blocker_task_id}: {error}"
                     );
-                    return Vec::new();
-                }
-            };
-            let mut ready = Vec::new();
-            for blocked_id in blocked_ids {
-                match db.count_open_task_blockers(&blocked_id) {
-                    Ok(0) => {}
-                    Ok(_) => continue,
-                    Err(error) => {
-                        log::error!("cannot count open blockers for {blocked_id}: {error}");
-                        continue;
-                    }
-                }
-                match blocker_branches_for_task(&db, &blocked_id) {
-                    Ok(blocker_branches) => ready.push((blocked_id, blocker_branches)),
-                    Err((_, error)) => {
-                        log::error!("cannot resolve blocker branches for {blocked_id}: {error}");
-                        ready.push((blocked_id, Vec::new()));
-                    }
+                    Vec::new()
                 }
             }
-            ready
         })
         .await;
         match gathered {
-            Ok(ready) => ready,
+            Ok(dependent_ids) => dependent_ids,
             Err(join_error) => {
                 log::error!(
                     "dependent discovery worker failed for closed blocker {blocker_task_id}: {join_error}"
@@ -394,7 +370,43 @@ pub(super) async fn start_dependents_unblocked_by_close_with_daemon(
         }
     };
 
-    for (blocked_id, blocker_branches) in ready_dependents {
+    for blocked_id in dependent_ids {
+        // The same durable-id lease is used by block/unblock, lifecycle
+        // actions, and every competing last-blocker close. Hold it through
+        // the authoritative blocker re-read, worktree preparation, spawn,
+        // and possible integration-task substitution.
+        let _dependent_mutation = state.begin_requested_task_mutation(&blocked_id).await;
+        let blocker_branches = {
+            let state = Arc::clone(state);
+            let ready_task_id = blocked_id.clone();
+            match tokio::task::spawn_blocking(move || {
+                let db = Db::open(&state.config.db_path).map_err(|error| {
+                    format!("cannot open db while starting {ready_task_id}: {error}")
+                })?;
+                match db.count_open_task_blockers(&ready_task_id) {
+                    Ok(0) => blocker_branches_for_task(&db, &ready_task_id)
+                        .map(Some)
+                        .map_err(|(_, error)| error),
+                    Ok(_) => Ok(None),
+                    Err(error) => Err(format!(
+                        "cannot count open blockers for {ready_task_id}: {error}"
+                    )),
+                }
+            })
+            .await
+            {
+                Ok(Ok(Some(blocker_branches))) => blocker_branches,
+                Ok(Ok(None)) => continue,
+                Ok(Err(error)) => {
+                    log::error!("{error}");
+                    continue;
+                }
+                Err(join_error) => {
+                    log::error!("dependent readiness worker failed for {blocked_id}: {join_error}");
+                    continue;
+                }
+            }
+        };
         match start_dormant_task_if_ready_with_daemon(state, daemon, &blocked_id, blocker_branches)
             .await
         {
@@ -418,6 +430,8 @@ pub(super) async fn block_task(
     axum::extract::Path(task_id): axum::extract::Path<String>,
     Json(payload): Json<crate::mobile_api::BlockTaskRequest>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id).await?;
+    let _task_mutation = state.begin_requested_task_mutation(&task_id).await;
     let task_id = {
         let state = Arc::clone(&state);
         super::blocking::run_handler_blocking("task block", move || {
@@ -444,6 +458,8 @@ pub(super) async fn unblock_task(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id).await?;
+    let _task_mutation = state.begin_requested_task_mutation(&task_id).await;
     // Blocker-branch resolution shells out to git; the whole discovery and
     // removal section runs behind the blocking boundary.
     let (task_id, blocker_branches) = {
@@ -457,8 +473,8 @@ pub(super) async fn unblock_task(
             })?;
             let task_id = resolve_existing_task_id(&db, &task_id)?;
             let blocker_branches = blocker_branches_for_task(&db, &task_id)?;
-            db.remove_all_task_blockers(&task_id)
-                .map_err(|e| db_write_error("db error", e))?;
+            db.replace_task_blockers_atomically(&task_id, &[])
+                .map_err(task_blocker_replacement_error)?;
             Ok((task_id, blocker_branches))
         })
         .await?

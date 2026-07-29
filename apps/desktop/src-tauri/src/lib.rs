@@ -6,6 +6,7 @@ mod macos;
 mod menu;
 mod pipeline_listener;
 mod subprocess_env;
+mod transfer_artifact;
 mod transfer_identity;
 mod transfer_sidecar;
 
@@ -33,8 +34,9 @@ pub(crate) const KANNA_BUILD_COMMIT: &str = env!("KANNA_BUILD_COMMIT");
 pub(crate) const KANNA_BUILD_TASK_ID: &str = env!("KANNA_BUILD_TASK_ID");
 pub(crate) const KANNA_BUILD_WORKTREE: &str = env!("KANNA_BUILD_WORKTREE");
 pub(crate) const KANNA_BUILD_INFO: &str = env!("KANNA_BUILD_INFO");
-pub type TransferServiceState = Arc<Mutex<Option<transfer_sidecar::TransferSidecarClient>>>;
 pub type CloudTransferProxyState = cloud_transfer_proxy::CloudTransferProxyState;
+pub type TransferServiceState = Arc<Mutex<Option<Arc<transfer_sidecar::TransferSidecarClient>>>>;
+pub type TransferEventConsumerState = transfer_sidecar::TransferEventConsumerState;
 static RUNTIME_BUNDLE_IDENTIFIER: OnceLock<String> = OnceLock::new();
 
 /// Process-wide lock serializing tests that read or mutate process env vars.
@@ -111,6 +113,9 @@ pub fn run() {
         >::new())) as WindowSessionSizes)
         .manage(Arc::new(Mutex::new(None)) as PipelineSocketState)
         .manage(Arc::new(Mutex::new(None)) as TransferServiceState)
+        .manage(Arc::new(std::sync::Mutex::new(
+            transfer_sidecar::TransferEventConsumer::default(),
+        )) as TransferEventConsumerState)
         .manage(Arc::new(Mutex::new(std::collections::HashMap::new())) as CloudTransferProxyState)
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -324,12 +329,20 @@ pub fn run() {
             commands::transfer::request_task_pull,
             commands::transfer::stage_transfer_artifact,
             commands::transfer::fetch_transfer_artifact,
+            commands::transfer::materialize_transfer_artifact,
+            commands::transfer::claim_transfer_event_consumer,
+            commands::transfer::release_transfer_event_consumer,
+            commands::transfer::acknowledge_transfer_lifecycle_event,
+            commands::transfer::nack_transfer_lifecycle_event,
+            commands::transfer::renew_transfer_lifecycle_event,
+            commands::transfer::claim_transfer_lifecycle_phase,
             commands::transfer::finalize_outgoing_transfer,
             commands::transfer::complete_outgoing_transfer_finalization,
             commands::transfer::acknowledge_incoming_transfer_commit,
             commands::transfer::mark_incoming_transfer_event_recorded,
             commands::transfer::mark_incoming_transfer_ack_completed,
             commands::transfer::mark_outgoing_transfer_commit_applied,
+            commands::transfer::nack_outgoing_transfer_commit,
             commands::transfer::ensure_cloud_transfer_proxy,
             commands::transfer::remove_cloud_transfer_proxy,
             commands::transfer::clear_cloud_transfer_proxies,

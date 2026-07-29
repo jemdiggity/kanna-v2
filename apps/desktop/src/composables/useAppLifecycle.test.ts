@@ -32,7 +32,7 @@ describe("handleTaskPullRequested", () => {
     const refreshCloudTransferRoute = vi.fn(() =>
       new Promise<void>((resolve) => { releaseRefresh = resolve; }));
     const pushTaskToPeer = vi.fn(async () => {});
-    const inFlight = new Set<string>();
+    const inFlight = new Map();
     const store = { items: [item()], pushTaskToPeer };
     const event = {
       requestId: "pull-1",
@@ -49,9 +49,9 @@ describe("handleTaskPullRequested", () => {
 
     expect(refreshCloudTransferRoute).toHaveBeenCalledTimes(1);
     expect(pushTaskToPeer).not.toHaveBeenCalled();
-    expect(await duplicate).toBe(false);
     releaseRefresh();
-    expect(await first).toBe(true);
+    expect(await duplicate).toBe("delivered");
+    expect(await first).toBe("delivered");
     expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
     expect(pushTaskToPeer).toHaveBeenCalledWith("task-source", "peer-requester", {
       transport: "lan",
@@ -87,14 +87,14 @@ describe("handleTaskPullRequested", () => {
       requestId: "pull-1",
       requesterPeerId: "peer-requester",
       sourceTaskId: "task-source",
-    }, { items: [item()], pushTaskToPeer } as never, new Set(), [
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [
       machine({
         peerId: "peer-other",
         desktopId: "desktop-other",
         relayDesktopId: "desktop-other",
       }),
       machine(requesterOverrides),
-    ], { refreshCloudTransferRoute })).resolves.toBe(true);
+    ], { refreshCloudTransferRoute })).resolves.toBe("delivered");
 
     expect(refreshCloudTransferRoute).toHaveBeenCalledTimes(1);
     expect(refreshCloudTransferRoute).toHaveBeenCalledWith("peer-requester");
@@ -107,7 +107,7 @@ describe("handleTaskPullRequested", () => {
       new Promise<void>((resolve) => { releaseRefresh = resolve; }));
     const pushTaskToPeer = vi.fn(async () => {});
     const abortController = new AbortController();
-    const inFlight = new Set<string>();
+    const inFlight = new Map();
 
     const pending = handleTaskPullRequested({
       requestId: "pull-1",
@@ -122,9 +122,234 @@ describe("handleTaskPullRequested", () => {
     abortController.abort();
     releaseRefresh();
 
-    await expect(pending).resolves.toBe(false);
+    await expect(pending).resolves.toBe("interrupted");
     expect(pushTaskToPeer).not.toHaveBeenCalled();
-    expect(inFlight).toEqual(new Set());
+    expect(inFlight).toEqual(new Map());
+  });
+
+  it("lets abort take precedence when a pending route refresh rejects", async () => {
+    let rejectRefresh!: (error: unknown) => void;
+    const refreshCloudTransferRoute = vi.fn(() =>
+      new Promise<void>((_resolve, reject) => { rejectRefresh = reject; }));
+    const pushTaskToPeer = vi.fn(async () => {});
+    const reportOperationalError = vi.fn();
+    const waitForRetry = vi.fn(async () => {});
+    const abortController = new AbortController();
+
+    const pending = handleTaskPullRequested({
+      requestId: "pull-aborted-refresh-rejection",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [machine()], {
+      maxAttempts: 3,
+      refreshCloudTransferRoute,
+      reportOperationalError,
+      signal: abortController.signal,
+      waitForRetry,
+    });
+
+    await vi.waitFor(() => expect(refreshCloudTransferRoute).toHaveBeenCalledTimes(1));
+    abortController.abort();
+    rejectRefresh(new Error("route refresh failed during unmount"));
+
+    await expect(pending).resolves.toBe("interrupted");
+    expect(waitForRetry).not.toHaveBeenCalled();
+    expect(pushTaskToPeer).not.toHaveBeenCalled();
+    expect(reportOperationalError).not.toHaveBeenCalled();
+  });
+
+  it("retries route refresh failures with a delay before starting one return push", async () => {
+    const refreshCloudTransferRoute = vi.fn()
+      .mockRejectedValueOnce(new Error("relay route unavailable"))
+      .mockRejectedValueOnce(new Error("relay route unavailable"))
+      .mockResolvedValue(undefined);
+    const pushTaskToPeer = vi.fn(async () => {});
+    const waitForRetry = vi.fn(async () => {});
+
+    await expect(handleTaskPullRequested({
+      requestId: "pull-route-retry",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [machine()], {
+      maxAttempts: 3,
+      retryDelayMs: 125,
+      refreshCloudTransferRoute,
+      waitForRetry,
+    })).resolves.toBe("delivered");
+
+    expect(refreshCloudTransferRoute).toHaveBeenCalledTimes(3);
+    expect(waitForRetry).toHaveBeenCalledTimes(2);
+    expect(waitForRetry).toHaveBeenNthCalledWith(1, 125);
+    expect(waitForRetry).toHaveBeenNthCalledWith(2, 125);
+    expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts during a route-refresh retry delay without refreshing or pushing again", async () => {
+    let releaseRetry!: () => void;
+    const refreshCloudTransferRoute = vi.fn(async () => {
+      throw new Error("relay route unavailable");
+    });
+    const pushTaskToPeer = vi.fn(async () => {});
+    const waitForRetry = vi.fn(() =>
+      new Promise<void>((resolve) => { releaseRetry = resolve; }));
+    const reportOperationalError = vi.fn();
+    const abortController = new AbortController();
+
+    const pending = handleTaskPullRequested({
+      requestId: "pull-route-retry-unmount",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [machine()], {
+      maxAttempts: 3,
+      refreshCloudTransferRoute,
+      reportOperationalError,
+      signal: abortController.signal,
+      waitForRetry,
+    });
+
+    await vi.waitFor(() => expect(waitForRetry).toHaveBeenCalledTimes(1));
+    abortController.abort();
+    releaseRetry();
+
+    await expect(pending).resolves.toBe("interrupted");
+    expect(refreshCloudTransferRoute).toHaveBeenCalledTimes(1);
+    expect(pushTaskToPeer).not.toHaveBeenCalled();
+    expect(reportOperationalError).not.toHaveBeenCalled();
+  });
+
+  it("treats a rejected return push as terminal instead of replaying non-idempotent setup", async () => {
+    const pushTaskToPeer = vi.fn(async () => {
+      throw new Error("preflight failed after reserving a transfer");
+    });
+    const waitForRetry = vi.fn(async () => {});
+
+    await expect(handleTaskPullRequested({
+      requestId: "pull-terminal-push",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [machine()], {
+      maxAttempts: 3,
+      waitForRetry,
+    })).resolves.toBe("terminal");
+
+    expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
+    expect(waitForRetry).not.toHaveBeenCalled();
+  });
+
+  it("preserves terminal settlement when abort races with a non-retryable push rejection", async () => {
+    let rejectPush!: (error: unknown) => void;
+    const pushTaskToPeer = vi.fn(() =>
+      new Promise<void>((_resolve, reject) => { rejectPush = reject; }));
+    const reportOperationalError = vi.fn();
+    const abortController = new AbortController();
+
+    const pending = handleTaskPullRequested({
+      requestId: "pull-terminal-push-unmount",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [
+      machine({ relayDesktopId: null }),
+    ], {
+      maxAttempts: 3,
+      reportOperationalError,
+      signal: abortController.signal,
+    });
+
+    await vi.waitFor(() => expect(pushTaskToPeer).toHaveBeenCalledTimes(1));
+    abortController.abort();
+    const error = new Error("preflight failed after reserving a transfer");
+    rejectPush(error);
+
+    await expect(pending).resolves.toBe("terminal");
+    expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
+    expect(reportOperationalError).toHaveBeenCalledWith(error);
+  });
+
+  it("retries explicitly safe pre-mutation push failures with a bounded delay", async () => {
+    const retryable = Object.assign(new Error("source desktop identity unavailable"), {
+      retryableTaskPush: true,
+    });
+    const pushTaskToPeer = vi.fn()
+      .mockRejectedValueOnce(retryable)
+      .mockRejectedValueOnce(retryable)
+      .mockResolvedValue(undefined);
+    const waitForRetry = vi.fn(async () => {});
+
+    await expect(handleTaskPullRequested({
+      requestId: "pull-retryable-push",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [machine()], {
+      maxAttempts: 3,
+      retryDelayMs: 125,
+      waitForRetry,
+    })).resolves.toBe("delivered");
+
+    expect(pushTaskToPeer).toHaveBeenCalledTimes(3);
+    expect(waitForRetry).toHaveBeenCalledTimes(2);
+    expect(waitForRetry).toHaveBeenNthCalledWith(1, 125);
+    expect(waitForRetry).toHaveBeenNthCalledWith(2, 125);
+  });
+
+  it("aborts during a safe push retry delay without pushing again", async () => {
+    const retryable = Object.assign(new Error("source desktop identity unavailable"), {
+      retryableTaskPush: true,
+    });
+    let releaseRetry!: () => void;
+    const pushTaskToPeer = vi.fn(async () => {
+      throw retryable;
+    });
+    const waitForRetry = vi.fn(() =>
+      new Promise<void>((resolve) => { releaseRetry = resolve; }));
+    const reportOperationalError = vi.fn();
+    const abortController = new AbortController();
+
+    const pending = handleTaskPullRequested({
+      requestId: "pull-retryable-push-unmount",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [
+      machine({ relayDesktopId: null }),
+    ], {
+      maxAttempts: 3,
+      reportOperationalError,
+      signal: abortController.signal,
+      waitForRetry,
+    });
+
+    await vi.waitFor(() => expect(waitForRetry).toHaveBeenCalledTimes(1));
+    abortController.abort();
+    releaseRetry();
+
+    await expect(pending).resolves.toBe("interrupted");
+    expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
+    expect(reportOperationalError).not.toHaveBeenCalled();
+  });
+
+  it("preserves one successful route refresh across safe return-push retries", async () => {
+    const retryable = Object.assign(new Error("source desktop identity unavailable"), {
+      retryableTaskPush: true,
+    });
+    const refreshCloudTransferRoute = vi.fn(async () => {});
+    const pushTaskToPeer = vi.fn()
+      .mockRejectedValueOnce(retryable)
+      .mockRejectedValueOnce(retryable)
+      .mockResolvedValue(undefined);
+    const waitForRetry = vi.fn(async () => {});
+
+    await expect(handleTaskPullRequested({
+      requestId: "pull-route-once-push-retry",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [machine()], {
+      maxAttempts: 3,
+      refreshCloudTransferRoute,
+      waitForRetry,
+    })).resolves.toBe("delivered");
+
+    expect(refreshCloudTransferRoute).toHaveBeenCalledTimes(1);
+    expect(pushTaskToPeer).toHaveBeenCalledTimes(3);
+    expect(waitForRetry).toHaveBeenCalledTimes(2);
   });
 
   it("rejects a requester that is absent from the current eligible machine catalog", async () => {
@@ -134,14 +359,14 @@ describe("handleTaskPullRequested", () => {
       requestId: "pull-1",
       requesterPeerId: "peer-requester",
       sourceTaskId: "task-source",
-    }, { items: [item()], pushTaskToPeer } as never, new Set(), [])).resolves.toBe(false);
+    }, { items: [item()], pushTaskToPeer } as never, new Map(), [])).resolves.toBe("terminal");
 
     expect(pushTaskToPeer).not.toHaveBeenCalled();
   });
 
   it("retains an event that arrives before the requester catalog and pushes exactly once", async () => {
     const pushTaskToPeer = vi.fn(async () => {});
-    const inFlight = new Set<string>();
+    const inFlight = new Map();
     let machines: TransferMachine[] = [];
     const waitForRetry = vi.fn(async () => {
       machines = [machine()];
@@ -168,8 +393,8 @@ describe("handleTaskPullRequested", () => {
       { maxAttempts: 2, waitForRetry },
     );
 
-    await expect(duplicate).resolves.toBe(false);
-    await expect(pending).resolves.toBe(true);
+    await expect(duplicate).resolves.toBe("delivered");
+    await expect(pending).resolves.toBe("delivered");
     expect(waitForRetry).toHaveBeenCalledTimes(1);
     expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
   });
@@ -193,7 +418,7 @@ describe("handleTaskPullRequested", () => {
       requestId: "pull-1",
       requesterPeerId: "peer-requester",
       sourceTaskId,
-    }, { items, pushTaskToPeer } as never, new Set(), [machine()])).resolves.toBe(false);
+    }, { items, pushTaskToPeer } as never, new Map(), [machine()])).resolves.toBe("terminal");
 
     expect(pushTaskToPeer).not.toHaveBeenCalled();
   });

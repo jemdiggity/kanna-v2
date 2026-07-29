@@ -873,6 +873,29 @@ describe("pushTaskToPeer", () => {
     expect(invokeMock).not.toHaveBeenCalledWith("signal_session", expect.anything());
   });
 
+  it("marks unavailable source desktop identity as safe to retry before preflight", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    store.repos = [buildRepo()];
+    store.items = [buildItem()];
+    invokeMock.mockImplementation(async (cmd) => {
+      if (cmd === "mobile_server_status") return {};
+      return null;
+    });
+
+    const error = await store.pushTaskToPeer("task-source", "peer-target", {
+      transport: "cloud",
+      targetDesktopId: "desktop-target",
+    }).catch((caught) => caught);
+
+    expect(error).toMatchObject({
+      message: "source desktop identity is unavailable for cloud transfer",
+      retryableTaskPush: true,
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("prepare_outgoing_transfer", expect.anything());
+  });
+
   it("falls back from LAN connection failure to cloud before creating the transfer row", async () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");
@@ -1209,6 +1232,7 @@ describe("pushTaskToPeer", () => {
       transferId: "transfer-123",
       artifactId: "transfer-123-codex-rollout",
       path: "/Users/tester/.codex/sessions/2026/04/18/rollout-2026-04-18T06-27-04-019d9a8c-9f39-7240-818f-88367a7c31df.jsonl",
+      owned: false,
     });
 
     const prepareCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer");
@@ -1288,6 +1312,7 @@ describe("pushTaskToPeer", () => {
       transferId: "transfer-123",
       artifactId: "transfer-123-claude-session",
       path: "/tmp/kanna-transfer-transfer-123-claude-session.tar.gz",
+      owned: true,
     });
 
     const prepareCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer");
@@ -1365,6 +1390,7 @@ describe("pushTaskToPeer", () => {
       transferId: "transfer-123",
       artifactId: "transfer-123-copilot-session",
       path: "/tmp/kanna-transfer-transfer-123-copilot-session.tar.gz",
+      owned: true,
     });
 
     const prepareCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer");
@@ -1437,6 +1463,7 @@ describe("pushTaskToPeer", () => {
       transferId: "transfer-123",
       artifactId: expect.any(String),
       path: expect.stringContaining(".bundle"),
+      owned: true,
     });
 
     const prepareCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer");
@@ -1567,6 +1594,104 @@ describe("incoming transfer approval", () => {
     invokeMock.mockReset();
     loadSessionRecoveryStateMock.mockReset();
     vi.useRealTimers();
+  });
+
+  it.each([
+    ["repository acquisition completion", 0],
+    ["artifact materialization completion", 0],
+    ["task creation completion", 1],
+  ])("fences stale import ownership after %s", async (lostPhase, expectedTasks) => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const payload = {
+      ...buildIncomingTransferPayload(),
+      task: {
+        ...buildIncomingTransferPayload().task,
+        resume_session_id: "resume-fenced",
+      },
+      artifacts: [{
+        artifact_id: "artifact-fenced",
+        filename: "claude-session.tar.gz",
+        provider: "claude" as const,
+        kind: "session-archive" as const,
+        materialization: "extract-tar-gz" as const,
+        home_rel_path: ".claude/tasks/resume-fenced",
+      }],
+    };
+    const fakeDb = createTransferDb({
+      transfers: [{
+        id: "transfer-1",
+        direction: "incoming",
+        status: "claimed",
+        source_peer_id: "peer-source",
+        target_peer_id: null,
+        source_task_id: "task-source",
+        local_task_id: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(payload),
+      }],
+    });
+    await store.init(fakeDb);
+    mockIncomingTransferApprovalInvoke(payload, async (cmd, args) => {
+      if (cmd === "file_exists") return (args?.path as string) === "/tmp/repo-1";
+      if (cmd === "fetch_transfer_artifact") return { path: "/tmp/session.tar.gz" };
+      if (cmd === "materialize_transfer_artifact") return true;
+      if (cmd === "which_binary") return args?.name === "claude" ? "/usr/bin/claude" : null;
+      if (cmd === "git_worktree_add" || cmd === "spawn_agent_session") return null;
+      throw new Error(`unexpected invoke: ${cmd}`);
+    });
+
+    await expect(store.approveIncomingTransfer(
+      "transfer-1",
+      "owner-stale",
+      {
+        assertOwnership: async (phase) => phase !== lostPhase,
+      },
+    )).rejects.toThrow(/ownership was lost/);
+
+    expect(fakeDb.tables.pipeline_item).toHaveLength(expectedTasks);
+    expect(fakeDb.tables.task_transfer[0]?.status).not.toBe("completed");
+    expect(fakeDb.tables.task_transfer_provenance).toHaveLength(0);
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "acknowledge_incoming_transfer_commit",
+      expect.anything(),
+    );
+  });
+
+  it("rejects finalized payload provenance that differs from the durable reservation", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const payload = buildIncomingTransferPayload();
+    payload.task.source_peer_id = "peer-impersonated";
+    const fakeDb = createTransferDb({
+      transfers: [{
+        id: "transfer-1",
+        direction: "incoming",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: null,
+        source_task_id: "task-source",
+        local_task_id: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(payload),
+      }],
+    });
+
+    await store.init(fakeDb);
+    mockIncomingTransferApprovalInvoke(payload, async (cmd) => {
+      throw new Error(`unexpected invoke: ${cmd}`);
+    });
+
+    await expect(store.approveIncomingTransfer("transfer-1")).rejects.toThrow(
+      /source identity does not match reservation/i,
+    );
+    expect(fakeDb.tables.pipeline_item).toHaveLength(0);
   });
 
   it("requests source finalization before importing an approved transfer", async () => {
@@ -2307,7 +2432,9 @@ describe("incoming transfer approval", () => {
     expect(typeof localTaskId).toBe("string");
   });
 
-  it("restores codex resume state when importing a transferred codex task", async () => {
+  it.each([true, false])(
+    "restores codex resume state when artifact publication returns %s",
+    async (materialized) => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");
     const store = useKannaStore();
@@ -2389,9 +2516,10 @@ describe("incoming transfer approval", () => {
         if (args?.name === "KANNA_MOBILE_SERVER_PORT") return "";
         return "";
       }
+      if (cmd === "materialize_transfer_artifact") {
+        return materialized;
+      }
       if (
-        cmd === "ensure_directory" ||
-        cmd === "copy_file" ||
         cmd === "git_worktree_add" ||
         cmd === "acknowledge_incoming_transfer_commit"
       ) {
@@ -2424,7 +2552,8 @@ describe("incoming transfer approval", () => {
         }),
       }),
     );
-  });
+    },
+  );
 
   it("imports a transferred codex rollout artifact before resuming", async () => {
     setActivePinia(createPinia());
@@ -2501,11 +2630,10 @@ describe("incoming transfer approval", () => {
       if (cmd === "read_env_var") {
         return "/Users/tester";
       }
-      if (
-        cmd === "ensure_directory" ||
-        cmd === "copy_file" ||
-        cmd === "acknowledge_incoming_transfer_commit"
-      ) {
+      if (cmd === "materialize_transfer_artifact") {
+        return true;
+      }
+      if (cmd === "acknowledge_incoming_transfer_commit") {
         return null;
       }
       if (cmd === "git_worktree_add") {
@@ -2525,13 +2653,15 @@ describe("incoming transfer approval", () => {
       transferId: "transfer-1",
       artifactId: "artifact-codex-rollout",
     });
-    expect(invokeMock).toHaveBeenCalledWith("ensure_directory", {
-      path: "/Users/tester/.codex/sessions/2026/04/18",
+    expect(invokeMock).toHaveBeenCalledWith("materialize_transfer_artifact", {
+      sourcePath: "/tmp/fetched-rollout.jsonl",
+      provider: "codex",
+      resumeSessionId: "019d9a8c-9f39-7240-818f-88367a7c31df",
+      filename: "rollout-2026-04-18T06-27-04-019d9a8c-9f39-7240-818f-88367a7c31df.jsonl",
+      kind: "session-rollout",
+      materialization: "copy-file",
     });
-    expect(invokeMock).toHaveBeenCalledWith("copy_file", {
-      src: "/tmp/fetched-rollout.jsonl",
-      dst: "/Users/tester/.codex/sessions/2026/04/18/rollout-2026-04-18T06-27-04-019d9a8c-9f39-7240-818f-88367a7c31df.jsonl",
-    });
+    expect(invokeMock).not.toHaveBeenCalledWith("copy_file", expect.anything());
     expect(invokeMock).toHaveBeenCalledWith(
       "spawn_session",
       expect.objectContaining({
@@ -2779,15 +2909,14 @@ describe("incoming transfer approval", () => {
       if (cmd === "read_env_var") {
         return "/Users/tester";
       }
+      if (cmd === "materialize_transfer_artifact") {
+        return true;
+      }
       if (
-        cmd === "ensure_directory" ||
         cmd === "git_worktree_add" ||
         cmd === "acknowledge_incoming_transfer_commit"
       ) {
         return null;
-      }
-      if (cmd === "run_script") {
-        return "";
       }
       if (cmd === "spawn_session") {
         return null;
@@ -2799,33 +2928,17 @@ describe("incoming transfer approval", () => {
     await flushBackgroundSetup();
 
     expect(localTaskId).toEqual(expect.any(String));
-    expect(invokeMock).toHaveBeenCalledWith("ensure_directory", {
-      path: "/Users/tester/.claude/tasks",
+    expect(invokeMock).toHaveBeenCalledWith("materialize_transfer_artifact", {
+      sourcePath: "/tmp/fetched-claude-session.tar.gz",
+      provider: "claude",
+      resumeSessionId: "364643cc-5e6d-48fc-86ca-ca7764380900",
+      filename: "claude-session.tar.gz",
+      kind: "session-archive",
+      materialization: "extract-tar-gz",
     });
-    expect(invokeMock).toHaveBeenCalledWith(
-      "run_script",
-      expect.objectContaining({
-        script: expect.stringContaining("mktemp -d"),
-        cwd: "/tmp/repo-1",
-        env: expect.objectContaining({
-          KANNA_WORKTREE: "1",
-        }),
-      }),
-    );
-    const claudeImportCall = invokeMock.mock.calls.find(([cmd, args]) =>
-      cmd === "run_script" &&
-      typeof args === "object" &&
-      args !== null &&
-      "script" in args &&
-      typeof args.script === "string" &&
-      args.script.includes("/tmp/fetched-claude-session.tar.gz"),
-    );
-    expect(claudeImportCall?.[1]).toMatchObject({
-      script: expect.stringContaining("mv "),
-    });
-    expect(JSON.stringify(claudeImportCall?.[1])).not.toContain(
-      "tar -xzf '/tmp/fetched-claude-session.tar.gz' -C '/Users/tester/.claude/tasks'",
-    );
+    expect(invokeMock).not.toHaveBeenCalledWith("run_script", expect.objectContaining({
+      script: expect.stringContaining("/tmp/fetched-claude-session.tar.gz"),
+    }));
     expect(invokeMock).toHaveBeenCalledWith(
       "spawn_session",
       expect.objectContaining({
@@ -2906,15 +3019,14 @@ describe("incoming transfer approval", () => {
       if (cmd === "read_env_var") {
         return "/Users/tester";
       }
+      if (cmd === "materialize_transfer_artifact") {
+        return true;
+      }
       if (
-        cmd === "ensure_directory" ||
         cmd === "git_worktree_add" ||
         cmd === "acknowledge_incoming_transfer_commit"
       ) {
         return null;
-      }
-      if (cmd === "run_script") {
-        return "";
       }
       if (cmd === "spawn_session") {
         return null;
@@ -2926,33 +3038,17 @@ describe("incoming transfer approval", () => {
     await flushBackgroundSetup();
 
     expect(localTaskId).toEqual(expect.any(String));
-    expect(invokeMock).toHaveBeenCalledWith("ensure_directory", {
-      path: "/Users/tester/.copilot/session-state",
+    expect(invokeMock).toHaveBeenCalledWith("materialize_transfer_artifact", {
+      sourcePath: "/tmp/fetched-copilot-session.tar.gz",
+      provider: "copilot",
+      resumeSessionId: "5fc2bd17-1d1b-4ae9-bed8-011fa4011100",
+      filename: "copilot-session.tar.gz",
+      kind: "session-archive",
+      materialization: "extract-tar-gz",
     });
-    expect(invokeMock).toHaveBeenCalledWith(
-      "run_script",
-      expect.objectContaining({
-        script: expect.stringContaining("mktemp -d"),
-        cwd: "/tmp/repo-1",
-        env: expect.objectContaining({
-          KANNA_WORKTREE: "1",
-        }),
-      }),
-    );
-    const copilotImportCall = invokeMock.mock.calls.find(([cmd, args]) =>
-      cmd === "run_script" &&
-      typeof args === "object" &&
-      args !== null &&
-      "script" in args &&
-      typeof args.script === "string" &&
-      args.script.includes("/tmp/fetched-copilot-session.tar.gz"),
-    );
-    expect(copilotImportCall?.[1]).toMatchObject({
-      script: expect.stringContaining("mv "),
-    });
-    expect(JSON.stringify(copilotImportCall?.[1])).not.toContain(
-      "tar -xzf '/tmp/fetched-copilot-session.tar.gz' -C '/Users/tester/.copilot/session-state'",
-    );
+    expect(invokeMock).not.toHaveBeenCalledWith("run_script", expect.objectContaining({
+      script: expect.stringContaining("/tmp/fetched-copilot-session.tar.gz"),
+    }));
     expect(invokeMock).toHaveBeenCalledWith(
       "spawn_session",
       expect.objectContaining({
@@ -3061,6 +3157,9 @@ describe("incoming transfer approval", () => {
       if (cmd === "read_env_var") {
         return "/Users/tester";
       }
+      if (cmd === "materialize_transfer_artifact") {
+        return false;
+      }
       if (
         cmd === "git_worktree_add" ||
         cmd === "acknowledge_incoming_transfer_commit"
@@ -3077,7 +3176,18 @@ describe("incoming transfer approval", () => {
     await flushBackgroundSetup();
 
     expect(localTaskId).toEqual(expect.any(String));
-    expect(invokeMock).not.toHaveBeenCalledWith("fetch_transfer_artifact", expect.anything());
+    expect(invokeMock).toHaveBeenCalledWith("fetch_transfer_artifact", {
+      transferId: "transfer-1",
+      artifactId,
+    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "materialize_transfer_artifact",
+      expect.objectContaining({
+        sourcePath: artifactPath,
+        provider,
+        resumeSessionId,
+      }),
+    );
     expect(invokeMock).not.toHaveBeenCalledWith("run_script", expect.anything());
     const spawnCall = invokeMock.mock.calls.find(([cmd]) => cmd === "spawn_session");
     expect(spawnCall).toBeTruthy();
@@ -3264,6 +3374,87 @@ describe("source transfer finalization", () => {
     expect(result.payload.task.source_task_id).toBe("task-source");
   });
 
+  it("stops finalization before snapshot persistence after delivery ownership is lost", async () => {
+    vi.useFakeTimers();
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const sourceItem = buildItem();
+    sourceItem.agent_session_id = "claude-session-owner-lost";
+    const outgoingPayload = buildOutgoingTransferPayload({
+      sourcePeerId: "peer-source",
+      sourceTaskId: sourceItem.id,
+      targetPeerId: "peer-target",
+      item: sourceItem,
+      repoPath: "/tmp/repo-1",
+      repoName: "repo-1",
+      repoDefaultBranch: "main",
+      repoRemoteUrl: null,
+      recovery: null,
+      artifacts: [],
+      targetHasRepo: true,
+      bundle: null,
+    });
+    const fakeDb = createTransferDb({
+      repos: [buildRepo()],
+      items: [sourceItem],
+      transfers: [{
+        id: "transfer-owner-lost",
+        direction: "outgoing",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: "peer-target",
+        source_task_id: sourceItem.id,
+        local_task_id: sourceItem.id,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(outgoingPayload),
+      }],
+    });
+    const updatePayload = vi.fn(async () => true);
+    updateDesktopServerClientHandlersForTests({
+      updateTaskTransferPayload: updatePayload,
+    });
+    await store.init(fakeDb);
+    store.repos = [buildRepo()];
+    store.items = [sourceItem];
+    invokeMock.mockImplementation(async (cmd) => {
+      if (cmd === "read_env_var") return "/Users/tester";
+      if (cmd === "file_exists") return true;
+      return null;
+    });
+
+    const assertOwnership = vi.fn(async (phase: string) => {
+      if (phase === "Claude archive staging") {
+        throw new Error("lifecycle delivery ownership was lost before archive staging");
+      }
+    });
+    const claimPhase = vi.fn(async () => true);
+    const finalizePromise = store.finalizeOutgoingTransfer("transfer-owner-lost", {
+      deliveryId: "lifecycle-finalization-lost",
+      assertOwnership,
+      claimPhase,
+    });
+    const rejection = expect(finalizePromise).rejects.toThrow("ownership was lost");
+    await vi.advanceTimersByTimeAsync(1500);
+
+    await rejection;
+    expect(invokeMock).toHaveBeenCalledWith("signal_session", {
+      sessionId: sourceItem.id,
+      signal: "SIGINT",
+    });
+    expect(claimPhase).toHaveBeenCalledWith("pty-finalization-signal");
+    expect(invokeMock).toHaveBeenCalledWith("remove_file", {
+      path: "/tmp/kanna-transfer-transfer-owner-lost-claude-session-lifecycle-finalization-lost.tar.gz",
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "stage_transfer_artifact",
+      expect.anything(),
+    );
+    expect(updatePayload).not.toHaveBeenCalled();
+  });
+
   it("preserves authenticated desktop identities while rebuilding the finalized payload", async () => {
     vi.useFakeTimers();
     setActivePinia(createPinia());
@@ -3324,6 +3515,78 @@ describe("outgoing transfer commit acknowledgment", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     loadSessionRecoveryStateMock.mockReset();
+  });
+
+  it("tombstones a replay whose completed transfer row was already compacted", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    await store.init(createTransferDb({}));
+    invokeMock.mockResolvedValue(null);
+
+    await store.handleOutgoingTransferCommitted({
+      transferId: "transfer-compacted",
+      sourceTaskId: "task-source",
+      destinationLocalTaskId: "task-imported",
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("mark_outgoing_transfer_commit_applied", {
+      transferId: "transfer-compacted",
+    });
+  });
+
+  it("does not complete a transfer when delivery ownership is lost during source closure", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const repo = buildRepo();
+    const sourceItem = buildItem(repo.id);
+    const fakeDb = createTransferDb({
+      repos: [repo],
+      items: [sourceItem],
+      transfers: [{
+        id: "transfer-owner-lost",
+        direction: "outgoing",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: "peer-target",
+        source_task_id: sourceItem.id,
+        local_task_id: sourceItem.id,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(buildIncomingTransferPayload()),
+      }],
+    });
+    const completeTransfer = vi.fn(async () => true);
+    updateDesktopServerClientHandlersForTests({
+      completeTaskTransfer: completeTransfer,
+    });
+    await store.init(fakeDb);
+    store.repos = [repo];
+    store.items = [sourceItem];
+    invokeMock.mockResolvedValue(null);
+    const assertOwnership = vi.fn(async (phase: string) => {
+      if (phase === "outgoing transfer completion") {
+        throw new Error("lifecycle delivery ownership was lost before completion");
+      }
+    });
+
+    await expect(store.handleOutgoingTransferCommitted({
+      transferId: "transfer-owner-lost",
+      sourceTaskId: sourceItem.id,
+      destinationLocalTaskId: "task-imported",
+    }, {
+      deliveryId: "lifecycle-commit-lost",
+      assertOwnership,
+    })).rejects.toThrow("ownership was lost");
+
+    expect(fakeDb.tables.pipeline_item[0]?.closed_at).not.toBeNull();
+    expect(completeTransfer).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "mark_outgoing_transfer_commit_applied",
+      expect.anything(),
+    );
   });
 
   it("marks the outgoing transfer completed and closes the source task", async () => {

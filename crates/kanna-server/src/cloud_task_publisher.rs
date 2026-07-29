@@ -6,6 +6,8 @@ use tokio::time::{Duration, Instant};
 
 const MAX_PUBLISH_ATTEMPTS: u8 = 3;
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
+const CLOUD_TASK_SCHEMA_V1: u8 = 1;
+const CLOUD_TASK_SCHEMA_V2: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,6 +20,18 @@ pub(crate) struct CloudTaskSnapshotEnvelope {
 impl CloudTaskSnapshotEnvelope {
     pub(crate) fn fingerprint(&self) -> String {
         serde_json::to_string(self).expect("cloud task snapshot must serialize")
+    }
+
+    fn for_publication_version(mut self, version: u8) -> Self {
+        if version == CLOUD_TASK_SCHEMA_V2 {
+            self.schema_version = CLOUD_TASK_SCHEMA_V2;
+            return self;
+        }
+        self.schema_version = CLOUD_TASK_SCHEMA_V1;
+        for task in &mut self.tasks {
+            task.transfer = CloudTransferSnapshot::none();
+        }
+        self
     }
 }
 
@@ -52,6 +66,8 @@ struct CloudTaskSnapshot {
     stage: String,
     activity: String,
     activity_revision: i64,
+    blocker_revision: i64,
+    transition_revision: Option<String>,
     status: String,
     has_running_post: bool,
     repo: CloudRepoSnapshot,
@@ -92,6 +108,17 @@ struct CloudTransferSnapshot {
     transfer_id: Option<String>,
     source_desktop_id: Option<String>,
     destination_desktop_id: Option<String>,
+}
+
+impl CloudTransferSnapshot {
+    fn none() -> Self {
+        Self {
+            state: "none".into(),
+            transfer_id: None,
+            source_desktop_id: None,
+            destination_desktop_id: None,
+        }
+    }
 }
 
 pub(crate) fn map_ui_snapshot(
@@ -142,7 +169,7 @@ pub(crate) fn map_ui_snapshot(
     });
 
     CloudTaskSnapshotEnvelope {
-        schema_version: 1,
+        schema_version: CLOUD_TASK_SCHEMA_V2,
         desktop: CloudDesktopSnapshot {
             display_name: truncate(desktop_name, 256),
             transfer: desktop_transfer,
@@ -212,6 +239,8 @@ fn map_task(
         stage: truncate(&item.stage, 64),
         activity: truncate(&item.activity, 32),
         activity_revision: item.activity_revision,
+        blocker_revision: item.blocker_revision,
+        transition_revision: item.transition_revision,
         status: status.into(),
         has_running_post: item.has_running_post != 0,
         repo: CloudRepoSnapshot {
@@ -239,31 +268,25 @@ fn map_task(
 }
 
 fn map_transfer(item: &SnapshotPipelineItem) -> CloudTransferSnapshot {
-    let none = || CloudTransferSnapshot {
-        state: "none".into(),
-        transfer_id: None,
-        source_desktop_id: None,
-        destination_desktop_id: None,
-    };
     let Some(transfer_id) = nonblank(item.transfer_id.as_deref()) else {
-        return none();
+        return CloudTransferSnapshot::none();
     };
     let Some(source_desktop_id) = nonblank(item.transfer_source_desktop_id.as_deref()) else {
-        return none();
+        return CloudTransferSnapshot::none();
     };
     let Some(destination_desktop_id) = nonblank(item.transfer_target_desktop_id.as_deref()) else {
-        return none();
+        return CloudTransferSnapshot::none();
     };
     let state = match (
         item.transfer_direction.as_deref(),
         item.transfer_status.as_deref(),
     ) {
         (Some("outgoing"), Some("pending" | "streaming")) => "outgoing",
-        (Some("incoming"), Some("pending" | "streaming" | "importing")) => "incoming",
+        (Some("incoming"), Some("pending" | "claimed" | "streaming" | "importing")) => "incoming",
         (Some("incoming"), Some("awaiting_acknowledgment")) if item.closed_at.is_none() => {
             "finalization_pending"
         }
-        _ => return none(),
+        _ => return CloudTransferSnapshot::none(),
     };
 
     CloudTransferSnapshot {
@@ -309,6 +332,7 @@ pub(crate) enum PublisherStep {
 #[derive(Debug)]
 pub(crate) struct PublisherState {
     authenticated: bool,
+    publication_version: u8,
     force_reconcile: bool,
     latest: Option<CloudTaskSnapshotEnvelope>,
     last_acked_fingerprint: Option<String>,
@@ -322,6 +346,7 @@ impl PublisherState {
     pub(crate) fn new() -> Self {
         Self {
             authenticated: false,
+            publication_version: CLOUD_TASK_SCHEMA_V1,
             force_reconcile: false,
             latest: None,
             last_acked_fingerprint: None,
@@ -332,8 +357,12 @@ impl PublisherState {
         }
     }
 
-    pub(crate) fn on_authenticated(&mut self) {
+    pub(crate) fn on_authenticated(&mut self, advertised_version: Option<u64>) {
         self.authenticated = true;
+        self.publication_version = match advertised_version {
+            Some(2) => CLOUD_TASK_SCHEMA_V2,
+            _ => CLOUD_TASK_SCHEMA_V1,
+        };
         self.force_reconcile = true;
         self.reconnect = false;
     }
@@ -373,7 +402,11 @@ impl PublisherState {
             Some((_, attempt)) => attempt,
             None => 1,
         };
-        let Some(snapshot) = self.latest.clone() else {
+        let Some(snapshot) = self
+            .latest
+            .clone()
+            .map(|snapshot| snapshot.for_publication_version(self.publication_version))
+        else {
             return PublisherStep::Wait;
         };
         let fingerprint = snapshot.fingerprint();
@@ -481,6 +514,8 @@ mod tests {
                     agent_provider: "codex".into(),
                     activity: activity.into(),
                     activity_revision: 7,
+                    blocker_revision: 11,
+                    transition_revision: Some("run-7".into()),
                     activity_changed_at: Some("2026-07-14 01:02:03".into()),
                     unread_at: None,
                     port_offset: None,
@@ -516,7 +551,7 @@ mod tests {
         let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("working"));
         let json = serde_json::to_value(snapshot).unwrap();
 
-        assert_eq!(json["schemaVersion"], 1);
+        assert_eq!(json["schemaVersion"], 2);
         assert_eq!(json["desktop"]["displayName"], "Studio Mac");
         assert_eq!(json["tasks"][0]["ownerDesktopId"], "desktop-1");
         assert_eq!(json["tasks"][0]["ownerLocalTaskId"], "task-1");
@@ -529,6 +564,8 @@ mod tests {
         );
         assert_eq!(json["tasks"][0]["activity"], "working");
         assert_eq!(json["tasks"][0]["activityRevision"], 7);
+        assert_eq!(json["tasks"][0]["blockerRevision"], 11);
+        assert_eq!(json["tasks"][0]["transitionRevision"], "run-7");
         assert_eq!(json["tasks"][0]["hasRunningPost"], false);
         assert_eq!(json["tasks"][0]["waitingPromptSnippet"], "Ready for review");
         assert_eq!(json["tasks"][0]["status"], "blocked");
@@ -776,7 +813,7 @@ mod tests {
         let idle = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("idle"));
         let working = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("working"));
         let mut state = PublisherState::new();
-        state.on_authenticated();
+        state.on_authenticated(Some(2));
         state.observe(idle);
 
         let PublisherStep::Publish(first) = state.next_step(now) else {
@@ -792,10 +829,34 @@ mod tests {
     }
 
     #[test]
+    fn publisher_downconverts_transfer_state_for_v1_or_unknown_relays() {
+        let now = Instant::now();
+
+        for advertised_version in [None, Some(1), Some(99)] {
+            let mut source = ui_snapshot("idle");
+            let item = &mut source.entries[0].items[0];
+            item.transfer_id = Some("transfer-1".into());
+            item.transfer_direction = Some("outgoing".into());
+            item.transfer_status = Some("streaming".into());
+            item.transfer_source_desktop_id = Some("desktop-a".into());
+            item.transfer_target_desktop_id = Some("desktop-b".into());
+            let mut state = PublisherState::new();
+            state.on_authenticated(advertised_version);
+            state.observe(map_ui_snapshot("desktop-1", "Studio Mac", source));
+            let PublisherStep::Publish(request) = state.next_step(now) else {
+                panic!("expected compatibility publication");
+            };
+            let json = serde_json::to_value(request.snapshot).unwrap();
+            assert_eq!(json["schemaVersion"], 1);
+            assert_eq!(json["tasks"][0]["transfer"]["state"], "none");
+        }
+    }
+
+    #[test]
     fn publisher_retries_with_backoff_then_requests_reconnect() {
         let now = Instant::now();
         let mut state = PublisherState::new();
-        state.on_authenticated();
+        state.on_authenticated(Some(2));
         state.observe(map_ui_snapshot(
             "desktop-1",
             "Studio Mac",
@@ -823,7 +884,7 @@ mod tests {
         let now = Instant::now();
         let snapshot = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("idle"));
         let mut state = PublisherState::new();
-        state.on_authenticated();
+        state.on_authenticated(Some(2));
         state.observe(snapshot.clone());
         let PublisherStep::Publish(first) = state.next_step(now) else {
             panic!("expected first")
@@ -832,7 +893,7 @@ mod tests {
         assert!(matches!(state.next_step(now), PublisherStep::Wait));
 
         state.on_disconnected();
-        state.on_authenticated();
+        state.on_authenticated(Some(2));
         state.observe(snapshot);
         assert!(matches!(state.next_step(now), PublisherStep::Publish(_)));
     }
@@ -841,7 +902,7 @@ mod tests {
     fn publisher_times_out_an_unacknowledged_request_and_retries() {
         let now = Instant::now();
         let mut state = PublisherState::new();
-        state.on_authenticated();
+        state.on_authenticated(Some(2));
         state.observe(map_ui_snapshot(
             "desktop-1",
             "Studio Mac",
@@ -864,7 +925,7 @@ mod tests {
         let idle = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("idle"));
         let working = map_ui_snapshot("desktop-1", "Studio Mac", ui_snapshot("working"));
         let mut state = PublisherState::new();
-        state.on_authenticated();
+        state.on_authenticated(Some(2));
         state.observe(idle);
 
         let PublisherStep::Publish(abandoned) = state.next_step(now) else {
@@ -877,7 +938,7 @@ mod tests {
         ));
 
         state.on_disconnected();
-        state.on_authenticated();
+        state.on_authenticated(Some(2));
         let PublisherStep::Publish(reconnected) = state.next_step(now + Duration::from_secs(16))
         else {
             panic!("expected reconnect reconciliation")

@@ -64,6 +64,10 @@ export function createLanTransport(
   options: { deviceCredentials?: LanDeviceCredentials | null } = {}
 ): KannaTransport {
   const deviceCredentials = options.deviceCredentials ?? null;
+  let kspStreamVersion: 1 | 2 = 1;
+  const streamCredential = deviceCredentials
+    ? JSON.stringify(deviceCredentials)
+    : undefined;
   const credentialHeaders = (): Record<string, string> =>
     deviceCredentials
       ? {
@@ -98,7 +102,11 @@ export function createLanTransport(
   };
 
   return {
-    getStatus: () => request<MobileServerStatus>("/v1/status"),
+    getStatus: async () => {
+      const status = await request<MobileServerStatus>("/v1/status");
+      kspStreamVersion = status.kspStreamVersion === 2 ? 2 : 1;
+      return status;
+    },
     async listDesktops() {
       const desktops = await request<DesktopDescriptor[]>("/v1/desktops");
       return desktops.map(mapDesktopSummary);
@@ -201,7 +209,8 @@ export function createLanTransport(
     },
     observeTaskTerminal(taskId, listener) {
       const client = new StreamClient({
-        url: buildKspWebSocketUrl(baseUrl),
+        url: buildKspWebSocketUrl(baseUrl, kspStreamVersion),
+        credential: streamCredential,
         webSocketFactory: (url) => createSocket(url) as unknown as StreamWebSocketLike,
         reconnectDelaysMs: [250, 500, 1000, 2000]
       });
@@ -234,7 +243,8 @@ export function createLanTransport(
     },
     observeTaskAgent(taskId, listener) {
       const client = new StreamClient({
-        url: buildKspWebSocketUrl(baseUrl),
+        url: buildKspWebSocketUrl(baseUrl, kspStreamVersion),
+        credential: streamCredential,
         webSocketFactory: (url) => createSocket(url) as unknown as StreamWebSocketLike,
         reconnectDelaysMs: [250, 500, 1000, 2000]
       });
@@ -274,7 +284,8 @@ export function createLanTransport(
     },
     observeTaskCompanion(taskId, listener) {
       const client = new StreamClient({
-        url: buildKspWebSocketUrl(baseUrl),
+        url: buildKspWebSocketUrl(baseUrl, kspStreamVersion),
+        credential: streamCredential,
         webSocketFactory: (url) => createSocket(url) as unknown as StreamWebSocketLike,
         reconnectDelaysMs: [250, 500, 1000, 2000]
       });
@@ -315,10 +326,13 @@ export function buildTaskDiffQuery(request?: TaskDiffRequest): string {
   return `?scope=${encodeURIComponent(request.scope)}&mode=${encodeURIComponent(request.mode)}`;
 }
 
-function buildKspWebSocketUrl(baseUrl: string): string {
+function buildKspWebSocketUrl(
+  baseUrl: string,
+  streamVersion: 1 | 2
+): string {
   const url = new URL(baseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.pathname = "/v1/stream";
+  url.pathname = `/v${streamVersion}/stream`;
   url.search = "";
   return url.toString();
 }

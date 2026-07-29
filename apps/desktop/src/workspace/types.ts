@@ -54,6 +54,8 @@ export interface WorkspaceTaskSource {
   taskId: string;
   repoId: string;
   updatedAt: string;
+  blockerRevision?: number;
+  transitionRevision?: string | null;
   terminalRef?: DesktopCloudTerminalRef;
   blockedByTaskIds: string[];
 }

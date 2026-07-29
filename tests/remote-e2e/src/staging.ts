@@ -78,6 +78,7 @@ export function stagingServerTomlLines(input: {
   kannaCliPath: string;
   lanPort: number;
   pairingStorePath: string;
+  transferPort: number;
 }): string[] {
   return [
     `relay_url = "${STAGING_RELAY_URL}"`,
@@ -92,6 +93,7 @@ export function stagingServerTomlLines(input: {
     `environment = "staging"`,
     `lan_host = "127.0.0.1"`,
     `lan_port = ${input.lanPort}`,
+    `transfer_port = ${input.transferPort}`,
     `pairing_store_path = "${shellTomlString(input.pairingStorePath)}"`
   ];
 }

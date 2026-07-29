@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS pipeline_item (
     agent_provider TEXT NOT NULL DEFAULT 'claude',
     activity TEXT NOT NULL DEFAULT 'idle',
     activity_revision INTEGER NOT NULL DEFAULT 0,
+    blocker_revision INTEGER NOT NULL DEFAULT 0,
     activity_changed_at TEXT,
     unread_at TEXT,
     port_offset INTEGER,

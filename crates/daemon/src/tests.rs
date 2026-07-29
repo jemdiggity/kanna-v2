@@ -365,18 +365,24 @@ fn attach_cutover_holds_fanout_lock_across_snapshot_and_registration() {
     let snapshot_index = attach_body
         .find("session.snapshot(&session_id)")
         .expect("attach cutover should take the authoritative snapshot");
+    let incarnation_guard_index = attach_body
+        .find("registration_is_current(&sessions, &fanouts")
+        .expect("attach cutover should revalidate the exact session and fanout incarnation");
     let register_index = attach_body
         .find("fanout_state.register(")
         .expect("attach cutover should register the subscriber");
-    let unlock_index = attach_body
-        .find("drop(fanout_state)")
-        .expect("attach cutover should release the fanout lock explicitly");
+    let unlock_index = register_index
+        + attach_body[register_index..]
+            .find("drop(fanout_state)")
+            .expect("attach cutover should release the fanout lock explicitly");
 
     assert!(
         fanout_lock_index < snapshot_index
+            && snapshot_index < incarnation_guard_index
+            && incarnation_guard_index < register_index
             && snapshot_index < register_index
             && register_index < unlock_index,
-        "the snapshot and subscriber registration must both happen under the \
+        "the snapshot, exact-incarnation guard, and subscriber registration must happen under the \
          session fanout lock so the ingestion loop (which holds it across \
          mirror -> enqueue) cannot interleave a chunk between them",
     );
@@ -1013,6 +1019,7 @@ async fn agent_input_rejects_resume_while_reservation_is_held() {
     let (_server_read, server_write) = server.into_split();
     let writer: kanna_daemon::agent::AgentClientWriter = Arc::new(Mutex::new(server_write));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
+    let daemon_lifecycle = crate::daemon_lifecycle::new_daemon_lifecycle();
 
     crate::agent_runtime::handle_agent_input(
         "sess".to_string(),
@@ -1020,6 +1027,7 @@ async fn agent_input_rejects_resume_while_reservation_is_held() {
         writer,
         broadcast_tx,
         agents.clone(),
+        daemon_lifecycle,
     )
     .await;
 
@@ -1097,6 +1105,7 @@ async fn concurrent_spawn_agent_creates_exactly_one_session() {
     let dir = temp_daemon_dir("agent-create-race");
     let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(64);
+    let daemon_lifecycle = crate::daemon_lifecycle::new_daemon_lifecycle();
 
     let (writer_a, mut reader_a) = agent_client_writer();
     let (writer_b, mut reader_b) = agent_client_writer();
@@ -1108,6 +1117,7 @@ async fn concurrent_spawn_agent_creates_exactly_one_session() {
             broadcast_tx.clone(),
             agents.clone(),
             dir.clone(),
+            daemon_lifecycle.clone(),
         )
     };
     tokio::join!(spawn(writer_a), spawn(writer_b));
@@ -1375,6 +1385,7 @@ async fn forged_agent_handoff_cannot_target_unrelated_processes() {
         agents.clone(),
         broadcast_tx.clone(),
         dir.clone(),
+        crate::daemon_lifecycle::new_daemon_lifecycle(),
     )
     .await;
 
@@ -1446,6 +1457,7 @@ async fn legacy_handoff_without_identity_keeps_live_agents_killable() {
         agents.clone(),
         broadcast_tx.clone(),
         dir.clone(),
+        crate::daemon_lifecycle::new_daemon_lifecycle(),
     )
     .await;
 
@@ -1896,6 +1908,7 @@ async fn rejected_duplicate_spawn_does_not_contaminate_the_winners_journal() {
     let _serial = crate::agent_runtime::seal_test_serializer().lock().await;
     let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
     let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(64);
+    let daemon_lifecycle = crate::daemon_lifecycle::new_daemon_lifecycle();
 
     let (writer_a, mut reader_a) = agent_client_writer();
     let (writer_b, mut reader_b) = agent_client_writer();
@@ -1909,6 +1922,7 @@ async fn rejected_duplicate_spawn_does_not_contaminate_the_winners_journal() {
             broadcast_tx.clone(),
             agents.clone(),
             dir.clone(),
+            daemon_lifecycle.clone(),
         )
     };
     tokio::join!(spawn(writer_a, "prompt-a"), spawn(writer_b, "prompt-b"));
@@ -2255,6 +2269,7 @@ async fn a_pty_exit_during_a_sealed_handoff_defers_to_the_transfer_outcome() {
     let terminal_emulator_clients: TerminalEmulatorClients = Arc::new(Mutex::new(HashMap::new()));
     let session_sizes: SessionSizes = Arc::new(Mutex::new(HashMap::new()));
     let recovery_manager = kanna_daemon::recovery::RecoveryManager::start().await;
+    let daemon_lifecycle = crate::daemon_lifecycle::new_daemon_lifecycle();
 
     // The snapshot has been taken and the fd sent; the transfer is in flight.
     let _epoch = sessions.lock().await.seal_for_handoff();
@@ -2270,6 +2285,7 @@ async fn a_pty_exit_during_a_sealed_handoff_defers_to_the_transfer_outcome() {
         sessions.clone(),
         session_sizes.clone(),
         recovery_manager.clone(),
+        daemon_lifecycle,
         handle.clone(),
     ));
 

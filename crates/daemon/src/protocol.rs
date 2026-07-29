@@ -802,6 +802,48 @@ mod tests {
     }
 
     #[test]
+    fn handoff_retry_error_decodes_with_previous_error_code_schema() {
+        #[derive(Debug, Deserialize, PartialEq, Eq)]
+        #[serde(rename_all = "snake_case")]
+        enum PreviousErrorCode {
+            SessionNotFound,
+            SessionAlreadyExists,
+            HandoffLost,
+            HandoffVersionMismatch,
+            PtySpawnFailed,
+            PtyCloneFailed,
+            HeadlessTerminalInitFailed,
+            WriteFailed,
+            UnknownSignal,
+            AgentSpawnFailed,
+            NotAgentSession,
+            UnknownPermissionRequest,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(tag = "type")]
+        enum PreviousEvent {
+            Error {
+                code: Option<PreviousErrorCode>,
+                message: String,
+            },
+        }
+
+        let json = serde_json::to_string(&Event::Error {
+            code: None,
+            message: "daemon handoff already committed; retry against the adopting daemon"
+                .to_string(),
+        })
+        .unwrap();
+        match serde_json::from_str::<PreviousEvent>(&json).unwrap() {
+            PreviousEvent::Error { code, message } => {
+                assert_eq!(code, None);
+                assert!(message.contains("retry against the adopting daemon"));
+            }
+        }
+    }
+
+    #[test]
     fn test_session_info_roundtrip() {
         let info = SessionInfo {
             session_id: "s1".to_string(),

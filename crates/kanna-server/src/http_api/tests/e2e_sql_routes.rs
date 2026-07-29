@@ -197,7 +197,13 @@ async fn e2e_mobile_controls_gate_direct_lan_but_preserve_tunneled_transport() {
         .unwrap();
     assert_eq!(direct_response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-    let tunneled = super::dispatch_http_invoke(state, "GET", "/v1/status", json!(null)).await;
+    let tunneled = crate::http_api::dispatch_authenticated_http_invoke(
+        state,
+        "GET",
+        "/v1/status",
+        json!(null),
+    )
+    .await;
     assert_eq!(tunneled.status, StatusCode::OK.as_u16());
     assert_eq!(tunneled.error, None);
     assert_eq!(
@@ -209,6 +215,7 @@ async fn e2e_mobile_controls_gate_direct_lan_but_preserve_tunneled_transport() {
             "version": "test-version",
             "environment": "development",
             "serverVersion": "test-version",
+            "kspStreamVersion": 2,
             "lanHost": "0.0.0.0",
             "lanPort": 48120,
             "pairingCode": null

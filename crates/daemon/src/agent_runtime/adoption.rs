@@ -7,6 +7,7 @@ use kanna_daemon::protocol::{self, SessionStatus};
 
 use super::readers::start_agent_readers;
 use super::{log_error, log_info, log_warn};
+use crate::daemon_lifecycle::DaemonLifecycle;
 
 /// Authenticate EVERY descriptor in a transferred agent bundle against the
 /// claimed child pid — never just the first one.
@@ -67,6 +68,7 @@ pub async fn adopt_agent_session(
     agents: AgentSessions,
     broadcast_tx: broadcast::Sender<String>,
     data_dir: std::path::PathBuf,
+    daemon_lifecycle: DaemonLifecycle,
 ) {
     use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -253,7 +255,7 @@ pub async fn adopt_agent_session(
         record.shared.clone(),
     );
     agents.lock().await.insert(info.session_id, record);
-    start_agent_readers(life, stdout, stderr, agents, broadcast_tx);
+    start_agent_readers(life, stdout, stderr, agents, broadcast_tx, daemon_lifecycle);
 }
 
 #[cfg(test)]

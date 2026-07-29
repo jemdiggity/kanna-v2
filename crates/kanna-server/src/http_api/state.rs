@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::pairing::{self, ActivePairingSession};
 use kanna_agent_protocol::{ServerFrame, StateChangeScope};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 #[cfg(debug_assertions)]
 use std::sync::atomic::AtomicBool;
@@ -11,6 +11,13 @@ use tokio::sync::{broadcast, Mutex, Notify};
 
 #[derive(Clone, Copy)]
 pub(super) struct TunneledHttpInvoke;
+
+/// Marker for an in-process HTTP invoke whose caller was authenticated before
+/// the request entered the Axum router (for example, an authenticated relay
+/// tunnel). This is deliberately distinct from `TunneledHttpInvoke`: the
+/// latter records transport provenance but grants no authority by itself.
+#[derive(Clone, Copy)]
+pub(super) struct AuthenticatedHttpInvoke;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -23,6 +30,7 @@ pub struct AppState {
     pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
     requested_task_operations: Arc<RequestedTaskOperations>,
     relay_reconnect: Arc<Notify>,
+    requested_task_mutations: Arc<RequestedTaskMutations>,
     state_changes: broadcast::Sender<ServerFrame>,
     #[cfg(test)]
     pub(super) task_creator: Option<TestTaskCreator>,
@@ -50,9 +58,26 @@ struct RequestedTaskOperations {
     changed: Notify,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RequestedTaskMutationKind {
+    Advance,
+    Other,
+}
+
+#[derive(Default)]
+struct RequestedTaskMutations {
+    active: StdMutex<HashMap<String, RequestedTaskMutationKind>>,
+    changed: Notify,
+}
+
 pub(super) struct RequestedTaskOperation {
     task_id: String,
     operations: Arc<RequestedTaskOperations>,
+}
+
+pub(super) struct RequestedTaskMutation {
+    task_id: String,
+    mutations: Arc<RequestedTaskMutations>,
 }
 
 impl Drop for RequestedTaskOperation {
@@ -63,6 +88,17 @@ impl Drop for RequestedTaskOperation {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&self.task_id);
         self.operations.changed.notify_waiters();
+    }
+}
+
+impl Drop for RequestedTaskMutation {
+    fn drop(&mut self) {
+        self.mutations
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.task_id);
+        self.mutations.changed.notify_waiters();
     }
 }
 
@@ -175,6 +211,7 @@ impl AppState {
             repo_definitions: Arc::new(crate::task_creator::RepoDefinitionsCache::default()),
             requested_task_operations: Arc::new(RequestedTaskOperations::default()),
             relay_reconnect: Arc::new(Notify::new()),
+            requested_task_mutations: Arc::new(RequestedTaskMutations::default()),
             state_changes: broadcast::channel(256).0,
             #[cfg(test)]
             task_creator: None,
@@ -255,7 +292,8 @@ impl AppState {
 
     pub(super) async fn begin_requested_task_abort(&self, task_id: &str) -> RequestedTaskOperation {
         loop {
-            let changed = self.requested_task_operations.changed.notified();
+            let mut changed = Box::pin(self.requested_task_operations.changed.notified());
+            changed.as_mut().enable();
             {
                 let mut active = self
                     .requested_task_operations
@@ -266,6 +304,60 @@ impl AppState {
                     return RequestedTaskOperation {
                         task_id: task_id.to_string(),
                         operations: Arc::clone(&self.requested_task_operations),
+                    };
+                }
+            }
+            changed.await;
+        }
+    }
+
+    pub(super) async fn begin_requested_stage_advance(
+        &self,
+        task_id: &str,
+    ) -> Option<RequestedTaskMutation> {
+        loop {
+            let mut changed = Box::pin(self.requested_task_mutations.changed.notified());
+            changed.as_mut().enable();
+            {
+                let mut active = self
+                    .requested_task_mutations
+                    .active
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match active.get(task_id) {
+                    Some(RequestedTaskMutationKind::Advance) => return None,
+                    Some(RequestedTaskMutationKind::Other) => {}
+                    None => {
+                        active.insert(task_id.to_string(), RequestedTaskMutationKind::Advance);
+                        return Some(RequestedTaskMutation {
+                            task_id: task_id.to_string(),
+                            mutations: Arc::clone(&self.requested_task_mutations),
+                        });
+                    }
+                }
+            }
+            changed.await;
+        }
+    }
+
+    pub(super) async fn begin_requested_task_mutation(
+        &self,
+        task_id: &str,
+    ) -> RequestedTaskMutation {
+        loop {
+            let mut changed = Box::pin(self.requested_task_mutations.changed.notified());
+            changed.as_mut().enable();
+            {
+                let mut active = self
+                    .requested_task_mutations
+                    .active
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !active.contains_key(task_id) {
+                    active.insert(task_id.to_string(), RequestedTaskMutationKind::Other);
+                    return RequestedTaskMutation {
+                        task_id: task_id.to_string(),
+                        mutations: Arc::clone(&self.requested_task_mutations),
                     };
                 }
             }

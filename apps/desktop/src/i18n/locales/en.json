@@ -12,6 +12,7 @@
     "loadingOptions": "Loading task options…",
     "blockedBy": "Blocked by",
     "blockedByNone": "None",
+    "taskId": "Task {id}",
     "untitled": "Untitled",
     "renameTask": "Rename Task"
   },

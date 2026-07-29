@@ -56,6 +56,7 @@ export interface RemoteHarness {
     functions: number;
     relay: number;
     server: number;
+    transfer: number;
     ui: number;
   };
   relayUrl: string;
@@ -87,6 +88,7 @@ async function allocatePorts(): Promise<RemoteHarness["ports"]> {
     functions: await findFreePort(),
     relay: await findFreePort(),
     server: await findFreePort(),
+    transfer: await findFreePort(),
     ui: await findFreePort()
   };
 }
@@ -217,7 +219,8 @@ async function writeServerConfig(input: {
         deviceToken: input.stagingCredentials?.deviceToken ?? "",
         kannaCliPath: remoteHarnessKannaCliPath(input.repoRoot),
         lanPort: input.ports.server,
-        pairingStorePath: join(input.daemonDir, "pairings.json")
+        pairingStorePath: join(input.daemonDir, "pairings.json"),
+        transferPort: input.ports.transfer
       })
     : [
         `relay_url = "ws://127.0.0.1:${input.ports.relay}"`,
@@ -235,6 +238,7 @@ async function writeServerConfig(input: {
         `environment = "development"`,
         `lan_host = "${shellTomlString(input.lanHost)}"`,
         `lan_port = ${input.ports.server}`,
+        `transfer_port = ${input.ports.transfer}`,
         `pairing_store_path = "${shellTomlString(join(input.daemonDir, "pairings.json"))}"`
       ];
   await writeFile(

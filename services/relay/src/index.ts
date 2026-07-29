@@ -230,11 +230,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         return;
       }
 
-      if (
-        role === "server"
-        && desktopId
-        && serverAuthProof?.kind === "desktop"
-      ) {
+      if (role === "server" && desktopId && serverAuthProof?.kind === "desktop") {
         try {
           if (!await revalidateServerAuth(serverAuthProof, userId, desktopId)) {
             clearTimeout(authTimer);
@@ -268,7 +264,19 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       }
 
       // Send auth success
-      ws.send(JSON.stringify({ type: "auth_ok", userId }));
+      ws.send(JSON.stringify({
+        type: "auth_ok",
+        userId,
+        capabilities: {
+          tunnelServices: ["ksp", "task-transfer"],
+          ...(serverAuthProof?.kind === "desktop" ? {
+            taskSnapshotPublication: {
+              version: 2,
+              authModes: ["desktop-secret"],
+            },
+          } : {}),
+        },
+      }));
       console.log(
         `[ws] Authenticated ${role} for user ${userId} from ${remoteAddr}`
       );
@@ -304,6 +312,10 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             ...(error ? { error } : {}),
           }));
         };
+        if (serverAuthProof?.kind !== "desktop") {
+          sendAck(false, "desktop-secret authentication is required for task snapshot publication");
+          return;
+        }
         if (
           !id
           || !generation
@@ -312,7 +324,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           sendAck(false, "task snapshot publication is malformed or oversized");
           return;
         }
-        if (!desktopId || !serverAuthProof || !await revalidateServerAuth(
+        if (!desktopId || !await revalidateServerAuth(
           serverAuthProof,
           userId!,
           desktopId,

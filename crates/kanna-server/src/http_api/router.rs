@@ -6,8 +6,8 @@ use super::desktop::list_desktops;
 use super::e2e_mobile_controls::{gate_direct_lan_http, update_e2e_mobile_machine_controls};
 #[cfg(debug_assertions)]
 use super::e2e_sql::{execute_e2e_server_work, execute_e2e_sql};
-use super::ksp::ksp_stream;
-use super::lan_trust::attach_trusted_lan_device;
+use super::ksp::{ksp_stream, legacy_ksp_stream};
+use super::lan_trust::{attach_trusted_lan_device, require_privileged_task_access};
 use super::operator_events::post_operator_events;
 use super::pairing::{claim_pairing_session, create_pairing_session};
 use super::repo_commands::{list_repo_commands, run_repo_command};
@@ -19,7 +19,7 @@ use super::repos::{
 use super::settings::{delete_setting, get_setting, put_cloud_transfer_identity, put_setting};
 use super::signal_agent::signal_agent;
 use super::snapshot::get_snapshot;
-use super::state::{AppState, HttpInvokeResponse, TunneledHttpInvoke};
+use super::state::{AppState, AuthenticatedHttpInvoke, HttpInvokeResponse, TunneledHttpInvoke};
 use super::status::status;
 use super::task_actions::{
     abort_task_creation, advance_stage, close_task, complete_stage, pin_task, reopen_task,
@@ -44,7 +44,7 @@ use super::transfers::{
     list_incoming_transfer_cleanup_candidates, list_pending_incoming_transfers,
     mark_incoming_transfer_awaiting_acknowledgment, mark_incoming_transfer_importing,
     mark_incoming_transfer_sidecar_cleanup_completed, reject_task_transfer,
-    set_task_cloud_identity, update_task_transfer_payload,
+    renew_incoming_transfer_claim, set_task_cloud_identity, update_task_transfer_payload,
 };
 use super::window_workspace::mutate_window_workspace;
 use axum::body::Body;
@@ -80,7 +80,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/operator-events", post(post_operator_events))
         .route("/v1/analytics/repos/{repo_id}", get(get_repo_analytics))
-        .route("/v1/stream", get(ksp_stream))
+        .route("/v1/stream", get(legacy_ksp_stream))
+        .route("/v2/stream", get(ksp_stream))
         .route("/v1/desktops", get(list_desktops))
         .route("/v1/repos", get(list_repos).post(add_repo))
         .route("/v1/repos/by-path", get(get_repo_by_path))
@@ -233,6 +234,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(claim_pending_incoming_transfer),
         )
         .route(
+            "/v1/transfers/{transfer_id}/actions/renew-claim",
+            post(renew_incoming_transfer_claim),
+        )
+        .route(
             "/v1/transfers/{transfer_id}/actions/fail",
             post(fail_pending_incoming_transfer),
         )
@@ -259,6 +264,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     router
         .layer(CorsLayer::permissive())
         .layer(axum::middleware::from_fn(log_error_responses))
+        .layer(axum::middleware::from_fn(require_privileged_task_access))
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
             attach_trusted_lan_device,
@@ -385,6 +391,7 @@ async fn dispatch_http_invoke_with_access(
         .insert(axum::extract::ConnectInfo(invoke_peer));
     request.extensions_mut().insert(TunneledHttpInvoke);
     if authenticated_file_access {
+        request.extensions_mut().insert(AuthenticatedHttpInvoke);
         request
             .extensions_mut()
             .insert(super::task_files::AuthenticatedTaskFileAccess);

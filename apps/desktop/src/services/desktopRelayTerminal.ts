@@ -52,6 +52,10 @@ export interface MarkRemoteTaskReadOptions extends RemoteTerminalActionOptions {
   expectedActivityRevision: number;
 }
 
+export interface AdvanceRemoteTaskStageOptions extends RemoteTerminalActionOptions {
+  expectedTransitionRevision?: string;
+}
+
 export interface SendRemoteTerminalInputOptions extends RemoteTerminalActionOptions {
   data: string;
 }
@@ -76,7 +80,7 @@ export interface DesktopRelayTerminalClient {
   sendInput(options: SendRemoteTerminalInputOptions): Promise<void>;
   resize(options: ResizeRemoteTerminalOptions): Promise<void>;
   closeTask(options: RemoteTerminalActionOptions): Promise<void>;
-  advanceStage(options: RemoteTerminalActionOptions): Promise<void>;
+  advanceStage(options: AdvanceRemoteTaskStageOptions): Promise<void>;
   readTaskFile(options: ReadRemoteTaskFileOptions): Promise<RemoteTaskFileContent>;
   markTaskRead(options: MarkRemoteTaskReadOptions): Promise<void>;
 }
@@ -203,10 +207,13 @@ export function createDesktopRelayTerminalClient({
       assertSuccessfulTaskAction(response, "task close");
     },
     async advanceStage(options) {
+      const body = options.expectedTransitionRevision
+        ? { expectedTransitionRevision: options.expectedTransitionRevision }
+        : {};
       const response = await clientForDesktop(options.desktopId).request(
         "POST",
         `/v1/tasks/${encodeURIComponent(options.taskId)}/actions/advance-stage`,
-        null,
+        body,
       );
       assertSuccessfulTaskAction(response, "stage advance");
     },
@@ -226,11 +233,12 @@ export function createDesktopRelayTerminalClient({
       return { path: body.path, content: body.content };
     },
     async markTaskRead(options) {
-      await clientForDesktop(options.desktopId).request(
+      const response = await clientForDesktop(options.desktopId).request(
         "POST",
         `/v1/tasks/${encodeURIComponent(options.taskId)}/actions/mark-read`,
         { expectedActivityRevision: options.expectedActivityRevision },
       );
+      assertSuccessfulTaskAction(response, "mark read");
     },
   };
 }

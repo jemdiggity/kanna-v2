@@ -40,6 +40,8 @@ export interface PipelineItem {
   agent_provider: AgentProvider;
   activity: "working" | "unread" | "idle";
   activity_revision?: number;
+  blocker_revision?: number;
+  transition_revision?: string | null;
   activity_changed_at: string | null;
   unread_at: string | null;
   port_offset: number | null;
@@ -71,7 +73,9 @@ export type BlockerTaskStates = Record<string, BlockerTaskState>;
 export type BlockerDisplayItem = Pick<
   PipelineItem,
   "id" | "display_name" | "issue_title" | "prompt" | "closed_at" | "stage" | "pr_url"
->;
+> & {
+  fallback_task_id?: string;
+};
 
 export interface TaskPort {
   port: number;
@@ -82,7 +86,7 @@ export interface TaskPort {
 export interface TaskTransfer {
   id: string;
   direction: "incoming" | "outgoing";
-  status: "pending" | "streaming" | "importing" | "awaiting_acknowledgment" | "completed" | "failed" | "rejected";
+  status: "pending" | "claimed" | "streaming" | "importing" | "awaiting_acknowledgment" | "completed" | "failed" | "rejected";
   source_peer_id: string | null;
   target_peer_id: string | null;
   source_desktop_id: string | null;
@@ -93,6 +97,8 @@ export interface TaskTransfer {
   completed_at: string | null;
   error: string | null;
   payload_json: string | null;
+  claim_owner_token?: string | null;
+  claim_expires_at?: string | null;
 }
 
 export interface DbHandle {

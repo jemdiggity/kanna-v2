@@ -1,8 +1,8 @@
 use super::events::{RuntimeError, RuntimeEvent};
 use super::state::ListenerContext;
 use super::utils::{
-    ensure_peer_is_trusted_for, parse_peer_response_line, parse_peer_terminal_event_line,
-    peer_terminal_event_session_id, unexpected_peer_response, write_json_line,
+    parse_peer_response_line, parse_peer_terminal_event_line, peer_terminal_event_session_id,
+    unexpected_peer_response, write_json_line,
 };
 use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalEvent};
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
@@ -21,7 +21,9 @@ pub(super) async fn stream_peer_session(
     request_id: String,
     requester_peer_id: String,
     session_id: String,
-    incoming_sender: mpsc::UnboundedSender<RuntimeEvent>,
+    sealed_payload: String,
+    observer_lease_id: String,
+    incoming_sender: mpsc::Sender<RuntimeEvent>,
 ) -> Result<(), RuntimeError> {
     let mut stream = TcpStream::connect(&peer.endpoint).await?;
     write_json_line(
@@ -30,20 +32,19 @@ pub(super) async fn stream_peer_session(
             request_id: request_id.clone(),
             requester_peer_id,
             session_id: session_id.clone(),
+            sealed_payload: Some(sealed_payload),
         },
     )
     .await?;
 
+    let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
-    {
-        let mut reader = BufReader::new(&mut stream);
-        let read = reader.read_line(&mut response_line).await?;
-        if read == 0 {
-            return Err(RuntimeError::Protocol(format!(
-                "peer {} closed observe-session before response",
-                peer.peer_id
-            )));
-        }
+    let read = reader.read_line(&mut response_line).await?;
+    if read == 0 {
+        return Err(RuntimeError::Protocol(format!(
+            "peer {} closed observe-session before response",
+            peer.peer_id
+        )));
     }
 
     match parse_peer_response_line(&peer.peer_id, "observe-session", &response_line)? {
@@ -55,7 +56,6 @@ pub(super) async fn stream_peer_session(
         other => return Err(unexpected_peer_response("observe-session", &other)),
     }
 
-    let mut reader = BufReader::new(stream);
     loop {
         let mut event_line = String::new();
         let read = reader.read_line(&mut event_line).await?;
@@ -65,9 +65,10 @@ pub(super) async fn stream_peer_session(
         let event = parse_peer_terminal_event_line(&peer.peer_id, &session_id, &event_line)?;
         let event_session_id = peer_terminal_event_session_id(&event).to_owned();
         incoming_sender
-            .send(RuntimeEvent::TerminalEvent {
+            .try_send(RuntimeEvent::TerminalEvent {
                 peer_id: peer.peer_id.clone(),
                 session_id: event_session_id,
+                observer_lease_id: observer_lease_id.clone(),
                 event,
             })
             .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
@@ -76,11 +77,8 @@ pub(super) async fn stream_peer_session(
 
 pub(super) async fn prepare_session_observer(
     context: &ListenerContext,
-    requester_peer_id: &str,
     session_id: &str,
 ) -> Result<(DaemonConnection, kanna_daemon::protocol::TerminalSnapshot), RuntimeError> {
-    ensure_requester_peer_trusted(context, requester_peer_id).await?;
-
     let daemon_dir = context
         .daemon_dir
         .as_ref()
@@ -118,38 +116,11 @@ async fn observe_session_snapshot(
     }
 }
 
-async fn ensure_requester_peer_trusted(
-    context: &ListenerContext,
-    requester_peer_id: &str,
-) -> Result<(), RuntimeError> {
-    let requester_peer = context
-        .discovery
-        .list_peers(&context.self_peer_id)
-        .await?
-        .into_iter()
-        .find(|peer| peer.peer_id == requester_peer_id)
-        .ok_or_else(|| {
-            RuntimeError::Protocol(format!(
-                "requester peer {} is not currently discovered",
-                requester_peer_id
-            ))
-        })?;
-    ensure_peer_is_trusted_for(
-        &context.registry_root,
-        &context.self_peer_id,
-        requester_peer_id,
-        &requester_peer.public_key,
-    )?;
-    Ok(())
-}
-
 pub(super) async fn send_daemon_input(
     context: &ListenerContext,
-    requester_peer_id: &str,
     session_id: &str,
     data: Vec<u8>,
 ) -> Result<(), RuntimeError> {
-    ensure_requester_peer_trusted(context, requester_peer_id).await?;
     let daemon_dir = context
         .daemon_dir
         .as_ref()
@@ -175,12 +146,10 @@ pub(super) async fn send_daemon_input(
 
 pub(super) async fn resize_daemon_session(
     context: &ListenerContext,
-    requester_peer_id: &str,
     session_id: &str,
     cols: u16,
     rows: u16,
 ) -> Result<(), RuntimeError> {
-    ensure_requester_peer_trusted(context, requester_peer_id).await?;
     let daemon_dir = context
         .daemon_dir
         .as_ref()
@@ -207,40 +176,37 @@ pub(super) async fn resize_daemon_session(
 
 pub(super) async fn close_owner_task(
     context: &ListenerContext,
-    requester_peer_id: &str,
     task_id: &str,
 ) -> Result<(), RuntimeError> {
-    ensure_requester_peer_trusted(context, requester_peer_id).await?;
-    for session_id in [
-        task_id.to_owned(),
-        format!("shell-wt-{task_id}"),
-        format!("td-{task_id}"),
-    ] {
-        kill_daemon_session_if_present(context, &session_id).await?;
-    }
-    close_pipeline_item_in_db(context, task_id)?;
-    Ok(())
+    let port = context
+        .kanna_server_port
+        .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
+    post_local_kanna_task_action(port, task_id, "close", &serde_json::json!({})).await
 }
 
 pub(super) async fn advance_owner_task_stage(
     context: &ListenerContext,
-    requester_peer_id: &str,
     task_id: &str,
+    expected_transition_revision: Option<&str>,
 ) -> Result<(), RuntimeError> {
-    ensure_requester_peer_trusted(context, requester_peer_id).await?;
     let port = context
         .kanna_server_port
         .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
-    post_local_kanna_task_action(port, task_id, "advance-stage", &serde_json::json!({})).await
+    let body = expected_transition_revision
+        .map(|revision| {
+            serde_json::json!({
+                "expectedTransitionRevision": revision,
+            })
+        })
+        .unwrap_or_else(|| serde_json::json!({}));
+    post_local_kanna_task_action(port, task_id, "advance-stage", &body).await
 }
 
 pub(super) async fn read_owner_task_file(
     context: &ListenerContext,
-    requester_peer_id: &str,
     task_id: &str,
     path: &str,
 ) -> Result<(String, String), RuntimeError> {
-    ensure_requester_peer_trusted(context, requester_peer_id).await?;
     let port = context
         .kanna_server_port
         .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
@@ -325,11 +291,9 @@ async fn get_local_kanna_task_file(
 
 pub(super) async fn mark_owner_task_read(
     context: &ListenerContext,
-    requester_peer_id: &str,
     task_id: &str,
     expected_activity_revision: i64,
 ) -> Result<(), RuntimeError> {
-    ensure_requester_peer_trusted(context, requester_peer_id).await?;
     let port = context
         .kanna_server_port
         .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
@@ -409,63 +373,6 @@ fn encode_task_id_path_segment(task_id: &str) -> Result<String, RuntimeError> {
         }
     }
     Ok(encoded)
-}
-
-async fn kill_daemon_session_if_present(
-    context: &ListenerContext,
-    session_id: &str,
-) -> Result<(), RuntimeError> {
-    let daemon_dir = context
-        .daemon_dir
-        .as_ref()
-        .ok_or_else(|| RuntimeError::Protocol("daemon directory is not configured".into()))?;
-    let mut daemon = connect_daemon(daemon_dir).await?;
-    send_daemon_command(
-        &mut daemon,
-        &DaemonCommand::Kill {
-            session_id: session_id.to_owned(),
-        },
-    )
-    .await?;
-    match read_daemon_event(&mut daemon).await? {
-        DaemonEvent::Ok => Ok(()),
-        DaemonEvent::Error {
-            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
-            ..
-        } => Ok(()),
-        DaemonEvent::Error { message, .. }
-            if message.to_ascii_lowercase().contains("session not found") =>
-        {
-            Ok(())
-        }
-        DaemonEvent::Error { message, .. } => Err(RuntimeError::Protocol(message)),
-        other => Err(RuntimeError::Protocol(format!(
-            "unexpected daemon kill response: {:?}",
-            other
-        ))),
-    }
-}
-
-fn close_pipeline_item_in_db(context: &ListenerContext, task_id: &str) -> Result<(), RuntimeError> {
-    let db_path = context
-        .db_path
-        .as_ref()
-        .ok_or_else(|| RuntimeError::Protocol("database path is not configured".into()))?;
-    let conn = rusqlite::Connection::open(db_path)
-        .map_err(|error| RuntimeError::Protocol(format!("db error: {error}")))?;
-    let rows = conn
-        .execute(
-            "UPDATE pipeline_item
-             SET closed_at = datetime('now'),
-                 updated_at = datetime('now')
-             WHERE id = ?",
-            [task_id],
-        )
-        .map_err(|error| RuntimeError::Protocol(format!("db error: {error}")))?;
-    if rows == 0 {
-        return Err(RuntimeError::Protocol(format!("task not found: {task_id}")));
-    }
-    Ok(())
 }
 
 pub(super) async fn stream_daemon_session(

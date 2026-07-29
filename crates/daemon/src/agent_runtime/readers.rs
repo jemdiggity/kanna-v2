@@ -9,6 +9,7 @@ use kanna_daemon::protocol::{Event, SessionStatus};
 use super::{
     journal_and_fan_out, journal_without_fanout, log_info, publish_terminal_exit, set_status,
 };
+use crate::daemon_lifecycle::{DaemonLifecycle, DaemonLifecycleState};
 
 #[derive(Default)]
 struct ReaderCompletionState {
@@ -55,6 +56,13 @@ impl ReaderCompletion {
     }
 }
 
+/// A daemon that is handing off or shutting down must not publish child exits:
+/// the successor owns those sessions, and a late exit would retire a session
+/// the newcomer has already adopted.
+async fn daemon_is_running(daemon_lifecycle: &DaemonLifecycle) -> bool {
+    *daemon_lifecycle.read().await == DaemonLifecycleState::Running
+}
+
 /// Everything a reader owns for the exact child life it was started for.
 /// Readers never resolve these through the registry: a reader that outlives
 /// a kill+recreate of the same session id would otherwise pick up the
@@ -99,17 +107,33 @@ pub fn start_agent_readers(
     stderr: std::process::ChildStderr,
     agents: AgentSessions,
     broadcast_tx: broadcast::Sender<String>,
+    daemon_lifecycle: DaemonLifecycle,
 ) {
     {
         let life = life.clone();
         let agents = agents.clone();
         let broadcast_tx = broadcast_tx.clone();
+        let daemon_lifecycle = daemon_lifecycle.clone();
         tokio::task::spawn_blocking(move || {
-            run_agent_reader(life, Box::new(stdout), false, agents, broadcast_tx);
+            run_agent_reader(
+                life,
+                Box::new(stdout),
+                false,
+                agents,
+                broadcast_tx,
+                daemon_lifecycle,
+            );
         });
     }
     tokio::task::spawn_blocking(move || {
-        run_agent_reader(life, Box::new(stderr), true, agents, broadcast_tx);
+        run_agent_reader(
+            life,
+            Box::new(stderr),
+            true,
+            agents,
+            broadcast_tx,
+            daemon_lifecycle,
+        );
     });
 }
 
@@ -119,6 +143,7 @@ fn run_agent_reader(
     is_stderr: bool,
     agents: AgentSessions,
     broadcast_tx: broadcast::Sender<String>,
+    daemon_lifecycle: DaemonLifecycle,
 ) {
     let rt = tokio::runtime::Handle::current();
     let session_id = life.session_id.clone();
@@ -154,6 +179,9 @@ fn run_agent_reader(
         "[agent] reader eof session={} incarnation={} stderr={}",
         session_id, generation, is_stderr
     ));
+    if !rt.block_on(daemon_is_running(&daemon_lifecycle)) {
+        return;
+    }
     let ready = if is_stderr {
         life.completion.finish_stderr()
     } else {
@@ -366,6 +394,10 @@ pub(crate) async fn handle_child_exit_for_test(
     agents: &AgentSessions,
     broadcast_tx: &broadcast::Sender<String>,
 ) {
+    let daemon_lifecycle = crate::daemon_lifecycle::new_daemon_lifecycle();
+    if !daemon_is_running(&daemon_lifecycle).await {
+        return;
+    }
     if let Some(code) = prepare_child_exit(life, agents).await {
         publish_child_exit(life, code, agents, broadcast_tx).await;
     }

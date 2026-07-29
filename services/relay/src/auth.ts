@@ -68,9 +68,9 @@ export async function revalidateServerAuth(
     const principal = await verifyDesktopCredentials(proof.desktopId, proof.desktopSecret);
     return principal?.userId === expectedUserId && principal.desktopId === expectedDesktopId;
   }
-  // Legacy device tokens identify an account, not a specific desktop. They
-  // remain valid for the older relay command path, but cannot safely authorize
-  // writes to a desktop-owned Firestore subtree.
+  // A legacy device token proves account membership only. It cannot prove that
+  // the caller owns the supplied desktop ID, so it is never valid for
+  // desktop-scoped snapshot or transfer-identity publication.
   return false;
 }
 

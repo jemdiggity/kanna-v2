@@ -72,8 +72,17 @@ export interface DesktopServerClientHandlersForTests {
   fetchIncomingTransferCleanupCandidates?: () => MaybePromise<string[]>;
   markIncomingTransferSidecarCleanupCompleted?: (transferId: string) => MaybePromise<boolean>;
   fetchPendingIncomingTransfers?: () => MaybePromise<PendingIncomingTransfer[]>;
-  claimPendingIncomingTransfer?: (transferId: string) => MaybePromise<boolean>;
-  failPendingIncomingTransfer?: (transferId: string, reason: string) => MaybePromise<boolean>;
+  claimPendingIncomingTransfer?: (
+    transferId: string,
+    ownerToken: string,
+    recovery: boolean,
+  ) => MaybePromise<boolean>;
+  renewIncomingTransferClaim?: (transferId: string, ownerToken: string) => MaybePromise<boolean>;
+  failPendingIncomingTransfer?: (
+    transferId: string,
+    reason: string,
+    ownerToken?: string,
+  ) => MaybePromise<boolean>;
   fetchClosedTaskIdentities?: () => MaybePromise<ClosedTaskIdentity[]>;
   patchTask?: (taskId: string, input: PatchDesktopTaskInput) => MaybePromise<void>;
   setTaskParent?: (taskId: string, parentTaskId: string | null) => MaybePromise<void>;
@@ -82,10 +91,14 @@ export interface DesktopServerClientHandlersForTests {
   reorderPinnedTasks?: (repoId: string, orderedIds: string[]) => MaybePromise<void>;
   insertTaskTransfer?: (transfer: NewTaskTransferInput) => MaybePromise<void>;
   getTaskTransfer?: (transferId: string) => MaybePromise<TaskTransfer | null>;
-  updateTaskTransferPayload?: (transferId: string, payloadJson: string) => MaybePromise<boolean>;
-  markTaskTransferImporting?: (transferId: string, localTaskId: string) => MaybePromise<boolean>;
-  markTaskTransferAwaitingAcknowledgment?: (transferId: string, localTaskId: string) => MaybePromise<boolean>;
-  completeTaskTransfer?: (transferId: string, localTaskId: string) => MaybePromise<boolean>;
+  updateTaskTransferPayload?: (
+    transferId: string,
+    payloadJson: string,
+    ownerToken?: string,
+  ) => MaybePromise<boolean>;
+  markTaskTransferImporting?: (transferId: string, localTaskId: string, ownerToken?: string) => MaybePromise<boolean>;
+  markTaskTransferAwaitingAcknowledgment?: (transferId: string, localTaskId: string, ownerToken?: string) => MaybePromise<boolean>;
+  completeTaskTransfer?: (transferId: string, localTaskId: string, ownerToken?: string) => MaybePromise<boolean>;
   rejectTaskTransfer?: (transferId: string, reason: string) => MaybePromise<boolean>;
   insertTaskTransferProvenance?: (provenance: NewTaskTransferProvenanceInput) => MaybePromise<void>;
 }
@@ -861,26 +874,48 @@ export async function markIncomingTransferSidecarCleanupCompleted(
   return response.updated;
 }
 
-export async function claimPendingIncomingTransfer(transferId: string): Promise<boolean> {
+export async function claimPendingIncomingTransfer(
+  transferId: string,
+  ownerToken: string,
+  recovery: boolean,
+): Promise<boolean> {
   if (clientHandlersForTests?.claimPendingIncomingTransfer) {
-    return await clientHandlersForTests.claimPendingIncomingTransfer(transferId);
+    return await clientHandlersForTests.claimPendingIncomingTransfer(transferId, ownerToken, recovery);
   }
   const response = await requestJson<{ updated: boolean }>(
     `/v1/transfers/${encodeURIComponent(transferId)}/actions/claim`,
-    { method: "POST" },
+    { method: "POST", body: { ownerToken, recovery } },
   );
   return response.updated;
 }
 
-export async function failPendingIncomingTransfer(transferId: string, reason: string): Promise<boolean> {
+export async function renewIncomingTransferClaim(
+  transferId: string,
+  ownerToken: string,
+): Promise<boolean> {
+  if (clientHandlersForTests?.renewIncomingTransferClaim) {
+    return await clientHandlersForTests.renewIncomingTransferClaim(transferId, ownerToken);
+  }
+  const response = await requestJson<{ updated: boolean }>(
+    `/v1/transfers/${encodeURIComponent(transferId)}/actions/renew-claim`,
+    { method: "POST", body: { ownerToken, recovery: false } },
+  );
+  return response.updated;
+}
+
+export async function failPendingIncomingTransfer(
+  transferId: string,
+  reason: string,
+  ownerToken?: string,
+): Promise<boolean> {
   if (clientHandlersForTests?.failPendingIncomingTransfer) {
-    return await clientHandlersForTests.failPendingIncomingTransfer(transferId, reason);
+    return await clientHandlersForTests.failPendingIncomingTransfer(transferId, reason, ownerToken);
   }
   const response = await requestJson<{ updated: boolean }>(
     `/v1/transfers/${encodeURIComponent(transferId)}/actions/fail`,
     {
       method: "POST",
-      body: { reason },
+      body: { reason, claimOwnerToken: ownerToken },
     },
   );
   return response.updated;
@@ -930,15 +965,20 @@ export async function getDesktopTaskTransfer(transferId: string): Promise<TaskTr
 export async function updateDesktopTaskTransferPayload(
   transferId: string,
   payloadJson: string,
+  ownerToken?: string,
 ): Promise<boolean> {
   if (clientHandlersForTests?.updateTaskTransferPayload) {
-    return await clientHandlersForTests.updateTaskTransferPayload(transferId, payloadJson);
+    return await clientHandlersForTests.updateTaskTransferPayload(
+      transferId,
+      payloadJson,
+      ownerToken,
+    );
   }
   const response = await requestJson<{ updated: boolean }>(
     `/v1/transfers/${encodeURIComponent(transferId)}/payload`,
     {
       method: "PUT",
-      body: { payloadJson },
+      body: { payloadJson, claimOwnerToken: ownerToken },
     },
   );
   return response.updated;
@@ -947,15 +987,16 @@ export async function updateDesktopTaskTransferPayload(
 export async function completeDesktopTaskTransfer(
   transferId: string,
   localTaskId: string,
+  ownerToken?: string,
 ): Promise<boolean> {
   if (clientHandlersForTests?.completeTaskTransfer) {
-    return await clientHandlersForTests.completeTaskTransfer(transferId, localTaskId);
+    return await clientHandlersForTests.completeTaskTransfer(transferId, localTaskId, ownerToken);
   }
   const response = await requestJson<{ updated: boolean }>(
     `/v1/transfers/${encodeURIComponent(transferId)}/actions/complete`,
     {
       method: "POST",
-      body: { localTaskId },
+      body: { localTaskId, claimOwnerToken: ownerToken },
     },
   );
   return response.updated;
@@ -964,13 +1005,14 @@ export async function completeDesktopTaskTransfer(
 export async function markDesktopTaskTransferImporting(
   transferId: string,
   localTaskId: string,
+  ownerToken?: string,
 ): Promise<boolean> {
   if (clientHandlersForTests?.markTaskTransferImporting) {
-    return await clientHandlersForTests.markTaskTransferImporting(transferId, localTaskId);
+    return await clientHandlersForTests.markTaskTransferImporting(transferId, localTaskId, ownerToken);
   }
   const response = await requestJson<{ updated: boolean }>(
     `/v1/transfers/${encodeURIComponent(transferId)}/actions/importing`,
-    { method: "POST", body: { localTaskId } },
+    { method: "POST", body: { localTaskId, claimOwnerToken: ownerToken } },
   );
   return response.updated;
 }
@@ -978,16 +1020,18 @@ export async function markDesktopTaskTransferImporting(
 export async function markDesktopTaskTransferAwaitingAcknowledgment(
   transferId: string,
   localTaskId: string,
+  ownerToken?: string,
 ): Promise<boolean> {
   if (clientHandlersForTests?.markTaskTransferAwaitingAcknowledgment) {
     return await clientHandlersForTests.markTaskTransferAwaitingAcknowledgment(
       transferId,
       localTaskId,
+      ownerToken,
     );
   }
   const response = await requestJson<{ updated: boolean }>(
     `/v1/transfers/${encodeURIComponent(transferId)}/actions/awaiting-acknowledgment`,
-    { method: "POST", body: { localTaskId } },
+    { method: "POST", body: { localTaskId, claimOwnerToken: ownerToken } },
   );
   return response.updated;
 }

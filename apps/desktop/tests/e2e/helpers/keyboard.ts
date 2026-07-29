@@ -26,6 +26,14 @@ export function buildGlobalKeydownScript(options: KeydownScriptOptions): string 
 }));`;
 }
 
+export function buildHandledGlobalKeydownScript(options: KeydownScriptOptions): string {
+  return `const event = new KeyboardEvent("keydown", {
+  ${buildKeyboardEventInit(options)}
+});
+window.dispatchEvent(event);
+return event.defaultPrevented;`;
+}
+
 export function buildSelectorKeydownScript(
   selector: string,
   options: KeydownScriptOptions,

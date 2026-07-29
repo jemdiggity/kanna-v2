@@ -64,6 +64,16 @@ interface ActiveMarkReadClient {
   closed: boolean;
 }
 
+interface RemoteStageAdvancePending {
+  expectedTransitionRevision: string | null;
+  sourceGeneration: number;
+  sourceKind: "cloud" | "lan";
+  sourceRepoId: string;
+  sourceTaskId: string;
+  ownerDesktopId: string;
+  ownerTaskId: string;
+}
+
 const CLOUD_BACKEND_ERROR_TOAST_INTERVAL_MS = 30_000;
 const REMOTE_MARK_READ_TIMEOUT_MS = 10_000;
 
@@ -84,6 +94,8 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     blockedByTaskIds: {},
     transferMachines: [],
   });
+  const cloudAuthoritativeGeneration = ref(0);
+  const lanAuthoritativeGeneration = ref(0);
   const locallyClosedRemoteTaskIds = ref<Set<string>>(new Set());
   let unsubscribeDesktopAuth: (() => void) | null = null;
   let cloudTasksUnsubscribe: (() => void) | null = null;
@@ -92,9 +104,14 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   let cloudSnapshotRevision = 0;
   let cloudOneShotGeneration = 0;
   let lanRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  let lanRefreshInFlight: Promise<void> | null = null;
   let desktopCloudWorkspaceDisposed = false;
   const activeMarkReadClients = new Set<ActiveMarkReadClient>();
+  const remoteStageAdvancesPending = new Map<string, RemoteStageAdvancePending>();
   const associatedCloudUsers = new Set<string>();
+  const shownLanPeerIssues = new Set<string>();
+  let e2eLanRefreshFrozen = false;
+  let e2eNextRemoteActionFailure: string | null = null;
   let lastCloudBackendErrorToastAt: number | null = null;
   let currentDesktopId: string | null = null;
   const transferMachineRevision = ref(0);
@@ -212,6 +229,40 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     lanSnapshot: filterClosedRemoteSnapshot(lanSnapshot.value),
     remoteTaskPins: remoteTaskPins.value,
   }));
+  watchEffect(() => {
+    const cloudGeneration = cloudAuthoritativeGeneration.value;
+    const lanGeneration = lanAuthoritativeGeneration.value;
+    const tasks = workspace.value.tasks;
+    for (const [requestKey, pending] of remoteStageAdvancesPending) {
+      const task = tasks.find((candidate) =>
+        candidate.owner.kind === "remote"
+        && candidate.sources.some((source) =>
+          source.terminalRef?.ownerDesktopId === pending.ownerDesktopId
+          && source.terminalRef.ownerLocalTaskId === pending.ownerTaskId
+        ),
+      );
+      const source = task?.sources.find((candidate) =>
+        candidate.kind === pending.sourceKind
+        && candidate.terminalRef?.ownerDesktopId === pending.ownerDesktopId
+        && candidate.terminalRef.ownerLocalTaskId === pending.ownerTaskId
+      );
+      const sourceGeneration = pending.sourceKind === "cloud"
+        ? cloudGeneration
+        : lanGeneration;
+      const transitionRevision =
+        typeof source?.transitionRevision === "string" && source.transitionRevision.trim()
+          ? source.transitionRevision.trim()
+          : null;
+      if (
+        !task
+        || !source
+        || transitionRevision !== pending.expectedTransitionRevision
+        || sourceGeneration > pending.sourceGeneration
+      ) {
+        remoteStageAdvancesPending.delete(requestKey);
+      }
+    }
+  }, { flush: "sync" });
   const remoteTaskDiagnostics = computed(() => workspace.value.diagnostics);
   const workspaceSidebarProjection = computed(() => workspaceSidebarProjector.project({
     taskUiSlots: store.taskUiSlots,
@@ -402,6 +453,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       return;
     }
     cloudSnapshotRevision += 1;
+    cloudAuthoritativeGeneration.value += 1;
     cloudSnapshot.value = {
       repos: snapshot.repos,
       items: snapshot.items,
@@ -426,6 +478,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
           return;
         }
         cloudSnapshotRevision += 1;
+        cloudAuthoritativeGeneration.value += 1;
         cloudSnapshot.value = {
           repos: snapshot.repos,
           items: snapshot.items,
@@ -452,19 +505,35 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     subscribedCloudUid = null;
   }
 
-  async function refreshLanTasks(): Promise<void> {
-    await publishDesktopLanTaskSnapshot(db);
-    const snapshot = await listDesktopLanTasks({
-      localRepos: localReposForCloudMatching.value,
-      localClosedItems: closedLocalTaskIdentities.value,
+  function refreshLanTasks(): Promise<void> {
+    if (import.meta.env.DEV && e2eLanRefreshFrozen) return Promise.resolve();
+    if (lanRefreshInFlight) return lanRefreshInFlight;
+    const refresh = (async () => {
+      await publishDesktopLanTaskSnapshot(db);
+      const snapshot = await listDesktopLanTasks({
+        localRepos: localReposForCloudMatching.value,
+        localClosedItems: closedLocalTaskIdentities.value,
+        onPeerIssue: (issue) => {
+          const key = `${issue.peerId}:${issue.message}`;
+          if (shownLanPeerIssues.has(key)) return;
+          shownLanPeerIssues.add(key);
+          toast.warning(issue.message);
+        },
+      });
+      if (desktopCloudWorkspaceDisposed || (import.meta.env.DEV && e2eLanRefreshFrozen)) return;
+      lanAuthoritativeGeneration.value += 1;
+      lanSnapshot.value = {
+        repos: snapshot.repos,
+        items: snapshot.items,
+        terminalRefs: snapshot.terminalRefs ?? {},
+        blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
+        transferMachines: snapshot.transferMachines,
+      };
+    })();
+    lanRefreshInFlight = refresh.finally(() => {
+      lanRefreshInFlight = null;
     });
-    lanSnapshot.value = {
-      repos: snapshot.repos,
-      items: snapshot.items,
-      terminalRefs: snapshot.terminalRefs ?? {},
-      blockedByTaskIds: snapshot.blockedByTaskIds ?? {},
-      transferMachines: snapshot.transferMachines,
-    };
+    return lanRefreshInFlight;
   }
 
   async function initializeDesktopCloudAuth(): Promise<void> {
@@ -506,6 +575,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         associatedCloudUsers.clear();
         stopCloudTaskSubscription();
         cloudSnapshotRevision += 1;
+        cloudAuthoritativeGeneration.value += 1;
         cloudSnapshot.value = {
           repos: [],
           items: [],
@@ -561,6 +631,37 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         console.warn("[lan] failed to refresh LAN tasks:", error),
       );
     }, 1000);
+  }
+
+  function __e2eInjectRemoteSnapshot(
+    source: "cloud" | "lan",
+    snapshot: DesktopCloudSnapshot,
+    options: { freezeLanRefresh?: boolean } = {},
+  ): void {
+    if (!import.meta.env.DEV) {
+      throw new Error("remote snapshot injection is available only in development builds");
+    }
+    if (source === "cloud") {
+      cloudAuthoritativeGeneration.value += 1;
+      cloudSnapshot.value = snapshot;
+      return;
+    }
+    e2eLanRefreshFrozen = options.freezeLanRefresh === true;
+    if (e2eLanRefreshFrozen) {
+      if (lanRefreshTimer) {
+        clearInterval(lanRefreshTimer);
+        lanRefreshTimer = null;
+      }
+    }
+    lanAuthoritativeGeneration.value += 1;
+    lanSnapshot.value = snapshot;
+  }
+
+  function __e2eFailNextRemoteAction(message: string): void {
+    if (!import.meta.env.DEV) {
+      throw new Error("remote action failure injection is available only in development builds");
+    }
+    e2eNextRemoteActionFailure = message;
   }
 
   async function closeSelectedWorkspaceTask(): Promise<boolean> {
@@ -630,24 +731,111 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
       toast.error("Remote task is not reachable.");
       return;
     }
-
-    const client = workspaceTask.terminal.kind === "lan"
-      ? await createConfiguredDesktopLanTerminalClient()
-      : await createConfiguredDesktopRelayTerminalClient();
-    if (!client) {
-      toast.error("Remote task owner is unavailable.");
+    if (workspaceTask.item.has_running_post) return;
+    const sourceKind = workspaceTask.terminal.kind === "lan" ? "lan" : "cloud";
+    const selectedSource = workspaceTask.sources.find((source) =>
+      source.kind === sourceKind
+      && source.terminalRef?.ownerDesktopId === remoteRef.ownerDesktopId
+      && source.terminalRef.ownerLocalTaskId === remoteRef.ownerLocalTaskId
+    );
+    if (!selectedSource) {
+      toast.error("Remote task source is no longer authoritative.");
       return;
     }
+    const expectedTransitionRevision =
+      typeof selectedSource.transitionRevision === "string"
+      && selectedSource.transitionRevision.trim().length > 0
+        ? selectedSource.transitionRevision.trim()
+        : null;
 
+    const requestKey = JSON.stringify([
+      remoteRef.ownerDesktopId,
+      remoteRef.ownerLocalTaskId,
+    ]);
+    const pending: RemoteStageAdvancePending = {
+      expectedTransitionRevision,
+      sourceGeneration: sourceKind === "cloud"
+        ? cloudAuthoritativeGeneration.value
+        : lanAuthoritativeGeneration.value,
+      sourceKind,
+      sourceRepoId: selectedSource.repoId,
+      sourceTaskId: selectedSource.taskId,
+      ownerDesktopId: remoteRef.ownerDesktopId,
+      ownerTaskId: remoteRef.ownerLocalTaskId,
+    };
+    const existingPending = remoteStageAdvancesPending.get(requestKey);
+    if (
+      existingPending
+      && existingPending.expectedTransitionRevision === expectedTransitionRevision
+    ) return;
+    remoteStageAdvancesPending.set(requestKey, pending);
+
+    let client: DesktopRelayTerminalClient | null = null;
+    let accepted = false;
     try {
+      if (e2eNextRemoteActionFailure) {
+        const message = e2eNextRemoteActionFailure;
+        e2eNextRemoteActionFailure = null;
+        throw new Error(message);
+      }
+      client = workspaceTask.terminal.kind === "lan"
+        ? await createConfiguredDesktopLanTerminalClient()
+        : await createConfiguredDesktopRelayTerminalClient();
+      if (!client) {
+        toast.error("Remote task owner is unavailable.");
+        return;
+      }
+      if (desktopCloudWorkspaceDisposed) return;
+      const authoritativeGeneration = pending.sourceKind === "cloud"
+        ? cloudAuthoritativeGeneration.value
+        : lanAuthoritativeGeneration.value;
+      const authoritativeTask = workspace.value.tasks.find((candidate) =>
+        candidate.owner.kind === "remote"
+        && candidate.sources.some((source) =>
+          source.kind === pending.sourceKind
+          && source.repoId === pending.sourceRepoId
+          && source.taskId === pending.sourceTaskId
+          && source.terminalRef?.ownerDesktopId === pending.ownerDesktopId
+          && source.terminalRef.ownerLocalTaskId === pending.ownerTaskId
+        ),
+      );
+      const authoritativeSource = authoritativeTask?.sources.find((source) =>
+        source.kind === pending.sourceKind
+        && source.repoId === pending.sourceRepoId
+        && source.taskId === pending.sourceTaskId
+        && source.terminalRef?.ownerDesktopId === pending.ownerDesktopId
+        && source.terminalRef.ownerLocalTaskId === pending.ownerTaskId
+      );
+      const authoritativeRevision =
+        typeof authoritativeSource?.transitionRevision === "string"
+        && authoritativeSource.transitionRevision.trim().length > 0
+          ? authoritativeSource.transitionRevision.trim()
+          : null;
+      if (
+        remoteStageAdvancesPending.get(requestKey) !== pending
+        || authoritativeGeneration !== pending.sourceGeneration
+        || !authoritativeTask
+        || !authoritativeSource
+        || authoritativeRevision !== pending.expectedTransitionRevision
+      ) return;
       await client.advanceStage({
         desktopId: remoteRef.ownerDesktopId,
         taskId: remoteRef.ownerLocalTaskId,
+        ...(expectedTransitionRevision
+          ? { expectedTransitionRevision }
+          : {}),
       });
+      accepted = true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
     } finally {
-      client.close();
+      client?.close();
+      if (
+        !accepted
+        && remoteStageAdvancesPending.get(requestKey) === pending
+      ) {
+        remoteStageAdvancesPending.delete(requestKey);
+      }
     }
   }
 
@@ -794,6 +982,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
 
   function disposeDesktopCloudWorkspace(): void {
     desktopCloudWorkspaceDisposed = true;
+    remoteStageAdvancesPending.clear();
     for (const activeClient of [...activeMarkReadClients]) {
       closeMarkReadClient(activeClient);
     }
@@ -837,6 +1026,8 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     cloudRepoRemoteUrl,
     markWorkspaceTaskLocallyClosed,
     refreshLanTasks,
+    __e2eInjectRemoteSnapshot,
+    __e2eFailNextRemoteAction,
     initializeDesktopCloudAuth,
     initializeDesktopLanTaskSync,
     markTransferSidecarReady,

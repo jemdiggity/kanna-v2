@@ -240,6 +240,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
           toast.warning(t("mainPanel.taskBlocked"));
           return;
         }
+        if (workspaceTask.item.has_running_post) return;
         if (!workspaceTask.capabilities.canAdvanceStage) return;
         if (!workspaceTask.localTaskId) {
           void advanceSelectedRemoteWorkspaceTask(workspaceTask);

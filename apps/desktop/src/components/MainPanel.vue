@@ -55,6 +55,7 @@ const isBlocked = computed(() => {
   if (!props.blockers || props.blockers.length === 0) return false;
   return props.blockers.some(b => !isBlockerResolved(b));
 });
+
 const commandHintDismissed = ref(readCommandHintDismissed());
 const showCommandHint = computed(() => !commandHintDismissed.value);
 
@@ -247,7 +248,14 @@ function dismissCommandHint() {
                 class="blocker-status"
                 :style="{ color: b.closed_at != null ? 'var(--kn-text-muted)' : 'var(--kn-accent)' }"
               >{{ b.closed_at != null ? $t('mainPanel.blockerDone') : $t('mainPanel.blockerActive') }}</span>
-              <span class="blocker-name">{{ b.display_name || (b.prompt ? b.prompt.slice(0, 60) : $t('tasks.untitled')) }}</span>
+              <span class="blocker-name">{{
+                b.display_name
+                  || b.issue_title
+                  || (b.prompt ? b.prompt.slice(0, 60) : null)
+                  || (b.fallback_task_id
+                    ? $t('tasks.taskId', { id: b.fallback_task_id })
+                    : $t('tasks.untitled'))
+              }}</span>
             </div>
           </div>
         </div>

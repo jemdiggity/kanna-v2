@@ -24,6 +24,7 @@ mod worktrees;
 
 #[allow(unused_imports)]
 pub use analytics::RepoAnalytics;
+pub use blockers::ReplaceTaskBlockersError;
 #[allow(unused_imports)]
 pub use operator_events::NewOperatorEvent;
 #[allow(unused_imports)]
@@ -73,6 +74,8 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "032_task_transfer_sidecar_cleanup",
     "033_create_task_intent",
     "034_pipeline_item_revision_rounds",
+    "035_pipeline_item_blocker_revision",
+    "036_task_transfer_ownership_leases",
 ];
 
 #[derive(Debug, Serialize)]
@@ -163,6 +166,8 @@ pub struct SnapshotPipelineItem {
     pub agent_provider: String,
     pub activity: String,
     pub activity_revision: i64,
+    pub blocker_revision: i64,
+    pub transition_revision: Option<String>,
     pub activity_changed_at: Option<String>,
     pub unread_at: Option<String>,
     pub port_offset: Option<i64>,
@@ -751,6 +756,52 @@ fn add_column(
     conn.execute_batch(&sql)
 }
 
+fn create_blocker_revision_triggers(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        r#"
+        CREATE TRIGGER IF NOT EXISTS task_blocker_insert_revision
+        AFTER INSERT ON task_blocker
+        BEGIN
+          UPDATE pipeline_item
+          SET blocker_revision = blocker_revision + 1
+          WHERE id = NEW.blocked_item_id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS task_blocker_delete_revision
+        AFTER DELETE ON task_blocker
+        BEGIN
+          UPDATE pipeline_item
+          SET blocker_revision = blocker_revision + 1
+          WHERE id = OLD.blocked_item_id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS task_blocker_resolution_revision
+        AFTER UPDATE OF stage, pr_url, closed_at ON pipeline_item
+        WHEN
+          CASE
+            WHEN OLD.closed_at IS NOT NULL
+              OR (OLD.stage = 'pr' AND OLD.pr_url IS NOT NULL)
+            THEN 1 ELSE 0
+          END
+          <>
+          CASE
+            WHEN NEW.closed_at IS NOT NULL
+              OR (NEW.stage = 'pr' AND NEW.pr_url IS NOT NULL)
+            THEN 1 ELSE 0
+          END
+        BEGIN
+          UPDATE pipeline_item
+          SET blocker_revision = blocker_revision + 1
+          WHERE id IN (
+            SELECT blocked_item_id
+            FROM task_blocker
+            WHERE blocker_item_id = NEW.id
+          );
+        END;
+        "#,
+    )
+}
+
 fn drop_column(conn: &Connection, table: &str, column: &str) {
     let sql = format!("ALTER TABLE {table} DROP COLUMN {column}");
     if let Err(error) = conn.execute_batch(&sql) {
@@ -1281,6 +1332,60 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             "INTEGER NOT NULL DEFAULT 0",
         )?;
         Ok(())
+    })?;
+
+    run_migration(conn, "035_pipeline_item_blocker_revision", |conn| {
+        add_column(
+            conn,
+            "pipeline_item",
+            "blocker_revision",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        create_blocker_revision_triggers(conn)
+    })?;
+
+    run_migration(conn, "036_task_transfer_ownership_leases", |conn| {
+        add_column(conn, "task_transfer", "claim_owner_token", "TEXT")?;
+        add_column(conn, "task_transfer", "claim_expires_at", "TEXT")?;
+        conn.execute_batch(
+            r#"
+            UPDATE task_transfer
+            SET status = CASE
+                    WHEN local_task_id IS NULL THEN 'pending'
+                    ELSE 'importing'
+                END,
+                claim_owner_token = NULL,
+                claim_expires_at = NULL,
+                error = NULL
+            WHERE direction = 'incoming'
+              AND status = 'streaming';
+
+            UPDATE task_transfer AS loser
+            SET status = 'failed',
+                completed_at = datetime('now'),
+                error = COALESCE(error, 'superseded duplicate active ownership transfer during migration')
+            WHERE direction = 'outgoing'
+              AND source_task_id IS NOT NULL
+              AND status IN ('pending', 'streaming')
+              AND EXISTS (
+                SELECT 1
+                FROM task_transfer AS winner
+                WHERE winner.direction = 'outgoing'
+                  AND winner.source_task_id = loser.source_task_id
+                  AND winner.status IN ('pending', 'streaming')
+                  AND (
+                    winner.started_at < loser.started_at
+                    OR (winner.started_at = loser.started_at AND winner.id < loser.id)
+                  )
+              );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_task_transfer_active_outgoing_source
+            ON task_transfer(source_task_id)
+            WHERE direction = 'outgoing'
+              AND source_task_id IS NOT NULL
+              AND status IN ('pending', 'streaming');
+            "#,
+        )
     })?;
 
     Ok(())

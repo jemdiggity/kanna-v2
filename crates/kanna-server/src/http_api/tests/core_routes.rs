@@ -16,6 +16,327 @@ fn pairing_create_request(peer: [u8; 4]) -> Request<Body> {
     request
 }
 
+fn direct_lan_request(method: axum::http::Method, path: &str) -> Request<Body> {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [192, 168, 1, 42],
+            49152,
+        ))));
+    request
+}
+
+async fn serve_non_loopback_http_router(desktop_id: &str) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+        .await
+        .expect("bind non-loopback HTTP listener");
+    let port = listener.local_addr().expect("listener address").port();
+    let desktop_id = desktop_id.to_string();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            super::test_router(&desktop_id, "HTTP Network Auth")
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
+    let lan_ip = if_addrs::get_if_addrs()
+        .expect("enumerate network interfaces")
+        .into_iter()
+        .map(|interface| interface.ip())
+        .find(|ip| ip.is_ipv4() && !ip.is_loopback())
+        .expect("test host must expose a non-loopback IPv4 address");
+    (format!("http://{lan_ip}:{port}"), server)
+}
+
+#[tokio::test]
+async fn privileged_settings_and_reconnect_reject_real_unauthenticated_non_loopback_clients() {
+    let (base_url, server) = serve_non_loopback_http_router("desktop-settings-network-auth").await;
+    let client = reqwest::Client::new();
+    let identity = serde_json::json!({
+        "peerId": "attacker",
+        "displayName": "Attacker",
+        "publicKey": "attacker-key",
+        "protocolVersion": 1,
+        "acceptingTransfers": true,
+    });
+
+    for (response, expected) in [
+        (
+            client
+                .put(format!("{base_url}/v1/settings/cloud-transfer-identity"))
+                .json(&identity)
+                .send()
+                .await
+                .unwrap(),
+            reqwest::StatusCode::UNAUTHORIZED,
+        ),
+        (
+            client
+                .put(format!("{base_url}/v1/settings/cloud_transfer_identity_v1"))
+                .json(&serde_json::json!({ "value": identity.to_string() }))
+                .send()
+                .await
+                .unwrap(),
+            reqwest::StatusCode::FORBIDDEN,
+        ),
+        (
+            client
+                .delete(format!("{base_url}/v1/settings/cloud_transfer_identity_v1"))
+                .send()
+                .await
+                .unwrap(),
+            reqwest::StatusCode::FORBIDDEN,
+        ),
+        (
+            client
+                .post(format!("{base_url}/v1/cloud/relay/actions/reconnect"))
+                .send()
+                .await
+                .unwrap(),
+            reqwest::StatusCode::UNAUTHORIZED,
+        ),
+    ] {
+        assert_eq!(response.status(), expected);
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn generic_settings_routes_cannot_mutate_the_reserved_transfer_identity() {
+    let app = super::test_router("desktop-reserved-setting", "Reserved Setting Mac");
+    for request in [
+        Request::put("/v1/settings/cloud_transfer_identity_v1")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"value":"forged"}"#))
+            .unwrap(),
+        Request::delete("/v1/settings/cloud_transfer_identity_v1")
+            .body(Body::empty())
+            .unwrap(),
+    ] {
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+}
+
+#[tokio::test]
+async fn privileged_task_routes_reject_unauthenticated_non_loopback_clients() {
+    let app = super::test_router("desktop-private-actions", "Private Actions Mac");
+
+    for path in [
+        "/v1/tasks/task-private/input",
+        "/v1/tasks/task-private/actions/advance-stage",
+        "/v1/tasks/task-private/actions/close",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(direct_lan_request(axum::http::Method::POST, path))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated direct-LAN request reached {path}",
+        );
+    }
+}
+
+#[tokio::test]
+async fn transfer_control_plane_rejects_unauthenticated_non_loopback_cors_reads_and_mutations() {
+    let app =
+        super::test_router_with_seed("desktop-private-transfers", "Private Transfers Mac", |db| {
+            db.insert_test_task_transfer(
+                "transfer-private",
+                "incoming",
+                "pending",
+                Some(r#"{"secret":"transfer-payload"}"#),
+            )
+            .unwrap();
+        });
+
+    for (method, path) in [
+        (axum::http::Method::GET, "/v1/transfers/incoming/pending"),
+        (
+            axum::http::Method::POST,
+            "/v1/transfers/transfer-private/actions/reject",
+        ),
+    ] {
+        let mut request = direct_lan_request(method, path);
+        request.headers_mut().insert(
+            axum::http::header::ORIGIN,
+            axum::http::HeaderValue::from_static("https://hostile.example"),
+        );
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated cross-origin direct-LAN request reached {path}",
+        );
+    }
+
+    let loopback_list = app
+        .oneshot(
+            Request::get("/v1/transfers/incoming/pending")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(loopback_list.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(loopback_list.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(list["transfers"][0]["id"], "transfer-private");
+    assert_eq!(list["transfers"][0]["status"], "pending");
+}
+
+#[tokio::test]
+async fn stale_incoming_importer_cannot_fail_a_replacement_claim_owner() {
+    let app = super::test_router_with_seed("desktop-claim-fence", "Claim Fence Mac", |db| {
+        db.insert_test_task_transfer(
+            "transfer-claim-fence",
+            "incoming",
+            "pending",
+            Some(r#"{"task":{},"repo":{}}"#),
+        )
+        .unwrap();
+    });
+    for owner in ["owner-old", "owner-new"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/transfers/transfer-claim-fence/actions/claim")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "ownerToken": owner,
+                            "recovery": owner == "owner-new",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let stale_failure = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/transfers/transfer-claim-fence/actions/fail")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "reason": "old importer failed late",
+                        "claimOwnerToken": "owner-old",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(stale_failure.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["updated"],
+        false
+    );
+
+    let transfer = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/transfers/transfer-claim-fence")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(transfer.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let transfer = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+    assert_eq!(transfer["transfer"]["status"], "claimed");
+
+    let replacement_renewal = app
+        .oneshot(
+            Request::post("/v1/transfers/transfer-claim-fence/actions/renew-claim")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "ownerToken": "owner-new" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(replacement_renewal.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["updated"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn privileged_task_access_preserves_paired_loopback_and_authenticated_tunnel_dispatch() {
+    let state =
+        super::test_state_with_seed("desktop-private-positive", "Private Positive Mac", |_| {});
+    let pairing_path = std::path::PathBuf::from(&state.config().pairing_store_path);
+    let mut pairing_store = crate::pairing::PairingStore::default();
+    pairing_store.add_trusted_device(
+        &state.config().desktop_id,
+        "phone-1",
+        "Kanna Mobile",
+        &crate::pairing::hash_device_secret("lan-secret"),
+    );
+    pairing_store.save(&pairing_path).unwrap();
+    let app = crate::http_api::router(Arc::clone(&state));
+
+    let mut paired = direct_lan_request(axum::http::Method::POST, "/v1/tasks/task-private/input");
+    paired.headers_mut().insert(
+        "x-kanna-device-id",
+        axum::http::HeaderValue::from_static("phone-1"),
+    );
+    paired.headers_mut().insert(
+        "x-kanna-device-secret",
+        axum::http::HeaderValue::from_static("lan-secret"),
+    );
+    let paired_status = app.clone().oneshot(paired).await.unwrap().status();
+    assert_ne!(paired_status, StatusCode::UNAUTHORIZED);
+
+    let mut loopback = Request::post("/v1/tasks/task-private/actions/close")
+        .body(Body::empty())
+        .unwrap();
+    loopback
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            49152,
+        ))));
+    let loopback_status = app.oneshot(loopback).await.unwrap().status();
+    assert_ne!(loopback_status, StatusCode::UNAUTHORIZED);
+
+    let tunneled = crate::http_api::dispatch_authenticated_http_invoke(
+        state,
+        "POST",
+        "/v1/tasks/task-private/actions/advance-stage",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_ne!(tunneled.status, StatusCode::UNAUTHORIZED.as_u16());
+    let _ = std::fs::remove_file(pairing_path);
+}
+
 #[tokio::test]
 async fn list_desktops_route_returns_configured_desktop() {
     let app = super::test_router("desktop-1", "Studio Mac");
@@ -682,12 +1003,16 @@ async fn cloud_transfer_identity_route_persists_canonical_json_setting() {
 
     let response = app
         .clone()
-        .oneshot(
-            Request::put("/v1/settings/cloud-transfer-identity")
+        .oneshot({
+            let mut request = Request::put("/v1/settings/cloud-transfer-identity")
                 .header("content-type", "application/json")
                 .body(Body::from(identity.to_string()))
-                .unwrap(),
-        )
+                .unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                std::net::SocketAddr::from(([127, 0, 0, 1], 49152)),
+            ));
+            request
+        })
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -1210,7 +1535,14 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
         .clone()
         .oneshot(
             Request::post("/v1/transfers/transfer-1/actions/claim")
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "ownerToken": "window-owner",
+                        "recovery": false
+                    })
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -1228,7 +1560,11 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
             Request::post("/v1/transfers/transfer-1/actions/importing")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::json!({ "localTaskId": "task-local" }).to_string(),
+                    serde_json::json!({
+                        "localTaskId": "task-local",
+                        "claimOwnerToken": "window-owner"
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -1242,7 +1578,11 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
             Request::post("/v1/transfers/transfer-1/actions/awaiting-acknowledgment")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::json!({ "localTaskId": "task-local" }).to_string(),
+                    serde_json::json!({
+                        "localTaskId": "task-local",
+                        "claimOwnerToken": "window-owner"
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )
@@ -1294,7 +1634,11 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
             Request::post("/v1/transfers/transfer-1/actions/complete")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::json!({ "localTaskId": "task-local" }).to_string(),
+                    serde_json::json!({
+                        "localTaskId": "task-local",
+                        "claimOwnerToken": "window-owner"
+                    })
+                    .to_string(),
                 ))
                 .unwrap(),
         )

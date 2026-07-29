@@ -1,5 +1,5 @@
 use kanna_task_transfer::protocol::{
-    ControlRequest, ControlResponse, PeerRequest, PeerResponse, SidecarEvent,
+    ControlRequest, ControlResponse, PeerRequest, PeerResponse, PeerTerminalEvent, SidecarEvent,
 };
 use kanna_task_transfer::runtime::{ExternalPeer, TransferTransport};
 use serde_json::json;
@@ -62,6 +62,57 @@ fn control_messages_roundtrip_with_request_ids() {
     let json = serde_json::to_string(&message).unwrap();
     let parsed: ControlRequest = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed, message);
+}
+
+#[test]
+fn authenticated_request_epoch_handshake_roundtrips() {
+    assert_roundtrip(PeerRequest::GetAuthenticatedRequestEpoch {
+        request_id: "epoch-1".into(),
+    });
+    assert_roundtrip(PeerResponse::AuthenticatedRequestEpoch {
+        request_id: "epoch-1".into(),
+        epoch: "restart-random-owner-epoch".into(),
+    });
+}
+
+#[test]
+fn terminal_observer_control_messages_carry_subscription_leases() {
+    assert_roundtrip(ControlRequest::ObservePeerSession {
+        request_id: "observe-1".into(),
+        target_peer_id: "peer-owner".into(),
+        session_id: "task-1".into(),
+        observer_lease_id: "lease-new".into(),
+    });
+    assert_roundtrip(ControlRequest::UnobservePeerSession {
+        request_id: "unobserve-1".into(),
+        target_peer_id: "peer-owner".into(),
+        session_id: "task-1".into(),
+        observer_lease_id: "lease-new".into(),
+    });
+    let event = SidecarEvent::TerminalEvent {
+        peer_id: "peer-owner".into(),
+        session_id: "task-1".into(),
+        observer_lease_id: "lease-new".into(),
+        event: PeerTerminalEvent::Output {
+            session_id: "task-1".into(),
+            data: b"hello".to_vec(),
+        },
+    };
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        json!({
+            "type": "terminal_event",
+            "peer_id": "peer-owner",
+            "session_id": "task-1",
+            "observer_lease_id": "lease-new",
+            "event": {
+                "type": "output",
+                "session_id": "task-1",
+                "data": [104, 101, 108, 108, 111],
+            },
+        }),
+    );
+    assert_roundtrip(event);
 }
 
 #[test]
@@ -193,6 +244,14 @@ fn applied_import_commit_control_messages_roundtrip() {
         request_id: "req-applied".into(),
         transfer_id: "transfer-1".into(),
     });
+    assert_roundtrip(ControlRequest::NackImportCommit {
+        request_id: "req-nack".into(),
+        transfer_id: "transfer-1".into(),
+    });
+    assert_roundtrip(ControlResponse::NackImportCommit {
+        request_id: "req-nack".into(),
+        transfer_id: "transfer-1".into(),
+    });
     assert_roundtrip(ControlRequest::MarkImportAckCompleted {
         request_id: "req-ack-completed".into(),
         transfer_id: "transfer-1".into(),
@@ -287,6 +346,7 @@ fn remote_task_advance_messages_use_expected_wire_names() {
         request_id: "req-advance-control".into(),
         target_peer_id: "peer-owner".into(),
         task_id: "task-owner".into(),
+        expected_transition_revision: Some("run-1".into()),
     };
     assert_eq!(
         serde_json::to_value(&control_request).unwrap(),
@@ -295,6 +355,7 @@ fn remote_task_advance_messages_use_expected_wire_names() {
             "request_id": "req-advance-control",
             "target_peer_id": "peer-owner",
             "task_id": "task-owner",
+            "expected_transition_revision": "run-1",
         })
     );
     assert_roundtrip(control_request);
@@ -307,6 +368,8 @@ fn remote_task_advance_messages_use_expected_wire_names() {
         request_id: "req-advance-peer".into(),
         requester_peer_id: "peer-secondary".into(),
         task_id: "task-owner".into(),
+        expected_transition_revision: Some("run-1".into()),
+        sealed_payload: None,
     };
     assert_eq!(
         serde_json::to_value(&peer_request).unwrap(),
@@ -315,6 +378,7 @@ fn remote_task_advance_messages_use_expected_wire_names() {
             "request_id": "req-advance-peer",
             "requester_peer_id": "peer-secondary",
             "task_id": "task-owner",
+            "expected_transition_revision": "run-1",
         })
     );
     assert_roundtrip(peer_request);
@@ -322,6 +386,66 @@ fn remote_task_advance_messages_use_expected_wire_names() {
     assert_roundtrip(PeerResponse::AdvanceTaskStage {
         request_id: "req-advance-peer".into(),
     });
+}
+
+#[test]
+fn stage_advance_revision_field_is_backward_compatible() {
+    let legacy_control = serde_json::from_value::<ControlRequest>(json!({
+        "type": "advance_peer_task_stage",
+        "request_id": "req-legacy-control",
+        "target_peer_id": "peer-owner",
+        "task_id": "task-owner",
+    }));
+    assert!(
+        legacy_control.is_ok(),
+        "new sidecar must accept an older control request without a CAS revision: {legacy_control:?}",
+    );
+
+    let legacy_peer = serde_json::from_value::<PeerRequest>(json!({
+        "type": "advance_task_stage",
+        "request_id": "req-legacy-peer",
+        "requester_peer_id": "peer-secondary",
+        "task_id": "task-owner",
+    }));
+    assert!(
+        legacy_peer.is_ok(),
+        "new owner must accept an older peer message without a CAS revision: {legacy_peer:?}",
+    );
+
+    let new_control_without_cas = ControlRequest::AdvancePeerTaskStage {
+        request_id: "req-new-control".into(),
+        target_peer_id: "peer-owner".into(),
+        task_id: "task-owner".into(),
+        expected_transition_revision: None,
+    };
+    assert_eq!(
+        serde_json::to_value(new_control_without_cas).unwrap(),
+        json!({
+            "type": "advance_peer_task_stage",
+            "request_id": "req-new-control",
+            "target_peer_id": "peer-owner",
+            "task_id": "task-owner",
+        }),
+        "a no-CAS request must retain the legacy wire shape for older sidecars",
+    );
+
+    let new_peer_without_cas = PeerRequest::AdvanceTaskStage {
+        request_id: "req-new-peer".into(),
+        requester_peer_id: "peer-secondary".into(),
+        task_id: "task-owner".into(),
+        expected_transition_revision: None,
+        sealed_payload: None,
+    };
+    assert_eq!(
+        serde_json::to_value(new_peer_without_cas).unwrap(),
+        json!({
+            "type": "advance_task_stage",
+            "request_id": "req-new-peer",
+            "requester_peer_id": "peer-secondary",
+            "task_id": "task-owner",
+        }),
+        "a no-CAS peer request must retain the legacy revision shape",
+    );
 }
 
 #[test]
@@ -355,6 +479,7 @@ fn remote_task_file_messages_use_expected_wire_names() {
         requester_peer_id: "peer-secondary".into(),
         task_id: "task-owner".into(),
         path: "src/app.ts".into(),
+        sealed_payload: Some("sealed-read".into()),
     };
     assert_eq!(
         serde_json::to_value(&peer_request).unwrap(),
@@ -364,6 +489,7 @@ fn remote_task_file_messages_use_expected_wire_names() {
             "requester_peer_id": "peer-secondary",
             "task_id": "task-owner",
             "path": "src/app.ts",
+            "sealed_payload": "sealed-read",
         })
     );
     assert_roundtrip(peer_request);
@@ -427,6 +553,7 @@ fn transfer_artifact_control_messages_roundtrip() {
         transfer_id: "transfer-1".into(),
         artifact_id: "artifact-1".into(),
         path: "/tmp/transfer-1.bundle".into(),
+        owned: true,
     });
 
     assert_roundtrip(ControlRequest::FetchTransferArtifact {
@@ -459,6 +586,11 @@ fn transfer_artifact_control_messages_roundtrip() {
         request_id: "req-peer-fetch".into(),
         transfer_id: "transfer-1".into(),
         sealed_payload: "sealed-response".into(),
+        stream_header: Some(kanna_task_transfer::crypto::SealedStreamHeader {
+            version: 1,
+            ephemeral_public_key: "ephemeral-key".into(),
+            nonce_prefix_b64: "nonce-prefix".into(),
+        }),
     });
 
     assert_roundtrip(ControlRequest::FinalizeOutgoingTransfer {
@@ -498,6 +630,7 @@ fn transfer_artifact_control_messages_roundtrip() {
         request_id: "req-peer-finalize".into(),
         transfer_id: "transfer-1".into(),
         requester_peer_id: "peer-destination".into(),
+        sealed_payload: "sealed-finalize-request".into(),
     });
 
     assert_roundtrip(PeerResponse::FinalizeTransfer {
@@ -821,6 +954,11 @@ fn remaining_protocol_variants_use_expected_json_shapes() {
         request_id: "req-14".into(),
         transfer_id: "transfer-13".into(),
         sealed_payload: "sealed-response".into(),
+        stream_header: Some(kanna_task_transfer::crypto::SealedStreamHeader {
+            version: 1,
+            ephemeral_public_key: "ephemeral-key".into(),
+            nonce_prefix_b64: "nonce-prefix".into(),
+        }),
     };
     assert_eq!(
         serde_json::to_value(&peer_fetch_artifact_response).unwrap(),
@@ -829,6 +967,11 @@ fn remaining_protocol_variants_use_expected_json_shapes() {
             "request_id": "req-14",
             "transfer_id": "transfer-13",
             "sealed_payload": "sealed-response",
+            "stream_header": {
+                "version": 1,
+                "ephemeral_public_key": "ephemeral-key",
+                "nonce_prefix_b64": "nonce-prefix",
+            },
         })
     );
 
@@ -850,6 +993,7 @@ fn remaining_protocol_variants_use_expected_json_shapes() {
         transfer_id: "transfer-13".into(),
         artifact_id: "artifact-13".into(),
         path: "/tmp/transfer-13.bundle".into(),
+        owned: true,
     };
     assert_eq!(
         serde_json::to_value(&stage_artifact_request).unwrap(),
@@ -859,6 +1003,7 @@ fn remaining_protocol_variants_use_expected_json_shapes() {
             "transfer_id": "transfer-13",
             "artifact_id": "artifact-13",
             "path": "/tmp/transfer-13.bundle",
+            "owned": true,
         })
     );
 

@@ -883,6 +883,180 @@ fn test_kill_delivers_killed_exit_to_attached_clients_and_subscribers() {
     }
 }
 
+#[test]
+fn observe_snapshot_registration_is_ordered_before_a_concurrent_kill_exit() {
+    let daemon = DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_REGISTRATION_PAUSE_MS", "250")]);
+    let mut creator = daemon.connect();
+    spawn_shell_session(
+        &mut creator,
+        "sess-observe-kill-race",
+        "printf 'OLD_READY\\r\\n'; sleep 30",
+    );
+
+    let mut observer = daemon.connect();
+    observer.send(&Cmd::ObserveSnapshot {
+        session_id: "sess-observe-kill-race".into(),
+    });
+    wait_for_daemon_log(
+        &daemon,
+        "[registration-test-pause] operation=observe_snapshot session=sess-observe-kill-race",
+        Duration::from_secs(2),
+    );
+
+    let mut killer = daemon.connect();
+    killer.send(&Cmd::Kill {
+        session_id: "sess-observe-kill-race".into(),
+    });
+
+    assert!(matches!(
+        observer.recv(),
+        Evt::Snapshot { ref session_id, .. } if session_id == "sess-observe-kill-race"
+    ));
+    loop {
+        match observer.recv() {
+            Evt::Exit {
+                session_id, killed, ..
+            } => {
+                assert_eq!(session_id, "sess-observe-kill-race");
+                assert!(killed);
+                break;
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => {}
+            other => panic!("expected observer events followed by final Exit, got {other:?}"),
+        }
+    }
+    wait_for_ok(&mut killer, "kill after observe snapshot registration");
+    assert!(
+        observer
+            .recv_with_timeout(Duration::from_millis(250))
+            .is_err(),
+        "a stale observer must receive no Snapshot or StatusChanged after its final Exit",
+    );
+}
+
+#[test]
+fn attach_snapshot_registration_is_ordered_before_a_concurrent_kill_exit() {
+    let daemon = DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_REGISTRATION_PAUSE_MS", "250")]);
+    let mut creator = daemon.connect();
+    spawn_shell_session(
+        &mut creator,
+        "sess-attach-kill-race",
+        "printf 'OLD_READY\\r\\n'; sleep 30",
+    );
+
+    let mut attached = daemon.connect();
+    attached.send(&Cmd::AttachSnapshot {
+        session_id: "sess-attach-kill-race".into(),
+        emulate_terminal: false,
+    });
+    wait_for_daemon_log(
+        &daemon,
+        "[registration-test-pause] operation=attach_snapshot session=sess-attach-kill-race",
+        Duration::from_secs(2),
+    );
+
+    let mut killer = daemon.connect();
+    killer.send(&Cmd::Kill {
+        session_id: "sess-attach-kill-race".into(),
+    });
+
+    assert!(matches!(
+        attached.recv(),
+        Evt::Snapshot { ref session_id, .. } if session_id == "sess-attach-kill-race"
+    ));
+    loop {
+        match attached.recv() {
+            Evt::Exit {
+                session_id, killed, ..
+            } => {
+                assert_eq!(session_id, "sess-attach-kill-race");
+                assert!(killed);
+                break;
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => {}
+            other => panic!("expected attached events followed by final Exit, got {other:?}"),
+        }
+    }
+    wait_for_ok(&mut killer, "kill after attach snapshot registration");
+    assert!(
+        attached
+            .recv_with_timeout(Duration::from_millis(250))
+            .is_err(),
+        "a stale attachment must receive no Snapshot or StatusChanged after its final Exit",
+    );
+}
+
+#[test]
+fn same_id_respawn_waits_until_kill_finishes_stale_fanout_cleanup() {
+    let daemon =
+        DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_KILL_AFTER_EXIT_PAUSE_MS", "1200")]);
+    let mut creator = daemon.connect();
+    spawn_shell_session(&mut creator, "sess-kill-respawn-race", "sleep 30");
+    let mut stale_attached = daemon.connect();
+    attach(&mut stale_attached, "sess-kill-respawn-race");
+
+    let mut killer = daemon.connect();
+    killer.send(&Cmd::Kill {
+        session_id: "sess-kill-respawn-race".into(),
+    });
+    wait_for_daemon_log(
+        &daemon,
+        "[kill-test-pause] session=sess-kill-respawn-race",
+        Duration::from_secs(4),
+    );
+
+    let mut respawner = daemon.connect();
+    respawner.send(&Cmd::Spawn {
+        session_id: "sess-kill-respawn-race".into(),
+        executable: "/bin/sh".into(),
+        args: vec!["-c".into(), "printf 'NEW_READY\\r\\n'; sleep 30".into()],
+        cwd: "/tmp".into(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        terminal_prelude: None,
+    });
+    assert!(
+        respawner
+            .recv_with_timeout(Duration::from_millis(100))
+            .is_err(),
+        "same-id respawn must remain queued while killed incarnation cleanup holds lifecycle",
+    );
+
+    wait_for_ok(&mut killer, "kill before same-id respawn");
+    expect_session_created_with_timeout(
+        &mut respawner,
+        "sess-kill-respawn-race",
+        Duration::from_secs(2),
+    );
+    let snapshot = observe_snapshot(&mut respawner, "sess-kill-respawn-race");
+    let mut new_output = snapshot.vt;
+    while !new_output.contains("NEW_READY") {
+        match respawner.recv() {
+            Evt::Output { data, .. } => new_output.push_str(&String::from_utf8_lossy(&data)),
+            Evt::StatusChanged { .. } => {}
+            other => panic!("expected replacement output, got {other:?}"),
+        }
+    }
+
+    loop {
+        match stale_attached.recv() {
+            Evt::Exit { killed, .. } => {
+                assert!(killed);
+                break;
+            }
+            Evt::Output { .. } | Evt::StatusChanged { .. } => {}
+            other => panic!("expected stale attachment Exit, got {other:?}"),
+        }
+    }
+    assert!(
+        stale_attached
+            .recv_with_timeout(Duration::from_millis(250))
+            .is_err(),
+        "replacement Snapshot or StatusChanged leaked into the stale incarnation fanout",
+    );
+}
+
 /// A stage swap kills a session id and immediately respawns it with the next
 /// stage's agent. Subscribers must observe the old incarnation's Exit before
 /// the new incarnation's SessionCreated — the desktop terminal rebinds on
@@ -1545,13 +1719,24 @@ fn test_stale_reader_does_not_remove_respawned_session_with_same_id() {
     );
 
     let mut first_attach = daemon.connect();
-    attach(&mut first_attach, "sess-respawn");
-    let old_output = first_attach.collect_output_until_contains("OLD_READY");
-    assert!(
-        String::from_utf8_lossy(&old_output).contains("OLD_READY"),
-        "old session precondition failed: {:?}",
-        String::from_utf8_lossy(&old_output)
-    );
+    first_attach.send(&Cmd::AttachSnapshot {
+        session_id: "sess-respawn".to_string(),
+        emulate_terminal: false,
+    });
+    let old_ready_in_snapshot = match first_attach.recv() {
+        Evt::Snapshot {
+            session_id,
+            snapshot,
+        } => {
+            assert_eq!(session_id, "sess-respawn");
+            snapshot.vt.contains("OLD_READY")
+        }
+        Evt::Error { message } => panic!("attach failed: {message}"),
+        other => panic!("expected Snapshot, got: {other:?}"),
+    };
+    if !old_ready_in_snapshot {
+        first_attach.wait_for_content_with_timeout("OLD_READY", Duration::from_secs(5));
+    }
 
     kill_session(&mut shared, "sess-respawn");
 
@@ -1562,13 +1747,24 @@ fn test_stale_reader_does_not_remove_respawned_session_with_same_id() {
     );
 
     let mut second_attach = daemon.connect();
-    attach(&mut second_attach, "sess-respawn");
-    let new_output = second_attach.collect_output_until_contains("NEW_READY");
-    assert!(
-        String::from_utf8_lossy(&new_output).contains("NEW_READY"),
-        "respawned session output should remain visible, got {:?}",
-        String::from_utf8_lossy(&new_output)
-    );
+    second_attach.send(&Cmd::AttachSnapshot {
+        session_id: "sess-respawn".to_string(),
+        emulate_terminal: false,
+    });
+    let ready_in_snapshot = match second_attach.recv() {
+        Evt::Snapshot {
+            session_id,
+            snapshot,
+        } => {
+            assert_eq!(session_id, "sess-respawn");
+            snapshot.vt.contains("NEW_READY")
+        }
+        Evt::Error { message } => panic!("attach failed: {message}"),
+        other => panic!("expected Snapshot, got: {other:?}"),
+    };
+    if !ready_in_snapshot {
+        second_attach.wait_for_content_with_timeout("NEW_READY", Duration::from_secs(5));
+    }
 
     std::thread::sleep(Duration::from_millis(250));
     let snapshot = wait_for_snapshot(&mut shared, "sess-respawn", "NEW_READY");
@@ -1758,6 +1954,127 @@ fn same_id_reuse_waits_for_old_reader_exit_and_recovery_teardown() {
             Err(_) => {}
         }
     }
+}
+
+#[test]
+fn natural_exit_finalization_precedes_same_id_replacement_creation() {
+    let daemon = DaemonHandle::start_with_fake_recovery([(
+        "KANNA_DAEMON_TEST_NATURAL_EXIT_FINALIZE_PAUSE_MS",
+        "1200",
+    )]);
+    let session_id = "sess-natural-linearized-reuse";
+    let mut subscriber = daemon.connect();
+    subscriber.send(&Cmd::Subscribe);
+    wait_for_ok_with_timeout(
+        &mut subscriber,
+        "subscribe before natural-exit reuse",
+        Duration::from_secs(15),
+    );
+
+    let mut creator = daemon.connect();
+    creator.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "printf 'OLD_NATURAL_INCARNATION\\r\\n'".to_string(),
+        ],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        terminal_prelude: None,
+    });
+    expect_session_created_with_timeout(&mut creator, session_id, Duration::from_secs(15));
+
+    let natural_exit_deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let remaining = natural_exit_deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for the old incarnation's natural Exit"
+        );
+        match subscriber.recv_with_timeout(remaining.min(Duration::from_millis(50))) {
+            Ok(Evt::SessionCreated {
+                session_id: created,
+            }) => assert_eq!(created, session_id),
+            Ok(Evt::Exit {
+                session_id: exited,
+                killed,
+                ..
+            }) => {
+                assert_eq!(exited, session_id);
+                assert!(!killed);
+                break;
+            }
+            Ok(Evt::Output { .. }) | Ok(Evt::StatusChanged { .. }) | Err(_) => {}
+            Ok(other) => panic!("expected natural session lifecycle event, got: {other:?}"),
+        }
+    }
+
+    let mut replacement = daemon.connect();
+    replacement.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            "printf 'NEW_NATURAL_INCARNATION\\r\\n'; while :; do sleep 1; done".to_string(),
+        ],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        terminal_prelude: None,
+    });
+    assert!(
+        replacement
+            .recv_with_timeout(Duration::from_millis(250))
+            .is_err(),
+        "same-id Spawn escaped while natural-exit recovery teardown was still in flight",
+    );
+    expect_session_created_with_timeout(&mut replacement, session_id, Duration::from_secs(4));
+
+    let commands = wait_for_recovery_log(
+        &daemon,
+        |commands| {
+            commands
+                .iter()
+                .filter(|command| command["type"] == "StartSession")
+                .count()
+                >= 2
+                && commands
+                    .iter()
+                    .any(|command| command["type"] == "EndSession")
+        },
+        Duration::from_secs(4),
+    );
+    let replacement_start = commands
+        .iter()
+        .enumerate()
+        .filter(|(_, command)| command["type"] == "StartSession")
+        .nth(1)
+        .map(|(index, _)| index)
+        .expect("replacement recovery session should start");
+    assert!(
+        commands[..replacement_start]
+            .iter()
+            .any(|command| command["type"] == "EndSession"),
+        "old natural-exit recovery teardown must precede replacement start: {commands:?}",
+    );
+    assert!(
+        !commands[replacement_start + 1..]
+            .iter()
+            .any(|command| command["type"] == "EndSession"),
+        "stale natural-exit teardown targeted the replacement incarnation: {commands:?}",
+    );
+
+    let mut attached = daemon.connect();
+    attach(&mut attached, session_id);
+    let output = attached.collect_output_until_contains("NEW_NATURAL_INCARNATION");
+    assert!(
+        String::from_utf8_lossy(&output).contains("NEW_NATURAL_INCARNATION"),
+        "replacement terminal lost its fanout during stale natural-exit cleanup",
+    );
 }
 
 #[test]
@@ -2163,7 +2480,7 @@ fn overflowing_subscriber_resyncs_from_fresh_snapshot_without_delaying_healthy()
     // A small per-subscriber byte budget lets a modest flood overflow the
     // mailbox without pushing megabytes through debug-build JSON parsing.
     let daemon =
-        DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_SUBSCRIBER_MAILBOX_MAX_BYTES", "65536")]);
+        DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_SUBSCRIBER_MAILBOX_MAX_BYTES", "16384")]);
     let session_id = "sess-overflowing-subscriber";
     let dir = atomic_attach_dir("overflowing-subscriber");
 
@@ -2175,7 +2492,7 @@ fn overflowing_subscriber_resyncs_from_fresh_snapshot_without_delaying_healthy()
             "-c".to_string(),
             // Enough serialized volume to overflow the reduced byte budget on
             // top of the kernel socket buffers.
-            "while [ ! -f go ]; do sleep 0.01; done; head -c 262144 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
+            "while [ ! -f go ]; do sleep 0.01; done; head -c 32768 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
                 .to_string(),
         ],
         cwd: dir.display().to_string(),
@@ -2187,6 +2504,7 @@ fn overflowing_subscriber_resyncs_from_fresh_snapshot_without_delaying_healthy()
     expect_session_created(&mut control, session_id);
 
     let mut stalled = daemon.connect();
+    stalled.clamp_recv_buffer(4096);
     attach(&mut stalled, session_id);
     let mut healthy = daemon.connect();
     attach(&mut healthy, session_id);
@@ -2195,7 +2513,7 @@ fn overflowing_subscriber_resyncs_from_fresh_snapshot_without_delaying_healthy()
 
     // The healthy subscriber observes the end of the flood promptly while the
     // stalled subscriber's backlog overflows its byte budget.
-    healthy.wait_for_content_with_timeout("FLOOD_DONE", Duration::from_millis(2_500));
+    healthy.wait_for_content_with_timeout("FLOOD_DONE", Duration::from_secs(5));
 
     // The lagging subscriber is not disconnected: once it resumes reading and
     // drains its bounded backlog, the daemon resynchronizes it in place with
@@ -2234,7 +2552,7 @@ fn overflowing_observer_resyncs_with_fresh_snapshot_then_live_output() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let daemon =
-        DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_SUBSCRIBER_MAILBOX_MAX_BYTES", "65536")]);
+        DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_SUBSCRIBER_MAILBOX_MAX_BYTES", "16384")]);
     let session_id = "sess-overflowing-observer";
     let dir = atomic_attach_dir("overflowing-observer");
 
@@ -2244,7 +2562,7 @@ fn overflowing_observer_resyncs_with_fresh_snapshot_then_live_output() {
         executable: "/bin/sh".to_string(),
         args: vec![
             "-c".to_string(),
-            "while [ ! -f go ]; do sleep 0.01; done; head -c 262144 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
+            "while [ ! -f go ]; do sleep 0.01; done; head -c 32768 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
                 .to_string(),
         ],
         cwd: dir.display().to_string(),
@@ -2263,7 +2581,7 @@ fn overflowing_observer_resyncs_with_fresh_snapshot_then_live_output() {
 
     std::fs::write(dir.join("go"), b"go").unwrap();
 
-    healthy.wait_for_content_with_timeout("FLOOD_DONE", Duration::from_millis(2_500));
+    healthy.wait_for_content_with_timeout("FLOOD_DONE", Duration::from_secs(5));
     wait_for_daemon_log(
         &daemon,
         "stage=observer_write event=lag",

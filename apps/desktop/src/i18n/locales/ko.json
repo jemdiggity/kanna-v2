@@ -12,6 +12,7 @@
     "loadingOptions": "작업 옵션을 불러오는 중…",
     "blockedBy": "차단 원인",
     "blockedByNone": "없음",
+    "taskId": "작업 {id}",
     "untitled": "제목 없음",
     "renameTask": "작업 이름 변경"
   },

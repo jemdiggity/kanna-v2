@@ -45,29 +45,40 @@ function workspaceTask(
   displayName: string | null,
   blockedByTaskIds: string[] = [],
   ownerKind: "local" | "remote" = "remote",
+  options: {
+    repoKey?: string;
+    ownerDesktopId?: string;
+    stage?: string;
+    prUrl?: string | null;
+  } = {},
 ): WorkspaceTask {
-  const itemId = ownerKind === "local" ? ownerTaskId : `cloud:repo-1:${ownerTaskId}`;
+  const repoKey = options.repoKey ?? "repo-1";
+  const ownerDesktopId = options.ownerDesktopId ?? "desktop-owner";
+  const itemId = ownerKind === "local" ? ownerTaskId : `cloud:${repoKey}:${ownerTaskId}`;
   const taskItem = item(itemId, displayName);
+  taskItem.repo_id = `cloud:${repoKey}`;
+  taskItem.stage = options.stage ?? taskItem.stage;
+  taskItem.pr_url = options.prUrl ?? null;
   return {
     id: ownerKind === "local" ? `local:${ownerTaskId}` : itemId,
-    logicalTaskKey: `repo-1:owner-local:${ownerTaskId}`,
+    logicalTaskKey: `${repoKey}:owner-local:${ownerTaskId}`,
     localTaskId: ownerKind === "local" ? ownerTaskId : null,
     remoteTaskIds: ownerKind === "local" ? [] : [itemId],
-    repoKey: "repo-1",
+    repoKey,
     item: taskItem,
     owner: ownerKind === "local"
       ? { kind: "local", id: "local" }
-      : { kind: "remote", id: "desktop-owner" },
+      : { kind: "remote", id: ownerDesktopId },
     sources: [{
       kind: ownerKind === "local" ? "local" : "cloud",
       taskId: itemId,
-      repoId: "cloud:repo-1",
+      repoId: `cloud:${repoKey}`,
       updatedAt: taskItem.updated_at,
       blockedByTaskIds,
       ...(ownerKind === "remote"
         ? {
             terminalRef: {
-              ownerDesktopId: "desktop-owner",
+              ownerDesktopId,
               ownerLocalTaskId: ownerTaskId,
               transport: "cloud" as const,
             },
@@ -95,7 +106,7 @@ function workspaceTask(
       : {
           kind: "cloud",
           remoteRef: {
-            ownerDesktopId: "desktop-owner",
+            ownerDesktopId,
             ownerLocalTaskId: ownerTaskId,
             transport: "cloud",
           },
@@ -141,7 +152,6 @@ describe("projectWorkspaceBlockers", () => {
       blocked_item_id: blockedTask.item.id,
       blocker_item_id: blockerTask.item.id,
     }]);
-    expect(result.blockerNames[blockedTask.item.id]).toBe("Build dependency");
     expect(result.blockersByLogicalTaskKey[blockedTask.logicalTaskKey]).toEqual([
       expect.objectContaining({
         id: blockerTask.item.id,
@@ -150,7 +160,7 @@ describe("projectWorkspaceBlockers", () => {
     ]);
   });
 
-  it("keeps an unresolved owner blocker visible with a stable fallback label", () => {
+  it("keeps an unresolved owner blocker visible as raw fallback metadata", () => {
     const blockedTask = workspaceTask("blocked-owner", "Blocked task", ["3c45beea"]);
 
     const result = project([blockedTask]);
@@ -159,11 +169,55 @@ describe("projectWorkspaceBlockers", () => {
       blocked_item_id: blockedTask.item.id,
       blocker_item_id: "3c45beea",
     }]);
-    expect(result.blockerNames[blockedTask.item.id]).toBe("Task 3c45beea");
     expect(result.blockersByLogicalTaskKey[blockedTask.logicalTaskKey]).toEqual([
       expect.objectContaining({
         id: "3c45beea",
-        display_name: "Task 3c45beea",
+        display_name: null,
+        fallback_task_id: "3c45beea",
+      }),
+    ]);
+  });
+
+  it("does not resolve a raw blocker through a colliding task in another repo or owner", () => {
+    const blockedTask = workspaceTask(
+      "blocked-owner",
+      "Blocked task",
+      ["colliding-blocker"],
+      "remote",
+      {
+        repoKey: "repo-blocked",
+        ownerDesktopId: "desktop-blocked",
+      },
+    );
+    const unrelatedResolvedTask = workspaceTask(
+      "colliding-blocker",
+      "Unrelated resolved task",
+      [],
+      "remote",
+      {
+        repoKey: "repo-unrelated",
+        ownerDesktopId: "desktop-unrelated",
+        stage: "pr",
+        prUrl: "https://github.com/kanna/kanna/pull/999",
+      },
+    );
+
+    const result = project([blockedTask, unrelatedResolvedTask]);
+
+    expect(result.taskBlockers).toEqual([{
+      blocked_item_id: blockedTask.item.id,
+      blocker_item_id: "colliding-blocker",
+    }]);
+    expect(result.blockerTaskStates["colliding-blocker"]).toEqual({
+      closed_at: null,
+      stage: "in progress",
+      pr_url: null,
+    });
+    expect(result.blockersByLogicalTaskKey[blockedTask.logicalTaskKey]).toEqual([
+      expect.objectContaining({
+        id: "colliding-blocker",
+        display_name: null,
+        fallback_task_id: "collidin",
       }),
     ]);
   });
@@ -179,7 +233,6 @@ describe("projectWorkspaceBlockers", () => {
     const result = project([localTask]);
 
     expect(result.taskBlockers).toEqual([]);
-    expect(result.blockerNames).toEqual({});
     expect(result.blockersByLogicalTaskKey).toEqual({});
   });
 });

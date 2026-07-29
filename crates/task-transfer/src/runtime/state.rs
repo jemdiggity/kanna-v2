@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
@@ -46,6 +46,7 @@ pub(super) struct ImportCommitReceipt {
     pub(super) created_at_unix_ms: u64,
     pub(super) applied: bool,
     pub(super) event_queued: bool,
+    pub(super) delivery_in_flight: bool,
 }
 
 impl ImportCommitReceipt {
@@ -54,7 +55,7 @@ impl ImportCommitReceipt {
         transfer_id: &str,
         sender: &mpsc::Sender<OutgoingTransferCommittedEvent>,
     ) -> Result<(), RuntimeError> {
-        if self.applied || self.event_queued {
+        if self.applied || self.event_queued || self.delivery_in_flight {
             return Ok(());
         }
         let event = OutgoingTransferCommittedEvent {
@@ -84,10 +85,32 @@ pub struct StagedTransferArtifact {
 pub(super) struct TransferArtifactRecord {
     pub(super) path: PathBuf,
     pub(super) created_at: Instant,
+    pub(super) owned: bool,
+}
+
+pub(super) struct TerminalObserverSlot {
+    pub(super) closed: bool,
+    pub(super) closed_at: Option<Instant>,
+    pub(super) handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct AuthenticatedPeerRequestReplay {
+    pub(super) expires_at_unix_ms: u64,
+    pub(super) durable: bool,
+}
+
+pub(super) type CachedOutgoingTransferFinalization = Result<FinalizedOutgoingTransfer, String>;
+
+pub(super) enum OutgoingTransferFinalizationState {
+    Pending {
+        waiters: Vec<oneshot::Sender<CachedOutgoingTransferFinalization>>,
+    },
+    Completed(CachedOutgoingTransferFinalization),
 }
 
 pub(super) type PendingOutgoingTransferFinalizations =
-    Arc<Mutex<HashMap<String, oneshot::Sender<Result<FinalizedOutgoingTransfer, RuntimeError>>>>>;
+    Arc<Mutex<HashMap<String, OutgoingTransferFinalizationState>>>;
 
 pub(super) type PendingPairingRequests = Arc<Mutex<HashMap<String, PendingPairingRequest>>>;
 
@@ -115,11 +138,18 @@ pub(super) struct ListenerContext {
     pub(super) self_peer_id: String,
     pub(super) self_display_name: String,
     pub(super) self_public_key: String,
+    pub(super) authenticated_request_epoch: String,
     pub(super) registry_root: PathBuf,
     pub(super) discovery: PeerDiscovery,
     pub(super) external_peers: ExternalPeerRegistry,
     pub(super) pending_transfer_ttl: Duration,
     pub(super) peer_request_timeout: Duration,
+    pub(super) incoming_connection_permits: Arc<Semaphore>,
+    pub(super) legacy_artifact_memory_permits: Arc<Semaphore>,
+    pub(super) max_peer_request_bytes: usize,
+    pub(super) max_pending_pairing_requests: usize,
+    pub(super) max_task_pull_requests: usize,
+    pub(super) max_finalization_waiters: usize,
     pub(super) pending_pairing_requests: PendingPairingRequests,
     pub(super) pending_task_pull_requests: PendingTaskPullRequests,
     pub(super) outgoing_transfers: Arc<Mutex<HashMap<String, OutgoingTransferReservation>>>,
@@ -129,12 +159,14 @@ pub(super) struct ListenerContext {
     pub(super) incoming_reservations: Arc<Mutex<HashMap<String, IncomingTransferReservation>>>,
     pub(super) transfer_artifacts:
         Arc<Mutex<HashMap<String, HashMap<String, TransferArtifactRecord>>>>,
+    pub(super) authenticated_peer_requests:
+        Arc<Mutex<HashMap<String, AuthenticatedPeerRequestReplay>>>,
+    pub(super) max_authenticated_request_replays: usize,
     pub(super) task_snapshot: Arc<Mutex<Value>>,
     pub(super) daemon_dir: Option<PathBuf>,
-    pub(super) db_path: Option<PathBuf>,
     pub(super) kanna_server_port: Option<u16>,
     pub(super) request_counter: Arc<AtomicU64>,
-    pub(super) incoming_sender: mpsc::UnboundedSender<RuntimeEvent>,
+    pub(super) incoming_sender: mpsc::Sender<RuntimeEvent>,
     pub(super) receipt_sender: mpsc::Sender<OutgoingTransferCommittedEvent>,
 }
 
@@ -152,11 +184,16 @@ pub struct TransferRuntime {
     pub(super) transfer_artifacts:
         Arc<Mutex<HashMap<String, HashMap<String, TransferArtifactRecord>>>>,
     pub(super) task_snapshot: Arc<Mutex<Value>>,
-    pub(super) terminal_observers: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
-    pub(super) incoming_sender: mpsc::UnboundedSender<RuntimeEvent>,
-    pub(super) incoming_events: Mutex<mpsc::UnboundedReceiver<RuntimeEvent>>,
+    pub(super) terminal_observers: Arc<Mutex<HashMap<(String, String), TerminalObserverSlot>>>,
+    pub(super) legacy_artifact_memory_permits: Arc<Semaphore>,
+    pub(super) peer_request_permits: Arc<Semaphore>,
+    pub(super) artifact_peer_request_permits: Arc<Semaphore>,
+    pub(super) mark_read_peer_request_permits: Arc<Semaphore>,
+    pub(super) incoming_sender: mpsc::Sender<RuntimeEvent>,
+    pub(super) incoming_events: Mutex<mpsc::Receiver<RuntimeEvent>>,
     pub(super) receipt_events: Mutex<mpsc::Receiver<OutgoingTransferCommittedEvent>>,
     pub(super) request_counter: Arc<AtomicU64>,
+    pub(super) request_namespace: String,
     pub(super) listener_task: JoinHandle<()>,
     pub(super) receipt_retry_task: JoinHandle<()>,
     pub(super) registry_entry_path: Option<PathBuf>,

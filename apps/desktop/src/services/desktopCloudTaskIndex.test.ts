@@ -5,17 +5,40 @@ vi.mock("firebase/firestore", () => ({
   connectFirestoreEmulator: vi.fn(),
   getDocs: vi.fn(),
   getFirestore: vi.fn(),
+  onSnapshot: vi.fn(),
   query: vi.fn((collectionRef: unknown, ...constraints: unknown[]) => ({ kind: "query", collectionRef, constraints })),
   where: vi.fn((field: string, op: string, value: unknown) => ({ kind: "where", field, op, value })),
+}));
+
+vi.mock("firebase/app", () => ({
+  getApps: vi.fn(() => [{ name: "test" }]),
+  initializeApp: vi.fn(),
+}));
+
+vi.mock("./desktopFirebaseConfig", () => ({
+  resolveDesktopFirebaseConfig: vi.fn(async () => ({
+    app: {
+      apiKey: "test",
+      authDomain: "test",
+      projectId: "test",
+      appId: "test",
+    },
+    firestoreEmulator: null,
+  })),
 }));
 
 vi.mock("./desktopRelayTerminal", () => ({
   listActiveDesktopIdsViaRelay: vi.fn(),
 }));
 
-import { getDocs } from "firebase/firestore";
+import { getDocs, getFirestore, onSnapshot } from "firebase/firestore";
 import { listActiveDesktopIdsViaRelay } from "./desktopRelayTerminal";
-import { listDesktopCloudTasks, mapDesktopCloudTasks, type DesktopCloudTaskSnapshot } from "./desktopCloudTaskIndex";
+import {
+  listDesktopCloudTasks,
+  mapDesktopCloudTasks,
+  subscribeDesktopCloudTasks,
+  type DesktopCloudTaskSnapshot,
+} from "./desktopCloudTaskIndex";
 
 function remoteTaskSnapshot(overrides: Partial<DesktopCloudTaskSnapshot> = {}): DesktopCloudTaskSnapshot {
   return {
@@ -27,6 +50,7 @@ function remoteTaskSnapshot(overrides: Partial<DesktopCloudTaskSnapshot> = {}): 
     displayName: null,
     stage: "in progress",
     activity: "idle",
+    transitionRevision: "run-1",
     status: "active",
     repo: {
       cloudRepoId: "remote-repo-id",
@@ -49,9 +73,114 @@ function remoteTaskSnapshot(overrides: Partial<DesktopCloudTaskSnapshot> = {}): 
 beforeEach(() => {
   vi.mocked(getDocs).mockReset();
   vi.mocked(listActiveDesktopIdsViaRelay).mockReset();
+  vi.mocked(onSnapshot).mockReset();
+  vi.mocked(getFirestore).mockReturnValue({} as never);
+});
+
+describe("subscribeDesktopCloudTasks", () => {
+  it("discards an older async presence lookup that completes after a newer snapshot", async () => {
+    const callbacks: Array<(snapshot: { docs: Array<Record<string, unknown>> }) => void> = [];
+    vi.mocked(onSnapshot).mockImplementation(((_ref: unknown, callback: typeof callbacks[number]) => {
+      callbacks.push(callback);
+      return () => {};
+    }) as never);
+
+    const presenceResolvers: Array<(desktopIds: Set<string>) => void> = [];
+    vi.mocked(listActiveDesktopIdsViaRelay).mockImplementation(() => new Promise((resolve) => {
+      presenceResolvers.push(resolve);
+    }));
+    const updates: ReturnType<typeof mapDesktopCloudTasks>[] = [];
+    subscribeDesktopCloudTasks("user-1", (snapshot) => updates.push(snapshot), {
+      getOptions: () => ({ currentDesktopId: "desktop-local" }),
+    });
+    for (let attempt = 0; attempt < 10 && callbacks.length === 0; attempt += 1) {
+      await Promise.resolve();
+    }
+    expect(callbacks).toHaveLength(1);
+
+    const desktopRef = { kind: "desktop-ref" };
+    callbacks[0]({
+      docs: [{
+        id: "desktop-remote",
+        ref: desktopRef,
+        data: () => ({ displayName: "Remote Mac" }),
+      }],
+    });
+    callbacks[1]({ docs: [{ data: () => remoteTaskSnapshot({
+      ownerDesktopId: "desktop-remote",
+      title: "Older",
+    }) }] });
+    callbacks[1]({ docs: [{ data: () => remoteTaskSnapshot({
+      ownerDesktopId: "desktop-remote",
+      title: "Newer",
+    }) }] });
+    expect(presenceResolvers).toHaveLength(3);
+
+    presenceResolvers[2](new Set(["desktop-remote"]));
+    for (let attempt = 0; attempt < 10 && updates.length === 0; attempt += 1) {
+      await Promise.resolve();
+    }
+    expect(updates).toHaveLength(1);
+    expect(updates.at(-1)?.items[0]?.display_name).toBe("Newer (desktop-remote)");
+
+    presenceResolvers[0](new Set());
+    presenceResolvers[1](new Set());
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(updates).toHaveLength(1);
+    expect(updates[0].items[0]?.display_name).toBe("Newer (desktop-remote)");
+  });
 });
 
 describe("mapDesktopCloudTasks", () => {
+  it("selects one destination authority during overlapping transfer publications", () => {
+    const snapshot = mapDesktopCloudTasks([
+      remoteTaskSnapshot({
+        ownerDesktopId: "desktop-source",
+        ownerLocalTaskId: "task-source",
+        title: "Stale source title",
+        blockedByTaskIds: ["source-blocker"],
+        activityRevision: 99,
+        updatedAt: "2026-07-27T00:02:00.000Z",
+        transfer: {
+          state: "outgoing",
+          transferId: "transfer-1",
+          sourceDesktopId: "desktop-source",
+          destinationDesktopId: "desktop-destination",
+        },
+      }),
+      remoteTaskSnapshot({
+        ownerDesktopId: "desktop-destination",
+        ownerLocalTaskId: "task-destination",
+        title: "Destination title",
+        blockedByTaskIds: ["destination-blocker"],
+        activityRevision: 12,
+        transitionRevision: "destination-run",
+        updatedAt: "2026-07-27T00:01:00.000Z",
+        transfer: {
+          state: "finalization_pending",
+          transferId: "transfer-1",
+          sourceDesktopId: "desktop-source",
+          destinationDesktopId: "desktop-destination",
+        },
+      }),
+    ]);
+
+    expect(snapshot.items).toHaveLength(1);
+    expect(snapshot.items[0]).toMatchObject({
+      display_name: "Destination title (desktop-destination)",
+      activity_revision: 12,
+      transition_revision: "destination-run",
+    });
+    expect(snapshot.terminalRefs["cloud:remote-repo-id:task-1"]).toMatchObject({
+      ownerDesktopId: "desktop-destination",
+      ownerLocalTaskId: "task-destination",
+    });
+    expect(snapshot.blockedByTaskIds).toEqual({
+      "cloud:remote-repo-id:task-1": ["destination-blocker"],
+    });
+  });
+
   it("preserves blocker task ids for workspace projection", () => {
     const snapshot = mapDesktopCloudTasks([
       remoteTaskSnapshot({
@@ -104,6 +233,7 @@ describe("mapDesktopCloudTasks", () => {
         stage: "in progress",
         activity: "working",
         activityRevision: 9,
+        transitionRevision: "run-cloud-9",
         status: "active",
         repo: {
           cloudRepoId: "repo-1",
@@ -140,6 +270,7 @@ describe("mapDesktopCloudTasks", () => {
         agent_provider: "codex",
         agent_type: "agent",
         activity_revision: 9,
+        transition_revision: "run-cloud-9",
       },
     ]);
     expect(snapshot.terminalRefs["cloud:repo-1:task-1"]).toEqual({

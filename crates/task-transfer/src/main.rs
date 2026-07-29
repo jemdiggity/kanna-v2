@@ -1,8 +1,13 @@
 use kanna_task_transfer::protocol::{ControlRequest, ControlResponse, SidecarEvent};
 use kanna_task_transfer::runtime::{RuntimeConfig, RuntimeError, RuntimeEvent, TransferRuntime};
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 use std::sync::Mutex;
+use tokio::sync::{oneshot, Semaphore};
+
+const DEFAULT_CONTROL_MAX_IN_FLIGHT: usize = 32;
+const DEFAULT_MARK_READ_CONTROL_MAX_IN_FLIGHT: usize = 4;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -72,10 +77,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 RuntimeEvent::TerminalEvent {
                     peer_id,
                     session_id,
+                    observer_lease_id,
                     event,
                 } => SidecarEvent::TerminalEvent {
                     peer_id,
                     session_id,
+                    observer_lease_id,
                     event,
                 },
             };
@@ -86,26 +93,104 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let mut command_tasks = tokio::task::JoinSet::new();
+    let control_permits = Arc::new(Semaphore::new(control_limit(
+        "KANNA_TRANSFER_CONTROL_MAX_IN_FLIGHT",
+        DEFAULT_CONTROL_MAX_IN_FLIGHT,
+    )));
+    let mark_read_control_permits = Arc::new(Semaphore::new(control_limit(
+        "KANNA_TRANSFER_MARK_READ_CONTROL_MAX_IN_FLIGHT",
+        DEFAULT_MARK_READ_CONTROL_MAX_IN_FLIGHT,
+    )));
+    let mut input_tails = HashMap::<(String, String), oneshot::Receiver<()>>::new();
     for line in std::io::stdin().lock().lines() {
+        while command_tasks.try_join_next().is_some() {}
+        input_tails.retain(|_, receiver| match receiver.try_recv() {
+            Ok(()) | Err(oneshot::error::TryRecvError::Closed) => false,
+            Err(oneshot::error::TryRecvError::Empty) => true,
+        });
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
 
         let request_id = extract_request_id(&line);
-        let response = match serde_json::from_str::<ControlRequest>(&line) {
-            Ok(request) => handle_request(&runtime, request).await,
-            Err(error) => ControlResponse::Error {
-                request_id,
-                message: error.to_string(),
-            },
-        };
-
-        write_json_line(&stdout, &response)?;
+        match serde_json::from_str::<ControlRequest>(&line) {
+            Ok(request) => {
+                let is_mark_read = matches!(&request, ControlRequest::MarkPeerTaskRead { .. });
+                let permits = if is_mark_read {
+                    Arc::clone(&mark_read_control_permits)
+                } else {
+                    Arc::clone(&control_permits)
+                };
+                let permit = match permits.try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        write_json_line(
+                            &stdout,
+                            &ControlResponse::Error {
+                                request_id,
+                                message: if is_mark_read {
+                                    "too many mark-read controls are already in flight".into()
+                                } else {
+                                    "too many transfer controls are already in flight".into()
+                                },
+                            },
+                        )?;
+                        continue;
+                    }
+                };
+                let (input_predecessor, input_completion) = match &request {
+                    ControlRequest::SendPeerSessionInput {
+                        target_peer_id,
+                        session_id,
+                        ..
+                    } => {
+                        let key = (target_peer_id.clone(), session_id.clone());
+                        let (completion, tail) = oneshot::channel();
+                        (input_tails.insert(key, tail), Some(completion))
+                    }
+                    _ => (None, None),
+                };
+                let request_runtime = Arc::clone(&runtime);
+                let request_stdout = Arc::clone(&stdout);
+                command_tasks.spawn(async move {
+                    let _permit = permit;
+                    if let Some(predecessor) = input_predecessor {
+                        let _ = predecessor.await;
+                    }
+                    let response = handle_request(&request_runtime, request).await;
+                    if let Err(error) = write_json_line(&request_stdout, &response) {
+                        eprintln!("[task-transfer] failed writing control response: {error}");
+                    }
+                    if let Some(completion) = input_completion {
+                        let _ = completion.send(());
+                    }
+                });
+            }
+            Err(error) => {
+                write_json_line(
+                    &stdout,
+                    &ControlResponse::Error {
+                        request_id,
+                        message: error.to_string(),
+                    },
+                )?;
+            }
+        }
     }
 
+    command_tasks.shutdown().await;
     event_task.abort();
     Ok(())
+}
+
+fn control_limit(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
 }
 
 async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> ControlResponse {
@@ -153,9 +238,10 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
         },
         ControlRequest::ListPeerTaskSnapshots { request_id } => {
             match runtime.list_peer_task_snapshots().await {
-                Ok(snapshots) => ControlResponse::ListPeerTaskSnapshots {
+                Ok(listing) => ControlResponse::ListPeerTaskSnapshots {
                     request_id,
-                    snapshots,
+                    snapshots: listing.snapshots,
+                    issues: listing.issues,
                 },
                 Err(error) => control_error(request_id, error),
             }
@@ -164,8 +250,9 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             request_id,
             target_peer_id,
             session_id,
+            observer_lease_id,
         } => match runtime
-            .observe_peer_session(&target_peer_id, &session_id)
+            .observe_peer_session(&target_peer_id, &session_id, &observer_lease_id)
             .await
         {
             Ok(()) => ControlResponse::ObservePeerSession { request_id },
@@ -208,8 +295,13 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             request_id,
             target_peer_id,
             task_id,
+            expected_transition_revision,
         } => match runtime
-            .advance_peer_task_stage(&target_peer_id, &task_id)
+            .advance_peer_task_stage(
+                &target_peer_id,
+                &task_id,
+                expected_transition_revision.as_deref(),
+            )
             .await
         {
             Ok(()) => ControlResponse::AdvancePeerTaskStage { request_id },
@@ -247,8 +339,9 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             request_id,
             target_peer_id,
             session_id,
+            observer_lease_id,
         } => match runtime
-            .unobserve_peer_session(&target_peer_id, &session_id)
+            .unobserve_peer_session(&target_peer_id, &session_id, &observer_lease_id)
             .await
         {
             Ok(()) => ControlResponse::UnobservePeerSession { request_id },
@@ -294,8 +387,9 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             transfer_id,
             artifact_id,
             path,
+            owned,
         } => match runtime
-            .stage_transfer_artifact(&transfer_id, &artifact_id, path.into())
+            .stage_transfer_artifact(&transfer_id, &artifact_id, path.into(), owned)
             .await
         {
             Ok(()) => ControlResponse::StageTransferArtifact {
@@ -438,6 +532,16 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             transfer_id,
         } => match runtime.mark_import_commit_applied(&transfer_id).await {
             Ok(()) => ControlResponse::MarkImportCommitApplied {
+                request_id,
+                transfer_id,
+            },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::NackImportCommit {
+            request_id,
+            transfer_id,
+        } => match runtime.nack_import_commit(&transfer_id).await {
+            Ok(()) => ControlResponse::NackImportCommit {
                 request_id,
                 transfer_id,
             },

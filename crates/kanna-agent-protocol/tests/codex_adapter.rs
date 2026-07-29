@@ -14,7 +14,19 @@ fn translate_fixture(adapter: &mut CodexAdapter, fixture: &str) -> Vec<AgentEven
 fn translates_captured_tool_run() {
     let fixture = include_str!("fixtures/codex-tool-run.jsonl");
     let mut adapter = CodexAdapter::new();
-    let events = translate_fixture(&mut adapter, fixture);
+    let mut events = translate_fixture(&mut adapter, fixture);
+    let duration_ms = match events.last_mut() {
+        Some(AgentEvent::TurnCompleted { stats, .. }) => {
+            let duration_ms = stats.duration_ms;
+            stats.duration_ms = 0;
+            duration_ms
+        }
+        other => panic!("expected final TurnCompleted event, got {other:?}"),
+    };
+    assert!(
+        duration_ms < 1_000,
+        "synchronous fixture translation took unexpectedly long: {duration_ms}ms"
+    );
 
     assert_eq!(
         events,
@@ -57,7 +69,7 @@ fn translates_captured_tool_run() {
                 stats: kanna_agent_protocol::TurnStats {
                     // Codex reports no turn count; we derive it from the four
                     // completed items (message + 2 commands + message). Duration
-                    // is wall-clock, ~0ms for this synchronous in-process run.
+                    // is wall-clock, so it is asserted separately above.
                     num_turns: 4,
                     input_tokens: Some(38046),
                     output_tokens: Some(129),

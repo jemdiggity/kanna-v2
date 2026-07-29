@@ -14,6 +14,7 @@ describe("cloud task snapshot mapper", () => {
         stage: "in progress",
         activity: "working",
         activity_revision: 12,
+        transition_revision: "run-12",
         branch: "task-1",
         base_ref: "origin/main",
         pr_number: null,
@@ -44,6 +45,7 @@ describe("cloud task snapshot mapper", () => {
       promptSnippet: "Fix cloud mobile task list",
       waitingPromptSnippet: "Ready for review",
       activityRevision: 12,
+      transitionRevision: "run-12",
       repo: {
         cloudRepoId: "repo-1",
         name: "kanna",

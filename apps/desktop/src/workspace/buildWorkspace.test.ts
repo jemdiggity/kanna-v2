@@ -152,6 +152,63 @@ describe("buildWorkspace", () => {
     expect(result.tasks[0].blockedByTaskIds).toEqual([]);
   });
 
+  it("selects all fields from the newer equal-precedence authority", () => {
+    const firstCloudItem = item({
+      id: "cloud:first:repo-remote:blocked-owner",
+      repo_id: "cloud:repo-remote",
+      prompt: "Selected cloud route",
+      updated_at: "2026-07-25T00:00:00.000Z",
+    });
+    const newerCloudItem = item({
+      id: "cloud:second:repo-remote:blocked-owner",
+      repo_id: "cloud:repo-remote",
+      prompt: "Newer owner metadata",
+      updated_at: "2026-07-25T00:01:00.000Z",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [],
+        items: [firstCloudItem, newerCloudItem],
+        terminalRefs: {
+          [firstCloudItem.id]: {
+            ownerDesktopId: "desktop-owner",
+            ownerLocalTaskId: "blocked-owner",
+            transport: "cloud",
+          },
+          [newerCloudItem.id]: {
+            ownerDesktopId: "desktop-owner",
+            ownerLocalTaskId: "blocked-owner",
+            transport: "cloud",
+          },
+        },
+        blockedByTaskIds: {
+          [firstCloudItem.id]: ["blocker-owner"],
+        },
+      },
+      lanSnapshot: emptySnapshot(),
+    });
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0]).toMatchObject({
+      id: newerCloudItem.id,
+      item: {
+        id: newerCloudItem.id,
+        prompt: "Newer owner metadata",
+      },
+      blockedByTaskIds: [],
+      terminal: {
+        kind: "cloud",
+        remoteRef: {
+          ownerLocalTaskId: "blocked-owner",
+          transport: "cloud",
+        },
+      },
+    });
+  });
+
   it("keeps local blocker state authoritative for a matching remote task", () => {
     const localItem = item({ id: "blocked-owner" });
     const cloudItem = item({
@@ -405,7 +462,7 @@ describe("buildWorkspace", () => {
     });
   });
 
-  it("keeps the already-selected exact candidate for equal-precedence advertisements", () => {
+  it("replaces an equal-precedence advertisement when its authority is newer", () => {
     const firstCloudItem = item({
       id: "cloud:first:remote-repo:task-provenance",
       repo_id: "repo-local",
@@ -417,6 +474,7 @@ describe("buildWorkspace", () => {
       repo_id: "repo-local",
       prompt: "Second cloud copy",
       activity_revision: 9,
+      updated_at: "2026-05-23T00:01:00.000Z",
     });
 
     const result = buildWorkspace({
@@ -443,27 +501,94 @@ describe("buildWorkspace", () => {
 
     expect(result.tasks).toHaveLength(1);
     expect(result.tasks[0]).toMatchObject({
-      id: "cloud:first:remote-repo:task-provenance",
+      id: "cloud:second:remote-repo:task-provenance",
       remoteTaskIds: [
         "cloud:first:remote-repo:task-provenance",
         "cloud:second:remote-repo:task-provenance",
       ],
       item: {
-        id: "cloud:first:remote-repo:task-provenance",
-        prompt: "First cloud copy",
+        id: "cloud:second:remote-repo:task-provenance",
+        prompt: "Second cloud copy",
         activity_revision: 9,
       },
-      owner: { kind: "remote", id: "desktop-first" },
+      owner: { kind: "remote", id: "desktop-second" },
       terminal: {
         kind: "cloud",
         remoteRef: {
-          ownerDesktopId: "desktop-first",
+          ownerDesktopId: "desktop-second",
           ownerLocalTaskId: "task-provenance",
           transport: "cloud",
         },
       },
     });
     expect(result.tasks[0].sources).toHaveLength(2);
+  });
+
+  it("keeps transfer-time item, owner, blocker, and route on one cloud authority", () => {
+    const stableItemId = "cloud:remote-repo:stable-transfer-task";
+    const destination = item({
+      id: stableItemId,
+      repo_id: "cloud:repo-remote",
+      prompt: "Destination authority",
+      updated_at: "2026-07-27T00:02:00.000Z",
+      blocker_revision: 8,
+      transition_revision: "destination-run",
+    });
+    const displacedLanOwner = item({
+      id: stableItemId,
+      repo_id: "cloud:repo-remote",
+      prompt: "Displaced LAN owner",
+      updated_at: "2026-07-27T00:01:00.000Z",
+      blocker_revision: 99,
+      transition_revision: "source-run",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: {
+        ...emptySnapshot(),
+        items: [destination],
+        terminalRefs: {
+          [stableItemId]: {
+            ownerDesktopId: "desktop-destination",
+            ownerLocalTaskId: "task-destination",
+            transport: "cloud",
+          },
+        },
+        blockedByTaskIds: { [stableItemId]: ["destination-blocker"] },
+      },
+      lanSnapshot: {
+        ...emptySnapshot(),
+        items: [displacedLanOwner],
+        terminalRefs: {
+          [stableItemId]: {
+            ownerDesktopId: "desktop-source",
+            ownerLocalTaskId: "task-source",
+            transport: "lan",
+          },
+        },
+        blockedByTaskIds: { [stableItemId]: ["source-blocker"] },
+      },
+    });
+
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0]).toMatchObject({
+      item: {
+        prompt: "Destination authority",
+        blocker_revision: 8,
+        transition_revision: "destination-run",
+      },
+      owner: { kind: "remote", id: "desktop-destination" },
+      blockedByTaskIds: ["destination-blocker"],
+      terminal: {
+        kind: "cloud",
+        remoteRef: {
+          ownerDesktopId: "desktop-destination",
+          ownerLocalTaskId: "task-destination",
+        },
+      },
+    });
   });
 
   it("reports cloud transport diagnostics for cloud-only tasks", () => {

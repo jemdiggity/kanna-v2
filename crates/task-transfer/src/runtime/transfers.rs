@@ -1,7 +1,10 @@
 use super::events::{FinalizedOutgoingTransfer, PreflightResult, RuntimeError, RuntimeEvent};
 use super::state::StagedTransferArtifact;
 use super::state::{OutgoingTransferReservation, TransferArtifactRecord, TransferRuntime};
-use super::utils::{prune_outgoing_transfers, prune_transfer_artifacts};
+use super::utils::{
+    managed_artifact_dir, prune_outgoing_transfers, prune_transfer_artifacts,
+    remove_owned_artifact_paths, take_transfer_artifacts, ArtifactFraming,
+};
 use super::TransferTransport;
 use crate::crypto::{open_json, parse_public_key, seal_json};
 use crate::protocol::{PeerRequest, PeerResponse};
@@ -37,15 +40,19 @@ impl TransferRuntime {
             &target_peer.public_key,
             resolved_transport,
         )?;
-        let target_public_key = parse_public_key(&target_peer.public_key)?;
-        let sealed_payload = seal_json(
-            &self.identity,
-            &target_public_key,
-            &serde_json::json!({
-                "source_task_id": source_task_id,
-            }),
-        )?;
         let request_id = self.next_request_id("preflight");
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &target_peer,
+                "prepare_transfer",
+                &request_id,
+                serde_json::json!({
+                    "source_peer_id": self.config.peer_id,
+                    "source_task_id": source_task_id,
+                    "reserved_target_peer_id": target_peer.peer_id,
+                }),
+            )
+            .await?;
         let response = self
             .send_peer_request(
                 &target_peer,
@@ -115,7 +122,8 @@ impl TransferRuntime {
             PeerResponse::TaskSnapshot { .. } => Err(RuntimeError::Protocol(
                 "unexpected task-snapshot response during preflight".into(),
             )),
-            PeerResponse::ObserveSession { .. }
+            PeerResponse::AuthenticatedRequestEpoch { .. }
+            | PeerResponse::ObserveSession { .. }
             | PeerResponse::SendSessionInput { .. }
             | PeerResponse::ResizeSession { .. }
             | PeerResponse::CloseTask { .. }
@@ -222,7 +230,8 @@ impl TransferRuntime {
             PeerResponse::TaskSnapshot { .. } => Err(RuntimeError::Protocol(
                 "unexpected task-snapshot response during transfer commit".into(),
             )),
-            PeerResponse::ObserveSession { .. }
+            PeerResponse::AuthenticatedRequestEpoch { .. }
+            | PeerResponse::ObserveSession { .. }
             | PeerResponse::SendSessionInput { .. }
             | PeerResponse::ResizeSession { .. }
             | PeerResponse::CloseTask { .. }
@@ -259,8 +268,19 @@ impl TransferRuntime {
 
         let source_peer = self.find_peer(&source_peer_id).await?;
         self.ensure_peer_is_trusted(&source_peer.peer_id, &source_peer.public_key)?;
-        let source_public_key = parse_public_key(&source_peer.public_key)?;
         let request_id = self.next_request_id("finalize");
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &source_peer,
+                "finalize_transfer",
+                &request_id,
+                serde_json::json!({
+                    "requester_peer_id": self.config.peer_id,
+                    "transfer_id": transfer_id,
+                    "reserved_target_peer_id": self.config.peer_id,
+                }),
+            )
+            .await?;
         let response = self
             .send_peer_request(
                 &source_peer,
@@ -268,6 +288,7 @@ impl TransferRuntime {
                     request_id: request_id.clone(),
                     transfer_id: transfer_id.to_owned(),
                     requester_peer_id: self.config.peer_id.clone(),
+                    sealed_payload,
                 },
             )
             .await?;
@@ -290,6 +311,7 @@ impl TransferRuntime {
                         transfer_id, response_transfer_id
                     )));
                 }
+                let source_public_key = parse_public_key(&source_peer.public_key)?;
                 let payload = open_json(&self.identity, &source_public_key, &sealed_payload)?;
                 let finalized_payload = payload.get("payload").cloned().ok_or_else(|| {
                     RuntimeError::Protocol("finalize response missing payload".into())
@@ -305,7 +327,8 @@ impl TransferRuntime {
                     finalized_cleanly,
                 })
             }
-            PeerResponse::StartPairing { .. }
+            PeerResponse::AuthenticatedRequestEpoch { .. }
+            | PeerResponse::StartPairing { .. }
             | PeerResponse::RequestTaskPull { .. }
             | PeerResponse::PrepareTransfer { .. }
             | PeerResponse::SubmitTransferPayload { .. }
@@ -333,23 +356,33 @@ impl TransferRuntime {
         transfer_id: &str,
         result: Result<FinalizedOutgoingTransfer, RuntimeError>,
     ) -> Result<(), RuntimeError> {
-        let sender = self
-            .pending_outgoing_transfer_finalizations
-            .lock()
-            .await
-            .remove(transfer_id)
-            .ok_or_else(|| {
+        let cached = result.map_err(|error| error.to_string());
+        let failed = cached.is_err();
+        let waiters = {
+            let mut finalizations = self.pending_outgoing_transfer_finalizations.lock().await;
+            let state = finalizations.get_mut(transfer_id).ok_or_else(|| {
                 RuntimeError::Protocol(format!(
                     "missing pending outgoing transfer finalization {}",
                     transfer_id
                 ))
             })?;
-        sender.send(result).map_err(|_| {
-            RuntimeError::Protocol(format!(
-                "finalization receiver dropped for transfer {}",
-                transfer_id
-            ))
-        })
+            match state {
+                super::state::OutgoingTransferFinalizationState::Pending { waiters } => {
+                    let waiters = std::mem::take(waiters);
+                    *state =
+                        super::state::OutgoingTransferFinalizationState::Completed(cached.clone());
+                    waiters
+                }
+                super::state::OutgoingTransferFinalizationState::Completed(_) => return Ok(()),
+            }
+        };
+        for waiter in waiters {
+            let _ = waiter.send(cached.clone());
+        }
+        if failed {
+            self.cleanup_transfer_artifacts(transfer_id).await;
+        }
+        Ok(())
     }
 
     pub async fn next_event(&self) -> Result<RuntimeEvent, RuntimeError> {
@@ -378,6 +411,7 @@ impl TransferRuntime {
                     if receipt.applied {
                         continue;
                     }
+                    receipt.delivery_in_flight = true;
                     return Ok(RuntimeEvent::OutgoingTransferCommitted(event));
                 }
                 NextEvent::General(None) | NextEvent::Receipt(None) => {
@@ -391,11 +425,40 @@ impl TransferRuntime {
         &self,
         transfer_id: &str,
         artifact_id: &str,
-        path: PathBuf,
+        mut path: PathBuf,
+        owned: bool,
     ) -> Result<(), RuntimeError> {
+        if owned {
+            let artifact_dir =
+                managed_artifact_dir(&self.config.registry_dir, &self.config.peer_id, transfer_id);
+            tokio::fs::create_dir_all(&artifact_dir).await?;
+            let safe_artifact_id = super::utils::sanitize_artifact_filename(artifact_id);
+            let managed_path = artifact_dir.join(format!(
+                "{}-{}",
+                safe_artifact_id,
+                super::utils::sanitize_artifact_filename(
+                    path.file_name()
+                        .and_then(|filename| filename.to_str())
+                        .unwrap_or("artifact"),
+                ),
+            ));
+            if path != managed_path {
+                match tokio::fs::rename(&path, &managed_path).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+                        tokio::fs::copy(&path, &managed_path).await?;
+                        tokio::fs::remove_file(&path).await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            path = managed_path;
+        }
         let mut transfer_artifacts = self.transfer_artifacts.lock().await;
-        prune_transfer_artifacts(&mut transfer_artifacts, self.config.pending_transfer_ttl);
-        transfer_artifacts
+        let expired =
+            prune_transfer_artifacts(&mut transfer_artifacts, self.config.pending_transfer_ttl);
+        let retained_path = path.clone();
+        let replaced = transfer_artifacts
             .entry(transfer_id.to_owned())
             .or_default()
             .insert(
@@ -403,8 +466,18 @@ impl TransferRuntime {
                 TransferArtifactRecord {
                     path,
                     created_at: Instant::now(),
+                    owned,
                 },
             );
+        drop(transfer_artifacts);
+        let mut cleanup = expired;
+        if let Some(replaced) = replaced {
+            if replaced.owned {
+                cleanup.push(replaced.path);
+            }
+        }
+        cleanup.retain(|path| path != &retained_path);
+        remove_owned_artifact_paths(cleanup).await;
         Ok(())
     }
 
@@ -438,16 +511,20 @@ impl TransferRuntime {
         let source_peer = self.find_peer(&source_peer_id).await?;
         self.ensure_peer_is_trusted(&source_peer.peer_id, &source_peer.public_key)?;
         let source_public_key = parse_public_key(&source_peer.public_key)?;
+        let request_id = self.next_request_id("fetch-artifact");
+        let artifact_framing = ArtifactFraming::for_protocol(source_peer.protocol_version);
         let sealed_payload = seal_json(
             &self.identity,
             &source_public_key,
             &serde_json::json!({
+                "request_id": request_id,
+                "transfer_id": transfer_id,
                 "artifact_id": artifact_id,
+                "artifact_framing": artifact_framing.name(),
             }),
         )?;
-        let request_id = self.next_request_id("fetch-artifact");
-        let response = self
-            .send_peer_request(
+        let path = self
+            .fetch_peer_artifact_stream(
                 &source_peer,
                 PeerRequest::FetchTransferArtifact {
                     request_id: request_id.clone(),
@@ -455,82 +532,14 @@ impl TransferRuntime {
                     requester_peer_id: self.config.peer_id.clone(),
                     sealed_payload,
                 },
+                &request_id,
+                transfer_id,
+                artifact_id,
+                artifact_framing,
+                &source_public_key,
             )
             .await?;
-
-        match response {
-            PeerResponse::FetchTransferArtifact {
-                request_id: response_request_id,
-                transfer_id: response_transfer_id,
-                sealed_payload,
-            } => {
-                if response_request_id != request_id {
-                    return Err(RuntimeError::Protocol(format!(
-                        "mismatched request id in artifact fetch response: expected {}, got {}",
-                        request_id, response_request_id
-                    )));
-                }
-                if response_transfer_id != transfer_id {
-                    return Err(RuntimeError::Protocol(format!(
-                        "mismatched transfer id in artifact fetch response: expected {}, got {}",
-                        transfer_id, response_transfer_id
-                    )));
-                }
-                let payload = open_json(&self.identity, &source_public_key, &sealed_payload)?;
-                let response_artifact_id = payload
-                    .get("artifact_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        RuntimeError::Protocol("artifact fetch response missing artifact_id".into())
-                    })?;
-                if response_artifact_id != artifact_id {
-                    return Err(RuntimeError::Protocol(format!(
-                        "mismatched artifact id in artifact fetch response: expected {}, got {}",
-                        artifact_id, response_artifact_id
-                    )));
-                }
-                let filename =
-                    payload
-                        .get("filename")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            RuntimeError::Protocol(
-                                "artifact fetch response missing filename".into(),
-                            )
-                        })?;
-                let payload_b64 = payload
-                    .get("payload_b64")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        RuntimeError::Protocol("artifact fetch response missing payload_b64".into())
-                    })?;
-
-                let path = self
-                    .materialize_transfer_artifact(transfer_id, artifact_id, filename, payload_b64)
-                    .await?;
-                Ok(StagedTransferArtifact { path })
-            }
-            PeerResponse::StartPairing { .. }
-            | PeerResponse::RequestTaskPull { .. }
-            | PeerResponse::PrepareTransfer { .. }
-            | PeerResponse::SubmitTransferPayload { .. }
-            | PeerResponse::ImportCommitted { .. }
-            | PeerResponse::FinalizeTransfer { .. }
-            | PeerResponse::TaskSnapshot { .. }
-            | PeerResponse::ObserveSession { .. }
-            | PeerResponse::SendSessionInput { .. }
-            | PeerResponse::ResizeSession { .. }
-            | PeerResponse::CloseTask { .. }
-            | PeerResponse::AdvanceTaskStage { .. }
-            | PeerResponse::ReadTaskFile { .. }
-            | PeerResponse::MarkTaskRead { .. } => Err(RuntimeError::Protocol(
-                "unexpected response while fetching transfer artifact".into(),
-            )),
-            PeerResponse::Error {
-                request_id: _,
-                message,
-            } => Err(RuntimeError::Protocol(message)),
-        }
+        Ok(StagedTransferArtifact { path })
     }
 
     pub async fn acknowledge_import_committed(
@@ -609,7 +618,8 @@ impl TransferRuntime {
 
                 Ok(())
             }
-            PeerResponse::StartPairing { .. }
+            PeerResponse::AuthenticatedRequestEpoch { .. }
+            | PeerResponse::StartPairing { .. }
             | PeerResponse::RequestTaskPull { .. }
             | PeerResponse::PrepareTransfer { .. }
             | PeerResponse::SubmitTransferPayload { .. }
@@ -635,7 +645,16 @@ impl TransferRuntime {
     pub async fn mark_import_ack_completed(&self, transfer_id: &str) -> Result<(), RuntimeError> {
         self.incoming_reservations.lock().await.remove(transfer_id);
         self.replay_store.remove_incoming_reservation(transfer_id);
+        self.cleanup_transfer_artifacts(transfer_id).await;
         Ok(())
+    }
+
+    pub(super) async fn cleanup_transfer_artifacts(&self, transfer_id: &str) {
+        let paths = {
+            let mut artifacts = self.transfer_artifacts.lock().await;
+            take_transfer_artifacts(&mut artifacts, transfer_id)
+        };
+        remove_owned_artifact_paths(paths).await;
     }
 
     pub async fn mark_incoming_event_recorded(
@@ -670,9 +689,22 @@ impl TransferRuntime {
         }
         let mut applied = receipt.clone();
         applied.applied = true;
+        applied.delivery_in_flight = false;
         self.replay_store.save_receipt(transfer_id, &applied)?;
         *receipt = applied;
         self.replay_store.compact_receipts(&mut receipts);
+        Ok(())
+    }
+
+    pub async fn nack_import_commit(&self, transfer_id: &str) -> Result<(), RuntimeError> {
+        let mut receipts = self.import_commit_receipts.lock().await;
+        let receipt = receipts.get_mut(transfer_id).ok_or_else(|| {
+            RuntimeError::Protocol(format!("missing import commit receipt {}", transfer_id))
+        })?;
+        if receipt.applied {
+            return Ok(());
+        }
+        receipt.delivery_in_flight = false;
         Ok(())
     }
 }

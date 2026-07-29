@@ -1,7 +1,7 @@
 use super::NewStageRun;
 use super::{
     add_column, database_open_flags, run_migration, Db, NewPipelineItem, NewTaskTransfer,
-    NewTaskTransferProvenance, CURRENT_SCHEMA_MIGRATIONS,
+    NewTaskTransferProvenance, ReplaceTaskBlockersError, CURRENT_SCHEMA_MIGRATIONS,
 };
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
@@ -164,7 +164,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "034_pipeline_item_revision_rounds");
+    assert_eq!(latest_migration, "036_task_transfer_ownership_leases");
 
     let stage_run_sql: String = db
         .conn
@@ -398,7 +398,7 @@ fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
              );",
         )
         .expect("create provenance table");
-    db.insert_test_task_transfer("transfer-1", "incoming", "streaming", Some("{}"))
+    db.insert_test_task_transfer("transfer-1", "incoming", "pending", Some("{}"))
         .expect("insert transfer");
     drop(db);
 
@@ -407,13 +407,22 @@ fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
         .list_pending_incoming_transfers()
         .expect("list streaming transfer after restart");
     assert_eq!(streaming.len(), 1);
-    assert_eq!(streaming[0].status, "streaming");
+    assert_eq!(streaming[0].status, "pending");
     assert!(db
-        .claim_pending_incoming_transfer("transfer-1")
-        .expect("reclaim streaming transfer after restart"));
+        .claim_pending_incoming_transfer("transfer-1", "owner-a", false)
+        .expect("claim pending transfer after restart"));
+    assert!(!db
+        .update_task_transfer_payload("transfer-1", "{\"stale\":true}", None)
+        .expect("unowned payload update is fenced"));
+    assert!(!db
+        .update_task_transfer_payload("transfer-1", "{\"stale\":true}", Some("owner-stale"))
+        .expect("stale owner payload update is fenced"));
+    assert!(db
+        .update_task_transfer_payload("transfer-1", "{}", Some("owner-a"))
+        .expect("active owner updates payload"));
 
     assert!(db
-        .mark_incoming_transfer_importing("transfer-1", "task-local")
+        .mark_incoming_transfer_importing("transfer-1", "task-local", "owner-a")
         .expect("mark importing"));
     let importing = db
         .get_task_transfer("transfer-1")
@@ -443,7 +452,7 @@ fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
     assert_eq!(provenance_count, 1);
 
     assert!(db
-        .mark_incoming_transfer_awaiting_acknowledgment("transfer-1", "task-local")
+        .mark_incoming_transfer_awaiting_acknowledgment("transfer-1", "task-local", "owner-a",)
         .expect("mark awaiting"));
     let resumable = db
         .list_pending_incoming_transfers()
@@ -452,11 +461,17 @@ fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
     assert_eq!(resumable[0].status, "awaiting_acknowledgment");
     assert_eq!(resumable[0].local_task_id.as_deref(), Some("task-local"));
     assert!(db
-        .claim_pending_incoming_transfer("transfer-1")
-        .expect("claim resumable awaiting transfer"));
+        .claim_pending_incoming_transfer("transfer-1", "owner-b", true)
+        .expect("authoritative recovery takes over the active lease"));
+    assert!(!db
+        .renew_incoming_transfer_claim("transfer-1", "owner-a")
+        .expect("superseded owner cannot renew resumable transfer"));
+    assert!(db
+        .renew_incoming_transfer_claim("transfer-1", "owner-b")
+        .expect("replacement owner renews resumable transfer"));
 
     assert!(db
-        .mark_task_transfer_completed("transfer-1", "task-local")
+        .mark_task_transfer_completed("transfer-1", "task-local", Some("owner-b"))
         .expect("mark complete"));
     assert!(db
         .list_pending_incoming_transfers()
@@ -502,13 +517,13 @@ fn outgoing_transfer_completion_replays_only_for_the_same_source_task() {
         .expect("insert transfer");
 
     assert!(db
-        .mark_task_transfer_completed("transfer-1", "task-source")
+        .mark_task_transfer_completed("transfer-1", "task-source", None)
         .expect("complete transfer"));
     assert!(db
-        .mark_task_transfer_completed("transfer-1", "task-source")
+        .mark_task_transfer_completed("transfer-1", "task-source", None)
         .expect("replay matching completion"));
     assert!(!db
-        .mark_task_transfer_completed("transfer-1", "different-source")
+        .mark_task_transfer_completed("transfer-1", "different-source", None)
         .expect("reject mismatched completion"));
 
     let transfer = db
@@ -517,6 +532,117 @@ fn outgoing_transfer_completion_replays_only_for_the_same_source_task() {
         .expect("transfer exists");
     assert_eq!(transfer.status, "completed");
     assert_eq!(transfer.local_task_id.as_deref(), Some("task-source"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn incoming_transfer_claim_is_single_owner_and_expired_recovery_can_take_over() {
+    let path = Db::test_db_path("incoming-transfer-owner-lease");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_task_transfer("transfer-lease", "incoming", "pending", Some("{}"))
+        .expect("insert pending transfer");
+    drop(db);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles = ["window-a", "window-b"].map(|owner| {
+        let path = path.clone();
+        let barrier = barrier.clone();
+        std::thread::spawn(move || {
+            let db = Db::open(&path).expect("open shared db");
+            barrier.wait();
+            (
+                owner,
+                db.claim_pending_incoming_transfer("transfer-lease", owner, false)
+                    .expect("attempt claim"),
+            )
+        })
+    });
+    let results = handles.map(|handle| handle.join().expect("claim thread"));
+    assert_eq!(results.iter().filter(|(_, claimed)| *claimed).count(), 1);
+    let winner = results
+        .iter()
+        .find_map(|(owner, claimed)| claimed.then_some(*owner))
+        .expect("one winner");
+    let loser = if winner == "window-a" {
+        "window-b"
+    } else {
+        "window-a"
+    };
+
+    let db = Db::open(&path).expect("reopen lease db");
+    assert!(!db
+        .mark_incoming_transfer_importing("transfer-lease", "task-local", loser)
+        .expect("loser cannot materialize"));
+    assert!(db
+        .mark_incoming_transfer_importing("transfer-lease", "task-local", winner)
+        .expect("winner can materialize"));
+    db.conn
+        .execute(
+            "UPDATE task_transfer SET claim_expires_at = datetime('now', '-1 second')
+             WHERE id = 'transfer-lease'",
+            [],
+        )
+        .expect("expire lease");
+    assert!(db
+        .claim_pending_incoming_transfer("transfer-lease", loser, true)
+        .expect("recovery takes over expired lease"));
+    assert!(!db
+        .renew_incoming_transfer_claim("transfer-lease", winner)
+        .expect("former owner cannot renew"));
+    assert!(db
+        .renew_incoming_transfer_claim("transfer-lease", loser)
+        .expect("recovery owner renews"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn active_outgoing_transfer_lease_is_unique_across_connections() {
+    let path = Db::test_db_path("active-outgoing-transfer-lease");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    drop(db);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let handles = ["transfer-window-a", "transfer-window-b"].map(|id| {
+        let path = path.clone();
+        let barrier = barrier.clone();
+        std::thread::spawn(move || {
+            let db = Db::open(&path).expect("open shared db");
+            let transfer = NewTaskTransfer {
+                id: id.to_string(),
+                direction: "outgoing".into(),
+                status: "pending".into(),
+                source_peer_id: Some("peer-source".into()),
+                target_peer_id: Some("peer-target".into()),
+                source_desktop_id: None,
+                target_desktop_id: None,
+                source_task_id: Some("same-source-task".into()),
+                local_task_id: Some("same-source-task".into()),
+                error: None,
+                payload_json: Some("{}".into()),
+            };
+            barrier.wait();
+            db.insert_task_transfer(&transfer)
+        })
+    });
+    let results = handles.map(|handle| handle.join().expect("insert thread"));
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+
+    let db = Db::open(&path).expect("reopen transfer db");
+    let active: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_transfer
+             WHERE source_task_id = 'same-source-task'
+               AND direction = 'outgoing'
+               AND status IN ('pending', 'streaming')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count active transfers");
+    assert_eq!(active, 1);
 
     let _ = std::fs::remove_file(path);
 }
@@ -634,6 +760,20 @@ fn open_migrates_origin_main_028_activity_revision() {
         activity_revision_metadata,
         ("INTEGER".to_string(), 1, Some("0".to_string()))
     );
+    let blocker_revision_metadata: (String, i64, Option<String>) = db
+        .conn
+        .query_row(
+            "SELECT type, \"notnull\", dflt_value
+             FROM pragma_table_info('pipeline_item')
+             WHERE name = 'blocker_revision'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("blocker revision metadata");
+    assert_eq!(
+        blocker_revision_metadata,
+        ("INTEGER".to_string(), 1, Some("0".to_string()))
+    );
 
     let stored_revision: i64 = db
         .conn
@@ -682,6 +822,82 @@ fn open_migrates_origin_main_028_activity_revision() {
         .expect("transitioned pipeline item exists");
     assert_eq!(item.activity.as_deref(), Some("working"));
     assert_eq!(item.activity_revision, 1);
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn pre_036_streaming_incoming_transfers_recover_without_duplicate_tasks() {
+    let path = temp_db_path();
+    let conn = Connection::open(&path).expect("open pre-036 fixture db");
+    conn.execute_batch(include_str!("fixtures/origin_main_028.sql"))
+        .expect("load origin/main base fixture");
+    conn.execute_batch(include_str!("fixtures/pre_036_task_transfer.sql"))
+        .expect("load exact pre-036 transfer fixture");
+    let migration_036_index = CURRENT_SCHEMA_MIGRATIONS
+        .iter()
+        .position(|id| *id == "036_task_transfer_ownership_leases")
+        .expect("036 ownership migration exists");
+    for migration_id in &CURRENT_SCHEMA_MIGRATIONS[..migration_036_index] {
+        conn.execute(
+            "INSERT INTO schema_migrations (id) VALUES (?1)",
+            [migration_id],
+        )
+        .expect("record migration through 035");
+    }
+    drop(conn);
+
+    let db = Db::open_migrated(path.to_str().expect("utf8 path"))
+        .expect("migrate exact pre-036 transfer fixture");
+    let before_task = db
+        .get_task_transfer("legacy-stream-before-task")
+        .expect("read transfer without task")
+        .expect("transfer without task exists");
+    assert_eq!(before_task.status, "pending");
+    assert!(before_task.local_task_id.is_none());
+    assert!(before_task.claim_owner_token.is_none());
+    assert!(db
+        .claim_pending_incoming_transfer("legacy-stream-before-task", "owner-before", false)
+        .expect("freshly pending transfer is claimable"));
+
+    let after_task = db
+        .get_task_transfer("legacy-stream-after-task")
+        .expect("read transfer with task")
+        .expect("transfer with task exists");
+    assert_eq!(after_task.status, "importing");
+    assert_eq!(
+        after_task.local_task_id.as_deref(),
+        Some("origin-main-task")
+    );
+    assert!(after_task.claim_owner_token.is_none());
+    assert!(db
+        .claim_pending_incoming_transfer("legacy-stream-after-task", "owner-after", true)
+        .expect("partially imported transfer is recoverable"));
+    assert!(db
+        .mark_incoming_transfer_awaiting_acknowledgment(
+            "legacy-stream-after-task",
+            "origin-main-task",
+            "owner-after",
+        )
+        .expect("recovered transfer reaches acknowledgment"));
+    assert!(db
+        .mark_task_transfer_completed(
+            "legacy-stream-after-task",
+            "origin-main-task",
+            Some("owner-after"),
+        )
+        .expect("recovered transfer completes"));
+
+    let task_count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM pipeline_item WHERE id = 'origin-main-task'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count imported task");
+    assert_eq!(task_count, 1);
 
     drop(db);
     let _ = std::fs::remove_file(path);
@@ -1625,6 +1841,255 @@ fn count_open_task_blockers_treats_pr_stage_with_pr_url_as_resolved() {
         0
     );
 
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn blocker_revision_advances_without_touching_dependent_updated_at() {
+    let path = Db::test_db_path("blocker-revision");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "blocker-1",
+        "repo-1",
+        "prerequisite",
+        Some("Prerequisite"),
+        "in progress",
+        "2026-07-01T00:00:00Z",
+    )
+    .expect("blocker");
+    db.insert_test_pipeline_item(
+        "dependent-1",
+        "repo-1",
+        "build on it",
+        Some("Dependent"),
+        "in progress",
+        "2026-07-01T00:01:00Z",
+    )
+    .expect("dependent");
+
+    let dependent_freshness = || {
+        db.conn
+            .query_row(
+                "SELECT blocker_revision, updated_at
+                 FROM pipeline_item
+                 WHERE id = 'dependent-1'",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("dependent freshness")
+    };
+    let original_updated_at = dependent_freshness().1;
+
+    db.insert_task_blocker("dependent-1", "blocker-1")
+        .expect("insert blocker edge");
+    assert_eq!(dependent_freshness(), (1, original_updated_at.clone()));
+
+    db.remove_all_task_blockers("dependent-1")
+        .expect("remove blocker edge");
+    assert_eq!(dependent_freshness(), (2, original_updated_at.clone()));
+
+    db.insert_task_blocker("dependent-1", "blocker-1")
+        .expect("restore blocker edge");
+    db.close_pipeline_item("blocker-1")
+        .expect("resolve blocker by closing");
+    assert_eq!(dependent_freshness(), (4, original_updated_at.clone()));
+
+    db.reopen_pipeline_item("blocker-1")
+        .expect("make blocker unresolved again");
+    db.update_pipeline_item_stage("blocker-1", "pr")
+        .expect("advance blocker to pr");
+    db.update_pipeline_item_pr("blocker-1", Some(7), "https://github.com/acme/repo/pull/7")
+        .expect("resolve blocker by publishing pr");
+    assert_eq!(dependent_freshness(), (6, original_updated_at));
+
+    let snapshot = db.ui_snapshot().expect("snapshot");
+    let dependent = snapshot.entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "dependent-1")
+        .expect("dependent snapshot item");
+    assert_eq!(dependent.blocker_revision, 6);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn concurrent_blocker_replacements_cannot_both_create_inverse_edges() {
+    let path = Db::test_db_path("concurrent-blocker-cycle");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    for id in ["task-a", "task-b"] {
+        db.insert_test_pipeline_item(
+            id,
+            "repo-1",
+            id,
+            Some(id),
+            "in progress",
+            "2026-07-26T00:00:00Z",
+        )
+        .expect("task");
+    }
+    drop(db);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let spawn_replace = |task_id: &'static str, blocker_id: &'static str| {
+        let path = path.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            let db = Db::open(&path).expect("open concurrent db");
+            barrier.wait();
+            db.replace_task_blockers_atomically(task_id, &[blocker_id.to_string()])
+        })
+    };
+    let first = spawn_replace("task-a", "task-b");
+    let second = spawn_replace("task-b", "task-a");
+    barrier.wait();
+    let results = [first.join().unwrap(), second.join().unwrap()];
+
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(ReplaceTaskBlockersError::CircularDependency)))
+            .count(),
+        1
+    );
+
+    let db = Db::open(&path).expect("reopen db");
+    let a_blockers = db.list_task_blocker_ids("task-a").unwrap();
+    let b_blockers = db.list_task_blocker_ids("task-b").unwrap();
+    assert!(
+        (a_blockers == ["task-b"] && b_blockers.is_empty())
+            || (b_blockers == ["task-a"] && a_blockers.is_empty())
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn concurrent_blocker_replacements_publish_one_complete_set() {
+    let path = Db::test_db_path("concurrent-blocker-set");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    for id in ["task", "blocker-a", "blocker-b", "blocker-c", "blocker-d"] {
+        db.insert_test_pipeline_item(
+            id,
+            "repo-1",
+            id,
+            Some(id),
+            "in progress",
+            "2026-07-26T00:00:00Z",
+        )
+        .expect("task");
+    }
+    drop(db);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let spawn_replace = |blockers: Vec<String>| {
+        let path = path.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            let db = Db::open(&path).expect("open concurrent db");
+            barrier.wait();
+            db.replace_task_blockers_atomically("task", &blockers)
+        })
+    };
+    let first = spawn_replace(vec!["blocker-a".into(), "blocker-b".into()]);
+    let second = spawn_replace(vec!["blocker-c".into(), "blocker-d".into()]);
+    barrier.wait();
+    first.join().unwrap().expect("first replacement");
+    second.join().unwrap().expect("second replacement");
+
+    let blockers = Db::open(&path)
+        .unwrap()
+        .list_task_blocker_ids("task")
+        .unwrap();
+    assert!(
+        blockers == ["blocker-a", "blocker-b"] || blockers == ["blocker-c", "blocker-d"],
+        "concurrent replacements interleaved into {blockers:?}"
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn snapshot_never_observes_partial_blocker_replacement() {
+    let path = Db::test_db_path("snapshot-atomic-blockers");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    for id in ["task", "blocker-old", "blocker-new-a", "blocker-new-b"] {
+        db.insert_test_pipeline_item(
+            id,
+            "repo-1",
+            id,
+            Some(id),
+            "in progress",
+            "2026-07-26T00:00:00Z",
+        )
+        .expect("task");
+    }
+    db.insert_task_blocker("task", "blocker-old")
+        .expect("old blocker");
+    let old_snapshot = db.ui_snapshot().unwrap();
+    let old_revision = old_snapshot.entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "task")
+        .unwrap()
+        .blocker_revision;
+    drop(db);
+
+    let (deleted_tx, deleted_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let writer_path = path.clone();
+    let writer = std::thread::spawn(move || {
+        Db::open(&writer_path)
+            .unwrap()
+            .replace_task_blockers_atomically_with_hook(
+                "task",
+                &["blocker-new-a".into(), "blocker-new-b".into()],
+                || {
+                    deleted_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                },
+            )
+    });
+    deleted_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("replacement never reached fault boundary");
+
+    let during = Db::open(&path).unwrap().ui_snapshot().unwrap();
+    let during_blockers: Vec<_> = during
+        .task_blockers
+        .iter()
+        .filter(|edge| edge.blocked_item_id == "task")
+        .map(|edge| edge.blocker_item_id.as_str())
+        .collect();
+    let during_revision = during.entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "task")
+        .unwrap()
+        .blocker_revision;
+    assert_eq!(during_blockers, ["blocker-old"]);
+    assert_eq!(during_revision, old_revision);
+
+    resume_tx.send(()).unwrap();
+    writer.join().unwrap().expect("replacement commit");
+    let after = Db::open(&path).unwrap().ui_snapshot().unwrap();
+    let after_blockers: Vec<_> = after
+        .task_blockers
+        .iter()
+        .filter(|edge| edge.blocked_item_id == "task")
+        .map(|edge| edge.blocker_item_id.as_str())
+        .collect();
+    let after_revision = after.entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "task")
+        .unwrap()
+        .blocker_revision;
+    assert_eq!(after_blockers, ["blocker-new-a", "blocker-new-b"]);
+    assert!(after_revision > old_revision);
     let _ = std::fs::remove_file(path);
 }
 
