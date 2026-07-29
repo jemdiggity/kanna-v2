@@ -76,6 +76,7 @@ export interface IncomingTransferOwnership {
 
 export interface TransferLifecycleOwnership {
   deliveryId?: string;
+  consumerIncarnation?: string;
   assertOwnership?: (phase: string) => Promise<void>;
   claimPhase?: (phase: string) => Promise<boolean>;
 }
@@ -322,7 +323,12 @@ async function stageSessionArchiveArtifact(
       artifactId,
       path: archivePath,
       owned: true,
-      ...(ownership?.deliveryId ? { deliveryId: ownership.deliveryId } : {}),
+      ...(ownership?.deliveryId
+        ? {
+            deliveryId: ownership.deliveryId,
+            consumerIncarnation: ownership.consumerIncarnation,
+          }
+        : {}),
     });
     staged = true;
   } finally {
@@ -362,7 +368,12 @@ async function stageTransferredSessionArtifacts(
         artifactId,
         path: rollout.absolutePath,
         owned: false,
-        ...(ownership?.deliveryId ? { deliveryId: ownership.deliveryId } : {}),
+        ...(ownership?.deliveryId
+          ? {
+              deliveryId: ownership.deliveryId,
+              consumerIncarnation: ownership.consumerIncarnation,
+            }
+          : {}),
       });
       return [{
         artifact_id: artifactId,
@@ -1026,6 +1037,7 @@ export function createTransferApi(
       await invoke("mark_outgoing_transfer_commit_applied", {
         transferId: event.transferId,
         deliveryId: ownership.deliveryId,
+        consumerIncarnation: ownership.consumerIncarnation,
       });
       return;
     }
@@ -1060,6 +1072,7 @@ export function createTransferApi(
     await invoke("mark_outgoing_transfer_commit_applied", {
       transferId: event.transferId,
       deliveryId: ownership.deliveryId,
+      consumerIncarnation: ownership.consumerIncarnation,
     });
     await queries.reloadSnapshot();
   }

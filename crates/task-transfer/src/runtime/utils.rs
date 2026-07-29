@@ -371,7 +371,8 @@ fn remove_managed_artifact_root_impl(
                             }
                             Err(error)
                                 if error.raw_os_error() == Some(libc::EEXIST)
-                                    || error.raw_os_error() == Some(libc::ENOTEMPTY) => {}
+                                    || error.raw_os_error() == Some(libc::ENOTEMPTY)
+                                    || error.raw_os_error() == Some(libc::ENOTDIR) => {}
                             Err(error) => return Err(error),
                         }
                     }

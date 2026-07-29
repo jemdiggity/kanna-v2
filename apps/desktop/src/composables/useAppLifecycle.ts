@@ -102,6 +102,14 @@ function lifecycleDeliveryId(event: unknown): string | null {
   return typeof deliveryId === "string" && deliveryId.length > 0 ? deliveryId : null;
 }
 
+function lifecycleConsumerIncarnation(event: unknown): string | null {
+  const payload = eventPayload(event);
+  if (!payload || typeof payload !== "object") return null;
+  const incarnation =
+    (payload as Record<string, unknown>).__kannaLifecycleConsumerIncarnation;
+  return typeof incarnation === "string" && incarnation.length > 0 ? incarnation : null;
+}
+
 function lifecycleRecoveryRequired(event: unknown): boolean {
   const payload = eventPayload(event);
   return Boolean(
@@ -119,19 +127,28 @@ async function settleLifecycleDelivery(
 ): Promise<void> {
   const deliveryId = lifecycleDeliveryId(event);
   if (!deliveryId) return;
+  const consumerIncarnation = lifecycleConsumerIncarnation(event);
+  if (!consumerIncarnation) {
+    throw new Error("transfer lifecycle event is missing its consumer incarnation");
+  }
   await invoke(
     settlement === "ack"
       ? "acknowledge_transfer_lifecycle_event"
       : "nack_transfer_lifecycle_event",
-    { deliveryId },
+    { deliveryId, consumerIncarnation },
   );
 }
 
 function renewLifecycleDeliveryWhileHandling(event: unknown): () => void {
   const deliveryId = lifecycleDeliveryId(event);
   if (!deliveryId) return () => {};
+  const consumerIncarnation = lifecycleConsumerIncarnation(event);
+  if (!consumerIncarnation) return () => {};
   const interval = window.setInterval(() => {
-    void invoke("renew_transfer_lifecycle_event", { deliveryId }).catch((error: unknown) => {
+    void invoke("renew_transfer_lifecycle_event", {
+      deliveryId,
+      consumerIncarnation,
+    }).catch((error: unknown) => {
       console.error("[App] failed to renew transfer lifecycle delivery:", error);
     });
   }, 10_000);
@@ -140,6 +157,7 @@ function renewLifecycleDeliveryWhileHandling(event: unknown): () => void {
 
 function lifecycleDeliveryOwnership(event: unknown): {
   deliveryId: string;
+  consumerIncarnation: string;
   assertOwnership: (phase: string) => Promise<void>;
   claimPhase: (phase: string) => Promise<boolean>;
   stop: () => void;
@@ -148,10 +166,17 @@ function lifecycleDeliveryOwnership(event: unknown): {
   if (!deliveryId) {
     throw new Error("transfer lifecycle event is missing its delivery ownership token");
   }
+  const consumerIncarnation = lifecycleConsumerIncarnation(event);
+  if (!consumerIncarnation) {
+    throw new Error("transfer lifecycle event is missing its consumer incarnation");
+  }
   let lost = false;
   const renew = async (): Promise<boolean> => {
     if (lost) return false;
-    const owned = await invoke<boolean>("renew_transfer_lifecycle_event", { deliveryId });
+    const owned = await invoke<boolean>("renew_transfer_lifecycle_event", {
+      deliveryId,
+      consumerIncarnation,
+    });
     if (!owned) lost = true;
     return owned;
   };
@@ -163,6 +188,7 @@ function lifecycleDeliveryOwnership(event: unknown): {
   }, 10_000);
   return {
     deliveryId,
+    consumerIncarnation,
     async assertOwnership(phase: string) {
       if (lost || !await renew()) {
         throw new Error(`lifecycle delivery ownership was lost before ${phase}`);
@@ -174,6 +200,7 @@ function lifecycleDeliveryOwnership(event: unknown): {
       }
       return await invoke<boolean>("claim_transfer_lifecycle_phase", {
         deliveryId,
+        consumerIncarnation,
         phase,
       });
     },
@@ -336,6 +363,8 @@ export function useAppLifecycle({
   const taskPullPushesInFlight = new Map<string, Promise<TaskPullHandlingOutcome>>();
   const taskPullAbortController = new AbortController();
   let transferEventConsumerRegistered = false;
+  let transferEventConsumerIncarnation: string | null = null;
+  const taskPullLifecycleDeliveriesInFlight = new Set<Promise<void>>();
   let currentWindowClosePhase: "open" | "preparing" | "recovering" | "destroying" = "open";
   let resolveWindowMembershipInitialization: (() => void) | null = null;
   const windowMembershipInitialization = new Promise<void>((resolve) => {
@@ -541,34 +570,42 @@ export function useAppLifecycle({
     }
     try {
       const unlistenTaskPullRequested = await listen("task-pull-requested", async (event: unknown) => {
-        let outcome: TaskPullHandlingOutcome = "terminal";
-        const stopRenewing = renewLifecycleDeliveryWhileHandling(event);
-        try {
-          outcome = await handleTaskPullRequested(
-            parseTaskPullRequestedEvent(eventPayload(event)),
-            store,
-            taskPullPushesInFlight,
-            () => transferMachines.value,
-            {
-              refreshCloudTransferRoute,
-              signal: taskPullAbortController.signal,
-              reportOperationalError(error) {
-                console.error("[App] failed to handle task pull request:", error);
-                toast.error(error instanceof Error ? error.message : String(error));
+        const handling = (async () => {
+          let outcome: TaskPullHandlingOutcome = "terminal";
+          const stopRenewing = renewLifecycleDeliveryWhileHandling(event);
+          try {
+            outcome = await handleTaskPullRequested(
+              parseTaskPullRequestedEvent(eventPayload(event)),
+              store,
+              taskPullPushesInFlight,
+              () => transferMachines.value,
+              {
+                refreshCloudTransferRoute,
+                signal: taskPullAbortController.signal,
+                reportOperationalError(error) {
+                  console.error("[App] failed to handle task pull request:", error);
+                  toast.error(error instanceof Error ? error.message : String(error));
+                },
               },
-            },
-          );
-        } catch (e: unknown) {
-          console.error("[App] failed to handle task pull request:", e);
-          toast.error(e instanceof Error ? e.message : String(e));
+            );
+          } catch (e: unknown) {
+            console.error("[App] failed to handle task pull request:", e);
+            toast.error(e instanceof Error ? e.message : String(e));
+          } finally {
+            stopRenewing();
+            await settleLifecycleDelivery(
+              event,
+              outcome === "interrupted" ? "nack" : "ack",
+            ).catch((error: unknown) => {
+              console.error("[App] failed to settle task-pull lifecycle delivery:", error);
+            });
+          }
+        })();
+        taskPullLifecycleDeliveriesInFlight.add(handling);
+        try {
+          await handling;
         } finally {
-          stopRenewing();
-          await settleLifecycleDelivery(
-            event,
-            outcome === "interrupted" ? "nack" : "ack",
-          ).catch((error: unknown) => {
-            console.error("[App] failed to settle task-pull lifecycle delivery:", error);
-          });
+          taskPullLifecycleDeliveriesInFlight.delete(handling);
         }
       });
       appUnlisteners.push(unlistenTaskPullRequested);
@@ -705,6 +742,7 @@ export function useAppLifecycle({
               await invoke("nack_outgoing_transfer_commit", {
                 transferId,
                 deliveryId: ownership.deliveryId,
+                consumerIncarnation: ownership.consumerIncarnation,
               });
             } catch (nackError: unknown) {
               console.error("[App] failed to nack outgoing transfer commit acknowledgment:", nackError);
@@ -737,6 +775,7 @@ export function useAppLifecycle({
             finalizedCleanly: finalized.finalizedCleanly,
             error: null,
             deliveryId: ownership.deliveryId,
+            consumerIncarnation: ownership.consumerIncarnation,
           });
           succeeded = true;
         } catch (error: unknown) {
@@ -748,6 +787,7 @@ export function useAppLifecycle({
             finalizedCleanly: false,
             error: error instanceof Error ? error.message : String(error),
             deliveryId: ownership.deliveryId,
+            consumerIncarnation: ownership.consumerIncarnation,
           }))
             .then(() => true).catch((invokeError: unknown) => {
             console.error("[App] failed to report outgoing transfer finalization error:", invokeError);
@@ -768,8 +808,16 @@ export function useAppLifecycle({
 
     if (transferLifecycleListenersReady) {
       try {
-        const isAuthoritativeConsumer = await invoke<boolean>("claim_transfer_event_consumer");
+        const claim = await invoke<{
+          authoritative: boolean;
+          consumerIncarnation: string;
+        }>("claim_transfer_event_consumer");
+        if (!claim.consumerIncarnation) {
+          throw new Error("transfer lifecycle consumer claim missing incarnation");
+        }
+        const isAuthoritativeConsumer = claim.authoritative;
         transferEventConsumerRegistered = true;
+        transferEventConsumerIncarnation = claim.consumerIncarnation;
         initializeDesktopLanTaskSync();
         if (isAuthoritativeConsumer) {
           await importPendingIncomingTransfers();
@@ -842,13 +890,21 @@ export function useAppLifecycle({
   });
 
   onBeforeUnmount(() => {
+    taskPullAbortController.abort();
     if (transferEventConsumerRegistered) {
       transferEventConsumerRegistered = false;
-      void invoke("release_transfer_event_consumer").catch((e: unknown) => {
-        console.error("[App] transfer lifecycle consumer release failed:", e);
-      });
+      const consumerIncarnation = transferEventConsumerIncarnation;
+      transferEventConsumerIncarnation = null;
+      if (consumerIncarnation) {
+        void Promise.allSettled([...taskPullLifecycleDeliveriesInFlight])
+          .then(() => invoke("release_transfer_event_consumer", {
+            consumerIncarnation,
+          }))
+          .catch((e: unknown) => {
+            console.error("[App] transfer lifecycle consumer release failed:", e);
+          });
+      }
     }
-    taskPullAbortController.abort();
     disposeDesktopCloudWorkspace();
     stopSidebarResize();
     window.removeEventListener("dragenter", suppressFileDropNavigation);

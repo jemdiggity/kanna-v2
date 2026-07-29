@@ -358,6 +358,36 @@ fn managed_artifact_cleanup_handles_trees_deeper_than_the_process_fd_limit() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn managed_artifact_cleanup_skips_lift_name_collisions_without_following_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("temp registry");
+    let external = tempfile::tempdir().expect("external target");
+    let peer_id = "peer-lift-collisions";
+    let artifact_root = utils::managed_artifact_root(temp.path(), peer_id);
+    let nested = artifact_root.join("00-nested").join("child");
+    std::fs::create_dir_all(nested.join("grandchild")).expect("create nested tree");
+
+    let lifted_name =
+        |index| artifact_root.join(format!(".kanna-cleanup-{}-{index}", std::process::id(),));
+    std::fs::write(lifted_name(1), b"collision").expect("create file collision");
+    let external_sentinel = external.path().join("must-survive");
+    std::fs::write(&external_sentinel, b"external").expect("create external sentinel");
+    symlink(&external_sentinel, lifted_name(2)).expect("create symlink collision");
+    std::fs::create_dir_all(lifted_name(3).join("occupied")).expect("create directory collision");
+
+    utils::remove_managed_artifact_root(temp.path(), peer_id)
+        .expect("all lifted-name entry types should be treated as collisions");
+
+    assert!(!artifact_root.exists());
+    assert!(
+        external_sentinel.exists(),
+        "cleanup followed a colliding symlink outside the managed root",
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn startup_artifact_cleanup_yields_the_async_runtime_worker() {
     let temp = tempfile::tempdir().expect("temp registry");

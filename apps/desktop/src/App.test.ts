@@ -700,6 +700,7 @@ function buildOutgoingTransferCommittedEvent() {
       source_task_id: "task-source",
       destination_local_task_id: "task-imported",
       __kannaLifecycleDeliveryId: "lifecycle-commit-1",
+      __kannaLifecycleConsumerIncarnation: "consumer-incarnation-test",
     },
   };
 }
@@ -710,6 +711,7 @@ function buildOutgoingTransferFinalizationRequestedEvent() {
       type: "outgoing_transfer_finalization_requested",
       transfer_id: "transfer-1",
       __kannaLifecycleDeliveryId: "lifecycle-finalization-1",
+      __kannaLifecycleConsumerIncarnation: "consumer-incarnation-test",
     },
   };
 }
@@ -722,6 +724,7 @@ function buildTaskPullRequestedEvent() {
       requester_peer_id: "peer-requester",
       source_task_id: "task-source",
       __kannaLifecycleDeliveryId: "lifecycle-pull-failover-1",
+      __kannaLifecycleConsumerIncarnation: "consumer-incarnation-test",
       __kannaLifecycleRecovery: true,
     },
   };
@@ -1143,7 +1146,9 @@ describe("App", () => {
       if (command === "which_binary" && (args?.name === "claude" || args?.name === "codex")) return `/usr/bin/${args.name}`;
       if (command === "mark_incoming_transfer_ack_completed") return null;
       if (command === "mark_incoming_transfer_event_recorded") return null;
-      if (command === "claim_transfer_event_consumer") return true;
+      if (command === "claim_transfer_event_consumer") {
+        return { authoritative: true, consumerIncarnation: "consumer-incarnation-test" };
+      }
       if (command === "release_transfer_event_consumer") return null;
       if (command === "renew_transfer_lifecycle_event") return true;
       if (command === "claim_transfer_lifecycle_phase") return true;
@@ -5221,6 +5226,7 @@ describe("App", () => {
     const event = buildIncomingTransferEvent();
     Object.assign(event.payload, {
       __kannaLifecycleDeliveryId: "lifecycle-owner-close",
+      __kannaLifecycleConsumerIncarnation: "consumer-incarnation-test",
       __kannaLifecycleRecovery: true,
     });
 
@@ -5235,6 +5241,7 @@ describe("App", () => {
     );
     expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
       deliveryId: "lifecycle-owner-close",
+      consumerIncarnation: "consumer-incarnation-test",
     });
     expect(invokeMock).not.toHaveBeenCalledWith(
       "nack_transfer_lifecycle_event",
@@ -5268,7 +5275,9 @@ describe("App", () => {
   it("keeps standby task sync without running single-owner transfer import", async () => {
     const defaultInvoke = invokeMock.getMockImplementation();
     invokeMock.mockImplementation(async (command: string, args?: { name?: string; repoPath?: string }) => {
-      if (command === "claim_transfer_event_consumer") return false;
+      if (command === "claim_transfer_event_consumer") {
+        return { authoritative: false, consumerIncarnation: "consumer-incarnation-standby" };
+      }
       return await defaultInvoke?.(command, args);
     });
 
@@ -5292,9 +5301,11 @@ describe("App", () => {
     expect(store.pushTaskToPeer).not.toHaveBeenCalled();
     expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
       deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
     });
     expect(invokeMock).not.toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
       deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
     });
     wrapper.unmount();
   });
@@ -5312,6 +5323,8 @@ describe("App", () => {
     const push = createDeferred<void>();
     store.pushTaskToPeer.mockImplementationOnce(async () => push.promise);
     const defaultInvoke = invokeMock.getMockImplementation();
+    let terminalSettlementAccepted = false;
+    let prematureRedeliveries = 0;
     invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
       if (command === "list_transfer_peers") {
         return [{
@@ -5324,6 +5337,16 @@ describe("App", () => {
           accepting_transfers: true,
         }];
       }
+      if (command === "acknowledge_transfer_lifecycle_event") {
+        terminalSettlementAccepted = true;
+        return true;
+      }
+      if (command === "release_transfer_event_consumer") {
+        if (!terminalSettlementAccepted) {
+          prematureRedeliveries += 1;
+        }
+        return true;
+      }
       return await defaultInvoke?.(command, args);
     });
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -5335,13 +5358,27 @@ describe("App", () => {
     wrapper.unmount();
     push.reject(new Error("preflight failed after reserving a transfer"));
     await delivery;
+    await waitForCondition(() => invokeMock.mock.calls.some(
+      ([command]) => command === "release_transfer_event_consumer",
+    ));
 
     expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
       deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
     });
     expect(invokeMock).not.toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
       deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
     });
+    const ackCallIndex = invokeMock.mock.calls.findIndex(
+      ([command]) => command === "acknowledge_transfer_lifecycle_event",
+    );
+    const releaseCallIndex = invokeMock.mock.calls.findIndex(
+      ([command]) => command === "release_transfer_event_consumer",
+    );
+    expect(ackCallIndex).toBeLessThan(releaseCallIndex);
+    expect(prematureRedeliveries).toBe(0);
+    expect(store.pushTaskToPeer).toHaveBeenCalledTimes(1);
     expect(toastErrorMock).toHaveBeenCalledWith(
       "preflight failed after reserving a transfer",
     );
@@ -5359,9 +5396,11 @@ describe("App", () => {
 
     expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
       deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
     });
     expect(invokeMock).not.toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
       deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
     });
     errorSpy.mockRestore();
     wrapper.unmount();
@@ -5417,9 +5456,11 @@ describe("App", () => {
       || command === "nack_transfer_lifecycle_event")).toEqual([
       ["acknowledge_transfer_lifecycle_event", {
         deliveryId: "lifecycle-pull-failover-1",
+        consumerIncarnation: "consumer-incarnation-test",
       }],
       ["acknowledge_transfer_lifecycle_event", {
         deliveryId: "lifecycle-pull-failover-2",
+        consumerIncarnation: "consumer-incarnation-test",
       }],
     ]);
     expect(store.pushTaskToPeer).toHaveBeenCalledTimes(1);
@@ -5464,11 +5505,24 @@ describe("App", () => {
     const ownerDelivery = ownerHandler?.(event);
     owner.unmount();
     await ownerDelivery;
+    await waitForCondition(() => invokeMock.mock.calls.some(
+      ([command]) => command === "release_transfer_event_consumer",
+    ));
 
-    expect(invokeMock).toHaveBeenCalledWith("release_transfer_event_consumer", undefined);
+    expect(invokeMock).toHaveBeenCalledWith("release_transfer_event_consumer", {
+      consumerIncarnation: "consumer-incarnation-test",
+    });
     expect(invokeMock).toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
       deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
     });
+    // The consumer is released only once its interrupted delivery is settled, so
+    // the requeued pull can never be redelivered before the NACK lands.
+    expect(invokeMock.mock.calls.findIndex(
+      ([command]) => command === "nack_transfer_lifecycle_event",
+    )).toBeLessThan(invokeMock.mock.calls.findIndex(
+      ([command]) => command === "release_transfer_event_consumer",
+    ));
     expect(store.pushTaskToPeer).not.toHaveBeenCalled();
 
     standbyReady = true;
@@ -5488,6 +5542,7 @@ describe("App", () => {
     );
     expect(invokeMock).toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
       deliveryId: "lifecycle-pull-failover-1",
+      consumerIncarnation: "consumer-incarnation-test",
     });
     standby.unmount();
   });
@@ -5538,9 +5593,11 @@ describe("App", () => {
       expect(toastErrorMock).not.toHaveBeenCalled();
       expect(invokeMock).toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
         deliveryId: "lifecycle-pull-failover-1",
+        consumerIncarnation: "consumer-incarnation-test",
       });
       expect(invokeMock).not.toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
         deliveryId: "lifecycle-pull-failover-1",
+        consumerIncarnation: "consumer-incarnation-test",
       });
     } finally {
       owner.unmount();
@@ -5645,9 +5702,11 @@ describe("App", () => {
       expect(toastErrorMock).not.toHaveBeenCalled();
       expect(invokeMock).toHaveBeenCalledWith("nack_transfer_lifecycle_event", {
         deliveryId: "lifecycle-pull-failover-1",
+        consumerIncarnation: "consumer-incarnation-test",
       });
       expect(invokeMock).not.toHaveBeenCalledWith("acknowledge_transfer_lifecycle_event", {
         deliveryId: "lifecycle-pull-failover-1",
+        consumerIncarnation: "consumer-incarnation-test",
       });
     } finally {
       owner.unmount();
@@ -5982,6 +6041,7 @@ describe("App", () => {
       },
       expect.objectContaining({
         deliveryId: "lifecycle-commit-1",
+        consumerIncarnation: "consumer-incarnation-test",
         assertOwnership: expect.any(Function),
       }),
     );
@@ -6001,6 +6061,7 @@ describe("App", () => {
     expect(invokeMock).toHaveBeenCalledWith("nack_outgoing_transfer_commit", {
       transferId: "transfer-1",
       deliveryId: "lifecycle-commit-1",
+      consumerIncarnation: "consumer-incarnation-test",
     });
     errorSpy.mockRestore();
   });
@@ -6020,6 +6081,7 @@ describe("App", () => {
       "transfer-1",
       expect.objectContaining({
         deliveryId: "lifecycle-finalization-1",
+        consumerIncarnation: "consumer-incarnation-test",
         assertOwnership: expect.any(Function),
       }),
     );
@@ -6029,6 +6091,7 @@ describe("App", () => {
       finalizedCleanly: true,
       error: null,
       deliveryId: "lifecycle-finalization-1",
+      consumerIncarnation: "consumer-incarnation-test",
     });
   });
 

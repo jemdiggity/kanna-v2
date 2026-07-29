@@ -361,11 +361,16 @@ pub async fn stage_transfer_artifact(
     path: String,
     owned: Option<bool>,
     delivery_id: Option<String>,
+    consumer_incarnation: Option<String>,
 ) -> Result<Value, String> {
     if let Some(delivery_id) = delivery_id.as_deref() {
+        let consumer_incarnation = consumer_incarnation.as_deref().ok_or_else(|| {
+            "stage_transfer_artifact lifecycle ownership missing consumer incarnation".to_string()
+        })?;
         crate::transfer_sidecar::require_transfer_lifecycle_event_owner_in_state(
             consumer_state.inner(),
             webview.label(),
+            consumer_incarnation,
             delivery_id,
         )?;
     }
@@ -424,7 +429,7 @@ pub fn claim_transfer_event_consumer(
     app: tauri::AppHandle,
     webview: tauri::WebviewWindow,
     state: tauri::State<'_, crate::TransferEventConsumerState>,
-) -> Result<bool, String> {
+) -> Result<crate::transfer_sidecar::TransferEventConsumerClaim, String> {
     crate::transfer_sidecar::claim_transfer_event_consumer_in_state(
         &app,
         state.inner(),
@@ -437,11 +442,13 @@ pub fn release_transfer_event_consumer(
     app: tauri::AppHandle,
     webview: tauri::WebviewWindow,
     state: tauri::State<'_, crate::TransferEventConsumerState>,
-) -> Result<(), String> {
+    consumer_incarnation: String,
+) -> Result<bool, String> {
     crate::transfer_sidecar::release_transfer_event_consumer_in_state(
         &app,
         state.inner(),
         webview.label(),
+        &consumer_incarnation,
     )
 }
 
@@ -451,11 +458,13 @@ pub fn acknowledge_transfer_lifecycle_event(
     webview: tauri::WebviewWindow,
     state: tauri::State<'_, crate::TransferEventConsumerState>,
     delivery_id: String,
+    consumer_incarnation: String,
 ) -> Result<bool, String> {
     crate::transfer_sidecar::acknowledge_transfer_lifecycle_event_in_state(
         &app,
         state.inner(),
         webview.label(),
+        &consumer_incarnation,
         &delivery_id,
     )
 }
@@ -466,11 +475,13 @@ pub fn nack_transfer_lifecycle_event(
     webview: tauri::WebviewWindow,
     state: tauri::State<'_, crate::TransferEventConsumerState>,
     delivery_id: String,
+    consumer_incarnation: String,
 ) -> Result<bool, String> {
     crate::transfer_sidecar::nack_transfer_lifecycle_event_in_state(
         &app,
         state.inner(),
         webview.label(),
+        &consumer_incarnation,
         &delivery_id,
     )
 }
@@ -480,10 +491,12 @@ pub fn renew_transfer_lifecycle_event(
     webview: tauri::WebviewWindow,
     state: tauri::State<'_, crate::TransferEventConsumerState>,
     delivery_id: String,
+    consumer_incarnation: String,
 ) -> bool {
     crate::transfer_sidecar::renew_transfer_lifecycle_event_in_state(
         state.inner(),
         webview.label(),
+        &consumer_incarnation,
         &delivery_id,
     )
 }
@@ -493,11 +506,13 @@ pub fn claim_transfer_lifecycle_phase(
     webview: tauri::WebviewWindow,
     state: tauri::State<'_, crate::TransferEventConsumerState>,
     delivery_id: String,
+    consumer_incarnation: String,
     phase: String,
 ) -> Result<bool, String> {
     crate::transfer_sidecar::claim_transfer_lifecycle_phase_in_state(
         state.inner(),
         webview.label(),
+        &consumer_incarnation,
         &delivery_id,
         &phase,
     )
@@ -559,10 +574,12 @@ pub async fn mark_outgoing_transfer_commit_applied(
     consumer_state: tauri::State<'_, crate::TransferEventConsumerState>,
     transfer_id: String,
     delivery_id: String,
+    consumer_incarnation: String,
 ) -> Result<Value, String> {
     crate::transfer_sidecar::require_transfer_lifecycle_event_owner_in_state(
         consumer_state.inner(),
         webview.label(),
+        &consumer_incarnation,
         &delivery_id,
     )?;
     with_transfer_client!(
@@ -581,10 +598,12 @@ pub async fn nack_outgoing_transfer_commit(
     consumer_state: tauri::State<'_, crate::TransferEventConsumerState>,
     transfer_id: String,
     delivery_id: String,
+    consumer_incarnation: String,
 ) -> Result<Value, String> {
     crate::transfer_sidecar::require_transfer_lifecycle_event_owner_in_state(
         consumer_state.inner(),
         webview.label(),
+        &consumer_incarnation,
         &delivery_id,
     )?;
     with_transfer_client!(
@@ -620,10 +639,12 @@ pub async fn complete_outgoing_transfer_finalization(
     finalized_cleanly: bool,
     error: Option<String>,
     delivery_id: String,
+    consumer_incarnation: String,
 ) -> Result<Value, String> {
     crate::transfer_sidecar::require_transfer_lifecycle_event_owner_in_state(
         consumer_state.inner(),
         webview.label(),
+        &consumer_incarnation,
         &delivery_id,
     )?;
     with_transfer_client!(

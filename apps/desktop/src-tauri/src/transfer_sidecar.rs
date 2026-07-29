@@ -1,3 +1,6 @@
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use rand_core::{OsRng, RngCore};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -14,11 +17,24 @@ pub type TransferEventConsumerState = Arc<std::sync::Mutex<TransferEventConsumer
 
 pub struct TransferEventConsumer {
     ready_labels: VecDeque<String>,
-    consumer_incarnations: HashMap<String, u64>,
+    consumer_incarnations: HashMap<String, String>,
+    consumer_registrations: HashMap<String, ConsumerRegistration>,
     pending: VecDeque<PendingLifecycleEvent>,
     pending_bytes: usize,
-    next_consumer_incarnation: u64,
     next_delivery_id: u64,
+}
+
+#[derive(Clone)]
+struct ConsumerRegistration {
+    label: String,
+    release_requested: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferEventConsumerClaim {
+    pub authoritative: bool,
+    pub consumer_incarnation: String,
 }
 
 #[derive(Clone)]
@@ -28,11 +44,11 @@ struct PendingLifecycleEvent {
     payload: Value,
     bytes: usize,
     leased_to: Option<String>,
-    leased_consumer_incarnation: Option<u64>,
+    leased_consumer_incarnation: Option<String>,
     lease_expires_at: Option<Instant>,
     recovery_required: bool,
     claimed_phases: HashSet<String>,
-    nacked_by: HashSet<u64>,
+    nacked_by: HashSet<String>,
 }
 
 const MAX_PENDING_LIFECYCLE_EVENTS: usize = 256;
@@ -45,39 +61,134 @@ impl Default for TransferEventConsumer {
         Self {
             ready_labels: VecDeque::new(),
             consumer_incarnations: HashMap::new(),
+            consumer_registrations: HashMap::new(),
             pending: VecDeque::new(),
             pending_bytes: 0,
-            next_consumer_incarnation: 1,
             next_delivery_id: 1,
         }
     }
 }
 
 impl TransferEventConsumer {
-    fn claim(&mut self, candidate: &str) -> bool {
-        if !self.ready_labels.iter().any(|label| label == candidate) {
-            self.ready_labels.push_back(candidate.to_string());
-            self.consumer_incarnations
-                .insert(candidate.to_string(), self.next_consumer_incarnation);
-            self.next_consumer_incarnation = self.next_consumer_incarnation.wrapping_add(1).max(1);
-        }
-        self.ready_labels
-            .front()
-            .is_some_and(|label| label == candidate)
+    fn new_consumer_incarnation() -> String {
+        let mut bytes = [0_u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        URL_SAFE_NO_PAD.encode(bytes)
     }
 
-    fn release(&mut self, candidate: &str) {
-        let released_incarnation = self.consumer_incarnations.remove(candidate);
-        self.ready_labels.retain(|label| label != candidate);
+    fn claim(&mut self, candidate: &str) -> TransferEventConsumerClaim {
+        if let Some(previous_incarnation) = self.consumer_incarnations.get(candidate).cloned() {
+            self.release_incarnation(candidate, &previous_incarnation);
+        }
+        let consumer_incarnation = Self::new_consumer_incarnation();
+        self.ready_labels.push_back(candidate.to_string());
+        self.consumer_incarnations
+            .insert(candidate.to_string(), consumer_incarnation.clone());
+        self.consumer_registrations.insert(
+            consumer_incarnation.clone(),
+            ConsumerRegistration {
+                label: candidate.to_string(),
+                release_requested: false,
+            },
+        );
+        let authoritative = self
+            .ready_labels
+            .front()
+            .is_some_and(|label| label == candidate);
+        TransferEventConsumerClaim {
+            authoritative,
+            consumer_incarnation,
+        }
+    }
+
+    fn registration_matches(&self, label: &str, incarnation: &str) -> bool {
+        self.consumer_registrations
+            .get(incarnation)
+            .is_some_and(|registration| registration.label == label)
+    }
+
+    fn finish_release_if_idle(&mut self, incarnation: &str) {
+        let release_requested = self
+            .consumer_registrations
+            .get(incarnation)
+            .is_some_and(|registration| registration.release_requested);
+        let owns_lease = self
+            .pending
+            .iter()
+            .any(|event| event.leased_consumer_incarnation.as_deref() == Some(incarnation));
+        if release_requested && !owns_lease {
+            self.consumer_registrations.remove(incarnation);
+        }
+    }
+
+    fn release_incarnation(&mut self, label: &str, incarnation: &str) -> bool {
+        if !self.registration_matches(label, incarnation) {
+            return false;
+        }
+        if self
+            .consumer_incarnations
+            .get(label)
+            .is_some_and(|current| current == incarnation)
+        {
+            self.consumer_incarnations.remove(label);
+            self.ready_labels.retain(|candidate| candidate != label);
+        }
+        if let Some(registration) = self.consumer_registrations.get_mut(incarnation) {
+            registration.release_requested = true;
+        }
+        self.finish_release_if_idle(incarnation);
+        true
+    }
+
+    #[cfg(test)]
+    fn release(&mut self, label: &str) -> bool {
+        let Some(incarnation) = self.consumer_incarnations.get(label).cloned() else {
+            return false;
+        };
+        self.release_incarnation(label, &incarnation)
+    }
+
+    fn release_unavailable_label(&mut self, label: &str) {
+        self.ready_labels.retain(|candidate| candidate != label);
+        self.consumer_incarnations.remove(label);
+        let incarnations = self
+            .consumer_registrations
+            .iter()
+            .filter(|(_, registration)| registration.label == label)
+            .map(|(incarnation, _)| incarnation.clone())
+            .collect::<Vec<_>>();
+        for incarnation in &incarnations {
+            for event in &mut self.pending {
+                if event.leased_to.as_deref() == Some(label)
+                    && event.leased_consumer_incarnation.as_deref() == Some(incarnation)
+                {
+                    event.recovery_required = true;
+                    event.leased_to = None;
+                    event.leased_consumer_incarnation = None;
+                    event.lease_expires_at = None;
+                }
+            }
+            self.consumer_registrations.remove(incarnation);
+        }
+    }
+
+    fn expire_leases(&mut self, now: Instant) {
+        let mut expired_incarnations = Vec::new();
         for event in &mut self.pending {
-            if event.leased_to.as_deref() == Some(candidate)
-                && event.leased_consumer_incarnation == released_incarnation
+            if event
+                .lease_expires_at
+                .is_some_and(|lease_expires_at| lease_expires_at <= now)
             {
+                if let Some(incarnation) = event.leased_consumer_incarnation.take() {
+                    expired_incarnations.push(incarnation);
+                }
                 event.recovery_required = true;
                 event.leased_to = None;
-                event.leased_consumer_incarnation = None;
                 event.lease_expires_at = None;
             }
+        }
+        for incarnation in expired_incarnations {
+            self.finish_release_if_idle(&incarnation);
         }
     }
 
@@ -123,20 +234,13 @@ impl TransferEventConsumer {
         label: &str,
         mut emit: impl FnMut(&str, &str, &Value) -> Result<(), String>,
     ) -> Result<bool, String> {
-        let Some(consumer_incarnation) = self.consumer_incarnations.get(label).copied() else {
+        let Some(consumer_incarnation) = self.consumer_incarnations.get(label).cloned() else {
             return Ok(false);
         };
         let now = Instant::now();
+        self.expire_leases(now);
         let mut failed_emit = None;
         for event in &mut self.pending {
-            if event
-                .lease_expires_at
-                .is_some_and(|lease_expires_at| lease_expires_at <= now)
-            {
-                event.leased_to = None;
-                event.leased_consumer_incarnation = None;
-                event.lease_expires_at = None;
-            }
             if event.leased_to.is_some() {
                 return Ok(false);
             }
@@ -149,6 +253,10 @@ impl TransferEventConsumer {
                     "__kannaLifecycleDeliveryId".into(),
                     Value::String(event.delivery_id.clone()),
                 );
+                object.insert(
+                    "__kannaLifecycleConsumerIncarnation".into(),
+                    Value::String(consumer_incarnation.clone()),
+                );
                 if event.recovery_required {
                     object.insert("__kannaLifecycleRecovery".into(), Value::Bool(true));
                 }
@@ -158,14 +266,14 @@ impl TransferEventConsumer {
                 break;
             }
             event.leased_to = Some(label.to_string());
-            event.leased_consumer_incarnation = Some(consumer_incarnation);
+            event.leased_consumer_incarnation = Some(consumer_incarnation.clone());
             event.lease_expires_at = Some(now + LIFECYCLE_EVENT_LEASE);
             // Preserve lifecycle order and keep renderer work bounded: the
             // next event is offered only after this delivery is acknowledged.
             return Ok(true);
         }
         if let Some(error) = failed_emit {
-            self.release(label);
+            self.release_unavailable_label(label);
             return Err(error);
         }
         Ok(false)
@@ -178,24 +286,14 @@ impl TransferEventConsumer {
         let mut last_error = None;
         for event_index in 0..self.pending.len() {
             let now = Instant::now();
-            {
-                let event = &mut self.pending[event_index];
-                if event
-                    .lease_expires_at
-                    .is_some_and(|lease_expires_at| lease_expires_at <= now)
-                {
-                    event.leased_to = None;
-                    event.leased_consumer_incarnation = None;
-                    event.lease_expires_at = None;
-                }
-                if event.leased_to.is_some() {
-                    return Ok(false);
-                }
+            self.expire_leases(now);
+            if self.pending[event_index].leased_to.is_some() {
+                return Ok(false);
             }
 
             let candidates = self.ready_labels.iter().cloned().collect::<Vec<_>>();
             for label in candidates {
-                let Some(consumer_incarnation) = self.consumer_incarnations.get(&label).copied()
+                let Some(consumer_incarnation) = self.consumer_incarnations.get(&label).cloned()
                 else {
                     continue;
                 };
@@ -212,12 +310,16 @@ impl TransferEventConsumer {
                         "__kannaLifecycleDeliveryId".into(),
                         Value::String(self.pending[event_index].delivery_id.clone()),
                     );
+                    object.insert(
+                        "__kannaLifecycleConsumerIncarnation".into(),
+                        Value::String(consumer_incarnation.clone()),
+                    );
                     if self.pending[event_index].recovery_required {
                         object.insert("__kannaLifecycleRecovery".into(), Value::Bool(true));
                     }
                 }
                 if let Err(error) = emit(&label, &event_name, &delivered_payload) {
-                    self.release(&label);
+                    self.release_unavailable_label(&label);
                     last_error = Some(error);
                     continue;
                 }
@@ -234,27 +336,50 @@ impl TransferEventConsumer {
         }
     }
 
-    fn acknowledge(&mut self, label: &str, delivery_id: &str) -> bool {
-        let consumer_incarnation = self.consumer_incarnations.get(label).copied();
+    fn acknowledge_incarnation(
+        &mut self,
+        label: &str,
+        consumer_incarnation: &str,
+        delivery_id: &str,
+    ) -> bool {
+        if !self.registration_matches(label, consumer_incarnation) {
+            return false;
+        }
         let Some(index) = self.pending.iter().position(|event| {
             event.delivery_id == delivery_id
                 && event.leased_to.as_deref() == Some(label)
-                && event.leased_consumer_incarnation == consumer_incarnation
+                && event.leased_consumer_incarnation.as_deref() == Some(consumer_incarnation)
         }) else {
             return false;
         };
         if let Some(event) = self.pending.remove(index) {
             self.pending_bytes = self.pending_bytes.saturating_sub(event.bytes);
         }
+        self.finish_release_if_idle(consumer_incarnation);
         true
     }
 
-    fn nack(&mut self, label: &str, delivery_id: &str) -> bool {
-        let consumer_incarnation = self.consumer_incarnations.get(label).copied();
+    #[cfg(test)]
+    fn acknowledge(&mut self, label: &str, delivery_id: &str) -> bool {
+        let Some(consumer_incarnation) = self.consumer_incarnations.get(label).cloned() else {
+            return false;
+        };
+        self.acknowledge_incarnation(label, &consumer_incarnation, delivery_id)
+    }
+
+    fn nack_incarnation(
+        &mut self,
+        label: &str,
+        consumer_incarnation: &str,
+        delivery_id: &str,
+    ) -> bool {
+        if !self.registration_matches(label, consumer_incarnation) {
+            return false;
+        }
         let Some(event) = self.pending.iter_mut().find(|event| {
             event.delivery_id == delivery_id
                 && event.leased_to.as_deref() == Some(label)
-                && event.leased_consumer_incarnation == consumer_incarnation
+                && event.leased_consumer_incarnation.as_deref() == Some(consumer_incarnation)
         }) else {
             return false;
         };
@@ -264,19 +389,19 @@ impl TransferEventConsumer {
         event.lease_expires_at = None;
         // A NACK excludes this renderer only from this delivery. It remains a
         // mounted consumer for later queue entries.
-        event
-            .nacked_by
-            .insert(consumer_incarnation.expect("leased consumer has an incarnation"));
+        event.nacked_by.insert(consumer_incarnation.to_string());
+        self.finish_release_if_idle(consumer_incarnation);
         true
     }
 
-    fn nack_with(
+    fn nack_with_incarnation(
         &mut self,
         label: &str,
+        consumer_incarnation: &str,
         delivery_id: &str,
         mut emit: impl FnMut(&str, &str, &Value) -> Result<(), String>,
     ) -> Result<bool, String> {
-        if !self.nack(label, delivery_id) {
+        if !self.nack_incarnation(label, consumer_incarnation, delivery_id) {
             return Ok(false);
         }
         self.flush_pending_to_eligible(|target, event_name, payload| {
@@ -285,12 +410,32 @@ impl TransferEventConsumer {
         Ok(true)
     }
 
-    fn renew(&mut self, label: &str, delivery_id: &str) -> bool {
-        let consumer_incarnation = self.consumer_incarnations.get(label).copied();
+    #[cfg(test)]
+    fn nack_with(
+        &mut self,
+        label: &str,
+        delivery_id: &str,
+        emit: impl FnMut(&str, &str, &Value) -> Result<(), String>,
+    ) -> Result<bool, String> {
+        let Some(consumer_incarnation) = self.consumer_incarnations.get(label).cloned() else {
+            return Ok(false);
+        };
+        self.nack_with_incarnation(label, &consumer_incarnation, delivery_id, emit)
+    }
+
+    fn renew_incarnation(
+        &mut self,
+        label: &str,
+        consumer_incarnation: &str,
+        delivery_id: &str,
+    ) -> bool {
+        if !self.registration_matches(label, consumer_incarnation) {
+            return false;
+        }
         let Some(event) = self.pending.iter_mut().find(|event| {
             event.delivery_id == delivery_id
                 && event.leased_to.as_deref() == Some(label)
-                && event.leased_consumer_incarnation == consumer_incarnation
+                && event.leased_consumer_incarnation.as_deref() == Some(consumer_incarnation)
         }) else {
             return false;
         };
@@ -298,15 +443,33 @@ impl TransferEventConsumer {
         true
     }
 
-    fn claim_phase(&mut self, label: &str, delivery_id: &str, phase: &str) -> Result<bool, String> {
-        let consumer_incarnation = self.consumer_incarnations.get(label).copied();
+    #[cfg(test)]
+    fn renew(&mut self, label: &str, delivery_id: &str) -> bool {
+        let Some(consumer_incarnation) = self.consumer_incarnations.get(label).cloned() else {
+            return false;
+        };
+        self.renew_incarnation(label, &consumer_incarnation, delivery_id)
+    }
+
+    fn claim_phase_incarnation(
+        &mut self,
+        label: &str,
+        consumer_incarnation: &str,
+        delivery_id: &str,
+        phase: &str,
+    ) -> Result<bool, String> {
+        if !self.registration_matches(label, consumer_incarnation) {
+            return Err(format!(
+                "transfer lifecycle delivery {delivery_id} is no longer owned by {label}",
+            ));
+        }
         let event = self
             .pending
             .iter_mut()
             .find(|event| event.delivery_id == delivery_id)
             .ok_or_else(|| format!("unknown transfer lifecycle delivery {delivery_id}"))?;
         if event.leased_to.as_deref() != Some(label)
-            || event.leased_consumer_incarnation != consumer_incarnation
+            || event.leased_consumer_incarnation.as_deref() != Some(consumer_incarnation)
         {
             return Err(format!(
                 "transfer lifecycle delivery {delivery_id} is no longer owned by {label}",
@@ -1134,7 +1297,7 @@ fn spawn_lifecycle_redelivery(
                 .cloned()
                 .collect::<Vec<_>>();
             for label in stale_labels {
-                consumer.release(&label);
+                consumer.release_unavailable_label(&label);
             }
             if let Err(error) = consumer.flush_pending_to_eligible(|target, event_name, payload| {
                 app.emit_to(EventTarget::webview_window(target), event_name, payload)
@@ -1388,7 +1551,7 @@ pub fn claim_transfer_event_consumer_in_state(
     app: &AppHandle,
     state: &TransferEventConsumerState,
     label: &str,
-) -> Result<bool, String> {
+) -> Result<TransferEventConsumerClaim, String> {
     let mut consumer = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1399,9 +1562,9 @@ pub fn claim_transfer_event_consumer_in_state(
         .cloned()
         .collect::<Vec<_>>();
     for stale_label in stale_labels {
-        consumer.release(&stale_label);
+        consumer.release_unavailable_label(&stale_label);
     }
-    let authoritative = consumer.claim(label);
+    let claim = consumer.claim(label);
 
     consumer.flush_pending_to_eligible(|target, event_name, payload| {
         if app.get_webview_window(target).is_none() {
@@ -1414,18 +1577,21 @@ pub fn claim_transfer_event_consumer_in_state(
                 format!("failed delivering queued transfer lifecycle event to {target}: {error}")
             })
     })?;
-    Ok(authoritative)
+    Ok(claim)
 }
 
 pub fn release_transfer_event_consumer_in_state(
     app: &AppHandle,
     state: &TransferEventConsumerState,
     label: &str,
-) -> Result<(), String> {
+    consumer_incarnation: &str,
+) -> Result<bool, String> {
     let mut consumer = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    consumer.release(label);
+    if !consumer.release_incarnation(label, consumer_incarnation) {
+        return Ok(false);
+    }
     consumer.flush_pending_to_eligible(|target, event_name, payload| {
         if app.get_webview_window(target).is_none() {
             return Err(format!(
@@ -1437,19 +1603,20 @@ pub fn release_transfer_event_consumer_in_state(
                 format!("failed delivering queued transfer lifecycle event to {target}: {error}")
             })
     })?;
-    Ok(())
+    Ok(true)
 }
 
 pub fn acknowledge_transfer_lifecycle_event_in_state(
     app: &AppHandle,
     state: &TransferEventConsumerState,
     label: &str,
+    consumer_incarnation: &str,
     delivery_id: &str,
 ) -> Result<bool, String> {
     let mut consumer = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !consumer.acknowledge(label, delivery_id) {
+    if !consumer.acknowledge_incarnation(label, consumer_incarnation, delivery_id) {
         return Ok(false);
     }
     consumer.flush_pending_to_eligible(|target, event_name, payload| {
@@ -1468,39 +1635,47 @@ pub fn nack_transfer_lifecycle_event_in_state(
     app: &AppHandle,
     state: &TransferEventConsumerState,
     label: &str,
+    consumer_incarnation: &str,
     delivery_id: &str,
 ) -> Result<bool, String> {
     let mut consumer = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    consumer.nack_with(label, delivery_id, |target, event_name, payload| {
-        if app.get_webview_window(target).is_none() {
-            return Err(format!(
-                "transfer event consumer {target} is no longer available"
-            ));
-        }
-        app.emit_to(EventTarget::webview_window(target), event_name, payload)
-            .map_err(|error| error.to_string())
-    })
+    consumer.nack_with_incarnation(
+        label,
+        consumer_incarnation,
+        delivery_id,
+        |target, event_name, payload| {
+            if app.get_webview_window(target).is_none() {
+                return Err(format!(
+                    "transfer event consumer {target} is no longer available"
+                ));
+            }
+            app.emit_to(EventTarget::webview_window(target), event_name, payload)
+                .map_err(|error| error.to_string())
+        },
+    )
 }
 
 pub fn renew_transfer_lifecycle_event_in_state(
     state: &TransferEventConsumerState,
     label: &str,
+    consumer_incarnation: &str,
     delivery_id: &str,
 ) -> bool {
     let mut consumer = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    consumer.renew(label, delivery_id)
+    consumer.renew_incarnation(label, consumer_incarnation, delivery_id)
 }
 
 pub fn require_transfer_lifecycle_event_owner_in_state(
     state: &TransferEventConsumerState,
     label: &str,
+    consumer_incarnation: &str,
     delivery_id: &str,
 ) -> Result<(), String> {
-    if renew_transfer_lifecycle_event_in_state(state, label, delivery_id) {
+    if renew_transfer_lifecycle_event_in_state(state, label, consumer_incarnation, delivery_id) {
         Ok(())
     } else {
         Err(format!(
@@ -1512,6 +1687,7 @@ pub fn require_transfer_lifecycle_event_owner_in_state(
 pub fn claim_transfer_lifecycle_phase_in_state(
     state: &TransferEventConsumerState,
     label: &str,
+    consumer_incarnation: &str,
     delivery_id: &str,
     phase: &str,
 ) -> Result<bool, String> {
@@ -1521,7 +1697,7 @@ pub fn claim_transfer_lifecycle_phase_in_state(
     state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .claim_phase(label, delivery_id, phase)
+        .claim_phase_incarnation(label, consumer_incarnation, delivery_id, phase)
 }
 
 #[cfg(test)]
@@ -1961,12 +2137,18 @@ mod tests {
     #[test]
     fn lifecycle_events_select_exactly_one_authoritative_window() {
         let mut consumer = TransferEventConsumer::default();
-        assert!(consumer.claim("window-z"));
-        assert!(!consumer.claim("main"));
-        assert!(!consumer.claim("window-a"));
+        assert!(consumer.claim("window-z").authoritative);
+        assert!(!consumer.claim("main").authoritative);
+        assert!(!consumer.claim("window-a").authoritative);
         consumer.release("window-z");
-        assert!(consumer.claim("main"));
-        assert!(!consumer.claim("window-a"));
+        // Authority moves to the next standby in claim order. Re-claiming a label
+        // is not a query: it always mints a replacement incarnation and re-queues
+        // that label behind the consumers already waiting.
+        assert_eq!(
+            consumer.ready_labels.front().map(String::as_str),
+            Some("main"),
+        );
+        assert!(!consumer.claim("window-a").authoritative);
         assert!(is_state_mutating_lifecycle_event("transfer-request"));
         assert!(is_state_mutating_lifecycle_event("task-pull-requested"));
         assert!(is_state_mutating_lifecycle_event(
@@ -1991,7 +2173,7 @@ mod tests {
                 unreachable!("no ready consumer should avoid emit")
             })
             .is_err());
-        assert!(consumer.claim("main"));
+        assert!(consumer.claim("main").authoritative);
 
         let error = consumer
             .flush_pending_to("main", |_, _, _| Err("listener unavailable".into()))
@@ -2012,8 +2194,8 @@ mod tests {
                 unreachable!("no ready consumer should avoid emit")
             })
             .is_err());
-        assert!(consumer.claim("window-stale"));
-        assert!(!consumer.claim("window-ready"));
+        assert!(consumer.claim("window-stale").authoritative);
+        assert!(!consumer.claim("window-ready").authoritative);
         let mut attempts = Vec::new();
 
         consumer
@@ -2081,8 +2263,8 @@ mod tests {
                 unreachable!("no ready consumer should avoid emit")
             })
             .is_err());
-        assert!(consumer.claim("window-owner"));
-        assert!(!consumer.claim("window-standby"));
+        assert!(consumer.claim("window-owner").authoritative);
+        assert!(!consumer.claim("window-standby").authoritative);
         consumer.release("window-owner");
         let mut delivered = Vec::new();
 
@@ -2107,7 +2289,7 @@ mod tests {
     #[test]
     fn lifecycle_delivery_survives_owner_close_before_ack() {
         let mut consumer = TransferEventConsumer::default();
-        assert!(consumer.claim("window-owner"));
+        assert!(consumer.claim("window-owner").authoritative);
         let mut delivered_ids = Vec::new();
         let mut recovery_flags = Vec::new();
         consumer
@@ -2126,9 +2308,11 @@ mod tests {
                 },
             )
             .expect("deliver to owner");
-        assert!(!consumer.claim("window-standby"));
+        assert!(!consumer.claim("window-standby").authoritative);
 
-        consumer.release("window-owner");
+        // The owner window is gone, so it can never settle its delivery: the
+        // queue reclaims the lease outright instead of waiting for a settlement.
+        consumer.release_unavailable_label("window-owner");
         consumer
             .flush_pending_to("window-standby", |_, _, payload| {
                 delivered_ids.push(
@@ -2152,8 +2336,8 @@ mod tests {
     #[test]
     fn nacked_lifecycle_delivery_reemits_only_to_standby_consumers_and_stops_when_exhausted() {
         let mut consumer = TransferEventConsumer::default();
-        assert!(consumer.claim("window-owner"));
-        assert!(!consumer.claim("window-standby"));
+        assert!(consumer.claim("window-owner").authoritative);
+        assert!(!consumer.claim("window-standby").authoritative);
         let mut delivered_to = Vec::new();
         consumer
             .dispatch_with(
@@ -2191,7 +2375,7 @@ mod tests {
     #[test]
     fn nacked_lifecycle_delivery_reaches_a_standby_claimed_after_the_nack() {
         let mut consumer = TransferEventConsumer::default();
-        assert!(consumer.claim("window-owner"));
+        assert!(consumer.claim("window-owner").authoritative);
         let mut delivered_to = Vec::new();
         consumer
             .dispatch_with("task-pull-requested", json!({}), |label, _, _| {
@@ -2206,7 +2390,7 @@ mod tests {
             })
             .expect("owner NACK should retain the delivery"));
 
-        assert!(!consumer.claim("window-late-standby"));
+        assert!(!consumer.claim("window-late-standby").authoritative);
         assert!(consumer
             .flush_pending_to_eligible(|label, _, _| {
                 delivered_to.push(label.to_string());
@@ -2224,7 +2408,7 @@ mod tests {
     #[test]
     fn nacked_lifecycle_delivery_reaches_a_new_incarnation_with_the_same_label() {
         let mut consumer = TransferEventConsumer::default();
-        assert!(consumer.claim("main"));
+        assert!(consumer.claim("main").authoritative);
         let mut delivered_to = Vec::new();
         consumer
             .dispatch_with("task-pull-requested", json!({}), |label, _, _| {
@@ -2240,7 +2424,7 @@ mod tests {
             .expect("first main incarnation NACK should retain the delivery"));
 
         consumer.release("main");
-        assert!(consumer.claim("main"));
+        assert!(consumer.claim("main").authoritative);
         assert!(consumer
             .flush_pending_to_eligible(|label, _, _| {
                 delivered_to.push(label.to_string());
@@ -2253,10 +2437,114 @@ mod tests {
     }
 
     #[test]
+    fn release_waits_for_exact_incarnation_settlement_before_redelivery() {
+        let mut consumer = TransferEventConsumer::default();
+        let owner = consumer.claim("window-owner");
+        let standby = consumer.claim("window-standby");
+        let mut delivered_to = Vec::new();
+        consumer
+            .dispatch_with("task-pull-requested", json!({}), |label, _, _| {
+                delivered_to.push(label.to_string());
+                Ok(())
+            })
+            .expect("owner should receive the task pull");
+        let delivery_id = consumer.pending[0].delivery_id.clone();
+
+        assert!(consumer.release_incarnation("window-owner", &owner.consumer_incarnation,));
+        assert!(!consumer
+            .flush_pending_to_eligible(|label, _, _| {
+                delivered_to.push(label.to_string());
+                Ok(())
+            })
+            .expect("release should defer while settlement is pending"));
+        assert_eq!(delivered_to, ["window-owner"]);
+        assert_eq!(
+            consumer.pending[0].leased_consumer_incarnation.as_deref(),
+            Some(owner.consumer_incarnation.as_str()),
+        );
+
+        assert!(consumer.acknowledge_incarnation(
+            "window-owner",
+            &owner.consumer_incarnation,
+            &delivery_id,
+        ));
+        assert!(consumer.pending.is_empty());
+        assert!(!consumer.consumer_incarnations.contains_key("window-owner"));
+        assert_eq!(
+            consumer
+                .consumer_incarnations
+                .get("window-standby")
+                .map(String::as_str),
+            Some(standby.consumer_incarnation.as_str()),
+        );
+        assert_eq!(delivered_to, ["window-owner"]);
+    }
+
+    #[test]
+    fn delayed_commands_from_an_old_same_label_incarnation_cannot_act_on_replacement() {
+        let mut consumer = TransferEventConsumer::default();
+        let first = consumer.claim("main");
+        consumer
+            .dispatch_with("task-pull-requested", json!({}), |_, _, _| Ok(()))
+            .expect("first incarnation receives a delivery");
+        let first_delivery = consumer.pending[0].delivery_id.clone();
+        assert!(consumer.acknowledge_incarnation(
+            "main",
+            &first.consumer_incarnation,
+            &first_delivery,
+        ));
+
+        let replacement = consumer.claim("main");
+        assert_ne!(first.consumer_incarnation, replacement.consumer_incarnation,);
+        consumer
+            .dispatch_with("outgoing-transfer-committed", json!({}), |_, _, _| Ok(()))
+            .expect("replacement receives a delivery");
+        let replacement_delivery = consumer.pending[0].delivery_id.clone();
+
+        assert!(!consumer.release_incarnation("main", &first.consumer_incarnation));
+        assert!(!consumer.acknowledge_incarnation(
+            "main",
+            &first.consumer_incarnation,
+            &replacement_delivery,
+        ));
+        assert!(!consumer.nack_incarnation(
+            "main",
+            &first.consumer_incarnation,
+            &replacement_delivery,
+        ));
+        assert!(!consumer.renew_incarnation(
+            "main",
+            &first.consumer_incarnation,
+            &replacement_delivery,
+        ));
+        assert!(consumer
+            .claim_phase_incarnation(
+                "main",
+                &first.consumer_incarnation,
+                &replacement_delivery,
+                "stale-phase",
+            )
+            .is_err());
+        assert!(consumer.renew_incarnation(
+            "main",
+            &replacement.consumer_incarnation,
+            &replacement_delivery,
+        ));
+        assert!(consumer
+            .claim_phase_incarnation(
+                "main",
+                &replacement.consumer_incarnation,
+                &replacement_delivery,
+                "replacement-phase",
+            )
+            .expect("replacement owns its phase"));
+    }
+
+    #[test]
     fn exhausted_nack_candidates_remain_available_for_later_deliveries() {
         let mut consumer = TransferEventConsumer::default();
-        assert!(consumer.claim("window-owner"));
-        assert!(!consumer.claim("window-standby"));
+        assert!(consumer.claim("window-owner").authoritative);
+        assert!(!consumer.claim("window-standby").authoritative);
         let mut delivered = Vec::new();
         consumer
             .dispatch_with(
@@ -2309,7 +2597,7 @@ mod tests {
     #[test]
     fn expired_lifecycle_delivery_lease_is_redelivered_with_the_same_id() {
         let mut consumer = TransferEventConsumer::default();
-        assert!(consumer.claim("main"));
+        assert!(consumer.claim("main").authoritative);
         let mut delivery_ids = Vec::new();
         consumer
             .dispatch_with(
@@ -2346,7 +2634,7 @@ mod tests {
     #[test]
     fn active_lifecycle_consumer_can_renew_its_delivery_lease() {
         let mut consumer = TransferEventConsumer::default();
-        assert!(consumer.claim("main"));
+        assert!(consumer.claim("main").authoritative);
         consumer
             .dispatch_with("transfer-request", json!({"sequence": 1}), |_, _, _| Ok(()))
             .unwrap();
@@ -2364,40 +2652,61 @@ mod tests {
     #[test]
     fn mutating_lifecycle_work_rejects_a_released_delivery_owner() {
         let state = TransferEventConsumerState::default();
-        let delivery_id = {
+        let (owner, delivery_id) = {
             let mut consumer = state.lock().unwrap();
-            assert!(consumer.claim("owner"));
+            let owner = consumer.claim("owner");
+            assert!(owner.authoritative);
             consumer
                 .dispatch_with("outgoing-transfer-committed", json!({}), |_, _, _| Ok(()))
                 .unwrap();
-            consumer.pending[0].delivery_id.clone()
+            let delivery_id = consumer.pending[0].delivery_id.clone();
+            (owner, delivery_id)
         };
 
-        assert!(
-            require_transfer_lifecycle_event_owner_in_state(&state, "owner", &delivery_id,).is_ok()
-        );
+        assert!(require_transfer_lifecycle_event_owner_in_state(
+            &state,
+            "owner",
+            &owner.consumer_incarnation,
+            &delivery_id,
+        )
+        .is_ok());
         assert!(claim_transfer_lifecycle_phase_in_state(
             &state,
             "owner",
+            &owner.consumer_incarnation,
             &delivery_id,
             "pty-finalization-signal",
         )
         .unwrap());
-        {
+        let replacement = {
             let mut consumer = state.lock().unwrap();
-            consumer.release("owner");
-            assert!(consumer.claim("replacement"));
-            consumer
+            assert!(consumer.release_incarnation("owner", &owner.consumer_incarnation));
+            let replacement = consumer.claim("replacement");
+            // A released owner keeps its in-flight delivery until it settles, so
+            // the replacement cannot be handed the same work concurrently.
+            assert!(!consumer
                 .flush_pending_to("replacement", |_, _, _| Ok(()))
-                .unwrap();
-        }
-        let error = require_transfer_lifecycle_event_owner_in_state(&state, "owner", &delivery_id)
-            .unwrap_err();
+                .unwrap());
+            assert!(consumer.nack_incarnation("owner", &owner.consumer_incarnation, &delivery_id,));
+            assert!(consumer
+                .flush_pending_to("replacement", |_, _, _| Ok(()))
+                .unwrap());
+            replacement
+        };
+
+        let error = require_transfer_lifecycle_event_owner_in_state(
+            &state,
+            "owner",
+            &owner.consumer_incarnation,
+            &delivery_id,
+        )
+        .unwrap_err();
         assert!(error.contains("no longer owned"));
         assert!(
             !claim_transfer_lifecycle_phase_in_state(
                 &state,
                 "replacement",
+                &replacement.consumer_incarnation,
                 &delivery_id,
                 "pty-finalization-signal",
             )
