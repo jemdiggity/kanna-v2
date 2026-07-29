@@ -122,7 +122,7 @@ crate.from_cargo(
 crate.from_cargo(
     name = "terminal_recovery_crates",
     cargo_lockfile = "//packages/terminal-recovery:Cargo.lock",
-    manifests = ["//packages/terminal-recovery:Cargo.toml"],
+    manifests = ["//:Cargo.terminal-recovery.toml"],
     supported_platform_triples = [
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",

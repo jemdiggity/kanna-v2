@@ -10,6 +10,11 @@ pub mod pty;
 pub mod reaper;
 pub mod recovery;
 pub mod session;
-pub mod session_id;
+/// Session-id validation, shared with the recovery worker.
+///
+/// Re-exported rather than defined here: the worker is a SEPARATE process that also
+/// derives `{id}.json` from protocol input, and two copies of "safe" is how one of
+/// them ends up without the check.
+pub use kanna_runtime_defaults::session_id;
 pub mod subprocess_env;
 pub mod terminal_perf;

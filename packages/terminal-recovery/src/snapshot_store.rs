@@ -24,7 +24,7 @@ impl SnapshotStore {
     }
 
     pub fn write(&self, snapshot: &RecoverySnapshot) -> Result<(), String> {
-        let file_path = self.file_path(&snapshot.session_id);
+        let file_path = self.file_path(&snapshot.session_id)?;
         let temp_path =
             file_path.with_extension(format!("json.tmp-{}-{}", std::process::id(), now_millis()));
         std::fs::create_dir_all(file_path.parent().unwrap_or_else(|| Path::new(".")))
@@ -53,7 +53,7 @@ impl SnapshotStore {
     }
 
     pub fn read(&self, session_id: &str) -> Result<Option<RecoverySnapshot>, String> {
-        let path = self.file_path(session_id);
+        let path = self.file_path(session_id)?;
         if !path.exists() {
             return Ok(None);
         }
@@ -62,7 +62,7 @@ impl SnapshotStore {
     }
 
     pub fn require(&self, session_id: &str) -> Result<RecoverySnapshot, String> {
-        let path = self.file_path(session_id);
+        let path = self.file_path(session_id)?;
         let contents = std::fs::read_to_string(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 format!(
@@ -92,7 +92,7 @@ impl SnapshotStore {
     }
 
     pub fn remove(&self, session_id: &str) -> Result<(), String> {
-        let path = self.file_path(session_id);
+        let path = self.file_path(session_id)?;
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -100,8 +100,22 @@ impl SnapshotStore {
         }
     }
 
-    fn file_path(&self, session_id: &str) -> PathBuf {
-        self.root.join(format!("{}.json", session_id))
+    /// Path of a session's snapshot, refusing an id that would escape `root`.
+    ///
+    /// The worker is a SEPARATE PROCESS: `session_id` arrives over its NDJSON
+    /// protocol, so it is untrusted input here regardless of what the daemon does
+    /// with it. `Path::join` REPLACES its base given an absolute-looking id and `..`
+    /// walks out, so an unchecked id is an arbitrary-file read on load and an
+    /// arbitrary-file write on persist. The check is shared with the daemon via
+    /// `kanna_runtime_defaults::session_id` so the two processes cannot disagree
+    /// about what "safe" means.
+    fn file_path(&self, session_id: &str) -> Result<PathBuf, String> {
+        if !kanna_runtime_defaults::session_id::is_safe(session_id) {
+            return Err(format!(
+                "refusing to derive a snapshot path from unsafe session id {session_id:?}"
+            ));
+        }
+        Ok(self.root.join(format!("{}.json", session_id)))
     }
 
     fn remove_stale_temp_files(&self) -> Result<(), String> {
@@ -232,5 +246,73 @@ mod legacy_compat_tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod session_id_boundary_tests {
+    use super::*;
+
+    /// The WORKER must refuse a traversing session id on its own.
+    ///
+    /// It is a separate process: ids arrive over its NDJSON protocol, so relying on
+    /// the daemon to have validated them would leave this process one bug away from
+    /// an arbitrary-file read on load and an arbitrary-file write on persist.
+    #[test]
+    fn a_traversing_session_id_cannot_escape_the_snapshot_root() {
+        let root = std::env::temp_dir().join(format!(
+            "kanna-wkr-escape-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&root).expect("root");
+        let outside = root.parent().expect("parent").join("kanna-wkr-canary.json");
+        std::fs::write(&outside, b"SECRET").expect("plant canary");
+
+        let store = SnapshotStore::new(root.clone());
+        for hostile in [
+            "../kanna-wkr-canary",
+            "/etc/passwd",
+            "..",
+            "Upper",
+            "caf\u{e9}",
+        ] {
+            let snapshot = RecoverySnapshot {
+                session_id: hostile.to_string(),
+                serialized: "OVERWRITE".to_string(),
+                cols: 80,
+                rows: 24,
+                cursor_row: Some(0),
+                cursor_col: Some(0),
+                cursor_visible: Some(true),
+                saved_at: 0,
+                sequence: 0,
+            };
+            assert!(
+                store.write(&snapshot).is_err(),
+                "id {hostile:?} must be refused on write"
+            );
+            assert!(
+                store.read(hostile).is_err(),
+                "id {hostile:?} must be refused on read"
+            );
+            assert!(
+                store.require(hostile).is_err(),
+                "id {hostile:?} must be refused on require"
+            );
+            assert!(
+                store.remove(hostile).is_err(),
+                "id {hostile:?} must be refused on remove"
+            );
+        }
+
+        assert_eq!(
+            std::fs::read(&outside).expect("canary readable"),
+            b"SECRET".to_vec(),
+            "the file outside the snapshot root was read or modified"
+        );
+
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
