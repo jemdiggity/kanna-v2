@@ -3879,6 +3879,203 @@ fn dormant_task_preserves_explicit_provider_and_model_until_spawn() {
 }
 
 #[test]
+fn dormant_start_uses_stored_explicit_agent_provider_and_model() {
+    let repo_root = init_git_repo("dormant-start-stored-explicit-provider");
+    let agent_dir = repo_root.join(".kanna/agents/dormant-review");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("AGENT.md"),
+        "---\nname: dormant-review\ndescription: Reviews dormant tasks\nagent_provider: claude\nmodel: agent-model\n---\nReview the task.",
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        serde_json::json!({
+            "workspace": {
+                "path": {
+                    "prepend": [".kanna/test-provider-bin"]
+                }
+            },
+            "agentProviders": {
+                "dormant-review": {
+                    "provider": "codex",
+                    "model": "repo-model"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish dormant explicit provider fixture");
+
+    let config = test_config("dormant-start-stored-explicit-provider");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "blocker-explicit",
+        "repo-1",
+        "Explicit provider blocker",
+        Some("Explicit provider blocker"),
+        "in progress",
+        "2026-07-30 00:00:00",
+    )
+    .unwrap();
+
+    let created = create_dormant_task_for_api_with_error(
+        &db,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Resume with stored explicit preferences".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: Some("dormant-review".to_string()),
+            agent_provider: Some("opencode".to_string()),
+            agent_type: None,
+            model: Some("explicit-model".to_string()),
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: None,
+            recovery_snapshot: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: Some(vec!["blocker-explicit".to_string()]),
+            terminal_cols: None,
+            terminal_rows: None,
+        },
+        Some("dependent-explicit-provider".to_string()),
+    )
+    .unwrap();
+    db.insert_task_blocker(&created.task_id, "blocker-explicit")
+        .unwrap();
+    assert_eq!(db.count_open_task_blockers(&created.task_id).unwrap(), 1);
+    db.close_pipeline_item("blocker-explicit").unwrap();
+
+    let prepared = prepare_start_dormant_task_for_api(
+        &db,
+        &config,
+        &created.task_id,
+        vec!["main".to_string()],
+    )
+    .unwrap()
+    .expect("resolved blocker should prepare the dormant task");
+
+    assert_eq!(prepared.agent_provider, "opencode");
+    assert_eq!(prepared.model.as_deref(), Some("explicit-model"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+#[test]
+fn dormant_start_uses_repo_provider_preference_without_stored_explicit_values() {
+    let repo_root = init_git_repo("dormant-start-repo-provider");
+    let agent_dir = repo_root.join(".kanna/agents/implement");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("EXTEND.md"),
+        "---\nagent_provider: opencode\nmodel: agent-model\n---\n",
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish dormant agent preference fixture");
+
+    let config = test_config("dormant-start-repo-provider");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "blocker-repo",
+        "repo-1",
+        "Repo provider blocker",
+        Some("Repo provider blocker"),
+        "in progress",
+        "2026-07-30 00:00:00",
+    )
+    .unwrap();
+
+    let created = create_dormant_task_for_api_with_error(
+        &db,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Resume with the repo provider preference".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: None,
+            agent_type: None,
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: None,
+            recovery_snapshot: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: Some(vec!["blocker-repo".to_string()]),
+            terminal_cols: None,
+            terminal_rows: None,
+        },
+        Some("dependent-repo-provider".to_string()),
+    )
+    .unwrap();
+    db.insert_task_blocker(&created.task_id, "blocker-repo")
+        .unwrap();
+    assert_eq!(db.count_open_task_blockers(&created.task_id).unwrap(), 1);
+
+    let dormant_item = db.get_pipeline_item(&created.task_id).unwrap().unwrap();
+    assert_eq!(dormant_item.agent_provider.as_deref(), Some("opencode"));
+
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        serde_json::json!({
+            "workspace": {
+                "path": {
+                    "prepend": [".kanna/test-provider-bin"]
+                }
+            },
+            "agentProviders": {
+                "implement": {
+                    "provider": "codex",
+                    "model": "repo-model"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish dormant repo provider preference");
+    db.close_pipeline_item("blocker-repo").unwrap();
+
+    let prepared = prepare_start_dormant_task_for_api(
+        &db,
+        &config,
+        &created.task_id,
+        vec!["main".to_string()],
+    )
+    .unwrap()
+    .expect("resolved blocker should prepare the dormant task");
+
+    assert_eq!(prepared.agent_provider, "codex");
+    assert_eq!(prepared.model.as_deref(), Some("repo-model"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+#[test]
 fn prepare_task_for_api_classifies_requested_task_id_primary_key_collision() {
     let task_id = "c1d2e3f4a5b60718";
     let repo_root = init_git_repo("requested-task-id-collision");
