@@ -1,7 +1,9 @@
-import { chmod, mkdir, readdir, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -9,7 +11,6 @@ import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo"
 import { cleanupWorktrees, resetDatabase } from "../helpers/reset";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
-import { advanceStageWithShortcut } from "../helpers/stageAdvance";
 import { WebDriverClient } from "../helpers/webdriver";
 
 /**
@@ -28,6 +29,10 @@ import { WebDriverClient } from "../helpers/webdriver";
  *  - resumable → reopen that run's own worktree, which moves
  *    `pipeline_item.branch` back to the branch that run was on. There is no
  *    new `-<n>` in this case; that is the design, not a lost suffix.
+ *
+ * Like the rest of `real/`, this needs the provider CLI installed: the server
+ * probes the installed Copilot CLI's `--help` for `--resume` before it will
+ * resume a run, and a machine without it takes the fork path instead.
  */
 
 interface StageRunRow {
@@ -36,6 +41,39 @@ interface StageRunRow {
   kind: string | null;
   cwd: string | null;
   resumed_from_run_id: string | null;
+}
+
+const run = promisify(execFile);
+
+const CARRIED_FILE = "e2e-carried.txt";
+
+/**
+ * Fixture repos live under the OS temp dir, which is a symlink on macOS
+ * (`/var` → `/private/var`). Paths the server records go through
+ * `canonicalize`, so compare recorded paths by their resolved form.
+ */
+function samePath(recorded: string | null | undefined, expected: string): boolean {
+  if (!recorded) return false;
+  const resolve = (path: string) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return path;
+    }
+  };
+  return resolve(recorded) === resolve(expected);
+}
+
+/**
+ * Publish the fixture's `.kanna/` definitions to `origin/main`. The server
+ * resolves pipelines and agents from `origin/<default-branch>`, never from the
+ * checkout's working tree, so definitions written into the fixture after
+ * `createFixtureRepo` are invisible until they are committed and pushed.
+ */
+async function publishDefinitions(repoPath: string, message: string): Promise<void> {
+  await run("git", ["add", "."], { cwd: repoPath });
+  await run("git", ["commit", "-m", message], { cwd: repoPath });
+  await run("git", ["push", "origin", "main"], { cwd: repoPath });
 }
 
 function isVueCallError(value: unknown): value is { __error: string } {
@@ -47,26 +85,87 @@ function isVueCallError(value: unknown): value is { __error: string } {
   );
 }
 
-async function hydrateStoreItem(client: WebDriverClient, taskId: string): Promise<void> {
-  const rows = (await queryDb(
-    client,
-    "SELECT * FROM pipeline_item WHERE id = ?",
-    [taskId],
-  )) as Array<Record<string, unknown>>;
-  const item = rows[0];
-  if (!item) throw new Error(`task ${taskId} was not found`);
+/**
+ * Pull the seeded row into the store the way the app does. Splicing it into
+ * `store.items` is not enough: selection resolves against `store.taskUiSlots`,
+ * which only `reloadSnapshot()` builds — a hand-spliced item renders a sidebar
+ * row that clicks straight through `selectItem`'s `if (!slot) return`.
+ */
+async function reloadUntilTaskIsSelectable(
+  client: WebDriverClient,
+  taskId: string,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastSlotTaskIds: unknown = null;
+  while (Date.now() < deadline) {
+    const reloaded = await callVueMethod(client, "store.reloadSnapshot");
+    if (isVueCallError(reloaded)) throw new Error(reloaded.__error);
+    lastSlotTaskIds = await client.executeSync<Array<string | null>>(
+      `const ctx = window.__KANNA_E2E__.setupState;
+       const slots = ctx.store?.taskUiSlots?.value ?? ctx.store?.taskUiSlots ?? [];
+       return slots.map((slot) => slot.task_id ?? null);`,
+    );
+    if (Array.isArray(lastSlotTaskIds) && lastSlotTaskIds.includes(taskId)) return;
+    await sleep(200);
+  }
+  throw new Error(
+    `timed out waiting for ${taskId} to become selectable; slots: ${JSON.stringify(lastSlotTaskIds)}`,
+  );
+}
 
-  const result = await client.executeSync<string>(
-    `const item = ${JSON.stringify(item)};
-     const ctx = window.__KANNA_E2E__.setupState;
-     const items = ctx.store?.items?.value ?? ctx.store?.items;
-     if (!Array.isArray(items)) return "items-unavailable";
-     const index = items.findIndex((candidate) => candidate.id === item.id);
-     if (index >= 0) items.splice(index, 1, item);
-     else items.push(item);
+/**
+ * The store reports pipeline action failures through `console.error` and a
+ * toast, and its action functions resolve without surfacing them. Capture the
+ * console so a timeout here reports the server's reason instead of just the
+ * stage that never changed.
+ */
+async function installConsoleErrorCapture(client: WebDriverClient): Promise<void> {
+  await client.executeSync(
+    `if (!window.__KANNA_E2E_ERRORS__) {
+       window.__KANNA_E2E_ERRORS__ = [];
+       const original = console.error;
+       console.error = function (...args) {
+         try {
+           window.__KANNA_E2E_ERRORS__.push(
+             args.map((arg) => (arg && arg.message) ? arg.message : String(arg)).join(" "),
+           );
+         } catch (error) { /* never let capture break the app */ }
+         original.apply(console, args);
+       };
+     }
      return "ok";`,
   );
-  if (result !== "ok") throw new Error(`failed to hydrate store item: ${result}`);
+}
+
+async function capturedErrors(client: WebDriverClient): Promise<string[]> {
+  const errors = await client.executeSync<string[]>(
+    "return window.__KANNA_E2E_ERRORS__ ?? [];",
+  );
+  return Array.isArray(errors) ? errors : [];
+}
+
+/** Wait until the daemon reports a live session owned by `runId`. */
+async function waitForDaemonOwnedSession(
+  client: WebDriverClient,
+  runId: string,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let sessions: unknown = null;
+  while (Date.now() < deadline) {
+    sessions = await tauriInvoke(client, "list_sessions").catch((error) => String(error));
+    if (
+      Array.isArray(sessions) &&
+      sessions.some((session) => (session as { run_id?: string }).run_id === runId)
+    ) {
+      return;
+    }
+    await sleep(250);
+  }
+  throw new Error(
+    `timed out waiting for the daemon to own run ${runId}; sessions: ${JSON.stringify(sessions)}`,
+  );
 }
 
 async function readTask(
@@ -98,8 +197,47 @@ async function waitForTaskWorkspace(
     await sleep(250);
   }
   throw new Error(
-    `timed out waiting for ${taskId} at ${expectedStage}/${expectedBranch}; last: ${JSON.stringify(last)}`,
+    `timed out waiting for ${taskId} at ${expectedStage}/${expectedBranch}; last: ${JSON.stringify(last)}; ` +
+    `app errors: ${JSON.stringify(await capturedErrors(client))}`,
   );
+}
+
+/**
+ * Advance through the store action the ⌘S handler calls. The binding itself is
+ * covered by `stage-advance.test.ts`; what matters here is the transition the
+ * server, daemon, and git perform underneath it.
+ */
+async function advanceStage(client: WebDriverClient, taskId: string): Promise<void> {
+  const result = await callVueMethod(client, "store.advanceStage", taskId);
+  if (isVueCallError(result)) throw new Error(result.__error);
+}
+
+async function requestRevisionToInProgress(
+  client: WebDriverClient,
+  taskId: string,
+): Promise<void> {
+  const accepted = await callVueMethod(client, "store.requestRevision", taskId, {
+    targetStage: "in progress",
+    summary: "needs another pass",
+    prompt: "Add the missing coverage before this can advance.",
+  });
+  if (isVueCallError(accepted)) throw new Error(accepted.__error);
+  if (accepted !== true) {
+    const runs = await queryDb(
+      client,
+      "SELECT id, stage, kind, status, session_id, provider_session_id, run_ownership_version FROM stage_run WHERE task_id = ? ORDER BY started_at, rowid",
+      [taskId],
+    );
+    const sessions = await queryDb(
+      client,
+      "SELECT id, daemon_session_id FROM terminal_session WHERE pipeline_item_id = ?",
+      [taskId],
+    );
+    throw new Error(
+      `requestRevision was refused for ${taskId}; app errors: ${JSON.stringify(await capturedErrors(client))}; ` +
+      `runs: ${JSON.stringify(runs)}; sessions: ${JSON.stringify(sessions)}`,
+    );
+  }
 }
 
 async function listStageRuns(client: WebDriverClient, taskId: string): Promise<StageRunRow[]> {
@@ -138,6 +276,10 @@ async function workspaceDirs(repoPath: string, taskId: string): Promise<string[]
     .sort();
 }
 
+function implementRunId(taskId: string): string {
+  return `run-${taskId}-implement`;
+}
+
 async function seedTaskAtInProgress(
   client: WebDriverClient,
   repoId: string,
@@ -152,15 +294,48 @@ async function seedTaskAtInProgress(
        id, repo_id, prompt, pipeline, stage, branch,
        agent_type, agent_provider, activity, display_name, created_at, updated_at
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
-    [taskId, repoId, prompt, "revision-kickback-e2e", "in progress", branch, "pty", "codex", "idle", null],
+    [taskId, repoId, prompt, "revision-kickback-e2e", "in progress", branch, "pty", "copilot", "idle", null],
   );
-  await hydrateStoreItem(client, taskId);
+  // The finished `in progress` run the revision will target. A real implement
+  // run records exactly this: the stage, the provider, and the worktree it ran
+  // in. `provider_session_id` stays null here because a PTY codex run owns no
+  // resumable conversation — the resume case sets one explicitly.
+  await execDb(
+    client,
+    `INSERT INTO stage_run (
+       id, task_id, stage, kind, agent, agent_provider, status, result,
+       session_id, provider_session_id, cwd, completion_transition,
+       run_ownership_version, finished_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+    [
+      implementRunId(taskId),
+      taskId,
+      "in progress",
+      "main",
+      "implement-e2e",
+      "copilot",
+      "succeeded",
+      JSON.stringify({ status: "success", summary: "implemented" }),
+      taskId,
+      null,
+      join(repoPath, ".kanna-worktrees", branch),
+      "manual",
+      1,
+    ],
+  );
+  const worktreePath = join(repoPath, ".kanna-worktrees", branch);
   await tauriInvoke(client, "git_worktree_add", {
     repoPath,
     branch,
-    path: join(repoPath, ".kanna-worktrees", branch),
+    path: worktreePath,
     startPoint: "main",
   });
+  // Committed work in the creation workspace, so a later fork can be checked
+  // for carrying it: only committed work crosses a workspace boundary.
+  await writeFile(join(worktreePath, CARRIED_FILE), "implemented\n");
+  await run("git", ["add", CARRIED_FILE], { cwd: worktreePath });
+  await run("git", ["commit", "-m", "test: implement marker"], { cwd: worktreePath });
+  await reloadUntilTaskIsSelectable(client, taskId);
 }
 
 describe("real revision kickback workspace", () => {
@@ -177,40 +352,34 @@ describe("real revision kickback workspace", () => {
     await client.executeSync("location.reload()");
     await client.waitForAppReady();
     await dismissStartupShortcutsModal(client);
+    await installConsoleErrorCapture(client);
 
-    testRepoPath = await createFixtureRepo("revision-kickback-real-test");
+    // Canonicalize up front. Repo import stores the resolved path, and the
+    // revision resume precondition compares a recorded run cwd against
+    // `<repo.path>/.kanna-worktrees` *before* canonicalizing either side — so
+    // a fixture path that still goes through the macOS `/var` symlink would
+    // silently fail that check and fork instead of resuming.
+    testRepoPath = realpathSync(await createFixtureRepo("revision-kickback-real-test"));
     kannaDir = join(testRepoPath, ".kanna");
     await mkdir(join(kannaDir, "pipelines"), { recursive: true });
     await mkdir(join(kannaDir, "agents", "implement-e2e"), { recursive: true });
-    await mkdir(join(kannaDir, "agents", "review-e2e"), { recursive: true });
-    await mkdir(join(kannaDir, "fake-bin"), { recursive: true });
 
-    // Both stages are manual so the test drives every transition itself:
-    // ⌘S to enter review, then the desktop's revision action to come back.
+    // Both stages are manual, so the test drives every transition itself:
+    // advance into review, then the desktop's revision action to come back.
     await writeFile(
       join(kannaDir, "pipelines", "revision-kickback-e2e.json"),
       JSON.stringify({
         name: "revision-kickback-e2e",
-        environments: {
-          "fake-bin": {
-            setup: [`export PATH="${join(kannaDir, "fake-bin")}:$PATH"`],
-          },
-        },
         stages: [
           {
             name: "in progress",
             agent: "implement-e2e",
-            environment: "fake-bin",
             prompt: "Implement $TASK_PROMPT",
             policy: { transition: "manual" },
           },
-          {
-            name: "review",
-            agent: "review-e2e",
-            environment: "fake-bin",
-            prompt: "Review $BRANCH",
-            policy: { transition: "manual" },
-          },
+          // Agent-less: this test is about the transition, not about what a
+          // reviewer does inside the review workspace.
+          { name: "review", policy: { transition: "manual" } },
         ],
       }),
     );
@@ -220,50 +389,13 @@ describe("real revision kickback workspace", () => {
         "---",
         "name: implement-e2e",
         "description: Real E2E implement stage.",
-        "agent_provider: codex",
+        "agent_provider: copilot",
         "---",
         "Implement stage prompt marker.",
         "",
       ].join("\n"),
     );
-    await writeFile(
-      join(kannaDir, "agents", "review-e2e", "AGENT.md"),
-      [
-        "---",
-        "name: review-e2e",
-        "description: Real E2E review stage.",
-        "agent_provider: codex",
-        "---",
-        "Review stage prompt marker.",
-        "",
-      ].join("\n"),
-    );
-    // The fake agent commits from whichever worktree it was spawned in, so
-    // each stage fork carries the previous stage's committed work. It also
-    // answers `codex resume --help` so the server's provider resume probe
-    // treats it as resume-capable.
-    await writeFile(
-      join(kannaDir, "fake-bin", "codex"),
-      [
-        "#!/bin/sh",
-        "set -eu",
-        'if [ "${1:-}" = "resume" ]; then exit 0; fi',
-        'prompt=""',
-        'for arg in "$@"; do prompt="$arg"; done',
-        `printf '%s\\n---\\n' "$prompt" >> "${join(kannaDir, "revision-prompts.log")}"`,
-        'case "$prompt" in',
-        '  *"Implement stage prompt marker."*)',
-        '    marker="e2e-${KANNA_STAGE_RUN_ID:-unknown}.txt"',
-        '    printf \'implemented\\n\' > "$marker"',
-        '    git add "$marker"',
-        "    git commit -m 'test: implement marker'",
-        "    ;;",
-        "esac",
-        "sleep 30",
-        "",
-      ].join("\n"),
-    );
-    await chmod(join(kannaDir, "fake-bin", "codex"), 0o755);
+    await publishDefinitions(testRepoPath, "publish revision kickback definitions");
 
     const importResult = await callVueMethod(
       client,
@@ -306,11 +438,12 @@ describe("real revision kickback workspace", () => {
     // Forward transition: `in progress` (workspace 1) → `review` forks
     // workspace 2. This is the baseline the reported symptom is measured
     // against.
-    await advanceStageWithShortcut(client, prompt, forkTaskId);
+    await advanceStage(client, forkTaskId);
     await waitForTaskWorkspace(client, forkTaskId, "review", `task-${forkTaskId}-2`, 90_000);
 
-    // A PTY codex run records no provider session id, so the revision cannot
-    // resume the implement conversation and takes the fresh-fork path.
+    // The implement run recorded no provider session id, so there is no
+    // conversation for the revision to reopen and it takes the fresh-fork
+    // path — the same path every non-resumable kickback takes.
     const implementRun = await waitForStageRun(
       client,
       forkTaskId,
@@ -324,13 +457,7 @@ describe("real revision kickback workspace", () => {
     )) as Array<{ provider_session_id: string | null }>;
     expect(providerSessionIds[0]?.provider_session_id ?? null).toBeNull();
 
-    const revisionAccepted = await callVueMethod(client, "store.requestRevision", forkTaskId, {
-      targetStage: "in progress",
-      summary: "needs another pass",
-      prompt: "Add the missing coverage before this can advance.",
-    });
-    if (isVueCallError(revisionAccepted)) throw new Error(revisionAccepted.__error);
-    expect(revisionAccepted).toBe(true);
+    await requestRevisionToInProgress(client, forkTaskId);
 
     // The kickback forks workspace 3 — the durable task id plus the next free
     // counter, exactly like a forward transition.
@@ -356,53 +483,89 @@ describe("real revision kickback workspace", () => {
       "SELECT path, branch FROM worktree WHERE pipeline_item_id = ?",
       [forkTaskId],
     )) as Array<{ path: string | null; branch: string | null }>;
-    expect(worktreeRows.some((row) => row.branch === `task-${forkTaskId}-3` && row.path === forkedWorktree)).toBe(true);
+    expect(
+      worktreeRows.some((row) =>
+        row.branch === `task-${forkTaskId}-3` && samePath(row.path, forkedWorktree),
+      ),
+    ).toBe(true);
 
     const revisionRun = await waitForStageRun(
       client,
       forkTaskId,
-      (run) => run.stage === "in progress" && run.kind === "main" && run.cwd === forkedWorktree,
+      (run) =>
+        run.stage === "in progress" && run.kind === "main" && samePath(run.cwd, forkedWorktree),
       "the revision stage run in the forked workspace",
     );
     expect(revisionRun.resumed_from_run_id).toBeNull();
-    // The commit made in workspace 1 crossed into the fork: only committed
-    // work travels across a workspace boundary.
-    const carried = await readdir(forkedWorktree);
-    expect(carried.some((name) => name.startsWith("e2e-") && name.endsWith(".txt"))).toBe(true);
+    // The commit made in workspace 1 reached the fork through workspace 2:
+    // only committed work travels across a workspace boundary.
+    expect(existsSync(join(forkedWorktree, CARRIED_FILE))).toBe(true);
   }, 240_000);
 
   it("resumes the previous in-progress workspace instead of forking a new one", async () => {
     const prompt = "exercise a revision kickback that resumes";
-    await seedTaskAtInProgress(client, repoId, testRepoPath, resumeTaskId, prompt);
-
-    await advanceStageWithShortcut(client, prompt, resumeTaskId);
-    await waitForTaskWorkspace(client, resumeTaskId, "review", `task-${resumeTaskId}-2`, 90_000);
-
-    const implementRun = await waitForStageRun(
-      client,
-      resumeTaskId,
-      (run) => run.stage === "in progress" && run.kind === "main",
-      "the implement stage run",
-    );
     const implementWorktree = join(testRepoPath, ".kanna-worktrees", `task-${resumeTaskId}`);
-    expect(implementRun.cwd).toBe(implementWorktree);
+    const reviewBranch = `task-${resumeTaskId}-2`;
+    const reviewWorktree = join(testRepoPath, ".kanna-worktrees", reviewBranch);
+    const reviewRunId = `run-${resumeTaskId}-review`;
 
-    // Providers that own a resumable conversation record its id on the run.
-    // A PTY codex run does not, so stand one in: everything the resume path
-    // then verifies — worktree identity and registration, the committed tip,
-    // the installed CLI's resume feature, and daemon run ownership — is real.
+    // Seed the task as it stands mid-review: two workspaces on disk, a
+    // finished implement run that owns a resumable conversation, and a review
+    // run that owns the task's live process. The forward transition is
+    // covered by the fork case above; what this case has to reproduce is the
+    // *state a reviewer kicks back from*, including a daemon session the
+    // server can verify it still owns.
+    await seedTaskAtInProgress(client, repoId, testRepoPath, resumeTaskId, prompt);
     await execDb(client, "UPDATE stage_run SET provider_session_id = ? WHERE id = ?", [
       "e2e-resumable-session",
-      implementRun.id,
+      implementRunId(resumeTaskId),
     ]);
-
-    const revisionAccepted = await callVueMethod(client, "store.requestRevision", resumeTaskId, {
-      targetStage: "in progress",
-      summary: "needs another pass",
-      prompt: "Add the missing coverage before this can advance.",
+    await tauriInvoke(client, "git_worktree_add", {
+      repoPath: testRepoPath,
+      branch: reviewBranch,
+      path: reviewWorktree,
+      startPoint: `task-${resumeTaskId}`,
     });
-    if (isVueCallError(revisionAccepted)) throw new Error(revisionAccepted.__error);
-    expect(revisionAccepted).toBe(true);
+    await execDb(
+      client,
+      "UPDATE pipeline_item SET stage = 'review', branch = ? WHERE id = ?",
+      [reviewBranch, resumeTaskId],
+    );
+    await execDb(
+      client,
+      `INSERT INTO stage_run (
+         id, task_id, stage, kind, agent_provider, status, session_id, cwd,
+         completion_transition, run_ownership_version
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [reviewRunId, resumeTaskId, "review", "main", "copilot", "running", reviewRunId, reviewWorktree, "manual", 1],
+    );
+    // The daemon session that run owns. `KANNA_STAGE_RUN_ID` is what the
+    // daemon records as the session's run owner, and the server checks that
+    // ownership before it will resume anything.
+    await tauriInvoke(client, "spawn_session", {
+      sessionId: reviewRunId,
+      cwd: reviewWorktree,
+      executable: "/bin/sh",
+      args: ["-c", "sleep 600"],
+      env: { KANNA_STAGE_RUN_ID: reviewRunId },
+      cols: 80,
+      rows: 24,
+      agentProvider: null,
+    });
+    // The task's durable terminal mapping. Every real task has one, and the
+    // revision path needs it: preparing a revision retires the current run
+    // first, so the source session is resolved from this mapping rather than
+    // from a still-running stage run.
+    await execDb(
+      client,
+      `INSERT INTO terminal_session (id, repo_id, pipeline_item_id, label, cwd, daemon_session_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [`ts-${resumeTaskId}`, repoId, resumeTaskId, "agent", reviewWorktree, reviewRunId],
+    );
+    await waitForDaemonOwnedSession(client, reviewRunId);
+    await reloadUntilTaskIsSelectable(client, resumeTaskId);
+
+    await requestRevisionToInProgress(client, resumeTaskId);
 
     // The task goes back to the implement run's own workspace. Its branch
     // moves backwards and no new counter is allocated — this, not a missing
@@ -416,7 +579,7 @@ describe("real revision kickback workspace", () => {
     );
     expect(await workspaceDirs(testRepoPath, resumeTaskId)).toEqual([
       `task-${resumeTaskId}`,
-      `task-${resumeTaskId}-2`,
+      reviewBranch,
     ]);
 
     const resumedRun = await waitForStageRun(
@@ -425,7 +588,7 @@ describe("real revision kickback workspace", () => {
       (run) => run.stage === "in progress" && run.kind === "main" && run.resumed_from_run_id !== null,
       "the resumed revision stage run",
     );
-    expect(resumedRun.resumed_from_run_id).toBe(implementRun.id);
-    expect(resumedRun.cwd).toBe(implementWorktree);
+    expect(resumedRun.resumed_from_run_id).toBe(implementRunId(resumeTaskId));
+    expect(samePath(resumedRun.cwd, implementWorktree)).toBe(true);
   }, 240_000);
 });
