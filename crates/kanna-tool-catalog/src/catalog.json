@@ -51,6 +51,31 @@
       ]
     },
     {
+      "name": "kanna_wait_events",
+      "description": "Watch several Kanna tasks at once: blocks until any of them emits an event, then returns every event since your cursor plus a new cursor. This is the tool for orchestrating child tasks — kanna_wait_task blocks on one id and resolves only on finish, so it cannot watch a fan-out. Event types: 'task.created', 'run.started', 'run.finished' (payload.status succeeded/failed/cancelled, payload.result), 'stage.changed', 'task.pr_created', 'task.revision_requested' (payload.exhausted true means the task is parked for its human — stop waiting), 'task.closed', and 'task.awaiting_input' (the agent is parked on an interactive prompt and needs an answer, e.g. via kanna_send_task_input). Call it in a loop, passing back the cursor you were given: events that fire between two calls are delivered on the next one, each exactly once. Omit the cursor on the first call to receive the scope's retained history. An elapsed window returns waitOutcome 'timeout' with no events and a fresh cursor — a normal result, not an error. hasMore true means another batch is already waiting, so call again immediately.",
+      "method": "GET",
+      "path": "/v1/task-events",
+      "response": "json",
+      "params": [
+        { "name": "task_ids", "description": "Task ids (or branch names) to watch, e.g. the child tasks you created. Required unless repo_id is given.", "type": "string_array", "required": false, "location": "query", "key": "taskIds" },
+        { "name": "repo_id", "description": "Watch every task in this repository instead of naming ids. Ignored when task_ids is given.", "type": "string", "required": false, "location": "query", "key": "repoId" },
+        { "name": "cursor", "description": "Cursor returned by the previous call. Omit on the first call to receive the retained history for the scope.", "type": "string", "required": false, "location": "query" },
+        { "name": "timeout_secs", "description": "Seconds to block before returning waitOutcome 'timeout' with no events (clamped to at most 240, so the call returns inside the 300s tools/call timeout MCP clients enforce).", "type": "integer", "required": false, "location": "query", "key": "timeoutSecs", "default": 240, "max": 240 },
+        { "name": "limit", "description": "Maximum events in one response (1-500, default 100). When more are pending the response sets hasMore.", "type": "integer", "required": false, "location": "query", "min": 1, "max": 500 }
+      ]
+    },
+    {
+      "name": "kanna_set_task_notify",
+      "description": "Set or clear the task that is notified when this task finishes: that task's terminal receives 'TASK <id> DONE [success|failure]: <title>' as input. Unlike the creation-time notify_task_id this works on an already-running task, so an orchestrator can adopt tasks it did not create. Omit notify_task_id to stop notifying. For watching many tasks at once, prefer kanna_wait_events.",
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/actions/set-notify",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}) whose completion should be announced.", "type": "string", "required": true, "location": "path" },
+        { "name": "notify_task_id", "description": "Task id that receives the completion message. Omit to clear the notification target.", "type": "string", "required": false, "location": "body", "key": "notifyTaskId" }
+      ]
+    },
+    {
       "name": "kanna_task_logs",
       "description": "Fetch recent agent-session log lines for a Kanna task, oldest first.",
       "method": "GET",

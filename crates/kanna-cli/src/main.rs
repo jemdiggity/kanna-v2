@@ -393,6 +393,48 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Set or clear the task notified when a task finishes
+    SetNotify {
+        /// The task/pipeline_item ID whose completion should be announced
+        #[arg(long)]
+        task_id: String,
+
+        /// Task ID that receives the completion message. Omit to clear it.
+        #[arg(long)]
+        notify_task: Option<String>,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Watch several tasks at once and return their events since a cursor
+    WaitEvents {
+        /// Task IDs (or branch names) to watch; repeat or comma-separate
+        #[arg(long = "task-id", value_delimiter = ',')]
+        task_id: Vec<String>,
+
+        /// Watch every task in this repo instead of naming ids
+        #[arg(long)]
+        repo_id: Option<String>,
+
+        /// Cursor from the previous call; omit to receive retained history
+        #[arg(long)]
+        cursor: Option<String>,
+
+        /// Maximum seconds to block, clamped to 240 so the wait returns inside
+        /// the tools/call timeout MCP clients enforce; a wait that runs out
+        /// reports waitOutcome 'timeout' and can simply be called again
+        #[arg(long, default_value_t = kanna_tool_catalog::DEFAULT_WAIT_TIMEOUT_SECS)]
+        timeout_secs: u64,
+
+        /// Maximum events in one response
+        #[arg(long)]
+        limit: Option<i64>,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

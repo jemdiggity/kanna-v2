@@ -8,8 +8,9 @@ use serde_json::Value;
 use crate::models::{
     AddRepoRequest, BlockTaskRequest, CompleteStageRequest, CreateTaskRequest, CreateTaskResponse,
     DependentTasksExistResponse, RepoDetail, RepoSummary, RequestRevisionRequest,
-    SetTaskParentRequest, SignalAgentRequest, SignalAgentResponse, TaskActionResponse, TaskDetail,
-    TaskInputRequest, TaskInputResponse, TaskRenameRequest, TaskSummary, WaitUntil,
+    SetTaskNotifyRequest, SetTaskParentRequest, SignalAgentRequest, SignalAgentResponse,
+    TaskActionResponse, TaskDetail, TaskInputRequest, TaskInputResponse, TaskRenameRequest,
+    TaskSummary, WaitUntil,
 };
 
 pub(crate) fn join_server_url(base_url: &str, path: &str) -> String {
@@ -54,6 +55,37 @@ pub(crate) fn task_get_path(task_id: &str) -> String {
 
 pub(crate) fn dependent_tasks_exist_path(task_id: &str) -> String {
     format!("{}/dependent-tasks-exist", task_get_path(task_id))
+}
+
+/// Query for the multi-task event wait. Keys are camelCase because the server
+/// deserializes them with the same casing the MCP catalog sends.
+pub(crate) fn task_events_path(
+    task_ids: &[String],
+    repo_id: Option<&str>,
+    cursor: Option<&str>,
+    timeout_secs: u64,
+    limit: Option<i64>,
+) -> String {
+    let mut query = vec![format!(
+        "timeoutSecs={}",
+        clamp_wait_timeout_secs(timeout_secs)
+    )];
+    if !task_ids.is_empty() {
+        query.push(format!(
+            "taskIds={}",
+            encode_path_segment(&task_ids.join(","))
+        ));
+    }
+    if let Some(repo_id) = repo_id {
+        query.push(format!("repoId={}", encode_path_segment(repo_id)));
+    }
+    if let Some(cursor) = cursor {
+        query.push(format!("cursor={}", encode_path_segment(cursor)));
+    }
+    if let Some(limit) = limit {
+        query.push(format!("limit={limit}"));
+    }
+    format!("/v1/task-events?{}", query.join("&"))
 }
 
 pub(crate) fn task_logs_path(task_id: &str, tail: Option<usize>) -> String {
@@ -388,6 +420,34 @@ pub(crate) async fn rename_task_via_api(
     request: &TaskRenameRequest,
 ) -> Result<TaskActionResponse, String> {
     patch_json(base_url, &task_get_path(task_id), request).await
+}
+
+pub(crate) async fn wait_task_events_via_api(
+    base_url: &str,
+    task_ids: &[String],
+    repo_id: Option<&str>,
+    cursor: Option<&str>,
+    timeout_secs: u64,
+    limit: Option<i64>,
+) -> Result<Value, String> {
+    get_json(
+        base_url,
+        &task_events_path(task_ids, repo_id, cursor, timeout_secs, limit),
+    )
+    .await
+}
+
+pub(crate) async fn set_task_notify_via_api(
+    base_url: &str,
+    task_id: &str,
+    request: &SetTaskNotifyRequest,
+) -> Result<TaskActionResponse, String> {
+    post_json(
+        base_url,
+        &format!("/v1/tasks/{task_id}/actions/set-notify"),
+        request,
+    )
+    .await
 }
 
 pub(crate) async fn set_task_parent_via_api(

@@ -451,6 +451,9 @@ fn query_value(value: &Value, name: &str) -> Result<String, String> {
     match value {
         Value::String(value) => Ok(value.clone()),
         Value::Number(value) => Ok(value.to_string()),
+        // A list in a query string is comma-joined, so an agent passes the
+        // array its schema declares rather than pre-joining ids itself.
+        Value::Array(_) => Ok(string_array_value(value, name)?.join(",")),
         _ => Err(format!("{name} must be an unsigned integer")),
     }
 }

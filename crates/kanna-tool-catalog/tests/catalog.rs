@@ -23,6 +23,8 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_list_recent_tasks",
             "kanna_get_task",
             "kanna_wait_task",
+            "kanna_wait_events",
+            "kanna_set_task_notify",
             "kanna_task_logs",
             "kanna_search_tasks",
             "kanna_list_repo_tasks",
@@ -345,6 +347,22 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({}),
         ),
         (
+            "kanna_set_task_notify",
+            json!({ "task_id": "task-child", "notify_task_id": "task-parent" }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/tasks/task-child/actions/set-notify",
+            json!({ "notifyTaskId": "task-parent" }),
+        ),
+        (
+            "kanna_set_task_notify",
+            json!({ "task_id": "task-child" }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/tasks/task-child/actions/set-notify",
+            json!({}),
+        ),
+        (
             "kanna_is_dependent_tasks_exist",
             json!({ "task_id": "task-1" }),
             Method::Get,
@@ -409,6 +427,85 @@ fn resolves_expected_requests_for_every_bundled_tool() {
     assert_eq!(wait_spec.timeout_secs, MAX_WAIT_TIMEOUT_SECS);
     assert_eq!(wait_spec.poll_secs, 1);
     assert_eq!(wait_spec.until, WaitUntil::Closed);
+}
+
+/// The multi-task wait blocks server-side, so its window is bound by the same
+/// client budget as `kanna_wait_task`: the caller's `tools/call` is what dies
+/// at 300s, whichever end of the connection is doing the waiting.
+#[test]
+fn wait_events_is_scoped_cursored_and_bounded_by_the_client_budget() {
+    let catalog = bundled_catalog();
+
+    // The watched set is an array in the schema and comma-joined on the wire,
+    // so an agent hands over the ids it holds instead of formatting a query.
+    let request = resolve_request(
+        &catalog,
+        "kanna_wait_events",
+        &json!({ "task_ids": ["task-a", "task-b"], "cursor": "42" }),
+    )
+    .expect("wait events");
+    assert_eq!(request.method, Method::Get);
+    assert_eq!(request.kind, ResponseKind::Json);
+    assert_eq!(
+        request.path,
+        format!("/v1/task-events?taskIds=task-a%2Ctask-b&cursor=42&timeoutSecs={DEFAULT_WAIT_TIMEOUT_SECS}")
+    );
+    let tools = catalog.tools_list_value();
+    let schema = tools
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|tool| tool["name"] == "kanna_wait_events")
+        .expect("wait events tool")["inputSchema"]
+        .clone();
+    assert_eq!(
+        schema["properties"]["task_ids"]["items"],
+        json!({ "type": "string" }),
+        "task_ids must be declared as an array of strings"
+    );
+
+    let repo_scoped = resolve_request(
+        &catalog,
+        "kanna_wait_events",
+        &json!({ "repo_id": "repo 1", "timeout_secs": 3600, "limit": 5 }),
+    )
+    .expect("wait events")
+    .path;
+    assert_eq!(
+        repo_scoped,
+        format!("/v1/task-events?repoId=repo%201&timeoutSecs={MAX_WAIT_TIMEOUT_SECS}&limit=5"),
+        "an over-long window must be clamped before the client can kill the call"
+    );
+}
+
+/// The tool description is the only documentation an agent reads before
+/// deciding whether the feed answers its question, so every event type the
+/// server can emit has to be named there.
+#[test]
+fn wait_events_documents_every_event_type_the_server_emits() {
+    let catalog = bundled_catalog();
+    let description = &catalog
+        .tools
+        .iter()
+        .find(|tool| tool.name == "kanna_wait_events")
+        .expect("wait events tool")
+        .description;
+
+    for event_type in [
+        "task.created",
+        "run.started",
+        "run.finished",
+        "stage.changed",
+        "task.pr_created",
+        "task.revision_requested",
+        "task.closed",
+        "task.awaiting_input",
+    ] {
+        assert!(
+            description.contains(event_type),
+            "kanna_wait_events must document the {event_type} event"
+        );
+    }
 }
 
 // The window-vs-client-budget invariant itself is a compile-time assertion in
