@@ -804,9 +804,18 @@ export function buildTerminalDocument({
       }
 
       function alignViewportToSafeRegion() {
-        // A drag that panned the grid away from the bottom owns the viewport
-        // until it is dragged back; otherwise every redraw would yank the
-        // rows the user just uncovered back off-screen.
+        // A pan only owns the viewport for as long as the alternate screen is
+        // up. Once the TUI restores the normal buffer — an exiting agent
+        // emitting ESC[?1049l, which is when its closing output matters most —
+        // drags drive xterm's scrollback again and never touch scrollTop, so
+        // the safe region has to take the viewport back or the bottom rows
+        // stay stranded under the composer.
+        if (!isAlternateScreen()) {
+          viewportPinnedToBottom = true;
+        }
+        // Otherwise a drag that panned the grid away from the bottom keeps it
+        // there; realigning would yank the rows the user just uncovered back
+        // off-screen on the TUI's next redraw.
         if (!viewportPinnedToBottom) {
           return;
         }
@@ -819,7 +828,11 @@ export function buildTerminalDocument({
       function panTerminalViewport(deltaY) {
         const maxScrollTop = maxViewportScrollTop();
         if (maxScrollTop <= 0) {
+          // Nothing is clipped, so there is no pan to own the viewport with —
+          // leave the safe region in charge rather than stranding a frame that
+          // has since come to fit (e.g. the keyboard closed).
           touchScroll.viewportPanPx = 0;
+          viewportPinnedToBottom = true;
           return;
         }
         const nextScrollTop = clamp(

@@ -1506,6 +1506,85 @@ describe("buildTerminalDocument", () => {
     expect(viewport.scrollTop).toBe(96);
   });
 
+  it("hands the viewport back to the safe region when the TUI leaves the alternate screen", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.useAlternateBuffer();
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 300 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchend", [], undefined, [
+        { clientX: 220, clientY: 300 }
+      ])
+    );
+    expect(viewport.scrollTop).toBe(96);
+
+    // The agent exits, restoring the normal buffer: its closing output must
+    // not stay stranded under the composer.
+    terminal.useNormalBuffer();
+    window.__appendTerminalChunk({ chunksB64: [b64("agent exited\n")] });
+
+    expect(viewport.scrollTop).toBe(156);
+
+    window.__appendTerminalChunk({ chunksB64: [b64("final summary\n")] });
+    expect(viewport.scrollTop).toBe(156);
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 300 }])
+    );
+    window.__appendTerminalChunk({ chunksB64: [b64("still following\n")] });
+
+    expect(viewport.scrollTop).toBe(156);
+  });
+
+  it("releases a pan once the alternate-screen frame stops overflowing", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.useAlternateBuffer();
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 300 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchend", [], undefined, [
+        { clientX: 220, clientY: 300 }
+      ])
+    );
+    expect(viewport.scrollTop).toBe(96);
+
+    // The frame comes to fit the safe region exactly — the keyboard closed —
+    // so the next drag has nothing left to pan.
+    Object.defineProperty(viewport, "scrollHeight", {
+      configurable: true,
+      value: 844
+    });
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 300 }])
+    );
+
+    // It overflows again: alignment must own the viewport rather than stay
+    // stranded on the pan that no longer has anything to hold.
+    Object.defineProperty(viewport, "scrollHeight", {
+      configurable: true,
+      value: 1000
+    });
+    window.__appendTerminalChunk({ chunksB64: [b64("redrawn frame")] });
+
+    expect(viewport.scrollTop).toBe(156);
+  });
+
   it("re-pins the alt-screen frame to the composer safe region when dragged back down", () => {
     const { terminal, viewport, window } = createExecutedTerminalDocument();
     terminal.useAlternateBuffer();
