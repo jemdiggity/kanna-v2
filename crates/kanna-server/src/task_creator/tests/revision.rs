@@ -282,6 +282,17 @@ async fn request_revision_forks_workspace_for_target_stage_run_with_feedback() {
         .expect("revision forks a workspace");
     let fork_branch = fork.branch.clone();
     let fork_worktree = fork.worktree_path.clone();
+    // A revision fork is named like any other stage fork: the durable task id
+    // plus the next free workspace counter. The seeded branch
+    // `task-review-task-2ed` shares the `task-review-task-2` prefix, so this
+    // also proves the counter scan matches whole refs and not prefixes.
+    assert_eq!(fork_branch, "task-review-task-2");
+    assert_eq!(
+        fork_worktree,
+        repo_root
+            .join(".kanna-worktrees/task-review-task-2")
+            .to_string_lossy()
+    );
     assert_ne!(fork_worktree, worktree.to_string_lossy());
     assert_eq!(prepared.cwd, fork_worktree);
 

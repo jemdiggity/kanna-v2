@@ -130,11 +130,22 @@ pub(crate) async fn try_submit_task_input_idempotently(
             })?;
             send_idempotent_submission(daemon, session_id, delivery_id, message)
                 .await
-                .map_err(|error| match error {
-                    TaskInputError::Other(second_error) => TaskInputError::Other(format!(
-                        "{first_error}; retry after reconnect failed: {second_error}"
-                    )),
-                    other => other,
+                .map_err(|error| {
+                    let second_error = match error {
+                        TaskInputError::SessionNotFound => "session not found".to_string(),
+                        TaskInputError::DefiniteNonDelivery(message)
+                        | TaskInputError::Other(message) => message,
+                    };
+                    // The first peer may already have accepted the
+                    // submission, and no answer from a replacement peer can
+                    // prove otherwise — a session it cannot find may be one
+                    // the first peer already wrote to. Stay indeterminate so
+                    // the caller keeps its reservation instead of rolling
+                    // back and delivering the same post a second time.
+                    TaskInputError::Other(format!(
+                        "{first_error}; retry after reconnect did not confirm delivery: \
+                         {second_error}"
+                    ))
                 })
         }
         result => result,

@@ -451,7 +451,12 @@ impl Db {
         Ok(source)
     }
 
-    pub fn mark_reserved_live_post_delivery_acknowledged(
+    /// Record that this reservation's delivery has been *attempted*. Called
+    /// before the daemon submission, not after its acknowledgement: once the
+    /// submission may have reached the PTY, reconciliation must keep the
+    /// reservation (and therefore its delivery identity) instead of retiring
+    /// it and minting a new one for a second delivery.
+    pub fn mark_reserved_live_post_delivery_started(
         &self,
         task_id: &str,
         run_id: &str,
@@ -514,6 +519,24 @@ impl Db {
         source: Option<&ReplacedStageRunSource>,
     ) -> Result<(), rusqlite::Error> {
         let transaction = self.conn.unchecked_transaction()?;
+        // Release the reservation before deleting the run it points at.
+        // `successor_run_id` is `ON DELETE SET NULL`, so once the row is gone
+        // this predicate can never match again and the request would be left
+        // stranded in `post_reserved` with a delivery claim it no longer owns.
+        transaction.execute(
+            "UPDATE task_action_request
+             SET successor_run_id = NULL,
+                 phase = 'preparing',
+                 post_delivery_started_at = NULL,
+                 post_source_run_id = NULL,
+                 post_source_status = NULL,
+                 post_source_finished_at = NULL,
+                 updated_at = datetime('now')
+             WHERE successor_run_id = ?1
+               AND state = 'pending'
+               AND phase = 'post_reserved'",
+            [run_id],
+        )?;
         let deleted = transaction.execute(
             "DELETE FROM stage_run
              WHERE id = ?1
@@ -549,20 +572,6 @@ impl Db {
                 return Err(rusqlite::Error::QueryReturnedNoRows);
             }
         }
-        transaction.execute(
-            "UPDATE task_action_request
-             SET successor_run_id = NULL,
-                 phase = 'preparing',
-                 post_delivery_started_at = NULL,
-                 post_source_run_id = NULL,
-                 post_source_status = NULL,
-                 post_source_finished_at = NULL,
-                 updated_at = datetime('now')
-             WHERE successor_run_id = ?1
-               AND state = 'pending'
-               AND phase = 'post_reserved'",
-            [run_id],
-        )?;
         transaction.commit()
     }
 

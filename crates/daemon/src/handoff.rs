@@ -8,7 +8,7 @@ use kanna_daemon::{
     protocol::{self, Command, Event},
     recovery::RecoveryManager,
 };
-use tokio::io::BufReader;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{broadcast, Mutex};
 
 use crate::client::SessionSizes;
@@ -19,6 +19,21 @@ use crate::util::error_event;
 use crate::{fd_transfer, pty};
 
 const HANDOFF_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// How long a sender waits for already-admitted input submissions to reach the
+/// PTY before giving up on the transfer. The wait happens under the manager
+/// seal, and a submission blocks on PTY backpressure whenever the child has
+/// stopped reading — so an unbounded wait wedges Spawn/Kill on a daemon that
+/// then never hands off. Bounded, the incumbent unseals and keeps serving.
+const HANDOFF_QUIESCENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn handoff_quiescence_timeout() -> std::time::Duration {
+    std::env::var("KANNA_TEST_HANDOFF_QUIESCENCE_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(HANDOFF_QUIESCENCE_TIMEOUT)
+}
 
 /// The guarantees selected for this transfer. The mode is resolved at the
 /// version boundary and carried explicitly so a legacy response can never be
@@ -829,6 +844,7 @@ pub(crate) async fn handle_handoff(
     // transferred (silently lost when this daemon exits), and a killed
     // session must not be reinserted behind the snapshot. The seal lifts on
     // every abort path below; a committed handoff keeps it until exit.
+    let handoff_deadline = tokio::time::Instant::now() + handoff_quiescence_timeout();
     let pty_epoch = sessions.lock().await.seal_for_handoff();
     let (handles, input_deliveries) = {
         let manager = sessions.lock().await;
@@ -839,6 +855,48 @@ pub(crate) async fn handle_handoff(
         handles.len(),
         pty_epoch
     );
+
+    // A completed delivery identity is only useful to the adopter once the
+    // whole message-plus-Enter sequence has reached the PTY, so the snapshot
+    // has to follow every admitted submission. Freeze first (no new
+    // submission joins behind the barrier), then wait on the daemon-wide
+    // registry rather than the captured handles: a session removed by a
+    // racing Kill can still have a writer in flight whose identity would
+    // otherwise be lost during adoption.
+    for (_, handle) in &handles {
+        handle.freeze_input_submissions().await;
+    }
+    let abort_reason = {
+        let quiescence = input_deliveries.wait_for_all_in_flight();
+        tokio::pin!(quiescence);
+        let adopter_input = reader.fill_buf();
+        tokio::pin!(adopter_input);
+        tokio::select! {
+            _ = &mut quiescence => None,
+            result = &mut adopter_input => Some(match result {
+                Ok([]) => "adopting daemon disconnected while input submissions were quiescing"
+                    .to_string(),
+                Ok(_) => {
+                    "adopting daemon sent data before the handoff snapshot was ready".to_string()
+                }
+                Err(error) => format!(
+                    "adopting daemon connection failed while input submissions were \
+                     quiescing: {error}"
+                ),
+            }),
+            _ = tokio::time::sleep_until(handoff_deadline) => Some(
+                "timed out waiting for in-flight input submissions to quiesce".to_string()
+            ),
+        }
+    };
+    if let Some(reason) = abort_reason {
+        log::warn!("[handoff] aborting before snapshot: {reason}");
+        sessions.lock().await.unseal_for_handoff();
+        let evt = error_event(None, format!("handoff aborted: {reason}"));
+        let _ = write_event(&mut *writer.lock().await, &evt).await;
+        return false;
+    }
+
     let mut controls = Vec::new();
     for (_, handle) in &handles {
         if let Some(control) = handle.stream_control().await {
@@ -1035,14 +1093,6 @@ pub(crate) async fn handle_handoff(
         "[handoff] sending HandoffReady with {} sessions",
         infos.len()
     );
-
-    // Every handle still in the manager was frozen by `handoff_parts` above,
-    // and a handle removed by a racing Kill was retired before this handoff
-    // acquired the manager seal. Wait on the daemon-wide registry as well as
-    // the captured handles: otherwise a removed session's writer could finish
-    // after this snapshot and its durable completion identity would be lost
-    // during adoption.
-    input_deliveries.wait_for_all_in_flight().await;
 
     // v2 deployed adopters understand this full payload and ignore optional
     // metadata fields introduced by hardened senders.

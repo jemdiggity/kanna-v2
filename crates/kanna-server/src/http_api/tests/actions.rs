@@ -5959,13 +5959,19 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
         "the advance must not close the task while the approve post runs"
     );
 
-    // The approve prompt went to the live session as typed input.
+    // The approve prompt went to the live session as one atomic submission
+    // under a delivery identity — the daemon types the message and the
+    // discrete Enter itself.
     let logged = commands_log.lock().await;
     let prompt_input = logged
         .iter()
         .find_map(|command| match command {
-            DaemonCommand::Input { session_id, data } if session_id == "task-1" => {
-                let text = String::from_utf8(data.clone()).unwrap_or_default();
+            DaemonCommand::SubmitInput {
+                session_id,
+                message,
+                ..
+            } if session_id == "task-1" => {
+                let text = String::from_utf8(message.clone()).unwrap_or_default();
                 if text.contains("Approve the PR") {
                     Some(text)
                 } else {
