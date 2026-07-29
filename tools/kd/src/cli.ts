@@ -212,22 +212,27 @@ function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
     dev: false,
     staging: false,
     mobileRelay: false,
-    desktopPairing: false
+    desktopPairing: false,
+    ifChanged: false
   }, {
     "--mobile-relay": "mobileRelay",
-    "--desktop-pairing": "desktopPairing"
+    "--desktop-pairing": "desktopPairing",
+    "--if-changed": "ifChanged"
   });
   const unsupportedFlags = Object.entries(input)
     .filter(([key, value]) =>
-      !["dev", "staging", "mobileRelay", "desktopPairing"].includes(key) &&
+      !["dev", "staging", "mobileRelay", "desktopPairing", "ifChanged"].includes(key) &&
       value === true
     )
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
-    throw new Error("remote-e2e only accepts --dev, --staging, --mobile-relay, or --desktop-pairing");
+    throw new Error("remote-e2e only accepts --dev, --staging, --mobile-relay, --desktop-pairing, or --if-changed");
   }
   if (input.dev === true && input.staging === true) {
     throw new Error("remote-e2e accepts only one of --dev or --staging");
+  }
+  if (input.ifChanged === true && input.staging === true) {
+    throw new Error("remote-e2e --if-changed applies to the dev lane only");
   }
   return {
     taskId: "test.remote-e2e",
@@ -235,7 +240,8 @@ function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
       dev: input.staging !== true,
       staging: input.staging === true,
       mobileRelay: input.mobileRelay === true,
-      desktopPairing: input.desktopPairing === true
+      desktopPairing: input.desktopPairing === true,
+      ifChanged: input.ifChanged === true
     }
   };
 }
@@ -658,7 +664,7 @@ const helpTopics: Record<string, string[]> = {
     "  test cloud-staging",
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
-    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing]",
+    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing] [--if-changed]",
     "  doctor [--remote] [--staging]",
     "",
     "Run 'kd <command> --help' for command-specific help."
@@ -1034,7 +1040,7 @@ const helpTopics: Record<string, string[]> = {
     "  test cloud-staging",
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
-    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing]"
+    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing] [--if-changed]"
   ],
   "test all": [
     "Usage: kd test all",
@@ -1072,12 +1078,17 @@ const helpTopics: Record<string, string[]> = {
     "Run LAN sync tests against physical Macs over SSH."
   ],
   "test remote-e2e": [
-    "Usage: kd test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing]",
+    "Usage: kd test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing] [--if-changed]",
     "",
     "Run remote task interaction E2E tests.",
     "",
     "  --mobile-relay     Run Layer C mobile Appium over relay.",
-    "  --desktop-pairing  Run Layer D desktop pairing UI WebDriver test."
+    "  --desktop-pairing  Run Layer D desktop pairing UI WebDriver test.",
+    "  --if-changed       Run the dev lane only when this branch changes a remote",
+    "                     E2E surface (relay, kanna-server, firebase-functions,",
+    "                     mobile lib, tests/remote-e2e, kd), measured against the",
+    "                     merge-base with the default branch. Otherwise exits 0",
+    "                     without starting emulators or tests."
   ],
   doctor: [
     "Usage: kd doctor [--remote] [--staging]",
