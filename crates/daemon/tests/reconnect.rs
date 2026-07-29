@@ -463,6 +463,37 @@ impl ClientConn {
         result
     }
 
+    fn assert_no_event_within(&mut self, timeout: Duration) {
+        self.reader
+            .get_mut()
+            .set_read_timeout(Some(timeout))
+            .expect("failed to set read timeout");
+
+        let mut line = String::new();
+        let result = self.reader.read_line(&mut line);
+
+        self.reader
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("failed to restore read timeout");
+
+        match result {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => panic!("unexpected read error while awaiting no event: {error}"),
+            Ok(0) => panic!("connection closed while awaiting no event"),
+            Ok(_) => {
+                let event: Evt = serde_json::from_str(line.trim()).unwrap_or_else(|error| {
+                    panic!("failed to parse unexpected event {line:?}: {error}")
+                });
+                panic!("expected no event within {timeout:?}, got: {event:?}");
+            }
+        }
+    }
+
     /// Read events until we've collected `n` bytes of Output data, or timeout.
     fn collect_output(&mut self, n: usize) -> Vec<u8> {
         let mut collected = Vec::new();
@@ -1307,6 +1338,85 @@ fn test_spawn_attach_io() {
         "expected 'hello' in output, got: {:?}",
         String::from_utf8_lossy(&output)
     );
+}
+
+#[test]
+fn input_ok_waits_for_pty_write_and_acknowledged_input_reaches_output() {
+    let daemon = DaemonHandle::start();
+
+    let mut control = daemon.connect();
+    spawn_shell_session(
+        &mut control,
+        "sess-input-ack-stalled",
+        "i=0; while :; do i=$((i + 1)); printf 'INPUT-ACK-STALLED-%06d\\r\\n' \"$i\"; done",
+    );
+
+    let mut stalled_output = daemon.connect();
+    attach(&mut stalled_output, "sess-input-ack-stalled");
+    let warmup = stalled_output
+        .collect_output_until_contains_with_timeout("INPUT-ACK-STALLED-", Duration::from_secs(2));
+    assert!(
+        String::from_utf8_lossy(&warmup).contains("INPUT-ACK-STALLED-"),
+        "test precondition failed: stalled session output did not arrive"
+    );
+
+    let mut stalled_input = daemon.connect();
+    stalled_input.send(&Cmd::Input {
+        session_id: "sess-input-ack-stalled".to_string(),
+        // This is much larger than the PTY input buffer, which cannot drain
+        // because the child never reads stdin.
+        data: vec![b'x'; 16 * 1024 * 1024],
+    });
+
+    // Parsing the large JSON command is synchronous work. Wait for a separate
+    // command to complete so the assertion below measures the PTY write, not
+    // command parsing time. Input handling enqueues before it yields awaiting
+    // the acknowledgement, allowing List to run only after that point.
+    control.send(&Cmd::List);
+    let sessions = expect_session_list_with_timeout(&mut control, Duration::from_secs(15));
+    assert!(
+        session_list_contains(&sessions, "sess-input-ack-stalled"),
+        "stalled input session should remain live: {sessions:?}"
+    );
+
+    stalled_input.assert_no_event_within(Duration::from_millis(500));
+
+    spawn_echo_session(&mut control, "sess-input-ack-echo");
+    let mut output = daemon.connect();
+    attach(&mut output, "sess-input-ack-echo");
+
+    let mut echo_input = daemon.connect();
+    echo_input.send(&Cmd::Input {
+        session_id: "sess-input-ack-echo".to_string(),
+        data: b"acknowledged-input\n".to_vec(),
+    });
+    wait_for_ok_with_timeout(
+        &mut echo_input,
+        "acknowledged echo input",
+        Duration::from_secs(2),
+    );
+
+    let echoed = output
+        .collect_output_until_contains_with_timeout("acknowledged-input", Duration::from_secs(2));
+    assert!(
+        String::from_utf8_lossy(&echoed).contains("acknowledged-input"),
+        "acknowledged input should appear in session output"
+    );
+}
+
+#[test]
+fn empty_input_is_acknowledged_for_a_live_session() {
+    let daemon = DaemonHandle::start();
+
+    let mut control = daemon.connect();
+    spawn_echo_session(&mut control, "sess-empty-input-ack");
+
+    let mut input = daemon.connect();
+    input.send(&Cmd::Input {
+        session_id: "sess-empty-input-ack".to_string(),
+        data: Vec::new(),
+    });
+    wait_for_ok_with_timeout(&mut input, "empty input", Duration::from_secs(2));
 }
 
 #[test]
