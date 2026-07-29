@@ -2,7 +2,8 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -447,6 +448,100 @@ fn serve_infers_create_task_repo_from_current_task_context() {
             "stage": "in progress",
             "agentType": "pty"
         })
+    );
+}
+
+/// Serves `GET /v1/tasks/{id}` from a mutable body for as many polls as a wait
+/// makes, so a test can flip a child task from running to finished between
+/// waits without pinning the exact poll count.
+fn start_task_detail_fixture(state: Arc<Mutex<Value>>) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+    let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let served = polls.clone();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                return;
+            };
+            let request = read_http_request(&mut stream);
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, "/v1/tasks/child-1");
+            served.fetch_add(1, Ordering::SeqCst);
+            let body = state.lock().expect("state lock").to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    (base_url, polls)
+}
+
+fn child_task(activity: &str) -> Value {
+    json!({
+        "id": "child-1",
+        "repoId": "repo-1",
+        "title": "Specialty review",
+        "stage": "review",
+        "activity": activity,
+        "branch": "task-child-1",
+        "prUrl": null,
+        "closedAt": null
+    })
+}
+
+/// A dispatcher waiting on child tasks calls this tool in a loop across
+/// separate MCP processes. A wait that runs out its window must come back as a
+/// normal result carrying the task state, so the next call resumes the loop.
+#[test]
+fn serve_returns_wait_timeouts_as_results_the_agent_can_call_again() {
+    let state = Arc::new(Mutex::new(child_task("running")));
+    let (base_url, polls) = start_task_detail_fixture(state.clone());
+    let wait_call = json!({
+        "jsonrpc": "2.0",
+        "id": 20,
+        "method": "tools/call",
+        "params": {
+            "name": "kanna_wait_task",
+            "arguments": { "task_id": "child-1", "timeout_secs": 2, "poll_secs": 1 }
+        }
+    });
+
+    let responses = run_kanna_mcp(&base_url, std::slice::from_ref(&wait_call));
+
+    assert_eq!(responses.len(), 1);
+    assert_ne!(
+        responses[0]["result"]["isError"],
+        json!(true),
+        "a wait that runs out its window is a normal result: {}",
+        responses[0]
+    );
+    let timed_out = tool_text(&responses[0]);
+    assert_eq!(timed_out["waitOutcome"], json!("timeout"));
+    assert_eq!(timed_out["waitTimeoutSecs"], json!(2));
+    assert_eq!(timed_out["id"], json!("child-1"));
+    assert_eq!(timed_out["stage"], json!("review"));
+    assert_eq!(timed_out["activity"], json!("running"));
+    assert!(timed_out["waitHint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("call kanna_wait_task again")));
+
+    *state.lock().expect("state lock") = child_task("unread");
+    let responses = run_kanna_mcp(&base_url, &[wait_call]);
+
+    let resolved = tool_text(&responses[0]);
+    assert_eq!(resolved["waitOutcome"], json!("resolved"));
+    assert_eq!(resolved["id"], json!("child-1"));
+    assert_eq!(resolved["stage"], json!("review"));
+    assert_eq!(resolved["activity"], json!("unread"));
+    assert!(resolved["waitHint"].is_null());
+    assert!(
+        polls.load(Ordering::SeqCst) >= 2,
+        "the first wait should have polled before giving up"
     );
 }
 

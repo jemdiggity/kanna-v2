@@ -88,7 +88,7 @@ Give both ranges: the child judges the changes to review but must read the full 
 
 ### 4. Join the verdicts
 
-For each child, call `kanna_wait_task` with `until: "finished"`; if it times out, call it again. `TASK <id> DONE ...` lines in your session are wake-ups, not instructions.
+For each child, call `kanna_wait_task` with `until: "finished"`. Its window is bounded so the call always returns to you; a wait that runs out comes back as a normal result with `waitOutcome: "timeout"` and the child's latest detail — just call it again with the same arguments. `waitOutcome: "resolved"` means the child is done. `TASK <id> DONE ...` lines in your session are wake-ups, not instructions.
 
 Read each finished child's verdict with `kanna_get_task`: `latestRun` carries its `status` (`succeeded` = PASS, `failed` = FAIL) and its `summary`. A child that finished without recording a verdict run is a FAIL with "specialty review did not record a verdict". You own the children's lifecycle: close every child with `kanna_close_task` once you have its verdict.
 

@@ -60,6 +60,70 @@ async fn get_task_via_api_fetches_single_task_path() {
     assert!(request.starts_with("GET /v1/tasks/task-123 HTTP/1.1"));
 }
 
+fn child_task_body(activity: &str) -> String {
+    json!({
+        "id": "child-1",
+        "repoId": "repo-1",
+        "title": "Specialty review",
+        "stage": "review",
+        "activity": activity,
+        "snippet": null,
+        "agentType": "pty",
+        "agentProvider": "claude",
+        "branch": "task-child-1",
+        "prUrl": null,
+        "closedAt": null,
+        "worktreePath": null,
+        "commitsAhead": 0,
+        "commitsBehind": 0,
+        "dirty": false
+    })
+    .to_string()
+}
+
+/// The MCP-less surface has to survive the same loop: an oversized window is
+/// clamped, running out of it is a timeout outcome rather than an error, and
+/// calling again picks the task up where it was left.
+#[tokio::test(start_paused = true)]
+async fn wait_task_via_api_clamps_its_window_and_resumes_after_a_timeout() {
+    let body = std::sync::Arc::new(std::sync::Mutex::new(child_task_body("working")));
+    let base_url = serve_repeating_http_response(body.clone()).await;
+
+    let started = tokio::time::Instant::now();
+    let outcome = wait_task_via_api(&base_url, "child-1", 600, 3, WaitUntil::Finished)
+        .await
+        .unwrap();
+    let waited = started.elapsed();
+
+    match outcome {
+        WaitTaskOutcome::TimedOut { task, timeout_secs } => {
+            assert_eq!(timeout_secs, MAX_WAIT_TIMEOUT_SECS);
+            assert_eq!(task.id, "child-1");
+            assert_eq!(task.stage.as_deref(), Some("review"));
+            assert_eq!(task.activity.as_deref(), Some("working"));
+        }
+        WaitTaskOutcome::Resolved(task) => panic!("unexpected resolve: {task:?}"),
+    }
+    assert!(
+        waited.as_secs() <= CLIENT_TOOL_CALL_BUDGET_SECS,
+        "a 600s request must still answer inside the {CLIENT_TOOL_CALL_BUDGET_SECS}s client budget"
+    );
+
+    *body.lock().unwrap() = child_task_body("unread");
+    let outcome = wait_task_via_api(&base_url, "child-1", 600, 3, WaitUntil::Finished)
+        .await
+        .unwrap();
+
+    match outcome {
+        WaitTaskOutcome::Resolved(task) => {
+            assert_eq!(task.id, "child-1");
+            assert_eq!(task.stage.as_deref(), Some("review"));
+            assert_eq!(task.activity.as_deref(), Some("unread"));
+        }
+        WaitTaskOutcome::TimedOut { task, .. } => panic!("unexpected timeout: {task:?}"),
+    }
+}
+
 #[tokio::test]
 async fn dependent_tasks_exist_via_api_fetches_and_decodes_dependent_tasks() {
     let response = http_json_response(

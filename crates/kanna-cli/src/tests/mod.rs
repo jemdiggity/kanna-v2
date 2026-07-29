@@ -4,7 +4,7 @@ use crate::api::{
     rename_task_via_api, repo_task_list_path, request_revision_via_api, rerun_stage_via_api,
     send_task_input_via_api, set_task_parent_via_api, signal_agent_path, signal_agent_via_api,
     task_get_path, task_list_path, task_logs_path, task_matches_wait_until, task_search_path,
-    unblock_task_via_api,
+    unblock_task_via_api, wait_task_via_api, WaitTaskOutcome,
 };
 use crate::commands::guide::{
     build_guide_context, render_guide_json, render_guide_markdown, run_guide_command, GuideContext,
@@ -17,7 +17,7 @@ use crate::commands::stage_complete::{
 use crate::commands::task::{
     build_block_task_request, build_create_task_request, build_request_revision_request,
     build_send_task_input_request, find_task_status_row, format_task_list, format_task_status,
-    task_not_found_error,
+    render_wait_outcome, task_not_found_error,
 };
 use crate::commands::tool::build_tool_call_args;
 use crate::config::resolve_server_base_url;
@@ -26,6 +26,7 @@ use crate::models::{
     TaskRenameRequest, TaskSummary, WaitUntil,
 };
 use clap::{Command, CommandFactory, Parser};
+use kanna_tool_catalog::{CLIENT_TOOL_CALL_BUDGET_SECS, MAX_WAIT_TIMEOUT_SECS};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -259,6 +260,32 @@ async fn serve_single_http_response(response: String) -> (String, tokio::task::J
     });
 
     (base_url, handle)
+}
+
+/// Serves the same body for as many requests as a wait makes, so a polling test
+/// does not have to pin the exact poll count. The body is shared so a test can
+/// flip a task from running to finished between waits.
+async fn serve_repeating_http_response(body: std::sync::Arc<std::sync::Mutex<String>>) -> String {
+    let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = vec![0; 4096];
+            if socket.read(&mut buffer).await.is_err() {
+                continue;
+            }
+            let response = match body.lock() {
+                Ok(body) => http_json_response("200 OK", &body),
+                Err(_) => return,
+            };
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+
+    format!("http://{addr}")
 }
 
 mod api_paths;

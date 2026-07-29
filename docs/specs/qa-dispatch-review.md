@@ -81,7 +81,7 @@ the generic review agent — including this one.
 
 ### Server surface changes
 
-Two gaps stood between the dispatcher and the existing primitives:
+Three gaps stood between the dispatcher and the existing primitives:
 
 1. **`agent` override on `kanna_create_task`.** The HTTP API already accepted
    `CreateTaskRequest.agent` (it overrides the pinned pipeline stage's agent
@@ -95,6 +95,16 @@ Two gaps stood between the dispatcher and the existing primitives:
    task's most recent stage run. Verdict summaries are parsed out of the run's
    result JSON; non-verdict results (e.g. orphaned-workspace markers) pass
    through as-is.
+3. **A wait window the caller survives.** `kanna_wait_task` is the dispatcher's
+   join primitive, and MCP clients abort a `tools/call` on their own timer
+   (Codex and Claude Code both at 300s), destroying the result. The wait window
+   is therefore capped at `MAX_WAIT_TIMEOUT_SECS` = 240s — in
+   `kanna-tool-catalog` code, not only in `catalog.json`, so a `.kanna/`
+   catalog override cannot reintroduce a wait the client is guaranteed to kill
+   — and running the window out is a normal result, not an error: the caller
+   gets the task's latest detail plus `waitOutcome: "timeout"` and calls again.
+   A resolved wait carries `waitOutcome: "resolved"`. `kanna-cli task wait`
+   renders the same shape for MCP-less agents.
 
 ## Bounding the loop
 
@@ -299,7 +309,7 @@ findings.
 parent review stage (qa-dispatcher, auto)
   ├─ kanna_create_task {pipeline_name: specialty-review, agent: review-ui,   base_ref: $BRANCH, parent/notify: self}
   ├─ kanna_create_task {pipeline_name: specialty-review, agent: review-sec…, base_ref: $BRANCH, parent/notify: self}
-  ├─ kanna_wait_task until finished (per child; notify "TASK <id> DONE" doubles as a wake-up)
+  ├─ kanna_wait_task until finished (per child; waitOutcome timeout → call again; notify "TASK <id> DONE" doubles as a wake-up)
   ├─ kanna_get_task → latestRun.status/summary   (succeeded=PASS / failed=FAIL)
   ├─ kanna_close_task (every child, after collecting its verdict)
   ├─ filter findings against the scope bar (caused by this diff AND blocking)

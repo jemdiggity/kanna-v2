@@ -1,5 +1,7 @@
 use kanna_tool_catalog::{
-    bundled_catalog, resolve_request, Method, ParamLoc, ParamType, ResponseKind, WaitUntil,
+    bundled_catalog, clamp_wait_timeout_secs, resolve_request, wait_resolved_result,
+    wait_timeout_result, Catalog, Method, ParamLoc, ParamType, ResponseKind, WaitUntil,
+    CLIENT_TOOL_CALL_BUDGET_SECS, DEFAULT_WAIT_TIMEOUT_SECS, MAX_WAIT_TIMEOUT_SECS,
 };
 use serde_json::json;
 use std::fs;
@@ -102,8 +104,8 @@ fn generated_schema_surfaces_descriptions_defaults_and_integer_bounds() {
         .find(|tool| tool["name"] == "kanna_wait_task")
         .expect("wait task tool");
     let timeout = &wait["inputSchema"]["properties"]["timeout_secs"];
-    assert_eq!(timeout["default"], json!(600));
-    assert_eq!(timeout["maximum"], json!(600));
+    assert_eq!(timeout["default"], json!(DEFAULT_WAIT_TIMEOUT_SECS));
+    assert_eq!(timeout["maximum"], json!(MAX_WAIT_TIMEOUT_SECS));
     let poll = &wait["inputSchema"]["properties"]["poll_secs"];
     assert_eq!(poll["default"], json!(3));
     assert_eq!(poll["minimum"], json!(1));
@@ -404,9 +406,91 @@ fn resolves_expected_requests_for_every_bundled_tool() {
     assert_eq!(wait.path, "/v1/tasks/task%201");
     let wait_spec = wait.wait.expect("wait spec");
     assert_eq!(wait_spec.task_id, "task 1");
-    assert_eq!(wait_spec.timeout_secs, 600);
+    assert_eq!(wait_spec.timeout_secs, MAX_WAIT_TIMEOUT_SECS);
     assert_eq!(wait_spec.poll_secs, 1);
     assert_eq!(wait_spec.until, WaitUntil::Closed);
+}
+
+// The window-vs-client-budget invariant itself is a compile-time assertion in
+// the crate: a wait longer than the client's tools/call timeout is killed
+// before it can answer, so it must not be expressible.
+
+#[test]
+fn wait_defaults_to_the_bounded_window_without_arguments() {
+    let catalog = bundled_catalog();
+
+    let wait = resolve_request(&catalog, "kanna_wait_task", &json!({ "task_id": "task-1" }))
+        .expect("wait task")
+        .wait
+        .expect("wait spec");
+
+    assert_eq!(wait.timeout_secs, DEFAULT_WAIT_TIMEOUT_SECS);
+    assert!(wait.timeout_secs < CLIENT_TOOL_CALL_BUDGET_SECS);
+    assert_eq!(wait.until, WaitUntil::Finished);
+}
+
+/// The cap lives in code, not only in `catalog.json`: `.kanna/mcp-tools.json`
+/// overrides the bundled catalog, and an override that asks for a window the
+/// client will kill must still be clamped.
+#[test]
+fn override_catalog_cannot_reintroduce_an_unsurvivable_wait_window() {
+    let catalog: Catalog = serde_json::from_str(
+        r#"{
+          "tools": [{
+            "name": "kanna_wait_task",
+            "description": "Wait",
+            "method": "GET",
+            "path": "/v1/tasks/{task_id}",
+            "response": "wait",
+            "params": [
+              { "name": "task_id", "description": "Task id.", "type": "string", "required": true, "location": "path" },
+              { "name": "timeout_secs", "description": "Seconds.", "type": "integer", "required": false, "location": "body", "default": 3600, "max": 3600 }
+            ]
+          }]
+        }"#,
+    )
+    .expect("override catalog parses");
+
+    let defaulted = resolve_request(&catalog, "kanna_wait_task", &json!({ "task_id": "task-1" }))
+        .expect("wait task")
+        .wait
+        .expect("wait spec");
+    let explicit = resolve_request(
+        &catalog,
+        "kanna_wait_task",
+        &json!({ "task_id": "task-1", "timeout_secs": 3600 }),
+    )
+    .expect("wait task")
+    .wait
+    .expect("wait spec");
+
+    assert_eq!(defaulted.timeout_secs, MAX_WAIT_TIMEOUT_SECS);
+    assert_eq!(explicit.timeout_secs, MAX_WAIT_TIMEOUT_SECS);
+    assert_eq!(clamp_wait_timeout_secs(3600), MAX_WAIT_TIMEOUT_SECS);
+    assert_eq!(clamp_wait_timeout_secs(30), 30);
+}
+
+#[test]
+fn wait_results_carry_the_task_detail_and_an_outcome_discriminator() {
+    let task = json!({ "id": "task-1", "stage": "review", "activity": "running" });
+
+    let resolved = wait_resolved_result(task.clone());
+    assert_eq!(resolved["waitOutcome"], json!("resolved"));
+    assert_eq!(resolved["id"], json!("task-1"));
+    assert_eq!(resolved["stage"], json!("review"));
+    assert!(resolved["waitHint"].is_null());
+
+    let timed_out = wait_timeout_result(task, "task-1", MAX_WAIT_TIMEOUT_SECS);
+    assert_eq!(timed_out["waitOutcome"], json!("timeout"));
+    assert_eq!(timed_out["waitTimeoutSecs"], json!(MAX_WAIT_TIMEOUT_SECS));
+    assert_eq!(
+        timed_out["id"],
+        json!("task-1"),
+        "a timed-out wait must still hand back the task state it polled"
+    );
+    assert_eq!(timed_out["stage"], json!("review"));
+    let hint = timed_out["waitHint"].as_str().expect("wait hint");
+    assert!(hint.contains("call kanna_wait_task again"), "{hint}");
 }
 
 #[test]

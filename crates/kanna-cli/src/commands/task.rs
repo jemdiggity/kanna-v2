@@ -7,7 +7,7 @@ use crate::api::{
     dependent_tasks_exist_via_api, get_task_via_api, list_repo_tasks_via_api, list_tasks_via_api,
     parse_wait_until, rename_task_via_api, request_revision_via_api, rerun_stage_via_api,
     search_tasks_via_api, send_task_input_via_api, set_task_parent_via_api, task_logs_via_api,
-    unblock_task_via_api, wait_task_via_api,
+    unblock_task_via_api, wait_task_via_api, WaitTaskOutcome,
 };
 use crate::commands::{parse_metadata_json, print_json};
 use crate::config::resolve_server_base_url_from_env;
@@ -16,6 +16,7 @@ use crate::models::{
     TaskCreateOptions, TaskDetail, TaskInputRequest, TaskRenameRequest, TaskStatusRow, TaskSummary,
 };
 use crate::TaskCommands;
+use kanna_tool_catalog::{wait_resolved_result, wait_timeout_result};
 
 pub(crate) fn build_create_task_request(options: TaskCreateOptions) -> CreateTaskRequest {
     CreateTaskRequest {
@@ -60,6 +61,23 @@ pub(crate) fn build_send_task_input_request(message: String) -> TaskInputRequest
 
 pub(crate) fn build_block_task_request(blocker_task_ids: Vec<String>) -> BlockTaskRequest {
     BlockTaskRequest { blocker_task_ids }
+}
+
+/// Render a wait the same way the MCP tool does — the task detail plus the
+/// `waitOutcome` discriminator — so an agent looping on `kanna-cli task wait`
+/// reads the same field an MCP caller reads.
+pub(crate) fn render_wait_outcome(
+    outcome: WaitTaskOutcome,
+    task_id: &str,
+) -> Result<Value, String> {
+    match outcome {
+        WaitTaskOutcome::Resolved(task) => serde_json::to_value(task)
+            .map(wait_resolved_result)
+            .map_err(|e| format!("failed to render json: {e}")),
+        WaitTaskOutcome::TimedOut { task, timeout_secs } => serde_json::to_value(task)
+            .map(|task| wait_timeout_result(task, task_id, timeout_secs))
+            .map_err(|e| format!("failed to render json: {e}")),
+    }
 }
 
 pub(crate) fn task_status_row(task: &TaskSummary) -> TaskStatusRow {
@@ -204,13 +222,17 @@ pub(crate) async fn run(command: TaskCommands) {
                 process::exit(1);
             });
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-            let task = wait_task_via_api(&base_url, &task_id, timeout_secs, poll_secs, until)
+            let outcome = wait_task_via_api(&base_url, &task_id, timeout_secs, poll_secs, until)
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("Error: {e}");
                     process::exit(1);
                 });
-            if let Err(e) = print_json(&task) {
+            let rendered = render_wait_outcome(outcome, &task_id).unwrap_or_else(|e| {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            });
+            if let Err(e) = print_json(&rendered) {
                 eprintln!("Error: {e}");
                 process::exit(1);
             }
