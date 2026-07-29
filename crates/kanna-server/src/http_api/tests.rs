@@ -230,3 +230,4 @@ mod relay_dispatch;
 mod repo_commands;
 mod repo_definitions;
 mod revision_status;
+mod task_events;

@@ -15,6 +15,7 @@ mod repos;
 mod settings;
 mod snapshot;
 mod stage_runs;
+mod task_events;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
@@ -29,6 +30,8 @@ pub use blockers::ReplaceTaskBlockersError;
 pub use operator_events::NewOperatorEvent;
 #[allow(unused_imports)]
 pub use stage_runs::FinishedStageRun;
+#[allow(unused_imports)]
+pub use task_events::{appended as task_event_appended, TaskEvent, TaskEventKind, TaskEventScope};
 #[allow(unused_imports)]
 pub use transfers::{
     NewTaskTransfer, NewTaskTransferProvenance, PendingIncomingTransfer, TaskTransfer,
@@ -76,6 +79,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "034_pipeline_item_revision_rounds",
     "035_pipeline_item_blocker_revision",
     "036_task_transfer_ownership_leases",
+    "037_task_event_log",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1388,6 +1392,41 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         )
     })?;
 
+    run_migration(conn, "037_task_event_log", |conn| {
+        // `seq` is the watchers' cursor: AUTOINCREMENT so a deleted row's id is
+        // never reused, and SQLite's single-writer rule means it is allocated
+        // and committed under the same write lock (see db/task_events.rs).
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS task_event (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+                type TEXT NOT NULL,
+                payload TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_task_event_task_seq ON task_event(task_id, seq);
+            "#,
+        )?;
+        // Runtime status is the daemon's selection-independent view of a task
+        // session. `activity` cannot carry it: it collapses waiting into idle,
+        // which is exactly why a task parked on a prompt was invisible.
+        add_column(conn, "pipeline_item", "runtime_status", "TEXT")
+    })?;
+
+    Ok(())
+}
+
+/// Events exist to be tailed, not archived: a watcher that has been away for
+/// two weeks has lost the thread anyway. Pruning at open keeps the log bounded
+/// without putting a delete in the append path.
+const TASK_EVENT_RETENTION_DAYS: u32 = 14;
+
+fn prune_task_events(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "DELETE FROM task_event WHERE created_at < datetime('now', ?1)",
+        [format!("-{TASK_EVENT_RETENTION_DAYS} days")],
+    )?;
     Ok(())
 }
 
@@ -1434,6 +1473,7 @@ impl Db {
         let conn = Connection::open_with_flags(path, database_open_flags())?;
         configure_shared_database_connection(&conn)?;
         run_schema_migrations(&conn)?;
+        prune_task_events(&conn)?;
         run_quick_check(&conn)?;
         Ok(Self { conn })
     }

@@ -164,7 +164,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "036_task_transfer_ownership_leases");
+    assert_eq!(latest_migration, "037_task_event_log");
 
     let stage_run_sql: String = db
         .conn
@@ -1092,6 +1092,13 @@ fn server_connection_opens_with_desktop_like_wal_client_active() {
                   pipeline_item_id TEXT NOT NULL,
                   env_name TEXT NOT NULL
                 );
+                CREATE TABLE task_event (
+                  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                  task_id TEXT NOT NULL,
+                  type TEXT NOT NULL,
+                  payload TEXT,
+                  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
                 INSERT INTO pipeline_item (id, stage) VALUES ('task-1', 'in progress');
                 "#,
         )
@@ -1149,6 +1156,13 @@ fn close_pipeline_item_sets_closed_at_without_changing_stage() {
               port INTEGER PRIMARY KEY,
               pipeline_item_id TEXT NOT NULL,
               env_name TEXT NOT NULL
+            );
+            CREATE TABLE task_event (
+              seq INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id TEXT NOT NULL,
+              type TEXT NOT NULL,
+              payload TEXT,
+              created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
             INSERT INTO pipeline_item (id, stage) VALUES ('task-1', 'in progress');
             "#,
@@ -1624,6 +1638,13 @@ fn insert_pipeline_item_stores_stage_metadata() {
               display_name TEXT,
               created_at TEXT NOT NULL DEFAULT (datetime('now')),
               updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE task_event (
+              seq INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id TEXT NOT NULL,
+              type TEXT NOT NULL,
+              payload TEXT,
+              created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
             "#,
     )
@@ -2246,4 +2267,86 @@ fn revision_rounds_count_agent_rounds_until_reset() {
         .try_claim_agent_revision_round("missing-task", 3)
         .is_err());
     assert!(db.reset_task_revision_rounds("missing-task").is_err());
+}
+
+/// Event type names are a published contract: an orchestrator matches on these
+/// strings, and `kanna_wait_events`'s description enumerates them. Renaming one
+/// silently breaks every watcher written against it.
+#[test]
+fn task_event_type_names_are_stable() {
+    let names = super::TaskEventKind::ALL
+        .iter()
+        .map(|kind| kind.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        names,
+        vec![
+            "task.created",
+            "run.started",
+            "run.finished",
+            "stage.changed",
+            "task.closed",
+            "task.pr_created",
+            "task.revision_requested",
+            "task.awaiting_input",
+        ]
+    );
+}
+
+/// A migrated database must accept the log the event feed reads, including its
+/// autoincrementing cursor — the column the whole no-missed-events guarantee
+/// rests on.
+#[test]
+fn task_event_log_cursor_increases_and_survives_deletes() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open migrated db");
+    db.conn
+        .execute_batch(
+            "INSERT INTO repo (id, path, name) VALUES ('repo-1', '/tmp/repo-1', 'Repo');
+             INSERT INTO pipeline_item (id, repo_id, stage) VALUES ('task-1', 'repo-1', 'in progress');",
+        )
+        .expect("seed task");
+
+    db.append_task_event(
+        "task-1",
+        super::TaskEventKind::RunStarted,
+        serde_json::json!({}),
+    )
+    .expect("append");
+    db.append_task_event(
+        "task-1",
+        super::TaskEventKind::RunFinished,
+        serde_json::json!({}),
+    )
+    .expect("append");
+    let head = db.latest_task_event_seq().expect("head");
+    assert_eq!(head, 2);
+
+    // Retention pruning must not let a later event reuse a delivered cursor.
+    db.conn
+        .execute("DELETE FROM task_event", [])
+        .expect("prune");
+    db.append_task_event(
+        "task-1",
+        super::TaskEventKind::TaskClosed,
+        serde_json::json!({}),
+    )
+    .expect("append after prune");
+    let events = db
+        .list_task_events(
+            &super::TaskEventScope::Tasks(vec!["task-1".to_string()]),
+            head,
+            i64::MAX,
+            10,
+        )
+        .expect("list");
+    assert_eq!(events.len(), 1);
+    assert!(
+        events[0].seq > head,
+        "AUTOINCREMENT must not reuse a cursor"
+    );
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
 }

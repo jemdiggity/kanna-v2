@@ -1,10 +1,22 @@
 use super::{
     CloudTaskIdentityWrite, Db, NewPipelineItem, OpenAgentTask, PipelineItem,
-    ReopenPipelineItemError, TaskStageSource,
+    ReopenPipelineItemError, TaskEventKind, TaskStageSource,
 };
 use rusqlite::{params, OptionalExtension};
+use serde_json::json;
 
 impl Db {
+    fn pipeline_item_stage(&self, id: &str) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT stage FROM pipeline_item WHERE id = ?",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
+    }
+
     pub fn list_recent_pipeline_items(&self) -> Result<Vec<PipelineItem>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
@@ -462,6 +474,16 @@ impl Db {
                 item.pipeline_def,
             ],
         )?;
+        self.append_task_event(
+            item.id,
+            TaskEventKind::TaskCreated,
+            json!({
+                "repoId": item.repo_id,
+                "stage": item.stage,
+                "displayName": item.display_name,
+                "parentTaskId": item.parent_task_id,
+            }),
+        )?;
         Ok(())
     }
 
@@ -710,6 +732,11 @@ impl Db {
             }
             db.cancel_running_stage_runs(&pipeline_item_id)?;
             db.release_task_ports(&pipeline_item_id)?;
+            db.append_task_event(
+                &pipeline_item_id,
+                TaskEventKind::TaskClosed,
+                json!({ "stage": db.pipeline_item_stage(&pipeline_item_id)? }),
+            )?;
             Ok(())
         })
     }
@@ -765,6 +792,7 @@ impl Db {
     }
 
     pub fn update_pipeline_item_stage(&self, id: &str, stage: &str) -> Result<(), rusqlite::Error> {
+        let from_stage = self.pipeline_item_stage(id)?;
         let rows_affected = self.conn.execute(
             "UPDATE pipeline_item SET stage = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
             (stage, id),
@@ -772,7 +800,31 @@ impl Db {
         if rows_affected == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        Ok(())
+        self.append_stage_changed_event(id, from_stage.as_deref(), stage, None)
+    }
+
+    /// One `stage.changed` event per real transition. A rewrite to the stage a
+    /// task is already on (a repair path, a replayed request) is not a
+    /// transition and must not wake every watcher.
+    fn append_stage_changed_event(
+        &self,
+        id: &str,
+        from_stage: Option<&str>,
+        to_stage: &str,
+        branch: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        if from_stage == Some(to_stage) {
+            return Ok(());
+        }
+        self.append_task_event(
+            id,
+            TaskEventKind::StageChanged,
+            json!({
+                "fromStage": from_stage,
+                "toStage": to_stage,
+                "branch": branch,
+            }),
+        )
     }
 
     /// Record the task's pull request once an agent reports it (the pr
@@ -784,10 +836,27 @@ impl Db {
         pr_number: Option<i64>,
         pr_url: &str,
     ) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
+        let previous_pr_url: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT pr_url FROM pipeline_item WHERE id = ?",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let rows_affected = self.conn.execute(
             "UPDATE pipeline_item SET pr_number = ?, pr_url = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
             (pr_number, pr_url, id),
         )?;
+        // Re-reporting the same PR URL (a rerun of the pr stage, a replayed
+        // verdict) is not a new pull request.
+        if rows_affected > 0 && previous_pr_url.flatten().as_deref() != Some(pr_url) {
+            self.append_task_event(
+                id,
+                TaskEventKind::PrCreated,
+                json!({ "prNumber": pr_number, "prUrl": pr_url }),
+            )?;
+        }
         Ok(())
     }
 
@@ -851,6 +920,7 @@ impl Db {
         stage: &str,
         branch: &str,
     ) -> Result<(), rusqlite::Error> {
+        let from_stage = self.pipeline_item_stage(id)?;
         let rows_affected = self.conn.execute(
             "UPDATE pipeline_item SET stage = ?, branch = ?, updated_at = datetime('now') WHERE id = ? AND closed_at IS NULL",
             (stage, branch, id),
@@ -858,7 +928,7 @@ impl Db {
         if rows_affected == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
-        Ok(())
+        self.append_stage_changed_event(id, from_stage.as_deref(), stage, Some(branch))
     }
 
     pub fn get_pipeline_item_pr_branch(&self, id: &str) -> Result<Option<String>, rusqlite::Error> {

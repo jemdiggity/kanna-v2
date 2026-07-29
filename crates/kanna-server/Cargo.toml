@@ -24,6 +24,7 @@ sha2 = "0.10"
 kanna-daemon = { path = "../daemon" }
 kanna-agent-protocol = { path = "../kanna-agent-protocol" }
 kanna-runtime-defaults = { path = "../runtime-defaults" }
+kanna-tool-catalog = { path = "../kanna-tool-catalog" }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors"] }
 if-addrs = "0.15"

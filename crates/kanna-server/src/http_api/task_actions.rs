@@ -1419,13 +1419,15 @@ pub(super) async fn request_revision(
                     0
                 }
             };
+            let budget = crate::task_creator::RevisionBudget {
+                rounds,
+                limit: budget.limit,
+            };
+            append_revision_requested_event(&db, &source_task_id, &payload, &budget, false)?;
             Ok(RevisionOutcome::Started {
                 source_task_id,
                 prepared: Box::new(prepared),
-                budget: crate::task_creator::RevisionBudget {
-                    rounds,
-                    limit: budget.limit,
-                },
+                budget,
             })
         })
         .await?
@@ -1553,9 +1555,40 @@ fn park_exhausted_revision(
                 format!("db error: {}", e),
             )
         })?;
+    append_revision_requested_event(db, &source_task_id, payload, &budget, true)?;
     Ok(RevisionOutcome::Parked {
         source_task_id,
         budget,
+    })
+}
+
+/// A revision request is a state change a watcher cares about whether or not it
+/// started anything: an exhausted budget parks the task for its human, which is
+/// exactly when an orchestrator must stop waiting for a fix and report.
+fn append_revision_requested_event(
+    db: &Db,
+    task_id: &str,
+    payload: &crate::mobile_api::RequestRevisionRequest,
+    budget: &crate::task_creator::RevisionBudget,
+    exhausted: bool,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    db.append_task_event(
+        task_id,
+        crate::db::TaskEventKind::RevisionRequested,
+        serde_json::json!({
+            "targetStage": payload.target_stage,
+            "summary": payload.summary,
+            "origin": if payload.origin.unwrap_or_default().is_agent() { "agent" } else { "human" },
+            "rounds": budget.rounds,
+            "limit": budget.limit,
+            "exhausted": exhausted,
+        }),
+    )
+    .map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
     })
 }
 

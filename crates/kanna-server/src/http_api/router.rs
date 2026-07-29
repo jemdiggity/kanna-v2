@@ -30,13 +30,14 @@ use super::task_activity::{apply_runtime_status, mark_task_read};
 use super::task_agent_session::put_task_agent_session;
 use super::task_blockers::{block_task, unblock_task};
 use super::task_diff::get_task_diff;
+use super::task_events::wait_task_events;
 use super::task_files::{get_task_file, resolve_task_file_mentions};
 use super::task_input::send_task_input;
 use super::task_logs::task_logs;
 use super::task_ports::{claim_task_ports, release_task_ports};
 use super::tasks::{
     create_task, get_task, list_closed_task_identities, list_recent_tasks, put_task, search_tasks,
-    update_task,
+    set_task_notify, update_task,
 };
 use super::transfers::{
     claim_pending_incoming_transfer, complete_task_transfer, fail_pending_incoming_transfer,
@@ -113,6 +114,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/repos/{repo_id}/agents/{agent}/signal",
             post(signal_agent),
         )
+        .route("/v1/task-events", get(wait_task_events))
         .route("/v1/tasks/recent", get(list_recent_tasks))
         .route("/v1/tasks/search", get(search_tasks))
         .route(
@@ -170,6 +172,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/tasks/{task_id}/actions/set-parent",
             post(set_task_parent),
+        )
+        .route(
+            "/v1/tasks/{task_id}/actions/set-notify",
+            post(set_task_notify),
         )
         .route("/v1/tasks/{task_id}/actions/pin", post(pin_task))
         .route("/v1/tasks/{task_id}/actions/unpin", post(unpin_task))

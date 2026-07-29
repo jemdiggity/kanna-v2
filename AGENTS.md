@@ -197,6 +197,20 @@ the completion signal — updating activity to `unread`, claiming
 `TASK <child-id> DONE [success|failure]: <title>` through the same two-step
 input helper as `/v1/tasks/{task_id}/input`. Keep this server/daemon-side; it
 must not depend on the desktop frontend event bridge being open.
+`kanna_set_task_notify` retargets that notification on an already-running task.
+
+**Task event feed.** `GET /v1/task-events` (`kanna_wait_events`) is how an agent
+watches *several* tasks — `kanna_wait_task` blocks on one id and resolves only
+on finish, so a fan-out cannot use it. Events are appended by the same DB writes
+that change the state they describe, and the cursor is `task_event.seq`, whose
+ordering SQLite's single-writer rule guarantees; a caller that passes back its
+cursor never misses an event fired between two calls. Add a new event by
+appending it where the state already changes, not by diffing snapshots. The
+`task.awaiting_input` event is the daemon's `Waiting` status — a positive match
+on prompt chrome, never inferred from a quiet session, because mislabelling a
+long build as blocked is worse than not reporting it at all. See
+`docs/kanna-server-boundary.md` and
+`docs/2026-07-29-awaiting-input-detection-e2e-gap.md`.
 
 ## E2E coverage expectation
 
