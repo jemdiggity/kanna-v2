@@ -75,7 +75,8 @@ Record your current branch (`git rev-parse --abbrev-ref HEAD`); child tasks fork
 
 ```
 kanna_create_task {
-  "prompt": "Specialty review dispatched from task $KANNA_TASK_ID.\nBranch under review: <current branch> (your worktree is already forked at its tip).\nChanges to review: <previous review point sha>..HEAD (review round <n>).\nFull branch context: $BASE_REF..HEAD.\nOriginal task: <one-paragraph summary of $TASK_PROMPT>.\nFocus: <what this specialty must scrutinize in this particular change>.",
+  "display_name": "<Specialty> review: <subject> (round <n>)",
+  "prompt": "<Specialty> review (round <n>) dispatched from task $KANNA_TASK_ID.\nBranch under review: <current branch> (your worktree is already forked at its tip).\nChanges to review: <previous review point sha>..HEAD (review round <n>).\nFull branch context: $BASE_REF..HEAD.\nOriginal task: <one-paragraph summary of $TASK_PROMPT>.\nFocus: <what this specialty must scrutinize in this particular change>.",
   "pipeline_name": "specialty-review",
   "agent": "<specialty agent name, e.g. review-security>",
   "base_ref": "<current branch>",
@@ -85,6 +86,29 @@ kanna_create_task {
 ```
 
 Give both ranges: the child judges the changes to review but must read the full branch to judge them. On the first round say `$BASE_REF..HEAD` for both rather than inventing a marker. Create all children before waiting on any of them so they review in parallel.
+
+#### Naming rule
+
+**Every dispatched child carries an explicit `display_name`, and its prompt's first line names the same specialty and round.** This is a rule, not an example: `display_name` is optional in the tool schema and defaults to the prompt, so a child dispatched without one is titled by its prompt's first line — and every child of every round shares that line. The result is a sidebar of identical rows where a security review cannot be told from a migration review without opening it. You already know the specialty here, because you are choosing the `agent`.
+
+- **`display_name`** is `<Specialty> review: <subject> (round <n>)` — e.g. `Security review: sticky pipeline (round 2)`. Titles are read in a narrow sidebar column, so keep the whole thing under about sixty characters.
+  - **`<Specialty>`** is the label for the agent being dispatched:
+
+    | Agent | Label |
+    |---|---|
+    | `review-ui` | `UI` |
+    | `review-security` | `Security` |
+    | `review-perf` | `Performance` |
+    | `review-concurrency` | `Concurrency` |
+    | `review-migration` | `Migration` |
+    | `review-compat` | `Compatibility` |
+
+    A repo-added `review-*` agent takes its label from its own `description` — `review-release` ("packaging, vendoring, and release rules") is `Release review: …`.
+  - **`<subject>`** is a two-to-four-word noun phrase for the task under review, taken from `$TASK_PROMPT` — the same subject on every child of the round. It names what is being reviewed, never what this specialty is looking for; the specialty is already in the label.
+  - **`(round <n>)`** is the review round established in step 1. It is what tells this round's children from the previous round's, which otherwise differ in nothing a title shows.
+- **The prompt's first line** repeats the specialty and round instead of the same boilerplate for everyone, because prompt snippets surface on their own (the sidebar's waiting-prompt snippet, mobile). Keep the rest of the prompt's structure as templated above.
+
+Apply both to every child, including a re-run of a single specialty: a re-run is still a round-`<n>` child and is named like one.
 
 ### 4. Join the verdicts
 

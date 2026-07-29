@@ -197,6 +197,37 @@ describe("QA pipeline assets", () => {
     expect(dispatcher).toContain("Do not create follow-up tasks");
   });
 
+  it("names every dispatched child by its specialty and round", () => {
+    const dispatcher = readRepoPhrases(".kanna/agents/qa-dispatcher/AGENT.md");
+
+    // `display_name` is optional in the tool schema and falls back to the
+    // prompt, and every child's prompt opens with the same dispatch line — so
+    // a fan-out that omits it renders as a column of identical sidebar rows.
+    expect(dispatcher).toContain('"display_name": "<Specialty> review: <subject> (round <n>)"');
+    expect(dispatcher).toContain("Every dispatched child carries an explicit `display_name`");
+    // A label per built-in specialty, so the rule is applicable and not just
+    // aspirational; a repo-added reviewer derives its own.
+    for (const label of [
+      "| `review-ui` | `UI` |",
+      "| `review-security` | `Security` |",
+      "| `review-perf` | `Performance` |",
+      "| `review-concurrency` | `Concurrency` |",
+      "| `review-migration` | `Migration` |",
+      "| `review-compat` | `Compatibility` |",
+    ]) {
+      expect(dispatcher, label).toContain(label);
+    }
+    expect(dispatcher).toContain("A repo-added `review-*` agent takes its label from its own `description`");
+    // The round marker is what separates one round's children from the next's.
+    expect(dispatcher).toContain("It is what tells this round's children from the previous round's");
+    // The prompt snippet surfaces on its own (sidebar, mobile), so the first
+    // line must be disambiguated too — not the old shared boilerplate.
+    expect(dispatcher).toContain(
+      '"prompt": "<Specialty> review (round <n>) dispatched from task $KANNA_TASK_ID.'
+    );
+    expect(dispatcher).not.toContain('"prompt": "Specialty review dispatched from task');
+  });
+
   it("reviews each round incrementally against the previous round's workspace branch", () => {
     const dispatcher = readRepoPhrases(".kanna/agents/qa-dispatcher/AGENT.md");
 

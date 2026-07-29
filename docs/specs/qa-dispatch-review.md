@@ -23,6 +23,18 @@ dispatcher's job (`kanna_wait_task`, then reading the child's recorded
 verdict). This follows the task-graph spec's fan-out/join section: join
 semantics are deliberately not engine-enforced.
 
+### Child naming
+
+A child task with no `display_name` is titled by its prompt, and every child's
+prompt opens with the same dispatch line — so an unnamed fan-out renders as a
+column of identical sidebar rows. The dispatcher therefore passes an explicit
+`display_name` of `<Specialty> review: <subject> (round <n>)` on every child
+and leads the child's prompt with the same specialty and round, since the
+prompt snippet is surfaced on its own in the sidebar and on mobile. The
+convention and its per-agent labels are stated as a rule in
+`.kanna/agents/qa-dispatcher/AGENT.md` (step 3, "Naming rule"). Nothing
+server-side infers it: `display_name` is the only title input the fan-out has.
+
 ### Built-in definitions
 
 - **`specialized-reviewers` pipeline** — the standard
@@ -307,8 +319,10 @@ findings.
 
 ```
 parent review stage (qa-dispatcher, auto)
-  ├─ kanna_create_task {pipeline_name: specialty-review, agent: review-ui,   base_ref: $BRANCH, parent/notify: self}
-  ├─ kanna_create_task {pipeline_name: specialty-review, agent: review-sec…, base_ref: $BRANCH, parent/notify: self}
+  ├─ kanna_create_task {pipeline_name: specialty-review, agent: review-ui,   base_ref: $BRANCH, parent/notify: self,
+  │                     display_name: "UI review: <subject> (round n)"}
+  ├─ kanna_create_task {pipeline_name: specialty-review, agent: review-sec…, base_ref: $BRANCH, parent/notify: self,
+  │                     display_name: "Security review: <subject> (round n)"}
   ├─ kanna_wait_task until finished (per child; waitOutcome timeout → call again; notify "TASK <id> DONE" doubles as a wake-up)
   ├─ kanna_get_task → latestRun.status/summary   (succeeded=PASS / failed=FAIL)
   ├─ kanna_close_task (every child, after collecting its verdict)

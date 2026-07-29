@@ -541,6 +541,8 @@ mod tests {
                 "kanna_list_recent_tasks",
                 "kanna_get_task",
                 "kanna_wait_task",
+                "kanna_wait_events",
+                "kanna_set_task_notify",
                 "kanna_task_logs",
                 "kanna_search_tasks",
                 "kanna_list_repo_tasks",
