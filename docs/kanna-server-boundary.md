@@ -18,6 +18,7 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - `GET /v1/desktops`
 - `GET /v1/repos`
 - `GET /v1/repos/{repo_id}/tasks`
+- `GET /v1/repos/{repo_id}/recent-pipelines` (pipeline names the repo's tasks were most recently created with, newest first)
 - `GET /v1/tasks/recent`
 - `GET /v1/tasks/search?query=...`
 - `GET /v1/task-events?taskIds=...|repoId=...&cursor=...&timeoutSecs=...&limit=...` (multi-task event feed; blocks server-side until an event arrives or the window elapses)
@@ -53,6 +54,30 @@ polling each child. It is cursor-based, not snapshot-diffed:
   is a positive match on a prompt the agent CLI rendered. It is deliberately
   never inferred from a session going quiet; see
   [2026-07-29-awaiting-input-detection-e2e-gap.md](2026-07-29-awaiting-input-detection-e2e-gap.md).
+
+## Sticky Pipeline Selection
+
+`GET /v1/repos/{repo_id}/recent-pipelines` backs the New Task modal's default
+pipeline: a repo's most recently used pipeline outranks the one its
+`.kanna/config.json` configures. The caller keeps the first returned name its
+repo still offers and otherwise falls back to the configured default, so a
+renamed or deleted pipeline degrades instead of sticking.
+
+It is a projection of the durable `pipeline_item` rows, not a stored preference,
+and that is the whole design:
+
+- **No `closed_at` filter.** `db::snapshot` excludes closed tasks, so a create
+  whose response was lost and whose task then closed — possibly from another
+  window — would be invisible to a snapshot-based answer. The row is what
+  matters, and the row survives the close.
+- **No recovery record to reconcile or clear.** A create either commits its task
+  row or it does not; there is no second write that can fail on its own and lose
+  the choice, and nothing to publish after the fact.
+- **Every writer feeds it, every reader agrees.** Any path that creates a task —
+  desktop, LAN/mobile, relay — updates it without being instrumented, and all
+  windows and restarts read the same rows.
+- **Child tasks are excluded** (`parent_task_id IS NULL`). A specialty review a
+  review stage dispatched is not a pipeline the operator picked.
 
 ## Task Completion Notification
 

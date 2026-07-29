@@ -192,6 +192,43 @@ pub(super) async fn list_repo_tasks(
     Ok(Json(tasks))
 }
 
+/// How many distinct recently-used pipelines to report. The caller keeps the
+/// first name its repo still offers, so a handful is enough to stay useful
+/// after a pipeline is renamed or dropped from `.kanna/pipelines`.
+const RECENT_REPO_PIPELINE_LIMIT: u32 = 10;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RecentRepoPipelinesResponse {
+    pipelines: Vec<String>,
+}
+
+/// Pipelines this repo's tasks were most recently created with, newest first.
+///
+/// Served straight from the durable task rows, so every writer of a task row —
+/// desktop, LAN/mobile, relay — feeds it without needing to be instrumented,
+/// and every reader (any window, before or after a restart) agrees.
+pub(super) async fn list_recent_repo_pipelines(
+    State(state): State<Arc<AppState>>,
+    Path(repo_id): Path<String>,
+) -> Result<Json<RecentRepoPipelinesResponse>, HttpError> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let pipelines = db
+        .recent_repo_pipelines(&repo_id, RECENT_REPO_PIPELINE_LIMIT)
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+    Ok(Json(RecentRepoPipelinesResponse { pipelines }))
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct AvailableAgentProvider {

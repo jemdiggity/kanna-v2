@@ -226,6 +226,7 @@ mod core_routes;
 mod create_task;
 mod e2e_sql_routes;
 mod input;
+mod recent_pipelines;
 mod relay_dispatch;
 mod repo_commands;
 mod repo_definitions;

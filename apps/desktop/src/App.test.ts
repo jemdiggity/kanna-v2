@@ -1082,6 +1082,7 @@ describe("App", () => {
         defaultPipeline: "default",
         pipelines: ["default"],
       }),
+      fetchRepoRecentPipelines: async () => [],
       fetchRepoCommands: async (repoId) => ({
         repoId,
         revision: "catalog-v1",
@@ -3691,6 +3692,53 @@ describe("App", () => {
     await flushPromises();
 
     expect(wrapper.get('[data-testid="base-branch-value"]').text()).toBe("origin/main");
+  });
+
+  it("opens New Task submit-ready on the repository's most recently used pipeline", async () => {
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => ({
+        revision: "remote-rev",
+        refName: "origin/main",
+        config: {},
+        defaultPipeline: "default",
+        pipelines: ["default", "single-reviewer"],
+      }),
+      fetchRepoRecentPipelines: async () => ["single-reviewer"],
+    });
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    try {
+      await wrapper.get('[data-testid="open-new-task"]').trigger("click");
+      // Wait for the resolved state rather than a fixed number of flushes: the
+      // modal has to leave its loading state deterministically, not eventually.
+      await waitForCondition(
+        () => !wrapper.find('[data-testid="task-options-loading"]').exists(),
+        20,
+      );
+
+      expect(wrapper.find('[data-testid="task-options-loading"]').exists()).toBe(false);
+      expect(wrapper.get('[data-testid="pipeline-value"]').text()).toBe("single-reviewer");
+      expect(wrapper.get('[data-testid="pipeline-toggle"]').attributes("disabled")).toBeUndefined();
+      expect(wrapper.get('[data-testid="base-branch-value"]').text()).toBe("origin/main");
+      expect(wrapper.get('[data-testid="base-branch-toggle"]').attributes("disabled")).toBeUndefined();
+
+      // Submit-ready: a prompt is all that stands between the operator and a
+      // create, and the create carries the sticky pipeline.
+      await wrapper.get("textarea").setValue("Ship the sticky pipeline");
+      expect(wrapper.get(".modal-overlay .btn-primary").attributes("disabled")).toBeUndefined();
+      await wrapper.get(".modal-overlay .btn-primary").trigger("click");
+      await flushPromises();
+
+      expect(store.createItem).toHaveBeenCalledWith(
+        "repo-1",
+        expect.any(String),
+        "Ship the sticky pipeline",
+        "pty",
+        expect.objectContaining({ pipelineName: "single-reviewer" }),
+      );
+    } finally {
+      wrapper.unmount();
+    }
   });
 
   it("keeps sidebar tasks visible and opens New Task with an error when definitions fail", async () => {

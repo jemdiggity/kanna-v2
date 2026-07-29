@@ -61,6 +61,7 @@ export interface DesktopServerClientHandlersForTests {
     agentSelector: string,
   ) => MaybePromise<DesktopRepoAgentDefinition>;
   fetchRepoAgentProviders?: (repoId: string) => MaybePromise<AgentProvider[]>;
+  fetchRepoRecentPipelines?: (repoId: string) => MaybePromise<string[]>;
   fetchRepoCommands?: (repoId: string) => MaybePromise<DesktopRepoCommandCatalog>;
   runRepoCommand?: (
     repoId: string,
@@ -351,6 +352,25 @@ export async function fetchDesktopRepoAgentProviders(repoId: string): Promise<Ag
     `/v1/repos/${encodeURIComponent(repoId)}/agent-providers`,
   );
   return response.providers.map(({ id }) => id).filter(isAgentProvider);
+}
+
+interface DesktopRepoRecentPipelinesResponse {
+  pipelines: string[];
+}
+
+/**
+ * Pipelines this repo's tasks were most recently created with, newest first.
+ * Derived from durable task rows, so it survives closed tasks, lost create
+ * responses, and restarts, and reads the same in every window.
+ */
+export async function fetchDesktopRepoRecentPipelines(repoId: string): Promise<string[]> {
+  if (clientHandlersForTests?.fetchRepoRecentPipelines) {
+    return await clientHandlersForTests.fetchRepoRecentPipelines(repoId);
+  }
+  const response = await requestJson<DesktopRepoRecentPipelinesResponse>(
+    `/v1/repos/${encodeURIComponent(repoId)}/recent-pipelines`,
+  );
+  return response.pipelines;
 }
 
 export interface DesktopSettingResponse {
