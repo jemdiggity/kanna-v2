@@ -115,10 +115,19 @@ enum Evt {
     },
     Ok,
     Error {
+        code: Option<ErrorCode>,
         message: String,
     },
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ErrorCode {
+    PtySpawnFailed,
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Deserialize)]
@@ -179,6 +188,7 @@ impl DaemonHandle {
 
         let mut command = Command::new(&daemon_bin);
         command.env("KANNA_DAEMON_DIR", dir.to_str().unwrap());
+        command.env_remove("KANNA_TEST_PTY_ENXIO_AFTER");
         if fake_recovery {
             command.env(
                 "KANNA_TERMINAL_RECOVERY_BIN",
@@ -392,6 +402,23 @@ fn wait_for_daemon_log(daemon: &DaemonHandle, needle: &str, timeout: Duration) {
         }
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn daemon_log_contents(daemon: &DaemonHandle) -> String {
+    std::fs::read_dir(&daemon._dir)
+        .expect("should read daemon data directory")
+        .flatten()
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "log")
+        })
+        .map(|entry| {
+            std::fs::read_to_string(entry.path()).expect("should read daemon log file as UTF-8")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 struct ClientConn {
@@ -691,7 +718,7 @@ fn expect_session_created_with_timeout(conn: &mut ClientConn, session_id: &str, 
             Ok(Evt::Output { .. }) | Ok(Evt::StatusChanged { .. }) | Ok(Evt::Exit { .. }) => {
                 continue;
             }
-            Ok(Evt::Error { message }) => panic!("spawn failed: {message}"),
+            Ok(Evt::Error { message, .. }) => panic!("spawn failed: {message}"),
             Ok(other) => panic!("expected SessionCreated, got: {:?}", other),
             Err(_) => continue,
         }
@@ -714,6 +741,74 @@ fn spawn_shell_session(conn: &mut ClientConn, session_id: &str, script: &str) {
         Evt::SessionCreated { session_id: sid } => assert_eq!(sid, session_id),
         other => panic!("expected SessionCreated, got: {:?}", other),
     }
+}
+
+#[test]
+fn pty_spawn_enxio_reports_live_daemon_occupancy() {
+    let daemon = DaemonHandle::start_with_env([("KANNA_TEST_PTY_ENXIO_AFTER", "1")]);
+    let mut conn = daemon.connect();
+    let live_session_id = "sess-live-before-enxio";
+    let failed_session_id = "sess-forced-enxio";
+
+    spawn_echo_session(&mut conn, live_session_id);
+
+    conn.send(&Cmd::List);
+    let sessions = expect_session_list_with_timeout(&mut conn, Duration::from_secs(5));
+    let live_pid = sessions
+        .iter()
+        .find(|session| session["session_id"] == live_session_id)
+        .and_then(|session| session["pid"].as_u64())
+        .expect("live PTY session should have a registry PID");
+
+    conn.send(&Cmd::Spawn {
+        session_id: failed_session_id.to_string(),
+        executable: "/bin/cat".to_string(),
+        args: vec![],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        terminal_prelude: None,
+    });
+
+    match conn.recv() {
+        Evt::Error {
+            code: Some(ErrorCode::PtySpawnFailed),
+            message,
+        } => assert!(
+            message.contains("failed to spawn PTY"),
+            "unexpected spawn error: {message}"
+        ),
+        other => panic!("expected PtySpawnFailed, got: {other:?}"),
+    }
+
+    let log_marker = format!("[pty-exhaustion] failed_session={failed_session_id}");
+    wait_for_daemon_log(&daemon, &log_marker, Duration::from_secs(5));
+    let logs = daemon_log_contents(&daemon);
+    let exhaustion_log = logs
+        .lines()
+        .find(|line| line.contains(&log_marker))
+        .expect("daemon log should contain the PTY exhaustion record");
+
+    assert!(
+        exhaustion_log.contains(&format!("daemon_pid={}", daemon.child.id())),
+        "exhaustion log should identify the daemon process: {exhaustion_log}"
+    );
+    assert!(
+        exhaustion_log.contains("open_master_count=1"),
+        "exhaustion log should count the live PTY master: {exhaustion_log}"
+    );
+
+    let attribution_prefix = format!("{live_session_id}(pid={live_pid},master_fd=");
+    let master_fd = exhaustion_log
+        .split_once(&attribution_prefix)
+        .and_then(|(_, suffix)| suffix.split_once(')'))
+        .and_then(|(fd, _)| fd.parse::<i32>().ok())
+        .expect("exhaustion log should attribute a numeric master fd to the live session");
+    assert!(
+        master_fd >= 0,
+        "exhaustion log should contain an open master fd: {exhaustion_log}"
+    );
 }
 
 #[test]
@@ -1190,7 +1285,7 @@ fn kill_session(conn: &mut ClientConn, session_id: &str) {
             Evt::Output { .. } => continue,
             Evt::StatusChanged { .. } => continue,
             Evt::Exit { .. } => continue,
-            Evt::Error { message } => panic!("kill failed: {}", message),
+            Evt::Error { message, .. } => panic!("kill failed: {}", message),
             other => panic!("expected Ok for kill, got: {:?}", other),
         }
     }
@@ -1206,7 +1301,7 @@ fn attach(conn: &mut ClientConn, session_id: &str) {
         Evt::Snapshot {
             session_id: sid, ..
         } => assert_eq!(sid, session_id),
-        Evt::Error { message } => panic!("attach failed: {}", message),
+        Evt::Error { message, .. } => panic!("attach failed: {}", message),
         other => panic!("expected Snapshot, got: {:?}", other),
     }
 }
@@ -1221,7 +1316,7 @@ fn attach_emulating_terminal(conn: &mut ClientConn, session_id: &str) {
         Evt::Snapshot {
             session_id: sid, ..
         } => assert_eq!(sid, session_id),
-        Evt::Error { message } => panic!("attach failed: {}", message),
+        Evt::Error { message, .. } => panic!("attach failed: {}", message),
         other => panic!("expected Snapshot, got: {:?}", other),
     }
 }
@@ -1247,7 +1342,7 @@ fn observe_snapshot(conn: &mut ClientConn, session_id: &str) -> SnapshotPayload 
             assert_eq!(sid, session_id);
             snapshot
         }
-        Evt::Error { message } => panic!("observe snapshot failed: {}", message),
+        Evt::Error { message, .. } => panic!("observe snapshot failed: {}", message),
         other => panic!(
             "expected Snapshot as the first observer event, got: {:?}",
             other
@@ -1270,7 +1365,7 @@ fn wait_for_ok(conn: &mut ClientConn, action: &str) {
             Evt::Ok => break,
             Evt::Output { .. } => continue,
             Evt::StatusChanged { .. } => continue,
-            Evt::Error { message } => panic!("{action} failed: {message}"),
+            Evt::Error { message, .. } => panic!("{action} failed: {message}"),
             other => panic!("expected Ok for {action}, got: {:?}", other),
         }
     }
@@ -1288,7 +1383,7 @@ fn wait_for_ok_with_timeout(conn: &mut ClientConn, action: &str, timeout: Durati
         match conn.recv_with_timeout(remaining.min(Duration::from_millis(50))) {
             Ok(Evt::Ok) => break,
             Ok(Evt::Output { .. }) | Ok(Evt::StatusChanged { .. }) => continue,
-            Ok(Evt::Error { message }) => panic!("{action} failed: {message}"),
+            Ok(Evt::Error { message, .. }) => panic!("{action} failed: {message}"),
             Ok(other) => panic!("expected Ok for {action}, got: {:?}", other),
             Err(_) => continue,
         }
@@ -1309,7 +1404,7 @@ fn attach_snapshot_and_capture(conn: &mut ClientConn, session_id: &str) -> Snaps
             assert_eq!(sid, session_id);
             snapshot
         }
-        Evt::Error { message } => panic!("attach snapshot failed: {}", message),
+        Evt::Error { message, .. } => panic!("attach snapshot failed: {}", message),
         other => panic!("expected Snapshot, got: {:?}", other),
     }
 }
@@ -1327,7 +1422,7 @@ fn request_snapshot(conn: &mut ClientConn, session_id: &str) -> SnapshotPayload 
             assert_eq!(sid, session_id);
             snapshot
         }
-        Evt::Error { message } => panic!("snapshot failed: {}", message),
+        Evt::Error { message, .. } => panic!("snapshot failed: {}", message),
         other => panic!("expected Snapshot, got: {:?}", other),
     }
 }
@@ -1410,7 +1505,7 @@ fn send_input(conn: &mut ClientConn, session_id: &str, data: &[u8]) {
             Evt::Ok => break,
             Evt::Output { .. } => continue,
             Evt::StatusChanged { .. } => continue,
-            Evt::Error { message } => panic!("input failed: {}", message),
+            Evt::Error { message, .. } => panic!("input failed: {}", message),
             other => panic!("expected Ok for input, got: {:?}", other),
         }
     }
@@ -1425,7 +1520,7 @@ fn expect_session_list_with_timeout(conn: &mut ClientConn, timeout: Duration) ->
         match conn.recv_with_timeout(remaining.min(Duration::from_millis(50))) {
             Ok(Evt::SessionList { sessions }) => return sessions,
             Ok(Evt::Output { .. }) | Ok(Evt::StatusChanged { .. }) => continue,
-            Ok(Evt::Error { message }) => panic!("list failed: {message}"),
+            Ok(Evt::Error { message, .. }) => panic!("list failed: {message}"),
             Ok(other) => panic!("expected SessionList, got: {:?}", other),
             Err(_) => continue,
         }
@@ -1731,7 +1826,7 @@ fn test_stale_reader_does_not_remove_respawned_session_with_same_id() {
             assert_eq!(session_id, "sess-respawn");
             snapshot.vt.contains("OLD_READY")
         }
-        Evt::Error { message } => panic!("attach failed: {message}"),
+        Evt::Error { message, .. } => panic!("attach failed: {message}"),
         other => panic!("expected Snapshot, got: {other:?}"),
     };
     if !old_ready_in_snapshot {
@@ -1759,7 +1854,7 @@ fn test_stale_reader_does_not_remove_respawned_session_with_same_id() {
             assert_eq!(session_id, "sess-respawn");
             snapshot.vt.contains("NEW_READY")
         }
-        Evt::Error { message } => panic!("attach failed: {message}"),
+        Evt::Error { message, .. } => panic!("attach failed: {message}"),
         other => panic!("expected Snapshot, got: {other:?}"),
     };
     if !ready_in_snapshot {

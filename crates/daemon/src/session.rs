@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Weak,
@@ -162,6 +163,50 @@ impl PendingInput {
 pub struct MirrorResult {
     pub status: Option<SessionStatus>,
     pub replies: Vec<Vec<u8>>,
+}
+
+/// One live PTY master, attributed to the session that owns it, for the
+/// exhaustion diagnostics logged when `openpty` reports `ENXIO`.
+#[derive(Debug, Eq, PartialEq)]
+pub struct PtyMasterAttribution {
+    pub session_id: String,
+    pub child_pid: u32,
+    pub master_fd: std::os::fd::RawFd,
+}
+
+/// Every PTY master this daemon currently holds, in a stable order, so an
+/// exhaustion log line names which sessions occupy the host pool.
+#[derive(Debug, Eq, PartialEq)]
+pub struct PtyOccupancySnapshot {
+    sessions: Vec<PtyMasterAttribution>,
+}
+
+impl PtyOccupancySnapshot {
+    pub fn new(mut sessions: Vec<PtyMasterAttribution>) -> Self {
+        sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        Self { sessions }
+    }
+}
+
+impl fmt::Display for PtyOccupancySnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "open_master_count={} sessions=[",
+            self.sessions.len()
+        )?;
+        for (index, session) in self.sessions.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(", ")?;
+            }
+            write!(
+                formatter,
+                "{}(pid={},master_fd={})",
+                session.session_id, session.child_pid, session.master_fd
+            )?;
+        }
+        formatter.write_str("]")
+    }
 }
 
 pub struct SessionHandle {
@@ -456,6 +501,15 @@ impl SessionHandle {
 
     pub async fn try_wait(&self) -> Option<i32> {
         self.pty.lock().await.try_wait()
+    }
+
+    pub async fn pty_master_attribution(&self, session_id: String) -> PtyMasterAttribution {
+        let pty = self.pty.lock().await;
+        PtyMasterAttribution {
+            session_id,
+            child_pid: pty.pid(),
+            master_fd: pty.master_raw_fd(),
+        }
     }
 
     pub async fn info(&self, session_id: String) -> SessionInfo {
@@ -870,6 +924,16 @@ pub mod test_support {
     }
 }
 
+/// Attribute every live PTY master to its session for exhaustion diagnostics.
+pub async fn pty_occupancy_snapshot(sessions: &Arc<Mutex<SessionManager>>) -> PtyOccupancySnapshot {
+    let handles = sessions.lock().await.handles();
+    let mut attribution = Vec::with_capacity(handles.len());
+    for (session_id, session) in handles {
+        attribution.push(session.pty_master_attribution(session_id).await);
+    }
+    PtyOccupancySnapshot::new(attribution)
+}
+
 fn status_detection_throttle() -> Duration {
     Duration::from_millis(STATUS_DETECTION_THROTTLE_MS)
 }
@@ -960,8 +1024,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        replay_headless_terminal_for_benchmark, BenchmarkStatusState, SessionHandle,
-        SessionManager, SessionRecord, StreamControl,
+        replay_headless_terminal_for_benchmark, BenchmarkStatusState, PtyMasterAttribution,
+        PtyOccupancySnapshot, SessionHandle, SessionManager, SessionRecord, StreamControl,
     };
     use crate::bench::transcript::{BenchmarkMode, BenchmarkProvider, TranscriptSpec};
     use crate::headless_terminal::{initial_session_status, HeadlessTerminal};
@@ -1270,5 +1334,26 @@ mod tests {
             SessionStatus::Busy | SessionStatus::Idle
         ));
         assert!(state.status_observed);
+    }
+
+    #[test]
+    fn pty_exhaustion_occupancy_is_sorted_and_attributed() {
+        let snapshot = PtyOccupancySnapshot::new(vec![
+            PtyMasterAttribution {
+                session_id: "zeta".to_string(),
+                child_pid: 42,
+                master_fd: 12,
+            },
+            PtyMasterAttribution {
+                session_id: "alpha".to_string(),
+                child_pid: 7,
+                master_fd: 9,
+            },
+        ]);
+
+        assert_eq!(
+            snapshot.to_string(),
+            "open_master_count=2 sessions=[alpha(pid=7,master_fd=9), zeta(pid=42,master_fd=12)]"
+        );
     }
 }
