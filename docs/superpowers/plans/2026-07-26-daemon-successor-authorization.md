@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Auto-select `superpowers:subagent-driven-development` or `superpowers:executing-plans` based on task coupling, subagent availability, and whether execution should stay in the current session. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Authorize only an app-spawned successor daemon before the sender allocates a handoff owner token, seals registries, snapshots sessions, writes metadata, or transfers descriptors.
+**Goal:** Authorize only an app-spawned successor daemon before the sender acquires daemon-lifecycle ownership, seals registries, snapshots sessions, writes metadata, or transfers descriptors.
 
-**Architecture:** Capture the sender's daemon executable path and trusted launcher executable path from kernel process metadata at startup. A focused authorizer pins the connected peer and its live direct parent by PID/start time, validates both executable paths, and rechecks identity and paths immediately before returning an unforgeable authorization result. The existing transactional handoff consumes that result before owner-token allocation and otherwise remains unchanged.
+**Architecture:** Capture the sender's daemon executable path and trusted launcher executable path from kernel process metadata at startup. A focused authorizer pins the connected peer and its live direct parent by PID/start time, validates both executable paths, and rechecks identity and paths immediately before returning an unforgeable authorization result. The existing transactional-v3 handoff consumes that result before its daemon-lifecycle write guard and otherwise remains unchanged.
 
 **Tech Stack:** Rust 2021, Tokio Unix sockets, macOS `libproc` process inspection, Linux `/proc` fallback, serde NDJSON protocol, real-process daemon integration tests.
 
@@ -17,11 +17,11 @@
 - Modify `crates/daemon/src/main.rs`: register the focused authorization module.
 - Modify `crates/daemon/src/startup.rs`: capture the launcher trust root before attempting receiver-side handoff and share it with accepted connections.
 - Modify `crates/daemon/src/connection.rs`: carry the authorization policy into `handle_handoff`.
-- Modify `crates/daemon/src/handoff.rs`: validate supported versions, authorize the peer, and only then allocate the existing owner token and seal registries.
+- Modify `crates/daemon/src/handoff.rs`: validate supported versions, authorize the peer, and only then acquire the existing daemon-lifecycle write guard and seal registries.
 - Modify `crates/daemon/src/protocol.rs`: add a specific `handoff_unauthorized` error code without changing the `Handoff` command shape or version.
 - Modify `crates/daemon/src/tests.rs`: cover process lookup and deterministic authorization/recheck behavior where shared crate tests are the established home.
 - Modify `crates/daemon/tests/handoff.rs`: prove an ordinary client gets no metadata or descriptors and leaves lifecycle operations usable; retain successful real replacement and compatibility coverage.
-- Modify `crates/daemon/SPEC.md` and `CLAUDE.md`: document sender-side successor authorization and the preserved rolling/dev topology.
+- Modify `crates/daemon/SPEC.md` and `AGENTS.md`: document sender-side successor authorization and the preserved rolling/dev topology.
 
 ### Task 1: Kernel-Derived Executable Paths
 
@@ -271,7 +271,7 @@ successor:
 fn denied_successor_never_enters_handoff_transaction() {
     let transaction_entries = Cell::new(0);
     let result = authorize_supported_handoff(
-        HANDOFF_VERSION,
+        protocol::HANDOFF_PROTOCOL_VERSION,
         || Err(AuthorizationError::PeerExecutableMismatch),
         |_| transaction_entries.set(transaction_entries.get() + 1),
     );
@@ -282,8 +282,8 @@ fn denied_successor_never_enters_handoff_transaction() {
 ```
 
 The production helper returns `AuthorizedSuccessor`; only the success branch
-can continue to owner-token allocation. Keep version mismatch handling before
-authorization because it discloses no session state.
+can continue to daemon-lifecycle ownership acquisition. Keep version mismatch
+handling before authorization because it discloses no session state.
 
 - [ ] **Step 2: Run the boundary test and verify it fails**
 
@@ -390,7 +390,7 @@ git commit -m "fix(daemon): authorize successor before handoff transaction"
 
 **Files:**
 - Modify: `crates/daemon/SPEC.md`
-- Modify: `CLAUDE.md`
+- Modify: `AGENTS.md`
 
 - [ ] **Step 1: Update protocol and invariant documentation**
 
@@ -398,7 +398,7 @@ Document:
 
 - sender-side peer/parent executable provenance authorization;
 - startup capture of the launcher path before reparenting;
-- supported-version authorization before owner-token allocation;
+- supported-version authorization before daemon-lifecycle ownership;
 - fail-closed refusal before seals, metadata, or descriptors;
 - unchanged receiver-side old-daemon identity recheck;
 - unchanged `Handoff` wire shape and rolling/dev compatibility.
@@ -430,7 +430,7 @@ Expected: the canonical Rust suite passes with zero failures.
 - [ ] **Step 4: Commit documentation**
 
 ```bash
-git add crates/daemon/SPEC.md CLAUDE.md
+git add crates/daemon/SPEC.md AGENTS.md
 git commit -m "docs(daemon): specify successor authorization"
 ```
 
@@ -440,8 +440,8 @@ Run:
 
 ```bash
 git status --short
-git diff 22b99f4c3805e7c0477dc5155ffb0d680c159feb..HEAD --check
-git log --oneline 22b99f4c3805e7c0477dc5155ffb0d680c159feb..HEAD
+git diff origin/main..HEAD --check
+git log --oneline origin/main..HEAD
 ```
 
 Expected: clean worktree, no whitespace errors, and only the design, plan,

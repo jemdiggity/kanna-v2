@@ -4,20 +4,20 @@
 
 The daemon's Unix socket is a multipurpose local API. An ordinary client can
 currently send `Handoff` and reach the transactional transfer path. On the
-sending daemon, that path acquires a single-flight owner token, seals the PTY
-and agent registries, snapshots every session, writes `HandoffReady`, transfers
+sending daemon, that path acquires the daemon-lifecycle write guard, seals PTY
+mutation around the PTY and agent snapshot, writes `HandoffReady`, transfers
 PTY masters and agent pipes with `SCM_RIGHTS`, and commits when the receiver
 acknowledges adoption.
 
 Socket access is not sufficient authority for those operations. The sender must
-authenticate a replacement daemon before it acquires the handoff owner token or
+authenticate a replacement daemon before it acquires lifecycle ownership or
 touches either registry.
 
-This change is based on transactional handoff commit
-`22b99f4c3805e7c0477dc5155ffb0d680c159feb`. It preserves that implementation's
-single-flight owner token, seal epochs, abort behavior, and receiver-side
-old-daemon PID/start-time recheck. Descriptor provenance validation and
-`SCM_RIGHTS` framing are outside this change.
+The implementation is rebased onto main's transactional-v3 handoff at
+`7add2d0727d2511f06e3188d87a90ec22d6710e5`. It preserves the existing
+daemon-lifecycle ownership fence, PTY seal epoch, commit/abort behavior, and
+receiver-side old-daemon PID/start-time recheck. Descriptor provenance
+validation and `SCM_RIGHTS` framing are outside this change.
 
 ## Trust Root
 
@@ -61,9 +61,9 @@ request, the sender performs these checks in order:
    the peer must still be the same live PID/start identity with the same direct
    parent PID, and the parent must still be the same live PID/start identity.
 
-Only after all six checks succeed may `handle_handoff` allocate its owner token
-and call `try_seal_for_handoff`. The authorization policy does not reserve,
-seal, snapshot, clone, or transfer anything itself.
+Only after all six checks succeed may `handle_handoff` acquire the
+daemon-lifecycle write guard and call `seal_for_handoff`. The authorization
+policy does not reserve, seal, snapshot, clone, or transfer anything itself.
 
 An unsupported protocol version may still receive the existing version error
 without exposing session state. A supported request with failed authorization
@@ -78,7 +78,7 @@ recheck failure is a closed failure.
 
 On failure:
 
-- no handoff owner token is allocated;
+- no daemon-lifecycle ownership is acquired;
 - neither registry is sealed;
 - no session snapshot or descriptor clone is attempted;
 - no `HandoffReady` event is written;
@@ -137,7 +137,7 @@ shares the policy with connection handlers. `handle_connection` authorizes a
 supported `Handoff` before calling `handle_handoff`.
 
 `handle_handoff` retains ownership of the existing version validation,
-single-flight owner token, registry seals, snapshot, descriptor transfer,
+daemon-lifecycle fencing, registry seal, snapshot, descriptor transfer,
 acknowledgement, and commit/abort transaction.
 
 ## Tests
@@ -160,4 +160,4 @@ levels:
    proving the app/test-launcher direct-parent topology remains authorized and
    sessions survive upgrades.
 7. Compatibility coverage confirms the request wire shape remains unchanged;
-  no capability field or protocol-version bump is introduced.
+   no capability field or protocol-version bump is introduced.

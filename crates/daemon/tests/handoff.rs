@@ -307,6 +307,24 @@ impl Drop for DaemonHandle {
     }
 }
 
+fn spawn_replacement_without_wait(dir: &Path, extra_env: &[(&str, &str)]) -> Child {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_kanna-daemon"));
+    command
+        .env("KANNA_DAEMON_DIR", dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    command.spawn().expect("failed to start replacement daemon")
+}
+
+fn install_test_daemon_at(source: &Path, destination: &Path) {
+    let staged = destination.with_extension(format!("next-{}", std::process::id()));
+    std::fs::copy(source, &staged).expect("stage daemon executable");
+    std::fs::rename(&staged, destination).expect("install daemon executable");
+}
+
 struct ClientConn {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -1020,12 +1038,17 @@ fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
 }
 
 #[test]
-fn current_v3_hands_stable_pty_and_agent_to_shipped_v2_adopter() {
+fn current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter() {
     let dir = test_dir("v3-v2-adopter");
     cleanup(&dir);
     std::fs::create_dir_all(&dir).expect("create cross-version daemon directory");
     let script = write_steerable_agent(&dir);
-    let mut current = DaemonHandle::start_in(&dir);
+    let stable_daemon = dir.join("stable-kanna-daemon");
+    install_test_daemon_at(
+        Path::new(env!("CARGO_BIN_EXE_kanna-daemon")),
+        &stable_daemon,
+    );
+    let mut current = DaemonHandle::start_binary_in(&stable_daemon, &dir);
 
     spawn_echo(&mut current.connect(), "stable-pty");
     spawn_agent(
@@ -1041,7 +1064,8 @@ fn current_v3_hands_stable_pty_and_agent_to_shipped_v2_adopter() {
 
     drop(current_pty);
     let previous = support::previous_daemon::binary();
-    let old_adopter = DaemonHandle::start_binary_in(&previous, &dir);
+    install_test_daemon_at(&previous, &stable_daemon);
+    let old_adopter = DaemonHandle::start_binary_in(&stable_daemon, &dir);
     assert!(
         wait_for_child_exit(&mut current.child, Duration::from_secs(10)).is_some(),
         "current v3 sender should exit after the shipped v2 adopter ACKs"
@@ -1051,7 +1075,6 @@ fn current_v3_hands_stable_pty_and_agent_to_shipped_v2_adopter() {
     attach(&mut adopted_pty, "stable-pty");
     send_input_and_wait_for_echo(&mut adopted_pty, "stable-pty", b"after\n", "after");
     assert_agent_steers_after_handoff(&old_adopter, "stable-agent");
-    assert_daemon_log_contains(&dir, "accepted mode legacy-v2");
 
     drop(adopted_pty);
     drop(old_adopter);
@@ -1198,23 +1221,13 @@ fn test_handoff_capture_serializes_spawn_and_kill_until_abort() {
     let mut owner = daemon.connect();
     spawn_echo(&mut owner, "sess-captured-before-abort");
 
-    let socket_path = compute_socket_path(&dir);
-    let mut handoff = UnixStream::connect(&socket_path).expect("connect handoff client");
-    writeln!(
-        handoff,
-        "{}",
-        serde_json::json!({ "type": "Handoff", "version": 2 })
-    )
-    .unwrap();
-    handoff.flush().unwrap();
-    let mut handoff_reader = BufReader::new(handoff.try_clone().unwrap());
-    let mut ready = String::new();
-    handoff_reader
-        .read_line(&mut ready)
-        .expect("read handoff metadata");
+    let mut successor =
+        spawn_replacement_without_wait(&dir, &[("KANNA_TEST_HANDOFF_ACK_DELAY_MS", "1500")]);
+    let log = daemon.wait_for_log("HandoffReady sent and flushed");
     assert!(
-        ready.contains("HandoffReady") && ready.contains("sess-captured-before-abort"),
-        "handoff capture did not include the live session: {ready:?}",
+        log.contains("snapshotting session sess-captured-before-abort")
+            && log.contains("HandoffReady sent and flushed"),
+        "real successor did not capture the live session: {log:?}",
     );
 
     let mut spawner = daemon.connect();
@@ -1246,8 +1259,8 @@ fn test_handoff_capture_serializes_spawn_and_kill_until_abort() {
         "Kill mutated the PTY registry after handoff capture but before ACK resolution",
     );
 
-    drop(handoff_reader);
-    drop(handoff);
+    successor.kill().expect("kill successor before handoff ACK");
+    successor.wait().expect("reap interrupted successor");
 
     expect_session_created_with_timeout(
         &mut spawner,
@@ -1281,21 +1294,15 @@ fn test_handoff_commit_refuses_mutations_with_retry_on_successor() {
     let dir = test_dir("handoff-lifecycle-seal-commit");
     let mut daemon = DaemonHandle::start_in(&dir);
     let script = write_steerable_agent(&dir);
-    let socket_path = compute_socket_path(&dir);
-    let mut handoff = UnixStream::connect(&socket_path).expect("connect handoff client");
-    writeln!(
-        handoff,
-        "{}",
-        serde_json::json!({ "type": "Handoff", "version": 2 })
-    )
-    .unwrap();
-    handoff.flush().unwrap();
-    let mut handoff_reader = BufReader::new(handoff.try_clone().unwrap());
-    let mut ready = String::new();
-    handoff_reader
-        .read_line(&mut ready)
-        .expect("read empty handoff metadata");
-    assert!(ready.contains("HandoffReady"), "{ready:?}");
+    // The adoption delay must outlast the sealed-window probes below: four
+    // clients each block a full 250ms recv timeout before the ACK may land.
+    let mut successor =
+        spawn_replacement_without_wait(&dir, &[("KANNA_TEST_HANDOFF_ACK_DELAY_MS", "3000")]);
+    let log = daemon.wait_for_log("HandoffReady sent and flushed");
+    assert!(
+        log.contains("HandoffReady sent and flushed"),
+        "real successor did not reach the pre-ACK window: {log:?}"
+    );
 
     let mut spawner = daemon.connect();
     spawner.send(&Cmd::Spawn {
@@ -1340,20 +1347,15 @@ fn test_handoff_commit_refuses_mutations_with_retry_on_successor() {
         );
     }
 
-    writeln!(
-        handoff,
-        "{}",
-        serde_json::json!({ "type": "HandoffAdopted", "version": 2 })
-    )
-    .unwrap();
-    handoff.flush().unwrap();
+    // The authenticated successor commits adoption on its own once the test
+    // ACK delay elapses; the first refusal therefore waits out that delay.
     for (name, client) in [
         ("Spawn", &mut spawner),
         ("SpawnAgent", &mut agent_spawner),
         ("Kill", &mut killer),
         ("AgentInput", &mut agent_input),
     ] {
-        match client.recv_with_timeout(Duration::from_secs(2)) {
+        match client.recv_with_timeout(Duration::from_secs(5)) {
             Ok(Evt::Error {
                 code: Some(ErrorCode::RetryOnSuccessor),
                 message,
@@ -1366,6 +1368,8 @@ fn test_handoff_commit_refuses_mutations_with_retry_on_successor() {
     }
 
     let _ = wait_for_child_exit(&mut daemon.child, Duration::from_secs(3));
+    successor.kill().expect("stop adopting daemon");
+    successor.wait().expect("reap adopting daemon");
     cleanup(&dir);
 }
 

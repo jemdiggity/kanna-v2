@@ -2,7 +2,7 @@ use std::fmt;
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 
-use crate::proc_info::{ProcessIdentity, ProcessInfo};
+use crate::proc_info::{ProcessInfo, StartTime};
 
 trait ProcessLookup {
     fn socket_peer_pid(&self, socket_fd: RawFd) -> Option<libc::pid_t>;
@@ -34,8 +34,15 @@ pub(crate) struct SuccessorAuthorizer {
 
 #[derive(Debug)]
 pub(crate) struct AuthorizedSuccessor {
-    pub(crate) peer: ProcessIdentity,
-    pub(crate) parent: ProcessIdentity,
+    pub(crate) peer: PinnedProcessIdentity,
+    pub(crate) parent: PinnedProcessIdentity,
+}
+
+#[derive(Debug)]
+pub(crate) struct PinnedProcessIdentity {
+    pub(crate) pid: libc::pid_t,
+    #[allow(dead_code)]
+    pub(crate) start: StartTime,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -297,11 +304,11 @@ impl SuccessorAuthorizer {
         }
 
         Ok(AuthorizedSuccessor {
-            peer: ProcessIdentity {
+            peer: PinnedProcessIdentity {
                 pid: peer.pid,
                 start: peer.start,
             },
-            parent: ProcessIdentity {
+            parent: PinnedProcessIdentity {
                 pid: parent.pid,
                 start: parent.start,
             },
