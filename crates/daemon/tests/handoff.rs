@@ -95,6 +95,7 @@ enum ErrorCode {
     AgentSpawnFailed,
     NotAgentSession,
     UnknownPermissionRequest,
+    RetryOnSuccessor,
 }
 
 #[allow(dead_code)]
@@ -1162,9 +1163,10 @@ fn test_handoff_capture_serializes_spawn_and_kill_until_abort() {
 }
 
 #[test]
-fn test_handoff_commit_refuses_mutation_for_retry_on_adopting_daemon() {
+fn test_handoff_commit_refuses_mutations_with_retry_on_successor() {
     let dir = test_dir("handoff-lifecycle-seal-commit");
     let mut daemon = DaemonHandle::start_in(&dir);
+    let script = write_steerable_agent(&dir);
     let socket_path = compute_socket_path(&dir);
     let mut handoff = UnixStream::connect(&socket_path).expect("connect handoff client");
     writeln!(
@@ -1192,12 +1194,37 @@ fn test_handoff_commit_refuses_mutation_for_retry_on_adopting_daemon() {
         rows: 24,
         agent_provider: None,
     });
-    assert!(
-        spawner
-            .recv_with_timeout(Duration::from_millis(250))
-            .is_err(),
-        "Spawn escaped before handoff ACK",
-    );
+
+    let mut agent_spawner = daemon.connect();
+    agent_spawner.send(&Cmd::SpawnAgent {
+        session_id: "agent-must-retry-after-commit".to_string(),
+        params: agent_params(&script, "must not spawn on the old daemon"),
+    });
+
+    let mut killer = daemon.connect();
+    killer.send(&Cmd::Kill {
+        session_id: "kill-must-retry-after-commit".to_string(),
+    });
+
+    let mut agent_input = daemon.connect();
+    agent_input.send(&Cmd::AgentInput {
+        session_id: "input-must-retry-after-commit".to_string(),
+        text: "must not reach the old daemon".to_string(),
+    });
+
+    for (name, client) in [
+        ("Spawn", &mut spawner),
+        ("SpawnAgent", &mut agent_spawner),
+        ("Kill", &mut killer),
+        ("AgentInput", &mut agent_input),
+    ] {
+        assert!(
+            client
+                .recv_with_timeout(Duration::from_millis(250))
+                .is_err(),
+            "{name} escaped before handoff ACK",
+        );
+    }
 
     writeln!(
         handoff,
@@ -1206,15 +1233,162 @@ fn test_handoff_commit_refuses_mutation_for_retry_on_adopting_daemon() {
     )
     .unwrap();
     handoff.flush().unwrap();
-    match spawner.recv_with_timeout(Duration::from_secs(2)) {
-        Ok(Evt::Error {
-            code: None,
-            message,
-        }) => assert!(message.contains("retry against the adopting daemon")),
-        other => panic!("committed handoff mutation was not retryably refused: {other:?}"),
+    for (name, client) in [
+        ("Spawn", &mut spawner),
+        ("SpawnAgent", &mut agent_spawner),
+        ("Kill", &mut killer),
+        ("AgentInput", &mut agent_input),
+    ] {
+        match client.recv_with_timeout(Duration::from_secs(2)) {
+            Ok(Evt::Error {
+                code: Some(ErrorCode::RetryOnSuccessor),
+                message,
+            }) => assert!(
+                message.contains("retry against the adopting daemon"),
+                "{name} returned the right code with the wrong guidance: {message}",
+            ),
+            other => panic!("{name} was not refused with retry_on_successor: {other:?}"),
+        }
     }
 
     let _ = wait_for_child_exit(&mut daemon.child, Duration::from_secs(3));
+    cleanup(&dir);
+}
+
+#[test]
+fn retry_on_successor_creates_one_session_and_publishes_one_killed_exit() {
+    let dir = test_dir("handoff-retry-idempotency");
+    let mut old = DaemonHandle::start_in(&dir);
+    spawn_echo(&mut old.connect(), "adopted-then-killed");
+
+    // Open command sockets while they still resolve to the incumbent.
+    let mut refused_spawn = old.connect();
+    let mut refused_kill = old.connect();
+    let spawn = Cmd::Spawn {
+        session_id: "spawned-on-successor".to_string(),
+        executable: "/bin/cat".to_string(),
+        args: Vec::new(),
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        agent_provider: None,
+    };
+    let kill = Cmd::Kill {
+        session_id: "adopted-then-killed".to_string(),
+    };
+
+    let successor_dir = dir.clone();
+    let successor_start = std::thread::spawn(move || {
+        DaemonHandle::start_in_with_env(
+            &successor_dir,
+            &[("KANNA_TEST_HANDOFF_ACK_DELAY_MS", "750")],
+        )
+    });
+    wait_for_daemon_log_contains(
+        &dir,
+        "TEST HOOK: delaying adoption acknowledgement",
+        Duration::from_secs(5),
+    );
+
+    refused_spawn.send(&spawn);
+    refused_kill.send(&kill);
+    assert!(
+        refused_spawn
+            .recv_with_timeout(Duration::from_millis(200))
+            .is_err(),
+        "Spawn must remain fenced until adoption commits"
+    );
+    assert!(
+        refused_kill
+            .recv_with_timeout(Duration::from_millis(200))
+            .is_err(),
+        "Kill must remain fenced until adoption commits"
+    );
+
+    let successor = successor_start.join().expect("successor start");
+    for (name, client) in [("Spawn", &mut refused_spawn), ("Kill", &mut refused_kill)] {
+        let response = client.recv();
+        assert!(
+            matches!(
+                response,
+                Evt::Error {
+                    code: Some(ErrorCode::RetryOnSuccessor),
+                    ..
+                }
+            ),
+            "{name} must be explicitly retryable, got {response:?}"
+        );
+    }
+    assert!(
+        wait_for_child_exit(&mut old.child, Duration::from_secs(5)).is_some(),
+        "incumbent must exit after committed handoff"
+    );
+
+    let mut events = successor.connect();
+    events.send(&Cmd::Subscribe);
+    assert!(matches!(events.recv(), Evt::Ok));
+
+    let mut successor_commands = successor.connect();
+    successor_commands.send(&spawn);
+    expect_session_created_with_timeout(
+        &mut successor_commands,
+        "spawned-on-successor",
+        Duration::from_secs(2),
+    );
+    successor_commands.send(&kill);
+    assert!(matches!(successor_commands.recv(), Evt::Ok));
+
+    successor_commands.send(&Cmd::List);
+    let sessions = match successor_commands.recv() {
+        Evt::SessionList { sessions } => sessions,
+        other => panic!("expected SessionList, got {other:?}"),
+    };
+    assert_eq!(
+        sessions
+            .iter()
+            .filter(|session| session["session_id"] == "spawned-on-successor")
+            .count(),
+        1,
+        "the retried Spawn must create exactly one session"
+    );
+    assert!(
+        sessions
+            .iter()
+            .all(|session| session["session_id"] != "adopted-then-killed"),
+        "the retried Kill must remove the adopted incarnation"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut created = 0;
+    let mut exits = 0;
+    while Instant::now() < deadline && (created == 0 || exits == 0) {
+        match events.recv_with_timeout(Duration::from_millis(200)) {
+            Ok(Evt::SessionCreated { session_id }) if session_id == "spawned-on-successor" => {
+                created += 1;
+            }
+            Ok(Evt::Exit { session_id, .. }) if session_id == "adopted-then-killed" => {
+                exits += 1;
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
+    while let Ok(event) = events.recv_with_timeout(Duration::from_millis(200)) {
+        match event {
+            Evt::SessionCreated { session_id } if session_id == "spawned-on-successor" => {
+                created += 1;
+            }
+            Evt::Exit { session_id, .. } if session_id == "adopted-then-killed" => {
+                exits += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(created, 1, "SessionCreated must be published once");
+    assert_eq!(exits, 1, "the successful Kill must publish one Exit");
+
+    drop(successor);
+    drop(old);
     cleanup(&dir);
 }
 

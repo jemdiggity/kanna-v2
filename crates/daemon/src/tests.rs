@@ -1170,6 +1170,46 @@ async fn concurrent_spawn_agent_creates_exactly_one_session() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The agent registry seal is a defensive pre-side-effect fence beneath the
+/// daemon lifecycle lock. If it rejects SpawnAgent, the caller can safely
+/// replay the unchanged command against the published successor.
+#[tokio::test]
+async fn sealed_spawn_agent_is_retryable_on_successor_without_reserving_the_id() {
+    let _serial = crate::agent_runtime::seal_test_serializer().lock().await;
+    let dir = temp_daemon_dir("sealed-agent-spawn");
+    let agents: kanna_daemon::agent::AgentSessions = Arc::new(Mutex::new(Default::default()));
+    let (broadcast_tx, _rx) = tokio::sync::broadcast::channel(16);
+    let daemon_lifecycle = crate::daemon_lifecycle::new_daemon_lifecycle();
+    let (writer, mut reader) = agent_client_writer();
+    let seal = crate::agent_runtime::AgentHandoffSealGuard::arm();
+
+    crate::agent_runtime::handle_spawn_agent(
+        "sealed-spawn".to_string(),
+        sleeper_spawn_params("sealed-spawn"),
+        writer,
+        broadcast_tx,
+        agents.clone(),
+        dir.clone(),
+        daemon_lifecycle,
+    )
+    .await;
+
+    assert!(matches!(
+        read_reply(&mut reader).await,
+        Event::Error {
+            code: Some(protocol::ErrorCode::RetryOnSuccessor),
+            ..
+        }
+    ));
+    assert!(
+        !agents.lock().await.contains_key("sealed-spawn"),
+        "a retryable refusal must occur before reserving or spawning"
+    );
+
+    drop(seal);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Create/kill interleaving at the exact race point: the session is killed
 /// while its initial spawn is in flight (reservation present, install not
 /// yet). The installer must clean up the spawned loser instead of resurrecting

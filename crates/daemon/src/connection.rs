@@ -321,7 +321,7 @@ pub(crate) async fn handle_command(
             let daemon_lifecycle_guard = daemon_lifecycle.read().await;
             if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
                 let evt = error_event(
-                    None,
+                    Some(protocol::ErrorCode::RetryOnSuccessor),
                     "daemon handoff already committed; retry against the adopting daemon",
                 );
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
@@ -903,7 +903,7 @@ pub(crate) async fn handle_command(
             let daemon_lifecycle_guard = daemon_lifecycle.read().await;
             if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
                 let evt = error_event(
-                    None,
+                    Some(protocol::ErrorCode::RetryOnSuccessor),
                     "daemon handoff already committed; retry against the adopting daemon",
                 );
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
@@ -933,7 +933,7 @@ pub(crate) async fn handle_command(
                             session_id
                         );
                         let evt = error_event(
-                            Some(protocol::ErrorCode::HandoffLost),
+                            Some(protocol::ErrorCode::RetryOnSuccessor),
                             format!(
                                 "daemon handoff in progress; retry killing session {session_id} against the new daemon"
                             ),
@@ -986,7 +986,7 @@ pub(crate) async fn handle_command(
                         session_id
                     );
                     let evt = error_event(
-                        Some(protocol::ErrorCode::HandoffLost),
+                        Some(protocol::ErrorCode::RetryOnSuccessor),
                         format!(
                             "daemon handoff in progress; retry killing session {session_id} against the new daemon"
                         ),
@@ -1198,7 +1198,7 @@ pub(crate) async fn handle_command(
             let daemon_lifecycle_guard = daemon_lifecycle.read().await;
             if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
                 let evt = error_event(
-                    None,
+                    Some(protocol::ErrorCode::RetryOnSuccessor),
                     "daemon handoff already committed; retry against the adopting daemon",
                 );
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
@@ -1227,7 +1227,7 @@ pub(crate) async fn handle_command(
             let daemon_lifecycle_guard = daemon_lifecycle.read().await;
             if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
                 let evt = error_event(
-                    None,
+                    Some(protocol::ErrorCode::RetryOnSuccessor),
                     "daemon handoff already committed; retry against the adopting daemon",
                 );
                 let _ = write_event(&mut *writer.lock().await, &evt).await;

@@ -249,6 +249,19 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn post_spawn_install_failures_are_not_safe_for_successor_replay() {
+        for operation in ["initial", "resumed"] {
+            assert!(matches!(
+                commands::post_spawn_install_failure("agent-1", operation),
+                Event::Error {
+                    code: Some(protocol::ErrorCode::AgentSpawnFailed),
+                    ..
+                }
+            ));
+        }
+    }
+
     #[tokio::test]
     async fn terminal_exit_becomes_published_only_after_all_delivery_steps() {
         let data_dir =

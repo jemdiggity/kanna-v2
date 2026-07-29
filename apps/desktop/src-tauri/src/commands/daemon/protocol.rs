@@ -91,18 +91,35 @@ pub(super) fn parse_ack(response: &str) -> Result<(), DaemonCommandError> {
     }
 }
 
+pub(super) fn parse_session_created(response: &str) -> Result<(), DaemonCommandError> {
+    let event: serde_json::Value =
+        serde_json::from_str(response).map_err(|error| DaemonCommandError {
+            message: format!("bad response: {error}"),
+            code: None,
+        })?;
+    match event.get("type").and_then(|event_type| event_type.as_str()) {
+        Some("SessionCreated") => Ok(()),
+        Some("Error") => Err(parse_error_event(&event)),
+        _ => Err(DaemonCommandError {
+            message: format!("unexpected spawn response: {response}"),
+            code: Some(UNEXPECTED_ACK_EVENT_CODE.to_string()),
+        }),
+    }
+}
+
 pub(super) fn is_retryable_command_error(error: &DaemonCommandError) -> bool {
-    error.message.starts_with("failed to write command:")
-        || error.message.starts_with("failed to flush command:")
-        || error
-            .message
-            .starts_with("failed to connect to daemon socket:")
-        || error.message == "daemon client unavailable"
+    error.code.as_deref() == Some("retry_on_successor")
 }
 
 pub(super) fn should_clear_daemon_client_after_error(error: &DaemonCommandError) -> bool {
     error.code.as_deref() == Some(UNEXPECTED_ACK_EVENT_CODE)
         || is_retryable_command_error(error)
+        || error.message.starts_with("failed to write command:")
+        || error.message.starts_with("failed to flush command:")
+        || error
+            .message
+            .starts_with("failed to connect to daemon socket:")
+        || error.message == "daemon client unavailable"
         || error.message.starts_with("failed to read event:")
         || error.message == "connection closed by daemon"
 }
@@ -253,10 +270,21 @@ mod tests {
     }
 
     #[test]
-    fn stale_write_failures_are_retried_after_reconnect() {
+    fn ambiguous_write_failures_are_not_retried() {
         let error = DaemonCommandError {
             message: "failed to write command: Broken pipe (os error 32)".to_string(),
             code: None,
+        };
+
+        assert!(!is_retryable_command_error(&error));
+        assert!(should_clear_daemon_client_after_error(&error));
+    }
+
+    #[test]
+    fn only_explicit_pre_side_effect_refusals_retry_on_successor() {
+        let error = DaemonCommandError {
+            message: "retry against the adopting daemon".to_string(),
+            code: Some("retry_on_successor".to_string()),
         };
 
         assert!(is_retryable_command_error(&error));
