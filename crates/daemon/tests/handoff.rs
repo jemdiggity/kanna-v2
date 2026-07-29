@@ -454,10 +454,13 @@ fn kill_session(conn: &mut ClientConn, id: &str) {
     conn.send(&Cmd::Kill {
         session_id: id.to_string(),
     });
-    match conn.recv() {
-        Evt::Ok => {}
-        Evt::Error { code, message } => panic!("kill failed: {:?}: {}", code, message),
-        other => panic!("expected Ok after Kill, got: {:?}", other),
+    loop {
+        match conn.recv() {
+            Evt::Ok => break,
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            Evt::Error { code, message } => panic!("kill failed: {:?}: {}", code, message),
+            other => panic!("expected Ok after Kill, got: {:?}", other),
+        }
     }
 }
 
