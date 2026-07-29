@@ -17,11 +17,11 @@ const requiredFlavors = [
 
 const requiredBuiltInAgents = ["setup"];
 
-// The user-facing pipeline lineup, in increasing review depth. `default` is
+// The user-facing pipeline lineup, in increasing review depth. `no-review` is
 // the fallback the server resolves when a repo names no pipeline, so its name
 // is load-bearing. `specialty-review` is excluded: it is the internal
 // single-stage pipeline qa-dispatcher gives its child tasks, not a choice.
-const BUILTIN_PIPELINES = ["default", "single-reviewer", "specialized-reviewers"];
+const BUILTIN_PIPELINES = ["no-review", "single-reviewer", "specialized-reviewers"];
 
 function read(path: string): string {
   return readFileSync(path, "utf8");
@@ -146,7 +146,7 @@ describe("bundled agent flavor contracts", () => {
     // A copied pipeline file would fossilize whatever the built-ins looked
     // like on the day setup ran. Selecting one keeps the repo on the shipped
     // definition, so the preset is a config selection, not a pipeline author.
-    expect(setupConfig.pipeline).toBe("default");
+    expect(setupConfig.pipeline).toBe("no-review");
     expect(BUILTIN_PIPELINES).toContain(setupConfig.pipeline);
     expect(setupAgent).not.toContain("github-flow.json");
     expect(setupContract).toContain("not author a pipeline file of its own");
@@ -224,7 +224,7 @@ describe("bundled agent flavor contracts", () => {
       return pipeline.stages?.find((stage) => stage.name === "review")?.agent;
     };
 
-    expect(reviewAgentFor("default")).toBeUndefined();
+    expect(reviewAgentFor("no-review")).toBeUndefined();
     expect(reviewAgentFor("single-reviewer")).toBe("review");
     expect(reviewAgentFor("specialized-reviewers")).toBe("qa-dispatcher");
   });

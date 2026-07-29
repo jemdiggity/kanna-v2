@@ -75,7 +75,7 @@ describe("NewTaskModal", () => {
       global: { mocks: { $t: (key: string) => key } },
     });
 
-    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toBe("default");
+    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toBe("no-review");
 
     await wrapper.setProps({
       optionsLoading: false,
@@ -343,7 +343,7 @@ describe("NewTaskModal", () => {
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")?.[0]).toEqual([
-      "Use OpenCode headlessly", "opencode", "default", "main", "agent", [],
+      "Use OpenCode headlessly", "opencode", "no-review", "main", "agent", [],
     ]);
   });
 
@@ -692,7 +692,7 @@ describe("NewTaskModal", () => {
     wrapper.unmount();
   });
 
-  it("uses a default pipeline option when no pipelines are provided", async () => {
+  it("uses the no-review pipeline option when no pipelines are provided", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {},
       global: { mocks: { $t: (key: string) => key } },
@@ -701,8 +701,8 @@ describe("NewTaskModal", () => {
     await flushPromises();
     await wrapper.get('[data-testid="pipeline-toggle"]').trigger("click");
 
-    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toContain("default");
-    expect(wrapper.get('[data-testid="pipeline-option-default"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="pipeline-value"]').text()).toContain("no-review");
+    expect(wrapper.get('[data-testid="pipeline-option-no-review"]').exists()).toBe(true);
   });
 
   it("filters branch options with fuzzy search", async () => {

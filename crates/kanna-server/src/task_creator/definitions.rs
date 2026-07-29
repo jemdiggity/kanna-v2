@@ -409,7 +409,7 @@ impl RepoDefinitions {
             .list_direct_entries(path)
             .map_err(|error| definition_error(&self.snapshot, path, error))?;
         let mut names = BTreeSet::from([
-            "default".to_string(),
+            "no-review".to_string(),
             "single-reviewer".to_string(),
             "specialized-reviewers".to_string(),
             "specialty-review".to_string(),
@@ -711,6 +711,7 @@ fn optional_builtin_agent_resource(selector: &AgentSelector) -> Option<String> {
 /// a retired name never returns as a user-facing choice, and they always lose
 /// to a repo that ships its own pipeline under the same name.
 pub(super) const LEGACY_BUILTIN_PIPELINES: &[(&str, &str)] = &[
+    ("default", "no-review"),
     ("qa", "single-reviewer"),
     ("qa-dispatch", "specialized-reviewers"),
 ];
@@ -737,8 +738,8 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
     }
 
     match relative_path {
-        ".kanna/pipelines/default.json" => {
-            Some(include_str!("../../../../.kanna/pipelines/default.json"))
+        ".kanna/pipelines/no-review.json" => {
+            Some(include_str!("../../../../.kanna/pipelines/no-review.json"))
         }
         ".kanna/pipelines/single-reviewer.json" => Some(include_str!(
             "../../../../.kanna/pipelines/single-reviewer.json"

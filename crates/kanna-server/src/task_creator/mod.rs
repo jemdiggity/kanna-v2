@@ -68,6 +68,8 @@ pub(crate) use stages::{
 };
 pub(crate) use worktree::resolve_current_source_worktree_branch;
 
+const FALLBACK_PIPELINE_NAME: &str = "no-review";
+
 #[derive(Clone, Debug)]
 pub(crate) enum DefinitionLookupError {
     InvalidName(String),
@@ -130,10 +132,10 @@ pub(crate) fn load_repo_kanna_definitions(
             .config()
             .pipeline
             .clone()
-            .unwrap_or_else(|| "default".to_string());
+            .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
         // The manifest's default must be a name the caller can select from
         // `pipelines`. A repo whose committed config still names a retired
-        // built-in (`qa`, `qa-dispatch`) resolves to the current definition,
+        // built-in (`default`, `qa`, `qa-dispatch`) resolves to the current definition,
         // but the retired name is deliberately absent from `pipelines` — so
         // report the current name here or the desktop's picker silently falls
         // back to its first option and the repo loses its configured review
@@ -152,6 +154,44 @@ pub(crate) fn load_repo_kanna_definitions(
             pipelines,
         })
     })
+}
+
+/// Canonicalize stored recently-used pipeline names for the sticky new-task
+/// default. Task rows are durable, so `pipeline_item.pipeline` can still name
+/// a retired built-in (`default`, `qa`, `qa-dispatch`); serving that name
+/// verbatim would make the sticky picker skip it — the retired name is
+/// deliberately absent from the repo's selectable pipelines — and silently
+/// fall back, losing the depth of review the operator last chose. Same rule
+/// as the manifest's `defaultPipeline`: a name the repo still offers stays
+/// verbatim (a repo shipping its own `default.json` makes `default` a real
+/// choice), anything else maps through the retired-name table. Canonicalizing
+/// can collapse two stored names into one, so duplicates keep only their
+/// newest position. When the repo's definitions cannot be resolved the stored
+/// names are served untouched — the caller filters by availability anyway.
+pub(crate) fn canonicalize_recent_pipeline_names(
+    cache: &RepoDefinitionsCache,
+    repo: &Repo,
+    stored: Vec<String>,
+) -> Vec<String> {
+    let Ok(offered) = cache.with_definitions(repo, |definitions| {
+        definitions
+            .pipeline_names()
+            .map_err(DefinitionLookupError::Other)
+    }) else {
+        return stored;
+    };
+    let mut seen = std::collections::HashSet::new();
+    stored
+        .into_iter()
+        .map(|name| {
+            if offered.contains(&name) {
+                name
+            } else {
+                definitions::canonical_builtin_pipeline_name(&name).to_string()
+            }
+        })
+        .filter(|name| seen.insert(name.clone()))
+        .collect()
 }
 
 pub(crate) fn load_repo_pipeline_definition(
@@ -304,7 +344,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
     let pipeline_name = source_task
         .pipeline
         .clone()
-        .unwrap_or_else(|| "default".to_string());
+        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
     let stage_name = source_task
         .stage
         .clone()
@@ -1073,7 +1113,7 @@ fn try_prepare_workspace_teardown_for_close(
     let pipeline_name = source_task
         .pipeline
         .clone()
-        .unwrap_or_else(|| "default".to_string());
+        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
     let pipeline =
         definitions.task_pipeline(&pipeline_name, source_task.pipeline_def.as_deref())?;
     Ok(prepare_workspace_teardown_for_transition_close(
@@ -1719,7 +1759,7 @@ pub(crate) fn create_dormant_task_for_api_with_error(
     let pipeline_name = request
         .pipeline_name
         .or(repo_config.pipeline.clone())
-        .unwrap_or_else(|| "default".to_string());
+        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
     let pipeline = definitions.pipeline(&pipeline_name)?;
     let pipeline_def_json =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
@@ -1848,7 +1888,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
     let pipeline_name = item
         .pipeline
         .clone()
-        .unwrap_or_else(|| "default".to_string());
+        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
     let pipeline = definitions.task_pipeline(&pipeline_name, item.pipeline_def.as_deref())?;
     let stage_name = item
         .stage
@@ -2367,7 +2407,7 @@ fn resolve_task_spawn(
         .pipeline_name
         .clone()
         .or(repo_config.pipeline.clone())
-        .unwrap_or_else(|| "default".to_string());
+        .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
     let pipeline = definitions.task_pipeline(&pipeline_name, request.pipeline_def.as_deref())?;
     let pipeline_def_json =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;

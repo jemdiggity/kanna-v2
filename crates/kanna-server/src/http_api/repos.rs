@@ -226,6 +226,18 @@ pub(super) async fn list_recent_repo_pipelines(
                 format!("db error: {}", e),
             )
         })?;
+    // Durable task rows can name a retired built-in pipeline; resolve those to
+    // the current name so the sticky default keeps matching what the repo
+    // offers. An unknown repo (or one whose definitions cannot load) serves
+    // the stored names untouched.
+    let pipelines = match db.get_repo(&repo_id) {
+        Ok(Some(repo)) => crate::task_creator::canonicalize_recent_pipeline_names(
+            &state.repo_definitions,
+            &repo,
+            pipelines,
+        ),
+        _ => pipelines,
+    };
     Ok(Json(RecentRepoPipelinesResponse { pipelines }))
 }
 

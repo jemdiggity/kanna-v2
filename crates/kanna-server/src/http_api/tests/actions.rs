@@ -5067,7 +5067,7 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
     daemon_server.await.unwrap();
 
     // The deferred transition executes on a detached task; wait for it.
-    // The stage landed on is the built-in `default` pipeline's second stage:
+    // The stage landed on is the built-in `no-review` pipeline's second stage:
     // this repo's `.kanna` fixture is committed but never published to
     // origin/main, which is where definitions resolve from, so it never
     // takes effect. What this test asserts is the transition itself, not

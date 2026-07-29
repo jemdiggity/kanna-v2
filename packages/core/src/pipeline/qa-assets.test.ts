@@ -101,16 +101,16 @@ describe("QA pipeline assets", () => {
     expect(prStage?.post?.prompt).toContain("$PREV_RESULT");
   });
 
-  it("ships the approve post on the default pipeline pr stage so advancing queues the merge", () => {
-    const parsed = parsePipelineJson(readRepoFile(".kanna/pipelines/default.json"));
+  it("ships the approve post on the no-review pipeline pr stage so advancing queues the merge", () => {
+    const parsed = parsePipelineJson(readRepoFile(".kanna/pipelines/no-review.json"));
     const prStage = parsed.stages.find((stage) => stage.name === "pr");
     expect(prStage?.post?.name).toBe("approve");
     expect(prStage?.post?.agent).toBe("approve");
     expect(prStage?.post?.prompt).toContain("$PREV_RESULT");
   });
 
-  it("automates default implement revisions without automating the initial handoff", () => {
-    const parsed = parsePipelineJson(readRepoFile(".kanna/pipelines/default.json"));
+  it("automates no-review implement revisions without automating the initial handoff", () => {
+    const parsed = parsePipelineJson(readRepoFile(".kanna/pipelines/no-review.json"));
     const implement = parsed.stages.find((stage) => stage.name === "in progress");
 
     expect(implement?.policy).toEqual({

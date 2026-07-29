@@ -320,8 +320,10 @@ async fn repo_definition_manifest_reports_retired_pipeline_names_as_their_curren
     // is a member of `pipelines`, and otherwise silently falls back to the
     // first option. Retired names are deliberately absent from `pipelines`,
     // so reporting the committed name verbatim would drop an upgraded repo
-    // onto `default` — losing the review depth it configured, with no error.
+    // onto the picker's first option — losing the review depth it configured,
+    // with no error.
     for (legacy, current) in [
+        ("default", "no-review"),
         ("qa", "single-reviewer"),
         ("qa-dispatch", "specialized-reviewers"),
     ] {
@@ -480,7 +482,7 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
     assert_eq!(
         manifest["pipelines"],
         json!([
-            "default",
+            "no-review",
             "qa",
             "release.v2",
             "remote-qa",
@@ -607,22 +609,25 @@ async fn repo_definition_routes_use_bundled_only_values_without_a_remote_ref() {
     assert_eq!(manifest["revision"], Value::Null);
     assert_eq!(manifest["refName"], "origin/main");
     assert_eq!(manifest["config"], json!({}));
-    assert_eq!(manifest["defaultPipeline"], "default");
+    assert_eq!(manifest["defaultPipeline"], "no-review");
     assert_eq!(
         manifest["pipelines"],
         json!([
-            "default",
+            "no-review",
             "single-reviewer",
             "specialized-reviewers",
             "specialty-review"
         ])
     );
 
-    let (status, pipeline) =
-        json_response(&app, "/v1/repos/repo-1/kanna-definitions/pipelines/default").await;
+    let (status, pipeline) = json_response(
+        &app,
+        "/v1/repos/repo-1/kanna-definitions/pipelines/no-review",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(pipeline["revision"], Value::Null);
-    assert_eq!(pipeline["definition"]["name"], "default");
+    assert_eq!(pipeline["definition"]["name"], "no-review");
 }
 
 #[tokio::test]
