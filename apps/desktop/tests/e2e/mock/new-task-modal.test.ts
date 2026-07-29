@@ -45,6 +45,7 @@ async function holdNewTaskOptionRequests(
      const heldPaths = new Set([
        ${JSON.stringify(`/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions`)},
        ${JSON.stringify(`/v1/repos/${encodeURIComponent(repoId)}/agent-providers`)},
+       ${JSON.stringify(`/v1/repos/${encodeURIComponent(repoId)}/recent-pipelines`)},
      ]);
      const responses = new Map(Object.entries(${JSON.stringify(responses)}));
      const gate = {
@@ -487,6 +488,7 @@ describe("new task modal", () => {
   it("renders an editable New Task modal while repository options are unresolved", async () => {
     const definitionsPath = `/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions`;
     const providersPath = `/v1/repos/${encodeURIComponent(repoId)}/agent-providers`;
+    const recentPipelinesPath = `/v1/repos/${encodeURIComponent(repoId)}/recent-pipelines`;
     await holdNewTaskOptionRequests(client, repoId);
 
     try {
@@ -494,7 +496,13 @@ describe("new task modal", () => {
 
       const loading = await client.waitForElement('[data-testid="task-options-loading"]', 5_000);
       expect(loading).toBeTruthy();
-      await waitForHeldNewTaskOptionRequests(client, [definitionsPath, providersPath]);
+      // The sticky-pipeline lookup is held alongside the other option requests,
+      // so the modal has to leave its loading state on the slowest of them.
+      await waitForHeldNewTaskOptionRequests(client, [
+        definitionsPath,
+        providersPath,
+        recentPipelinesPath,
+      ]);
       const prompt = await client.waitForElement(".prompt-input", 2_000);
       await client.sendKeys(prompt, "Prompt remains editable while options load");
 
@@ -592,6 +600,7 @@ describe("new task modal", () => {
   it("shows cached repository options immediately while a reopen refresh is held", async () => {
     const definitionsPath = `/v1/repos/${encodeURIComponent(repoId)}/kanna-definitions`;
     const providersPath = `/v1/repos/${encodeURIComponent(repoId)}/agent-providers`;
+    const recentPipelinesPath = `/v1/repos/${encodeURIComponent(repoId)}/recent-pipelines`;
     let optionRequestsHeld = false;
     let trunkBranchCreated = false;
 
@@ -621,11 +630,19 @@ describe("new task modal", () => {
           defaultPipeline: "release",
           pipelines: ["default", "qa-review", "release"],
         },
+        // A repo's most recently used pipeline outranks its configured
+        // default, so an empty history is the precondition for observing the
+        // refreshed manifest default at all.
+        [recentPipelinesPath]: { pipelines: [] },
       });
       optionRequestsHeld = true;
       await client.executeSync(buildGlobalKeydownScript({ key: "N", meta: true, shift: true }));
       await client.waitForElement('[data-testid="task-options-loading"]', 5_000);
-      await waitForHeldNewTaskOptionRequests(client, [definitionsPath, providersPath]);
+      await waitForHeldNewTaskOptionRequests(client, [
+        definitionsPath,
+        providersPath,
+        recentPipelinesPath,
+      ]);
 
       const cachedState = await client.executeSync<{
         requestsHeld: string[];
@@ -944,5 +961,124 @@ describe("new task modal", () => {
       [dependentTask.id],
     );
     expect(worktreeRows).toEqual([]);
+  });
+
+  async function selectPipeline(pipeline: string): Promise<void> {
+    await client.click(await client.waitForElement('[data-testid="pipeline-toggle"]', 2_000));
+    await client.click(
+      await client.waitForElement(`[data-testid="pipeline-option-${pipeline}"]`, 2_000),
+    );
+    await client.waitForText('[data-testid="pipeline-value"]', pipeline, 2_000);
+  }
+
+  it("defaults New Task to the pipeline this repository last created a task with", async () => {
+    // Every task so far used the repo's configured default.
+    await openNewTaskModal(client);
+    expect(await client.executeSync<string>(
+      `return document.querySelector('[data-testid="pipeline-value"]')?.textContent?.trim() ?? "";`,
+    )).toBe("qa-review");
+
+    const stickyPrompt = "Sticky pipeline picks default";
+    await selectPipeline("default");
+    await submitTaskFromModal(client, stickyPrompt);
+    const stickyTask = await waitForTaskCreated(client, stickyPrompt);
+    expect(await queryDb(
+      client,
+      "SELECT pipeline FROM pipeline_item WHERE id = ?",
+      [stickyTask.id],
+    )).toEqual([{ pipeline: "default" }]);
+
+    await openNewTaskModal(client);
+    await client.waitForText('[data-testid="pipeline-value"]', "default", 5_000);
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
+    await client.waitForNoElement(".modal-overlay", 5_000);
+  });
+
+  it("remembers the pipeline of a create whose response was lost, past a close and a restart", async () => {
+    const lostPrompt = "Sticky pipeline survives a lost create response";
+
+    // A create that commits its task row server-side but never delivers the
+    // response to this window.
+    await client.executeSync(
+      `const originalFetch = globalThis.fetch;
+       const callOriginalFetch = originalFetch.bind(globalThis);
+       window.__KANNA_LOST_CREATE_RESPONSE__ = { originalFetch };
+       globalThis.fetch = async (input, init) => {
+         const url = typeof input === "string"
+           ? input
+           : input instanceof URL
+             ? input.href
+             : input.url;
+         const path = new URL(url, window.location.href).pathname;
+         const method = (init?.method ?? (typeof input === "object" && "method" in input ? input.method : "GET") ?? "GET").toUpperCase();
+         const response = await callOriginalFetch(input, init);
+         if (path === "/v1/tasks" && method === "POST") {
+           throw new TypeError("simulated create response loss");
+         }
+         return response;
+       };
+       return true;`,
+    );
+
+    let lostTaskId = "";
+    try {
+      await openNewTaskModal(client);
+      await client.waitForText('[data-testid="pipeline-value"]', "default", 5_000);
+      await selectPipeline("qa-review");
+
+      const promptInput = await client.waitForElement(".prompt-input", 2_000);
+      await client.sendKeys(promptInput, lostPrompt);
+      const submitOutcome = await client.executeAsync<string>(
+        `const cb = arguments[arguments.length - 1];
+         const ctx = window.__KANNA_E2E__?.setupState;
+         Promise.resolve(ctx?.appTaskCreation?.handleNewTaskSubmit?.(
+           ${JSON.stringify(lostPrompt)},
+           "claude",
+           "qa-review",
+           document.querySelector('[data-testid="base-branch-value"]')?.textContent?.trim() ?? "",
+           "pty"
+         ))
+           .then(() => cb("settled"))
+           .catch((e) => cb("err:" + (e?.message || String(e))));`,
+      );
+      // handleNewTaskSubmit reports the failure through a toast rather than
+      // rejecting, so the window genuinely never learns the task id.
+      expect(submitOutcome).toBe("settled");
+
+      const lostTask = await waitForTaskCreated(client, lostPrompt);
+      lostTaskId = lostTask.id;
+      expect(await queryDb(
+        client,
+        "SELECT pipeline FROM pipeline_item WHERE id = ?",
+        [lostTaskId],
+      )).toEqual([{ pipeline: "qa-review" }]);
+    } finally {
+      await client.executeSync(
+        `const saved = window.__KANNA_LOST_CREATE_RESPONSE__;
+         if (saved) globalThis.fetch = saved.originalFetch;
+         delete window.__KANNA_LOST_CREATE_RESPONSE__;
+         return true;`,
+      ).catch(() => undefined);
+      await client.executeSync(buildGlobalKeydownScript({ key: "Escape" })).catch(() => undefined);
+      await client.waitForNoElement(".modal-overlay", 5_000).catch(() => undefined);
+    }
+
+    // Closed before the restart: the desktop snapshot drops closed tasks, so
+    // only the durable rows can still answer what pipeline it used.
+    await waitForTaskInStore(client, lostTaskId);
+    expect(await callVueMethod(client, "store.closeTask", lostTaskId, { selectNext: false })).toBe(true);
+    const closedRows = await queryDb(
+      client,
+      "SELECT closed_at FROM pipeline_item WHERE id = ?",
+      [lostTaskId],
+    ) as Array<{ closed_at: string | null }>;
+    expect(closedRows[0]?.closed_at).toBeTruthy();
+
+    await reloadApp(client);
+    await dismissStartupShortcutsModal(client);
+    await openNewTaskModal(client);
+    await client.waitForText('[data-testid="pipeline-value"]', "qa-review", 5_000);
+    await client.executeSync(buildGlobalKeydownScript({ key: "Escape" }));
+    await client.waitForNoElement(".modal-overlay", 5_000);
   });
 });

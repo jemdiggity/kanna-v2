@@ -118,6 +118,7 @@ describe("useAppTaskCreation", () => {
         pipelines: ["default"],
       }),
       fetchRepoAgentProviders: async () => ["claude", "copilot", "codex", "opencode", "antigravity"],
+      fetchRepoRecentPipelines: async () => [],
     });
     invokeMock.mockReset();
     invokeMock.mockImplementation(async (command: string) => {
@@ -171,6 +172,93 @@ describe("useAppTaskCreation", () => {
     defaultBranch.resolve("main");
     baseBranches.resolve(["origin/main"]);
     await openPromise;
+  });
+
+  it("defaults the New Task pipeline to the repository's most recently used one", async () => {
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => ({
+        revision: "remote-rev",
+        refName: "origin/main",
+        config: {},
+        defaultPipeline: "default",
+        pipelines: ["default", "single-reviewer"],
+      }),
+      fetchRepoRecentPipelines: async () => ["single-reviewer", "default"],
+    });
+    const { creation, defaultPipelineName, availablePipelines } = createTaskCreationHarness();
+
+    await creation.openNewTaskModal();
+
+    expect(availablePipelines.value).toEqual(["default", "single-reviewer"]);
+    expect(defaultPipelineName.value).toBe("single-reviewer");
+    expect(creation.newTaskOptionsLoading.value).toBe(false);
+  });
+
+  it("ignores recently used pipelines the repository no longer offers", async () => {
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => ({
+        revision: "remote-rev",
+        refName: "origin/main",
+        config: {},
+        defaultPipeline: "default",
+        pipelines: ["default", "single-reviewer"],
+      }),
+      fetchRepoRecentPipelines: async () => ["retired-pipeline", "single-reviewer"],
+    });
+    const { creation, defaultPipelineName } = createTaskCreationHarness();
+
+    await creation.openNewTaskModal();
+
+    expect(defaultPipelineName.value).toBe("single-reviewer");
+  });
+
+  it("falls back to the configured default when recently used pipelines cannot be read", async () => {
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => ({
+        revision: "remote-rev",
+        refName: "origin/main",
+        config: {},
+        defaultPipeline: "default",
+        pipelines: ["default", "single-reviewer"],
+      }),
+      fetchRepoRecentPipelines: async () => {
+        throw new Error("kanna-server unreachable");
+      },
+    });
+    const { creation, defaultPipelineName, toast } = createTaskCreationHarness();
+
+    await creation.openNewTaskModal();
+
+    expect(defaultPipelineName.value).toBe("default");
+    expect(creation.newTaskOptionsLoading.value).toBe(false);
+    // A missing sticky default is not worth interrupting the operator over.
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("keeps each repository's sticky pipeline default to itself", async () => {
+    const recentPipelinesByRepo: Record<string, string[]> = {
+      "repo-1": ["single-reviewer"],
+      "repo-2": [],
+    };
+    updateDesktopServerClientHandlersForTests({
+      fetchRepoKannaDefinitions: async () => ({
+        revision: "remote-rev",
+        refName: "origin/main",
+        config: {},
+        defaultPipeline: "default",
+        pipelines: ["default", "single-reviewer"],
+      }),
+      fetchRepoRecentPipelines: async (repoId: string) => recentPipelinesByRepo[repoId] ?? [],
+    });
+    const { creation, store, showNewTaskModal, defaultPipelineName } = createTaskCreationHarness();
+    store.repos.push({ id: "repo-2", path: "/repo-2" });
+
+    await creation.openNewTaskModal("repo-1");
+    expect(defaultPipelineName.value).toBe("single-reviewer");
+    showNewTaskModal.value = false;
+
+    await creation.openNewTaskModal("repo-2");
+    expect(defaultPipelineName.value).toBe("default");
   });
 
   it("hydrates cached repository options while refreshing them on reopen", async () => {

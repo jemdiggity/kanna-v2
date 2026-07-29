@@ -17,6 +17,43 @@ impl Db {
             .map(Option::flatten)
     }
 
+    /// Pipeline names most recently chosen by operator-initiated task creates
+    /// in a repo, newest first and deduplicated.
+    ///
+    /// This reads the durable task rows and deliberately does not filter on
+    /// `closed_at`. The New Task modal's sticky default has to survive the task
+    /// closing — including a close from another window — and the desktop
+    /// snapshot (`db::snapshot`) excludes closed tasks, so the snapshot cannot
+    /// answer this question. A row exists here exactly when a create succeeded
+    /// durably, which is also why a lost create response cannot lose the
+    /// choice: the row was already committed.
+    ///
+    /// Child tasks are excluded. A specialty review that a review stage
+    /// dispatched is not a pipeline the operator picked, and letting those rows
+    /// win would hijack the default after every dispatched review.
+    ///
+    /// Ordered by `rowid`, i.e. insertion order. `created_at` is second
+    /// resolution text, so tasks created within the same second tie under it.
+    pub fn recent_repo_pipelines(
+        &self,
+        repo_id: &str,
+        limit: u32,
+    ) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pipeline
+             FROM pipeline_item
+             WHERE repo_id = ?1
+               AND parent_task_id IS NULL
+               AND pipeline IS NOT NULL
+               AND pipeline <> ''
+             GROUP BY pipeline
+             ORDER BY MAX(rowid) DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![repo_id, limit], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
     pub fn list_recent_pipeline_items(&self) -> Result<Vec<PipelineItem>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,

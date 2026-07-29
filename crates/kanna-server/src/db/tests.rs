@@ -1,6 +1,6 @@
 use super::NewStageRun;
 use super::{
-    add_column, database_open_flags, run_migration, Db, NewPipelineItem, NewTaskTransfer,
+    add_column, database_open_flags, run_migration, Db, NewPipelineItem, NewRepo, NewTaskTransfer,
     NewTaskTransferProvenance, ReplaceTaskBlockersError, CURRENT_SCHEMA_MIGRATIONS,
 };
 use rusqlite::Connection;
@@ -2348,5 +2348,163 @@ fn task_event_log_cursor_increases_and_survives_deletes() {
     );
 
     drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+fn seed_sticky_pipeline_db(path: &std::path::Path) -> Db {
+    let db = Db::open_for_tests(path.to_str().expect("utf8 path")).expect("open db");
+    for (id, name) in [("repo-1", "first"), ("repo-2", "second")] {
+        db.insert_repo(NewRepo {
+            id,
+            path: &format!("/tmp/{id}"),
+            name,
+            default_branch: Some("main"),
+        })
+        .expect("insert repo");
+    }
+    db
+}
+
+fn insert_sticky_pipeline_task(db: &Db, id: &str, repo_id: &str, pipeline: &str) {
+    insert_sticky_pipeline_child_task(db, id, repo_id, pipeline, None);
+}
+
+fn insert_sticky_pipeline_child_task(
+    db: &Db,
+    id: &str,
+    repo_id: &str,
+    pipeline: &str,
+    parent_task_id: Option<&str>,
+) {
+    db.insert_pipeline_item(NewPipelineItem {
+        id,
+        repo_id,
+        prompt: "sticky pipeline task",
+        display_name: None,
+        pipeline,
+        pipeline_def: None,
+        stage: "in progress",
+        branch: &format!("task-{id}"),
+        agent_type: "pty",
+        agent_provider: "claude",
+        activity: "idle",
+        port_offset: None,
+        port_env_json: None,
+        agent_spawn_options_json: None,
+        base_ref: None,
+        notify_task_id: None,
+        parent_task_id,
+    })
+    .expect("insert pipeline item");
+}
+
+#[test]
+fn recent_repo_pipelines_reports_newest_first_per_repo() {
+    let path = temp_db_path();
+    let db = seed_sticky_pipeline_db(&path);
+
+    insert_sticky_pipeline_task(&db, "task-1", "repo-1", "default");
+    insert_sticky_pipeline_task(&db, "task-2", "repo-1", "single-reviewer");
+    // Another repo's history must never leak into this one's default.
+    insert_sticky_pipeline_task(&db, "task-3", "repo-2", "specialized-reviewers");
+
+    assert_eq!(
+        db.recent_repo_pipelines("repo-1", 10).expect("repo-1"),
+        vec!["single-reviewer".to_string(), "default".to_string()],
+    );
+    assert_eq!(
+        db.recent_repo_pipelines("repo-2", 10).expect("repo-2"),
+        vec!["specialized-reviewers".to_string()],
+    );
+    assert!(db
+        .recent_repo_pipelines("repo-unknown", 10)
+        .expect("unknown repo")
+        .is_empty());
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn recent_repo_pipelines_survives_a_closed_task() {
+    let path = temp_db_path();
+    let db = seed_sticky_pipeline_db(&path);
+
+    insert_sticky_pipeline_task(&db, "task-1", "repo-1", "single-reviewer");
+    db.close_pipeline_item("task-1").expect("close task");
+
+    // The desktop snapshot drops closed tasks; the sticky default must not,
+    // or a create whose response was lost and whose task then closed would
+    // lose the operator's choice.
+    assert_eq!(
+        db.recent_repo_pipelines("repo-1", 10).expect("repo-1"),
+        vec!["single-reviewer".to_string()],
+    );
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn recent_repo_pipelines_dedupes_and_ignores_dispatched_child_tasks() {
+    let path = temp_db_path();
+    let db = seed_sticky_pipeline_db(&path);
+
+    insert_sticky_pipeline_task(&db, "task-1", "repo-1", "default");
+    insert_sticky_pipeline_task(&db, "task-2", "repo-1", "specialized-reviewers");
+    insert_sticky_pipeline_task(&db, "task-3", "repo-1", "default");
+    // A review stage dispatching specialty reviews is not an operator choice.
+    insert_sticky_pipeline_child_task(&db, "task-4", "repo-1", "specialty-review", Some("task-2"));
+
+    assert_eq!(
+        db.recent_repo_pipelines("repo-1", 10).expect("repo-1"),
+        vec!["default".to_string(), "specialized-reviewers".to_string()],
+    );
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn recent_repo_pipelines_honours_the_requested_limit() {
+    let path = temp_db_path();
+    let db = seed_sticky_pipeline_db(&path);
+
+    insert_sticky_pipeline_task(&db, "task-1", "repo-1", "default");
+    insert_sticky_pipeline_task(&db, "task-2", "repo-1", "single-reviewer");
+    insert_sticky_pipeline_task(&db, "task-3", "repo-1", "specialized-reviewers");
+
+    assert_eq!(
+        db.recent_repo_pipelines("repo-1", 2).expect("repo-1"),
+        vec![
+            "specialized-reviewers".to_string(),
+            "single-reviewer".to_string()
+        ],
+    );
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn recent_repo_pipelines_reads_durable_rows_after_reopening_the_database() {
+    let path = temp_db_path();
+    let path_string = path.to_string_lossy().to_string();
+    let db = seed_sticky_pipeline_db(&path);
+    insert_sticky_pipeline_task(&db, "task-1", "repo-1", "single-reviewer");
+    db.close_pipeline_item("task-1").expect("close task");
+    drop(db);
+
+    // Restart: a fresh connection to the same file, as a relaunched app or a
+    // second window would open.
+    let reopened = Db::open(&path_string).expect("reopen db");
+    assert_eq!(
+        reopened
+            .recent_repo_pipelines("repo-1", 10)
+            .expect("repo-1"),
+        vec!["single-reviewer".to_string()],
+    );
+
+    drop(reopened);
     let _ = std::fs::remove_file(path);
 }

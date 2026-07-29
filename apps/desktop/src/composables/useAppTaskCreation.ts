@@ -13,7 +13,9 @@ import type { DesktopCloudSnapshot } from "../services/desktopCloudTaskIndex";
 import {
   fetchDesktopRepoAgentProviders,
   fetchDesktopRepoKannaDefinitions,
+  fetchDesktopRepoRecentPipelines,
 } from "../services/desktopServerClient";
+import { resolveStickyPipelineDefault } from "../utils/stickyPipeline";
 import type { useKannaStore } from "../stores/kanna";
 import { claimLocalTaskSelectionOwnership } from "./localTaskSelectionOwnership";
 import type { useToast } from "./useToast";
@@ -128,7 +130,7 @@ export function useAppTaskCreation({
     const repoPath = targetRepo?.path;
     try {
       if (repoPath) {
-        const [manifest, defaultBranch, baseBranches, repoAgentProviders] = await Promise.all([
+        const [manifest, defaultBranch, baseBranches, repoAgentProviders, recentPipelines] = await Promise.all([
           fetchDesktopRepoKannaDefinitions(targetRepo.id).catch((error: unknown) => {
             const message = error instanceof Error ? error.message : String(error);
             console.error("[App] failed to load repo definitions for new task modal:", error);
@@ -149,12 +151,23 @@ export function useAppTaskCreation({
             console.debug("[App] failed to resolve repo agent providers for new task modal:", error);
             return undefined;
           }),
+          // Sticky pipeline default. Losing it is not worth failing the modal
+          // over — an empty history falls back to the repo's configured default.
+          fetchDesktopRepoRecentPipelines(targetRepo.id).catch((error) => {
+            console.debug("[App] failed to read recently used pipelines for new task modal:", error);
+            return [] as string[];
+          }),
         ]);
         if (loadGeneration !== newTaskOptionsLoadGeneration || !showNewTaskModal.value) return;
+        const availablePipelineNames = manifest?.pipelines ?? [];
         const snapshot: NewTaskOptionsSnapshot = {
           availableAgentProviders: repoAgentProviders,
-          availablePipelines: manifest?.pipelines ?? [],
-          defaultPipelineName: manifest?.defaultPipeline,
+          availablePipelines: availablePipelineNames,
+          defaultPipelineName: resolveStickyPipelineDefault(
+            availablePipelineNames,
+            recentPipelines,
+            manifest?.defaultPipeline,
+          ),
           availableBaseBranches: baseBranches,
           defaultBaseBranchName:
             getDefaultBaseBranch(baseBranches, defaultBranch || "main") || undefined,
