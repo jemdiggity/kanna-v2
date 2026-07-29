@@ -29,6 +29,7 @@ const exposedTools = [
   ["test_all", "test.all"],
   ["test_app_update_bundle", "test.app-update-bundle"],
   ["test_remote_e2e", "test.remote-e2e"],
+  ["test_staging_smoke", "test.staging-smoke"],
   ["emulators_up", "emulators.up"],
   ["emulators_down", "emulators.down"],
   ["emulators_status", "emulators.status"],

@@ -487,12 +487,16 @@ describe("kd CLI", () => {
     await expect(runCli(["test", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("test all"));
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("test rust"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("test staging-smoke"));
 
     await expect(runCli(["test", "all", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd test all"));
 
     await expect(runCli(["test", "rust", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd test rust"));
+
+    await expect(runCli(["test", "staging-smoke", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd test staging-smoke"));
 
     await expect(runCli(["rust-cache", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd rust-cache <command>"));
@@ -992,6 +996,13 @@ describe("kd CLI", () => {
     });
     expect(() => parseCliArgs(["test", "remote-e2e", "--staging", "--if-changed"])).toThrow(
       "remote-e2e --if-changed applies to the dev lane only"
+    );
+    expect(parseCliArgs(["test", "staging-smoke"])).toEqual({
+      taskId: "test.staging-smoke",
+      input: {},
+    });
+    expect(getTaskDefinition("test.staging-smoke").description).toBe(
+      "Run the staging health smoke: remote doctor, then the staging remote E2E lane.",
     );
   });
 

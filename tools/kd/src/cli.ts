@@ -1,4 +1,8 @@
 import { getTaskDefinition } from "./tasks/registry";
+import {
+  STAGING_DEVICE_TOKEN_ENV,
+  STAGING_PASSWORD_ENV
+} from "./runtime/staging-credentials";
 
 export interface ParsedCliCommand {
   taskId: string;
@@ -569,6 +573,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "test" && command === "remote-e2e") {
     return parseRemoteE2eInput(rest);
   }
+  if (group === "test" && command === "staging-smoke") {
+    return { taskId: "test.staging-smoke", input: {} };
+  }
   if (group === "doctor" && command === "--remote") {
     return parseRemoteDoctorInput([command, ...rest]);
   }
@@ -669,6 +676,7 @@ const helpTopics: Record<string, string[]> = {
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
     "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing] [--if-changed]",
+    "  test staging-smoke",
     "  doctor [--remote] [--staging]",
     "",
     "Run 'kd <command> --help' for command-specific help."
@@ -1056,7 +1064,8 @@ const helpTopics: Record<string, string[]> = {
     "  test cloud-staging",
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
-    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing] [--if-changed]"
+    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing] [--if-changed]",
+    "  test staging-smoke"
   ],
   "test all": [
     "Usage: kd test all",
@@ -1105,6 +1114,16 @@ const helpTopics: Record<string, string[]> = {
     "                     mobile lib, tests/remote-e2e, kd), measured against the",
     "                     merge-base with the default branch. Otherwise exits 0",
     "                     without starting emulators or tests."
+  ],
+  "test staging-smoke": [
+    "Usage: kd test staging-smoke",
+    "",
+    "Run the staging health smoke: 'kd doctor --remote --staging', then",
+    "'kd test remote-e2e --staging', failing fast on the first broken step.",
+    "",
+    `Needs the staging Buffy credentials (${STAGING_DEVICE_TOKEN_ENV} and`,
+    `${STAGING_PASSWORD_ENV}) in the environment; without them it exits 0`,
+    "with the staging suite's SKIP message instead of failing."
   ],
   doctor: [
     "Usage: kd doctor [--remote] [--staging]",
