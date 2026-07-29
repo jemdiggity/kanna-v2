@@ -48,6 +48,60 @@ fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     Ok(())
 }
 
+fn open_pty(master_fd: &mut RawFd, slave_fd: &mut RawFd) -> io::Result<()> {
+    #[cfg(debug_assertions)]
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static OPEN_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+        let fail_after = std::env::var("KANNA_TEST_PTY_ENXIO_AFTER")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok());
+        if fail_after
+            .is_some_and(|allowed| OPEN_ATTEMPTS.fetch_add(1, Ordering::Relaxed) == allowed)
+        {
+            return Err(io::Error::from_raw_os_error(libc::ENXIO));
+        }
+    }
+
+    let ret = unsafe {
+        libc::openpty(
+            master_fd,
+            slave_fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ret != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// True when a PTY spawn error chain contains macOS/Linux `ENXIO`.
+///
+/// `openpty(3)` reports this when the host PTY pool cannot allocate another
+/// pair. Keep the source-chain walk here, next to the allocation boundary, so
+/// callers can add occupancy diagnostics without string-matching OS messages.
+pub fn is_pty_exhaustion_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(candidate) = current {
+        if let Some(io_error) = candidate.downcast_ref::<io::Error>() {
+            if io_error.raw_os_error() == Some(libc::ENXIO) {
+                return true;
+            }
+            if let Some(inner) = io_error.get_ref() {
+                if is_pty_exhaustion_error(inner) {
+                    return true;
+                }
+            }
+        }
+        current = candidate.source();
+    }
+    false
+}
+
 /// How confidently this daemon can tie `child_pid` to the process it is
 /// supposed to signal. Signals are only ever sent while ownership is
 /// provable; once it degrades to `Unproven` the pid may belong to an
@@ -270,18 +324,7 @@ impl PtySession {
         let _spawn_boundary = crate::fd::spawn_fd_boundary();
 
         // Open PTY pair
-        let ret = unsafe {
-            libc::openpty(
-                &mut master_fd,
-                &mut slave_fd,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        if ret != 0 {
-            return Err(io::Error::last_os_error().into());
-        }
+        open_pty(&mut master_fd, &mut slave_fd)?;
 
         #[cfg(test)]
         {
@@ -917,7 +960,7 @@ impl PtySession {
 
 #[cfg(test)]
 mod tests {
-    use super::PtySession;
+    use super::{is_pty_exhaustion_error, PtySession};
     use std::collections::HashMap;
     use std::ffi::CString;
     use std::io::Read;
@@ -1887,5 +1930,14 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn pty_exhaustion_detection_finds_enxio_in_error_chain() {
+        let nested = std::io::Error::other(std::io::Error::from_raw_os_error(libc::ENXIO));
+        assert!(is_pty_exhaustion_error(&nested));
+
+        let other = std::io::Error::from_raw_os_error(libc::EMFILE);
+        assert!(!is_pty_exhaustion_error(&other));
     }
 }

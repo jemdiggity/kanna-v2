@@ -21,7 +21,9 @@ use crate::fanout::{
 use crate::handoff::{blank_snapshot, handle_handoff};
 use crate::output::{handle_output_chunk, stream_output};
 use crate::paths::daemon_data_dir;
-use crate::session::{SessionHandle, SessionManager, SessionRecord, StreamControl};
+use crate::session::{
+    pty_occupancy_snapshot, SessionHandle, SessionManager, SessionRecord, StreamControl,
+};
 use crate::socket::{read_command, write_event};
 use crate::successor_auth::SuccessorAuthorizer;
 use crate::util::{error_event, recovery_snapshot_to_terminal_snapshot};
@@ -550,6 +552,16 @@ pub(crate) async fn handle_command(
                     }
                 }
                 Err(e) => {
+                    if pty::is_pty_exhaustion_error(e.as_ref()) {
+                        let occupancy = pty_occupancy_snapshot(&sessions).await;
+                        log::error!(
+                            "[pty-exhaustion] failed_session={} daemon_pid={} error={} {}",
+                            session_id,
+                            std::process::id(),
+                            e,
+                            occupancy
+                        );
+                    }
                     let evt = error_event(
                         Some(protocol::ErrorCode::PtySpawnFailed),
                         format!("failed to spawn PTY: {}", e),
