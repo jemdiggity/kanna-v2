@@ -1693,9 +1693,19 @@ pub(crate) async fn dispatch_prepared_post_for_api(
     // row, not a daemon delivery: it is caller-chosen, reusable, and bounded
     // retention prunes its replay row, so a later reuse could match a stale
     // tombstone and be silently swallowed. Derive the identity from the
-    // server-owned reservation instead — stable across retries of the same
-    // reservation (a replayed request resolves to the same reserved run) and
-    // distinct for every other submission.
+    // server-owned reservation instead.
+    //
+    // That only stays idempotent because the reservation outlives an
+    // ambiguous attempt. Claim the delivery *before* submitting: from here on
+    // the message may have reached the PTY, so reconciliation must keep this
+    // reservation rather than retire it and mint a fresh run — and therefore
+    // a fresh delivery identity the daemon cannot recognize as a replay.
+    // Only a provably unsent submission rolls the claim back below.
+    if prepared.action_request_key.is_some() {
+        Db::open(db_path)
+            .and_then(|db| db.mark_reserved_live_post_delivery_started(&task_id, &run_id))
+            .map_err(|error| format!("db error: {error}"))?;
+    }
     let delivery_id = format!("live-post:{task_id}:{run_id}");
     match try_submit_task_input_idempotently(
         daemon,
@@ -1706,16 +1716,6 @@ pub(crate) async fn dispatch_prepared_post_for_api(
     .await
     {
         Ok(()) => {
-            if prepared.action_request_key.is_some() {
-                if let Err(error) = Db::open(db_path).and_then(|db| {
-                    db.mark_reserved_live_post_delivery_acknowledged(&task_id, &run_id)
-                }) {
-                    return Err(StageSpawnError::Indeterminate(format!(
-                        "db error: {error}; live post reservation {run_id} retained because \
-                         the complete daemon submission was acknowledged"
-                    )));
-                }
-            }
             #[cfg(test)]
             pause_live_post_after_delivery(prepared.action_request_key.as_deref()).await;
             if let Err(error) =

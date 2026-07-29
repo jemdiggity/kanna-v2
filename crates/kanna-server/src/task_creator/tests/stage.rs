@@ -3867,6 +3867,156 @@ async fn lost_live_post_ack_retries_the_same_complete_delivery_identity() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
+/// A live-post delivery that may have reached the PTY must keep its
+/// reservation across a server restart. The desktop reuses one
+/// `Idempotency-Key` for every retry of an advance, so if reconciliation
+/// retired the reservation the re-dispatch would mint a new run — and with it
+/// a delivery identity the daemon (a separate process whose tombstones
+/// survived the restart) cannot recognize as a replay, injecting the post into
+/// the live agent session a second time.
+#[tokio::test]
+async fn indeterminate_live_post_delivery_survives_reconcile_without_a_second_identity() {
+    let repo_root = init_git_repo("live-post-indeterminate-reconcile");
+    write_post_pipeline_fixtures(&repo_root);
+
+    let config = test_config("live-post-indeterminate-reconcile");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_pipeline_task(&config, &db, &repo_root);
+    db.insert_stage_run(NewStageRun {
+        id: "run-main",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("claude"),
+        model: Some("sonnet"),
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some(repo_root.to_string_lossy().as_ref()),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    assert_eq!(
+        db.claim_task_action_request("restart-post-key", "task-1", "advance-stage", "{}")
+            .unwrap(),
+        crate::db::TaskActionRequestClaim::Claimed,
+    );
+    db.begin_task_action_request_execution("restart-post-key", "server-before-restart")
+        .unwrap();
+
+    let mut post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Post(post) => post,
+        _ => panic!("expected post dispatch"),
+    };
+    post.action_request_key = Some("restart-post-key".to_string());
+
+    // Both the first submission and its post-reconnect replay are accepted by
+    // the daemon and then lose their acknowledgement, so delivery is
+    // indeterminate: the message may already be in the agent's terminal.
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let fake_daemon = tokio::spawn(async move {
+        let mut deliveries = Vec::new();
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, _write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            match serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap() {
+                kanna_daemon::protocol::Command::SubmitInput { delivery_id, .. } => {
+                    deliveries.push(delivery_id);
+                }
+                other => panic!("expected SubmitInput, got {other:?}"),
+            }
+        }
+        deliveries
+    });
+
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error = crate::task_creator::dispatch_prepared_post_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        *post,
+    )
+    .await
+    .expect_err("a lost acknowledgement cannot be reported as delivered");
+    assert!(
+        matches!(
+            error,
+            crate::task_creator::StageSpawnError::Indeterminate(_)
+        ),
+        "delivery must stay indeterminate, got {error:?}"
+    );
+    let deliveries = fake_daemon.await.unwrap();
+    assert_eq!(deliveries.len(), 2);
+    assert_eq!(deliveries[0], deliveries[1]);
+    let attempted_delivery_id = deliveries[0].clone();
+
+    // The reservation is claimed as attempted, so a restarted server cannot
+    // retire it.
+    let (reserved_run_id, delivery_started): (String, Option<String>) = db
+        .connection_for_e2e_tests()
+        .query_row(
+            "SELECT successor_run_id, post_delivery_started_at
+             FROM task_action_request
+             WHERE idempotency_key = 'restart-post-key'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the reservation survives an indeterminate delivery");
+    assert!(
+        delivery_started.is_some(),
+        "an attempted delivery must be recorded before the submission, not after its ack"
+    );
+    assert_eq!(
+        attempted_delivery_id,
+        format!("live-post:task-1:{reserved_run_id}")
+    );
+
+    // A restarted server retries the same caller key from a new owner.
+    assert!(matches!(
+        db.claim_task_action_request("restart-post-key", "task-1", "advance-stage", "{}")
+            .unwrap(),
+        crate::db::TaskActionRequestClaim::Pending { .. }
+    ));
+    let reconciled = db
+        .reconcile_task_action_request("restart-post-key")
+        .unwrap();
+    match reconciled {
+        crate::db::TaskActionRequestClaim::Pending {
+            successor_run_id, ..
+        } => assert_eq!(
+            successor_run_id.as_deref(),
+            Some(reserved_run_id.as_str()),
+            "reconcile must keep the attempted reservation so a retry replays one identity"
+        ),
+        other => panic!(
+            "reconcile retired an attempted delivery, so a retry would mint a second \
+             delivery identity and inject the post twice: {other:?}"
+        ),
+    }
+    let reserved_run_still_exists: bool = db
+        .connection_for_e2e_tests()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM stage_run WHERE id = ?1 AND kind = 'post')",
+            [&reserved_run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        reserved_run_still_exists,
+        "the reserved post run must outlive reconcile so its delivery identity is replayable"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
 #[tokio::test]
 async fn completed_live_post_kills_main_process_owner_before_replacement_spawn() {
     let repo_root = init_git_repo("completed-live-post-replacement-owner");
@@ -4059,19 +4209,26 @@ async fn live_post_write_failed_ack_rolls_back_before_fresh_session_fallback() {
         .iter()
         .any(|command| matches!(command, kanna_daemon::protocol::Command::Spawn { .. })));
 
-    let delivery_started: Option<String> = db
+    // The delivery claim taken before the submission is released again: a
+    // WriteFailed acknowledgement proves the atomic submission never reached
+    // the PTY, so the reservation must not keep looking half-delivered.
+    let (phase, delivery_started): (String, Option<String>) = db
         .connection_for_e2e_tests()
         .query_row(
-            "SELECT post_delivery_started_at
+            "SELECT phase, post_delivery_started_at
              FROM task_action_request
              WHERE idempotency_key = 'write-failed-post'",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
     assert!(
         delivery_started.is_none(),
         "WriteFailed is proof the atomic submission was not accepted"
+    );
+    assert_ne!(
+        phase, "post_reserved",
+        "the rolled-back request must not stay parked on a reservation it no longer owns"
     );
 
     let runs = db.list_stage_runs_for_task("task-1").unwrap();
