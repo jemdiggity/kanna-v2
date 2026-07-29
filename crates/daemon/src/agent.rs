@@ -120,6 +120,42 @@ pub fn event_status(event: &AgentEvent) -> Option<SessionStatus> {
     }
 }
 
+#[derive(Debug)]
+struct RetryBudget {
+    attempts: u32,
+    next_attempt_at: Option<std::time::Instant>,
+}
+
+impl RetryBudget {
+    const BASE: std::time::Duration = std::time::Duration::from_millis(200);
+    const MAX: std::time::Duration = std::time::Duration::from_secs(30);
+
+    fn new() -> Self {
+        Self {
+            attempts: 0,
+            next_attempt_at: None,
+        }
+    }
+
+    fn due(&self) -> bool {
+        self.next_attempt_at
+            .is_none_or(|at| std::time::Instant::now() >= at)
+    }
+
+    fn record_failure(&mut self) {
+        self.attempts = self.attempts.saturating_add(1);
+        let backoff = Self::BASE
+            .saturating_mul(1u32 << self.attempts.min(8))
+            .min(Self::MAX);
+        self.next_attempt_at = Some(std::time::Instant::now() + backoff);
+    }
+
+    fn record_success(&mut self) {
+        self.attempts = 0;
+        self.next_attempt_at = None;
+    }
+}
+
 /// Append-only event journal: in memory plus an NDJSON file under
 /// `<daemon-data>/agent-journals/{session_id}.ndjson`. Each line is a
 /// [`SeqAgentEvent`]; the file is reloaded on daemon restart/handoff.
@@ -283,8 +319,16 @@ pub struct AgentJournal {
     file: Option<std::fs::File>,
     events: Vec<SeqAgentEvent>,
     provider_session_id: Option<String>,
+    pending_provider_session_id: Option<String>,
     /// Disk persistence failed at least once (already reported).
     degraded: bool,
+    repair_needed: bool,
+    repair_retry: RetryBudget,
+    metadata_retry: RetryBudget,
+    #[cfg(test)]
+    metadata_publish_attempts: u32,
+    #[cfg(test)]
+    history_rewrite_attempts: u32,
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -308,7 +352,15 @@ impl AgentJournal {
             file: None,
             events: Vec::new(),
             provider_session_id: None,
+            pending_provider_session_id: None,
             degraded: true,
+            repair_needed: false,
+            repair_retry: RetryBudget::new(),
+            metadata_retry: RetryBudget::new(),
+            #[cfg(test)]
+            metadata_publish_attempts: 0,
+            #[cfg(test)]
+            history_rewrite_attempts: 0,
         }
     }
 
@@ -381,6 +433,7 @@ impl AgentJournal {
         // duplicates are already on disk, and `append`/`next_seq` assume
         // seq == index, so replay and resume would misbehave. Compile the
         // history into a dense, unique sequence at load, once, atomically.
+        let mut migration_unconfirmed = false;
         if Self::needs_seq_migration(&events) {
             let repaired: Vec<SeqAgentEvent> = events
                 .into_iter()
@@ -396,22 +449,30 @@ impl AgentJournal {
                     repaired.len(),
                     path
                 ),
-                Err(error) => log::error!(
-                    "[agent] failed to migrate duplicate seqs in {:?}: {}                      (continuing with the repaired in-memory history)",
-                    path,
-                    error
-                ),
+                Err(error) => {
+                    migration_unconfirmed = true;
+                    log::error!(
+                        "[agent] failed to migrate duplicate seqs in {:?}: {}                      (continuing with the repaired in-memory history)",
+                        path,
+                        error
+                    );
+                }
             }
             events = repaired;
         }
 
-        let file = dir
-            .open_file(&file_name, libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT)
-            .map_err(|error| {
-                log::error!("[agent] journal disk persistence unavailable for {path:?}: {error}");
-                error
-            })
-            .ok();
+        let file = if migration_unconfirmed {
+            None
+        } else {
+            dir.open_file(&file_name, libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT)
+                .map_err(|error| {
+                    log::error!(
+                        "[agent] journal disk persistence unavailable for {path:?}: {error}"
+                    );
+                    error
+                })
+                .ok()
+        };
         let degraded = file.is_none();
 
         Self {
@@ -423,7 +484,15 @@ impl AgentJournal {
             file,
             events,
             provider_session_id,
+            pending_provider_session_id: None,
             degraded,
+            repair_needed: migration_unconfirmed,
+            repair_retry: RetryBudget::new(),
+            metadata_retry: RetryBudget::new(),
+            #[cfg(test)]
+            metadata_publish_attempts: 0,
+            #[cfg(test)]
+            history_rewrite_attempts: 0,
         }
     }
 
@@ -515,6 +584,12 @@ impl AgentJournal {
     /// memory-only (reported once via log + a Diagnostic event from the
     /// caller), never lose the in-memory event.
     pub fn append(&mut self, event: AgentEvent) -> SeqAgentEvent {
+        let repair_due = self.repair_needed && self.repair_retry.due();
+        let metadata_due = self.pending_provider_session_id.is_some() && self.metadata_retry.due();
+        if repair_due || metadata_due {
+            self.retry_pending_durable_work(repair_due, metadata_due);
+        }
+
         let seq = self.events.len() as u64;
         let entry = SeqAgentEvent { seq, event };
         if let Some(file) = self.file.as_mut() {
@@ -531,6 +606,8 @@ impl AgentJournal {
                 }
                 self.degraded = true;
                 self.file = None;
+                self.repair_needed = true;
+                self.repair_retry.record_failure();
             }
         }
         self.events.push(entry.clone());
@@ -541,6 +618,26 @@ impl AgentJournal {
     /// a Diagnostic event.
     pub fn is_degraded(&self) -> bool {
         self.degraded
+    }
+
+    #[cfg(test)]
+    fn repair_needed_for_test(&self) -> bool {
+        self.repair_needed
+    }
+
+    #[cfg(test)]
+    fn pending_provider_session_id_for_test(&self) -> bool {
+        self.pending_provider_session_id.is_some()
+    }
+
+    #[cfg(test)]
+    fn metadata_attempts_for_test(&self) -> u32 {
+        self.metadata_publish_attempts
+    }
+
+    #[cfg(test)]
+    fn history_rewrite_attempts_for_test(&self) -> u32 {
+        self.history_rewrite_attempts
     }
 
     /// The seq the next appended event will get.
@@ -576,9 +673,35 @@ impl AgentJournal {
         if self.provider_session_id.as_deref() == Some(provider_session_id) {
             return;
         }
-        self.provider_session_id = Some(provider_session_id.to_string());
+
+        let repeats_pending =
+            self.pending_provider_session_id.as_deref() == Some(provider_session_id);
+        if repeats_pending {
+            if !self.metadata_retry.due() {
+                return;
+            }
+        } else {
+            self.metadata_retry.record_success();
+        }
+
+        if self.publish_provider_session_id(provider_session_id) {
+            self.provider_session_id = Some(provider_session_id.to_string());
+            self.pending_provider_session_id = None;
+            self.metadata_retry.record_success();
+        } else {
+            self.pending_provider_session_id = Some(provider_session_id.to_string());
+            self.metadata_retry.record_failure();
+        }
+    }
+
+    fn publish_provider_session_id(&mut self, provider_session_id: &str) -> bool {
+        #[cfg(test)]
+        {
+            self.metadata_publish_attempts += 1;
+        }
+
         let metadata = AgentJournalMetadata {
-            provider_session_id: self.provider_session_id.clone(),
+            provider_session_id: Some(provider_session_id.to_string()),
         };
         // Atomic, not `fs::write`. A plain write TRUNCATES first, so a crash
         // mid-write leaves the metadata empty or half-written and the provider
@@ -589,7 +712,9 @@ impl AgentJournal {
             Some(dir) => serde_json::to_string(&metadata)
                 .map_err(std::io::Error::other)
                 .and_then(|json| Self::replace_durably(dir, &self.metadata_name, json.as_bytes())),
-            None => Ok(()),
+            None => Err(std::io::Error::other(
+                "journal directory is unavailable for durable metadata",
+            )),
         };
         if let Err(error) = write_result {
             log::warn!(
@@ -597,6 +722,62 @@ impl AgentJournal {
                 self.metadata_path,
                 error
             );
+            return false;
+        }
+        true
+    }
+
+    fn retry_pending_durable_work(&mut self, repair_due: bool, metadata_due: bool) {
+        if metadata_due {
+            if let Some(pending) = self.pending_provider_session_id.clone() {
+                if self.publish_provider_session_id(&pending) {
+                    self.provider_session_id = Some(pending);
+                    self.pending_provider_session_id = None;
+                    self.metadata_retry.record_success();
+                } else {
+                    self.metadata_retry.record_failure();
+                }
+            }
+        }
+
+        if repair_due {
+            #[cfg(test)]
+            {
+                self.history_rewrite_attempts += 1;
+            }
+            let Some(dir) = self.dir.as_ref() else {
+                self.repair_retry.record_failure();
+                return;
+            };
+            match Self::rewrite_atomically(dir, &self.file_name, &self.events) {
+                Ok(()) => match dir.open_file(
+                    &self.file_name,
+                    libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT,
+                ) {
+                    Ok(file) => {
+                        self.file = Some(file);
+                        self.repair_needed = false;
+                        self.degraded = false;
+                        self.repair_retry.record_success();
+                    }
+                    Err(error) => {
+                        log::debug!(
+                            "[agent] rewrote {:?} but could not reopen it: {}",
+                            self.path,
+                            error
+                        );
+                        self.repair_retry.record_failure();
+                    }
+                },
+                Err(error) => {
+                    log::debug!(
+                        "[agent] deferred journal repair for {:?} still failing: {}",
+                        self.path,
+                        error
+                    );
+                    self.repair_retry.record_failure();
+                }
+            }
         }
     }
 
@@ -1602,6 +1783,19 @@ mod tests {
     }
     use std::io::Read;
 
+    fn with_failing_dir_sync<T>(body: impl FnOnce() -> T) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TEST_FAIL_DIR_SYNC.with(|slot| slot.set(false));
+            }
+        }
+
+        TEST_FAIL_DIR_SYNC.with(|slot| slot.set(true));
+        let _reset = Reset;
+        body()
+    }
+
     #[test]
     fn opencode_has_headless_adapter() {
         let adapter = make_adapter(AgentProvider::Opencode).expect("opencode adapter exists");
@@ -1702,6 +1896,118 @@ mod tests {
 
         // An unowned pid with no provable identity is refused outright.
         assert!(kill_agent_group_verified(pid as u32, None).is_err());
+    }
+
+    /// Sustained disk failure must not turn each event into another full-history
+    /// rewrite or provider-metadata publication attempt.
+    #[test]
+    fn sustained_disk_failure_does_not_retry_durable_work_per_event() {
+        let dir = tempdir::TempDirGuard::new("journal-sustained");
+        let journal_dir = AgentJournal::journal_dir(dir.path());
+        std::fs::create_dir_all(&journal_dir).expect("journal dir");
+        std::fs::write(
+            journal_dir.join("busy.ndjson"),
+            b"{\"seq\":0,\"event\":{\"type\":\"diagnostic\",\"message\":\"a\"}}\n\
+              {\"seq\":0,\"event\":{\"type\":\"diagnostic\",\"message\":\"b\"}}\n",
+        )
+        .expect("seed duplicate sequence");
+
+        with_failing_dir_sync(|| {
+            let mut journal = AgentJournal::open(dir.path(), "busy");
+            assert!(journal.repair_needed_for_test());
+            journal.set_provider_session_id("provider-sustained");
+            assert!(journal.pending_provider_session_id_for_test());
+
+            let metadata_before = journal.metadata_attempts_for_test();
+            let rewrites_before = journal.history_rewrite_attempts_for_test();
+            for index in 0..500 {
+                journal.append(AgentEvent::Diagnostic {
+                    message: format!("event-{index}"),
+                });
+            }
+
+            assert!(
+                journal.metadata_attempts_for_test() - metadata_before <= 5,
+                "metadata publication retried per event"
+            );
+            assert!(
+                journal.history_rewrite_attempts_for_test() - rewrites_before <= 5,
+                "full-history repair retried per event"
+            );
+            assert_eq!(journal.next_seq(), 502);
+        });
+    }
+
+    #[test]
+    fn repeated_production_style_set_and_append_honors_metadata_budget() {
+        let dir = tempdir::TempDirGuard::new("journal-metadata-budget");
+        let mut journal = AgentJournal::open(dir.path(), "prod");
+
+        with_failing_dir_sync(|| {
+            let before = journal.metadata_attempts_for_test();
+            for index in 0..300 {
+                journal.set_provider_session_id("provider-prod");
+                journal.append(AgentEvent::Diagnostic {
+                    message: format!("event-{index}"),
+                });
+            }
+
+            assert!(
+                journal.metadata_attempts_for_test() - before <= 5,
+                "metadata setter bypassed its retry budget"
+            );
+            assert!(journal.pending_provider_session_id_for_test());
+            assert_eq!(journal.provider_session_id(), None);
+            assert_eq!(journal.next_seq(), 300);
+        });
+    }
+
+    #[test]
+    fn pending_durable_work_retries_after_its_backoff() {
+        let dir = tempdir::TempDirGuard::new("journal-retry-recovery");
+        let journal_dir = AgentJournal::journal_dir(dir.path());
+        std::fs::create_dir_all(&journal_dir).expect("journal dir");
+        std::fs::write(
+            journal_dir.join("recover.ndjson"),
+            b"{\"seq\":0,\"event\":{\"type\":\"diagnostic\",\"message\":\"a\"}}\n\
+              {\"seq\":0,\"event\":{\"type\":\"diagnostic\",\"message\":\"b\"}}\n",
+        )
+        .expect("seed duplicate sequence");
+
+        let mut journal = with_failing_dir_sync(|| {
+            let mut journal = AgentJournal::open(dir.path(), "recover");
+            journal.set_provider_session_id("provider-recovered");
+            journal
+        });
+        assert!(journal.repair_needed_for_test());
+        assert!(journal.pending_provider_session_id_for_test());
+
+        std::thread::sleep(std::time::Duration::from_millis(450));
+        journal.append(AgentEvent::Diagnostic {
+            message: "retry trigger".to_string(),
+        });
+
+        assert!(!journal.repair_needed_for_test());
+        assert!(!journal.pending_provider_session_id_for_test());
+        assert_eq!(
+            journal.provider_session_id().as_deref(),
+            Some("provider-recovered")
+        );
+        assert_eq!(journal.next_seq(), 3);
+    }
+
+    #[test]
+    fn a_new_provider_id_gets_a_fresh_metadata_budget() {
+        let dir = tempdir::TempDirGuard::new("journal-new-provider-id");
+        let mut journal = AgentJournal::open(dir.path(), "fresh");
+
+        with_failing_dir_sync(|| {
+            journal.set_provider_session_id("first-id");
+        });
+        assert!(journal.pending_provider_session_id_for_test());
+
+        journal.set_provider_session_id("second-id");
+        assert_eq!(journal.provider_session_id().as_deref(), Some("second-id"));
     }
 
     /// Legacy journals with DUPLICATE seq values (written before one shared

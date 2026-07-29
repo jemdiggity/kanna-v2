@@ -7,10 +7,27 @@ use std::sync::{Arc, Mutex as StdMutex};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
 const RECOVERY_QUEUE_CAPACITY: usize = 1024;
 const RECOVERY_SHUTDOWN_TIMEOUT_MS: u64 = 2_000;
+#[cfg(not(test))]
+const RECOVERY_RESTART_BACKOFF_BASE_MS: u64 = 200;
+#[cfg(test)]
+const RECOVERY_RESTART_BACKOFF_BASE_MS: u64 = 100;
+const RECOVERY_RESTART_BACKOFF_MAX_MS: u64 = 30_000;
+#[cfg(not(test))]
+const RECOVERY_REQUEST_TIMEOUT_MS: u64 = 10_000;
+#[cfg(test)]
+const RECOVERY_REQUEST_TIMEOUT_MS: u64 = 200;
+
+fn recovery_request_timeout() -> std::time::Duration {
+    std::time::Duration::from_millis(RECOVERY_REQUEST_TIMEOUT_MS)
+}
+
+fn recovery_caller_timeout() -> std::time::Duration {
+    recovery_request_timeout().saturating_mul(2)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -44,19 +61,57 @@ pub struct RecoveryManager {
     seeded_for_next_start: Arc<StdMutex<HashSet<String>>>,
     sequences: Arc<StdMutex<HashMap<String, u64>>>,
     state: Arc<Mutex<RecoveryState>>,
+    restart_guard: Arc<Mutex<()>>,
 }
 
 #[derive(Debug)]
 struct RecoveryState {
-    sender: Option<mpsc::Sender<WorkerMessage>>,
+    sender: Option<Arc<RecoveryWorker>>,
     shutdown_requested: bool,
     tracked_sessions: HashMap<String, SessionGeometry>,
+    restart_retry: RestartRetry,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct SessionGeometry {
     cols: u16,
     rows: u16,
+}
+
+#[derive(Debug)]
+struct RestartRetry {
+    attempts: u32,
+    next_attempt_at: Option<std::time::Instant>,
+}
+
+impl RestartRetry {
+    fn new() -> Self {
+        Self {
+            attempts: 0,
+            next_attempt_at: None,
+        }
+    }
+
+    fn due(&self) -> bool {
+        self.next_attempt_at
+            .is_none_or(|at| std::time::Instant::now() >= at)
+    }
+
+    fn record_failure(&mut self) {
+        self.attempts = self.attempts.saturating_add(1);
+        let multiplier = 1u32 << self.attempts.saturating_sub(1).min(8);
+        let backoff = std::time::Duration::from_millis(RECOVERY_RESTART_BACKOFF_BASE_MS)
+            .saturating_mul(multiplier)
+            .min(std::time::Duration::from_millis(
+                RECOVERY_RESTART_BACKOFF_MAX_MS,
+            ));
+        self.next_attempt_at = Some(std::time::Instant::now() + backoff);
+    }
+
+    fn record_success(&mut self) {
+        self.attempts = 0;
+        self.next_attempt_at = None;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +186,44 @@ enum WorkerMessage {
         command: RecoveryCommand,
         reply: oneshot::Sender<Result<RecoveryResponse, String>>,
     },
+}
+
+#[derive(Debug)]
+struct RecoveryWorker {
+    sender: mpsc::Sender<WorkerMessage>,
+    cancel: watch::Sender<bool>,
+    stopped: watch::Receiver<bool>,
+}
+
+impl RecoveryWorker {
+    fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+
+    fn is_cancelled(&self) -> bool {
+        *self.cancel.borrow()
+    }
+
+    fn cancel(&self) {
+        let _ = self.cancel.send(true);
+    }
+
+    /// Resolves once this exact worker's task has reaped its sidecar.
+    ///
+    /// `watch::Receiver::wait_for` inspects the current value before it waits,
+    /// so an already-stopped worker returns immediately and there is no window
+    /// in which the stop signal can be missed. It also resolves with an error
+    /// if the worker task died without signalling, which keeps a panicked task
+    /// from wedging callers that hold `restart_guard`.
+    async fn wait_stopped(&self) {
+        let mut stopped = self.stopped.clone();
+        let _ = stopped.wait_for(|stopped| *stopped).await;
+    }
+
+    async fn cancel_and_wait(&self) {
+        self.cancel();
+        self.wait_stopped().await;
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -282,6 +375,11 @@ impl RecoveryManager {
         rows: u16,
         resume_from_disk: bool,
     ) -> Result<(), String> {
+        if !crate::session_id::is_safe(session_id) {
+            return Err(format!(
+                "refusing to start a recovery session with unsafe id {session_id:?}"
+            ));
+        }
         match self
             .request(RecoveryCommand::StartSession {
                 session_id: session_id.to_string(),
@@ -307,6 +405,10 @@ impl RecoveryManager {
     }
 
     pub async fn write_output(&self, session_id: &str, data: &[u8], sequence: u64) {
+        if !crate::session_id::is_safe(session_id) {
+            log::warn!("[recovery] dropping output for unsafe session id {session_id:?}");
+            return;
+        }
         if let Some(delay) = test_slow_recovery_write_delay() {
             tokio::time::sleep(delay).await;
         }
@@ -320,6 +422,10 @@ impl RecoveryManager {
     }
 
     pub async fn resize_session(&self, session_id: &str, cols: u16, rows: u16) {
+        if !crate::session_id::is_safe(session_id) {
+            log::warn!("[recovery] ignoring resize for unsafe session id {session_id:?}");
+            return;
+        }
         {
             let mut state = self.state.lock().await;
             state
@@ -336,6 +442,10 @@ impl RecoveryManager {
     }
 
     pub async fn end_session(&self, session_id: &str) {
+        if !crate::session_id::is_safe(session_id) {
+            log::warn!("[recovery] ignoring end for unsafe session id {session_id:?}");
+            return;
+        }
         {
             let mut state = self.state.lock().await;
             state.tracked_sessions.remove(session_id);
@@ -352,6 +462,11 @@ impl RecoveryManager {
     }
 
     pub async fn get_snapshot(&self, session_id: &str) -> Result<Option<RecoverySnapshot>, String> {
+        if !crate::session_id::is_safe(session_id) {
+            return Err(format!(
+                "refusing to send unsafe session id {session_id:?} to the recovery worker"
+            ));
+        }
         if self.launcher.is_none() {
             return self.read_persisted_snapshot(session_id);
         }
@@ -437,40 +552,47 @@ impl RecoveryManager {
     }
 
     pub async fn flush_and_shutdown(&self) {
-        let sender = {
+        let worker = {
             let mut state = self.state.lock().await;
             state.shutdown_requested = true;
-            if let Some(sender) = state.sender.as_ref() {
-                if sender.is_closed() {
-                    state.sender = None;
-                    None
-                } else {
-                    Some(sender.clone())
-                }
+            state.sender.take()
+        };
+
+        if let Some(worker) = worker {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if worker
+                .sender
+                .send(WorkerMessage::Request {
+                    command: RecoveryCommand::FlushAndShutdown,
+                    reply: reply_tx,
+                })
+                .await
+                .is_err()
+            {
+                worker.cancel_and_wait().await;
             } else {
-                None
+                let graceful = match tokio::time::timeout(recovery_caller_timeout(), reply_rx).await
+                {
+                    Ok(Ok(Err(message))) => {
+                        log::warn!("recovery flush_and_shutdown failed: {}", message);
+                        false
+                    }
+                    Ok(Ok(Ok(_))) => true,
+                    Ok(Err(_)) => {
+                        log::warn!("recovery worker stopped before shutdown reply");
+                        false
+                    }
+                    Err(_) => {
+                        log::warn!("recovery worker did not reply to shutdown in time");
+                        false
+                    }
+                };
+                if graceful {
+                    worker.wait_stopped().await;
+                } else {
+                    worker.cancel_and_wait().await;
+                }
             }
-        };
-
-        let Some(sender) = sender else {
-            return;
-        };
-
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if sender
-            .send(WorkerMessage::Request {
-                command: RecoveryCommand::FlushAndShutdown,
-                reply: reply_tx,
-            })
-            .await
-            .is_err()
-        {
-            self.reset_sender().await;
-        } else if let Ok(Err(message)) = reply_rx.await {
-            log::warn!("recovery flush_and_shutdown failed: {}", message);
-            self.reset_sender().await;
-        } else {
-            self.reset_sender().await;
         }
 
         let mut state = self.state.lock().await;
@@ -487,7 +609,9 @@ impl RecoveryManager {
                 sender: None,
                 shutdown_requested: false,
                 tracked_sessions: HashMap::new(),
+                restart_retry: RestartRetry::new(),
             })),
+            restart_guard: Arc::new(Mutex::new(())),
         }
     }
 
@@ -497,18 +621,21 @@ impl RecoveryManager {
         }
 
         for attempt in 0..2 {
-            let Some(sender) = self.ensure_sender().await else {
+            let Some(worker) = self.ensure_sender().await else {
                 return;
             };
 
-            match sender.try_send(WorkerMessage::FireAndForget(command.clone())) {
+            match worker
+                .sender
+                .try_send(WorkerMessage::FireAndForget(command.clone()))
+            {
                 Ok(()) => return,
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     log::warn!("recovery queue is full; dropping mirrored command");
                     return;
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
-                    self.reset_sender().await;
+                    self.invalidate_worker(&worker).await;
                     if attempt == 1 {
                         log::warn!(
                             "recovery worker closed before mirrored command could be queued"
@@ -526,7 +653,7 @@ impl RecoveryManager {
         }
 
         for attempt in 0..2 {
-            let Some(sender) = self.ensure_sender().await else {
+            let Some(worker) = self.ensure_sender().await else {
                 log::warn!(
                     "recovery request could not ensure sender on attempt {}",
                     attempt
@@ -535,7 +662,8 @@ impl RecoveryManager {
             };
 
             let (reply_tx, reply_rx) = oneshot::channel();
-            if sender
+            if worker
+                .sender
                 .send(WorkerMessage::Request {
                     command: command.clone(),
                     reply: reply_tx,
@@ -543,25 +671,31 @@ impl RecoveryManager {
                 .await
                 .is_err()
             {
-                self.reset_sender().await;
+                self.invalidate_worker(&worker).await;
                 if attempt == 1 {
                     return Err("recovery worker stopped before request send".to_string());
                 }
                 continue;
             }
 
-            match reply_rx.await {
-                Ok(Ok(response)) => return Ok(response),
-                Ok(Err(message)) => {
-                    self.reset_sender().await;
+            match tokio::time::timeout(recovery_caller_timeout(), reply_rx).await {
+                Ok(Ok(Ok(response))) => return Ok(response),
+                Ok(Ok(Err(message))) => {
+                    self.invalidate_worker(&worker).await;
                     if attempt == 1 {
                         return Err(message);
                     }
                 }
-                Err(_) => {
-                    self.reset_sender().await;
+                Ok(Err(_)) => {
+                    self.invalidate_worker(&worker).await;
                     if attempt == 1 {
                         return Err("recovery worker stopped before reply".to_string());
+                    }
+                }
+                Err(_) => {
+                    self.invalidate_worker(&worker).await;
+                    if attempt == 1 {
+                        return Err("recovery worker did not reply in time".to_string());
                     }
                 }
             }
@@ -570,36 +704,60 @@ impl RecoveryManager {
         Err("recovery request failed".to_string())
     }
 
-    async fn ensure_sender(&self) -> Option<mpsc::Sender<WorkerMessage>> {
+    async fn ensure_sender(&self) -> Option<Arc<RecoveryWorker>> {
         self.launcher.as_ref()?;
 
-        let tracked_sessions = {
+        {
+            let state = self.state.lock().await;
+            if state.shutdown_requested {
+                return None;
+            }
+            if let Some(worker) = state.sender.as_ref() {
+                if !worker.is_closed() && !worker.is_cancelled() {
+                    return Some(worker.clone());
+                }
+            }
+        }
+
+        let _restart = self.restart_guard.lock().await;
+        let (stale_worker, tracked_sessions, restart_due) = {
             let mut state = self.state.lock().await;
             if state.shutdown_requested {
                 return None;
             }
-            if let Some(sender) = state.sender.as_ref() {
-                if !sender.is_closed() {
-                    return Some(sender.clone());
+            if let Some(worker) = state.sender.as_ref() {
+                if !worker.is_closed() && !worker.is_cancelled() {
+                    return Some(worker.clone());
                 }
-                state.sender = None;
             }
-            state.tracked_sessions.clone()
+            (
+                state.sender.take(),
+                state.tracked_sessions.clone(),
+                state.restart_retry.due(),
+            )
         };
 
+        if let Some(stale_worker) = stale_worker {
+            stale_worker.cancel_and_wait().await;
+        }
+        if !restart_due {
+            return None;
+        }
+
         let launcher = self.launcher.as_ref()?.clone();
-        let sender = match spawn_worker(launcher, self.snapshot_dir.clone()).await {
-            Ok(sender) => sender,
+        let worker = match spawn_worker(launcher, self.snapshot_dir.clone()).await {
+            Ok(worker) => worker,
             Err(message) => {
                 log::warn!("failed to start recovery sidecar: {}", message);
+                self.state.lock().await.restart_retry.record_failure();
                 return None;
             }
         };
 
         for (session_id, geometry) in tracked_sessions {
             let resume_from_disk = self.has_persisted_snapshot(&session_id);
-            if let Err(message) = send_request_via_sender(
-                &sender,
+            if let Err(message) = replay_session(
+                &worker,
                 RecoveryCommand::StartSession {
                     session_id,
                     cols: geometry.cols,
@@ -613,19 +771,44 @@ impl RecoveryManager {
                     "failed to re-register recovery session after restart: {}",
                     message
                 );
-                self.reset_sender().await;
+                worker.cancel_and_wait().await;
+                self.state.lock().await.restart_retry.record_failure();
                 return None;
             }
         }
 
         let mut state = self.state.lock().await;
-        state.sender = Some(sender.clone());
-        Some(sender)
+        if state.shutdown_requested {
+            drop(state);
+            worker.cancel_and_wait().await;
+            return None;
+        }
+        state.restart_retry.record_success();
+        state.sender = Some(worker.clone());
+        Some(worker)
     }
 
-    async fn reset_sender(&self) {
-        let mut state = self.state.lock().await;
-        state.sender = None;
+    async fn invalidate_worker(&self, used: &Arc<RecoveryWorker>) {
+        // Mark the exact worker first so the lock-free fast path in
+        // `ensure_sender` cannot hand it to another caller while invalidation is
+        // waiting for the restart gate.
+        used.cancel();
+
+        let _restart = self.restart_guard.lock().await;
+        {
+            let mut state = self.state.lock().await;
+            if state
+                .sender
+                .as_ref()
+                .is_some_and(|installed| Arc::ptr_eq(installed, used))
+            {
+                state.sender = None;
+            }
+        }
+        // The worker closes its receiver before killing the child, which drops
+        // every queued message and prevents any backlog from draining after a
+        // replacement starts.
+        used.cancel_and_wait().await;
     }
 
     fn snapshot_file(&self, session_id: &str) -> PathBuf {
@@ -671,12 +854,10 @@ fn lock_seeded_for_next_start(
     }
 }
 
-async fn send_request_via_sender(
-    sender: &mpsc::Sender<WorkerMessage>,
-    command: RecoveryCommand,
-) -> Result<RecoveryResponse, String> {
+async fn replay_session(worker: &RecoveryWorker, command: RecoveryCommand) -> Result<(), String> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    sender
+    worker
+        .sender
         .send(WorkerMessage::Request {
             command,
             reply: reply_tx,
@@ -684,16 +865,23 @@ async fn send_request_via_sender(
         .await
         .map_err(|_| "recovery worker stopped before replay request".to_string())?;
 
-    match reply_rx.await {
-        Ok(result) => result,
-        Err(_) => Err("recovery worker stopped before replay response".to_string()),
+    match tokio::time::timeout(recovery_caller_timeout(), reply_rx).await {
+        Ok(Ok(Ok(RecoveryResponse::Ok))) => Ok(()),
+        Ok(Ok(Ok(RecoveryResponse::Error { message }))) => Err(message),
+        Ok(Ok(Ok(other))) => Err(format!(
+            "unexpected recovery response while replaying session: {:?}",
+            other
+        )),
+        Ok(Ok(Err(message))) => Err(message),
+        Ok(Err(_)) => Err("recovery worker stopped before replay response".to_string()),
+        Err(_) => Err("recovery worker did not reply to replay in time".to_string()),
     }
 }
 
 async fn spawn_worker(
     launcher: RecoveryLauncher,
     snapshot_dir: PathBuf,
-) -> Result<mpsc::Sender<WorkerMessage>, String> {
+) -> Result<Arc<RecoveryWorker>, String> {
     std::fs::create_dir_all(&snapshot_dir).map_err(|error| {
         format!(
             "failed to create recovery snapshot dir {:?}: {}",
@@ -714,6 +902,7 @@ async fn spawn_worker(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    command.kill_on_drop(true);
 
     // Fork/exec inside the spawn/fd boundary so the sidecar can never capture
     // another thread's not-yet-CLOEXEC descriptor (e.g. a PTY pair mid-open).
@@ -742,8 +931,28 @@ async fn spawn_worker(
     }
 
     let (tx, rx) = mpsc::channel(RECOVERY_QUEUE_CAPACITY);
-    tokio::spawn(recovery_worker(child, child_stdin, child_stdout, rx));
-    Ok(tx)
+    let (cancel, cancel_rx) = watch::channel(false);
+    let (stopped_tx, stopped) = watch::channel(false);
+    let worker = Arc::new(RecoveryWorker {
+        sender: tx,
+        cancel,
+        stopped,
+    });
+    tokio::spawn(recovery_worker(
+        child,
+        child_stdin,
+        child_stdout,
+        rx,
+        cancel_rx,
+        stopped_tx,
+    ));
+    Ok(worker)
+}
+
+#[derive(Clone, Copy)]
+enum WorkerExit {
+    Graceful,
+    Kill,
 }
 
 async fn recovery_worker(
@@ -751,31 +960,95 @@ async fn recovery_worker(
     mut stdin: tokio::process::ChildStdin,
     stdout: ChildStdout,
     mut rx: mpsc::Receiver<WorkerMessage>,
+    mut cancel: watch::Receiver<bool>,
+    stopped: watch::Sender<bool>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
+    let exit = loop {
+        let message = tokio::select! {
+            biased;
+            _ = wait_for_worker_cancellation(&mut cancel) => break WorkerExit::Kill,
+            message = rx.recv() => match message {
+                Some(message) => message,
+                None => break WorkerExit::Kill,
+            },
+        };
 
-    while let Some(message) = rx.recv().await {
         match message {
             WorkerMessage::FireAndForget(command) => {
-                if let Err(message) = send_fire_and_forget(&mut stdin, &command).await {
+                let result = tokio::select! {
+                    biased;
+                    _ = wait_for_worker_cancellation(&mut cancel) => {
+                        break WorkerExit::Kill;
+                    }
+                    result = tokio::time::timeout(
+                        recovery_request_timeout(),
+                        send_fire_and_forget(&mut stdin, &command),
+                    ) => result,
+                };
+                let failure = match result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(message)) => Some(message),
+                    Err(_) => Some("recovery sidecar stopped reading stdin".to_string()),
+                };
+                if let Some(message) = failure {
                     log::warn!("recovery mirrored command failed: {}", message);
-                    break;
+                    break WorkerExit::Kill;
                 }
             }
             WorkerMessage::Request { command, reply } => {
                 let is_shutdown = matches!(command, RecoveryCommand::FlushAndShutdown);
-                let result = send_request(&mut stdin, &mut lines, &command).await;
+                let result = tokio::select! {
+                    biased;
+                    _ = wait_for_worker_cancellation(&mut cancel) => {
+                        break WorkerExit::Kill;
+                    }
+                    result = tokio::time::timeout(
+                        recovery_request_timeout(),
+                        send_request(&mut stdin, &mut lines, &command),
+                    ) => match result {
+                        Ok(result) => result,
+                        Err(_) => Err(format!(
+                            "recovery sidecar did not answer within {RECOVERY_REQUEST_TIMEOUT_MS}ms"
+                        )),
+                    },
+                };
                 let should_break = is_shutdown || result.is_err();
+                let graceful = is_shutdown && result.is_ok();
                 let _ = reply.send(result);
                 if should_break {
-                    break;
+                    break if graceful {
+                        WorkerExit::Graceful
+                    } else {
+                        WorkerExit::Kill
+                    };
                 }
             }
         }
-    }
+    };
 
-    let _ = stdin.shutdown().await;
-    wait_for_child_exit(&mut child).await;
+    // Closing and dropping the receiver discards the exact worker's backlog
+    // before its sidecar can be replaced.
+    rx.close();
+    drop(rx);
+    match exit {
+        WorkerExit::Graceful => {
+            let _ = stdin.shutdown().await;
+            wait_for_child_exit(&mut child).await;
+        }
+        WorkerExit::Kill => {
+            drop(stdin);
+            kill_and_reap_child(&mut child).await;
+        }
+    }
+    let _ = stopped.send(true);
+}
+
+async fn wait_for_worker_cancellation(cancel: &mut watch::Receiver<bool>) {
+    if *cancel.borrow() {
+        return;
+    }
+    let _ = cancel.changed().await;
 }
 
 async fn send_command(
@@ -854,6 +1127,15 @@ async fn wait_for_child_exit(child: &mut Child) {
                 log::warn!("failed to reap recovery sidecar after kill: {}", error);
             }
         }
+    }
+}
+
+async fn kill_and_reap_child(child: &mut Child) {
+    if let Err(error) = child.kill().await {
+        log::warn!("failed to kill recovery sidecar: {}", error);
+    }
+    if let Err(error) = child.wait().await {
+        log::warn!("failed to reap recovery sidecar after kill: {}", error);
     }
 }
 
@@ -971,6 +1253,400 @@ fn unique_test_snapshot_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unsafe_session_ids_never_reach_the_worker_or_tracked_state() {
+        let snapshot_dir = unique_test_snapshot_dir();
+        std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
+        let seen = snapshot_dir.join("sent.log");
+        let manager = RecoveryManager::new(
+            snapshot_dir.clone(),
+            Some(RecoveryLauncher {
+                program: PathBuf::from("/bin/sh"),
+                args: vec![
+                    "-c".to_string(),
+                    format!(
+                        "while IFS= read -r line; do printf '%s\\n' \"$line\" >> {}; \
+                         printf '%s\\n' '{{\"type\":\"Ok\"}}'; done",
+                        seen.display()
+                    ),
+                ],
+            }),
+        );
+        assert!(manager.ensure_sender().await.is_some(), "worker installs");
+
+        for hostile in ["../escape", "/etc/passwd", "..", "Upper", "caf\u{e9}"] {
+            manager.write_output(hostile, b"leak", 1).await;
+            manager.resize_session(hostile, 80, 24).await;
+            manager.end_session(hostile).await;
+            assert!(
+                manager.start_session(hostile, 80, 24, false).await.is_err(),
+                "start_session must refuse {hostile:?}"
+            );
+            assert!(
+                manager.get_snapshot(hostile).await.is_err(),
+                "get_snapshot must refuse {hostile:?}"
+            );
+        }
+
+        assert!(
+            manager.state.lock().await.tracked_sessions.is_empty(),
+            "unsafe ids must not be recorded for replay"
+        );
+
+        manager
+            .start_session("good-session", 80, 24, false)
+            .await
+            .expect("valid request still works");
+        manager.write_output("good-session", b"ok", 1).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let sent = std::fs::read_to_string(&seen).unwrap_or_default();
+        for hostile in ["../escape", "/etc/passwd", "\"..\"", "Upper", "caf"] {
+            assert!(
+                !sent.contains(hostile),
+                "unsafe id reached the worker: {sent}"
+            );
+        }
+        assert!(sent.contains("good-session"));
+
+        manager.flush_and_shutdown().await;
+        let _ = std::fs::remove_dir_all(&snapshot_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hung_sidecar_does_not_wedge_requests_or_leak_the_child() {
+        let snapshot_dir = unique_test_snapshot_dir();
+        std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
+        let pid_log = snapshot_dir.join("sidecar-pids.log");
+        let manager = RecoveryManager::new(
+            snapshot_dir.clone(),
+            Some(RecoveryLauncher {
+                program: PathBuf::from("/bin/sh"),
+                args: vec![
+                    "-c".to_string(),
+                    format!(
+                        "echo $$ >> {}; while IFS= read -r line; do :; done",
+                        pid_log.display()
+                    ),
+                ],
+            }),
+        );
+        assert!(manager.ensure_sender().await.is_some(), "worker installs");
+
+        let request = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            manager.get_snapshot("hung-session"),
+        )
+        .await;
+        if request.is_err() {
+            if let Ok(pids) = std::fs::read_to_string(&pid_log) {
+                for pid in pids.lines().filter_map(|line| line.parse::<i32>().ok()) {
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        assert!(
+            matches!(request, Ok(Err(_))),
+            "a silent sidecar must return a bounded error"
+        );
+
+        let pids = std::fs::read_to_string(&pid_log).expect("sidecar pid log");
+        for pid in pids.lines().filter_map(|line| line.parse::<i32>().ok()) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "hung sidecar {pid} was not killed and reaped"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&snapshot_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sidecar_that_stops_reading_cannot_wedge_a_mirrored_write() {
+        let snapshot_dir = unique_test_snapshot_dir();
+        std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
+        let manager = RecoveryManager::new(
+            snapshot_dir.clone(),
+            Some(RecoveryLauncher {
+                program: PathBuf::from("/bin/sleep"),
+                args: vec!["300".to_string()],
+            }),
+        );
+        assert!(manager.ensure_sender().await.is_some(), "worker installs");
+
+        manager
+            .write_output("blocked-session", &vec![b'x'; 512 * 1024], 1)
+            .await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let closed = manager
+                .state
+                .lock()
+                .await
+                .sender
+                .as_ref()
+                .is_some_and(|worker| worker.is_closed());
+            if closed {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker stayed blocked writing to sidecar stdin"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        let _ = std::fs::remove_dir_all(&snapshot_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn simultaneous_restarts_spawn_exactly_one_sidecar() {
+        let snapshot_dir = unique_test_snapshot_dir();
+        std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
+        let spawn_log = snapshot_dir.join("spawns.log");
+        let manager = RecoveryManager::new(
+            snapshot_dir.clone(),
+            Some(RecoveryLauncher {
+                program: PathBuf::from("/bin/sh"),
+                args: vec![
+                    "-c".to_string(),
+                    format!(
+                        "echo spawned >> {}; while IFS= read -r line; do :; done",
+                        spawn_log.display()
+                    ),
+                ],
+            }),
+        );
+        let count = || {
+            std::fs::read_to_string(&spawn_log)
+                .map(|contents| contents.lines().count())
+                .unwrap_or(0)
+        };
+        let initial = manager.ensure_sender().await.expect("initial worker");
+        let initial_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while count() < 1 && std::time::Instant::now() < initial_deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(count(), 1, "initial sidecar did not start");
+        manager.invalidate_worker(&initial).await;
+
+        let gate = Arc::new(tokio::sync::Barrier::new(8));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let manager = manager.clone();
+            let gate = gate.clone();
+            tasks.push(tokio::spawn(async move {
+                gate.wait().await;
+                manager.ensure_sender().await.is_some()
+            }));
+        }
+        for task in tasks {
+            assert!(task.await.expect("restart task"));
+        }
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while count() < 2 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            count(),
+            2,
+            "initial startup plus one restart should spawn exactly two sidecars"
+        );
+
+        manager.flush_and_shutdown().await;
+        let _ = std::fs::remove_dir_all(&snapshot_dir);
+    }
+
+    #[tokio::test]
+    async fn stale_worker_failure_does_not_erase_its_replacement() {
+        let snapshot_dir = unique_test_snapshot_dir();
+        std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
+        let manager = RecoveryManager::new(
+            snapshot_dir.clone(),
+            Some(RecoveryLauncher {
+                program: PathBuf::from("/bin/sh"),
+                args: vec![
+                    "-c".to_string(),
+                    "while IFS= read -r line; do :; done".to_string(),
+                ],
+            }),
+        );
+
+        let first = manager.ensure_sender().await.expect("first worker");
+        manager.invalidate_worker(&first).await;
+        let second = manager.ensure_sender().await.expect("replacement worker");
+        assert!(!Arc::ptr_eq(&first, &second));
+
+        manager.invalidate_worker(&first).await;
+        assert!(
+            manager
+                .state
+                .lock()
+                .await
+                .sender
+                .as_ref()
+                .is_some_and(|worker| Arc::ptr_eq(worker, &second)),
+            "a stale failure erased the replacement"
+        );
+
+        manager.invalidate_worker(&second).await;
+        assert!(
+            manager.state.lock().await.sender.is_none(),
+            "the installed worker's failure must invalidate it"
+        );
+
+        drop(first);
+        drop(second);
+        drop(manager);
+        let _ = std::fs::remove_dir_all(&snapshot_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn timed_out_worker_is_reaped_before_replacement_can_write() {
+        let snapshot_dir = unique_test_snapshot_dir();
+        std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
+        let active_pid = snapshot_dir.join("active.pid");
+        let spawn_log = snapshot_dir.join("spawns.log");
+        let overlap_log = snapshot_dir.join("overlap.log");
+        let script = format!(
+            "if test -s {active}; then old=$(sed -n '1p' {active}); \
+             if kill -0 \"$old\" 2>/dev/null; then echo \"$old -> $$\" >> {overlap}; fi; fi; \
+             echo $$ > {active}; echo $$ >> {spawns}; \
+             IFS= read -r line || exit 0; while :; do :; done",
+            active = active_pid.display(),
+            overlap = overlap_log.display(),
+            spawns = spawn_log.display(),
+        );
+        let manager = RecoveryManager::new(
+            snapshot_dir.clone(),
+            Some(RecoveryLauncher {
+                program: PathBuf::from("/bin/sh"),
+                args: vec!["-c".to_string(), script],
+            }),
+        );
+        assert!(manager.ensure_sender().await.is_some(), "worker installs");
+
+        // The mirrored writes are queued before the request. The sidecar consumes
+        // the first command and stays alive without replying, so the request
+        // times out while that exact worker still owns a queued backlog.
+        for sequence in 1..=3 {
+            manager
+                .write_output("queued-session", b"queued", sequence)
+                .await;
+        }
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            manager.get_snapshot("queued-session"),
+        )
+        .await
+        .expect("request remains bounded");
+        assert!(result.is_err(), "both deliberately stuck workers must fail");
+
+        let spawns = std::fs::read_to_string(&spawn_log).expect("spawn log");
+        assert_eq!(
+            spawns.lines().count(),
+            2,
+            "the caller retries once with a replacement"
+        );
+        assert!(
+            !overlap_log.exists()
+                || std::fs::read_to_string(&overlap_log)
+                    .expect("overlap log")
+                    .is_empty(),
+            "replacement sidecar started while the timed-out sidecar was alive"
+        );
+
+        let _ = std::fs::remove_dir_all(&snapshot_dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn failed_replay_is_single_flight_and_backed_off_for_all_waiters() {
+        let snapshot_dir = unique_test_snapshot_dir();
+        std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
+        let spawn_log = snapshot_dir.join("spawns.log");
+        let manager = RecoveryManager::new(
+            snapshot_dir.clone(),
+            Some(RecoveryLauncher {
+                program: PathBuf::from("/bin/sh"),
+                args: vec![
+                    "-c".to_string(),
+                    format!(
+                        "echo $$ >> {}; IFS= read -r line || exit 0; while :; do :; done",
+                        spawn_log.display()
+                    ),
+                ],
+            }),
+        );
+        manager.state.lock().await.tracked_sessions.insert(
+            "replay-session".to_string(),
+            SessionGeometry { cols: 80, rows: 24 },
+        );
+
+        let call_batch = |manager: RecoveryManager| async move {
+            let gate = Arc::new(tokio::sync::Barrier::new(8));
+            let mut tasks = Vec::new();
+            for _ in 0..8 {
+                let manager = manager.clone();
+                let gate = gate.clone();
+                tasks.push(tokio::spawn(async move {
+                    gate.wait().await;
+                    manager.ensure_sender().await.is_some()
+                }));
+            }
+            for task in tasks {
+                assert!(!task.await.expect("restart waiter"));
+            }
+        };
+
+        let started = std::time::Instant::now();
+        call_batch(manager.clone()).await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "waiters serialized replay timeouts instead of sharing one attempt"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&spawn_log)
+                .expect("spawn log")
+                .lines()
+                .count(),
+            1,
+            "simultaneous waiters must share one failed replay attempt"
+        );
+
+        call_batch(manager.clone()).await;
+        assert_eq!(
+            std::fs::read_to_string(&spawn_log)
+                .expect("spawn log")
+                .lines()
+                .count(),
+            1,
+            "retry backoff must suppress an immediate second failure wave"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(
+            RECOVERY_RESTART_BACKOFF_BASE_MS + 50,
+        ))
+        .await;
+        call_batch(manager.clone()).await;
+        assert_eq!(
+            std::fs::read_to_string(&spawn_log)
+                .expect("spawn log")
+                .lines()
+                .count(),
+            2,
+            "one new attempt is allowed after the bounded retry delay"
+        );
+
+        let _ = std::fs::remove_dir_all(&snapshot_dir);
+    }
 
     /// The exact JSON v0.0.30 wrote: no cursor fields at all.
     const V0_0_30_SNAPSHOT: &str = r#"{"sessionId":"legacy-v0030","serialized":"LEGACY_SCROLLBACK\r\n","cols":80,"rows":24,"savedAt":1700000000000,"sequence":7}"#;
