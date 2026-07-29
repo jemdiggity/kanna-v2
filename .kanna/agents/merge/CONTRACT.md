@@ -13,6 +13,7 @@ Required behavior:
 - It must parse the source branch and target branch from structured `MERGE` lines.
 - It may accept natural-language operator requests only after resolving them into concrete branches or PRs.
 - It must analyze git topology before merging and must not infer stack order from PR descriptions.
+- Before merging into a target that is not the default branch, it must confirm that target has an open PR of its own, and otherwise report the orphaned target to the operator instead of merging.
 - Before deleting a merged branch associated with a Kanna task, it must call `kanna_is_dependent_tasks_exist`.
 - It must finish each merge-master turn with `kanna_complete_stage` status `success` or `failure`.
 

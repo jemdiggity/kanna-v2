@@ -330,4 +330,99 @@ describe("QA pipeline assets", () => {
     expect(mergeAgent).toContain("Do not push directly to the target branch.");
     expect(mergeAgent).not.toContain("--delete-branch");
   });
+
+  // Every flavor that opens a PR carries its own copy of the steps, so the
+  // guards below have to hold for all of them: fixing one path while a
+  // sibling keeps opening dead-end and duplicate PRs fixes nothing.
+  const PR_CREATING_AGENTS = [
+    ".kanna/agents/pr/AGENT.md",
+    ".kanna/agents/pr/flavors/draft-pr/AGENT.md",
+  ];
+
+  it("makes every PR-creating agent prove its base ref still leads to the default branch", () => {
+    // A PR that merges cleanly into an abandoned integration branch is
+    // indistinguishable from a healthy one: review, checks, and the mergeable
+    // state all pass while the work lands nowhere. $BASE_REF is where the task
+    // started, not evidence that the branch is still going anywhere.
+    for (const path of PR_CREATING_AGENTS) {
+      const agent = readRepoPhrases(path);
+
+      expect(agent, path).toContain("gh pr list --state open --head <base> --json number,url,baseRefName");
+      expect(agent, path).toContain("git ls-remote --heads origin <base>");
+      expect(agent, path).toContain("git merge-base --is-ancestor origin/<base> origin/<default>");
+      // Retargeting must replay only the task's own commits — rebasing onto
+      // the default branch without `--onto` drags the dead base's commits in.
+      expect(agent, path).toContain("git rebase --onto origin/<default> origin/<base> HEAD");
+      // Asking is a valid outcome; silently landing on a dead branch is not.
+      expect(agent, path).toContain("Stopping to ask is a correct outcome");
+      // Stacked PRs onto a live feature branch stay working.
+      expect(agent, path).toContain("Never retarget unconditionally");
+      // Distance behind the default branch is corroboration, never the
+      // trigger: long-lived stack parents drift behind without being
+      // abandoned.
+      expect(agent, path).toContain("Do not trigger on how far the base is behind the default branch");
+    }
+
+    expect(readRepoPhrases(".kanna/agents/pr/CONTRACT.md")).toContain(
+      "still a live path to the default branch",
+    );
+  });
+
+  it("makes every PR-creating agent find an existing PR the rename step hid", () => {
+    // The rename step moves the branch, so a prior PR for this task can sit on
+    // a branch name this worktree no longer has — a `gh pr create` that only
+    // looked at the current branch opened a duplicate for the same commit.
+    for (const path of PR_CREATING_AGENTS) {
+      const agent = readRepoPhrases(path);
+
+      expect(agent, path).toContain("Check whether an open PR already covers this work");
+      // Matching is on the work: head sha recorded before the rebase, this
+      // task's branch names, the task-id trailer, and patch equivalence.
+      expect(agent, path).toContain("headRefOid");
+      expect(agent, path).toContain('gh pr list --state open --search "$KANNA_TASK_ID in:body"');
+      expect(agent, path).toContain("git cherry origin/<headRefName> HEAD");
+      expect(agent, path).toContain("Kanna-Task: $KANNA_TASK_ID");
+      // Updating means pushing to the PR's branch, not renaming away from it.
+      expect(agent, path).toContain("git push --force-with-lease origin HEAD:refs/heads/<headRefName>");
+      expect(agent, path).toContain("Do not rename the branch");
+    }
+
+    expect(readRepoPhrases(".kanna/agents/pr/CONTRACT.md")).toContain(
+      "must not open a second pull request",
+    );
+  });
+
+  it("keeps pr@draft-pr drafting while it validates the base and reuses PRs", () => {
+    // The flavor's whole reason to exist is the draft, so the shared guards
+    // must not cost it: it still opens drafts, and reusing a PR that someone
+    // already readied must not push it back into draft state.
+    const draftFlavor = readRepoPhrases(".kanna/agents/pr/flavors/draft-pr/AGENT.md");
+
+    expect(draftFlavor).toContain("gh pr create --draft --base <target>");
+    expect(draftFlavor).toContain("Ready PRs count as matches too, not just drafts");
+    expect(draftFlavor).toContain("never convert a ready PR back to a draft");
+    expect(readRepoPhrases(".kanna/agents/pr/CONTRACT.md")).toContain(
+      "it must leave that PR's draft state alone",
+    );
+  });
+
+  it("stops approve and the merge master from shipping into an orphaned base", () => {
+    // The same blind spot, one and two steps later: approve signals a merge
+    // for a target it never checked, and the merge master merges it. Both
+    // guards are one `gh pr list` call, and after the merge the mistake is
+    // invisible — so both are worth paying for.
+    const approveAgent = readRepoPhrases(".kanna/agents/approve/AGENT.md");
+    const approveContract = readRepoPhrases(".kanna/agents/approve/CONTRACT.md");
+    const mergeAgent = readRepoPhrases(".kanna/agents/merge/AGENT.md");
+    const mergeGithub = readRepoPhrases(".kanna/agents/merge/flavors/github/AGENT.md");
+    const mergeContract = readRepoPhrases(".kanna/agents/merge/CONTRACT.md");
+
+    expect(approveAgent).toContain("gh pr list --state open --head <baseRefName> --json number,url");
+    expect(approveAgent).toContain("do not signal the merge master");
+    expect(approveContract).toContain("it must finish with status `failure` and signal no merge");
+    expect(mergeAgent).toContain("A requested target is not automatically a live one");
+    expect(mergeAgent).toContain("ask the operator whether to retarget before merging");
+    expect(mergeGithub).toContain("Confirm the resolved target is live before merging");
+    expect(mergeContract).toContain("report the orphaned target to the operator instead of merging");
+  });
 });
