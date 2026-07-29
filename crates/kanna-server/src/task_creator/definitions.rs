@@ -3,7 +3,8 @@ use crate::db::Repo;
 use kanna_agent_protocol::AgentProvider;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
-use std::collections::{BTreeSet, HashMap};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -22,6 +23,13 @@ pub(super) struct RepoConfig {
     pub(super) flavors: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) vars: Option<HashMap<String, String>>,
+    #[serde(
+        rename = "agentProviders",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_agent_provider_preferences"
+    )]
+    pub(super) agent_providers: Option<BTreeMap<String, AgentProviderPreference>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) reserved_ports: Vec<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -30,6 +38,89 @@ pub(super) struct RepoConfig {
     pub(super) stage_order: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) workspace: Option<RepoWorkspaceConfig>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct AgentProviderPreference {
+    #[serde(rename = "provider")]
+    pub(super) providers: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) model: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for AgentProviderPreference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        parse_agent_provider_preference(&value)
+            .ok_or_else(|| serde::de::Error::custom("invalid agent provider preference"))
+    }
+}
+
+impl RepoConfig {
+    /// Resolve a repo-level provider/model preference for an agent selector.
+    ///
+    /// Exact names win. Otherwise, the glob with the most non-wildcard
+    /// characters wins; equally specific globs use lexical order so JSON map
+    /// ordering never affects resolution.
+    pub(super) fn agent_provider_preference(
+        &self,
+        agent_selector: Option<&str>,
+    ) -> Option<&AgentProviderPreference> {
+        let selector = agent_selector?.trim();
+        if selector.is_empty() {
+            return None;
+        }
+        let preferences = self.agent_providers.as_ref()?;
+        if let Some(preference) = preferences.get(selector) {
+            return Some(preference);
+        }
+
+        preferences
+            .iter()
+            .filter(|(pattern, _)| pattern.contains('*') && wildcard_matches(pattern, selector))
+            .min_by(|(left, _), (right, _)| compare_agent_provider_globs(left, right))
+            .map(|(_, preference)| preference)
+    }
+}
+
+fn compare_agent_provider_globs(left: &str, right: &str) -> Ordering {
+    let specificity = |pattern: &str| pattern.bytes().filter(|byte| *byte != b'*').count();
+    specificity(right)
+        .cmp(&specificity(left))
+        .then_with(|| left.cmp(right))
+}
+
+fn wildcard_matches(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let (mut pattern_index, mut value_index) = (0, 0);
+    let mut wildcard_index = None;
+    let mut wildcard_value_index = 0;
+
+    while value_index < value.len() {
+        if pattern_index < pattern.len() && pattern[pattern_index] == value[value_index] {
+            pattern_index += 1;
+            value_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            wildcard_index = Some(pattern_index);
+            pattern_index += 1;
+            wildcard_value_index = value_index;
+        } else if let Some(wildcard) = wildcard_index {
+            pattern_index = wildcard + 1;
+            wildcard_value_index += 1;
+            value_index = wildcard_value_index;
+        } else {
+            return false;
+        }
+    }
+
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -535,6 +626,22 @@ fn parse_repo_config(content: &str) -> Result<RepoConfig, String> {
         (!normalized.is_empty()).then_some(normalized)
     });
 
+    let agent_providers = raw
+        .get("agentProviders")
+        .and_then(serde_json::Value::as_object)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|(pattern, value)| {
+                    (!pattern.trim().is_empty())
+                        .then(|| parse_agent_provider_preference(value))
+                        .flatten()
+                        .map(|preference| (pattern.clone(), preference))
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .filter(|values| !values.is_empty());
+
     let integer_array = |name: &str, valid: fn(i64) -> bool| {
         raw.get(name)
             .and_then(serde_json::Value::as_array)
@@ -585,11 +692,66 @@ fn parse_repo_config(content: &str) -> Result<RepoConfig, String> {
         ports,
         flavors: string_map(raw.get("flavors")),
         vars: string_map(raw.get("vars")),
+        agent_providers,
         reserved_port_offsets: integer_array("reserved_port_offsets", |value| value >= 0),
         reserved_ports: integer_array("reserved_ports", |value| (1..=65535).contains(&value)),
         stage_order: string_array("stage_order"),
         workspace,
     })
+}
+
+fn deserialize_optional_agent_provider_preferences<'de, D>(
+    deserializer: D,
+) -> Result<Option<BTreeMap<String, AgentProviderPreference>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(raw) = value.and_then(|value| value.as_object().cloned()) else {
+        return Ok(None);
+    };
+    let preferences = raw
+        .iter()
+        .filter_map(|(pattern, value)| {
+            (!pattern.trim().is_empty())
+                .then(|| parse_agent_provider_preference(value))
+                .flatten()
+                .map(|preference| (pattern.clone(), preference))
+        })
+        .collect::<BTreeMap<_, _>>();
+    Ok((!preferences.is_empty()).then_some(preferences))
+}
+
+fn parse_agent_provider_preference(value: &serde_json::Value) -> Option<AgentProviderPreference> {
+    let (provider, model) = match value {
+        serde_json::Value::String(_) => (value, None),
+        serde_json::Value::Object(raw) => (
+            raw.get("provider")?,
+            raw.get("model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        ),
+        _ => return None,
+    };
+    let providers = match provider {
+        serde_json::Value::String(provider) => provider
+            .split(',')
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        serde_json::Value::Array(providers) => providers
+            .iter()
+            .map(serde_json::Value::as_str)
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        _ => return None,
+    };
+    (!providers.is_empty()).then_some(AgentProviderPreference { providers, model })
 }
 
 fn read_snapshot_utf8(

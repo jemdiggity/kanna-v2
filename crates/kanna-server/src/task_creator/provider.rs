@@ -61,6 +61,7 @@ pub(super) fn validate_provider_model(
 pub(super) fn resolve_agent_provider(
     explicit_provider: Option<&str>,
     stage_provider: Option<&[String]>,
+    repo_provider: Option<&[String]>,
     agent: Option<&AgentDefinition>,
     fallback_provider: Option<&str>,
     search_path: Option<&str>,
@@ -69,6 +70,7 @@ pub(super) fn resolve_agent_provider(
     let candidates = resolve_agent_provider_candidates(
         explicit_provider,
         stage_provider,
+        repo_provider,
         agent,
         fallback_provider,
     )?;
@@ -85,6 +87,7 @@ pub(super) fn resolve_agent_provider(
 pub(super) fn resolve_agent_provider_candidates(
     explicit_provider: Option<&str>,
     stage_provider: Option<&[String]>,
+    repo_provider: Option<&[String]>,
     agent: Option<&AgentDefinition>,
     fallback_provider: Option<&str>,
 ) -> Result<Vec<AgentProvider>, String> {
@@ -97,6 +100,8 @@ pub(super) fn resolve_agent_provider_candidates(
                 .map(str::to_string)
                 .collect::<Vec<_>>()
         } else if let Some(providers) = stage_provider.filter(|providers| !providers.is_empty()) {
+            providers.to_vec()
+        } else if let Some(providers) = repo_provider.filter(|providers| !providers.is_empty()) {
             providers.to_vec()
         } else if let Some(agent) = agent.filter(|agent| !agent.agent_providers.is_empty()) {
             agent.agent_providers.clone()
@@ -136,6 +141,7 @@ fn unavailable_provider_error(candidates: &[AgentProvider]) -> String {
 pub(super) fn resolve_agent_provider_with(
     explicit_provider: Option<&str>,
     stage_provider: Option<&[String]>,
+    repo_provider: Option<&[String]>,
     agent: Option<&AgentDefinition>,
     fallback_provider: Option<&str>,
     is_available: impl Fn(AgentProvider) -> bool,
@@ -143,6 +149,7 @@ pub(super) fn resolve_agent_provider_with(
     let candidates = resolve_agent_provider_candidates(
         explicit_provider,
         stage_provider,
+        repo_provider,
         agent,
         fallback_provider,
     )?;

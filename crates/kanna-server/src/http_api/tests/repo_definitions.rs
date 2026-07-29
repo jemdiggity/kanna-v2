@@ -139,6 +139,13 @@ fn write_remote_definitions(repo: &Path) {
             "test": "must-be-an-array",
             "ports": {"REMOTE_PORT": 49100, "BAD_PORT": "nope"},
             "flavors": {"review": "strict", "bad": 42},
+            "agentProviders": {
+                "review@*": {
+                    "provider": ["codex", "claude"],
+                    "model": "gpt-5"
+                },
+                "bad": 42
+            },
             "vars": {"SOURCE": "remote", "BAD_VAR": false},
             "stage_order": ["review", "in progress"],
             "reserved_port_offsets": [0, "bad", -1, 2],
@@ -526,6 +533,15 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
     assert_eq!(manifest["config"]["vars"]["SOURCE"], "remote");
     assert_eq!(manifest["config"]["ports"], json!({"REMOTE_PORT": 49100}));
     assert_eq!(manifest["config"]["flavors"], json!({"review": "strict"}));
+    assert_eq!(
+        manifest["config"]["agentProviders"],
+        json!({
+            "review@*": {
+                "provider": ["codex", "claude"],
+                "model": "gpt-5"
+            }
+        })
+    );
     assert_eq!(manifest["config"]["reserved_port_offsets"], json!([0, 2]));
     assert_eq!(manifest["config"]["reserved_ports"], json!([48120]));
     assert_eq!(

@@ -2,6 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { AGENT_PROVIDERS } from "@kanna/agent-protocol";
 import { describe, expect, it } from "vitest";
+import { parseAgentDefinition } from "./agent-loader";
 import { parsePipelineJson } from "./pipeline-loader";
 
 const repoRoot = resolve(process.cwd(), "../..");
@@ -54,12 +55,65 @@ describe("built-in agent completion protocol", () => {
 });
 
 describe("QA pipeline assets", () => {
+  it("prefers Codex for Kanna review roles without changing other repos' built-in order", () => {
+    const config = JSON.parse(readRepoFile(".kanna/config.json")) as {
+      agentProviders?: Record<string, { provider?: unknown } | string>;
+    };
+    const codexFirst = ["codex", "claude", "copilot", "opencode", "antigravity"];
+
+    expect(config.agentProviders?.review).toEqual({ provider: codexFirst });
+    expect(config.agentProviders?.["review-*"]).toEqual({ provider: codexFirst });
+    expect(config.agentProviders?.["qa-dispatcher"]).toEqual({ provider: codexFirst });
+
+    for (const name of [
+      "implement",
+      "commit",
+      "pr",
+      "approve",
+      "merge",
+      "setup",
+      "agent-factory",
+      "config-factory",
+      "pipeline-factory",
+    ]) {
+      const agent = parseAgentDefinition(readRepoFile(`.kanna/agents/${name}/AGENT.md`));
+      expect(agent.agent_provider?.[0], name).toBe("claude");
+    }
+
+    // The repo config is the flip. Keeping the shipped definitions unchanged
+    // is what preserves current behavior for repositories without the key.
+    for (const name of [
+      "review",
+      "qa-dispatcher",
+      "review-ui",
+      "review-security",
+      "review-perf",
+      "review-concurrency",
+      "review-migration",
+      "review-compat",
+      "review-release",
+    ]) {
+      const agent = parseAgentDefinition(readRepoFile(`.kanna/agents/${name}/AGENT.md`));
+      expect(agent.agent_provider?.[0], name).toBe("claude");
+    }
+  });
+
   it("keeps the pipeline provider schema aligned with the generated registry", () => {
     const schema = JSON.parse(readRepoFile(".kanna/pipelines/schema.json")) as {
       $defs?: { agentProvider?: { enum?: string[] } };
     };
 
     expect(schema.$defs?.agentProvider?.enum).toEqual([...AGENT_PROVIDERS]);
+  });
+
+  it("keeps the repo agent provider schema aligned with the generated registry", () => {
+    const schema = JSON.parse(readRepoFile(".kanna/config.schema.json")) as {
+      $defs?: { agentProvider?: { enum?: string[] } };
+      properties?: { agentProviders?: unknown };
+    };
+
+    expect(schema.$defs?.agentProvider?.enum).toEqual([...AGENT_PROVIDERS]);
+    expect(schema.properties?.agentProviders).toBeDefined();
   });
 
   it("keeps the commit agent focused on committing work instead of task-session mechanics", () => {

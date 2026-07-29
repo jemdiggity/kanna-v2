@@ -167,13 +167,20 @@ acknowledging transferred descriptors.
 - Use `apps/desktop/src/utils/fuzzyMatch.ts` instead of writing a new fuzzy
   search.
 - `.kanna/` is per-repo config: `config.json` (`setup`, `teardown`, `test`,
-  `ports`, `pipeline`), `pipelines/{name}.json`, `agents/{name}/AGENT.md`
-  (repo files override built-ins by name), `agents/{name}/EXTEND.md` (layers
-  onto the resolved agent without rewriting it — read only from the open repo,
-  never from bundled resources), and `tasks/{slug}/agent.md` templates. Its
-  `config.schema.json` is the public schema served at
+  `ports`, `pipeline`, and `agentProviders`, whose exact agent names or `*`
+  globs select a provider plus an optional model), `pipelines/{name}.json`,
+  `agents/{name}/AGENT.md` (repo files override built-ins by name),
+  `agents/{name}/EXTEND.md` (layers onto the resolved agent without rewriting
+  it — read only from the open repo, never from bundled resources), and
+  `tasks/{slug}/agent.md` templates. Its `config.schema.json` is the public
+  schema served at
   `https://schemas.kanna.build/config.schema.json`; publish it with
   `./kd pages publish-schema` (see `docs/dev/dev-workflow.md`).
+  Provider/model precedence is an explicit task or stage override, then the
+  repo's matching `agentProviders` entry, then layered `AGENT.md`/`EXTEND.md`
+  frontmatter, then the global default provider setting. Exact map keys beat
+  globs; among globs, the most non-`*` characters wins and lexical order breaks
+  ties.
 - Built-in agent/pipeline definitions must ship as Tauri bundled resources,
   **not** as TypeScript string constants.
 

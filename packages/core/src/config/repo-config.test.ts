@@ -104,6 +104,42 @@ describe("parseRepoConfig", () => {
     });
   });
 
+  it("parses repo agent provider and model preferences", () => {
+    const config = parseRepoConfig(JSON.stringify({
+      agentProviders: {
+        review: "codex",
+        "review-*": {
+          provider: ["codex", "claude"],
+          model: "gpt-5",
+        },
+      },
+    }));
+
+    expect(config.agentProviders).toEqual({
+      review: { provider: ["codex"] },
+      "review-*": {
+        provider: ["codex", "claude"],
+        model: "gpt-5",
+      },
+    });
+  });
+
+  it("ignores malformed repo agent provider preferences", () => {
+    const config = parseRepoConfig(JSON.stringify({
+      agentProviders: {
+        review: "future-agent",
+        "review-*": { provider: ["codex", 42] },
+        "": "claude",
+        implement: { model: "missing-provider" },
+        commit: "claude",
+      },
+    }));
+
+    expect(config.agentProviders).toEqual({
+      commit: { provider: ["claude"] },
+    });
+  });
+
   it("ignores malformed agent flavor and var entries", () => {
     const config = parseRepoConfig(JSON.stringify({
       flavors: {

@@ -447,6 +447,7 @@ fn provider_resolution_cases_match_shared_contract() {
         let result = resolve_agent_provider_with(
             joined(&case.explicit).as_deref(),
             (!case.stage.is_empty()).then_some(case.stage.as_slice()),
+            None,
             agent.as_ref(),
             joined(&case.fallback).as_deref(),
             |provider| available.iter().any(|value| value == provider.as_str()),
@@ -465,7 +466,8 @@ fn provider_resolution_cases_match_shared_contract() {
 #[test]
 fn provider_resolution_rejects_unknown_values() {
     assert_eq!(
-        resolve_agent_provider_with(Some("future-agent"), None, None, None, |_| true).unwrap_err(),
+        resolve_agent_provider_with(Some("future-agent"), None, None, None, None, |_| true)
+            .unwrap_err(),
         "unsupported agent provider: future-agent",
     );
 }
@@ -535,6 +537,145 @@ fn create_task_rejects_model_for_provider_without_a_verified_flag() {
     );
     assert!(db.list_pipeline_items("repo-1").unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn provider_resolution_prefers_explicit_then_stage_then_repo_then_agent_then_fallback() {
+    let agent = AgentDefinition {
+        name: "review".to_string(),
+        description: "Review".to_string(),
+        prompt: String::new(),
+        agent_providers: vec!["opencode".to_string()],
+        model: Some("agent-model".to_string()),
+        permission_mode: None,
+        allowed_tools: Vec::new(),
+    };
+    let stage = vec!["copilot".to_string()];
+    let repo = vec!["codex".to_string()];
+    let available = |_| true;
+
+    assert_eq!(
+        resolve_agent_provider_with(
+            Some("claude"),
+            Some(&stage),
+            Some(&repo),
+            Some(&agent),
+            Some("antigravity"),
+            available,
+        )
+        .unwrap(),
+        AgentProvider::Claude,
+    );
+    assert_eq!(
+        resolve_agent_provider_with(
+            None,
+            Some(&stage),
+            Some(&repo),
+            Some(&agent),
+            Some("antigravity"),
+            available,
+        )
+        .unwrap(),
+        AgentProvider::Copilot,
+    );
+    assert_eq!(
+        resolve_agent_provider_with(
+            None,
+            None,
+            Some(&repo),
+            Some(&agent),
+            Some("antigravity"),
+            available,
+        )
+        .unwrap(),
+        AgentProvider::Codex,
+    );
+    assert_eq!(
+        resolve_agent_provider_with(
+            None,
+            None,
+            None,
+            Some(&agent),
+            Some("antigravity"),
+            available,
+        )
+        .unwrap(),
+        AgentProvider::Opencode,
+    );
+    assert_eq!(
+        resolve_agent_provider_with(None, None, None, None, Some("antigravity"), available,)
+            .unwrap(),
+        AgentProvider::Antigravity,
+    );
+}
+
+#[test]
+fn repo_agent_provider_preferences_resolve_exact_then_most_specific_glob() {
+    let config: super::super::definitions::RepoConfig = serde_json::from_value(serde_json::json!({
+        "agentProviders": {
+            "review-*": "codex",
+            "review-s*": {"provider": "opencode", "model": "glob-model"},
+            "review-security": "copilot",
+            "qa-dispatcher": "claude"
+        }
+    }))
+    .unwrap();
+
+    let exact = config
+        .agent_provider_preference(Some("review-security"))
+        .unwrap();
+    assert_eq!(exact.providers, vec!["copilot"]);
+    let glob = config
+        .agent_provider_preference(Some("review-storage"))
+        .unwrap();
+    assert_eq!(glob.providers, vec!["opencode"]);
+    assert_eq!(glob.model.as_deref(), Some("glob-model"));
+    assert_eq!(
+        config
+            .agent_provider_preference(Some("review-ui"))
+            .unwrap()
+            .providers,
+        vec!["codex"],
+    );
+    assert!(config
+        .agent_provider_preference(Some("implement"))
+        .is_none());
+}
+
+#[test]
+fn model_resolution_prefers_explicit_then_repo_then_layered_agent_definition() {
+    let agent = AgentDefinition {
+        name: "review".to_string(),
+        description: "Review".to_string(),
+        prompt: String::new(),
+        agent_providers: vec!["claude".to_string()],
+        model: Some("agent-model".to_string()),
+        permission_mode: None,
+        allowed_tools: Vec::new(),
+    };
+    let preference = super::super::definitions::AgentProviderPreference {
+        providers: vec!["codex".to_string()],
+        model: Some("repo-model".to_string()),
+    };
+
+    assert_eq!(
+        super::super::resolve_agent_model(
+            Some("explicit-model".to_string()),
+            Some(&preference),
+            Some(&agent),
+        )
+        .as_deref(),
+        Some("explicit-model"),
+    );
+    assert_eq!(
+        super::super::resolve_agent_model(None, Some(&preference), Some(&agent)).as_deref(),
+        Some("repo-model"),
+    );
+    assert_eq!(
+        super::super::resolve_agent_model(None, None, Some(&agent)).as_deref(),
+        Some("agent-model"),
+    );
+    assert_eq!(super::super::resolve_agent_model(None, None, None), None);
 }
 
 #[test]
@@ -1521,6 +1662,29 @@ fn repo_config_normalization_matches_shared_parser_behavior() {
                 "workspace": {
                     "env": {"GOOD": "yes"},
                     "path": {"prepend": ["./bin"]}
+                }
+            }),
+        ),
+        (
+            "agent provider preferences normalize shorthand and filter malformed entries",
+            serde_json::json!({
+                "agentProviders": {
+                    "review": "codex",
+                    "review-*": {
+                        "provider": ["codex", "claude"],
+                        "model": "gpt-5"
+                    },
+                    "bad-type": 42,
+                    "bad-provider-list": {"provider": ["codex", 42]}
+                }
+            }),
+            serde_json::json!({
+                "agentProviders": {
+                    "review": {"provider": ["codex"]},
+                    "review-*": {
+                        "provider": ["codex", "claude"],
+                        "model": "gpt-5"
+                    }
                 }
             }),
         ),
@@ -4370,7 +4534,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
 }
 
 #[test]
-fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_setting() {
+fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_provider_setting() {
     let repo_root = std::env::temp_dir().join(format!(
         "kanna-task-default-agent-provider-{}",
         std::process::id()
@@ -4477,9 +4641,110 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
         .unwrap()
         .unwrap();
 
-    // The built-in implement definition is Claude-first and takes precedence
-    // over the configured Copilot default.
+    // With no agentProviders key, the built-in implement definition remains
+    // Claude-first and takes precedence over the configured Copilot default.
     assert_eq!(created_source.agent_provider.as_deref(), Some("claude"));
+    assert_eq!(prepared.model, None);
+
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
+    std::fs::write(repo_root.join(".kanna/config.json"), "{}").unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/implement/EXTEND.md"),
+        "---\nagent_provider: opencode\nmodel: extension-model\n---\n",
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish layered implement preference");
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Use the layered agent definition".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: None,
+            agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: None,
+            recovery_snapshot: None,
+            blocker_task_ids: None,
+            notify_task_id: None,
+            parent_task_id: None,
+        },
+    )
+    .unwrap();
+    let created_source = db
+        .get_task_stage_source(&prepared.created_task.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(created_source.agent_provider.as_deref(), Some("opencode"));
+    assert_eq!(prepared.model.as_deref(), Some("extension-model"));
+
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        serde_json::json!({
+            "agentProviders": {
+                "implement": {
+                    "provider": "codex",
+                    "model": "repo-model"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish repo implement preference");
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Use the repo provider preference".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: None,
+            agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
+            model: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: None,
+            recovery_snapshot: None,
+            blocker_task_ids: None,
+            notify_task_id: None,
+            parent_task_id: None,
+        },
+    )
+    .unwrap();
+    let created_source = db
+        .get_task_stage_source(&prepared.created_task.task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(created_source.agent_provider.as_deref(), Some("codex"));
+    assert_eq!(prepared.model.as_deref(), Some("repo-model"));
 
     let prepared = prepare_task_for_api(
         &db,
@@ -4496,7 +4761,7 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
             agent_type: Some("pty".to_string()),
             terminal_cols: None,
             terminal_rows: None,
-            model: None,
+            model: Some("explicit-model".to_string()),
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -4519,6 +4784,7 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
         .unwrap();
 
     assert_eq!(created_source.agent_provider.as_deref(), Some("claude"));
+    assert_eq!(prepared.model.as_deref(), Some("explicit-model"));
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

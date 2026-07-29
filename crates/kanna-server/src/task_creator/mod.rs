@@ -413,15 +413,17 @@ pub(crate) fn prepare_rerun_stage_for_api(
         repo.path.as_str()
     };
     let provider_search_path = build_workspace_search_path(provider_workspace_root, repo_config);
+    let repo_preference = repo_config.agent_provider_preference(current_stage.agent.as_deref());
     let provider = resolve_agent_provider(
         None,
         current_stage.agent_provider.as_deref(),
+        repo_preference.map(|preference| preference.providers.as_slice()),
         agent.as_ref(),
         source_task.agent_provider.as_deref(),
         provider_search_path.as_deref(),
         provider_workspace_root,
     )?;
-    let model = agent.as_ref().and_then(|agent| agent.model.clone());
+    let model = resolve_agent_model(None, repo_preference, agent.as_ref());
     let permission_mode = agent
         .as_ref()
         .and_then(|agent| agent.permission_mode.clone());
@@ -796,9 +798,13 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         Some(agent_name) => Some(definitions.agent(agent_name)?),
         None => None,
     };
+    let repo_preference = definitions
+        .config()
+        .agent_provider_preference(target_stage.agent.as_deref());
     let provider_candidates = resolve_agent_provider_candidates(
         explicit_provider.as_deref(),
         target_stage.agent_provider.as_deref(),
+        repo_preference.map(|preference| preference.providers.as_slice()),
         agent.as_ref(),
         fallback_provider,
     )?;
@@ -879,7 +885,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
                     .unwrap_or_default(),
             );
         }
-        let model = agent.as_ref().and_then(|agent| agent.model.clone());
+        let model = resolve_agent_model(None, repo_preference, agent.as_ref());
         let permission_mode = agent
             .as_ref()
             .and_then(|agent| agent.permission_mode.clone());
@@ -1793,6 +1799,7 @@ pub(crate) fn create_dormant_task_for_api_with_error(
     } else {
         None
     };
+    let repo_preference = repo_config.agent_provider_preference(stage_agent.as_deref());
     let provider_search_path = build_workspace_search_path(&repo.path, repo_config);
     let provider = resolve_agent_provider(
         explicit_provider.as_deref(),
@@ -1801,16 +1808,14 @@ pub(crate) fn create_dormant_task_for_api_with_error(
         } else {
             stage.agent_provider.as_deref()
         },
+        repo_preference.map(|preference| preference.providers.as_slice()),
         agent.as_ref(),
         default_provider.as_deref(),
         provider_search_path.as_deref(),
         &repo.path,
     )?;
     let agent_type = resolve_agent_type(request.agent_type.as_deref(), provider)?;
-    let model = request
-        .model
-        .clone()
-        .or_else(|| agent.as_ref().and_then(|agent| agent.model.clone()));
+    let model = resolve_agent_model(request.model.clone(), repo_preference, agent.as_ref());
     validate_provider_model(provider, model.as_deref())
         .map_err(PrepareTaskError::InvalidRequest)?;
     let permission_mode = request.permission_mode.clone().or_else(|| {
@@ -1954,12 +1959,24 @@ pub(crate) fn prepare_start_dormant_task_for_api(
     } else {
         None
     };
+    let repo_preference = repo_config.agent_provider_preference(stage_agent.as_deref());
     let provider_search_path = build_workspace_search_path(&repo.path, repo_config);
     let provider = resolve_agent_provider(
+        create_request
+            .as_ref()
+            .and_then(|request| request.agent_provider.as_deref()),
+        if create_request
+            .as_ref()
+            .and_then(|request| request.agent.as_ref())
+            .is_some()
+        {
+            None
+        } else {
+            stage.agent_provider.as_deref()
+        },
+        repo_preference.map(|preference| preference.providers.as_slice()),
+        agent.as_ref(),
         item.agent_provider.as_deref(),
-        None,
-        None,
-        None,
         provider_search_path.as_deref(),
         &repo.path,
     )?;
@@ -1994,10 +2011,13 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         },
     );
 
-    let model = create_request
-        .as_ref()
-        .and_then(|request| request.model.clone())
-        .or_else(|| agent.as_ref().and_then(|agent| agent.model.clone()));
+    let model = resolve_agent_model(
+        create_request
+            .as_ref()
+            .and_then(|request| request.model.clone()),
+        repo_preference,
+        agent.as_ref(),
+    );
     let permission_mode = create_request
         .as_ref()
         .and_then(|request| request.permission_mode.clone())
@@ -2484,6 +2504,16 @@ fn generate_failure_run_id(task_id: &str) -> String {
     format!("run-{task_id}-{nanos}")
 }
 
+fn resolve_agent_model(
+    explicit_model: Option<String>,
+    repo_preference: Option<&definitions::AgentProviderPreference>,
+    agent: Option<&definitions::AgentDefinition>,
+) -> Option<String> {
+    explicit_model
+        .or_else(|| repo_preference.and_then(|preference| preference.model.clone()))
+        .or_else(|| agent.and_then(|agent| agent.model.clone()))
+}
+
 fn resolve_task_spawn(
     _repo: &Repo,
     request: TaskCreationRequest,
@@ -2553,15 +2583,20 @@ fn resolve_task_spawn(
         } else {
             stage.agent_provider.as_deref()
         },
+        repo_config
+            .agent_provider_preference(stage_agent.as_deref())
+            .map(|preference| preference.providers.as_slice()),
         agent.as_ref(),
         request.default_provider.as_deref(),
     )?;
     if provider_candidates.len() == 1 {
         resolve_agent_type(request.agent_type.as_deref(), provider_candidates[0])?;
     }
-    let model = request
-        .model
-        .or_else(|| agent.as_ref().and_then(|agent| agent.model.clone()));
+    let model = resolve_agent_model(
+        request.model,
+        repo_config.agent_provider_preference(stage_agent.as_deref()),
+        agent.as_ref(),
+    );
     validate_model_shape(model.as_deref())?;
     if model.is_some()
         && provider_candidates
