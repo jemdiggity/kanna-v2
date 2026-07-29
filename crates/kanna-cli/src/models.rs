@@ -192,6 +192,13 @@ pub(crate) struct SetTaskParentRequest {
     pub(crate) parent_task_id: Option<String>,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetTaskNotifyRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) notify_task_id: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BlockTaskRequest {

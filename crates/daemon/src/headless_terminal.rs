@@ -553,16 +553,69 @@ fn line_is_permission_option(line: &str) -> bool {
     let trimmed = prompt_remainder(line, &[CLAUDE_IDLE_PROMPT, CODEX_IDLE_PROMPT])
         .unwrap_or(line)
         .trim_start();
-    let digit_count = trimmed.chars().take_while(char::is_ascii_digit).count();
+    starts_numbered_option(trimmed)
+}
+
+fn starts_numbered_option(text: &str) -> bool {
+    let digit_count = text.chars().take_while(char::is_ascii_digit).count();
     digit_count > 0
-        && trimmed[digit_count..]
+        && text[digit_count..]
             .chars()
             .next()
             .is_some_and(|character| matches!(character, '.' | ')'))
 }
 
+/// A selected option in an interactive menu: the caret is on a numbered choice
+/// rather than on an empty input box.
+///
+/// This is what makes an AskUserQuestion menu ("rebase and force-push / …")
+/// visible. Those carry none of the permission-prompt wording, and the caret
+/// alone reads as the idle input box — so without this a task parked on a
+/// question looked exactly like a task waiting for its next instruction.
+///
+/// It is a positive match on rendered chrome, never an inference from silence:
+/// a session running a long build shows no caret-on-option line and is never
+/// reported as waiting. The one benign overlap is a human who typed a line
+/// beginning "1." into the input box and did not send it — a task that is, in
+/// fact, waiting on its human.
+fn line_is_selected_menu_option(line: &str) -> bool {
+    prompt_remainder(line, &[CLAUDE_IDLE_PROMPT]).is_some_and(starts_numbered_option)
+}
+
+/// The question a menu is asking, read from the lines above its first option.
+/// Scanning from the bottom instead would return the option list, which tells a
+/// watcher what the choices are but not what is being decided.
+fn waiting_question_above_menu(lines: &[String]) -> Option<String> {
+    let menu_index = lines
+        .iter()
+        .position(|line| line_is_selected_menu_option(line))?;
+
+    let mut question = Vec::new();
+    for line in lines[..menu_index].iter().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || line_is_visual_divider(trimmed) {
+            if question.is_empty() {
+                continue;
+            }
+            break;
+        }
+        if line_is_permission_option(trimmed) {
+            break;
+        }
+        question.push(trimmed);
+        if question.len() == WAITING_PROMPT_MAX_LINES {
+            break;
+        }
+    }
+    question.reverse();
+    bound_waiting_prompt(&question.join(" "))
+}
+
 fn waiting_prompt_from_lines(lines: &[String], provider: AgentProvider) -> Option<String> {
     if let Some(question) = waiting_question_from_lines(lines) {
+        return Some(question);
+    }
+    if let Some(question) = waiting_question_above_menu(lines) {
         return Some(question);
     }
 
@@ -617,6 +670,9 @@ fn claude_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
     }
     if claude_lines_have_active_subagent_footer(lines) {
         return Some(SessionStatus::Busy);
+    }
+    if lines.iter().any(|line| line_is_selected_menu_option(line)) {
+        return Some(SessionStatus::Waiting);
     }
     if line_starts_with_prompt(last_non_empty_line(lines), &[CLAUDE_IDLE_PROMPT]) {
         return Some(SessionStatus::Idle);
@@ -1030,6 +1086,85 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("• Ready for review.")
+        );
+    }
+
+    /// A question menu (Claude's AskUserQuestion) carries none of the
+    /// permission-prompt wording, and its caret line reads as the idle input
+    /// box — so a task parked on one used to be indistinguishable from a task
+    /// that had simply finished talking.
+    #[test]
+    fn claude_selection_menu_reports_waiting_and_its_question() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "⏺ The branch has diverged from main.\r\n",
+                "\r\n",
+                "How should I publish the fix?\r\n",
+                "❯ 1. Rebase and force-push\r\n",
+                "  2. Force-push as-is\r\n",
+                "  3. Leave local\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .visible_status(Some(AgentProvider::Claude))
+                .unwrap(),
+            Some(SessionStatus::Waiting)
+        );
+        assert_eq!(
+            terminal
+                .waiting_prompt_snippet(Some(AgentProvider::Claude))
+                .unwrap()
+                .as_deref(),
+            Some("How should I publish the fix?")
+        );
+    }
+
+    /// The event feed's whole value rests on this: a session running a long
+    /// build must never be reported as blocked on input, no matter how quiet it
+    /// is or what its output happens to contain.
+    #[test]
+    fn claude_running_build_output_is_never_waiting() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "⏺ Bash(cargo build)\r\n",
+                "  Compiling kanna-server v0.1.0\r\n",
+                "  1. this line merely starts with a number\r\n",
+                "\r\n",
+                "✻ Building… (312s • esc to interrupt)\r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .visible_status(Some(AgentProvider::Claude))
+                .unwrap(),
+            Some(SessionStatus::Busy)
+        );
+    }
+
+    #[test]
+    fn claude_empty_input_box_still_reports_idle() {
+        let mut terminal = HeadlessTerminal::new(120, 10, 10_000).unwrap();
+        terminal.write(
+            concat!(
+                "⏺ Done — 3 files changed.\r\n",
+                "────────────────────────────────\r\n",
+                "❯ \r\n",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            terminal
+                .visible_status(Some(AgentProvider::Claude))
+                .unwrap(),
+            Some(SessionStatus::Idle)
         );
     }
 

@@ -77,6 +77,20 @@ pub(super) async fn apply_runtime_status(
         }));
     }
 
+    // The attached desktop reports the same daemon-derived status the terminal
+    // watcher sees; record it so the event feed does not depend on which
+    // observer got there first.
+    if db
+        .update_pipeline_item_runtime_status(
+            &task_id,
+            payload.status.as_str(),
+            item.last_output_preview.as_deref(),
+        )
+        .map_err(|e| db_write_error("db error", e))?
+    {
+        state.publish_state_changed(StateChangeScope::Tasks);
+    }
+
     let Some(activity) = activity_for_runtime_status(
         item.activity.as_deref(),
         payload.status.as_str(),

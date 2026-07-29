@@ -27,58 +27,46 @@ fn persist_exit_resume_session_id(
     Ok(())
 }
 
+/// Returns whether anything changed. Publishing is the caller's job: one
+/// daemon event can move the prompt, the runtime status, and the activity, and
+/// the desktop only needs to be told once.
 fn persist_waiting_prompt(
     state: &http_api::AppState,
     session_id: &str,
     prompt: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let db = crate::db::Db::open(&state.config().db_path)
         .map_err(|error| format!("db error: {error}"))?;
-    if db
-        .update_pipeline_item_waiting_prompt(session_id, prompt)
-        .map_err(|error| format!("db error: {error}"))?
-    {
-        state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
-    }
-    Ok(())
+    db.update_pipeline_item_waiting_prompt(session_id, prompt)
+        .map_err(|error| format!("db error: {error}"))
 }
 
 fn apply_watcher_runtime_status(
     state: &http_api::AppState,
     session_id: &str,
     status: kanna_daemon::protocol::SessionStatus,
-) -> Result<(), String> {
-    // Busy is selection-independent: every live observer agrees it means
-    // working, so the watcher remains an authoritative writer even while a
-    // terminal client is attached. Idle/waiting still belong to the attached
-    // client because only it knows whether the task is selected (idle) or
-    // unselected (unread).
-    if state.terminal_attachments().is_attached(session_id)
-        && !matches!(status, kanna_daemon::protocol::SessionStatus::Busy)
-    {
-        return Ok(());
-    }
-
+    waiting_prompt: Option<&str>,
+) -> Result<bool, String> {
     let db = crate::db::Db::open(&state.config().db_path)
         .map_err(|error| format!("db error: {error}"))?;
     let Some(task_id) = db
         .resolve_pipeline_item_id(session_id)
         .map_err(|error| format!("db error: {error}"))?
     else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(item) = db
         .get_pipeline_item(&task_id)
         .map_err(|error| format!("db error: {error}"))?
     else {
-        return Ok(());
+        return Ok(false);
     };
     if item.closed_at.is_some() {
-        return Ok(());
+        return Ok(false);
     }
 
     let status = match status {
@@ -86,18 +74,40 @@ fn apply_watcher_runtime_status(
         kanna_daemon::protocol::SessionStatus::Waiting => "waiting",
         kanna_daemon::protocol::SessionStatus::Idle => "idle",
     };
+
+    // Runtime status is recorded whatever the desktop is doing: it is the
+    // daemon's own verdict, it does not depend on which task is selected, and
+    // it is the only place `waiting` survives — `activity` folds waiting into
+    // idle, which is why a task parked on a prompt used to be invisible to
+    // anything but a human reading the terminal.
+    let changed = db
+        .update_pipeline_item_runtime_status(
+            &task_id,
+            status,
+            waiting_prompt.or(item.last_output_preview.as_deref()),
+        )
+        .map_err(|error| format!("db error: {error}"))?;
+
+    // Busy is selection-independent: every live observer agrees it means
+    // working, so the watcher remains an authoritative writer even while a
+    // terminal client is attached. Idle/waiting still belong to the attached
+    // client because only it knows whether the task is selected (idle) or
+    // unselected (unread).
+    if state.terminal_attachments().is_attached(session_id) && status != "busy" {
+        return Ok(changed);
+    }
+
     let Some(activity) = http_api::task_activity::activity_for_runtime_status(
         item.activity.as_deref(),
         status,
         false,
     ) else {
-        return Ok(());
+        return Ok(changed);
     };
 
     db.update_pipeline_item_activity(&task_id, activity)
         .map_err(|error| format!("db error: {error}"))?;
-    state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
-    Ok(())
+    Ok(true)
 }
 
 async fn reconcile_detached_terminal_status(
@@ -129,7 +139,9 @@ async fn reconcile_detached_terminal_status(
                 // The runtime-status helper re-checks the lease after the
                 // daemon round-trip, closing a concurrent reattach race for
                 // selection-dependent idle/waiting updates.
-                apply_watcher_runtime_status(state, session_id, session.status)?;
+                if apply_watcher_runtime_status(state, session_id, session.status, None)? {
+                    state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+                }
             }
             Ok(())
         }
@@ -207,14 +219,17 @@ async fn terminal_state_watcher_once(
     {
         DaemonEvent::SessionList { sessions } => {
             for session in sessions {
-                if let Err(error) =
-                    apply_watcher_runtime_status(state, &session.session_id, session.status)
+                match apply_watcher_runtime_status(state, &session.session_id, session.status, None)
                 {
-                    log::warn!(
+                    Ok(true) => {
+                        state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks)
+                    }
+                    Ok(false) => {}
+                    Err(error) => log::warn!(
                         "failed to reconcile terminal status for {}: {}",
                         session.session_id,
                         error
-                    );
+                    ),
                 }
             }
         }
@@ -235,21 +250,36 @@ async fn terminal_state_watcher_once(
                 status,
                 waiting_prompt_snippet,
             } => {
-                if let Some(prompt) = waiting_prompt_snippet {
-                    if let Err(error) = persist_waiting_prompt(state, &session_id, &prompt) {
-                        log::warn!(
+                // One daemon event, at most one state-changed publish: the
+                // prompt, the runtime status, and the activity all move
+                // together and the desktop refetches the same snapshot for
+                // each.
+                let mut changed = false;
+                if let Some(prompt) = &waiting_prompt_snippet {
+                    match persist_waiting_prompt(state, &session_id, prompt) {
+                        Ok(prompt_changed) => changed |= prompt_changed,
+                        Err(error) => log::warn!(
                             "failed to persist waiting prompt for {}: {}",
                             session_id,
                             error
-                        );
+                        ),
                     }
                 }
-                if let Err(error) = apply_watcher_runtime_status(state, &session_id, status) {
-                    log::warn!(
+                match apply_watcher_runtime_status(
+                    state,
+                    &session_id,
+                    status,
+                    waiting_prompt_snippet.as_deref(),
+                ) {
+                    Ok(status_changed) => changed |= status_changed,
+                    Err(error) => log::warn!(
                         "failed to apply terminal status for {}: {}",
                         session_id,
                         error
-                    );
+                    ),
+                }
+                if changed {
+                    state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
                 }
             }
             DaemonEvent::Exit {
@@ -722,6 +752,119 @@ mod tests {
         assert!(
             !replacements.consume("task-child"),
             "legacy replacement entry should have been consumed"
+        );
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    /// The daemon is the only component that can tell a parked agent from a
+    /// quiet one, and `activity` throws that distinction away. This is the
+    /// hand-off that makes `task.awaiting_input` real rather than a guess.
+    #[tokio::test]
+    async fn watcher_records_waiting_status_and_emits_awaiting_input() {
+        let unique = unique_name("terminal-watcher-awaiting-input");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe(&listener).await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::StatusChanged {
+                    session_id: "task-child".to_string(),
+                    status: kanna_daemon::protocol::SessionStatus::Waiting,
+                    waiting_prompt_snippet: Some("How should I publish the fix?".to_string()),
+                },
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+        });
+
+        terminal_state_watcher_once(
+            &http_api::AppState::new(config.clone()),
+            &session_replacements::SessionReplacements::default(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let db = Db::open(&config.db_path).unwrap();
+        assert_eq!(
+            db.get_pipeline_item_runtime_status("task-child")
+                .unwrap()
+                .as_deref(),
+            Some("waiting")
+        );
+        let events = db
+            .list_task_events(
+                &crate::db::TaskEventScope::Tasks(vec!["task-child".to_string()]),
+                0,
+                i64::MAX,
+                10,
+            )
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "task.awaiting_input");
+        assert_eq!(
+            events[0].payload["prompt"],
+            serde_json::json!("How should I publish the fix?")
+        );
+
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    /// Adopting a running task: the notification target is attached after the
+    /// task started, and the same server-side completion path must honour it.
+    #[tokio::test]
+    async fn watcher_notifies_a_target_attached_after_task_creation() {
+        let unique = unique_name("terminal-watcher-retrofit-notify");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        Db::open(&config.db_path)
+            .unwrap()
+            .update_pipeline_item_notify_task("task-child", Some("task-parent"))
+            .unwrap();
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe(&listener).await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::Exit {
+                    session_id: "task-child".to_string(),
+                    code: 0,
+                    resume_session_id: None,
+                    killed: false,
+                },
+            )
+            .await;
+            let inputs = expect_completion_notification(&listener).await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+            inputs
+        });
+
+        timeout(
+            Duration::from_secs(2),
+            terminal_state_watcher_once(
+                &http_api::AppState::new(config.clone()),
+                &session_replacements::SessionReplacements::default(),
+            ),
+        )
+        .await
+        .expect("watcher did not finish")
+        .unwrap();
+        let inputs = server.await.unwrap();
+
+        assert_eq!(
+            inputs,
+            vec![
+                b"TASK task-child DONE [success]: Child Display".to_vec(),
+                vec![b'\r']
+            ]
         );
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);

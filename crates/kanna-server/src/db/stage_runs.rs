@@ -1,5 +1,6 @@
-use super::{Db, NewStageRun, StageRun};
+use super::{Db, NewStageRun, StageRun, TaskEventKind};
 use rusqlite::OptionalExtension;
+use serde_json::json;
 
 /// Identity of a run closed by `finish_latest_running_stage_run`.
 pub struct FinishedStageRun {
@@ -58,6 +59,21 @@ impl Db {
                 completion_transition,
             ),
         )?;
+        // A pending run has not started anything yet; the watcher wants the
+        // moment an agent is actually working.
+        if run.status == "running" {
+            self.append_task_event(
+                run.task_id,
+                TaskEventKind::RunStarted,
+                json!({
+                    "runId": run.id,
+                    "stage": run.stage,
+                    "kind": run.kind,
+                    "agent": run.agent,
+                    "agentProvider": run.agent_provider,
+                }),
+            )?;
+        }
         Ok(())
     }
 
@@ -139,6 +155,20 @@ impl Db {
         result: Option<&str>,
         feedback: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
+        let identity = self
+            .conn
+            .query_row(
+                "SELECT task_id, stage, kind FROM stage_run WHERE id = ?",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
         let rows_affected = self.conn.execute(
             "UPDATE stage_run
              SET status = ?, result = ?, feedback = ?, finished_at = datetime('now')
@@ -147,6 +177,19 @@ impl Db {
         )?;
         if rows_affected == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        if let Some((task_id, stage, kind)) = identity {
+            self.append_task_event(
+                &task_id,
+                TaskEventKind::RunFinished,
+                json!({
+                    "runId": id,
+                    "stage": stage,
+                    "kind": kind,
+                    "status": status,
+                    "result": result,
+                }),
+            )?;
         }
         Ok(())
     }

@@ -89,6 +89,26 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
+            "kanna_wait_events",
+            TypedToolSurface {
+                command_path: &["task", "wait-events"],
+                param_args: &[
+                    ("task_ids", "task_id"),
+                    ("repo_id", "repo_id"),
+                    ("cursor", "cursor"),
+                    ("timeout_secs", "timeout_secs"),
+                    ("limit", "limit"),
+                ],
+            },
+        ),
+        (
+            "kanna_set_task_notify",
+            TypedToolSurface {
+                command_path: &["task", "set-notify"],
+                param_args: &[("task_id", "task_id"), ("notify_task_id", "notify_task")],
+            },
+        ),
+        (
             "kanna_task_logs",
             TypedToolSurface {
                 command_path: &["task", "logs"],

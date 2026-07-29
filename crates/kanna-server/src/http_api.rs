@@ -25,6 +25,7 @@ pub(crate) mod task_activity;
 mod task_agent_session;
 mod task_blockers;
 mod task_diff;
+mod task_events;
 mod task_files;
 mod task_input;
 mod task_logs;

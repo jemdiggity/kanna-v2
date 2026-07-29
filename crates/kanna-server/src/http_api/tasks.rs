@@ -143,6 +143,58 @@ pub(super) async fn update_task(
     }))
 }
 
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SetTaskNotifyRequest {
+    notify_task_id: Option<String>,
+}
+
+/// Attach or clear a task's completion-notification target after creation.
+/// `notifyTaskId` was creation-time only, so an orchestrator that adopted an
+/// already-running task had no way to be told when it finished.
+pub(super) async fn set_task_notify(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    payload: Option<Json<SetTaskNotifyRequest>>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let payload = payload.map(|Json(payload)| payload).unwrap_or_default();
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let task_id = super::task_blockers::resolve_existing_task_id(&db, &task_id)?;
+    let notify_task_id = match payload
+        .notify_task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        // Resolve the target too: a notification addressed to a branch name or
+        // a task that no longer exists would fail silently at delivery time.
+        Some(notify_task_id) => Some(super::task_blockers::resolve_existing_task_id(
+            &db,
+            notify_task_id,
+        )?),
+        None => None,
+    };
+    if notify_task_id.as_deref() == Some(task_id.as_str()) {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "notifyTaskId must be a different task: a task cannot notify itself".to_string(),
+        ));
+    }
+    db.update_pipeline_item_notify_task(&task_id, notify_task_id.as_deref())
+        .map_err(|e| db_write_error("db error", e))?;
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+        revision_budget: None,
+    }))
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SearchTasksQuery {

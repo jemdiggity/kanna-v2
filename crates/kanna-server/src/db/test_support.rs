@@ -103,7 +103,8 @@ impl Db {
                 agent_session_id TEXT,
                 agent_spawn_options TEXT,
                 teardown_started_at TEXT,
-                revision_rounds INTEGER NOT NULL DEFAULT 0
+                revision_rounds INTEGER NOT NULL DEFAULT 0,
+                runtime_status TEXT
             );
             CREATE UNIQUE INDEX idx_pipeline_item_open_cloud_task_id
             ON pipeline_item(cloud_task_id)
@@ -190,6 +191,15 @@ impl Db {
                 seconds INTEGER NOT NULL,
                 PRIMARY KEY (pipeline_item_id, activity)
             );
+
+            CREATE TABLE task_event (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                payload TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX idx_task_event_task_seq ON task_event(task_id, seq);
 
             CREATE TABLE task_transfer (
                 id TEXT PRIMARY KEY,

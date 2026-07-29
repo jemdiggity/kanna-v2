@@ -2951,6 +2951,7 @@ dependencies = [
  "kanna-agent-protocol",
  "kanna-daemon",
  "kanna-runtime-defaults",
+ "kanna-tool-catalog",
  "libc",
  "log",
  "mdns-sd",

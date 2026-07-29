@@ -437,3 +437,123 @@ fn typed_signal_agent_body_matches_catalog_signal_agent_body() {
 
     assert_eq!(typed_body, resolved.body);
 }
+
+#[test]
+fn parses_wait_events_and_set_notify_commands() {
+    let cli = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "wait-events",
+        "--task-id",
+        "child-a,child-b",
+        "--task-id",
+        "child-c",
+        "--cursor",
+        "42",
+        "--timeout-secs",
+        "30",
+        "--limit",
+        "10",
+    ])
+    .unwrap();
+    match cli.command {
+        crate::Commands::Task {
+            command:
+                crate::TaskCommands::WaitEvents {
+                    task_id,
+                    repo_id,
+                    cursor,
+                    timeout_secs,
+                    limit,
+                    ..
+                },
+        } => {
+            assert_eq!(task_id, vec!["child-a", "child-b", "child-c"]);
+            assert_eq!(repo_id, None);
+            assert_eq!(cursor.as_deref(), Some("42"));
+            assert_eq!(timeout_secs, 30);
+            assert_eq!(limit, Some(10));
+        }
+        _ => panic!("expected task wait-events command"),
+    }
+
+    let cli = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "set-notify",
+        "--task-id",
+        "child-a",
+        "--notify-task",
+        "parent-1",
+    ])
+    .unwrap();
+    match cli.command {
+        crate::Commands::Task {
+            command:
+                crate::TaskCommands::SetNotify {
+                    task_id,
+                    notify_task,
+                    ..
+                },
+        } => {
+            assert_eq!(task_id, "child-a");
+            assert_eq!(notify_task.as_deref(), Some("parent-1"));
+        }
+        _ => panic!("expected task set-notify command"),
+    }
+}
+
+/// The typed CLI and the catalog tool must hit the same endpoint with the same
+/// arguments, or an agent without MCP support silently watches something else.
+#[test]
+fn typed_wait_events_path_matches_the_catalog_tool_path() {
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let resolved = kanna_tool_catalog::resolve_request(
+        &catalog,
+        "kanna_wait_events",
+        &json!({ "task_ids": ["child-a", "child-b"], "cursor": "42", "timeout_secs": 30, "limit": 10 }),
+    )
+    .unwrap();
+
+    // The typed CLI orders its query differently; compare the parsed pairs.
+    let typed = crate::api::task_events_path(
+        &["child-a".to_string(), "child-b".to_string()],
+        None,
+        Some("42"),
+        30,
+        Some(10),
+    );
+    let query_pairs = |path: &str| {
+        let mut pairs = path
+            .split_once('?')
+            .expect("query")
+            .1
+            .split('&')
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        pairs.sort();
+        pairs
+    };
+    assert_eq!(
+        resolved.path.split_once('?').unwrap().0,
+        typed.split_once('?').unwrap().0
+    );
+    assert_eq!(query_pairs(&resolved.path), query_pairs(&typed));
+}
+
+#[test]
+fn typed_set_notify_body_matches_catalog_set_notify_body() {
+    let typed_body = serde_json::to_value(crate::models::SetTaskNotifyRequest {
+        notify_task_id: Some("parent-1".to_string()),
+    })
+    .unwrap();
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let resolved = kanna_tool_catalog::resolve_request(
+        &catalog,
+        "kanna_set_task_notify",
+        &json!({ "task_id": "child-a", "notify_task_id": "parent-1" }),
+    )
+    .unwrap();
+
+    assert_eq!(typed_body, resolved.body);
+}
