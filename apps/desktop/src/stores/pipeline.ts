@@ -146,7 +146,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     stage: string;
   }): Promise<StageAdvanceProjection> {
     try {
-      const pipeline = await loadPipeline(item.repo_id, item.pipeline || "default");
+      const pipeline = await loadPipeline(item.repo_id, item.pipeline || "no-review");
       const currentIndex = pipeline.stages.findIndex((stage) => stage.name === item.stage);
       if (currentIndex === -1) return { nextStageName: null, pendingPostName: null, closesOnSuccess: false };
       const currentStage = pipeline.stages[currentIndex];

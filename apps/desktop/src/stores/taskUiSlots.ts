@@ -35,7 +35,7 @@ export function buildCreatingTaskUiSlot(
       repo_id: options.repoId,
       prompt: options.prompt,
       display_name: options.displayName ?? null,
-      pipeline: options.pipelineName ?? "default",
+      pipeline: options.pipelineName ?? "no-review",
       stage: options.stage ?? "in progress",
       agent_type: options.agentType,
       agent_provider: providers[0] ?? "claude",

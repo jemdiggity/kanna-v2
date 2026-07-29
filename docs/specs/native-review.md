@@ -188,7 +188,7 @@ writes the `.kanna/` files — flavor selections, an EXTEND.md where an
 answer doesn't match a stock flavor, and a pipeline JSON only when the
 built-ins do not already cover the shape. It composes tested flavors; it
 does not author agents from scratch. The stock preset is the GitHub
-flow, which *selects* a built-in pipeline (`default`, `single-reviewer`,
+flow, which *selects* a built-in pipeline (`no-review`, `single-reviewer`,
 or `specialized-reviewers`) and attaches `merge@github`:
 `pr` → review in ⌘D → approve post → `merge@github`.
 

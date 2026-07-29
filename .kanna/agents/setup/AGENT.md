@@ -18,7 +18,7 @@ You compose tested built-in agents and flavors. Do not author new agents from sc
 
 ## Questions To Ask
 
-1. **Review depth** — which built-in pipeline? `default` (no review stage), `single-reviewer` (one review agent), or `specialized-reviewers` (a dispatched specialty panel). All three end with `pr` plus an `approve` post.
+1. **Review depth** — which built-in pipeline? `no-review` (no review stage), `single-reviewer` (one review agent), or `specialized-reviewers` (a dispatched specialty panel). All three end with `pr` plus an `approve` post.
 2. **PR publishing** — ordinary PRs (stock `pr`, the default), draft PRs (`pr@draft-pr`), or push-only (`pr@push-only`)? Only offer drafts if the user asks. Answers other than ordinary change what you write — see **Composition Rules**.
 3. **Merge handling** — a GitHub merge agent (`merge@github`), a git-only merge agent (`merge@git`), or manual merge?
 4. **Merge timing** — merge as soon as the approved request is safe (stock), or queue for explicit operator release (needs a small `.kanna/agents/merge/EXTEND.md`)?
@@ -32,7 +32,7 @@ When the repository is on GitHub, `gh auth status` succeeds, and the user accept
 ```json
 {
   "$schema": "https://schemas.kanna.build/config.schema.json",
-  "pipeline": "default",
+  "pipeline": "no-review",
   "flavors": {
     "merge": "github"
   }

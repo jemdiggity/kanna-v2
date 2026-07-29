@@ -40,13 +40,13 @@ const agentProvider = ref<AgentProvider>(props.defaultAgentProvider ?? "claude")
 const displayMode = ref<AgentExecutionType>(props.defaultAgentType ?? "pty");
 const pipelineOptions = computed(() => {
   if (props.pipelines && props.pipelines.length > 0) return props.pipelines;
-  return ["default"];
+  return ["no-review"];
 });
 const resolvedDefaultPipeline = computed(() => {
   if (props.defaultPipeline && pipelineOptions.value.includes(props.defaultPipeline)) {
     return props.defaultPipeline;
   }
-  return pipelineOptions.value[0] ?? "default";
+  return pipelineOptions.value[0] ?? "no-review";
 });
 const selectedPipeline = ref<string>(resolvedDefaultPipeline.value);
 let pipelineSelectionIsAutomatic = true;

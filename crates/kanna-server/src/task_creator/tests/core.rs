@@ -1148,8 +1148,8 @@ fn missing_remote_custom_definitions_fall_back_only_to_compiled_builtins() {
     let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
 
     assert_eq!(
-        definitions.pipeline("default").unwrap().name.as_deref(),
-        Some("default")
+        definitions.pipeline("no-review").unwrap().name.as_deref(),
+        Some("no-review")
     );
     assert_eq!(definitions.agent("review").unwrap().name, "review");
 
@@ -1222,13 +1222,18 @@ fn builtin_dispatch_definitions_resolve_from_compiled_resources() {
 
 #[test]
 fn legacy_builtin_pipeline_names_still_resolve_for_committed_repo_config() {
-    // `qa` and `qa-dispatch` shipped as built-ins before the lineup was
-    // reorganized by review depth. A repo that committed a config selecting
-    // one of them must keep resolving after upgrading, without the retired
-    // name reappearing as a choice.
+    // `default`, `qa`, and `qa-dispatch` shipped as built-ins before the
+    // lineup was renamed by review depth. A repo that committed a config
+    // selecting one of them must keep resolving after upgrading, without the
+    // retired name reappearing as a choice.
     for (legacy, current, review_agent) in [
-        ("qa", "single-reviewer", "review"),
-        ("qa-dispatch", "specialized-reviewers", "qa-dispatcher"),
+        ("default", "no-review", None),
+        ("qa", "single-reviewer", Some("review")),
+        (
+            "qa-dispatch",
+            "specialized-reviewers",
+            Some("qa-dispatcher"),
+        ),
     ] {
         let repo_root =
             init_git_repo_without_provider_fixtures(&format!("definitions-legacy-{legacy}"));
@@ -1251,12 +1256,17 @@ fn legacy_builtin_pipeline_names_still_resolve_for_committed_repo_config() {
         // ...to the current definition, which reports its own current name so
         // the task records which pipeline it actually got.
         assert_eq!(resolved.name.as_deref(), Some(current));
-        let review = resolved
-            .stages
-            .iter()
-            .find(|stage| stage.name == "review")
-            .unwrap_or_else(|| panic!("`{current}` must have a review stage"));
-        assert_eq!(review.agent.as_deref(), Some(review_agent));
+        let review = resolved.stages.iter().find(|stage| stage.name == "review");
+        match review_agent {
+            Some(review_agent) => assert_eq!(
+                review
+                    .unwrap_or_else(|| panic!("`{current}` must have a review stage"))
+                    .agent
+                    .as_deref(),
+                Some(review_agent)
+            ),
+            None => assert!(review.is_none(), "`{current}` must not have a review stage"),
+        }
 
         // The retired name stays out of the user-facing manifest.
         let names = definitions.pipeline_names().unwrap();
@@ -1267,7 +1277,7 @@ fn legacy_builtin_pipeline_names_still_resolve_for_committed_repo_config() {
         assert_eq!(
             names,
             vec![
-                "default",
+                "no-review",
                 "single-reviewer",
                 "specialized-reviewers",
                 "specialty-review"
@@ -1384,8 +1394,8 @@ fn local_only_committed_definitions_without_remote_tracking_ref_are_ignored() {
     assert!(definitions.pipeline("local-pipeline").is_err());
     assert!(definitions.agent("local-agent").is_err());
     assert_eq!(
-        definitions.pipeline("default").unwrap().name.as_deref(),
-        Some("default")
+        definitions.pipeline("no-review").unwrap().name.as_deref(),
+        Some("no-review")
     );
     assert_eq!(definitions.agent("review").unwrap().name, "review");
 
@@ -1603,7 +1613,7 @@ fn pipeline_names_are_sorted_deduped_remote_and_compiled_union() {
         definitions.pipeline_names().unwrap(),
         vec![
             "alpha",
-            "default",
+            "no-review",
             "qa",
             "single-reviewer",
             "specialized-reviewers",

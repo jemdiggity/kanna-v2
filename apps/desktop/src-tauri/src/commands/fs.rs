@@ -123,7 +123,7 @@ fn resolve_builtin_resource_path(base: &Path, relative_path: &str) -> Result<Pat
 }
 
 /// Read a file from the app's bundled resources directory.
-/// `relative_path` is relative to the resources root (e.g., ".kanna/pipelines/default.json").
+/// `relative_path` is relative to the resources root (e.g., ".kanna/pipelines/no-review.json").
 #[tauri::command]
 pub fn read_builtin_resource(app: AppHandle, relative_path: String) -> Result<String, String> {
     let base = builtin_resource_dir(&app)?;
@@ -486,12 +486,12 @@ mod tests {
     fn builtin_resource_path_accepts_normal_relative_paths() {
         let base = Path::new("/repo/resources");
 
-        let resolved = resolve_builtin_resource_path(base, ".kanna/pipelines/default.json")
+        let resolved = resolve_builtin_resource_path(base, ".kanna/pipelines/no-review.json")
             .expect("normal relative resource path should resolve");
 
         assert_eq!(
             resolved,
-            Path::new("/repo/resources/.kanna/pipelines/default.json")
+            Path::new("/repo/resources/.kanna/pipelines/no-review.json")
         );
     }
 

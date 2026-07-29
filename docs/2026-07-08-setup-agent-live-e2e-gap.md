@@ -15,7 +15,7 @@ That test needs a deterministic live-agent harness that can:
   matching;
 - assert generated `.kanna/` files after the agent records completion —
   including that the stock answer *selects* a built-in pipeline
-  (`default`, `single-reviewer`, or `specialized-reviewers`) plus
+  (`no-review`, `single-reviewer`, or `specialized-reviewers`) plus
   `flavors.merge` rather than authoring a pipeline file;
 - continue through the ordinary `pr` stage, in-app review approval, `approve`,
   and `merge@github` without touching a real production repository;

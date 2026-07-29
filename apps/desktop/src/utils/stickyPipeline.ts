@@ -8,7 +8,11 @@
  * `recentPipelines` is newest-first and may name pipelines the repo no longer
  * offers (renamed, deleted, or created against a different checkout), so the
  * first name that is still selectable wins rather than only the newest one.
- * With no usable recent name this falls back to the repo's configured default.
+ * Retired built-in names (`default`, `qa`, …) never reach here: the server
+ * serves them from `/recent-pipelines` already canonicalized to the current
+ * built-in name, which is why a pre-rename row still sticks instead of being
+ * skipped. With no usable recent name this falls back to the repo's
+ * configured default.
  */
 export function resolveStickyPipelineDefault(
   availablePipelines: readonly string[],

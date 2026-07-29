@@ -35,6 +35,63 @@ fn seed_task(db: &Db, id: &str, repo_id: &str, pipeline: &str, parent_task_id: O
     .expect("insert pipeline item");
 }
 
+fn run_git(repo: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A repo whose definitions resolve: local commits only, so the manifest
+/// offers exactly the compiled built-in pipelines. `files` are published to
+/// `origin/main` when non-empty, making repo-authored definitions visible.
+fn definitions_repo(label: &str, files: &[(&str, String)]) -> (tempfile::TempDir, PathBuf) {
+    let temp = tempfile::Builder::new()
+        .prefix(&format!("kanna-recent-pipelines-{label}-"))
+        .tempdir()
+        .unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    run_git(&repo, &["init", "--initial-branch", "main"]);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Kanna Test"]);
+    for (path, contents) in files {
+        let full = repo.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, contents).unwrap();
+    }
+    std::fs::write(repo.join("README.md"), "recent pipelines fixture\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "publish definitions"]);
+    if !files.is_empty() {
+        let origin = temp.path().join("origin.git");
+        run_git(temp.path(), &["init", "--bare", origin.to_str().unwrap()]);
+        run_git(
+            &repo,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        run_git(&repo, &["push", "-u", "origin", "main"]);
+    }
+    (temp, repo)
+}
+
+fn seed_repo_at_path(db: &Db, id: &str, path: &str) {
+    db.insert_repo(NewRepo {
+        id,
+        path,
+        name: id,
+        default_branch: Some("main"),
+    })
+    .expect("insert repo");
+}
+
 async fn recent_pipelines(app: &axum::Router, repo_id: &str) -> (StatusCode, Value) {
     let response = app
         .clone()
@@ -135,4 +192,57 @@ async fn recent_pipelines_route_survives_a_closed_task_and_a_restart() {
         body,
         serde_json::json!({ "pipelines": ["single-reviewer"] }),
     );
+}
+
+/// The sticky new-task default keeps the first recent name the repo still
+/// offers, so a durable row naming a retired built-in (`default`, `qa`) must
+/// be served as its current name — otherwise the rename silently drops the
+/// operator's last choice and the picker falls back to the configured
+/// default. Canonicalizing can collapse a retired name into a newer row's
+/// current name; the collapsed name keeps its newest position.
+#[tokio::test]
+async fn recent_pipelines_route_serves_retired_builtin_names_as_their_current_name() {
+    let (_temp, repo) = definitions_repo("canonical", &[]);
+    let repo_path = repo.to_string_lossy().to_string();
+    let app = test_router_with_seed("recent-pipelines-canonical", "Studio Mac", move |db| {
+        seed_repo_at_path(db, "repo-1", &repo_path);
+        seed_task(db, "task-1", "repo-1", "single-reviewer", None);
+        seed_task(db, "task-2", "repo-1", "no-review", None);
+        // Newest: a task created before the `default` -> `no-review` rename.
+        seed_task(db, "task-3", "repo-1", "default", None);
+    });
+
+    let (status, body) = recent_pipelines(&app, "repo-1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        serde_json::json!({ "pipelines": ["no-review", "single-reviewer"] }),
+    );
+}
+
+/// A repo shipping its own pipeline under a retired built-in name makes that
+/// name a real choice: the stored name must be served verbatim, not
+/// canonicalized away to the built-in it once aliased.
+#[tokio::test]
+async fn recent_pipelines_route_keeps_a_repo_authored_pipeline_named_like_a_retired_builtin() {
+    let (_temp, repo) = definitions_repo(
+        "authored",
+        &[(
+            ".kanna/pipelines/default.json",
+            serde_json::json!({
+                "name": "default",
+                "stages": [{"name": "in progress", "policy": {"transition": "manual"}}]
+            })
+            .to_string(),
+        )],
+    );
+    let repo_path = repo.to_string_lossy().to_string();
+    let app = test_router_with_seed("recent-pipelines-authored", "Studio Mac", move |db| {
+        seed_repo_at_path(db, "repo-1", &repo_path);
+        seed_task(db, "task-1", "repo-1", "default", None);
+    });
+
+    let (status, body) = recent_pipelines(&app, "repo-1").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!({ "pipelines": ["default"] }));
 }

@@ -1,6 +1,6 @@
 {
   "$schema": "./schema.json",
-  "name": "default",
+  "name": "no-review",
   "description": "Simple: implement (commit as post) -> PR. No review stage.",
   "stages": [
     {
