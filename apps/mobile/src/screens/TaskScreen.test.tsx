@@ -8,6 +8,7 @@ import {
   DEFAULT_TASK_QUICK_REPLIES,
   type TaskQuickReply
 } from "./taskQuickReplies";
+import { getTerminalSelectionToolbarTop } from "./terminalSafeArea";
 
 const hookHarness = vi.hoisted(() => ({
   effectCleanups: [] as Array<(() => void) | undefined>,
@@ -1038,6 +1039,40 @@ describe("TaskScreen", () => {
         expectedInset
       );
     }
+  });
+
+  it("keeps the terminal selection toolbar clear of the measured top chrome", () => {
+    let tree = renderTaskScreen({ agentType: "pty" });
+
+    // Until the floating chrome reports a layout, the terminal still gets a
+    // clearance that covers the collapsed header instead of rendering the
+    // toolbar underneath it.
+    expect(findByType(tree, "TerminalWebView")?.props?.selectionToolbarTop).toBe(
+      getTerminalSelectionToolbarTop(null)
+    );
+
+    invokeLayout(findByTestId(tree, "mobile.task-top-chrome"), {
+      height: 52,
+      width: 362,
+      x: 14,
+      y: 16
+    });
+    tree = renderTaskScreen({ agentType: "pty" });
+    expect(findByType(tree, "TerminalWebView")?.props?.selectionToolbarTop).toBe(
+      getTerminalSelectionToolbarTop(68)
+    );
+
+    // An expanded title chip grows the chrome; the toolbar tracks its bottom.
+    invokeLayout(findByTestId(tree, "mobile.task-top-chrome"), {
+      height: 360,
+      width: 362,
+      x: 14,
+      y: 16
+    });
+    tree = renderTaskScreen({ agentType: "pty" });
+    expect(findByType(tree, "TerminalWebView")?.props?.selectionToolbarTop).toBe(
+      getTerminalSelectionToolbarTop(376)
+    );
   });
 
   it("lists terminal mentions from the + menu and previews a canonical selection", async () => {

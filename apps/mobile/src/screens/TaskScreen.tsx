@@ -61,7 +61,10 @@ import {
   type TaskQuickReply
 } from "./taskQuickReplies";
 import { buildTaskWorkspaceModel } from "./taskWorkspace";
-import { getTerminalBottomInset } from "./terminalSafeArea";
+import {
+  getTerminalBottomInset,
+  getTerminalSelectionToolbarTop
+} from "./terminalSafeArea";
 
 const EMPTY_MENTIONED_FILES: TerminalFileMentionHistory = {
   mentions: [],
@@ -173,6 +176,7 @@ export function TaskScreen({
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [screenHeight, setScreenHeight] = useState(0);
   const [composerTop, setComposerTop] = useState<number | null>(null);
+  const [topChromeBottom, setTopChromeBottom] = useState<number | null>(null);
   const [selectedFile, setSelectedFile] = useState<{
     path: string;
     line?: number;
@@ -271,6 +275,8 @@ export function TaskScreen({
     !isAgentTask &&
     (terminalStatus === "idle" || terminalStatus === "connecting");
   const terminalBottomInset = getTerminalBottomInset(screenHeight, composerTop);
+  const terminalSelectionToolbarTop =
+    getTerminalSelectionToolbarTop(topChromeBottom);
   const composerSnapshotRef = useRef({
     taskId: task.id,
     draftInput,
@@ -510,6 +516,7 @@ export function TaskScreen({
             rows={terminalRows}
             taskId={task.id}
             bottomInset={terminalBottomInset}
+            selectionToolbarTop={terminalSelectionToolbarTop}
             onConsolePress={Keyboard.dismiss}
             onMentionedFilesChange={(history) => {
               setMentionedFiles({ history, previewRevision });
@@ -563,7 +570,15 @@ export function TaskScreen({
         />
       ) : null}
 
-      <View pointerEvents="box-none" style={styles.topChrome}>
+      <View
+        pointerEvents="box-none"
+        style={styles.topChrome}
+        testID={MOBILE_E2E_IDS.taskTopChrome}
+        onLayout={(event) => {
+          const { y, height } = event.nativeEvent.layout;
+          setTopChromeBottom(y + height);
+        }}
+      >
         <Pressable
           style={styles.backButton}
           testID={MOBILE_E2E_IDS.taskBackButton}

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_TERMINAL_BOTTOM_INSET,
-  getTerminalBottomInset
+  getTerminalBottomInset,
+  getTerminalSelectionToolbarTop
 } from "./terminalSafeArea";
 
 describe("getTerminalBottomInset", () => {
@@ -35,5 +36,29 @@ describe("getTerminalBottomInset", () => {
   it("rounds up fractional layout values and never returns a negative inset", () => {
     expect(getTerminalBottomInset(800.2, 676.1)).toBe(133);
     expect(getTerminalBottomInset(800, 900)).toBe(0);
+  });
+});
+
+describe("getTerminalSelectionToolbarTop", () => {
+  it("keeps the toolbar clear of the measured floating chrome", () => {
+    // Collapsed chrome: 16px top offset + a 44px title chip.
+    expect(getTerminalSelectionToolbarTop(60)).toBe(72);
+    // Expanded title chip pushes the toolbar further down with it.
+    expect(getTerminalSelectionToolbarTop(376)).toBe(388);
+  });
+
+  it("rounds up fractional chrome measurements", () => {
+    expect(getTerminalSelectionToolbarTop(60.4)).toBe(73);
+  });
+
+  it("falls back to collapsed-chrome clearance until the header is measured", () => {
+    const fallback = getTerminalSelectionToolbarTop(null);
+    expect(fallback).toBe(72);
+    expect(getTerminalSelectionToolbarTop(Number.NaN)).toBe(fallback);
+    expect(getTerminalSelectionToolbarTop(Number.POSITIVE_INFINITY)).toBe(
+      fallback
+    );
+    expect(getTerminalSelectionToolbarTop(0)).toBe(fallback);
+    expect(getTerminalSelectionToolbarTop(-20)).toBe(fallback);
   });
 });

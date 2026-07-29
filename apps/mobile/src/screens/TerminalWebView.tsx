@@ -15,7 +15,10 @@ import {
   buildTerminalResizeScript
 } from "./buildTerminalDocument";
 import { planTerminalMutation } from "./terminalMutation";
-import { DEFAULT_TERMINAL_BOTTOM_INSET } from "./terminalSafeArea";
+import {
+  DEFAULT_TERMINAL_BOTTOM_INSET,
+  getTerminalSelectionToolbarTop
+} from "./terminalSafeArea";
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import {
   parseTerminalFileMentionHistory,
@@ -33,6 +36,7 @@ interface TerminalWebViewProps {
   rows: number | null;
   fullscreen?: boolean;
   bottomInset?: number;
+  selectionToolbarTop?: number;
   onConsolePress?: () => void;
   onMentionedFilesChange?: (history: TerminalFileMentionHistory) => void;
   onOpenFile?: (path: string, line?: number) => void;
@@ -77,6 +81,7 @@ export function TerminalWebView({
   rows,
   fullscreen = false,
   bottomInset,
+  selectionToolbarTop,
   onConsolePress,
   onMentionedFilesChange,
   onOpenFile,
@@ -99,6 +104,12 @@ export function TerminalWebView({
   const [selectionCopyPending, setSelectionCopyPending] = useState(false);
   const resolvedBottomInset =
     bottomInset ?? (fullscreen ? DEFAULT_TERMINAL_BOTTOM_INSET : 24);
+  // Fullscreen embeds sit under floating screen chrome the wrapper cannot see;
+  // the owner passes the measured chrome clearance so the toolbar stays
+  // tappable. Non-fullscreen cards have no overlay, so the toolbar hugs the top.
+  const resolvedSelectionToolbarTop =
+    selectionToolbarTop ??
+    (fullscreen ? getTerminalSelectionToolbarTop(null) : 12);
   const document = useMemo(
     () =>
       buildTerminalDocument({
@@ -388,7 +399,7 @@ export function TerminalWebView({
       {terminalSelection ? (
         <View
           accessibilityLabel="Terminal text selection controls"
-          style={styles.selectionToolbar}
+          style={[styles.selectionToolbar, { top: resolvedSelectionToolbarTop }]}
         >
           <Text accessibilityLiveRegion="polite" style={styles.selectionStatus}>
             {selectionCopyError ?? "Text selected"}
@@ -482,7 +493,6 @@ const styles = StyleSheet.create({
     gap: 8,
     padding: 8,
     position: "absolute",
-    top: 12,
     zIndex: 10
   },
   wrap: {

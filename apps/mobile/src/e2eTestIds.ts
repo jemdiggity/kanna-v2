@@ -17,6 +17,7 @@ export const MOBILE_E2E_IDS = {
   taskTitleDismissLayer: "mobile.task-title-dismiss-layer",
   taskSnapshotMarker: "mobile.task-snapshot-marker",
   taskBackButton: "mobile.task-back-button",
+  taskTopChrome: "mobile.task-top-chrome",
   taskMoreButton: "mobile.task-more-button",
   taskActionPendingSpinner: "mobile.task-action-pending",
   taskComposerChrome: "mobile.task-composer-chrome",

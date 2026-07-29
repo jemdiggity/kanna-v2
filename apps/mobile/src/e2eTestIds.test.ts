@@ -25,6 +25,7 @@ describe("MOBILE_E2E_IDS", () => {
       "mobile.task-title-dismiss-layer"
     );
     expect(MOBILE_E2E_IDS.taskBackButton).toBe("mobile.task-back-button");
+    expect(MOBILE_E2E_IDS.taskTopChrome).toBe("mobile.task-top-chrome");
     expect(MOBILE_E2E_IDS.taskDiffTitle).toBe("mobile.task-diff.title");
     expect(MOBILE_E2E_IDS.taskDiffBase).toBe("mobile.task-diff.base");
     expect(MOBILE_E2E_IDS.taskDiffClose).toBe("mobile.task-diff.close");
