@@ -4168,7 +4168,7 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
         &config,
         CreateTaskRequest {
             repo_id: "repo-1".to_string(),
-            prompt: "Use the configured default provider".to_string(),
+            prompt: "Use the built-in implement provider".to_string(),
             display_name: None,
             pipeline_name: None,
             stage: None,
@@ -4200,7 +4200,9 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
         .unwrap()
         .unwrap();
 
-    assert_eq!(created_source.agent_provider.as_deref(), Some("codex"));
+    // The built-in implement definition is Claude-first and takes precedence
+    // over the configured Copilot default.
+    assert_eq!(created_source.agent_provider.as_deref(), Some("claude"));
 
     let prepared = prepare_task_for_api(
         &db,
