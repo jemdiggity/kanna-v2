@@ -57,6 +57,7 @@ import {
 } from "../runtime/pages";
 import { getPortStatuses } from "../runtime/port-status";
 import { executeRemoteE2e } from "../runtime/remote-e2e";
+import { executeStagingSmoke } from "../runtime/staging-smoke";
 import { nodeCommandRunner, type CommandResult, type CommandRunner } from "../runtime/process";
 import { readDevDesktopAuth, readStagingDesktopAuth } from "../runtime/developer-config";
 import {
@@ -2382,6 +2383,19 @@ export const taskDefinitions = [
         }
       });
     }
+  },
+  {
+    id: "test.staging-smoke",
+    description: "Run the staging health smoke: remote doctor, then the staging remote E2E lane.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      return executeStagingSmoke({
+        repoRoot: context.repoRoot,
+        env: context.env,
+        runner: nodeCommandRunner,
+      });
+    },
   },
   {
     id: "daemon.kill",

@@ -222,6 +222,79 @@ runs no tests; on a match it runs the dev lane completely unchanged. The flag
 applies to the dev lane only — it is refused with `--staging` — and the remote
 lane stays out of `./kd test all` because it needs Firebase emulators.
 
+### 6.1 Staging smoke: `kd test staging-smoke`
+
+`kd test staging-smoke` is the composed staging health check that replaces the
+deleted `staging-remote-e2e` nightly GitHub Actions job. It runs, in order and
+failing fast, streaming child output and reporting which step failed:
+
+1. `./kd doctor --remote --staging`
+2. `./kd test remote-e2e --staging`
+
+Credential handling is the staging suite's own single detection
+(`tools/kd/src/runtime/staging-credentials.ts`, re-exported by
+`tests/remote-e2e/src/staging.ts`): when `KANNA_E2E_DEVICE_TOKEN` or
+`KANNA_STAGING_TEST_PASSWORD` is absent, the command exits 0 with the suite's
+`SKIP staging remote-e2e: …` message — the same clean degradation as
+`kd test remote-e2e --staging` itself. With credentials present, a genuine
+staging failure exits non-zero.
+
+#### Opt-in local scheduling (launchd)
+
+There is no hosted cron. To get the nightly cadence back on a Mac, schedule
+the smoke yourself with a `launchd` user agent. This is strictly opt-in and
+manual: `kd` never installs, loads, or manages any launchd job.
+
+Credentials are the staging Buffy pair from §2 — the values that were
+previously the repository secrets of the deleted workflow
+(`KANNA_E2E_DEVICE_TOKEN`, provisioned via `provision-staging-buffy-user.mjs`,
+and `KANNA_STAGING_TEST_PASSWORD`). Keep them out of the plist: put them in a
+private env file, e.g. `~/.config/kanna/staging-smoke.env` with `chmod 600`:
+
+```sh
+KANNA_E2E_DEVICE_TOKEN=staging-buffy-device-token
+KANNA_STAGING_TEST_PASSWORD=…
+```
+
+Example `~/Library/LaunchAgents/build.kanna.staging-smoke.plist`, running
+daily at 10:23 (adjust the repo path and schedule):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>build.kanna.staging-smoke</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd "$HOME/kanna" &amp;&amp; set -a &amp;&amp; source "$HOME/.config/kanna/staging-smoke.env" &amp;&amp; set +a &amp;&amp; ./kd test staging-smoke</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>10</integer>
+    <key>Minute</key>
+    <integer>23</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/tmp/kanna-staging-smoke.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/kanna-staging-smoke.log</string>
+</dict>
+</plist>
+```
+
+Load it with `launchctl bootstrap gui/$(id -u)
+~/Library/LaunchAgents/build.kanna.staging-smoke.plist`, remove it with
+`launchctl bootout gui/$(id -u)/build.kanna.staging-smoke`. `-lc` runs a login
+shell so `node`/`pnpm` resolve the way they do in your terminal. Check
+`/tmp/kanna-staging-smoke.log` for results; a run without the env file present
+logs the SKIP message and exits 0 rather than failing.
+
 ## 7. Acceptance criteria (v2)
 
 - Flows 1–6 and 11 green under `kd test remote-e2e` in dev.

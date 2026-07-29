@@ -1,26 +1,27 @@
 import { randomUUID } from "node:crypto";
 import {
+  buffyStagingCredentialsFromEnv,
+  type StagingBuffyCredentials
+} from "../../../tools/kd/src/runtime/staging-credentials";
+import {
   fetchFirebaseIdToken,
   readMobileFirebaseApiKey
 } from "../../../tools/kd/src/runtime/staging-relay";
 
-export const STAGING_BUFFY_EMAIL = "upvote.sieve.7t@icloud.com";
-export const STAGING_DEVICE_TOKEN_ENV = "KANNA_E2E_DEVICE_TOKEN";
-export const STAGING_PASSWORD_ENV = "KANNA_STAGING_TEST_PASSWORD";
+export {
+  STAGING_BUFFY_EMAIL,
+  STAGING_DEVICE_TOKEN_ENV,
+  STAGING_PASSWORD_ENV,
+  buffyStagingCredentialsFromEnv,
+  stagingRemoteE2eSkipMessage,
+  type StagingBuffyCredentials,
+  type StagingCredentialsResult
+} from "../../../tools/kd/src/runtime/staging-credentials";
+
 export const STAGING_DEVICE_TOKEN = "staging-buffy-device-token";
 export const STAGING_RELAY_URL = "wss://relay-staging.kanna.build";
 export const STAGING_FIREBASE_PROJECT_ID = "kanna-staging";
 export const STAGING_DESKTOP_NAME = "Remote E2E Staging Desktop";
-
-export interface StagingBuffyCredentials {
-  deviceToken: string;
-  email: string;
-  password: string;
-}
-
-export type StagingCredentialsResult =
-  | { ok: true; credentials: StagingBuffyCredentials }
-  | { ok: false; missing: string[] };
 
 export interface StagingServerEnvironment {
   credentials: StagingBuffyCredentials;
@@ -32,29 +33,6 @@ export interface StagingServerEnvironment {
 export type StagingServerEnvironmentResult =
   | ({ ok: true } & StagingServerEnvironment)
   | { ok: false; missing: string[] };
-
-export function buffyStagingCredentialsFromEnv(env: NodeJS.ProcessEnv): StagingCredentialsResult {
-  const missing: string[] = [];
-  const deviceToken = env[STAGING_DEVICE_TOKEN_ENV]?.trim();
-  const password = env[STAGING_PASSWORD_ENV]?.trim();
-  if (!deviceToken) missing.push(STAGING_DEVICE_TOKEN_ENV);
-  if (!password) missing.push(STAGING_PASSWORD_ENV);
-  if (missing.length > 0) {
-    return { ok: false, missing };
-  }
-  return {
-    ok: true,
-    credentials: {
-      deviceToken: deviceToken!,
-      email: STAGING_BUFFY_EMAIL,
-      password: password!
-    }
-  };
-}
-
-export function stagingRemoteE2eSkipMessage(missing: string[]): string {
-  return `SKIP staging remote-e2e: missing ${missing.join(", ")}`;
-}
 
 export function stagingServerEnvironment(env: NodeJS.ProcessEnv): StagingServerEnvironmentResult {
   const credentials = buffyStagingCredentialsFromEnv(env);

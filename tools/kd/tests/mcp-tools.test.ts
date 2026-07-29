@@ -24,6 +24,7 @@ describe("MCP tool registry", () => {
       "test_all",
       "test_app_update_bundle",
       "test_remote_e2e",
+      "test_staging_smoke",
       "emulators_up",
       "emulators_down",
       "emulators_status",
