@@ -136,10 +136,88 @@ pub(super) async fn send_task_input(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// What ended a task, as known by the caller that fires its completion
+/// notification.
+///
+/// Daemon `Exit` alone cannot tell these apart — the agent erroring, the task
+/// advancing past its final stage, and a human closing the task from the
+/// sidebar all end the same PTY the same way — so the trigger is passed in and
+/// the reported status is derived from it together with the task's own
+/// terminating run.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum TaskCompletionTrigger {
+    /// The task's agent session ended on its own: an unkilled daemon `Exit`.
+    AgentSessionExit { exit_code: i32 },
+    /// The task advanced past its final pipeline stage — a normal completion.
+    PipelineCompleted,
+    /// The task was closed directly (sidebar ⇧⌘⌫ or `POST /v1/tasks/{id}/close`)
+    /// without finishing its pipeline.
+    DirectClose,
+}
+
+/// The status word in `TASK <id> DONE [<status>]: <title>`.
+///
+/// Three states, not two. An orchestrating agent acts on this payload without
+/// re-reading task state — that is the whole point of `notify_task_id` — so
+/// "a human cancelled this" must not read the same as "the work failed", and
+/// neither may read the same as a clean finish. The vocabulary is closed:
+/// receivers match these three words exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskCompletionStatus {
+    /// The task ran to a clean end: it reached the end of its pipeline, or its
+    /// session ended with no failing verdict against it.
+    Success,
+    /// The task's terminating run reported failure, or its agent process died.
+    Failure,
+    /// The task was closed before finishing its pipeline. Not a failure — no
+    /// verdict was reached at all.
+    Closed,
+}
+
+impl TaskCompletionStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+/// Derive the reported status from the task's real outcome.
+///
+/// A direct close reached no verdict, so it reports `closed` whatever state the
+/// task was in. Otherwise the terminating `stage_run` decides: an agent that
+/// reported failure and then let its session end is a failure however cleanly
+/// the PTY exited, and a task that reached the end of its pipeline behind a
+/// succeeded run is a success even though closing it killed the session.
+fn derive_task_completion_status(
+    db: &Db,
+    task_id: &str,
+    trigger: TaskCompletionTrigger,
+) -> Result<TaskCompletionStatus, String> {
+    match trigger {
+        TaskCompletionTrigger::DirectClose => return Ok(TaskCompletionStatus::Closed),
+        // A dead agent process is a failure regardless of any recorded verdict:
+        // the run it was executing never finished.
+        TaskCompletionTrigger::AgentSessionExit { exit_code } if exit_code != 0 => {
+            return Ok(TaskCompletionStatus::Failure)
+        }
+        _ => {}
+    }
+    let status = db
+        .latest_finished_stage_run_status(task_id)
+        .map_err(|e| format!("db error: {}", e))?;
+    Ok(match status.as_deref() {
+        Some("failed") => TaskCompletionStatus::Failure,
+        _ => TaskCompletionStatus::Success,
+    })
+}
+
 pub(crate) async fn handle_task_terminal_state(
     state: &AppState,
     task_id: &str,
-    success: bool,
+    exit_code: i32,
 ) -> Result<(), String> {
     let pipeline_item_id = {
         let db = Db::open(&state.config.db_path).map_err(|e| format!("db error: {}", e))?;
@@ -154,29 +232,40 @@ pub(crate) async fn handle_task_terminal_state(
         pipeline_item_id
     };
     state.publish_state_changed(StateChangeScope::Tasks);
-    notify_task_completion(state, &pipeline_item_id, success).await
+    notify_task_completion(
+        state,
+        &pipeline_item_id,
+        TaskCompletionTrigger::AgentSessionExit { exit_code },
+    )
+    .await
 }
 
 pub(super) async fn notify_task_completion(
     state: &AppState,
     child_id: &str,
-    success: bool,
+    trigger: TaskCompletionTrigger,
 ) -> Result<(), String> {
-    let notification = {
+    let (notification, status) = {
         let config = state.config();
         let db = Db::open(&config.db_path).map_err(|e| format!("db error: {}", e))?;
-        db.claim_task_notification(child_id)
-            .map_err(|e| format!("db error: {}", e))?
+        // Derive before claiming: the claim is one-shot, so a failure to read
+        // the outcome must not burn the notification on a wrong status.
+        let status = derive_task_completion_status(&db, child_id, trigger)?;
+        let notification = db
+            .claim_task_notification(child_id)
+            .map_err(|e| format!("db error: {}", e))?;
+        (notification, status)
     };
     let Some(notification) = notification else {
         return Ok(());
     };
     state.publish_state_changed(StateChangeScope::Tasks);
     let config = state.config();
-    let status = if success { "success" } else { "failure" };
     let message = format!(
         "TASK {} DONE [{}]: {}",
-        notification.child_id, status, notification.title
+        notification.child_id,
+        status.as_str(),
+        notification.title
     );
     let mut daemon = crate::daemon_client::DaemonClient::connect(&config.daemon_dir)
         .await

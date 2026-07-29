@@ -3,7 +3,7 @@ use super::state::{db_write_error, AppState};
 use super::task_blockers::{
     resolve_existing_task_id, start_dependents_unblocked_by_close_with_daemon,
 };
-use super::task_input::{notify_task_completion, submit_task_input};
+use super::task_input::{notify_task_completion, submit_task_input, TaskCompletionTrigger};
 use crate::db::Db;
 use axum::extract::State;
 use axum::Json;
@@ -502,9 +502,15 @@ pub(super) async fn close_task(
         )
         .await;
     }
-    notify_task_completion(state.as_ref(), &pipeline_item_id, false)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // A direct close reaches no verdict, so it is reported as `closed` — never
+    // as a failure the receiving agent would try to diagnose.
+    notify_task_completion(
+        state.as_ref(),
+        &pipeline_item_id,
+        TaskCompletionTrigger::DirectClose,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     start_dependents_unblocked_by_close_with_daemon(&state, &mut daemon, &pipeline_item_id).await;
     state.publish_state_changed(StateChangeScope::Tasks);
     state.publish_state_changed(StateChangeScope::Blockers);
@@ -662,9 +668,16 @@ async fn close_task_after_final_stage(
         crate::worktree_cleanup::cleanup_closed_task_worktrees_by_id(&db, &task_id)
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     }
-    notify_task_completion(state.as_ref(), &task_id, false)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // Reaching the end of the pipeline is a normal completion: the reported
+    // status comes from the run that terminated the task, not from the fact
+    // that closing it killed the session.
+    notify_task_completion(
+        state.as_ref(),
+        &task_id,
+        TaskCompletionTrigger::PipelineCompleted,
+    )
+    .await
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     start_dependents_unblocked_by_close_with_daemon(state, daemon, &task_id).await;
     state.publish_state_changed(StateChangeScope::Tasks);
     state.publish_state_changed(StateChangeScope::Blockers);
