@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
@@ -47,6 +48,8 @@ interface PtySize {
   cols: number;
   rows: number;
 }
+
+const execFileAsync = promisify(execFile);
 
 function getClientSessionId(client: WebDriverClient): string {
   const state = client as unknown as { sessionId?: string | null };
@@ -248,23 +251,67 @@ async function waitForDaemonPid(
   throw new Error(`Timed out waiting for replacement daemon pid ${expectedPid}`);
 }
 
-async function spawnReplacementDaemon(client: WebDriverClient): Promise<number> {
-  const daemonBin = await invokeOrThrow(client, "which_binary", { name: "kanna-daemon" }) as string;
-  const daemonDir = await invokeOrThrow(client, "read_env_var", { name: "KANNA_DAEMON_DIR" }) as string;
-  const child = spawn(daemonBin, [], {
-    detached: true,
-    env: {
-      ...process.env,
-      KANNA_DAEMON_DIR: daemonDir,
-    },
-    stdio: "ignore",
-  });
-  child.unref();
-  if (!child.pid) {
-    throw new Error("Replacement daemon did not expose a pid");
+async function readDaemonPid(daemonDir: string): Promise<number> {
+  const pid = Number.parseInt(await readFile(join(daemonDir, "daemon.pid"), "utf8"), 10);
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new Error(`Invalid daemon pid ${pid}`);
   }
-  await waitForDaemonPid(daemonDir, child.pid);
-  return child.pid;
+  return pid;
+}
+
+async function readProcessState(pid: number): Promise<string | null> {
+  try {
+    const result = await execFileAsync("/bin/ps", [
+      "-o",
+      "state=",
+      "-p",
+      String(pid),
+    ]);
+    return result.stdout.trim() || null;
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === 1
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function waitForProcessRelease(pid: number, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await readProcessState(pid);
+    if (state === null || state.startsWith("Z")) {
+      return;
+    }
+    await sleep(100);
+  }
+  throw new Error(`Timed out waiting for daemon pid ${pid} to release its sessions`);
+}
+
+interface ReplacementDaemonPids {
+  incumbent: number;
+  successor: number;
+}
+
+async function spawnReplacementDaemon(
+  client: WebDriverClient,
+): Promise<ReplacementDaemonPids> {
+  const daemonDir = await invokeOrThrow(client, "read_env_var", { name: "KANNA_DAEMON_DIR" }) as string;
+  const incumbent = await readDaemonPid(daemonDir);
+  const successor = await invokeOrThrow(
+    client,
+    "spawn_replacement_daemon_for_e2e",
+  );
+  if (typeof successor !== "number" || !Number.isSafeInteger(successor) || successor <= 0) {
+    throw new Error(`Replacement daemon returned invalid pid ${String(successor)}`);
+  }
+  await waitForDaemonPid(daemonDir, successor);
+  return { incumbent, successor };
 }
 
 async function waitForRecoverySnapshotText(
@@ -1078,7 +1125,9 @@ describe("pty session (real CLI)", () => {
     await waitForTerminalBufferText(client, deterministicSessionId, `ECHO:${beforeMarker}`, 10_000);
 
     await invokeOrThrow(client, "detach_session", { sessionId: deterministicSessionId });
-    await spawnReplacementDaemon(client);
+    const replacement = await spawnReplacementDaemon(client);
+    expect(replacement.successor).not.toBe(replacement.incumbent);
+    await waitForProcessRelease(replacement.incumbent);
     await sleep(1_000);
     await attachSessionWithRetry(client, deterministicSessionId);
 

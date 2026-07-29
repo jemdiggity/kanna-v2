@@ -256,6 +256,8 @@ pub fn run() {
             commands::daemon::seed_session_recovery_state,
             commands::daemon::attach_session_with_snapshot,
             commands::daemon::detach_session,
+            #[cfg(debug_assertions)]
+            daemon_lifecycle::spawn_replacement_daemon_for_e2e,
             // Git commands
             commands::git::diff::git_diff,
             commands::git::diff::git_diff_branch_range,

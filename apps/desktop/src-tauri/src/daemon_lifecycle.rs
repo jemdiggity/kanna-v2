@@ -55,23 +55,13 @@ pub(crate) async fn wait_for_successor(previous_pid: u32) -> Result<DaemonClient
     })
 }
 
-/// Always spawn a new daemon. If an old one is running, the new daemon
-/// performs a handoff (transfers sessions via SCM_RIGHTS) automatically.
-pub(crate) async fn ensure_daemon_running() {
-    eprintln!("[daemon] spawning daemon...");
-
+fn spawn_daemon_process() -> Result<(std::process::Child, std::path::PathBuf), String> {
     let daemon_bin = kanna_runtime_defaults::resolve_binary_from_candidates(
         "kanna-daemon",
         commands::fs::sidecar_candidates("kanna-daemon"),
         |_| Err("kanna-daemon sidecar binary not found".to_string()),
     )
-    .map(std::path::PathBuf::from)
-    .ok();
-
-    let Some(daemon_bin) = daemon_bin else {
-        eprintln!("[daemon] daemon binary not found — PTY sessions will not work");
-        return;
-    };
+    .map(std::path::PathBuf::from)?;
 
     let daemon_dir = daemon_data_dir();
     let inferred_worktree = kanna_runtime_defaults::worktree_root_for_path(&daemon_bin)
@@ -86,8 +76,8 @@ pub(crate) async fn ensure_daemon_running() {
         "[daemon] spawning {:?} (worktree={}, daemon_dir={:?})",
         daemon_bin, is_worktree, daemon_dir
     );
+
     use std::os::unix::process::CommandExt;
-    // setsid() detaches daemon from our process group so Ctrl+C doesn't kill it
     let mut cmd = std::process::Command::new(&daemon_bin);
     let mut explicit_env = Vec::new();
     if is_worktree {
@@ -101,15 +91,29 @@ pub(crate) async fn ensure_daemon_running() {
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    match unsafe {
+
+    let child = unsafe {
         cmd.pre_exec(|| {
             crate::macos::raise_child_nofile_limit();
             libc::setsid();
             Ok(())
         })
         .spawn()
-    } {
-        Ok(child) => {
+    }
+    .map_err(|error| format!("failed to spawn daemon: {error}"))?;
+
+    Ok((child, daemon_dir))
+}
+
+/// Always spawn a new daemon. If an old one is running, the new daemon
+/// performs a handoff (transfers sessions via SCM_RIGHTS) automatically.
+pub(crate) async fn ensure_daemon_running() {
+    eprintln!("[daemon] spawning daemon...");
+
+    match spawn_daemon_process() {
+        // setsid() in spawn_daemon_process detaches the daemon from our process
+        // group so Ctrl+C does not kill it.
+        Ok((child, daemon_dir)) => {
             let expected_pid = child.id();
 
             // Wait for the NEW daemon to be ready:
@@ -129,9 +133,21 @@ pub(crate) async fn ensure_daemon_running() {
             eprintln!("[daemon] spawned but could not connect after retries");
         }
         Err(e) => {
-            eprintln!("[daemon] failed to spawn: {}", e);
+            eprintln!("[daemon] {e} — PTY sessions will not work");
         }
     }
+}
+
+/// Exercise the production app -> daemon successor topology from real E2E tests.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub(crate) fn spawn_replacement_daemon_for_e2e() -> Result<u32, String> {
+    if std::env::var("KANNA_E2E_TEST_SQL").as_deref() != Ok("1") {
+        return Err("replacement daemon spawning is only available in E2E runs".to_string());
+    }
+
+    let (child, _) = spawn_daemon_process()?;
+    Ok(child.id())
 }
 
 /// Connect to the daemon with exponential backoff. Used by the event bridge
