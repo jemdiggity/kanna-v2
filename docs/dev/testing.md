@@ -2,7 +2,13 @@
 
 ## Canonical verification
 
-Every change should pass these two before it is considered done:
+Every change should pass this before it is considered done:
+
+```sh
+./kd test all    # runs every lane below in order, failing fast
+```
+
+It composes the individual lanes, which you can still run one at a time:
 
 ```sh
 pnpm test        # turbo-run JS/TS suites across the workspace

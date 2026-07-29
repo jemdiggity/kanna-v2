@@ -94,11 +94,11 @@ never start those by hand.
 ## Verify your setup
 
 ```sh
-pnpm test           # canonical JS/TS test suite (turbo across the workspace)
-./kd test rust      # canonical Rust test suite
+./kd test all       # canonical verification: every lane, failing fast
 ```
 
-Both should pass on a clean checkout. See [Testing](testing.md) for the rest of
+It should pass on a clean checkout. The lanes it composes — `pnpm test` (turbo
+across the workspace) and `./kd test rust` — can also be run individually. See [Testing](testing.md) for the rest of
 the taxonomy (E2E, live agent suites, mobile).
 
 ## Developing Kanna in Kanna

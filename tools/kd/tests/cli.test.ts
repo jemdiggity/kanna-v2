@@ -485,13 +485,25 @@ describe("kd CLI", () => {
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd doctor"));
 
     await expect(runCli(["test", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("test all"));
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("test rust"));
+
+    await expect(runCli(["test", "all", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd test all"));
 
     await expect(runCli(["test", "rust", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd test rust"));
 
     await expect(runCli(["rust-cache", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd rust-cache <command>"));
+
+    await expect(runCli(["pages", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("pages build-schema"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("pages publish-schema"));
+
+    await expect(runCli(["pages", "publish-schema", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd pages publish-schema"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Deploy from a branch"));
 
     await expect(runCli(["not-a-command", "--help"])).resolves.toBe(1);
     expect(error).toHaveBeenLastCalledWith("Unknown help topic: not-a-command");
@@ -936,6 +948,13 @@ describe("kd CLI", () => {
   });
 
   it("parses cloud test commands", () => {
+    expect(parseCliArgs(["test", "all"])).toEqual({
+      taskId: "test.all",
+      input: {},
+    });
+    expect(getTaskDefinition("test.all").description).toBe(
+      "Run all canonical local verification lanes.",
+    );
     expect(parseCliArgs(["test", "rust"])).toEqual({
       taskId: "test.rust",
       input: {},
@@ -961,12 +980,19 @@ describe("kd CLI", () => {
     });
     expect(parseCliArgs(["test", "remote-e2e"])).toEqual({
       taskId: "test.remote-e2e",
-      input: { dev: true, staging: false, mobileRelay: false, desktopPairing: false },
+      input: { dev: true, staging: false, mobileRelay: false, desktopPairing: false, ifChanged: false },
     });
     expect(parseCliArgs(["test", "remote-e2e", "--staging"])).toEqual({
       taskId: "test.remote-e2e",
-      input: { dev: false, staging: true, mobileRelay: false, desktopPairing: false },
+      input: { dev: false, staging: true, mobileRelay: false, desktopPairing: false, ifChanged: false },
     });
+    expect(parseCliArgs(["test", "remote-e2e", "--if-changed"])).toEqual({
+      taskId: "test.remote-e2e",
+      input: { dev: true, staging: false, mobileRelay: false, desktopPairing: false, ifChanged: true },
+    });
+    expect(() => parseCliArgs(["test", "remote-e2e", "--staging", "--if-changed"])).toThrow(
+      "remote-e2e --if-changed applies to the dev lane only"
+    );
   });
 
   it("parses rust-cache commands", () => {
@@ -1007,6 +1033,14 @@ describe("kd CLI", () => {
     expect(parseCliArgs(["pages", "build-schema", "--out-dir", ".build/pages-schema"])).toEqual({
       taskId: "pages.build-schema",
       input: { outDir: ".build/pages-schema" }
+    });
+    expect(parseCliArgs(["pages", "publish-schema"])).toEqual({
+      taskId: "pages.publish-schema",
+      input: { dryRun: false }
+    });
+    expect(parseCliArgs(["pages", "publish-schema", "--dry-run"])).toEqual({
+      taskId: "pages.publish-schema",
+      input: { dryRun: true }
     });
     expect(parseCliArgs(["release", "ship", "--dry-run", "--minor", "--arm64", "--staging"])).toEqual({
       taskId: "release.ship",

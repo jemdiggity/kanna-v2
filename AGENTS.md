@@ -159,7 +159,10 @@ troubleshooting: `docs/dev/dev-workflow.md`; OTA operations:
   `ports`, `pipeline`), `pipelines/{name}.json`, `agents/{name}/AGENT.md`
   (repo files override built-ins by name), `agents/{name}/EXTEND.md` (layers
   onto the resolved agent without rewriting it — read only from the open repo,
-  never from bundled resources), and `tasks/{slug}/agent.md` templates.
+  never from bundled resources), and `tasks/{slug}/agent.md` templates. Its
+  `config.schema.json` is the public schema served at
+  `https://schemas.kanna.build/config.schema.json`; publish it with
+  `./kd pages publish-schema` (see `docs/dev/dev-workflow.md`).
 - Built-in agent/pipeline definitions must ship as Tauri bundled resources,
   **not** as TypeScript string constants.
 

@@ -50,8 +50,13 @@ import {
   executeMobileOtaPublishWithContext,
   executeMobileOtaStatusWithContext
 } from "../runtime/mobile-ota";
-import { buildConfigSchemaPages } from "../runtime/pages";
+import {
+  buildConfigSchemaPages,
+  formatPublishConfigSchemaPagesResult,
+  publishConfigSchemaPages
+} from "../runtime/pages";
 import { getPortStatuses } from "../runtime/port-status";
+import { executeRemoteE2e } from "../runtime/remote-e2e";
 import { nodeCommandRunner, type CommandResult, type CommandRunner } from "../runtime/process";
 import { readDevDesktopAuth, readStagingDesktopAuth } from "../runtime/developer-config";
 import {
@@ -72,6 +77,7 @@ import { executeRustTests } from "../runtime/rust-test";
 import { buildDesktopSidecars } from "../runtime/sidecars";
 import { checkSetupPrerequisites, installSetupDependencies } from "../runtime/setup";
 import { getDevStatus } from "../runtime/status";
+import { executeTestAll } from "../runtime/test-all";
 import { captureTmuxLog, respawnTmuxWindow, startTmuxSession, stopTmuxSession, stopTmuxWindow } from "../runtime/tmux";
 import { readDesktopBundleIdentifier, writeTauriLocalConfig } from "../runtime/tauri";
 import type { KdPorts } from "../ports";
@@ -233,7 +239,8 @@ const remoteE2eInputSchema = z.object({
   dev: z.boolean().default(true),
   staging: z.boolean().default(false),
   mobileRelay: z.boolean().default(false),
-  desktopPairing: z.boolean().default(false)
+  desktopPairing: z.boolean().default(false),
+  ifChanged: z.boolean().default(false)
 });
 
 const remoteDoctorInputSchema = z.object({
@@ -252,6 +259,10 @@ const cleanInputSchema = z.object({
 
 const pagesBuildSchemaInputSchema = z.object({
   outDir: z.string()
+});
+
+const pagesPublishSchemaInputSchema = z.object({
+  dryRun: z.boolean().default(false)
 });
 
 const releaseShipInputSchema = z.object({
@@ -2000,6 +2011,25 @@ export const taskDefinitions = [
     }
   },
   {
+    id: "pages.publish-schema",
+    description: "Publish the config-schema Pages artifact to the gh-pages branch.",
+    inputSchema: pagesPublishSchemaInputSchema,
+    execute: async (_context, input) => {
+      const parsed = pagesPublishSchemaInputSchema.parse(input);
+      const context = await resolveDefaultContext(process.env);
+      try {
+        const result = await publishConfigSchemaPages({
+          repoRoot: context.repoRoot,
+          runner: nodeCommandRunner,
+          dryRun: parsed.dryRun
+        });
+        return { ok: true, message: formatPublishConfigSchemaPagesResult(result), data: result };
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : String(error) };
+      }
+    }
+  },
+  {
     id: "release.ship",
     description: "Build, sign, notarize, and optionally publish a Kanna release.",
     inputSchema: releaseShipInputSchema,
@@ -2146,6 +2176,19 @@ export const taskDefinitions = [
         data: plan
       };
     }
+  },
+  {
+    id: "test.all",
+    description: "Run all canonical local verification lanes.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      return executeTestAll({
+        repoRoot: context.repoRoot,
+        env: context.env,
+        runner: nodeCommandRunner,
+      });
+    },
   },
   {
     id: "test.rust",
@@ -2327,15 +2370,17 @@ export const taskDefinitions = [
         };
       }
       const context = await resolveDefaultContext(process.env);
-      const args = ["--dir", "tests/remote-e2e", "exec", "tsx", "src/run.ts", parsed.staging ? "--staging" : "--dev"];
-      if (parsed.mobileRelay) args.push("--mobile-relay");
-      if (parsed.desktopPairing) args.push("--desktop-pairing");
-      return runBuiltCommand(
-        "pnpm",
-        args,
-        context.repoRoot,
-        context.env
-      );
+      return executeRemoteE2e({
+        repoRoot: context.repoRoot,
+        env: context.env,
+        runner: nodeCommandRunner,
+        options: {
+          staging: parsed.staging,
+          mobileRelay: parsed.mobileRelay,
+          desktopPairing: parsed.desktopPairing,
+          ifChanged: parsed.ifChanged
+        }
+      });
     }
   },
   {

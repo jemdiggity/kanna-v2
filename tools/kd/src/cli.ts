@@ -212,22 +212,27 @@ function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
     dev: false,
     staging: false,
     mobileRelay: false,
-    desktopPairing: false
+    desktopPairing: false,
+    ifChanged: false
   }, {
     "--mobile-relay": "mobileRelay",
-    "--desktop-pairing": "desktopPairing"
+    "--desktop-pairing": "desktopPairing",
+    "--if-changed": "ifChanged"
   });
   const unsupportedFlags = Object.entries(input)
     .filter(([key, value]) =>
-      !["dev", "staging", "mobileRelay", "desktopPairing"].includes(key) &&
+      !["dev", "staging", "mobileRelay", "desktopPairing", "ifChanged"].includes(key) &&
       value === true
     )
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
-    throw new Error("remote-e2e only accepts --dev, --staging, --mobile-relay, or --desktop-pairing");
+    throw new Error("remote-e2e only accepts --dev, --staging, --mobile-relay, --desktop-pairing, or --if-changed");
   }
   if (input.dev === true && input.staging === true) {
     throw new Error("remote-e2e accepts only one of --dev or --staging");
+  }
+  if (input.ifChanged === true && input.staging === true) {
+    throw new Error("remote-e2e --if-changed applies to the dev lane only");
   }
   return {
     taskId: "test.remote-e2e",
@@ -235,7 +240,8 @@ function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
       dev: input.staging !== true,
       staging: input.staging === true,
       mobileRelay: input.mobileRelay === true,
-      desktopPairing: input.desktopPairing === true
+      desktopPairing: input.desktopPairing === true,
+      ifChanged: input.ifChanged === true
     }
   };
 }
@@ -536,6 +542,12 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "pages" && command === "build-schema") {
     return { taskId: "pages.build-schema", input: parseFlagInput(rest, {}) };
   }
+  if (group === "pages" && command === "publish-schema") {
+    return { taskId: "pages.publish-schema", input: parseFlagInput(rest, { dryRun: false }) };
+  }
+  if (group === "test" && command === "all") {
+    return { taskId: "test.all", input: {} };
+  }
   if (group === "test" && command === "rust") {
     return { taskId: "test.rust", input: {} };
   }
@@ -649,13 +661,14 @@ const helpTopics: Record<string, string[]> = {
     "  cloud deploy --staging|--production [--relay]",
     "  cloud relay-provision --staging|--production",
     "  pages build-schema --out-dir <dir>",
+    "  pages publish-schema [--dry-run]",
     "  test rust",
     "  test app-update-bundle",
     "  test cloud-emulator",
     "  test cloud-staging",
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
-    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing]",
+    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing] [--if-changed]",
     "  doctor [--remote] [--staging]",
     "",
     "Run 'kd <command> --help' for command-specific help."
@@ -1013,24 +1026,42 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd pages <command>",
     "",
     "Commands:",
-    "  pages build-schema --out-dir <dir>"
+    "  pages build-schema --out-dir <dir>",
+    "  pages publish-schema [--dry-run]"
   ],
   "pages build-schema": [
     "Usage: kd pages build-schema --out-dir <dir>",
     "",
     "Build the static config-schema Pages artifact."
   ],
+  "pages publish-schema": [
+    "Usage: kd pages publish-schema [--dry-run]",
+    "",
+    "Build the config-schema Pages artifact and publish it to the gh-pages branch on origin.",
+    "The commit is made in a throwaway git worktree, so the current worktree is never touched.",
+    "",
+    "  --dry-run                 Build and report what would be committed and pushed, without touching origin.",
+    "",
+    "Publishing only becomes visible after a human changes GitHub repo Settings → Pages → Source",
+    "from \"GitHub Actions\" to \"Deploy from a branch\", branch `gh-pages`, folder `/ (root)`."
+  ],
   test: [
     "Usage: kd test <command>",
     "",
     "Commands:",
+    "  test all",
     "  test rust",
     "  test app-update-bundle",
     "  test cloud-emulator",
     "  test cloud-staging",
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
-    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing]"
+    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing] [--if-changed]"
+  ],
+  "test all": [
+    "Usage: kd test all",
+    "",
+    "Run all canonical local verification lanes."
   ],
   "test rust": [
     "Usage: kd test rust",
@@ -1063,12 +1094,17 @@ const helpTopics: Record<string, string[]> = {
     "Run LAN sync tests against physical Macs over SSH."
   ],
   "test remote-e2e": [
-    "Usage: kd test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing]",
+    "Usage: kd test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing] [--if-changed]",
     "",
     "Run remote task interaction E2E tests.",
     "",
     "  --mobile-relay     Run Layer C mobile Appium over relay.",
-    "  --desktop-pairing  Run Layer D desktop pairing UI WebDriver test."
+    "  --desktop-pairing  Run Layer D desktop pairing UI WebDriver test.",
+    "  --if-changed       Run the dev lane only when this branch changes a remote",
+    "                     E2E surface (relay, kanna-server, firebase-functions,",
+    "                     mobile lib, tests/remote-e2e, kd), measured against the",
+    "                     merge-base with the default branch. Otherwise exits 0",
+    "                     without starting emulators or tests."
   ],
   doctor: [
     "Usage: kd doctor [--remote] [--staging]",
