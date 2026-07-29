@@ -485,7 +485,11 @@ describe("kd CLI", () => {
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd doctor"));
 
     await expect(runCli(["test", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("test all"));
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("test rust"));
+
+    await expect(runCli(["test", "all", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd test all"));
 
     await expect(runCli(["test", "rust", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd test rust"));
@@ -936,6 +940,13 @@ describe("kd CLI", () => {
   });
 
   it("parses cloud test commands", () => {
+    expect(parseCliArgs(["test", "all"])).toEqual({
+      taskId: "test.all",
+      input: {},
+    });
+    expect(getTaskDefinition("test.all").description).toBe(
+      "Run all canonical local verification lanes.",
+    );
     expect(parseCliArgs(["test", "rust"])).toEqual({
       taskId: "test.rust",
       input: {},

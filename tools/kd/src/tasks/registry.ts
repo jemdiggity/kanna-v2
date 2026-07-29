@@ -72,6 +72,7 @@ import { executeRustTests } from "../runtime/rust-test";
 import { buildDesktopSidecars } from "../runtime/sidecars";
 import { checkSetupPrerequisites, installSetupDependencies } from "../runtime/setup";
 import { getDevStatus } from "../runtime/status";
+import { executeTestAll } from "../runtime/test-all";
 import { captureTmuxLog, respawnTmuxWindow, startTmuxSession, stopTmuxSession, stopTmuxWindow } from "../runtime/tmux";
 import { readDesktopBundleIdentifier, writeTauriLocalConfig } from "../runtime/tauri";
 import type { KdPorts } from "../ports";
@@ -2146,6 +2147,19 @@ export const taskDefinitions = [
         data: plan
       };
     }
+  },
+  {
+    id: "test.all",
+    description: "Run all canonical local verification lanes.",
+    inputSchema: emptyInputSchema,
+    execute: async () => {
+      const context = await resolveDefaultContext(process.env);
+      return executeTestAll({
+        repoRoot: context.repoRoot,
+        env: context.env,
+        runner: nodeCommandRunner,
+      });
+    },
   },
   {
     id: "test.rust",
