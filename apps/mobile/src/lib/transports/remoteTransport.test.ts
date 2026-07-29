@@ -445,6 +445,14 @@ describe("remote transport", () => {
       version: "0.0.69-staging.1",
       environment: "staging",
       serverVersion: "0.0.69-staging.1",
+      writePathHealth: {
+        healthy: true,
+        status: "healthy",
+        activeWorkspaceCommands: 0,
+        maxWorkspaceCommands: 4,
+        longRunningWorkspaceCommands: 0,
+        oldestWorkspaceCommandSeconds: null
+      },
       lanHost: "10.0.0.2",
       lanPort: 48120,
       pairingCode: null
@@ -462,6 +470,14 @@ describe("remote transport", () => {
       version: "0.0.69-staging.1",
       environment: "staging",
       serverVersion: "0.0.69-staging.1",
+      writePathHealth: {
+        healthy: true,
+        status: "healthy",
+        activeWorkspaceCommands: 0,
+        maxWorkspaceCommands: 4,
+        longRunningWorkspaceCommands: 0,
+        oldestWorkspaceCommandSeconds: null
+      },
       lanHost: "10.0.0.2",
       lanPort: 48120,
       pairingCode: null
@@ -471,6 +487,37 @@ describe("remote transport", () => {
       method: "GET",
       path: "/v1/status",
       body: null
+    });
+  });
+
+  it("parses status from legacy desktops that omit writePathHealth", async () => {
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
+      state: "running",
+      desktopId: "desktop-1",
+      desktopName: "Studio Mac",
+      version: "0.0.68",
+      environment: "production",
+      serverVersion: "0.0.68",
+      lanHost: "10.0.0.2",
+      lanPort: 48120,
+      pairingCode: null
+    });
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-1",
+      invokeDesktop
+    });
+
+    await expect(transport.getStatus()).resolves.toEqual({
+      state: "running",
+      desktopId: "desktop-1",
+      desktopName: "Studio Mac",
+      version: "0.0.68",
+      environment: "production",
+      serverVersion: "0.0.68",
+      lanHost: "10.0.0.2",
+      lanPort: 48120,
+      pairingCode: null
     });
   });
 
@@ -2481,7 +2528,15 @@ describe("remote transport", () => {
     await expect(transport.getStatus()).resolves.toMatchObject({
       desktopId: "cloud",
       desktopName: "Kanna Cloud",
-      lanHost: "cloud"
+      lanHost: "cloud",
+      writePathHealth: {
+        healthy: true,
+        status: "healthy",
+        activeWorkspaceCommands: 0,
+        maxWorkspaceCommands: 0,
+        longRunningWorkspaceCommands: 0,
+        oldestWorkspaceCommandSeconds: null
+      }
     });
     await expect(transport.listRepos()).resolves.toEqual([
       { id: "repo-1", name: "Repo One" }

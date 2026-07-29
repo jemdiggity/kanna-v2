@@ -1,4 +1,5 @@
 use super::definitions::PipelineStageTransition;
+use super::provider::AgentProvider;
 use kanna_daemon::protocol::AgentProvider as DaemonAgentProvider;
 use std::collections::HashMap;
 
@@ -250,6 +251,25 @@ pub(crate) struct PreparedStageRunSpawn {
     /// the new stage's process output. Absent for non-transition spawns.
     pub(super) terminal_prelude: Option<Vec<u8>>,
     pub(super) session: PreparedSessionSpawn,
+    /// Repository setup is deliberately finalized by the detached transition
+    /// worker. The provisional provider/session above are never spawned while
+    /// this is present.
+    pub(super) deferred_setup: Option<DeferredStageSetup>,
+    #[cfg(test)]
+    pub(super) setup_hard_timeout: Option<std::time::Duration>,
+}
+
+pub(super) struct DeferredStageSetup {
+    pub(super) commands: Vec<String>,
+    pub(super) provider_candidates: Vec<AgentProvider>,
+    pub(super) source_agent_type: Option<String>,
+    pub(super) pipeline_name: String,
+    pub(super) final_prompt: String,
+    pub(super) model: Option<String>,
+    pub(super) permission_mode: Option<String>,
+    pub(super) allowed_tools: Vec<String>,
+    pub(super) mcp_config_path: Option<String>,
+    pub(super) claude_resume: Option<String>,
 }
 
 /// Detached best-effort cleanup for a workspace that the task is leaving.
@@ -257,12 +277,23 @@ pub(crate) struct PreparedStageRunSpawn {
 /// that worktree's branch so it does not collide with future task workspaces.
 pub(crate) struct PreparedWorkspaceTeardown {
     pub(crate) session_id: String,
+    pub(super) daemon_dir: String,
     pub(super) cwd: String,
     pub(super) env: HashMap<String, String>,
     pub(super) session: PreparedSessionSpawn,
 }
 
 impl PreparedStageRunSpawn {
+    #[cfg(test)]
+    pub(crate) fn has_deferred_setup(&self) -> bool {
+        self.deferred_setup.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_setup_hard_timeout(&mut self, timeout: std::time::Duration) {
+        self.setup_hard_timeout = Some(timeout);
+    }
+
     /// The freshly created workspace, when this run forked one.
     #[cfg(test)]
     pub(crate) fn forked_workspace(&self) -> Option<&ForkedWorkspace> {

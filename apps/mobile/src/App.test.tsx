@@ -465,6 +465,17 @@ describe("createAppModel", () => {
       recentTasks: [],
       repoTasks: []
     });
+    await expect(model.client.getStatus()).resolves.toMatchObject({
+      desktopId: "none",
+      writePathHealth: {
+        healthy: false,
+        status: "unavailable",
+        activeWorkspaceCommands: 0,
+        maxWorkspaceCommands: 0,
+        longRunningWorkspaceCommands: 0,
+        oldestWorkspaceCommandSeconds: null
+      }
+    });
     await expect(
       model.client.readTaskFile("task-1", "README.md")
     ).rejects.toThrow("No trusted desktop is available");

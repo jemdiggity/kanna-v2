@@ -39,8 +39,8 @@ use provider::{
 use std::collections::HashMap;
 use std::str::FromStr;
 use types::{
-    CreatedTask, ForkedWorkspace, PreparedRunWorkspace, PreparedSessionSpawn, RunWorkspaceSpec,
-    TaskCreationRequest,
+    CreatedTask, DeferredStageSetup, ForkedWorkspace, PreparedRunWorkspace, PreparedSessionSpawn,
+    RunWorkspaceSpec, TaskCreationRequest,
 };
 pub(crate) use types::{
     PrepareTaskError, PreparedStageRerun, PreparedStageRunSpawn, PreparedStageTransition,
@@ -828,29 +828,6 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
                     .unwrap_or_default(),
             );
         }
-        run_workspace_setup_commands(&setup, &worktree_path, &spawn_env)?;
-        let provider = provider_candidates
-            .iter()
-            .copied()
-            .find(|provider| {
-                resolve_provider_executable(
-                    *provider,
-                    spawn_env.get("PATH").map(String::as_str),
-                    &worktree_path,
-                )
-                .is_ok()
-            })
-            .ok_or_else(|| {
-                format!(
-                    "None of the configured agent providers are available: {}.",
-                    provider_candidates
-                        .iter()
-                        .map(|provider| provider.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })?;
-        let agent_type = resolve_agent_type(source_agent_type, provider)?;
         let model = agent.as_ref().and_then(|agent| agent.model.clone());
         let permission_mode = agent
             .as_ref()
@@ -860,6 +837,30 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             .map(|agent| agent.allowed_tools.clone())
             .unwrap_or_default();
         let stage_run_model = model.clone();
+        let provider = if setup.is_empty() {
+            provider_candidates
+                .iter()
+                .copied()
+                .find(|provider| {
+                    resolve_provider_executable(
+                        *provider,
+                        spawn_env.get("PATH").map(String::as_str),
+                        &worktree_path,
+                    )
+                    .is_ok()
+                })
+                .ok_or_else(|| unavailable_provider_error(&provider_candidates))?
+        } else {
+            // This provisional session is retained only to keep the prepared
+            // value structurally complete. The detached worker runs setup,
+            // resolves availability, and replaces it before any daemon spawn.
+            provider_candidates
+                .iter()
+                .copied()
+                .find(|provider| resolve_agent_type(source_agent_type, *provider).is_ok())
+                .ok_or_else(|| unavailable_provider_error(&provider_candidates))?
+        };
+        let agent_type = resolve_agent_type(source_agent_type, provider)?;
         let (session, provider_session_id) = build_prepared_session(
             provider,
             agent_type,
@@ -867,20 +868,32 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             &target_stage.name,
             pipeline_name,
             Some(completion_transition.as_str()),
-            final_prompt,
-            model,
-            permission_mode,
-            allowed_tools,
+            final_prompt.clone(),
+            model.clone(),
+            permission_mode.clone(),
+            allowed_tools.clone(),
             Vec::new(),
             None,
             None,
-            mcp_config_path,
+            mcp_config_path.clone(),
             &spawn_env,
             &worktree_path,
-            &[],
-            false,
+            &setup,
+            !setup.is_empty(),
             claude_resume.as_deref(),
         )?;
+        let deferred_setup = (!setup.is_empty()).then(|| DeferredStageSetup {
+            commands: setup,
+            provider_candidates: provider_candidates.clone(),
+            source_agent_type: source_agent_type.map(str::to_string),
+            pipeline_name: pipeline_name.to_string(),
+            final_prompt: final_prompt.clone(),
+            model: stage_run_model.clone(),
+            permission_mode,
+            allowed_tools,
+            mcp_config_path,
+            claude_resume: claude_resume.clone(),
+        });
         let session_id = db
             .resolve_task_terminal_session_id(task_id)
             .map_err(|e| format!("db error: {}", e))?
@@ -892,24 +905,32 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             session_id,
             provider,
             stage_run_model,
+            deferred_setup,
         ))
     })();
-    let (spawn_env, session, provider_session_id, session_id, provider, stage_run_model) =
-        match prepared_session {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                if let PreparedRunWorkspace::Forked(fork) = &workspace {
-                    if let Err(rollback_error) =
-                        remove_prepared_worktree(&fork.worktree_path, &fork.branch)
-                    {
-                        return Err(format!(
-                            "{error}; fork preparation rollback failed: {rollback_error}"
-                        ));
-                    }
+    let (
+        spawn_env,
+        session,
+        provider_session_id,
+        session_id,
+        provider,
+        stage_run_model,
+        deferred_setup,
+    ) = match prepared_session {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            if let PreparedRunWorkspace::Forked(fork) = &workspace {
+                if let Err(rollback_error) =
+                    remove_prepared_worktree(&fork.worktree_path, &fork.branch)
+                {
+                    return Err(format!(
+                        "{error}; fork preparation rollback failed: {rollback_error}"
+                    ));
                 }
-                return Err(error);
             }
-        };
+            return Err(error);
+        }
+    };
 
     Ok(PreparedStageRunSpawn {
         task_id: task_id.to_string(),
@@ -930,7 +951,85 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         env: spawn_env,
         terminal_prelude: None,
         session,
+        deferred_setup,
+        #[cfg(test)]
+        setup_hard_timeout: None,
     })
+}
+
+fn unavailable_provider_error(provider_candidates: &[AgentProvider]) -> String {
+    format!(
+        "None of the configured agent providers are available: {}.",
+        provider_candidates
+            .iter()
+            .map(|provider| provider.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+pub(crate) fn finish_deferred_stage_setup(
+    prepared: &mut PreparedStageRunSpawn,
+) -> Result<(), String> {
+    let Some(deferred) = prepared.deferred_setup.take() else {
+        return Ok(());
+    };
+    #[cfg(test)]
+    let setup_result = match prepared.setup_hard_timeout {
+        Some(timeout) => environment::run_workspace_setup_commands_with_timeout(
+            &deferred.commands,
+            &prepared.cwd,
+            &prepared.env,
+            timeout,
+        ),
+        None => run_workspace_setup_commands(&deferred.commands, &prepared.cwd, &prepared.env),
+    };
+    #[cfg(not(test))]
+    let setup_result =
+        run_workspace_setup_commands(&deferred.commands, &prepared.cwd, &prepared.env);
+    if let Err(error) = setup_result {
+        prepared.deferred_setup = Some(deferred);
+        return Err(error);
+    }
+    let provider = deferred
+        .provider_candidates
+        .iter()
+        .copied()
+        .find(|provider| {
+            resolve_provider_executable(
+                *provider,
+                prepared.env.get("PATH").map(String::as_str),
+                &prepared.cwd,
+            )
+            .is_ok()
+        })
+        .ok_or_else(|| unavailable_provider_error(&deferred.provider_candidates))?;
+    let agent_type = resolve_agent_type(deferred.source_agent_type.as_deref(), provider)?;
+    let (session, provider_session_id) = build_prepared_session(
+        provider,
+        agent_type,
+        &prepared.task_id,
+        &prepared.run_stage,
+        &deferred.pipeline_name,
+        Some(prepared.completion_transition.as_str()),
+        deferred.final_prompt,
+        deferred.model,
+        deferred.permission_mode,
+        deferred.allowed_tools,
+        Vec::new(),
+        None,
+        None,
+        deferred.mcp_config_path,
+        &prepared.env,
+        &prepared.cwd,
+        &[],
+        false,
+        deferred.claude_resume.as_deref(),
+    )?;
+    prepared.agent_provider = provider.as_str().to_string();
+    prepared.provider_session_id = provider_session_id;
+    prepared.session = session;
+    Ok(())
 }
 
 pub(crate) fn prepare_workspace_teardown_for_close(
@@ -1074,6 +1173,7 @@ fn prepare_workspace_teardown_with_extra(
     let shell_command = build_teardown_shell_command(&teardown);
     Some(PreparedWorkspaceTeardown {
         session_id,
+        daemon_dir: config.daemon_dir.clone(),
         cwd: worktree_path,
         env: spawn_env,
         session: PreparedSessionSpawn::Pty {

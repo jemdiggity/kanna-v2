@@ -271,7 +271,7 @@ async fn request_revision_route_resolves_branch_style_task_id() {
     // new stage run carrying the feedback; nothing is closed and no new task
     // is created. The respawn executes on a detached task; wait for it.
     let db = Db::open(&config.db_path).unwrap();
-    let source = super::actions::wait_for_task_stage(&db, "710917fb", "in progress").await;
+    let source = super::actions::wait_for_running_task_stage(&db, "710917fb", "in progress").await;
     assert_eq!(source.stage.as_deref(), Some("in progress"));
     assert!(source.closed_at.is_none());
 
@@ -847,7 +847,8 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
     // stage moves back and a new run carries the revision feedback. The
     // respawn executes on a detached task; wait for it.
     let db = Db::open(&config.db_path).unwrap();
-    let reviewed = super::actions::wait_for_task_stage(&db, "review-task", "in progress").await;
+    let reviewed =
+        super::actions::wait_for_running_task_stage(&db, "review-task", "in progress").await;
     assert_eq!(reviewed.stage.as_deref(), Some("in progress"));
     assert!(reviewed.closed_at.is_none());
     assert_eq!(
@@ -1290,7 +1291,7 @@ async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
     assert_eq!(budget.limit, 1);
 
     let db = Db::open(&fixture.config.db_path).unwrap();
-    let task = super::actions::wait_for_task_stage(&db, "budget-1", "in progress").await;
+    let task = super::actions::wait_for_running_task_stage(&db, "budget-1", "in progress").await;
     assert_eq!(task.stage.as_deref(), Some("in progress"));
     assert_eq!(db.task_revision_rounds("budget-1").unwrap(), 0);
 

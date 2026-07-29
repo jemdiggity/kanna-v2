@@ -24,6 +24,7 @@ import type {
   TaskFileMentionResolution,
   TaskDetail,
   TaskSummary,
+  WritePathHealth,
 } from "../api/types";
 import {
   buildCloudTaskId,
@@ -532,7 +533,15 @@ export function createRemoteTransport({
           serverVersion: "cloud",
           lanHost: "cloud",
           lanPort: 0,
-          pairingCode: null
+          pairingCode: null,
+          writePathHealth: {
+            healthy: true,
+            status: "healthy",
+            activeWorkspaceCommands: 0,
+            maxWorkspaceCommands: 0,
+            longRunningWorkspaceCommands: 0,
+            oldestWorkspaceCommandSeconds: null
+          }
         };
       }
       return mapMobileServerStatus(await request("GET", "/v1/status", null));
@@ -1123,6 +1132,7 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
   const lanHost = getStringField(response, "lanHost");
   const lanPort = getNumberField(response, "lanPort");
   const pairingCode = getNullableStringField(response, "pairingCode");
+  const writePathHealth = mapWritePathHealth(response.writePathHealth);
 
   if (
     state === null ||
@@ -1148,7 +1158,41 @@ function mapMobileServerStatus(response: unknown): MobileServerStatus {
     serverVersion,
     lanHost,
     lanPort,
-    pairingCode
+    pairingCode,
+    ...(writePathHealth ? { writePathHealth } : {})
+  };
+}
+
+/** Desktops that predate write-path health reporting omit the field entirely;
+ * absence means unknown (mirroring the optional `kspStreamVersion`), so only a
+ * present-but-malformed payload is rejected. */
+function mapWritePathHealth(value: unknown): WritePathHealth | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (
+    !isRecord(value) ||
+    typeof value.healthy !== "boolean" ||
+    typeof value.status !== "string" ||
+    typeof value.activeWorkspaceCommands !== "number" ||
+    typeof value.maxWorkspaceCommands !== "number" ||
+    typeof value.longRunningWorkspaceCommands !== "number" ||
+    (value.oldestWorkspaceCommandSeconds !== null &&
+      typeof value.oldestWorkspaceCommandSeconds !== "number")
+  ) {
+    throw new RemoteTransportError(
+      "invalid_status_response",
+      "Remote desktop returned an invalid status response."
+    );
+  }
+
+  return {
+    healthy: value.healthy,
+    status: value.status,
+    activeWorkspaceCommands: value.activeWorkspaceCommands,
+    maxWorkspaceCommands: value.maxWorkspaceCommands,
+    longRunningWorkspaceCommands: value.longRunningWorkspaceCommands,
+    oldestWorkspaceCommandSeconds: value.oldestWorkspaceCommandSeconds
   };
 }
 

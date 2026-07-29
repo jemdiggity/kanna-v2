@@ -1,23 +1,31 @@
 use super::*;
 
 /// Stage transitions execute on detached tasks (see
-/// execute_stage_transition_detached); route tests poll for the DB effect.
-pub(super) async fn wait_for_task_stage(
+/// execute_stage_transition_detached). The stage write lands before the run
+/// insert, so route tests must poll for both parts of the durable transition.
+pub(super) async fn wait_for_running_task_stage(
     db: &Db,
     task_id: &str,
     expected_stage: &str,
 ) -> crate::db::TaskStageSource {
     for _ in 0..100 {
         let task = db.get_task_stage_source(task_id).unwrap().unwrap();
-        if task.stage.as_deref() == Some(expected_stage) {
+        let has_running_stage_run = db
+            .list_stage_runs_for_task(task_id)
+            .unwrap()
+            .iter()
+            .any(|run| run.stage == expected_stage && run.status == "running");
+        if task.stage.as_deref() == Some(expected_stage) && has_running_stage_run {
             return task;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     let task = db.get_task_stage_source(task_id).unwrap().unwrap();
+    let runs = db.list_stage_runs_for_task(task_id).unwrap();
     panic!(
-        "task {task_id} never reached stage {expected_stage}; last: {:?}",
-        task.stage
+        "task {task_id} never completed transition to running stage {expected_stage}; \
+         last stage: {:?}, runs: {:?}",
+        task.stage, runs
     );
 }
 
@@ -35,7 +43,7 @@ async fn wait_for_stage_run(db: &Db, task_id: &str, expected_stage: &str) -> cra
 async fn recv_state_change_scope(
     rx: &mut tokio::sync::broadcast::Receiver<kanna_agent_protocol::ServerFrame>,
 ) -> kanna_agent_protocol::StateChangeScope {
-    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
         .await
         .expect("timed out waiting for state change")
         .expect("state change channel closed");
@@ -3793,6 +3801,22 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         "---\nname: Reviewer\ndescription: Test review agent\nagent_provider: claude\n---\nReview task $TASK_PROMPT",
     )
     .unwrap();
+    let setup_started = repo_root.join("setup-started");
+    let setup_finished = repo_root.join("setup-finished");
+    let release_setup = repo_root.join("release-setup");
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        serde_json::json!({
+            "setup": [format!(
+                "touch '{}'; while [ ! -e '{}' ]; do sleep 0.05; done; touch '{}'",
+                setup_started.display(),
+                release_setup.display(),
+                setup_finished.display()
+            )]
+        })
+        .to_string(),
+    )
+    .unwrap();
     assert!(Command::new("git")
         .args(["add", ".kanna"])
         .current_dir(&repo_root)
@@ -3916,14 +3940,17 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
     drop(db);
 
     let app = super::router(Arc::new(super::AppState::new(config.clone())));
-    let response = app
-        .oneshot(
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        app.oneshot(
             Request::post("/v1/tasks/source-1/actions/advance-stage")
                 .body(Body::empty())
                 .unwrap(),
-        )
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .expect("advance-stage must return while repository setup is running")
+    .unwrap();
 
     if response.status() != StatusCode::OK {
         daemon_server.abort();
@@ -3941,11 +3968,21 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         .unwrap();
     let created: TaskActionResponse = from_slice(&body).unwrap();
     assert_eq!(created.task_id, "source-1");
+    let setup_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !setup_started.exists() && tokio::time::Instant::now() < setup_deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(setup_started.exists(), "detached setup never started");
+    assert!(
+        !setup_finished.exists(),
+        "setup should still be waiting after the HTTP response"
+    );
+    std::fs::write(&release_setup, "").unwrap();
 
     // The transition executes on a detached task (the request's caller may
     // be the session being replaced); wait for it to land.
     let db = Db::open(&config.db_path).unwrap();
-    let source = wait_for_task_stage(&db, "source-1", "review").await;
+    let source = wait_for_running_task_stage(&db, "source-1", "review").await;
 
     // Durable stage swap: the SAME task moves to `review` with a new main
     // run on the same session id; nothing is closed or recreated.
@@ -3964,6 +4001,181 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
     if created_sidecar {
         let _ = std::fs::remove_file(&kanna_cli_path);
     }
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn advance_stage_route_notifies_after_detached_setup_failure_is_persisted() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-advance-failure-{unique}"));
+    init_test_git_repo(&repo_root);
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/default.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual" },
+    { "name": "review", "transition": "manual", "agent": "reviewer", "prompt": "Review $PREV_RESULT" }
+  ]
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/reviewer/AGENT.md"),
+        "---\nname: Reviewer\ndescription: Test review agent\nagent_provider: claude\n---\nReview task $TASK_PROMPT",
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        serde_json::json!({
+            "setup": ["printf 'route setup failed\\n'; exit 23"]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", ".kanna"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add failing setup"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+    super::publish_test_origin_main(&repo_root);
+    assert!(Command::new("git")
+        .args(["branch", "task-source"])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-failure-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let kanna_cli_path = daemon_dir.join("kanna-cli");
+    std::fs::write(&kanna_cli_path, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&kanna_cli_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
+    // Accept (and immediately EOF) connections for the whole test: a
+    // single-accept fake would strand later connections in the closed
+    // listener's backlog, hanging the detached worker until the daemon
+    // command timeout instead of failing fast.
+    let (first_contact_tx, first_contact_rx) = tokio::sync::oneshot::channel();
+    let daemon_server = tokio::spawn(async move {
+        let (_stream, _) = daemon_listener.accept().await.unwrap();
+        let _ = first_contact_tx.send(());
+        loop {
+            let Ok((_stream, _)) = daemon_listener.accept().await else {
+                break;
+            };
+        }
+    });
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-advance-failure-{unique}")),
+        kanna_cli_path: Some(kanna_cli_path.to_string_lossy().to_string()),
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        pairing_store_path: format!("/tmp/kanna-pairings-advance-failure-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "source-1",
+        "repo-1",
+        "Implement it",
+        Some("Implement it"),
+        "in progress",
+        "2026-07-02 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "source-1",
+        "task-source",
+        "default",
+        Some("{\"status\":\"success\",\"summary\":\"implemented\"}"),
+        "claude",
+    )
+    .unwrap();
+    drop(db);
+
+    let state = Arc::new(super::AppState::new(config.clone()));
+    let mut state_changes = state.subscribe_state_changes();
+    let app = super::router(Arc::clone(&state));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/source-1/actions/advance-stage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert_eq!(
+        recv_state_change_scope(&mut state_changes).await,
+        kanna_agent_protocol::StateChangeScope::Tasks,
+        "the route should publish its immediate accepted-state notification"
+    );
+    assert_eq!(
+        recv_state_change_scope(&mut state_changes).await,
+        kanna_agent_protocol::StateChangeScope::Tasks,
+        "the detached worker should publish again after persisting setup failure"
+    );
+
+    let db = Db::open(&config.db_path).unwrap();
+    let item = db.get_pipeline_item("source-1").unwrap().unwrap();
+    assert_eq!(item.stage.as_deref(), Some("in progress"));
+    assert_eq!(item.activity.as_deref(), Some("unread"));
+    let failed = db.latest_stage_run("source-1").unwrap().unwrap();
+    assert_eq!(failed.stage, "review");
+    assert_eq!(failed.status, "failed");
+    assert!(
+        failed
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains("route setup failed")),
+        "failed run should retain setup diagnostics: {:?}",
+        failed.result
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), first_contact_rx)
+        .await
+        .expect("the detached worker should contact the daemon")
+        .unwrap();
+    daemon_server.abort();
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir_all(&daemon_dir);
     let _ = std::fs::remove_dir_all(&repo_root);
@@ -4861,7 +5073,7 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
     // takes effect. What this test asserts is the transition itself, not
     // which pipeline supplied the stage name.
     let db = Db::open(&config.db_path).unwrap();
-    let task = wait_for_task_stage(&db, "task-1", "pr").await;
+    let task = wait_for_running_task_stage(&db, "task-1", "pr").await;
     assert_eq!(task.stage.as_deref(), Some("pr"));
     assert!(task.closed_at.is_none());
 
@@ -5393,7 +5605,7 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
     // complete (and therefore must run off the runtime thread) while this
     // current-thread test keeps polling.
     let db = Db::open(&config.db_path).unwrap();
-    let source = wait_for_task_stage(&db, "source-1", "review").await;
+    let source = wait_for_running_task_stage(&db, "source-1", "review").await;
     assert_eq!(source.stage.as_deref(), Some("review"));
 
     daemon_server.await.unwrap();

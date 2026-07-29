@@ -21,6 +21,7 @@ mod task_transfer_tunnel;
 mod terminal_attachments;
 mod terminal_watcher;
 mod visual_companion;
+mod workspace_commands;
 mod worktree_cleanup;
 
 use config::Config;

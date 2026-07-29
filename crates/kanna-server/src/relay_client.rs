@@ -411,7 +411,15 @@ mod tests {
                     "kspStreamVersion": 2,
                     "lanHost": "127.0.0.1",
                     "lanPort": 48120,
-                    "pairingCode": null
+                    "pairingCode": null,
+                    "writePathHealth": {
+                        "healthy": true,
+                        "status": "healthy",
+                        "activeWorkspaceCommands": 0,
+                        "maxWorkspaceCommands": 4,
+                        "longRunningWorkspaceCommands": 0,
+                        "oldestWorkspaceCommandSeconds": null
+                    }
                 }
             })
         );

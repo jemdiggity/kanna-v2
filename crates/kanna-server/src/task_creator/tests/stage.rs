@@ -150,7 +150,7 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
     assert!(prompt.contains("V1_STAGE Pinned task V1_VAR"), "{prompt}");
     assert!(!prompt.contains("V2"), "{prompt}");
 
-    let run = super::super::prepare_stage_run_spawn(
+    let mut run = super::super::prepare_stage_run_spawn(
         &db,
         &config,
         &repo,
@@ -174,6 +174,8 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
     assert_eq!(run.env.get("V1_ENV").map(String::as_str), Some("yes"));
     assert!(!run.env.contains_key("V2_ENV"));
     assert_eq!(run.model.as_deref(), Some("v1-model"));
+    assert!(!worktree.join("v1-stage.marker").exists());
+    super::super::finish_deferred_stage_setup(&mut run).unwrap();
     assert!(worktree.join("v1-stage.marker").is_file());
     assert!(!worktree.join("v2-stage.marker").exists());
 

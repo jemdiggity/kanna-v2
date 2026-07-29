@@ -42,6 +42,21 @@ pub struct MobileServerStatus {
     pub lan_host: String,
     pub lan_port: u16,
     pub pairing_code: Option<String>,
+    /// Absent on legacy servers. Legacy identity-only status is intentionally
+    /// not adoptable because it cannot prove the write path is live.
+    #[serde(default)]
+    pub write_path_health: Option<WritePathHealth>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WritePathHealth {
+    pub healthy: bool,
+    pub status: String,
+    pub active_workspace_commands: usize,
+    pub max_workspace_commands: usize,
+    pub long_running_workspace_commands: usize,
+    pub oldest_workspace_command_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -476,6 +491,14 @@ fn stopped_snapshot(state: &MobileServerState) -> Result<MobileServerStatus, Str
         lan_host: "0.0.0.0".to_string(),
         lan_port: local_server_port_for_cloud_env(state.cloud_env),
         pairing_code: None,
+        write_path_health: Some(WritePathHealth {
+            healthy: true,
+            status: "healthy".to_string(),
+            active_workspace_commands: 0,
+            max_workspace_commands: 4,
+            long_running_workspace_commands: 0,
+            oldest_workspace_command_seconds: None,
+        }),
     })
 }
 
@@ -498,6 +521,10 @@ fn is_current_server_status(
     status.desktop_id == expected_desktop_id
         && status.version == expected_version
         && status.environment == expected_environment
+        && status
+            .write_path_health
+            .as_ref()
+            .is_some_and(|health| health.healthy)
 }
 
 fn ensure_server_belongs_to_desktop(
@@ -845,7 +872,7 @@ mod tests {
         desktop_id, escape_toml_string, generate_uuid_v4_from_reader, is_current_server_status,
         resolved_db_path, server_base_url, server_stderr_log, stop_server_on_port,
         stopped_snapshot, MobilePairingSession, MobileServerManager, MobileServerState,
-        MobileServerStatus,
+        MobileServerStatus, WritePathHealth,
     };
     use std::ffi::CString;
     use std::os::unix::fs::PermissionsExt;
@@ -962,6 +989,14 @@ mod tests {
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
             pairing_code: None,
+            write_path_health: Some(WritePathHealth {
+                healthy: true,
+                status: "healthy".to_string(),
+                active_workspace_commands: 0,
+                max_workspace_commands: 4,
+                long_running_workspace_commands: 0,
+                oldest_workspace_command_seconds: None,
+            }),
         };
 
         assert!(is_current_server_status(
@@ -974,6 +1009,40 @@ mod tests {
             status.server_version.as_deref(),
             Some(current_server_version())
         );
+        let full_capacity_busy = MobileServerStatus {
+            write_path_health: Some(WritePathHealth {
+                healthy: true,
+                status: "busy".to_string(),
+                active_workspace_commands: 4,
+                max_workspace_commands: 4,
+                long_running_workspace_commands: 0,
+                oldest_workspace_command_seconds: Some(30),
+            }),
+            ..status.clone()
+        };
+        assert!(is_current_server_status(
+            &full_capacity_busy,
+            "desktop-1",
+            current_server_version(),
+            "production",
+        ));
+        let unhealthy = MobileServerStatus {
+            write_path_health: Some(WritePathHealth {
+                healthy: false,
+                status: "degraded".to_string(),
+                active_workspace_commands: 4,
+                max_workspace_commands: 4,
+                long_running_workspace_commands: 1,
+                oldest_workspace_command_seconds: Some(601),
+            }),
+            ..status.clone()
+        };
+        assert!(!is_current_server_status(
+            &unhealthy,
+            "desktop-1",
+            current_server_version(),
+            "production",
+        ));
 
         let stale_wrong_version = MobileServerStatus {
             version: "__stale__".to_string(),
@@ -1079,6 +1148,73 @@ mod tests {
         assert_eq!(
             status.server_version.as_deref(),
             Some(status.version.as_str())
+        );
+
+        stop_server_on_port(port)
+            .await
+            .expect("cleanup should stop server");
+        cleanup_process_test_env();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn manager_replaces_unhealthy_current_server() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let root = unique_test_root("replace-unhealthy-current");
+        let port = free_loopback_port();
+        let app_data_dir = root.join("app-data");
+        let db_path = root.join("kanna-test.db");
+        let daemon_dir = root.join("daemon");
+        configure_process_test_env(port, &db_path, &daemon_dir);
+        create_test_database(&db_path);
+        let manager = MobileServerManager::new(app_data_dir.clone());
+        let (expected_desktop_id, current_config_path, current_config) = {
+            let state = manager.inner.lock().await;
+            let expected_desktop_id =
+                desktop_id(&state.config_path).expect("desktop identity should be generated");
+            let current_config =
+                build_server_config(&state).expect("current server config should build");
+            (
+                expected_desktop_id,
+                state.config_path.clone(),
+                current_config,
+            )
+        };
+        std::fs::create_dir_all(current_config_path.parent().unwrap()).unwrap();
+        std::fs::write(&current_config_path, current_config)
+            .expect("current server config should be written");
+        let mut unhealthy_server = start_unhealthy_status_server(port, &expected_desktop_id).await;
+        let unhealthy_pid = unhealthy_server
+            .id()
+            .expect("unhealthy server should have pid");
+
+        manager
+            .start()
+            .await
+            .expect("manager should replace unhealthy current server");
+        tokio::time::timeout(Duration::from_secs(5), unhealthy_server.wait())
+            .await
+            .expect("unhealthy server should exit promptly")
+            .expect("unhealthy server should have been reaped");
+        assert!(
+            !process_is_running(unhealthy_pid),
+            "unhealthy kanna-server process should be stopped"
+        );
+
+        let status = manager
+            .snapshot()
+            .await
+            .expect("replacement server should report status");
+        assert_eq!(status.desktop_id, expected_desktop_id);
+        assert_eq!(status.version, current_server_version());
+        assert_eq!(status.environment, "development");
+        assert!(
+            status
+                .write_path_health
+                .as_ref()
+                .is_some_and(|health| health.healthy),
+            "replacement server should report a healthy write path: {status:?}"
         );
 
         stop_server_on_port(port)
@@ -2159,6 +2295,82 @@ mod tests {
         }
         let _ = child.kill().await;
         panic!("timed out waiting for kanna-server on {base_url}");
+    }
+
+    async fn start_unhealthy_status_server(port: u16, desktop_id: &str) -> Child {
+        let status = serde_json::json!({
+            "state": "running",
+            "desktopId": desktop_id,
+            "desktopName": "Unhealthy Kanna Test",
+            "version": current_server_version(),
+            "environment": "development",
+            "serverVersion": current_server_version(),
+            "lanHost": "127.0.0.1",
+            "lanPort": port,
+            "pairingCode": null,
+            "writePathHealth": {
+                "healthy": false,
+                "status": "degraded",
+                "activeWorkspaceCommands": 4,
+                "maxWorkspaceCommands": 4,
+                "longRunningWorkspaceCommands": 4,
+                "oldestWorkspaceCommandSeconds": 601
+            }
+        })
+        .to_string();
+        let script = r#"
+import socket
+import sys
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(("127.0.0.1", int(sys.argv[1])))
+sock.listen(8)
+body = sys.argv[2].encode("utf-8")
+while True:
+    conn, _ = sock.accept()
+    with conn:
+        _ = conn.recv(4096)
+        response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"content-type: application/json\r\n"
+            + f"content-length: {len(body)}\r\n".encode("ascii")
+            + b"connection: close\r\n\r\n"
+            + body
+        )
+        conn.sendall(response)
+"#;
+        let mut child = Command::new("python3")
+            .arg("-c")
+            .arg(script)
+            .arg(port.to_string())
+            .arg(status)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("unhealthy status server should spawn");
+        let base_url = server_base_url(port);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if let Some(status) = child
+                .try_wait()
+                .expect("unhealthy server status should be readable")
+            {
+                panic!("unhealthy status server exited early with {status}");
+            }
+            if reqwest::get(format!("{base_url}/v1/status"))
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                return child;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        panic!("timed out waiting for unhealthy status server on {base_url}");
     }
 
     async fn try_start_production_status_server(port: u16) -> Result<Child, String> {

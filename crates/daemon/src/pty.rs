@@ -1040,6 +1040,58 @@ mod tests {
     }
 
     #[test]
+    fn kill_terminates_the_entire_pty_process_group() {
+        let root = std::env::temp_dir().join(format!(
+            "kanna-daemon-pty-group-kill-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let pid_file = root.join("grandchild.pid");
+        let mut session = PtySession::spawn(
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                format!(
+                    "(trap '' HUP TERM; while :; do sleep 1; done) & echo $! > '{}'; wait",
+                    pid_file.display()
+                ),
+            ],
+            root.to_string_lossy().as_ref(),
+            &HashMap::new(),
+            80,
+            24,
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let grandchild: i32 = loop {
+            if let Ok(contents) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = contents.trim().parse() {
+                    break pid;
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "pid file missing");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+
+        session.kill().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let alive = unsafe { libc::kill(grandchild, 0) == 0 };
+            if !alive && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grandchild {grandchild} survived PTY kill"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = session.try_wait();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn spawn_does_not_inherit_kanna_control_plane_env() {
         let _guard = env_lock().lock().expect("env lock should not be poisoned");
         unsafe {
