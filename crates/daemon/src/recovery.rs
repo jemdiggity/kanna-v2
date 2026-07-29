@@ -287,6 +287,17 @@ impl RecoveryManager {
         Ok(manager)
     }
 
+    #[doc(hidden)]
+    pub async fn reconnect_worker_for_test(&self) -> Result<(), String> {
+        if let Some(worker) = self.ensure_sender().await {
+            self.invalidate_worker(&worker).await;
+        }
+        self.ensure_sender()
+            .await
+            .map(|_| ())
+            .ok_or_else(|| "recovery sidecar failed to reconnect for tests".to_string())
+    }
+
     pub fn snapshot_file_for_test(&self, session_id: &str) -> PathBuf {
         self.snapshot_path(session_id)
             .expect("tests must use a safe session id")

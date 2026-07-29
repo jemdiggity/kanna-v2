@@ -139,6 +139,53 @@ async fn recovery_seeded_snapshot_can_resume_adopted_session() {
     assert_eq!(snapshot.rows, 45);
 }
 
+#[tokio::test]
+async fn recovery_manager_rejects_hostile_ids_before_worker_send_or_replay() {
+    let recovery = RecoveryManager::new_for_test()
+        .await
+        .expect("test recovery manager should start");
+
+    for session_id in [
+        "../kanna-recovery-manager-canary",
+        "/etc/passwd",
+        "Upper",
+        "caf\u{e9}",
+    ] {
+        for resume_from_disk in [true, false] {
+            let error = recovery
+                .start_session(session_id, 80, 24, resume_from_disk)
+                .await
+                .expect_err("hostile id must be rejected before worker send");
+            assert!(
+                error.contains("unsafe id"),
+                "unexpected start_session error for {session_id:?}: {error}"
+            );
+        }
+
+        let error = recovery
+            .get_snapshot(session_id)
+            .await
+            .expect_err("hostile id must be rejected before worker send");
+        assert!(
+            error.contains("unsafe session id"),
+            "unexpected get_snapshot error for {session_id:?}: {error}"
+        );
+    }
+
+    recovery
+        .reconnect_worker_for_test()
+        .await
+        .expect("rejected starts must not poison tracked-session replay");
+    assert!(
+        recovery
+            .get_snapshot("safe-reconnect-probe")
+            .await
+            .expect("fresh worker should answer after replay")
+            .is_none(),
+        "fresh worker should not have an unexpected probe snapshot"
+    );
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]

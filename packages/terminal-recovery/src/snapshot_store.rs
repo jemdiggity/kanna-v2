@@ -277,6 +277,21 @@ mod session_id_boundary_tests {
             "Upper",
             "caf\u{e9}",
         ] {
+            let snapshot = RecoverySnapshot {
+                session_id: hostile.to_string(),
+                serialized: "OVERWRITE".to_string(),
+                cols: 80,
+                rows: 24,
+                cursor_row: Some(0),
+                cursor_col: Some(0),
+                cursor_visible: Some(true),
+                saved_at: 0,
+                sequence: 0,
+            };
+            assert!(
+                store.write(&snapshot).is_err(),
+                "id {hostile:?} must be refused on write"
+            );
             assert!(
                 store.read(hostile).is_err(),
                 "id {hostile:?} must be refused on read"
