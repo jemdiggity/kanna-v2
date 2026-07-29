@@ -199,7 +199,9 @@ impl RecoveryManager {
     }
 
     pub fn has_persisted_snapshot(&self, session_id: &str) -> bool {
-        self.snapshot_file(session_id).exists()
+        self.snapshot_path(session_id)
+            .map(|path| path.exists())
+            .unwrap_or(false)
     }
 
     pub fn seed_snapshot(
@@ -228,7 +230,7 @@ impl RecoveryManager {
 
         let payload = serde_json::to_vec(&snapshot)
             .map_err(|error| format!("failed to serialize seeded recovery snapshot: {}", error))?;
-        let path = self.snapshot_file(session_id);
+        let path = self.snapshot_path(session_id)?;
         let temp_path =
             path.with_extension(format!("json.tmp-{}-{}", std::process::id(), now_millis()));
         std::fs::write(&temp_path, payload).map_err(|error| {
@@ -399,7 +401,7 @@ impl RecoveryManager {
         &self,
         session_id: &str,
     ) -> Result<Option<RecoverySnapshot>, String> {
-        let path = self.snapshot_file(session_id);
+        let path = self.snapshot_path(session_id)?;
         if !path.exists() {
             return Ok(None);
         }
@@ -628,6 +630,20 @@ impl RecoveryManager {
 
     fn snapshot_file(&self, session_id: &str) -> PathBuf {
         self.snapshot_dir.join(format!("{}.json", session_id))
+    }
+
+    /// Derive a persisted snapshot path only for a safe, unambiguous id.
+    ///
+    /// Protocol callers validate first so hostile ids cannot create processes
+    /// or registry entries. This path-layer check is the backstop shared by all
+    /// persisted snapshot reads, writes, and existence checks.
+    fn snapshot_path(&self, session_id: &str) -> Result<PathBuf, String> {
+        if !crate::session_id::is_safe(session_id) {
+            return Err(format!(
+                "refusing to derive a snapshot path from unsafe session id {session_id:?}"
+            ));
+        }
+        Ok(self.snapshot_file(session_id))
     }
 }
 
@@ -958,6 +974,91 @@ mod tests {
 
     /// The exact JSON v0.0.30 wrote: no cursor fields at all.
     const V0_0_30_SNAPSHOT: &str = r#"{"sessionId":"legacy-v0030","serialized":"LEGACY_SCROLLBACK\r\n","cols":80,"rows":24,"savedAt":1700000000000,"sequence":7}"#;
+
+    fn seeded_snapshot(serialized: &str) -> SeededRecoverySnapshot {
+        SeededRecoverySnapshot {
+            serialized: serialized.to_string(),
+            cols: 80,
+            rows: 24,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: true,
+            saved_at: 0,
+            sequence: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn traversing_session_id_cannot_read_outside_snapshot_dir() {
+        let snapshot_dir = unique_test_snapshot_dir();
+        std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
+        let manager = RecoveryManager::new(snapshot_dir.clone(), None);
+        let stem = snapshot_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| format!("{name}-outside-read"))
+            .expect("snapshot dir name");
+        let outside = snapshot_dir
+            .parent()
+            .expect("snapshot dir parent")
+            .join(format!("{stem}.json"));
+        let hostile_id = format!("../{stem}");
+        std::fs::write(
+            &outside,
+            serde_json::json!({
+                "sessionId": hostile_id,
+                "serialized": "SECRET",
+                "cols": 80,
+                "rows": 24,
+                "cursorRow": 0,
+                "cursorCol": 0,
+                "cursorVisible": true,
+                "savedAt": 0,
+                "sequence": 0
+            })
+            .to_string(),
+        )
+        .expect("plant outside snapshot");
+
+        let error = manager
+            .get_snapshot(&hostile_id)
+            .await
+            .expect_err("traversing id must be rejected");
+        assert!(error.contains("unsafe session id"), "{error}");
+
+        let _ = std::fs::remove_file(outside);
+        let _ = std::fs::remove_dir_all(snapshot_dir);
+    }
+
+    #[test]
+    fn traversing_session_id_cannot_write_outside_snapshot_dir() {
+        let snapshot_dir = unique_test_snapshot_dir();
+        std::fs::create_dir_all(&snapshot_dir).expect("snapshot dir");
+        let manager = RecoveryManager::new(snapshot_dir.clone(), None);
+        let stem = snapshot_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| format!("{name}-outside-write"))
+            .expect("snapshot dir name");
+        let outside = snapshot_dir
+            .parent()
+            .expect("snapshot dir parent")
+            .join(format!("{stem}.json"));
+        let hostile_id = format!("../{stem}");
+        std::fs::write(&outside, "SECRET").expect("plant outside file");
+
+        let error = manager
+            .seed_snapshot(&hostile_id, &seeded_snapshot("OVERWRITE"))
+            .expect_err("traversing id must be rejected");
+        assert!(error.contains("unsafe session id"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&outside).expect("outside file remains readable"),
+            "SECRET"
+        );
+
+        let _ = std::fs::remove_file(outside);
+        let _ = std::fs::remove_dir_all(snapshot_dir);
+    }
 
     /// A released v0.0.30 snapshot must still load.
     ///

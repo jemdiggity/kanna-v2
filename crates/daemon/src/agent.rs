@@ -318,6 +318,18 @@ impl AgentJournal {
 
     /// Open (or create) the journal for a session, loading existing events.
     pub fn open(data_dir: &Path, session_id: &str) -> Self {
+        // Protocol callers reject invalid ids before spawning or registering
+        // sessions. This check is the backstop at the point where journal paths
+        // are derived, so a future missed boundary cannot write outside the
+        // journal directory or alias another session's files.
+        if !crate::session_id::is_safe(session_id) {
+            log::error!(
+                "[agent] refusing to derive journal names from unsafe session id \
+                 {session_id:?}; running memory-only"
+            );
+            return Self::memory_only();
+        }
+
         let dir_path = Self::journal_dir(data_dir);
         let file_name = format!("{session_id}.ndjson");
         let metadata_name = format!("{session_id}.meta.json");
@@ -2059,6 +2071,31 @@ mod tests {
         let dir = tempdir::TempDirGuard::new("agent-journal-test");
         let journal = AgentJournal::open(dir.path(), "sess-1");
         (dir, journal)
+    }
+
+    #[test]
+    fn unsafe_session_ids_never_open_journal_files() {
+        let dir = tempdir::TempDirGuard::new("agent-journal-unsafe-id");
+
+        for session_id in ["../escape", "Agent", "caf\u{e9}"] {
+            let mut journal = AgentJournal::open(dir.path(), session_id);
+            assert!(
+                journal.is_degraded(),
+                "{session_id:?} must use a memory-only journal"
+            );
+            journal.append(AgentEvent::TurnStarted { model: None });
+            journal.set_provider_session_id("provider-session");
+        }
+
+        assert!(!dir.path().join("escape.ndjson").exists());
+        assert!(!dir.path().join("escape.meta.json").exists());
+        assert!(!dir.path().join("agent-journals/Agent.ndjson").exists());
+        assert!(!dir.path().join("agent-journals/Agent.meta.json").exists());
+        assert!(!dir.path().join("agent-journals/caf\u{e9}.ndjson").exists());
+        assert!(!dir
+            .path()
+            .join("agent-journals/caf\u{e9}.meta.json")
+            .exists());
     }
 
     // Minimal temp-dir helper (no external dev-dependency).

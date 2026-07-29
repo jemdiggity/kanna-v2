@@ -304,6 +304,20 @@ pub(crate) async fn handle_command(
             agent_provider,
             terminal_prelude,
         } => {
+            // A PTY id also reaches the recovery snapshot path. Reject before
+            // any lock -- an unsafe id is invalid whatever the daemon's
+            // lifecycle state, and "retry against the adopting daemon" would be
+            // the wrong answer for it.
+            if !kanna_daemon::session_id::is_safe(&session_id) {
+                log::warn!("[spawn] rejecting unsafe session id {session_id:?}");
+                let evt = error_event(
+                    Some(protocol::ErrorCode::PtySpawnFailed),
+                    format!("invalid session id: {session_id:?}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+
             let daemon_lifecycle_guard = daemon_lifecycle.read().await;
             if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
                 let evt = error_event(
@@ -1068,6 +1082,17 @@ pub(crate) async fn handle_command(
         }
 
         Command::Snapshot { session_id } => {
+            // A live-session miss falls through to a persisted snapshot read.
+            if !kanna_daemon::session_id::is_safe(&session_id) {
+                log::warn!("[snapshot] rejecting unsafe session id {session_id:?}");
+                let evt = error_event(
+                    Some(protocol::ErrorCode::SessionNotFound),
+                    format!("invalid session id: {session_id:?}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+
             let live_snapshot = {
                 match session_handle(&sessions, &session_id).await {
                     Some(session) => Some(session.snapshot(&session_id).await),
@@ -1126,6 +1151,13 @@ pub(crate) async fn handle_command(
             session_id,
             snapshot,
         } => {
+            if !kanna_daemon::session_id::is_safe(&session_id) {
+                log::warn!("[seed-snapshot] rejecting unsafe session id {session_id:?}");
+                let evt = error_event(None, format!("invalid session id: {session_id:?}"));
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+
             let evt = match recovery_manager.seed_snapshot_for_next_start(
                 &session_id,
                 &SeededRecoverySnapshot {
