@@ -355,6 +355,19 @@ pub(super) async fn get_repo_agent_definition(
     .map(Json)
 }
 
+pub(super) async fn list_repo_agents(
+    State(state): State<Arc<AppState>>,
+    Path(repo_id): Path<String>,
+) -> Result<Json<Vec<crate::task_creator::ResolvedAgentDefinition>>, HttpError> {
+    run_blocking_http(move || {
+        let repo = get_definition_repo(&state, &repo_id)?;
+        crate::task_creator::list_repo_agents(&state.repo_definitions, &repo)
+            .map_err(map_definition_lookup_error)
+    })
+    .await
+    .map(Json)
+}
+
 pub(super) async fn list_available_agent_providers(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,

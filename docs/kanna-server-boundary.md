@@ -18,6 +18,7 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - `GET /v1/desktops`
 - `GET /v1/repos`
 - `GET /v1/repos/{repo_id}/tasks`
+- `GET /v1/repos/{repo_id}/agents` (resolved named agent definitions available to task creation)
 - `GET /v1/repos/{repo_id}/recent-pipelines` (pipeline names the repo's tasks were most recently created with, newest first)
 - `GET /v1/tasks/recent`
 - `GET /v1/tasks/search?query=...`
@@ -32,6 +33,24 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - `POST /v1/tasks/{task_id}/actions/run-merge-agent`
 - `POST /v1/tasks/{task_id}/actions/set-notify`
 - `POST /v1/pairing/sessions`
+
+## Agent Definition Discovery
+
+`GET /v1/repos/{repo_id}/agents` and the catalog-backed
+`kanna_list_agents` tool list the definitions that the `agent` field of task
+creation can run. Names are invokable directory selectors. Descriptions,
+default providers, and default models come from the fully resolved definition:
+a repo `AGENT.md` wins over a built-in of the same name, then the repo's
+`EXTEND.md` is layered on top. `source` is `built_in`, `repo_override`, or
+`repo_authored`; extending a built-in counts as a repo override because the
+definition that runs is repo-modified.
+
+Task creation uses that same resolution path for any agent role, not only
+specialty reviewers. An explicit request provider wins, followed by the
+definition's provider candidates, then the configured user default when the
+definition declares none. Role-specific agents can still fail their own
+preconditions—for example, `pr` needs committed task work to publish—but Kanna
+does not reject them as first-stage bindings.
 
 ## Task Event Feed
 

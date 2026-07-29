@@ -41,6 +41,16 @@ pub(crate) struct SignalAgentResponse {
     pub(crate) created: bool,
 }
 
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResolvedAgentDefinition {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) default_provider: Option<String>,
+    pub(crate) default_model: Option<String>,
+    pub(crate) source: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TaskSummary {

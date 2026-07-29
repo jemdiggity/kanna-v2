@@ -96,6 +96,16 @@ pub(crate) enum RepoCommands {
 
 #[derive(Subcommand)]
 pub(crate) enum RepoAgentCommands {
+    /// List resolved agent definitions available to task creation
+    List {
+        /// The target repo ID
+        #[arg(long)]
+        repo_id: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Send a message to a repo-scoped singleton agent
     Signal {
         /// The target repo ID
