@@ -555,6 +555,7 @@ mod tests {
                 "kanna_rename_task",
                 "kanna_advance_stage",
                 "kanna_rerun_stage",
+                "kanna_resume_task",
                 "kanna_block_task",
                 "kanna_unblock_task",
                 "kanna_set_task_parent",

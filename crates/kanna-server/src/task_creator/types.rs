@@ -84,8 +84,8 @@ pub(crate) struct PreparedTaskSpawn {
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
     pub(super) completion_transition: PipelineStageTransition,
-    /// The agent CLI's own session id assigned at spawn (Claude PTY only);
-    /// recorded on the stage run so a later revision can resume it.
+    /// The agent CLI's own session id assigned at spawn (Claude or Copilot
+    /// PTY); recorded on the stage run so a later recovery can resume it.
     pub(super) provider_session_id: Option<String>,
     pub(super) recovery_snapshot: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
     pub(super) session: PreparedSessionSpawn,
@@ -246,6 +246,8 @@ pub(crate) struct PreparedStageRunSpawn {
     /// Set on a resumed revision: the stage run whose provider session this
     /// run continues.
     pub(super) resumed_from_run_id: Option<String>,
+    /// Why a requested resume became a fresh provider conversation.
+    pub(super) resume_fallback_reason: Option<String>,
     pub(super) cwd: String,
     pub(super) env: HashMap<String, String>,
     /// Ordered bytes seeded into a replacement PTY's terminal history before
@@ -270,7 +272,7 @@ pub(super) struct DeferredStageSetup {
     pub(super) permission_mode: Option<String>,
     pub(super) allowed_tools: Vec<String>,
     pub(super) mcp_config_path: Option<String>,
-    pub(super) claude_resume: Option<String>,
+    pub(super) resume_session_id: Option<String>,
 }
 
 /// Detached best-effort cleanup for a workspace that the task is leaving.
@@ -285,6 +287,10 @@ pub(crate) struct PreparedWorkspaceTeardown {
 }
 
 impl PreparedStageRunSpawn {
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
     #[cfg(test)]
     pub(crate) fn has_deferred_setup(&self) -> bool {
         self.deferred_setup.is_some()

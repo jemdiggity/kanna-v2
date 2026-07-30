@@ -81,6 +81,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "036_task_transfer_ownership_leases",
     "037_task_event_log",
     "038_pipeline_item_initial_pipeline",
+    "039_stage_run_resume_fallback_reason",
 ];
 
 #[derive(Debug, Serialize)]
@@ -329,6 +330,10 @@ pub struct StageRun {
     /// Set when this run resumed a previous run's provider session instead
     /// of starting a fresh agent; records which run's session it continued.
     pub resumed_from_run_id: Option<String>,
+    /// Set when a caller requested resume but Kanna had to start a fresh
+    /// provider conversation. This is deliberately durable so a fresh spawn
+    /// is never presented as a successful resume.
+    pub resume_fallback_reason: Option<String>,
     /// Effective completion policy chosen when this run was prepared.
     /// Legacy rows leave this null and fall back to the pinned stage policy.
     pub completion_transition: Option<String>,
@@ -687,6 +692,7 @@ fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           provider_session_id TEXT,
           cwd TEXT,
           resumed_from_run_id TEXT,
+          resume_fallback_reason TEXT,
           completion_transition TEXT CHECK (completion_transition IN ('manual', 'auto')),
           started_at TEXT NOT NULL DEFAULT (datetime('now')),
           finished_at TEXT
@@ -1423,6 +1429,12 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
              WHERE initial_pipeline IS NULL;",
         )
     })?;
+
+    run_migration(conn, "039_stage_run_resume_fallback_reason", |conn| {
+        add_column(conn, "stage_run", "resume_fallback_reason", "TEXT")?;
+        Ok(())
+    })?;
+
 
     Ok(())
 }

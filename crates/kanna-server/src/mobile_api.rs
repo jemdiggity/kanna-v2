@@ -127,6 +127,8 @@ pub struct TaskLatestRun {
     pub kind: String,
     pub status: String,
     pub summary: Option<String>,
+    pub resumed_from_run_id: Option<String>,
+    pub resume_fallback_reason: Option<String>,
     pub finished_at: Option<String>,
 }
 
@@ -711,6 +713,8 @@ fn map_task_latest_run(run: crate::db::StageRun) -> TaskLatestRun {
         kind: run.kind,
         status: run.status,
         summary,
+        resumed_from_run_id: run.resumed_from_run_id,
+        resume_fallback_reason: run.resume_fallback_reason,
         finished_at: run.finished_at,
     }
 }

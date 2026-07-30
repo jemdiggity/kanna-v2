@@ -206,9 +206,19 @@
     },
     {
       "name": "kanna_rerun_stage",
-      "description": "Rerun the current pipeline stage for a Kanna task in place: cancels the running stage run and starts a fresh agent session for the same stage in the same worktree.",
+      "description": "Explicitly restart the current pipeline stage from scratch in the same worktree: cancels the running stage run and starts a fresh provider conversation. For recovery after a dead session, use kanna_resume_task so Kanna preserves the provider transcript when possible.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/rerun-stage",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" }
+      ]
+    },
+    {
+      "name": "kanna_resume_task",
+      "description": "Recover a Kanna task whose latest run is cancelled or failed and whose daemon session is dead. Kanna restarts the same stage in the same worktree and resumes the recorded provider conversation when supported. If a provider id, transcript, worktree, or other resume precondition is unavailable, Kanna starts fresh and records the exact reason in latestRun.resumeFallbackReason; latestRun.resumedFromRunId is set only for a real resume.",
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/actions/resume",
       "response": "json",
       "params": [
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" }
@@ -271,7 +281,7 @@
     },
     {
       "name": "kanna_request_revision",
-      "description": "Request a revision on a Kanna task: resumes the target stage's previous agent session in its worktree when possible (Claude, with context intact), otherwise starts a fresh agent in a newly forked workspace. Kanna delivers the original task prompt alongside the revision prompt, so the prompt should focus on the required changes. Agent-requested revisions are budgeted per task: the response's revisionBudget reports rounds/limit, and once the budget is spent the request starts nothing and the task parks for its human (revisionBudget.exhausted) — report your findings and stop instead of retrying.",
+      "description": "Request a revision on a Kanna task: resumes the target stage's previous provider conversation in its worktree when supported, otherwise starts a fresh agent in a newly forked workspace and records why resume was unavailable. Kanna delivers the original task prompt alongside the revision prompt, so the prompt should focus on the required changes. Agent-requested revisions are budgeted per task: the response's revisionBudget reports rounds/limit, and once the budget is spent the request starts nothing and the task parks for its human (revisionBudget.exhausted) — report your findings and stop instead of retrying.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/request-revision",
       "response": "json",
