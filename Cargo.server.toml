@@ -4,6 +4,7 @@ members = [
     "crates/daemon",
     "crates/kanna-agent-protocol",
     "crates/kanna-server",
+    "crates/kanna-tool-catalog",
     "crates/runtime-defaults",
 ]
 resolver = "2"
