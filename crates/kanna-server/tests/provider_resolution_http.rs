@@ -641,6 +641,19 @@ async fn repo_provider_and_model_override_agent_frontmatter_through_http_task_cr
         other => panic!("expected repo-preferred headless spawn, got {other:?}"),
     }
 
+    let task = client
+        .get(format!("http://127.0.0.1:{port}/v1/tasks/{task_id}"))
+        .send()
+        .await
+        .expect("task detail should reach kanna-server")
+        .error_for_status()
+        .expect("task detail should succeed")
+        .json::<Value>()
+        .await
+        .expect("task detail should be JSON");
+    assert_eq!(task["agentProvider"], "claude");
+    assert_eq!(task["model"], "repo-model");
+
     stop_server(&mut server).await;
     std::fs::remove_dir_all(root).expect("test root should be removed");
 }

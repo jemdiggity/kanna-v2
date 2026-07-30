@@ -3879,6 +3879,137 @@ fn dormant_task_preserves_explicit_provider_and_model_until_spawn() {
 }
 
 #[test]
+fn dormant_task_composes_repo_preference_with_complete_persisted_spawn_options() {
+    let repo_root = init_git_repo("dormant-repo-preference-spawn-options");
+    let agent_dir = repo_root.join(".kanna/agents/dormant-review");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("AGENT.md"),
+        "---\nname: dormant-review\ndescription: Reviews dormant tasks\nagent_provider: claude\nmodel: agent-model\n---\nReview the task.",
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        serde_json::json!({
+            "workspace": {
+                "path": {
+                    "prepend": [".kanna/test-provider-bin"]
+                }
+            },
+            "agentProviders": {
+                "dormant-review": {
+                    "provider": "codex",
+                    "model": "repo-model"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish dormant spawn-option fixture");
+
+    let config = test_config("dormant-repo-preference-spawn-options");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let created = create_dormant_task_for_api_with_error(
+        &db,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Start with repo preferences and stored spawn options".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: Some("dormant-review".to_string()),
+            agent_provider: None,
+            agent_type: Some("agent".to_string()),
+            model: None,
+            permission_mode: Some("dontAsk".to_string()),
+            allowed_tools: Some(vec!["Read".to_string(), "Bash".to_string()]),
+            disallowed_tools: Some(vec!["WebFetch".to_string()]),
+            max_turns: Some(9),
+            max_budget_usd: Some(2.5),
+            setup_cmds: Some(vec![
+                "printf 'dormant setup' > .kanna/dormant-setup-ran".to_string()
+            ]),
+            task_template: None,
+            resume_session_id: None,
+            recovery_snapshot: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+            terminal_cols: None,
+            terminal_rows: None,
+        },
+        Some("dependent-repo-spawn-options".to_string()),
+    )
+    .unwrap();
+
+    let detail =
+        crate::mobile_api::MobileApi::new(config.clone(), Db::open(&config.db_path).unwrap())
+            .get_task(&created.task_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(detail.agent_provider.as_deref(), Some("codex"));
+    assert_eq!(detail.model.as_deref(), Some("repo-model"));
+
+    let spawn_options: serde_json::Value = serde_json::from_str(
+        db.get_test_pipeline_item_spawn_options(&created.task_id)
+            .unwrap()
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(spawn_options["model"], "repo-model");
+    assert_eq!(spawn_options["permissionMode"], "dontAsk");
+    assert_eq!(
+        spawn_options["allowedTools"],
+        serde_json::json!(["Read", "Bash"])
+    );
+    assert_eq!(
+        spawn_options["disallowedTools"],
+        serde_json::json!(["WebFetch"])
+    );
+    assert_eq!(spawn_options["maxTurns"], 9);
+    assert_eq!(spawn_options["maxBudgetUsd"], 2.5);
+
+    let prepared = prepare_start_dormant_task_for_api(&db, &config, &created.task_id, Vec::new())
+        .unwrap()
+        .expect("dormant task should become runnable");
+    assert_eq!(prepared.agent_provider, "codex");
+    assert_eq!(prepared.model.as_deref(), Some("repo-model"));
+    assert!(std::path::Path::new(&prepared.cwd)
+        .join(".kanna/dormant-setup-ran")
+        .is_file());
+    match prepared.session {
+        PreparedSessionSpawn::Agent {
+            agent_provider,
+            model,
+            permission_mode,
+            allowed_tools,
+            disallowed_tools,
+            max_turns,
+            max_budget_usd,
+            ..
+        } => {
+            assert_eq!(agent_provider, DaemonAgentProvider::Codex);
+            assert_eq!(model.as_deref(), Some("repo-model"));
+            assert_eq!(permission_mode.as_deref(), Some("dontAsk"));
+            assert_eq!(allowed_tools, ["Read".to_string(), "Bash".to_string()]);
+            assert_eq!(disallowed_tools, ["WebFetch".to_string()]);
+            assert_eq!(max_turns, Some(9));
+            assert_eq!(max_budget_usd, Some(2.5));
+        }
+        PreparedSessionSpawn::Pty { .. } => panic!("expected headless spawn"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+#[test]
 fn dormant_start_uses_stored_explicit_agent_provider_and_model() {
     let repo_root = init_git_repo("dormant-start-stored-explicit-provider");
     let agent_dir = repo_root.join(".kanna/agents/dormant-review");
