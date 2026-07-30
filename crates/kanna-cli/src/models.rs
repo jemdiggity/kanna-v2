@@ -211,6 +211,22 @@ pub(crate) struct SetTaskNotifyRequest {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct SetTaskPipelineRequest {
+    pub(crate) pipeline_name: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetTaskPipelineResponse {
+    pub(crate) task_id: String,
+    pub(crate) pipeline_name: String,
+    pub(crate) stage: String,
+    pub(crate) revision_rounds: i64,
+    pub(crate) revision_limit: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct BlockTaskRequest {
     pub(crate) blocker_task_ids: Vec<String>,
 }

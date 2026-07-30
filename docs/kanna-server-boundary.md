@@ -20,6 +20,7 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - `GET /v1/repos/{repo_id}/tasks`
 - `GET /v1/repos/{repo_id}/agents` (resolved named agent definitions available to task creation)
 - `GET /v1/repos/{repo_id}/recent-pipelines` (pipeline names the repo's tasks were most recently created with, newest first)
+- `POST /v1/tasks/{task_id}/actions/set-pipeline` (re-pin an open task to a compatible pipeline definition)
 - `GET /v1/tasks/recent`
 - `GET /v1/tasks/search?query=...`
 - `GET /v1/task-events?taskIds=...|repoId=...&cursor=...&timeoutSecs=...&limit=...` (multi-task event feed; blocks server-side until an event arrives or the window elapses)
@@ -74,6 +75,29 @@ polling each child. It is cursor-based, not snapshot-diffed:
   never inferred from a session going quiet; see
   [2026-07-29-awaiting-input-detection-e2e-gap.md](2026-07-29-awaiting-input-detection-e2e-gap.md).
 
+## Dynamic Pipeline Changes
+
+`POST /v1/tasks/{task_id}/actions/set-pipeline` and
+`kanna_set_task_pipeline` replace an open task's current pipeline name and
+`pipeline_def` snapshot atomically. Resolution and serialization use the same
+pinning path as task creation, including repo overrides, legacy snapshot
+normalization, and retired built-in aliases (`default` resolves to
+`no-review` unless the repo still defines `default.json`).
+
+Stage mapping is deliberately strict: the new definition must contain a stage
+whose name exactly matches the task's current stage. The task stays at that
+stage. If it is absent, the request returns `409 Conflict`, names the
+incompatible stage and pipeline, and changes nothing. Kanna does not guess a
+nearest stage because that could silently skip or repeat work.
+
+A running `stage_run`, terminal session, branch, and worktree are not replaced
+or killed. The live run finishes normally, and the new snapshot governs its
+next transition. `revision_rounds` also remains unchanged; switching to a
+higher `revision_limit` can therefore make more rounds available, while
+switching to an equal or lower limit cannot reset spent rounds. A successful
+change emits `task.pipeline_changed` with the old and new names, current stage,
+spent rounds, and new limit.
+
 ## Sticky Pipeline Selection
 
 `GET /v1/repos/{repo_id}/recent-pipelines` backs the New Task modal's default
@@ -82,8 +106,9 @@ pipeline: a repo's most recently used pipeline outranks the one its
 repo still offers and otherwise falls back to the configured default, so a
 renamed or deleted pipeline degrades instead of sticking.
 
-It is a projection of the durable `pipeline_item` rows, not a stored preference,
-and that is the whole design:
+It is a projection of the durable `pipeline_item.initial_pipeline` values, not
+a mutable preference. That column captures the successfully created task's
+choice and is intentionally not changed by dynamic re-pipelining:
 
 - **No `closed_at` filter.** `db::snapshot` excludes closed tasks, so a create
   whose response was lost and whose task then closed — possibly from another

@@ -25,6 +25,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_wait_task",
             "kanna_wait_events",
             "kanna_set_task_notify",
+            "kanna_set_task_pipeline",
             "kanna_task_logs",
             "kanna_search_tasks",
             "kanna_list_repo_tasks",
@@ -400,6 +401,14 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             ResponseKind::Json,
             "/v1/tasks/task-child/actions/set-notify",
             json!({}),
+        ),
+        (
+            "kanna_set_task_pipeline",
+            json!({ "task_id": "task-child", "pipeline_name": "single-reviewer" }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/tasks/task-child/actions/set-pipeline",
+            json!({ "pipelineName": "single-reviewer" }),
         ),
         (
             "kanna_is_dependent_tasks_exist",

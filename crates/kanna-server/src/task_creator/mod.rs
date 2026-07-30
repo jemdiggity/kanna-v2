@@ -119,6 +119,36 @@ pub(crate) struct RevisionedAgentDefinition {
     definition: definitions::AgentDefinition,
 }
 
+pub(crate) struct TaskPipelineSnapshot {
+    pub(crate) definition_json: String,
+    pub(crate) stage_names: Vec<String>,
+    pub(crate) revision_limit: i64,
+}
+
+/// Resolve and serialize a pipeline through the same pinning path task
+/// creation uses. A dynamic pipeline change is creation of a new durable
+/// snapshot for an existing task, so aliasing, repo overrides, legacy
+/// normalization, and revision-limit defaults must not grow a second resolver.
+pub(crate) fn resolve_task_pipeline_snapshot(
+    repo: &Repo,
+    pipeline_name: &str,
+) -> Result<TaskPipelineSnapshot, String> {
+    validate_definition_component(pipeline_name, "pipeline name")
+        .map_err(|error| error.to_string())?;
+    let definitions = RepoDefinitions::resolve(repo)?;
+    let (pipeline, definition_json) =
+        pin_task_pipeline_definition(&definitions, pipeline_name, None)?;
+    Ok(TaskPipelineSnapshot {
+        definition_json,
+        stage_names: pipeline
+            .stages
+            .iter()
+            .map(|stage| stage.name.clone())
+            .collect(),
+        revision_limit: pipeline.revision_limit(),
+    })
+}
+
 pub(crate) fn list_repo_agents(
     cache: &RepoDefinitionsCache,
     repo: &Repo,
@@ -168,8 +198,8 @@ pub(crate) fn load_repo_kanna_definitions(
 }
 
 /// Canonicalize stored recently-used pipeline names for the sticky new-task
-/// default. Task rows are durable, so `pipeline_item.pipeline` can still name
-/// a retired built-in (`default`, `qa`, `qa-dispatch`); serving that name
+/// default. Task rows are durable, so `pipeline_item.initial_pipeline` can
+/// still name a retired built-in (`default`, `qa`, `qa-dispatch`); serving that name
 /// verbatim would make the sticky picker skip it — the retired name is
 /// deliberately absent from the repo's selectable pipelines — and silently
 /// fall back, losing the depth of review the operator last chose. Same rule
@@ -1778,9 +1808,8 @@ pub(crate) fn create_dormant_task_for_api_with_error(
         .pipeline_name
         .or(repo_config.pipeline.clone())
         .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
-    let pipeline = definitions.pipeline(&pipeline_name)?;
-    let pipeline_def_json =
-        serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
+    let (pipeline, pipeline_def_json) =
+        pin_task_pipeline_definition(&definitions, &pipeline_name, None)?;
     let stage = if let Some(stage_name) = request.stage.as_deref() {
         pipeline
             .stages
@@ -2514,6 +2543,17 @@ fn resolve_agent_model(
         .or_else(|| agent.and_then(|agent| agent.model.clone()))
 }
 
+fn pin_task_pipeline_definition(
+    definitions: &RepoDefinitions,
+    pipeline_name: &str,
+    stored: Option<&str>,
+) -> Result<(definitions::PipelineDefinition, String), String> {
+    let pipeline = definitions.task_pipeline(pipeline_name, stored)?;
+    let definition_json =
+        serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {e}"))?;
+    Ok((pipeline, definition_json))
+}
+
 fn resolve_task_spawn(
     _repo: &Repo,
     request: TaskCreationRequest,
@@ -2527,9 +2567,8 @@ fn resolve_task_spawn(
         .clone()
         .or(repo_config.pipeline.clone())
         .unwrap_or_else(|| FALLBACK_PIPELINE_NAME.to_string());
-    let pipeline = definitions.task_pipeline(&pipeline_name, request.pipeline_def.as_deref())?;
-    let pipeline_def_json =
-        serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
+    let (pipeline, pipeline_def_json) =
+        pin_task_pipeline_definition(definitions, &pipeline_name, request.pipeline_def.as_deref())?;
     let stage = if let Some(stage_name) = request.stage_override.as_deref() {
         pipeline
             .stages

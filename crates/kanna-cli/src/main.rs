@@ -417,6 +417,20 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Change an open task's pinned pipeline without restarting its live run
+    SetPipeline {
+        /// The task/pipeline_item ID to re-pipeline
+        #[arg(long)]
+        task_id: String,
+
+        /// Pipeline definition to pin
+        #[arg(long)]
+        pipeline_name: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Watch several tasks at once and return their events since a cursor
     WaitEvents {
         /// Task IDs (or branch names) to watch; repeat or comma-separate

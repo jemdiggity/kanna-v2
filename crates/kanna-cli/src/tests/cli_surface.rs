@@ -691,3 +691,20 @@ fn typed_set_notify_body_matches_catalog_set_notify_body() {
 
     assert_eq!(typed_body, resolved.body);
 }
+
+#[test]
+fn typed_set_pipeline_body_matches_catalog_set_pipeline_body() {
+    let typed_body = serde_json::to_value(crate::models::SetTaskPipelineRequest {
+        pipeline_name: "single-reviewer".to_string(),
+    })
+    .unwrap();
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let resolved = kanna_tool_catalog::resolve_request(
+        &catalog,
+        "kanna_set_task_pipeline",
+        &json!({ "task_id": "child-a", "pipeline_name": "single-reviewer" }),
+    )
+    .unwrap();
+
+    assert_eq!(typed_body, resolved.body);
+}

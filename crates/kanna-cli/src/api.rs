@@ -8,9 +8,9 @@ use serde_json::Value;
 use crate::models::{
     AddRepoRequest, BlockTaskRequest, CompleteStageRequest, CreateTaskRequest, CreateTaskResponse,
     DependentTasksExistResponse, RepoDetail, RepoSummary, RequestRevisionRequest,
-    ResolvedAgentDefinition, SetTaskNotifyRequest, SetTaskParentRequest, SignalAgentRequest,
-    SignalAgentResponse, TaskActionResponse, TaskDetail, TaskInputRequest, TaskInputResponse,
-    TaskRenameRequest, TaskSummary, WaitUntil,
+    ResolvedAgentDefinition, SetTaskNotifyRequest, SetTaskParentRequest, SetTaskPipelineRequest,
+    SetTaskPipelineResponse, SignalAgentRequest, SignalAgentResponse, TaskActionResponse,
+    TaskDetail, TaskInputRequest, TaskInputResponse, TaskRenameRequest, TaskSummary, WaitUntil,
 };
 
 pub(crate) fn join_server_url(base_url: &str, path: &str) -> String {
@@ -469,6 +469,19 @@ pub(crate) async fn set_task_parent_via_api(
     post_json(
         base_url,
         &format!("/v1/tasks/{task_id}/actions/set-parent"),
+        request,
+    )
+    .await
+}
+
+pub(crate) async fn set_task_pipeline_via_api(
+    base_url: &str,
+    task_id: &str,
+    request: &SetTaskPipelineRequest,
+) -> Result<SetTaskPipelineResponse, String> {
+    post_json(
+        base_url,
+        &format!("/v1/tasks/{task_id}/actions/set-pipeline"),
         request,
     )
     .await

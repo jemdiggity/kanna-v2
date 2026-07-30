@@ -18,6 +18,7 @@ import {
   markIncomingTransferSidecarCleanupCompleted,
   putDesktopCloudTransferIdentity,
   setDesktopTaskCloudIdentity,
+  setDesktopTaskPipeline,
   setDesktopServerClientHandlersForTests,
   setDesktopSnapshotFetcherForTests,
 } from "./desktopServerClient";
@@ -471,6 +472,36 @@ describe("desktopServerClient", () => {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ cloudTaskId: "task-source-stable" }),
+      },
+    );
+  });
+
+  it("changes a task pipeline through the encoded local task endpoint", async () => {
+    const response = {
+      taskId: "task/with space",
+      pipelineName: "single-reviewer",
+      stage: "in progress",
+      revisionRounds: 2,
+      revisionLimit: 3,
+    };
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      setDesktopTaskPipeline("task/with space", "single-reviewer"),
+    ).resolves.toEqual(response);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/tasks/task%2Fwith%20space/actions/set-pipeline",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pipelineName: "single-reviewer" }),
       },
     );
   });

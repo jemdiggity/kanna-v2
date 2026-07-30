@@ -183,6 +183,106 @@ pub(super) async fn set_task_parent(
     }))
 }
 
+pub(super) async fn set_task_pipeline(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(payload): Json<crate::mobile_api::SetTaskPipelineRequest>,
+) -> Result<Json<crate::mobile_api::SetTaskPipelineResponse>, (axum::http::StatusCode, String)> {
+    let pipeline_name = payload.pipeline_name.trim().to_string();
+    if pipeline_name.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "pipelineName must be non-empty".to_string(),
+        ));
+    }
+
+    let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
+    let _task_mutation = state.begin_requested_task_mutation(&task_id).await;
+    let (response, changed) = {
+        let state = Arc::clone(&state);
+        super::blocking::run_handler_blocking("task pipeline update", move || {
+            let db = Db::open(&state.config.db_path).map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {error}"),
+                )
+            })?;
+            let item = db
+                .get_pipeline_item(&task_id)
+                .map_err(|error| db_write_error("db error", error))?
+                .ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::NOT_FOUND,
+                        format!("task not found: {task_id}"),
+                    )
+                })?;
+            if item.closed_at.is_some() {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!("cannot change pipeline for closed task {task_id}"),
+                ));
+            }
+            let stage = item.stage.clone().ok_or_else(|| {
+                (
+                    axum::http::StatusCode::CONFLICT,
+                    format!(
+                        "task {task_id} has no current stage to map into pipeline {pipeline_name}"
+                    ),
+                )
+            })?;
+            let repo = db
+                .get_repo(&item.repo_id)
+                .map_err(|error| db_write_error("db error", error))?
+                .ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::NOT_FOUND,
+                        format!("repo not found for task {task_id}: {}", item.repo_id),
+                    )
+                })?;
+            let snapshot =
+                crate::task_creator::resolve_task_pipeline_snapshot(&repo, &pipeline_name)
+                    .map_err(|error| (axum::http::StatusCode::BAD_REQUEST, error))?;
+            if !snapshot.stage_names.iter().any(|name| name == &stage) {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!(
+                        "cannot change task {task_id} from pipeline {} to {pipeline_name}: \
+                         current stage '{stage}' is not present in the new pipeline (stages: {})",
+                        item.pipeline.as_deref().unwrap_or("<none>"),
+                        snapshot.stage_names.join(", ")
+                    ),
+                ));
+            }
+
+            let changed = db
+                .update_pipeline_item_pipeline(
+                    &task_id,
+                    &stage,
+                    &pipeline_name,
+                    &snapshot.definition_json,
+                    item.revision_rounds,
+                    snapshot.revision_limit,
+                )
+                .map_err(|error| db_write_error("db error", error))?;
+            Ok((
+                crate::mobile_api::SetTaskPipelineResponse {
+                    task_id,
+                    pipeline_name,
+                    stage,
+                    revision_rounds: item.revision_rounds,
+                    revision_limit: snapshot.revision_limit,
+                },
+                changed,
+            ))
+        })
+        .await?
+    };
+    if changed {
+        state.publish_state_changed(StateChangeScope::Tasks);
+    }
+    Ok(Json(response))
+}
+
 /// How a blocker resolved — determines the wording dependents receive.
 /// Passed explicitly because the close paths collect instructions before
 /// `closed_at` is written, so the row itself cannot be trusted mid-close.
