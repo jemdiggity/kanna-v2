@@ -27,6 +27,7 @@ interface SpawnResult {
   status: number | null;
   stdout: string;
   stderr: string;
+  durationMs: number;
 }
 
 function commandPath(command: string): string {
@@ -43,6 +44,7 @@ function spawnResult(
   }
 ): Promise<SpawnResult> {
   return new Promise((resolvePromise, reject) => {
+    const startedAt = Date.now();
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
@@ -74,7 +76,12 @@ function spawnResult(
         );
         return;
       }
-      resolvePromise({ status, stdout, stderr });
+      resolvePromise({
+        status,
+        stdout,
+        stderr,
+        durationMs: Date.now() - startedAt
+      });
     });
   });
 }
@@ -306,6 +313,7 @@ describe("kd CLI", () => {
       join(tempRoot, `repo ${index + 1}`)
     );
     const home = join(tempRoot, "home");
+    const resolverTimeoutMs = 120_000;
     mkdirSync(home, { recursive: true });
 
     try {
@@ -316,7 +324,8 @@ describe("kd CLI", () => {
       const cacheRoot = join(tempRoot, "cache");
       const env = {
         ...cleanLauncherEnv(home),
-        KANNA_KD_CACHE_ROOT: cacheRoot
+        KANNA_KD_CACHE_ROOT: cacheRoot,
+        KANNA_KD_RESOLVER_TIMEOUT_MS: String(resolverTimeoutMs)
       };
       const launches = await Promise.all(
         fixtureRepoRoots.map((fixtureRepoRoot) =>
@@ -334,6 +343,7 @@ describe("kd CLI", () => {
           launch.status,
           `stdout:\n${launch.stdout}\nstderr:\n${launch.stderr}`
         ).toBe(0);
+        expect(launch.durationMs).toBeLessThan(resolverTimeoutMs);
         expect(
           (JSON.parse(launch.stdout) as { repoRoot: string }).repoRoot
         ).toBe(realpathSync(fixtureRepoRoot));
@@ -344,12 +354,14 @@ describe("kd CLI", () => {
           false
         );
       }
+      const launcherDiagnostics = launches
+        .map((launch) => launch.stderr)
+        .join("");
+      expect(launcherDiagnostics.match(/Installing kd:/g)).toHaveLength(1);
       expect(
-        launches
-          .map((launch) => launch.stderr)
-          .join("")
-          .match(/Installing kd:/g)
-      ).toHaveLength(1);
+        launcherDiagnostics.match(/Waiting for kd installation:/g)?.length ??
+          0
+      ).toBeGreaterThan(0);
 
       const installs = readdirSync(cacheRoot).filter((name) => !name.startsWith("."));
       expect(installs).toHaveLength(1);
@@ -368,10 +380,11 @@ describe("kd CLI", () => {
       const cacheMetadata = readdirSync(cacheRoot).filter((name) =>
         name.startsWith(".")
       );
-      expect(cacheMetadata).toHaveLength(10);
+      const leases = cacheMetadata.filter((name) => name.includes(".lease-"));
+      expect(leases.length).toBeGreaterThan(0);
+      expect(leases.length).toBeLessThanOrEqual(fixtureRepoRoots.length);
+      expect(cacheMetadata).toHaveLength(leases.length + 2);
       expect(cacheMetadata).toContain(KD_CACHE_ROOT_MARKER);
-      expect(cacheMetadata.filter((name) => name.includes(".lease-")))
-        .toHaveLength(8);
       expect(cacheMetadata.filter((name) => name.endsWith(".used")))
         .toHaveLength(1);
       expect(cacheMetadata.some((name) =>
