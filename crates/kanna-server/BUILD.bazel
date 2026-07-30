@@ -25,6 +25,7 @@ rust_binary(
     deps = all_crate_deps(normal = True) + [
         "//crates/daemon:kanna_daemon_lib_for_server",
         "//crates/kanna-agent-protocol:kanna_agent_protocol_for_server",
+        "//crates/kanna-tool-catalog:kanna_tool_catalog_for_server",
         "//crates/runtime-defaults:kanna_runtime_defaults",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
@@ -44,6 +45,7 @@ rust_binary(
     deps = all_crate_deps(normal = True) + [
         "//crates/daemon:kanna_daemon_lib_for_server",
         "//crates/kanna-agent-protocol:kanna_agent_protocol_for_server",
+        "//crates/kanna-tool-catalog:kanna_tool_catalog_for_server",
         "//crates/runtime-defaults:kanna_runtime_defaults",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
