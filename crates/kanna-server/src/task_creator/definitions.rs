@@ -853,6 +853,10 @@ const BUILTIN_AGENT_RESOURCES: &[(&str, &str)] = &[
         ".kanna/agents/setup/AGENT.md",
         include_str!("../../../../.kanna/agents/setup/AGENT.md"),
     ),
+    (
+        ".kanna/agents/ship/AGENT.md",
+        include_str!("../../../../.kanna/agents/ship/AGENT.md"),
+    ),
 ];
 
 fn builtin_agent_names() -> BTreeSet<String> {

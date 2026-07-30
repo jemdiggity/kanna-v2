@@ -712,6 +712,33 @@ Deploy safely.
     }
 
     #[test]
+    fn builtin_ship_launch_binds_the_canonical_agent_in_interactive_mode() {
+        let repo_dir = tempfile::tempdir().expect("temporary repository");
+        let repo = Repo {
+            id: "repo-1".to_string(),
+            path: repo_dir.path().to_string_lossy().into_owned(),
+            name: "Kanna".to_string(),
+            default_branch: Some("main".to_string()),
+            remote_url_hash: None,
+            hidden: None,
+            sort_order: None,
+            created_at: None,
+            last_opened_at: None,
+        };
+
+        let launch = resolve_repo_command_launch(&repo, "custom:ship")
+            .expect("resolve command")
+            .1
+            .expect("ship launch");
+
+        assert_eq!(launch.display_name, "Ship");
+        assert_eq!(launch.agent.as_deref(), Some("ship"));
+        assert_eq!(launch.agent_type.as_deref(), Some("pty"));
+        assert!(launch.prompt.contains("interactive palette mode"));
+        assert!(!launch.prompt.contains("git cherry-pick -x"));
+    }
+
+    #[test]
     fn merge_master_resolves_to_the_merge_singleton() {
         let repo_dir = tempfile::tempdir().expect("temporary repository");
         let repo = Repo {
