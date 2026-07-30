@@ -149,7 +149,7 @@ from "GitHub Actions" to "Deploy from a branch", branch `gh-pages`, folder
 |---|---|
 | Frontend behavior, console output | `/tmp/kanna-webview-*.log` (worktrees use the directory name, e.g. `kanna-webview-task-348cf000.log`; main uses a cwd hash) |
 | Dev process output (vite, tauri, mobile) | `./kd dev log [mobile]`, or attach with `./kd dev up --attach` |
-| Daemon behavior, PTY sessions | `kanna-daemon_*.log` in the instance's daemon dir |
+| Daemon behavior, PTY sessions | `kanna-daemon.log` (current process), `kanna-daemon_*.log` (history), and `kanna-daemon-lifecycle.log` (startup/handoff audit) in the instance's daemon dir |
 | Local API | `curl http://127.0.0.1:48120/v1/status` (main/production instance) |
 | Resolved instance config | `./kd env print` |
 | Silent agent CLI failures | The agent SDK captures stderr — check it |

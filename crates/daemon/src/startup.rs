@@ -12,7 +12,8 @@ use crate::fanout::{session_fanout, SessionFanouts};
 use crate::handoff::attempt_handoff;
 use crate::output::stream_output;
 use crate::paths::{
-    app_support_dir, daemon_data_dir, handle_cli_args, install_panic_hook, CliAction,
+    app_support_dir, daemon_data_dir, handle_cli_args, init_lifecycle_audit, install_panic_hook,
+    lifecycle_audit, publish_current_log_link, CliAction,
 };
 use crate::session::{PendingInput, SessionHandle, SessionManager, SessionRecord, StreamControl};
 use crate::socket::bind_socket;
@@ -102,18 +103,49 @@ pub(crate) async fn run_daemon() {
 
     let dir = app_support_dir();
     std::fs::create_dir_all(&dir).expect("Failed to create app support dir");
+    match init_lifecycle_audit(&dir) {
+        Ok(path) => lifecycle_audit(format_args!(
+            "event=startup_begin daemon_dir={} audit_log={} executable={} parent_pid={}",
+            dir.display(),
+            path.display(),
+            std::env::current_exe()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|error| format!("<unavailable: {error}>")),
+            unsafe { libc::getppid() }
+        )),
+        Err(error) => eprintln!(
+            "kanna-daemon: failed to initialize lifecycle audit in {}: {error}",
+            dir.display()
+        ),
+    }
     install_panic_hook(dir.clone());
 
-    // Log to file + stderr
-    let _ = flexi_logger::Logger::try_with_env_or_str("info")
-        .unwrap()
-        .log_to_file(
-            flexi_logger::FileSpec::default()
-                .directory(&dir)
-                .discriminant(std::process::id().to_string()),
-        )
-        .duplicate_to_stderr(flexi_logger::Duplicate::Info)
-        .start();
+    // Log to a timestamped per-process file + stderr. The stable symlink and
+    // lifecycle audit make the active daemon discoverable without guessing
+    // its pid or relying on this logger to initialize successfully.
+    let logger_result = flexi_logger::Logger::try_with_env_or_str("info").and_then(|logger| {
+        logger
+            .log_to_file(
+                flexi_logger::FileSpec::default()
+                    .directory(&dir)
+                    .discriminant(std::process::id().to_string()),
+            )
+            .format(flexi_logger::detailed_format)
+            .duplicate_to_stderr(flexi_logger::Duplicate::Info)
+            .start()
+    });
+    let _logger_handle = match logger_result {
+        Ok(handle) => {
+            lifecycle_audit(format_args!("event=logger_ready"));
+            Some(handle)
+        }
+        Err(error) => {
+            lifecycle_audit(format_args!(
+                "event=logger_failed error={error:?} fallback=lifecycle_audit"
+            ));
+            None
+        }
+    };
     kanna_daemon::terminal_perf::start_global_watchdog();
 
     // Capture the app/test launcher executable while it is still our direct
@@ -127,6 +159,9 @@ pub(crate) async fn run_daemon() {
                 "[handoff] refusing to start without successor trust root: {}",
                 error
             );
+            lifecycle_audit(format_args!(
+                "event=startup_aborted phase=successor_trust_root reason={error}"
+            ));
             eprintln!("kanna-daemon: could not capture launcher trust root: {error}");
             std::process::exit(1);
         }
@@ -139,6 +174,9 @@ pub(crate) async fn run_daemon() {
     let handoff_result = attempt_handoff(&pid_path, &socket_path).await;
     if let Some(message) = handoff_result.abort_start.as_ref() {
         log::error!("[handoff] refusing to start daemon: {}", message);
+        lifecycle_audit(format_args!(
+            "event=startup_aborted phase=handoff reason={message}"
+        ));
         eprintln!("kanna-daemon: refusing to start: {message}");
         std::process::exit(1);
     }
@@ -167,6 +205,10 @@ pub(crate) async fn run_daemon() {
                     "[handoff] old daemon (pid={}) still owns adopted sessions; refusing to publish",
                     old_daemon.pid
                 );
+                lifecycle_audit(format_args!(
+                    "event=startup_aborted phase=release_barrier old_pid={} reason=incumbent_still_owns_sessions",
+                    old_daemon.pid
+                ));
                 eprintln!(
                     "kanna-daemon: refusing to start: previous daemon (pid={}) never released ownership",
                     old_daemon.pid
@@ -391,6 +433,29 @@ pub(crate) async fn run_daemon() {
         pid,
         socket_path
     );
+    match publish_current_log_link(&dir, pid) {
+        Ok(target) => lifecycle_audit(format_args!(
+            "event=current_log_published link={} target={}",
+            dir.join("kanna-daemon.log").display(),
+            target.display()
+        )),
+        Err(error) => lifecycle_audit(format_args!(
+            "event=current_log_publish_failed error={error}"
+        )),
+    }
+    let published_sessions = sessions.lock().await.session_ids();
+    let published_agent_sessions = agent_sessions
+        .lock()
+        .await
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    lifecycle_audit(format_args!(
+        "event=daemon_published socket={} pty_sessions={:?} agent_sessions={:?}",
+        socket_path.display(),
+        published_sessions,
+        published_agent_sessions
+    ));
 
     let pid_path_clone = pid_path.clone();
     let socket_path_clone = socket_path.clone();
@@ -401,6 +466,10 @@ pub(crate) async fn run_daemon() {
             .expect("failed to register SIGTERM handler");
         sigterm.recv().await;
         log::info!("kanna-daemon shutting down");
+        let session_ids = sessions_shutdown.lock().await.session_ids();
+        lifecycle_audit(format_args!(
+            "event=sigterm_shutdown sessions_to_kill={session_ids:?}"
+        ));
         recovery_shutdown.flush_and_shutdown().await;
         // Scan rounds batched across every session. This awaits plan
         // completion, so teardown finishes before the exit below; the bounded

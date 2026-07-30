@@ -53,6 +53,11 @@ new daemon to publish alongside a live incumbent. The newcomer exits instead.
 After an acknowledged transfer, only an authenticated, identity-pinned
 incumbent may be terminated if it fails to exit.
 
+If the incumbent accepts the connection but does not answer before the
+handoff deadline, the successor records the timeout in the stable lifecycle
+audit, exits non-zero, and leaves the incumbent's pid file, socket, and
+sessions untouched. A timeout is not evidence that any session was lost.
+
 ## Session Lifecycle
 
 ```
@@ -261,9 +266,24 @@ Line-delimited JSON over Unix domain socket. Each message is one JSON object + `
 
 The daemon logs to both stderr and a per-process log file using `flexi_logger` with the standard `log` crate macros.
 
-**Log file location:** `{KANNA_DAEMON_DIR}/kanna-daemon_{discriminant}.log`
+**Per-process log location:**
+`{KANNA_DAEMON_DIR}/kanna-daemon_{pid}_{timestamp}.log`
 
-Default: `~/Library/Application Support/Kanna/kanna-daemon_{pid}.log`
+Default:
+`~/Library/Application Support/Kanna/kanna-daemon_{pid}_{timestamp}.log`
+
+The current published daemon also owns the
+`{KANNA_DAEMON_DIR}/kanna-daemon.log` symlink. A replacement does not update
+that link until it has adopted sessions and published its pid file and socket,
+so a failed successor cannot hide the incumbent's active log.
+
+Startup and handoff decisions are additionally appended to
+`{KANNA_DAEMON_DIR}/kanna-daemon-lifecycle.log`. This path is stable across
+process generations and does not depend on the `log`/`flexi_logger`
+initialization path. It records logger initialization failures, authorization,
+the exact transferred session ids, commit/rollback, timeout, publication, and
+SIGTERM teardown. It is the first diagnostic to inspect when a per-process log
+is absent.
 
 **Log level:** Controlled by `RUST_LOG` env var. Defaults to `info`.
 
@@ -273,7 +293,10 @@ Default: `~/Library/Application Support/Kanna/kanna-daemon_{pid}.log`
 | `info` | Startup, shutdown, handoff progress, session adoption |
 | `debug` | Detailed protocol tracing (when `RUST_LOG=debug`) |
 
-Logs are written to both destinations simultaneously — the file for tooling/debugging, stderr for the dev terminal running `bun tauri dev`.
+Normal logs are timestamped and written to both destinations simultaneously —
+the file for tooling/debugging, stderr for the dev terminal started by `kd`.
+Failure to initialize the normal logger is recorded in the lifecycle audit
+instead of being discarded.
 
 ## Configuration
 

@@ -1151,6 +1151,80 @@ fn test_handoff_ambiguous_post_send_failure_exits_without_split_brain() {
     cleanup(&dir);
 }
 
+/// A successor timing out against a responsive-but-wedged incumbent must
+/// fail closed. The incumbent remains published and its live PTY remains
+/// usable; the stable lifecycle audit records why the replacement aborted.
+#[test]
+fn test_handoff_unresponsive_incumbent_keeps_sessions_and_audits_failure() {
+    let dir = test_dir("unresponsive-incumbent");
+    cleanup(&dir);
+    let old =
+        DaemonHandle::start_in_with_env(&dir, &[("KANNA_TEST_HANDOFF_RESPONSE_DELAY_MS", "1000")]);
+    let old_pid = old.child.id();
+    let startup_log = old.wait_for_log("kanna-daemon");
+    assert!(
+        startup_log.contains("] INFO ["),
+        "per-process daemon logs should include timestamps and levels:\n{startup_log}"
+    );
+    let session_id = unique_session_id("wedged-survivor");
+    let mut attached = old.connect();
+    spawn_echo(&mut attached, &session_id);
+    attach(&mut attached, &session_id);
+    send_input_and_wait_for_echo(
+        &mut attached,
+        &session_id,
+        b"before-timeout\n",
+        "before-timeout",
+    );
+
+    let mut successor =
+        spawn_replacement_without_wait(&dir, &[("KANNA_TEST_HANDOFF_RESPONSE_TIMEOUT_MS", "100")]);
+    let status = wait_for_child_exit(&mut successor, Duration::from_secs(5))
+        .expect("timed-out successor must exit");
+    assert!(
+        !status.success(),
+        "timed-out successor must not publish a fresh empty daemon"
+    );
+
+    let published_pid = std::fs::read_to_string(dir.join("daemon.pid"))
+        .expect("incumbent pid file should remain")
+        .trim()
+        .parse::<u32>()
+        .expect("published pid should parse");
+    assert_eq!(
+        published_pid, old_pid,
+        "the incumbent must remain the published daemon"
+    );
+    send_input_and_wait_for_echo(
+        &mut attached,
+        &session_id,
+        b"after-timeout\n",
+        "after-timeout",
+    );
+
+    let audit = std::fs::read_to_string(dir.join("kanna-daemon-lifecycle.log"))
+        .expect("lifecycle audit should exist");
+    assert!(
+        audit.contains("event=handoff_aborted")
+            && audit.contains("timeout reading handoff response")
+            && audit.contains("incumbent_retained=true"),
+        "audit should explain the fail-closed timeout:\n{audit}"
+    );
+    let current_log = std::fs::read_link(dir.join("kanna-daemon.log"))
+        .expect("current daemon log link should exist");
+    assert!(
+        current_log
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains(&format!("_{old_pid}_"))),
+        "failed successor must not replace the incumbent log link: {current_log:?}"
+    );
+
+    drop(attached);
+    drop(old);
+    cleanup(&dir);
+}
+
 #[test]
 fn ordinary_client_cannot_begin_or_receive_handoff() {
     let dir = test_dir("unauthorized-client");
