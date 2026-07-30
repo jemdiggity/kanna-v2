@@ -24,6 +24,18 @@ fn provider_metadata_matches_runtime_contracts() {
 }
 
 #[test]
+fn provider_model_override_flags_are_explicit() {
+    assert_eq!(AgentProvider::Claude.model_override_flag(), Some("--model"));
+    assert_eq!(
+        AgentProvider::Copilot.model_override_flag(),
+        Some("--model")
+    );
+    assert_eq!(AgentProvider::Codex.model_override_flag(), Some("-m"));
+    assert_eq!(AgentProvider::Opencode.model_override_flag(), Some("-m"));
+    assert_eq!(AgentProvider::Antigravity.model_override_flag(), None);
+}
+
+#[test]
 fn provider_strings_round_trip() {
     for provider in AgentProvider::ALL {
         assert_eq!(

@@ -1,7 +1,9 @@
 use super::super::definitions::{
     AgentDefinition, PipelineDefinition, PipelineStageTransition, RepoDefinitions,
 };
-use super::super::provider::resolve_agent_provider_with;
+use super::super::provider::{
+    resolve_agent_provider_with, validate_model_shape, validate_provider_model,
+};
 use super::*;
 
 #[test]
@@ -466,6 +468,73 @@ fn provider_resolution_rejects_unknown_values() {
         resolve_agent_provider_with(Some("future-agent"), None, None, None, |_| true).unwrap_err(),
         "unsupported agent provider: future-agent",
     );
+}
+
+#[test]
+fn model_validation_checks_shape_without_allowlisting_ids() {
+    assert!(validate_model_shape(Some("future-provider/model-2027.preview")).is_ok());
+    assert_eq!(
+        validate_model_shape(Some("")).unwrap_err(),
+        "model override must not be empty"
+    );
+    assert_eq!(
+        validate_model_shape(Some(" gpt-5.6")).unwrap_err(),
+        "model override must not have leading or trailing whitespace"
+    );
+    assert_eq!(
+        validate_provider_model(AgentProvider::Antigravity, Some("some-model")).unwrap_err(),
+        "model overrides are not supported for agent provider 'antigravity'"
+    );
+}
+
+#[test]
+fn create_task_rejects_model_for_provider_without_a_verified_flag() {
+    let repo_root = init_git_repo("reject-antigravity-model");
+    let config = test_config("reject-antigravity-model");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let error = match prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Use an unsupported model override".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("antigravity".to_string()),
+            agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
+            model: Some("some-model".to_string()),
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: None,
+            recovery_snapshot: None,
+            blocker_task_ids: None,
+            notify_task_id: None,
+            parent_task_id: None,
+        },
+    ) {
+        Ok(_) => panic!("antigravity model override should be rejected"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error,
+        "model overrides are not supported for agent provider 'antigravity'"
+    );
+    assert!(db.list_pipeline_items("repo-1").unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[test]
@@ -3289,7 +3358,7 @@ fn prepare_task_persists_create_spawn_options_and_custom_setup() {
             let command = args.join(" ");
             assert!(command.contains("custom-setup-ran"));
             assert!(command.contains("Running startup..."));
-            assert!(command.contains("--model opus"));
+            assert!(command.contains("--model 'opus'"));
             assert!(command.contains("--permission-mode acceptEdits"));
             assert!(command.contains("--allowedTools Bash"));
             assert!(command.contains("--disallowedTools WebFetch"));
@@ -3577,6 +3646,69 @@ fn dormant_start_preparation_rechecks_open_blockers() {
         .get_task_worktree_path(&created.task_id)
         .unwrap()
         .is_none());
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+#[test]
+fn dormant_task_preserves_explicit_provider_and_model_until_spawn() {
+    let repo_root = init_git_repo("dormant-model-spawn");
+    let config = test_config("dormant-model-spawn");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let created = create_dormant_task_for_api_with_error(
+        &db,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Start with the requested Codex model".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("codex".to_string()),
+            agent_type: Some("agent".to_string()),
+            model: Some("gpt-5.6-codex".to_string()),
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: None,
+            recovery_snapshot: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+            terminal_cols: None,
+            terminal_rows: None,
+        },
+        Some("d0c0de12".to_string()),
+    )
+    .unwrap();
+    let detail =
+        crate::mobile_api::MobileApi::new(config.clone(), Db::open(&config.db_path).unwrap())
+            .get_task(&created.task_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(detail.agent_provider.as_deref(), Some("codex"));
+    assert_eq!(detail.model.as_deref(), Some("gpt-5.6-codex"));
+
+    let prepared = prepare_start_dormant_task_for_api(&db, &config, &created.task_id, Vec::new())
+        .unwrap()
+        .expect("dormant task should become runnable");
+    assert_eq!(prepared.agent_provider, "codex");
+    assert_eq!(prepared.model.as_deref(), Some("gpt-5.6-codex"));
+    match prepared.session {
+        PreparedSessionSpawn::Agent { model, .. } => {
+            assert_eq!(model.as_deref(), Some("gpt-5.6-codex"));
+        }
+        PreparedSessionSpawn::Pty { .. } => panic!("expected headless spawn"),
+    }
 
     let _ = std::fs::remove_dir_all(&repo_root);
     let _ = std::fs::remove_file(config.db_path);
@@ -4387,6 +4519,164 @@ fn prepare_task_prefers_explicit_then_agent_definition_over_default_provider_set
         .unwrap();
 
     assert_eq!(created_source.agent_provider.as_deref(), Some("claude"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn create_task_model_and_provider_precedence_reaches_claude_and_codex_pty_argv() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ModelSpawnContract {
+        provider: String,
+        model: String,
+        pty_flag: String,
+    }
+
+    let contracts: Vec<ModelSpawnContract> = serde_json::from_str(include_str!(
+        "../../../../../tests/cli-contract/fixtures/task-model-spawn.json"
+    ))
+    .unwrap();
+    let request_defaults = || CreateTaskRequest {
+        repo_id: String::new(),
+        prompt: String::new(),
+        display_name: None,
+        pipeline_name: None,
+        stage: None,
+        base_ref: None,
+        agent: None,
+        agent_provider: None,
+        agent_type: None,
+        terminal_cols: None,
+        terminal_rows: None,
+        model: None,
+        permission_mode: None,
+        allowed_tools: None,
+        disallowed_tools: None,
+        max_turns: None,
+        max_budget_usd: None,
+        setup_cmds: None,
+        task_template: None,
+        resume_session_id: None,
+        recovery_snapshot: None,
+        blocker_task_ids: None,
+        notify_task_id: None,
+        parent_task_id: None,
+    };
+    let repo_root = init_git_repo("create-model-precedence-contract");
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/model-agent")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/model-agent/AGENT.md"),
+        "---\nname: model-agent\ndescription: Model precedence fixture\nagent_provider: claude\nmodel: definition-model\n---\nRun $TASK_PROMPT",
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/model-contract.json"),
+        serde_json::json!({
+            "stages": [{
+                "name": "in progress",
+                "agent": "model-agent",
+                "prompt": "$TASK_PROMPT",
+                "policy": { "transition": "manual" }
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish model precedence contract");
+
+    let config = test_config("create-model-precedence-contract");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let from_definition = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Use definition model".to_string(),
+            pipeline_name: Some("model-contract".to_string()),
+            agent_type: Some("pty".to_string()),
+            ..request_defaults()
+        },
+    )
+    .unwrap();
+    assert_eq!(from_definition.agent_provider, "claude");
+    assert_eq!(from_definition.model.as_deref(), Some("definition-model"));
+
+    for contract in contracts {
+        let prepared = prepare_task_for_api(
+            &db,
+            &config,
+            CreateTaskRequest {
+                repo_id: "repo-1".to_string(),
+                prompt: format!("Use explicit {} model", contract.provider),
+                pipeline_name: Some("model-contract".to_string()),
+                agent_provider: Some(contract.provider.clone()),
+                agent_type: Some("pty".to_string()),
+                model: Some(contract.model.clone()),
+                ..request_defaults()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(prepared.agent_provider, contract.provider);
+        assert_eq!(prepared.model.as_deref(), Some(contract.model.as_str()));
+        match prepared.session {
+            PreparedSessionSpawn::Pty { args, .. } => {
+                assert!(
+                    args.join(" ").contains(&contract.pty_flag),
+                    "created task did not pass model through to PTY argv"
+                );
+            }
+            PreparedSessionSpawn::Agent { .. } => panic!("expected PTY spawn"),
+        }
+
+        if contract.provider == "claude" || contract.provider == "codex" {
+            let headless = prepare_task_for_api(
+                &db,
+                &config,
+                CreateTaskRequest {
+                    repo_id: "repo-1".to_string(),
+                    prompt: format!("Use explicit {} model headlessly", contract.provider),
+                    pipeline_name: Some("model-contract".to_string()),
+                    agent_provider: Some(contract.provider.clone()),
+                    agent_type: Some("agent".to_string()),
+                    model: Some(contract.model.clone()),
+                    ..request_defaults()
+                },
+            )
+            .unwrap();
+            match headless.session {
+                PreparedSessionSpawn::Agent {
+                    agent_provider,
+                    model,
+                    ..
+                } => {
+                    assert_eq!(agent_provider.as_str(), contract.provider);
+                    assert_eq!(model.as_deref(), Some(contract.model.as_str()));
+                }
+                PreparedSessionSpawn::Pty { .. } => panic!("expected headless spawn"),
+            }
+        }
+    }
+
+    let provider_default = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Use provider default model".to_string(),
+            agent_provider: Some("codex".to_string()),
+            agent_type: Some("pty".to_string()),
+            ..request_defaults()
+        },
+    )
+    .unwrap();
+    assert_eq!(provider_default.agent_provider, "codex");
+    assert_eq!(provider_default.model, None);
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

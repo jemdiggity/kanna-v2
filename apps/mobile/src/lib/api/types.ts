@@ -218,6 +218,8 @@ export interface TaskLatestRun {
 export interface TaskDetail extends TaskSummary {
   pipelineName?: string | null;
   stageTransition?: string | null;
+  /** Resolved model used by the latest stage run. */
+  model?: string | null;
   branch?: string | null;
   prUrl?: string | null;
   closedAt?: string | null;

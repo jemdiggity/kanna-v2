@@ -29,6 +29,35 @@ pub(super) fn normalize_agent_type(agent_type: Option<&str>) -> Option<&str> {
     }
 }
 
+pub(super) fn validate_model_shape(model: Option<&str>) -> Result<(), String> {
+    let Some(model) = model else {
+        return Ok(());
+    };
+    if model.is_empty() {
+        return Err("model override must not be empty".to_string());
+    }
+    if model.trim() != model {
+        return Err("model override must not have leading or trailing whitespace".to_string());
+    }
+    if model.chars().any(char::is_control) {
+        return Err("model override must not contain control characters".to_string());
+    }
+    Ok(())
+}
+
+pub(super) fn validate_provider_model(
+    provider: AgentProvider,
+    model: Option<&str>,
+) -> Result<(), String> {
+    validate_model_shape(model)?;
+    if model.is_some() && provider.model_override_flag().is_none() {
+        return Err(format!(
+            "model overrides are not supported for agent provider '{provider}'"
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn resolve_agent_provider(
     explicit_provider: Option<&str>,
     stage_provider: Option<&[String]>,

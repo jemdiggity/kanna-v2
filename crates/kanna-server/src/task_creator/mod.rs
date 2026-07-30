@@ -34,7 +34,8 @@ use environment::{
 use prompt::{build_stage_prompt, PromptContext};
 use provider::{
     normalize_agent_type, resolve_agent_provider, resolve_agent_provider_candidates,
-    resolve_agent_type, AgentProvider, AgentSessionType,
+    resolve_agent_type, validate_model_shape, validate_provider_model, AgentProvider,
+    AgentSessionType,
 };
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -1333,6 +1334,7 @@ fn build_prepared_session(
     defer_headless_setup: bool,
     claude_resume: Option<&str>,
 ) -> Result<(PreparedSessionSpawn, Option<String>), String> {
+    validate_provider_model(provider, model.as_deref())?;
     Ok(match agent_type {
         AgentSessionType::Pty => {
             // Keep PTY bootstrap visible and in the provider's shell. Setup
@@ -1785,7 +1787,8 @@ pub(crate) fn create_dormant_task_for_api_with_error(
             .first()
             .ok_or_else(|| format!("pipeline has no stages: {}", pipeline_name))?
     };
-    let agent = if let Some(agent_name) = stage.agent.as_deref() {
+    let stage_agent = request.agent.clone().or_else(|| stage.agent.clone());
+    let agent = if let Some(agent_name) = stage_agent.as_deref() {
         Some(definitions.agent(agent_name)?)
     } else {
         None
@@ -1793,13 +1796,44 @@ pub(crate) fn create_dormant_task_for_api_with_error(
     let provider_search_path = build_workspace_search_path(&repo.path, repo_config);
     let provider = resolve_agent_provider(
         explicit_provider.as_deref(),
-        stage.agent_provider.as_deref(),
+        if request.agent.is_some() {
+            None
+        } else {
+            stage.agent_provider.as_deref()
+        },
         agent.as_ref(),
         default_provider.as_deref(),
         provider_search_path.as_deref(),
         &repo.path,
     )?;
     let agent_type = resolve_agent_type(request.agent_type.as_deref(), provider)?;
+    let model = request
+        .model
+        .clone()
+        .or_else(|| agent.as_ref().and_then(|agent| agent.model.clone()));
+    validate_provider_model(provider, model.as_deref())
+        .map_err(PrepareTaskError::InvalidRequest)?;
+    let permission_mode = request.permission_mode.clone().or_else(|| {
+        agent
+            .as_ref()
+            .and_then(|agent| agent.permission_mode.clone())
+    });
+    let allowed_tools = request
+        .allowed_tools
+        .clone()
+        .filter(|tools| !tools.is_empty())
+        .or_else(|| agent.as_ref().map(|agent| agent.allowed_tools.clone()))
+        .unwrap_or_default();
+    let spawn_options_json = serde_json::to_string(&serde_json::json!({
+        "model": model,
+        "permissionMode": permission_mode,
+        "allowedTools": allowed_tools,
+        "disallowedTools": request.disallowed_tools,
+        "maxTurns": request.max_turns,
+        "maxBudgetUsd": request.max_budget_usd,
+        "taskTemplate": request.task_template,
+    }))
+    .map_err(|error| format!("serialize error: {error}"))?;
     let has_requested_task_id = requested_task_id.is_some();
     let task_id = match requested_task_id {
         Some(task_id) => task_id,
@@ -1823,7 +1857,7 @@ pub(crate) fn create_dormant_task_for_api_with_error(
             activity: "idle",
             port_offset: None,
             port_env_json: None,
-            agent_spawn_options_json: None,
+            agent_spawn_options_json: Some(&spawn_options_json),
             base_ref: None,
             notify_task_id: request.notify_task_id.as_deref(),
             parent_task_id: parent_task_id.as_deref(),
@@ -1875,7 +1909,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
     if item.closed_at.is_some() {
         return Ok(None);
     }
-    let recovery_snapshot = db
+    let create_request = db
         .get_create_task_intent(task_id)
         .map_err(|error| format!("db error: {error}"))?
         .map(|request_json| {
@@ -1883,8 +1917,10 @@ pub(crate) fn prepare_start_dormant_task_for_api(
                 |error| format!("invalid stored create task intent for {task_id}: {error}"),
             )
         })
-        .transpose()?
-        .and_then(|request| request.recovery_snapshot);
+        .transpose()?;
+    let recovery_snapshot = create_request
+        .as_ref()
+        .and_then(|request| request.recovery_snapshot.clone());
     let repo = db
         .get_repo(&item.repo_id)
         .map_err(|e| format!("db error: {}", e))?
@@ -1909,7 +1945,10 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         .iter()
         .find(|stage| stage.name == stage_name)
         .ok_or_else(|| format!("stage not found in pipeline: {}", stage_name))?;
-    let stage_agent = stage.agent.clone();
+    let stage_agent = create_request
+        .as_ref()
+        .and_then(|request| request.agent.clone())
+        .or_else(|| stage.agent.clone());
     let agent = if let Some(agent_name) = stage_agent.as_deref() {
         Some(definitions.agent(agent_name)?)
     } else {
@@ -1917,10 +1956,10 @@ pub(crate) fn prepare_start_dormant_task_for_api(
     };
     let provider_search_path = build_workspace_search_path(&repo.path, repo_config);
     let provider = resolve_agent_provider(
-        None,
-        stage.agent_provider.as_deref(),
-        agent.as_ref(),
         item.agent_provider.as_deref(),
+        None,
+        None,
+        None,
         provider_search_path.as_deref(),
         &repo.path,
     )?;
@@ -1955,14 +1994,48 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         },
     );
 
-    let model = agent.as_ref().and_then(|agent| agent.model.clone());
-    let permission_mode = agent
+    let model = create_request
         .as_ref()
-        .and_then(|agent| agent.permission_mode.clone());
-    let allowed_tools = agent
+        .and_then(|request| request.model.clone())
+        .or_else(|| agent.as_ref().and_then(|agent| agent.model.clone()));
+    let permission_mode = create_request
         .as_ref()
-        .map(|agent| agent.allowed_tools.clone())
+        .and_then(|request| request.permission_mode.clone())
+        .or_else(|| {
+            agent
+                .as_ref()
+                .and_then(|agent| agent.permission_mode.clone())
+        });
+    let allowed_tools = create_request
+        .as_ref()
+        .and_then(|request| request.allowed_tools.clone())
+        .filter(|tools| !tools.is_empty())
+        .or_else(|| agent.as_ref().map(|agent| agent.allowed_tools.clone()))
         .unwrap_or_default();
+    let disallowed_tools = create_request
+        .as_ref()
+        .and_then(|request| request.disallowed_tools.clone())
+        .unwrap_or_default();
+    let max_turns = create_request
+        .as_ref()
+        .and_then(|request| request.max_turns);
+    let max_budget_usd = create_request
+        .as_ref()
+        .and_then(|request| request.max_budget_usd);
+    let stage_setup = stage
+        .environment
+        .as_deref()
+        .and_then(|name| pipeline.environments.as_ref()?.get(name))
+        .and_then(|environment| environment.setup.clone())
+        .unwrap_or_default();
+    let setup = new_task_setup_cmds(
+        repo_config,
+        &stage_setup,
+        create_request
+            .as_ref()
+            .and_then(|request| request.setup_cmds.as_deref())
+            .unwrap_or(&[]),
+    );
 
     create_worktree(&repo.path, &branch, &worktree_path, base_ref.as_deref())?;
 
@@ -2053,13 +2126,13 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         model,
         permission_mode,
         allowed_tools,
-        Vec::new(),
-        None,
-        None,
+        disallowed_tools,
+        max_turns,
+        max_budget_usd,
         mcp_config_path,
         &spawn_env,
         &worktree_path,
-        repo_config.setup.as_deref().unwrap_or(&[]),
+        &setup,
         false,
         None,
     ) {
@@ -2087,7 +2160,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         session_id: task_id.to_string(),
         cwd: worktree_path,
         env: spawn_env,
-        stage_agent: stage.agent.clone(),
+        stage_agent,
         agent_provider: provider.as_str().to_string(),
         model: stage_run_model,
         completion_transition: stage.policy.transition,
@@ -2236,7 +2309,13 @@ fn prepare_task_spawn_with_error(
     let requested_task_id = request.requested_task_id.clone();
     let create_intent_json = request.create_intent_json.clone();
     let has_requested_task_id = requested_task_id.is_some();
-    let resolved = resolve_task_spawn(repo, request, &definitions)?;
+    let resolved = resolve_task_spawn(repo, request, &definitions).map_err(|error| {
+        if error.starts_with("model override") {
+            PrepareTaskError::InvalidRequest(error)
+        } else {
+            PrepareTaskError::Other(error)
+        }
+    })?;
     let stage_run_model = resolved.model.clone();
     let provisional_provider = *resolved
         .provider_candidates
@@ -2483,6 +2562,17 @@ fn resolve_task_spawn(
     let model = request
         .model
         .or_else(|| agent.as_ref().and_then(|agent| agent.model.clone()));
+    validate_model_shape(model.as_deref())?;
+    if model.is_some()
+        && provider_candidates
+            .iter()
+            .all(|provider| provider.model_override_flag().is_none())
+    {
+        return Err(format!(
+            "model overrides are not supported for agent provider '{}'",
+            provider_candidates[0]
+        ));
+    }
     let permission_mode = request.permission_mode.or_else(|| {
         agent
             .as_ref()

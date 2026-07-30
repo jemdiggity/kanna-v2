@@ -52,6 +52,147 @@ async fn create_task_route_uses_task_creator() {
     assert_eq!(created.stage, "in progress");
 }
 
+async fn assert_created_task_model_reaches_daemon_spawn(
+    provider: AgentProvider,
+    model: &str,
+    expected_flag: &str,
+) {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = unique_test_suffix();
+    let repo_root = std::env::temp_dir().join(format!(
+        "kanna-http-create-model-{}-{unique}",
+        provider.as_str()
+    ));
+    init_test_git_repo(&repo_root);
+    let daemon_dir = std::env::temp_dir().join(format!(
+        "kanna-http-create-model-daemon-{}-{unique}",
+        provider.as_str()
+    ));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let expected_flag = expected_flag.to_string();
+    let daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let session_id = match command {
+            DaemonCommand::Spawn {
+                session_id,
+                args,
+                agent_provider,
+                ..
+            } => {
+                assert_eq!(agent_provider, Some(provider));
+                assert!(
+                    args.join(" ").contains(&expected_flag),
+                    "spawn argv did not contain {expected_flag:?}: {args:?}"
+                );
+                session_id
+            }
+            other => panic!("expected PTY Spawn command, got {other:?}"),
+        };
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!(
+            "http-api-create-model-{}-{unique}",
+            provider.as_str()
+        )),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        pairing_store_path: format!("/tmp/kanna-pairings-create-model-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "repoId": "repo-1",
+                        "prompt": format!("Run {} with an explicit model", provider.as_str()),
+                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "agentProvider": provider.as_str(),
+                        "model": model
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let created: CreateTaskResponse = from_slice(&body).unwrap();
+    let detail =
+        crate::mobile_api::MobileApi::new(config.clone(), Db::open(&config.db_path).unwrap())
+            .get_task(&created.task_id)
+            .unwrap()
+            .unwrap();
+    assert_eq!(detail.agent_provider.as_deref(), Some(provider.as_str()));
+    assert_eq!(detail.model.as_deref(), Some(model));
+
+    daemon.await.unwrap();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[tokio::test]
+async fn create_task_model_reaches_claude_and_codex_daemon_spawn_argv() {
+    assert_created_task_model_reaches_daemon_spawn(
+        AgentProvider::Claude,
+        "claude-fable-5",
+        "--model 'claude-fable-5'",
+    )
+    .await;
+    assert_created_task_model_reaches_daemon_spawn(
+        AgentProvider::Codex,
+        "gpt-5.6-codex",
+        "-m 'gpt-5.6-codex'",
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn create_task_route_rejects_invalid_requested_task_ids_before_creation() {
     let create_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -709,7 +850,7 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
                     for expected in [
                         "prepared-intent-setup",
                         "--resume '364643cc-5e6d-48fc-86ca-ca7764380900'",
-                        "--model claude-repair-model",
+                        "--model 'claude-repair-model'",
                         "--allowedTools Read,Bash",
                         "--disallowedTools WebFetch",
                         "--max-turns 17",
@@ -883,6 +1024,20 @@ fn create_task_prepare_error_replays_only_requested_id_collision() {
     .unwrap_err();
     assert_eq!(unrelated.0, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(unrelated.1, "setup failed");
+
+    let invalid = super::super::tasks::resolve_create_task_prepare_error(
+        &db,
+        crate::task_creator::PrepareTaskError::InvalidRequest(
+            "model overrides are not supported for agent provider 'antigravity'".to_string(),
+        ),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(invalid.0, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        invalid.1,
+        "model overrides are not supported for agent provider 'antigravity'"
+    );
 }
 
 #[tokio::test]

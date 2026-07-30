@@ -94,6 +94,9 @@ pub struct TaskDetail {
     pub waiting_prompt_snippet: Option<String>,
     pub agent_type: Option<String>,
     pub agent_provider: Option<String>,
+    /// Resolved model for the latest stage run. Before the first run starts,
+    /// this falls back to the resolved initial spawn option.
+    pub model: Option<String>,
     pub branch: Option<String>,
     pub pr_url: Option<String>,
     pub closed_at: Option<String>,
@@ -453,6 +456,14 @@ impl MobileApi {
             ._db
             .latest_stage_run(&item.id)
             .map_err(|e| format!("db error: {}", e))?;
+        let initial_spawn_options = self
+            ._db
+            .get_pipeline_item_agent_spawn_options(&item.id)
+            .map_err(|e| format!("db error: {}", e))?;
+        let resolved_model = match latest_run.as_ref() {
+            Some(run) => run.model.clone(),
+            None => model_from_spawn_options(initial_spawn_options.as_deref()),
+        };
         let blocked_by_task_ids = self
             ._db
             .list_open_task_blocker_ids(&item.id)
@@ -462,6 +473,7 @@ impl MobileApi {
             repo.as_ref(),
             worktree_path,
             latest_run,
+            resolved_model,
             blocked_by_task_ids,
         )))
     }
@@ -585,6 +597,7 @@ fn map_task_detail(
     repo: Option<&crate::db::Repo>,
     worktree_path: Option<String>,
     latest_run: Option<crate::db::StageRun>,
+    resolved_model: Option<String>,
     blocked_by_task_ids: Vec<String>,
 ) -> TaskDetail {
     let prompt = item.prompt.clone();
@@ -642,6 +655,7 @@ fn map_task_detail(
         waiting_prompt_snippet,
         agent_type: item.agent_type,
         agent_provider: item.agent_provider,
+        model: resolved_model,
         branch: item.branch,
         pr_url: item.pr_url,
         closed_at: item.closed_at,
@@ -655,6 +669,11 @@ fn map_task_detail(
         parent_task_id: item.parent_task_id,
         blocked_by_task_ids,
     }
+}
+
+fn model_from_spawn_options(raw: Option<&str>) -> Option<String> {
+    raw.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|options| options.get("model")?.as_str().map(str::to_string))
 }
 
 fn map_task_latest_run(run: crate::db::StageRun) -> TaskLatestRun {

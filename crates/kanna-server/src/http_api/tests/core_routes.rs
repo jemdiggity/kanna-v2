@@ -2259,6 +2259,23 @@ async fn get_task_route_returns_full_task_detail_by_id() {
             "2026-04-18 10:00:00",
         )
         .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-task-1",
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("implement"),
+            agent_provider: Some("claude"),
+            model: Some("claude-fable-5"),
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
     });
 
     let response = app
@@ -2289,6 +2306,7 @@ async fn get_task_route_returns_full_task_detail_by_id() {
     assert_eq!(task.activity.as_deref(), Some("idle"));
     assert_eq!(task.agent_type.as_deref(), Some("pty"));
     assert_eq!(task.agent_provider.as_deref(), Some("claude"));
+    assert_eq!(task.model.as_deref(), Some("claude-fable-5"));
     assert_eq!(task.branch.as_deref(), Some("branch-task-1"));
     assert_eq!(task.pr_url, None);
     assert_eq!(task.closed_at, None);

@@ -158,6 +158,7 @@ fn spawn_args_pin_the_stream_json_contract() {
     assert!(args.contains("--output-format stream-json"));
     assert!(args.contains("--input-format stream-json"));
     assert!(args.contains("--permission-mode acceptEdits"));
+    assert!(args.contains("--model claude-fable-5"));
     assert!(args.contains("--allowedTools Bash"));
     assert!(args.contains("--disallowedTools Write,Edit"));
     assert!(args.contains("--permission-prompt-tool stdio"));
