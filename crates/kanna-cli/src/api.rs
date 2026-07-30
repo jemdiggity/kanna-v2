@@ -7,10 +7,11 @@ use serde_json::Value;
 
 use crate::models::{
     AddRepoRequest, BlockTaskRequest, CompleteStageRequest, CreateTaskRequest, CreateTaskResponse,
-    DependentTasksExistResponse, RepoDetail, RepoSummary, RequestRevisionRequest,
-    ResolvedAgentDefinition, SetTaskNotifyRequest, SetTaskParentRequest, SetTaskPipelineRequest,
-    SetTaskPipelineResponse, SignalAgentRequest, SignalAgentResponse, TaskActionResponse,
-    TaskDetail, TaskInputRequest, TaskInputResponse, TaskRenameRequest, TaskSummary, WaitUntil,
+    DependentTasksExistResponse, MobileNotificationRequest, MobileNotificationResponse, RepoDetail,
+    RepoSummary, RequestRevisionRequest, ResolvedAgentDefinition, SetTaskNotifyRequest,
+    SetTaskParentRequest, SetTaskPipelineRequest, SetTaskPipelineResponse, SignalAgentRequest,
+    SignalAgentResponse, TaskActionResponse, TaskDetail, TaskInputRequest, TaskInputResponse,
+    TaskRenameRequest, TaskSummary, WaitUntil,
 };
 
 pub(crate) fn join_server_url(base_url: &str, path: &str) -> String {
@@ -459,6 +460,13 @@ pub(crate) async fn set_task_notify_via_api(
         request,
     )
     .await
+}
+
+pub(crate) async fn notify_mobile_via_api(
+    base_url: &str,
+    request: &MobileNotificationRequest,
+) -> Result<MobileNotificationResponse, String> {
+    post_json(base_url, "/v1/mobile/notifications", request).await
 }
 
 pub(crate) async fn set_task_parent_via_api(

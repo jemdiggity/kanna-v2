@@ -110,6 +110,13 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
+            "kanna_notify_mobile",
+            TypedToolSurface {
+                command_path: &["task", "notify-mobile"],
+                param_args: &[("title", "title"), ("body", "body"), ("task_id", "task_id")],
+            },
+        ),
+        (
             "kanna_set_task_notify",
             TypedToolSurface {
                 command_path: &["task", "set-notify"],

@@ -427,6 +427,24 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Send an operator-facing push notification to the Kanna mobile app
+    NotifyMobile {
+        /// Short notification title shown to the operator
+        #[arg(long)]
+        title: String,
+
+        /// Concise notification message shown to the operator
+        #[arg(long)]
+        body: String,
+
+        /// Optional durable task ID to open when the operator taps the notification
+        #[arg(long)]
+        task_id: Option<String>,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Change an open task's pinned pipeline without restarting its live run
     SetPipeline {
         /// The task/pipeline_item ID to re-pipeline

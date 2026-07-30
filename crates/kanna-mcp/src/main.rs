@@ -542,6 +542,7 @@ mod tests {
                 "kanna_get_task",
                 "kanna_wait_task",
                 "kanna_wait_events",
+                "kanna_notify_mobile",
                 "kanna_set_task_notify",
                 "kanna_set_task_pipeline",
                 "kanna_task_logs",

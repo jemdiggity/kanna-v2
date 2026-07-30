@@ -985,7 +985,22 @@ mod tests {
             })
             .await
             .expect("relay capability was not advertised");
-            http_api::dispatch_http_invoke(
+            let unauthenticated = http_api::dispatch_http_invoke(
+                Arc::clone(&state),
+                "POST",
+                "/v1/mobile/notifications",
+                serde_json::json!({
+                    "title": "Spoofed staging status",
+                    "body": "This must not reach the operator."
+                }),
+            )
+            .await;
+            assert_eq!(
+                unauthenticated.status,
+                axum::http::StatusCode::UNAUTHORIZED.as_u16()
+            );
+
+            http_api::dispatch_authenticated_http_invoke(
                 Arc::clone(&state),
                 "POST",
                 "/v1/mobile/notifications",

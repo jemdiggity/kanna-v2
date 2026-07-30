@@ -1,3 +1,4 @@
+use super::lan_trust::PrivilegedTaskAccess;
 use super::state::AppState;
 use crate::relay_client::MobileNotificationPayload;
 use axum::extract::State;
@@ -27,6 +28,7 @@ pub(super) struct MobileNotificationResponse {
 
 pub(super) async fn notify_mobile(
     State(state): State<Arc<AppState>>,
+    _access: PrivilegedTaskAccess,
     Json(payload): Json<MobileNotificationRequest>,
 ) -> Result<Json<MobileNotificationResponse>, (axum::http::StatusCode, String)> {
     let title = validate_text("title", payload.title, MAX_TITLE_CHARS)?;
