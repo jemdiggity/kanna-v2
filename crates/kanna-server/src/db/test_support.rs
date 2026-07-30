@@ -140,6 +140,7 @@ impl Db {
                 agent TEXT,
                 agent_provider TEXT,
                 model TEXT,
+                effort TEXT,
                 status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
                 result TEXT,
                 feedback TEXT,

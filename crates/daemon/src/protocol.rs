@@ -122,6 +122,8 @@ pub struct AgentSpawnParams {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
     pub permission_mode: Option<String>,
     #[serde(default)]
     pub allowed_tools: Vec<String>,

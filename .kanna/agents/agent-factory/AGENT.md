@@ -21,6 +21,7 @@ name: <agent-identifier>        # required, must match the directory name
 description: <what it does>     # required
 agent_provider: claude, codex, copilot, opencode, antigravity
 model: <provider model override>   # optional, falls back to the provider default
+effort: <provider-native effort>  # optional, e.g. low, medium, high, xhigh
 permission_mode: default           # optional: default (yolo-equivalent) | acceptEdits | dontAsk
 allowed_tools: []                  # optional tool allowlist; empty = provider defaults
 ---
@@ -32,7 +33,7 @@ allowed_tools: []                  # optional tool allowlist; empty = provider d
 
 ## Extending A Built-in Instead
 
-`.kanna/agents/{name}/EXTEND.md` layers onto the resolved agent (the repo's own `AGENT.md`, or the built-in when the repo has none): its body is appended to the agent's prompt and its frontmatter fields (`description`, `model`, `permission_mode`, `allowed_tools`, `agent_provider`) replace the base's. Frontmatter is optional — a plain markdown file is a pure prompt extension. Identity comes from the directory name, so an extension cannot rename the agent.
+`.kanna/agents/{name}/EXTEND.md` layers onto the resolved agent (the repo's own `AGENT.md`, or the built-in when the repo has none): its body is appended to the agent's prompt and its frontmatter fields (`description`, `model`, `effort`, `permission_mode`, `allowed_tools`, `agent_provider`) replace the base's. Frontmatter is optional — a plain markdown file is a pure prompt extension. Identity comes from the directory name, so an extension cannot rename the agent.
 
 Prefer `EXTEND.md` over copying a built-in's body: the built-in keeps improving with Kanna updates, and the extension stays a small repo-specific delta.
 

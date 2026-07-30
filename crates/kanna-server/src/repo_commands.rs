@@ -46,6 +46,7 @@ struct CustomTaskDefinition {
     agent: Option<String>,
     agent_provider: Option<String>,
     model: Option<String>,
+    effort: Option<String>,
     permission_mode: Option<String>,
     execution_mode: Option<String>,
     allowed_tools: Option<Vec<String>>,
@@ -66,6 +67,7 @@ pub(crate) struct RepoCommandLaunch {
     pub(crate) agent_provider: Option<String>,
     pub(crate) agent_type: Option<String>,
     pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
     pub(crate) permission_mode: Option<String>,
     pub(crate) allowed_tools: Option<Vec<String>>,
     pub(crate) disallowed_tools: Option<Vec<String>>,
@@ -287,6 +289,7 @@ fn parse_custom_task(content: &str, slug: &str) -> Option<CustomTaskDefinition> 
         agent,
         agent_provider: first_known_provider(mapping_value(&fm, "agent_provider")),
         model: mapping_string(&fm, "model"),
+        effort: mapping_string(&fm, "effort"),
         permission_mode,
         execution_mode,
         allowed_tools: mapping_string_list(&fm, "allowed_tools"),
@@ -412,6 +415,7 @@ fn custom_task_launch(slug: &str, definition: &CustomTaskDefinition) -> RepoComm
         agent_provider: definition.agent_provider.clone(),
         agent_type: definition.execution_mode.clone(),
         model: definition.model.clone(),
+        effort: definition.effort.clone(),
         permission_mode: definition.permission_mode.clone(),
         allowed_tools: definition.allowed_tools.clone(),
         disallowed_tools: definition.disallowed_tools.clone(),
@@ -471,6 +475,7 @@ fn factory_launch(command_id: &str) -> Option<RepoCommandLaunch> {
         agent_provider: None,
         agent_type: Some("pty".to_string()),
         model: None,
+        effort: None,
         permission_mode: None,
         allowed_tools: None,
         disallowed_tools: None,
@@ -500,6 +505,7 @@ Available frontmatter fields (all optional, defaults shown):
 - agent: name of an existing `.kanna/agents/<name>/AGENT.md` to run
 - agent_provider: "claude" | "copilot" | "codex" | "opencode" | "antigravity" (optional)
 - model: null (uses Kanna default)
+- effort: null (uses the provider/model default)
 - permission_mode: "dontAsk" | "acceptEdits" | "default" (default: provider-specific yolo-equivalent: Claude and OpenCode use --dangerously-skip-permissions; Copilot and Codex use --yolo)
 - execution_mode: "pty" | "agent" (default: pty; legacy "sdk" is accepted as "agent")
 - allowed_tools: [] (empty = all allowed)
@@ -673,6 +679,7 @@ name: Deploy
 agent: implement
 agent_provider: codex, claude
 model: gpt-5.4-mini
+effort: high
 permission_mode: acceptEdits
 execution_mode: sdk
 allowed_tools: [Bash]
@@ -707,6 +714,7 @@ Deploy safely.
         assert_eq!(launch.agent.as_deref(), Some("implement"));
         assert_eq!(launch.agent_provider.as_deref(), Some("codex"));
         assert_eq!(launch.model.as_deref(), Some("gpt-5.4-mini"));
+        assert_eq!(launch.effort.as_deref(), Some("high"));
         assert_eq!(launch.permission_mode.as_deref(), Some("acceptEdits"));
         assert_eq!(launch.agent_type.as_deref(), Some("agent"));
         assert_eq!(launch.allowed_tools, Some(vec!["Bash".to_string()]));

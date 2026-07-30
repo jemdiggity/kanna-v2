@@ -85,6 +85,7 @@ fn start_run(db: &Db, run_id: &str, task_id: &str, stage: &str) {
         agent: Some("review"),
         agent_provider: Some("claude"),
         model: None,
+        effort: None,
         status: "running",
         result: None,
         feedback: None,

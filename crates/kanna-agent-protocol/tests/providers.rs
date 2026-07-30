@@ -1,4 +1,4 @@
-use kanna_agent_protocol::{agent_provider_specs, AgentProvider, AgentSessionType};
+use kanna_agent_protocol::{agent_provider_specs, AgentProvider, AgentSessionType, EffortOverride};
 use std::str::FromStr;
 
 #[test]
@@ -33,6 +33,47 @@ fn provider_model_override_flags_are_explicit() {
     assert_eq!(AgentProvider::Codex.model_override_flag(), Some("-m"));
     assert_eq!(AgentProvider::Opencode.model_override_flag(), Some("-m"));
     assert_eq!(AgentProvider::Antigravity.model_override_flag(), None);
+}
+
+#[test]
+fn provider_effort_controls_and_native_values_are_explicit() {
+    assert_eq!(
+        AgentProvider::Codex.effort_override(),
+        EffortOverride::Config("model_reasoning_effort")
+    );
+    assert_eq!(
+        AgentProvider::Claude.effort_override(),
+        EffortOverride::Flag("--effort")
+    );
+    assert_eq!(
+        AgentProvider::Copilot.effort_override(),
+        EffortOverride::Flag("--effort")
+    );
+    assert_eq!(
+        AgentProvider::Opencode.effort_override(),
+        EffortOverride::Flag("--variant")
+    );
+    assert_eq!(
+        AgentProvider::Antigravity.effort_override(),
+        EffortOverride::Flag("--effort")
+    );
+    assert_eq!(
+        AgentProvider::Codex.effort_values(),
+        Some(&["minimal", "low", "medium", "high", "xhigh"][..])
+    );
+    assert_eq!(
+        AgentProvider::Claude.effort_values(),
+        Some(&["low", "medium", "high", "xhigh", "max"][..])
+    );
+    assert_eq!(
+        AgentProvider::Copilot.effort_values(),
+        Some(&["none", "minimal", "low", "medium", "high", "xhigh", "max"][..])
+    );
+    assert_eq!(AgentProvider::Opencode.effort_values(), None);
+    assert_eq!(
+        AgentProvider::Antigravity.effort_values(),
+        Some(&["low", "medium", "high"][..])
+    );
 }
 
 #[test]

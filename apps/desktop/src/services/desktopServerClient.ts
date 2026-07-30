@@ -211,6 +211,7 @@ export interface CreateDesktopTaskRequest {
   agentProvider?: string;
   agentType?: string;
   model?: string;
+  effort?: string;
   permissionMode?: string;
   allowedTools?: string[];
   disallowedTools?: string[];

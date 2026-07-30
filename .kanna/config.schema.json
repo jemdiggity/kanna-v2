@@ -46,7 +46,7 @@
     },
     "agentProviders": {
       "type": "object",
-      "description": "Repo-level provider and optional model preferences by agent name or * glob. Exact names win; otherwise the matching glob with the most non-* characters wins, with lexical order breaking ties. Provider resolution is explicit task or stage override, then this map, then layered AGENT.md/EXTEND.md frontmatter, then the global default.",
+      "description": "Repo-level provider, model, and effort preferences by agent name or * glob. Exact names win; otherwise the matching glob with the most non-* characters wins, with lexical order breaking ties. Provider/model/effort resolution is explicit task or stage override, then this map, then layered AGENT.md/EXTEND.md frontmatter, then the global default.",
       "propertyNames": {
         "type": "string",
         "minLength": 1
@@ -77,6 +77,10 @@
                 ]
               },
               "model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "effort": {
                 "type": "string",
                 "minLength": 1
               }
@@ -178,7 +182,8 @@
         "review": "codex",
         "review-*": {
           "provider": ["codex", "claude"],
-          "model": "gpt-5"
+          "model": "gpt-5",
+          "effort": "high"
         }
       },
       "vars": {

@@ -46,6 +46,9 @@ impl ClaudeAdapter {
         if let Some(model) = &ctx.model {
             builder = builder.model(model.clone());
         }
+        if let Some(effort) = &ctx.effort {
+            builder = builder.effort_override(effort.clone());
+        }
         if !ctx.allowed_tools.is_empty() {
             builder = builder.allowed_tools(ctx.allowed_tools.clone());
         }

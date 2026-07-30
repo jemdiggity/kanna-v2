@@ -38,9 +38,9 @@ impl Db {
     ) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO stage_run
-             (id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback,
+             (id, task_id, stage, kind, agent, agent_provider, model, effort, status, result, feedback,
               session_id, provider_session_id, cwd, resumed_from_run_id, completion_transition)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run.id,
                 run.task_id,
@@ -49,6 +49,7 @@ impl Db {
                 run.agent,
                 run.agent_provider,
                 run.model,
+                run.effort,
                 run.status,
                 run.result,
                 run.feedback,
@@ -83,7 +84,7 @@ impl Db {
         task_id: &str,
     ) -> Result<Vec<StageRun>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback,
+            "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result, feedback,
                     session_id, provider_session_id, cwd, resumed_from_run_id,
                     resume_fallback_reason, completion_transition, started_at, finished_at
              FROM stage_run
@@ -99,7 +100,7 @@ impl Db {
         let run = self
             .conn
             .query_row(
-                "SELECT id, task_id, stage, kind, agent, agent_provider, model, status, result,
+                "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
                         resume_fallback_reason, completion_transition, started_at, finished_at
                  FROM stage_run
@@ -129,7 +130,7 @@ impl Db {
         let run = self
             .conn
             .query_row(
-                "SELECT id, task_id, stage, kind, agent, agent_provider, model, status, result,
+                "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
                         resume_fallback_reason, completion_transition, started_at, finished_at
                  FROM stage_run
@@ -458,16 +459,17 @@ fn stage_run_from_row(row: &rusqlite::Row<'_>) -> Result<StageRun, rusqlite::Err
         agent: row.get(4)?,
         agent_provider: row.get(5)?,
         model: row.get(6)?,
-        status: row.get(7)?,
-        result: row.get(8)?,
-        feedback: row.get(9)?,
-        session_id: row.get(10)?,
-        provider_session_id: row.get(11)?,
-        cwd: row.get(12)?,
-        resumed_from_run_id: row.get(13)?,
-        resume_fallback_reason: row.get(14)?,
-        completion_transition: row.get(15)?,
-        started_at: row.get(16)?,
-        finished_at: row.get(17)?,
+        effort: row.get(7)?,
+        status: row.get(8)?,
+        result: row.get(9)?,
+        feedback: row.get(10)?,
+        session_id: row.get(11)?,
+        provider_session_id: row.get(12)?,
+        cwd: row.get(13)?,
+        resumed_from_run_id: row.get(14)?,
+        resume_fallback_reason: row.get(15)?,
+        completion_transition: row.get(16)?,
+        started_at: row.get(17)?,
+        finished_at: row.get(18)?,
     })
 }

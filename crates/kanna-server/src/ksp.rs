@@ -4229,6 +4229,7 @@ mod tests {
             agent: None,
             agent_provider: Some("claude"),
             model: None,
+            effort: None,
             status: "running",
             result: None,
             feedback: None,

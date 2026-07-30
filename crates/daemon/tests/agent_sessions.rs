@@ -219,6 +219,7 @@ fn spawn_params(cwd: &Path, executable: &Path, prompt: &str) -> AgentSpawnParams
         cwd: cwd.to_string_lossy().to_string(),
         env: HashMap::new(),
         model: None,
+        effort: None,
         permission_mode: None,
         allowed_tools: Vec::new(),
         disallowed_tools: Vec::new(),

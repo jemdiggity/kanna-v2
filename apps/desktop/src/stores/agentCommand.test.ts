@@ -2,6 +2,27 @@ import { describe, expect, it, vi } from "vitest";
 import { buildAgentCommand } from "./agentCommand";
 
 describe("buildAgentCommand", () => {
+  it.each([
+    ["claude", "--effort 'xhigh'"],
+    ["codex", "-c 'model_reasoning_effort=\"xhigh\"'"],
+    ["copilot", "--effort='xhigh'"],
+    ["opencode", "--variant 'xhigh'"],
+    ["antigravity", "--effort 'xhigh'"],
+  ] as const)("builds %s commands with its native effort control", async (provider, effortFlag) => {
+    const command = await buildAgentCommand(provider, {
+      taskId: "task-1",
+      prompt: "Ship it",
+      permissionFlags: [],
+      runtimeSystemPrompt: "system",
+      runtimeUserPrompt: "Ship it",
+      effort: "xhigh",
+      createSessionId: () => "session-1",
+      persistAgentSessionId: async () => {},
+    });
+
+    expect(command.agentCmd).toContain(effortFlag);
+  });
+
   it("builds Codex commands with Kanna MCP config overrides", async () => {
     const command = await buildAgentCommand("codex", {
       taskId: "task-1",

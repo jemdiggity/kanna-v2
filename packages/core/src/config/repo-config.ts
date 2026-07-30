@@ -23,6 +23,7 @@ export interface RepoWorkspaceConfig {
 export interface RepoAgentProviderPreference {
   provider: AgentProvider[];
   model?: string;
+  effort?: string;
 }
 
 export interface RepoConfig {
@@ -119,6 +120,10 @@ export function parseRepoConfig(json: string): RepoConfig {
         const model = (rawPreference as Record<string, unknown>).model;
         if (typeof model === "string" && model.length > 0) {
           preference.model = model;
+        }
+        const effort = (rawPreference as Record<string, unknown>).effort;
+        if (typeof effort === "string" && effort.length > 0) {
+          preference.effort = effort;
         }
       }
       agentProviders[pattern] = preference;

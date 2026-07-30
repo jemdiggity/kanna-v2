@@ -48,7 +48,7 @@ function parseAgentProviders(value: unknown): AgentProvider[] {
 
 // An agent definition (`.kanna/agents/*/AGENT.md`) describes a reusable *role* and
 // intentionally supports a focused field set: name, description, prompt (body),
-// model, permission_mode, allowed_tools, and agent_provider. Per-task execution
+// model, effort, permission_mode, allowed_tools, and agent_provider. Per-task execution
 // limits (execution_mode, max_turns, max_budget_usd, disallowed_tools) and
 // worktree setup/teardown live on task templates (`.kanna/tasks/*/agent.md`, parsed
 // by parseAgentMd), not on agent definitions. Keep this boundary in mind before
@@ -67,6 +67,9 @@ export function parseAgentDefinition(content: string): AgentDefinition {
 
   if (typeof fm.model === "string") {
     def.model = fm.model;
+  }
+  if (typeof fm.effort === "string") {
+    def.effort = fm.effort;
   }
 
   const permissionMode = parsePermissionMode(fm.permission_mode);
@@ -109,6 +112,9 @@ export function parseAgentExtension(content: string): AgentExtension {
   if (typeof fm.model === "string") {
     ext.model = fm.model;
   }
+  if (typeof fm.effort === "string") {
+    ext.effort = fm.effort;
+  }
 
   const permissionMode = parsePermissionMode(fm.permission_mode);
   if (permissionMode !== undefined) {
@@ -132,6 +138,7 @@ export function applyAgentExtension(base: AgentDefinition, extension: AgentExten
     ...base,
     ...(extension.description !== undefined && { description: extension.description }),
     ...(extension.model !== undefined && { model: extension.model }),
+    ...(extension.effort !== undefined && { effort: extension.effort }),
     ...(extension.permission_mode !== undefined && { permission_mode: extension.permission_mode }),
     ...(extension.allowed_tools !== undefined && { allowed_tools: extension.allowed_tools }),
     ...(extension.agent_provider !== undefined && { agent_provider: extension.agent_provider }),

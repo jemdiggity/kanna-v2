@@ -19,6 +19,7 @@ export interface BuildAgentCommandParams {
   permissionFlags: string[];
   mcpConfigPath?: string;
   model?: string;
+  effort?: string;
   allowedTools?: string[];
   disallowedTools?: string[];
   maxTurns?: number;
@@ -64,6 +65,7 @@ export async function buildAgentCommand(
 async function buildCopilotCommand(params: BuildAgentCommandParams): Promise<AgentCommandResult> {
   const copilotFlags: string[] = [...params.permissionFlags];
   if (params.model) copilotFlags.push(`--model=${params.model}`);
+  if (params.effort) copilotFlags.push(`--effort=${shellSingleQuote(params.effort)}`);
   if (params.allowedTools?.length) {
     for (const tool of params.allowedTools) copilotFlags.push(`--allow-tool=${tool}`);
   }
@@ -97,6 +99,9 @@ async function buildCodexCommand(params: BuildAgentCommandParams): Promise<Agent
   const codexFlags: string[] = [...params.permissionFlags];
   codexFlags.push(...await buildCodexMcpConfigFlags(params));
   if (params.model) codexFlags.push(`-m ${params.model}`);
+  if (params.effort) {
+    codexFlags.push(codexConfigFlag("model_reasoning_effort", JSON.stringify(params.effort)));
+  }
   const flags = codexFlags.join(" ");
   if (params.resumeSessionId) {
     const resumeSessionArg = shellSingleQuote(params.resumeSessionId);
@@ -154,6 +159,7 @@ async function buildOpenCodeCommand(params: BuildAgentCommandParams): Promise<Ag
   const opencodeExecutable = shellSingleQuote(opencodePath);
   const opencodeFlags: string[] = [...params.permissionFlags];
   if (params.model) opencodeFlags.push(`-m ${params.model}`);
+  if (params.effort) opencodeFlags.push(`--variant ${shellSingleQuote(params.effort)}`);
   if (params.resumeSessionId) {
     opencodeFlags.push(`--session ${shellSingleQuote(params.resumeSessionId)}`);
   }
@@ -181,6 +187,7 @@ async function buildOpenCodeCommand(params: BuildAgentCommandParams): Promise<Ag
 function buildAntigravityCommand(params: BuildAgentCommandParams): AgentCommandResult {
   const antigravityFlags: string[] = [...params.permissionFlags];
   if (params.model) antigravityFlags.push(`--model ${params.model}`);
+  if (params.effort) antigravityFlags.push(`--effort ${shellSingleQuote(params.effort)}`);
   let workspaceAliasSetup: string[] = [];
   if (params.worktreePath) {
     const aliasBase = shellSingleQuote("/tmp/kanna-antigravity-workspaces");
@@ -224,6 +231,7 @@ async function buildClaudeCommand(params: BuildAgentCommandParams): Promise<Agen
     flags.push(`--mcp-config ${shellSingleQuote(params.mcpConfigPath)}`);
   }
   if (params.model) flags.push(`--model ${params.model}`);
+  if (params.effort) flags.push(`--effort ${shellSingleQuote(params.effort)}`);
   if (params.maxTurns != null) flags.push(`--max-turns ${params.maxTurns}`);
   if (params.maxBudgetUsd != null) flags.push(`--max-budget-usd ${params.maxBudgetUsd}`);
   if (params.allowedTools?.length) {

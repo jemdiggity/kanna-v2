@@ -149,6 +149,7 @@ fn spawn_args_pin_the_run_json_contract() {
         prompt: "fix the bug".to_string(),
         cwd: "/tmp/kanna-task".to_string(),
         model: Some("opencode/big-pickle".to_string()),
+        effort: Some("high".to_string()),
         ..Default::default()
     };
 
@@ -166,6 +167,8 @@ fn spawn_args_pin_the_run_json_contract() {
             "--dangerously-skip-permissions",
             "-m",
             "opencode/big-pickle",
+            "--variant",
+            "high",
             "fix the bug",
         ]
     );
@@ -184,6 +187,8 @@ fn spawn_args_pin_the_run_json_contract() {
             "--dangerously-skip-permissions",
             "-m",
             "opencode/big-pickle",
+            "--variant",
+            "high",
             "now add tests",
         ]
     );

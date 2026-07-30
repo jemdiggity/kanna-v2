@@ -27,6 +27,7 @@ pub enum Effort {
     Low,
     Medium,
     High,
+    XHigh,
     Max,
 }
 
@@ -37,6 +38,7 @@ impl Effort {
             Effort::Low => "low",
             Effort::Medium => "medium",
             Effort::High => "high",
+            Effort::XHigh => "xhigh",
             Effort::Max => "max",
         }
     }
@@ -71,6 +73,9 @@ pub struct SessionOptions {
     pub thinking: Option<ThinkingMode>,
     /// Effort level.
     pub effort: Option<Effort>,
+    /// Provider-native effort string for callers that resolve CLI options
+    /// dynamically instead of using [`Effort`].
+    pub effort_override: Option<String>,
     /// Additional environment variables for the CLI process.
     pub env: HashMap<String, String>,
     /// Whether the CLI process should inherit the parent process environment.
@@ -104,6 +109,7 @@ impl Default for SessionOptions {
             system_prompt: None,
             thinking: None,
             effort: None,
+            effort_override: None,
             env: HashMap::new(),
             inherit_parent_env: true,
             include_partial_messages: false,
@@ -195,9 +201,13 @@ impl SessionOptions {
             args.push(thinking.as_cli_flag().to_string());
         }
 
-        if let Some(effort) = &self.effort {
+        if let Some(effort) = self
+            .effort_override
+            .as_deref()
+            .or_else(|| self.effort.as_ref().map(Effort::as_cli_flag))
+        {
             args.push("--effort".to_string());
-            args.push(effort.as_cli_flag().to_string());
+            args.push(effort.to_string());
         }
 
         if self.include_partial_messages {
@@ -303,6 +313,12 @@ impl SessionOptionsBuilder {
     /// Set the effort level.
     pub fn effort(mut self, effort: Effort) -> Self {
         self.options.effort = Some(effort);
+        self
+    }
+
+    /// Set a provider-native effort string.
+    pub fn effort_override(mut self, effort: impl Into<String>) -> Self {
+        self.options.effort_override = Some(effort.into());
         self
     }
 
@@ -475,6 +491,7 @@ mod tests {
             (Effort::Low, "low"),
             (Effort::Medium, "medium"),
             (Effort::High, "high"),
+            (Effort::XHigh, "xhigh"),
             (Effort::Max, "max"),
         ] {
             let opts = SessionOptions::builder().effort(effort).build();
@@ -482,6 +499,14 @@ mod tests {
             let idx = args.iter().position(|a| a == "--effort").unwrap();
             assert_eq!(args[idx + 1], expected);
         }
+    }
+
+    #[test]
+    fn test_provider_native_effort_override() {
+        let opts = SessionOptions::builder().effort_override("xhigh").build();
+        let args = opts.to_cli_args(None);
+        let idx = args.iter().position(|arg| arg == "--effort").unwrap();
+        assert_eq!(args[idx + 1], "xhigh");
     }
 
     #[test]

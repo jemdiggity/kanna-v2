@@ -418,12 +418,12 @@ async fn list_agents_reports_the_resolved_repo_override_that_task_creation_uses(
         &[
             (
                 ".kanna/agents/commit/AGENT.md",
-                "---\nname: commit\ndescription: Repo commit base\nagent_provider: codex\nmodel: repo-base-model\n---\nRepo commit prompt."
+                "---\nname: commit\ndescription: Repo commit base\nagent_provider: codex\nmodel: repo-base-model\neffort: high\n---\nRepo commit prompt."
                     .to_string(),
             ),
             (
                 ".kanna/agents/commit/EXTEND.md",
-                "---\ndescription: Repo commit after extension\nagent_provider: copilot\nmodel: repo-extended-model\n---\nRepo extension."
+                "---\ndescription: Repo commit after extension\nagent_provider: copilot\nmodel: repo-extended-model\neffort: low\n---\nRepo extension."
                     .to_string(),
             ),
             (
@@ -450,6 +450,7 @@ async fn list_agents_reports_the_resolved_repo_override_that_task_creation_uses(
     assert_eq!(commit["description"], "Repo commit after extension");
     assert_eq!(commit["defaultProvider"], "copilot");
     assert_eq!(commit["defaultModel"], "repo-extended-model");
+    assert_eq!(commit["defaultEffort"], "low");
     assert_eq!(commit["source"], "repo_override");
 
     let ship = agents
@@ -459,6 +460,7 @@ async fn list_agents_reports_the_resolved_repo_override_that_task_creation_uses(
     assert_eq!(ship["description"], "Ships the product");
     assert_eq!(ship["defaultProvider"], "claude");
     assert!(ship["defaultModel"].is_null());
+    assert!(ship["defaultEffort"].is_null());
     assert_eq!(ship["source"], "repo_override");
 
     let review = agents

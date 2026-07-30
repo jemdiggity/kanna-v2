@@ -153,6 +153,7 @@ fn spawn_args_pin_the_exec_json_contract() {
     let ctx = SpawnCtx {
         prompt: "fix the bug".to_string(),
         model: Some("gpt-5.5".to_string()),
+        effort: Some("xhigh".to_string()),
         ..Default::default()
     };
 
@@ -167,6 +168,8 @@ fn spawn_args_pin_the_exec_json_contract() {
             "--dangerously-bypass-approvals-and-sandbox",
             "-m",
             "gpt-5.5",
+            "-c",
+            "model_reasoning_effort=\"xhigh\"",
             "--json",
             "fix the bug",
         ]
@@ -182,6 +185,8 @@ fn spawn_args_pin_the_exec_json_contract() {
             "--dangerously-bypass-approvals-and-sandbox",
             "-m",
             "gpt-5.5",
+            "-c",
+            "model_reasoning_effort=\"xhigh\"",
             "--json",
             "now add tests",
         ]

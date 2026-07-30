@@ -86,6 +86,7 @@ fn build_merge_task_request() -> Result<TaskCreationRequest, String> {
         agent_type: None,
         initial_terminal_geometry: None,
         model: None,
+        effort: None,
         permission_mode: None,
         allowed_tools: Vec::new(),
         disallowed_tools: Vec::new(),

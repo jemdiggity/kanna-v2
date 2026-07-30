@@ -97,6 +97,9 @@ pub struct TaskDetail {
     /// Resolved model for the latest stage run. Before the first run starts,
     /// this falls back to the resolved initial spawn option.
     pub model: Option<String>,
+    /// Resolved provider-native effort for the latest stage run. Before the
+    /// first run starts, this falls back to the resolved initial spawn option.
+    pub effort: Option<String>,
     pub branch: Option<String>,
     pub pr_url: Option<String>,
     pub closed_at: Option<String>,
@@ -201,6 +204,7 @@ pub struct CreateTaskRequest {
     pub terminal_cols: Option<u16>,
     pub terminal_rows: Option<u16>,
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub permission_mode: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
     pub disallowed_tools: Option<Vec<String>>,
@@ -482,6 +486,10 @@ impl MobileApi {
             Some(run) => run.model.clone(),
             None => model_from_spawn_options(initial_spawn_options.as_deref()),
         };
+        let resolved_effort = match latest_run.as_ref() {
+            Some(run) => run.effort.clone(),
+            None => spawn_option_from_json(initial_spawn_options.as_deref(), "effort"),
+        };
         let blocked_by_task_ids = self
             ._db
             .list_open_task_blocker_ids(&item.id)
@@ -492,6 +500,7 @@ impl MobileApi {
             worktree_path,
             latest_run,
             resolved_model,
+            resolved_effort,
             blocked_by_task_ids,
         )))
     }
@@ -542,6 +551,9 @@ pub fn record_orphaned_initialized_tasks(db: &Db) -> Result<bool, String> {
             model: already_recorded
                 .as_ref()
                 .and_then(|run| run.model.as_deref()),
+            effort: already_recorded
+                .as_ref()
+                .and_then(|run| run.effort.as_deref()),
             status: "failed",
             result: Some(&result),
             feedback: Some("worktree missing"),
@@ -616,6 +628,7 @@ fn map_task_detail(
     worktree_path: Option<String>,
     latest_run: Option<crate::db::StageRun>,
     resolved_model: Option<String>,
+    resolved_effort: Option<String>,
     blocked_by_task_ids: Vec<String>,
 ) -> TaskDetail {
     let prompt = item.prompt.clone();
@@ -674,6 +687,7 @@ fn map_task_detail(
         agent_type: item.agent_type,
         agent_provider: item.agent_provider,
         model: resolved_model,
+        effort: resolved_effort,
         branch: item.branch,
         pr_url: item.pr_url,
         closed_at: item.closed_at,
@@ -690,8 +704,12 @@ fn map_task_detail(
 }
 
 fn model_from_spawn_options(raw: Option<&str>) -> Option<String> {
+    spawn_option_from_json(raw, "model")
+}
+
+fn spawn_option_from_json(raw: Option<&str>, key: &str) -> Option<String> {
     raw.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|options| options.get("model")?.as_str().map(str::to_string))
+        .and_then(|options| options.get(key)?.as_str().map(str::to_string))
 }
 
 fn map_task_latest_run(run: crate::db::StageRun) -> TaskLatestRun {
@@ -1440,6 +1458,7 @@ mod tests {
             agent: Some("review-security"),
             agent_provider: Some("claude"),
             model: None,
+            effort: None,
             status: "running",
             result: None,
             feedback: None,

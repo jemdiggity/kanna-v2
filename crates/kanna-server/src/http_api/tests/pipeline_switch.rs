@@ -246,6 +246,7 @@ async fn mid_run_switch_keeps_the_live_run_and_session_for_the_next_transition()
             agent: Some("review"),
             agent_provider: Some("claude"),
             model: None,
+            effort: None,
             status: "running",
             result: None,
             feedback: None,

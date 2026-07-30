@@ -318,6 +318,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             agent: prepared.stage_agent.as_deref(),
             agent_provider: Some(prepared.agent_provider.as_str()),
             model: prepared.model.as_deref(),
+            effort: prepared.effort.as_deref(),
             status: "running",
             result: None,
             feedback: prepared.feedback.as_deref(),
@@ -363,6 +364,7 @@ fn record_stage_transition_failure(
                 agent: prepared.stage_agent.as_deref(),
                 agent_provider: Some(prepared.agent_provider.as_str()),
                 model: prepared.model.as_deref(),
+                effort: prepared.effort.as_deref(),
                 status: "failed",
                 result: Some(&result),
                 feedback: prepared.feedback.as_deref(),
@@ -562,11 +564,12 @@ pub(crate) async fn dispatch_prepared_post_for_api(
                 .map_err(|e| format!("db error: {}", e))?;
             // The post continues the inherited run's live agent session, so
             // its provider session id and cwd carry over too.
-            let (agent, agent_provider, model, provider_session_id, cwd) = match inherited {
+            let (agent, agent_provider, model, effort, provider_session_id, cwd) = match inherited {
                 Some(run) => (
                     run.agent,
                     run.agent_provider,
                     run.model,
+                    run.effort,
                     run.provider_session_id,
                     run.cwd,
                 ),
@@ -574,6 +577,7 @@ pub(crate) async fn dispatch_prepared_post_for_api(
                     prepared.fallback.stage_agent.clone(),
                     Some(prepared.fallback.agent_provider.clone()),
                     prepared.fallback.model.clone(),
+                    prepared.fallback.effort.clone(),
                     None,
                     Some(prepared.fallback.cwd.clone()),
                 ),
@@ -588,6 +592,7 @@ pub(crate) async fn dispatch_prepared_post_for_api(
                     agent: agent.as_deref(),
                     agent_provider: agent_provider.as_deref(),
                     model: model.as_deref(),
+                    effort: effort.as_deref(),
                     status: "running",
                     result: None,
                     feedback: None,
@@ -625,6 +630,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     let stage_agent = prepared.stage_agent.clone();
     let agent_provider = prepared.agent_provider.clone();
     let model = prepared.model.clone();
+    let effort = prepared.effort.clone();
     let completion_transition = prepared.completion_transition;
     let provider_session_id = prepared.provider_session_id.clone();
     let cwd = prepared.cwd.clone();
@@ -636,6 +642,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
         stage_agent.as_deref(),
         &agent_provider,
         model.as_deref(),
+        effort.as_deref(),
         &session_id,
         provider_session_id.as_deref(),
         &cwd,
@@ -686,6 +693,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
                 stage_agent.as_deref(),
                 &agent_provider,
                 model.as_deref(),
+                effort.as_deref(),
                 completion_transition.as_str(),
                 &session_id,
                 provider_session_id.as_deref(),
@@ -802,6 +810,7 @@ fn spawn_session_command(
             agent_provider,
             prompt,
             model,
+            effort,
             permission_mode,
             allowed_tools,
             disallowed_tools,
@@ -818,6 +827,7 @@ fn spawn_session_command(
                 cwd,
                 env,
                 model,
+                effort,
                 permission_mode,
                 allowed_tools,
                 disallowed_tools,
@@ -848,6 +858,7 @@ fn record_spawned_stage_run(db_path: &str, prepared: &PreparedTaskSpawn) -> Resu
                 agent: prepared.stage_agent.as_deref(),
                 agent_provider: Some(prepared.agent_provider.as_str()),
                 model: prepared.model.as_deref(),
+                effort: prepared.effort.as_deref(),
                 status: "running",
                 result: None,
                 feedback: None,
@@ -885,6 +896,7 @@ fn record_prepared_task_spawn_failure(
         agent: prepared.stage_agent.as_deref(),
         agent_provider: Some(prepared.agent_provider.as_str()),
         model: prepared.model.as_deref(),
+        effort: prepared.effort.as_deref(),
         status: "failed",
         result: Some(&result),
         feedback: Some("task spawn failed"),
@@ -905,6 +917,7 @@ fn record_rerun_stage_run(
     stage_agent: Option<&str>,
     agent_provider: &str,
     model: Option<&str>,
+    effort: Option<&str>,
     completion_transition: &str,
     session_id: &str,
     provider_session_id: Option<&str>,
@@ -925,6 +938,7 @@ fn record_rerun_stage_run(
                 agent: stage_agent,
                 agent_provider: Some(agent_provider),
                 model,
+                effort,
                 status: "running",
                 result: None,
                 feedback: None,
@@ -949,6 +963,7 @@ fn record_rerun_stage_failure(
     stage_agent: Option<&str>,
     agent_provider: &str,
     model: Option<&str>,
+    effort: Option<&str>,
     session_id: &str,
     provider_session_id: Option<&str>,
     cwd: &str,
@@ -971,6 +986,7 @@ fn record_rerun_stage_failure(
         agent: stage_agent,
         agent_provider: Some(agent_provider),
         model,
+        effort,
         status: "failed",
         result: Some(&result),
         feedback: Some("stage rerun failed"),

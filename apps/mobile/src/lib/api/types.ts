@@ -100,6 +100,7 @@ export interface CreateTaskRequest {
   agentProvider?: string;
   agentType?: "pty" | "agent";
   model?: string;
+  effort?: string;
   permissionMode?: string;
   allowedTools?: string[];
   terminalCols?: number;
@@ -222,6 +223,8 @@ export interface TaskDetail extends TaskSummary {
   stageTransition?: string | null;
   /** Resolved model used by the latest stage run. */
   model?: string | null;
+  /** Resolved provider-native reasoning effort used by the latest stage run. */
+  effort?: string | null;
   branch?: string | null;
   prUrl?: string | null;
   closedAt?: string | null;

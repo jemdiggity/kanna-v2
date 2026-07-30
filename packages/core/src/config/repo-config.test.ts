@@ -104,13 +104,14 @@ describe("parseRepoConfig", () => {
     });
   });
 
-  it("parses repo agent provider and model preferences", () => {
+  it("parses repo agent provider, model, and effort preferences", () => {
     const config = parseRepoConfig(JSON.stringify({
       agentProviders: {
         review: "codex",
         "review-*": {
           provider: ["codex", "claude"],
           model: "gpt-5",
+          effort: "high",
         },
       },
     }));
@@ -120,6 +121,7 @@ describe("parseRepoConfig", () => {
       "review-*": {
         provider: ["codex", "claude"],
         model: "gpt-5",
+        effort: "high",
       },
     });
   });

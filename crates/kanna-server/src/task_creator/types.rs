@@ -21,6 +21,7 @@ pub(super) struct TaskCreationRequest {
     pub(super) agent_type: Option<String>,
     pub(super) initial_terminal_geometry: Option<(u16, u16)>,
     pub(super) model: Option<String>,
+    pub(super) effort: Option<String>,
     pub(super) permission_mode: Option<String>,
     pub(super) allowed_tools: Vec<String>,
     pub(super) disallowed_tools: Vec<String>,
@@ -83,6 +84,7 @@ pub(crate) struct PreparedTaskSpawn {
     pub(super) stage_agent: Option<String>,
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
+    pub(super) effort: Option<String>,
     pub(super) completion_transition: PipelineStageTransition,
     /// The agent CLI's own session id assigned at spawn (Claude or Copilot
     /// PTY); recorded on the stage run so a later recovery can resume it.
@@ -110,6 +112,7 @@ pub(crate) enum PreparedSessionSpawn {
         agent_provider: DaemonAgentProvider,
         prompt: String,
         model: Option<String>,
+        effort: Option<String>,
         permission_mode: Option<String>,
         allowed_tools: Vec<String>,
         disallowed_tools: Vec<String>,
@@ -160,6 +163,7 @@ pub(crate) struct PreparedStageRerun {
     pub(super) stage_agent: Option<String>,
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
+    pub(super) effort: Option<String>,
     pub(super) completion_transition: PipelineStageTransition,
     pub(super) provider_session_id: Option<String>,
     pub(super) cwd: String,
@@ -238,6 +242,7 @@ pub(crate) struct PreparedStageRunSpawn {
     pub(super) stage_agent: Option<String>,
     pub(super) agent_provider: String,
     pub(super) model: Option<String>,
+    pub(super) effort: Option<String>,
     pub(super) completion_transition: PipelineStageTransition,
     pub(super) feedback: Option<String>,
     /// The agent CLI's own session id this run starts (fresh assign) or
@@ -269,6 +274,7 @@ pub(super) struct DeferredStageSetup {
     pub(super) pipeline_name: String,
     pub(super) final_prompt: String,
     pub(super) model: Option<String>,
+    pub(super) effort: Option<String>,
     pub(super) permission_mode: Option<String>,
     pub(super) allowed_tools: Vec<String>,
     pub(super) mcp_config_path: Option<String>,

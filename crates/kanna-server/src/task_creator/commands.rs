@@ -2,7 +2,7 @@ use super::provider::AgentProvider;
 use kanna_agent_protocol::mcp::{
     codex_mcp_config_overrides, opencode_mcp_config_content, read_kanna_mcp_server,
 };
-use kanna_agent_protocol::prompt_with_system_prompt;
+use kanna_agent_protocol::{prompt_with_system_prompt, EffortOverride};
 use std::path::Path;
 
 /// How a PTY spawn binds to the provider CLI's durable conversation store.
@@ -17,6 +17,7 @@ pub(super) fn build_agent_command(
     executable: &str,
     prompt: &str,
     model: Option<&str>,
+    effort: Option<&str>,
     permission_mode: Option<&str>,
     allowed_tools: &[String],
     disallowed_tools: &[String],
@@ -47,6 +48,7 @@ pub(super) fn build_agent_command(
             if let Some(model) = model {
                 flags.push(format!("--model '{}'", shell_single_quote(model)));
             }
+            extend_effort_flags(*provider, &mut flags, effort);
             if !allowed_tools.is_empty() {
                 flags.push(format!("--allowedTools {}", allowed_tools.join(",")));
             }
@@ -106,6 +108,7 @@ pub(super) fn build_agent_command(
             if let Some(model) = model {
                 flags.push(format!("--model='{}'", shell_single_quote(model)));
             }
+            extend_effort_flags(*provider, &mut flags, effort);
             if !allowed_tools.is_empty() {
                 for tool in allowed_tools {
                     flags.push(format!("--allow-tool={}", tool));
@@ -124,6 +127,7 @@ pub(super) fn build_agent_command(
             if let Some(model) = model {
                 flags.push(format!("-m '{}'", shell_single_quote(model)));
             }
+            extend_effort_flags(*provider, &mut flags, effort);
             match provider_session {
                 Some(ProviderSessionBinding::Resume(session_id)) => format!(
                     "{executable} {} resume '{}' '{}'",
@@ -139,6 +143,7 @@ pub(super) fn build_agent_command(
             if let Some(model) = model {
                 flags.push(format!("-m '{}'", shell_single_quote(model)));
             }
+            extend_effort_flags(*provider, &mut flags, effort);
             let mut parts = vec![
                 executable.clone(),
                 "run".to_string(),
@@ -163,6 +168,7 @@ pub(super) fn build_agent_command(
                 model.is_none(),
                 "antigravity model override was not rejected"
             );
+            extend_effort_flags(*provider, &mut flags, effort);
             let mut setup = Vec::new();
             if let Some(worktree_path) = worktree_path {
                 let alias_base = "/tmp/kanna-antigravity-workspaces";
@@ -188,6 +194,24 @@ pub(super) fn build_agent_command(
             }
             setup.push(parts.join(" "));
             setup.join(" && ")
+        }
+    }
+}
+
+fn extend_effort_flags(provider: AgentProvider, flags: &mut Vec<String>, effort: Option<&str>) {
+    let Some(effort) = effort else {
+        return;
+    };
+    match provider.effort_override() {
+        EffortOverride::Flag(flag) => {
+            flags.push(format!("{flag} '{}'", shell_single_quote(effort)));
+        }
+        EffortOverride::Config(key) => {
+            flags.push(format!(
+                "-c '{}=\"{}\"'",
+                shell_single_quote(key),
+                shell_single_quote(effort)
+            ));
         }
     }
 }

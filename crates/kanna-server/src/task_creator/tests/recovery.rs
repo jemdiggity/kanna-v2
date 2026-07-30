@@ -61,6 +61,7 @@ fn init_recovery_fixture(label: &str) -> (std::path::PathBuf, Config, Db) {
         agent: None,
         agent_provider: Some("claude"),
         model: None,
+        effort: None,
         status: "running",
         result: None,
         feedback: None,

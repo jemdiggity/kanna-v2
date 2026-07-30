@@ -774,6 +774,7 @@ fn agent_params(script: &Path, prompt: &str) -> AgentSpawnParams {
             .to_string(),
         env: HashMap::new(),
         model: None,
+        effort: None,
         permission_mode: None,
         allowed_tools: Vec::new(),
         disallowed_tools: Vec::new(),
