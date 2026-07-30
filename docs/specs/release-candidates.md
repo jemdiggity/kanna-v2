@@ -149,14 +149,16 @@ about a build that already proved itself, not a project.
   `--branch main|release/X.Y` to declare RC provenance explicitly from Kanna
   task worktrees (which always run on `task-*` branches).
 
-The shipping agent (`.kanna/tasks/ship/agent.md`) owns the process end to end:
+The shipping agent (`.kanna/agents/ship/AGENT.md`) owns the process end to end;
+the command-palette task is only an interactive wrapper around that definition:
 cutting branches, shipping RCs, applying release-candidate backports
 (cherry-pick from main, test, push, re-RC), promoting, and merging back.
 Promoting production remains a human decision: agents may cut branches, ship
-staging RCs, backport, and run `release status` freely, but must not run
-`kd release promote` (or `release_ship --production --release`) without an
-explicit human request for that promotion, matching the mobile OTA production
-rule.
+staging RCs, and push backports only after explicit authorization; an
+unauthorized programmatic launch is limited to status plus a staging dry-run.
+They must not run `kd release promote` (or
+`release_ship --production --release`) without a named human request for
+production, matching the mobile OTA production rule.
 
 ## Test coverage
 

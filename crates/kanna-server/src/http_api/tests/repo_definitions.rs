@@ -452,7 +452,7 @@ async fn list_agents_reports_the_resolved_repo_override_that_task_creation_uses(
     assert_eq!(ship["description"], "Ships the product");
     assert_eq!(ship["defaultProvider"], "claude");
     assert!(ship["defaultModel"].is_null());
-    assert_eq!(ship["source"], "repo_authored");
+    assert_eq!(ship["source"], "repo_override");
 
     let review = agents
         .iter()
