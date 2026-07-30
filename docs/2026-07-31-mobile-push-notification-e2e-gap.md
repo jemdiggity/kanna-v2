@@ -5,9 +5,11 @@ of its external boundary:
 
 - `kanna-server` drives the real local HTTP endpoint through its relay loop and
   asserts the capability-gated WebSocket publish and delivery acknowledgment.
-- `services/relay` asserts that a registered user's devices receive the typed,
-  versioned Firebase Cloud Messaging payload and that invalid tokens are
-  retired.
+- `services/relay` drives authenticated push registration and unregistration
+  through the HTTP routes, and drives desktop-secret WebSocket publication
+  through notification parsing and the Firestore device lookup. Unit coverage
+  asserts that registered devices receive the typed, versioned Firebase Cloud
+  Messaging payload and that invalid tokens are retired.
 - `apps/mobile` asserts authenticated token registration, token refresh,
   sign-out cleanup, unknown-payload tolerance, and task-tap identity
   resolution.

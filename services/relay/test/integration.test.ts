@@ -33,6 +33,10 @@ function healthUrl(): string {
   return `http://localhost:${relayPort}/health`;
 }
 
+function relayHttpUrl(path: string): string {
+  return `http://localhost:${relayPort}${path}`;
+}
+
 /**
  * Helper: wait for the relay's /health endpoint to respond 200.
  * Polls every 200ms for up to `timeoutMs`.
@@ -545,6 +549,77 @@ describe("Relay integration", () => {
     await closeAndWait(ws);
   });
 
+  it("registers and unregisters authenticated mobile push devices", async () => {
+    const deviceId = "relay-integration-push-device";
+    const deviceToken = "relay-integration-fcm-token";
+    const pushDeviceRef = testFirestore.doc(
+      `users/${TEST_USER_ID}/pushDevices/${sha256Hex(deviceId)}`,
+    );
+    await pushDeviceRef.delete();
+
+    try {
+      const invalidRegister = await fetch(relayHttpUrl("/push/register"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          idToken: "invalid-phone-token",
+          deviceId,
+          deviceToken,
+        }),
+      });
+      expect(invalidRegister.status).toBe(401);
+
+      const missingRegisterField = await fetch(relayHttpUrl("/push/register"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken, deviceId }),
+      });
+      expect(missingRegisterField.status).toBe(400);
+
+      const register = await fetch(relayHttpUrl("/push/register"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken, deviceId, deviceToken }),
+      });
+      expect(register.status).toBe(200);
+      expect(await register.json()).toEqual({ ok: true });
+      expect((await pushDeviceRef.get()).data()).toEqual({
+        deviceId,
+        token: deviceToken,
+        updatedAt: expect.any(String),
+      });
+
+      const invalidUnregister = await fetch(relayHttpUrl("/push/unregister"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          idToken: "invalid-phone-token",
+          deviceId,
+        }),
+      });
+      expect(invalidUnregister.status).toBe(401);
+      expect((await pushDeviceRef.get()).exists).toBe(true);
+
+      const missingUnregisterField = await fetch(relayHttpUrl("/push/unregister"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken }),
+      });
+      expect(missingUnregisterField.status).toBe(400);
+
+      const unregister = await fetch(relayHttpUrl("/push/unregister"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken, deviceId }),
+      });
+      expect(unregister.status).toBe(200);
+      expect(await unregister.json()).toEqual({ ok: true });
+      expect((await pushDeviceRef.get()).exists).toBe(false);
+    } finally {
+      await pushDeviceRef.delete();
+    }
+  });
+
   it("rejects a same-account legacy device token publishing as another desktop", async () => {
     const desktopRef = testFirestore.doc(
       `users/${TEST_USER_ID}/desktops/${SECRET_DESKTOP_ID}`,
@@ -573,6 +648,62 @@ describe("Relay integration", () => {
     expect((await desktopRef.collection("tasks").get()).docs.map((doc) => doc.id).sort())
       .toEqual(beforeTaskIds);
     await closeAndWait(ws);
+  });
+
+  it("routes mobile notification publishes only from desktop-secret servers", async () => {
+    const pushDevicesRef = testFirestore.collection(
+      `users/${TEST_USER_ID}/pushDevices`,
+    );
+    await testFirestore.recursiveDelete(pushDevicesRef);
+
+    const { ws: desktopServer } = await connectAndAuth({
+      desktop_id: SECRET_DESKTOP_ID,
+      desktop_secret: SECRET_DESKTOP_SECRET,
+    });
+    const desktopAck = waitForMessage(desktopServer, (message) =>
+      message.type === "mobile_notification_ack" && message.id === "notify-desktop");
+    desktopServer.send(JSON.stringify({
+      type: "mobile_notification_publish",
+      id: "notify-desktop",
+      notification: {
+        title: "Staging shipped",
+        body: "The staging deployment completed.",
+        taskId: "task-mobile-notification",
+      },
+    }));
+    await expect(desktopAck).resolves.toMatchObject({
+      type: "mobile_notification_ack",
+      id: "notify-desktop",
+      ok: true,
+      delivery: {
+        acceptedCount: 0,
+        failedCount: 0,
+      },
+    });
+    await closeAndWait(desktopServer);
+
+    const { ws: legacyServer } = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: SECRET_DESKTOP_ID,
+    });
+    const legacyAck = waitForMessage(legacyServer, (message) =>
+      message.type === "mobile_notification_ack" && message.id === "notify-legacy");
+    legacyServer.send(JSON.stringify({
+      type: "mobile_notification_publish",
+      id: "notify-legacy",
+      notification: {
+        title: "Staging shipped",
+        body: "The staging deployment completed.",
+        taskId: "task-mobile-notification",
+      },
+    }));
+    await expect(legacyAck).resolves.toMatchObject({
+      type: "mobile_notification_ack",
+      id: "notify-legacy",
+      ok: false,
+      error: expect.stringContaining("desktop-secret"),
+    });
+    await closeAndWait(legacyServer);
   });
 
   it("authenticates a desktop and clears its transfer capability when the session disconnects", async () => {
