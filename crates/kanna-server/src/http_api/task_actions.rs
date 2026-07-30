@@ -19,6 +19,18 @@ fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
     }
 }
 
+fn resume_action_error_status(error: &str) -> axum::http::StatusCode {
+    if error.starts_with("task is closed:")
+        || error.starts_with("task has no stage run to resume:")
+        || error.starts_with("latest run is ")
+        || error.starts_with("latest interrupted run is not the task's current stage:")
+    {
+        axum::http::StatusCode::CONFLICT
+    } else {
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct AdvanceStageRequest {
@@ -31,18 +43,16 @@ pub(super) async fn resolve_task_id_for_mutation(
 ) -> Result<String, (axum::http::StatusCode, String)> {
     let state = Arc::clone(state);
     let task_or_branch_id = task_or_branch_id.to_string();
-    Ok(
-        super::blocking::run_handler_blocking("task mutation identity", move || {
-            let db = Db::open(&state.config.db_path).map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("db error: {}", e),
-                )
-            })?;
-            resolve_existing_task_id(&db, &task_or_branch_id)
-        })
-        .await?,
-    )
+    super::blocking::run_handler_blocking("task mutation identity", move || {
+        let db = Db::open(&state.config.db_path).map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {}", e),
+            )
+        })?;
+        resolve_existing_task_id(&db, &task_or_branch_id)
+    })
+    .await
 }
 
 pub(super) async fn run_merge_agent(
@@ -1021,6 +1031,85 @@ fn execute_stage_transition_detached_holding(
             );
         }
     });
+}
+
+pub(super) async fn resume_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
+    let task_mutation = state.begin_requested_task_mutation(&task_id).await;
+    let prepared = {
+        let state = Arc::clone(&state);
+        let task_id = task_id.clone();
+        super::blocking::run_handler_blocking("task resume prepare", move || {
+            let db = Db::open(&state.config.db_path).map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {error}"),
+                )
+            })?;
+            crate::task_creator::prepare_resume_task_for_api(&db, &state.config, &task_id)
+                .map_err(|error| (resume_action_error_status(&error), error))
+        })
+        .await?
+    };
+    match crate::task_creator::daemon_session_presence(
+        &state.config.daemon_dir,
+        prepared.session_id(),
+    )
+    .await
+    {
+        crate::task_creator::DaemonSessionPresence::Present => {
+            let db_path = state.config.db_path.clone();
+            let restore_task_id = task_id.clone();
+            let restored = super::blocking::run_handler_blocking(
+                "task resume live-session reconciliation",
+                move || {
+                    crate::http_api::restore_task_run_for_live_session(&db_path, &restore_task_id)
+                        .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))
+                },
+            )
+            .await?;
+            if restored {
+                log::warn!(
+                    "resume request found live daemon session for {task_id}; restored interrupted run instead of spawning"
+                );
+                state.publish_state_changed(StateChangeScope::Tasks);
+                return Ok(Json(crate::mobile_api::TaskActionResponse {
+                    task_id,
+                    follow_task: None,
+                    revision_budget: None,
+                }));
+            }
+            return Err((
+                axum::http::StatusCode::CONFLICT,
+                format!("task session is still alive: {task_id}"),
+            ));
+        }
+        crate::task_creator::DaemonSessionPresence::Unknown => {
+            return Err((
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                format!("could not verify that task session is dead: {task_id}"),
+            ));
+        }
+        crate::task_creator::DaemonSessionPresence::Absent => {}
+    }
+    execute_stage_transition_detached_holding(
+        Arc::clone(&state),
+        task_id.clone(),
+        crate::task_creator::PreparedStageTransition::Run(Box::new(prepared)),
+        StageTransitionOwnership {
+            task_mutation: Some(task_mutation),
+            requested_operation: None,
+        },
+    );
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(crate::mobile_api::TaskActionResponse {
+        task_id,
+        follow_task: None,
+        revision_budget: None,
+    }))
 }
 
 pub(super) async fn rerun_stage(

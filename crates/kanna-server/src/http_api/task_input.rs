@@ -7,6 +7,9 @@ use kanna_agent_protocol::StateChangeScope;
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 use std::sync::Arc;
 
+pub(crate) const SESSION_INTERRUPTION_FEEDBACK: &str =
+    "session ended without a recorded stage verdict";
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TaskInputRequest {
@@ -219,17 +222,19 @@ pub(crate) async fn handle_task_terminal_state(
     task_id: &str,
     exit_code: i32,
 ) -> Result<(), String> {
-    let pipeline_item_id = {
-        let db = Db::open(&state.config.db_path).map_err(|e| format!("db error: {}", e))?;
-        let Some(pipeline_item_id) = db
-            .resolve_pipeline_item_id(task_id)
-            .map_err(|e| format!("db error: {}", e))?
-        else {
-            return Ok(());
-        };
-        db.update_pipeline_item_activity(&pipeline_item_id, "unread")
-            .map_err(|e| format!("db error: {}", e))?;
-        pipeline_item_id
+    let interrupted_status = if exit_code == 0 {
+        "cancelled"
+    } else {
+        "failed"
+    };
+    let result = format!(
+        "agent session exited before recording a stage verdict (exit code {exit_code}); \
+         use kanna_resume_task to recover provider context"
+    );
+    let Some(pipeline_item_id) =
+        mark_task_session_interrupted(&state.config.db_path, task_id, interrupted_status, &result)?
+    else {
+        return Ok(());
     };
     state.publish_state_changed(StateChangeScope::Tasks);
     notify_task_completion(
@@ -238,6 +243,46 @@ pub(crate) async fn handle_task_terminal_state(
         TaskCompletionTrigger::AgentSessionExit { exit_code },
     )
     .await
+}
+
+pub(crate) fn mark_task_session_interrupted(
+    db_path: &str,
+    task_or_session_id: &str,
+    status: &str,
+    reason: &str,
+) -> Result<Option<String>, String> {
+    let db = Db::open(db_path).map_err(|error| format!("db error: {error}"))?;
+    let Some(task_id) = db
+        .resolve_pipeline_item_id(task_or_session_id)
+        .map_err(|error| format!("db error: {error}"))?
+    else {
+        return Ok(None);
+    };
+    db.update_pipeline_item_activity(&task_id, "unread")
+        .map_err(|error| format!("db error: {error}"))?;
+    db.finish_latest_running_stage_run(
+        &task_id,
+        status,
+        Some(reason),
+        Some(SESSION_INTERRUPTION_FEEDBACK),
+    )
+    .map_err(|error| format!("db error: {error}"))?;
+    Ok(Some(task_id))
+}
+
+pub(crate) fn restore_task_run_for_live_session(
+    db_path: &str,
+    task_or_session_id: &str,
+) -> Result<bool, String> {
+    let db = Db::open(db_path).map_err(|error| format!("db error: {error}"))?;
+    let Some(task_id) = db
+        .resolve_pipeline_item_id(task_or_session_id)
+        .map_err(|error| format!("db error: {error}"))?
+    else {
+        return Ok(false);
+    };
+    db.restore_latest_interrupted_stage_run(&task_id, SESSION_INTERRUPTION_FEEDBACK)
+        .map_err(|error| format!("db error: {error}"))
 }
 
 pub(super) async fn notify_task_completion(

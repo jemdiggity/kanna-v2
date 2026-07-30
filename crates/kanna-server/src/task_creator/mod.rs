@@ -56,17 +56,19 @@ pub(crate) use definitions::ResolvedAgentDefinition;
 pub(crate) use definitions::DEFAULT_REVISION_LIMIT;
 pub(crate) use environment::warm_login_shell_path;
 pub(crate) use lifecycle::{
-    dispatch_prepared_post_for_api, kill_session_replacing, prepared_task_id,
-    rerun_prepared_stage_for_api, rollback_prepared_task_for_api, spawn_prepared_stage_run_for_api,
-    spawn_prepared_task_for_api_recording_stage_run, spawn_prepared_task_for_api_with_diagnostics,
-    spawn_prepared_workspace_teardown_best_effort,
+    daemon_session_presence, dispatch_prepared_post_for_api, kill_session_replacing,
+    prepared_task_id, rerun_prepared_stage_for_api, rollback_prepared_task_for_api,
+    spawn_prepared_stage_run_for_api, spawn_prepared_task_for_api_recording_stage_run,
+    spawn_prepared_task_for_api_with_diagnostics, spawn_prepared_workspace_teardown_best_effort,
+    DaemonSessionPresence,
 };
 pub(crate) use merge::prepare_merge_agent_for_api;
 pub use merge::run_merge_agent;
 pub(crate) use prompt::RevisionRound;
 pub(crate) use stages::{
-    prepare_advance_stage_for_api, prepare_revision_task_for_api, prepare_stage_completion_for_api,
-    resolve_revision_budget, resolve_revision_limit, resolve_stage_transition, RevisionBudget,
+    prepare_advance_stage_for_api, prepare_resume_task_for_api, prepare_revision_task_for_api,
+    prepare_stage_completion_for_api, resolve_revision_budget, resolve_revision_limit,
+    resolve_stage_transition, RevisionBudget,
 };
 pub(crate) use worktree::resolve_current_source_worktree_branch;
 
@@ -845,7 +847,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         resolve_agent_type(source_agent_type, provider_candidates[0])?;
     }
 
-    let (workspace, claude_resume, resumed_from_run_id) = match workspace_spec {
+    let (workspace, resume_session_id, resumed_from_run_id) = match workspace_spec {
         RunWorkspaceSpec::Fork {
             branch: fork_branch,
         } => {
@@ -967,7 +969,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             &worktree_path,
             &setup,
             !setup.is_empty(),
-            claude_resume.as_deref(),
+            resume_session_id.as_deref(),
         )?;
         let deferred_setup = (!setup.is_empty()).then(|| DeferredStageSetup {
             commands: setup,
@@ -979,7 +981,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             permission_mode,
             allowed_tools,
             mcp_config_path,
-            claude_resume: claude_resume.clone(),
+            resume_session_id: resume_session_id.clone(),
         });
         let session_id = db
             .resolve_task_terminal_session_id(task_id)
@@ -1034,6 +1036,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         feedback,
         provider_session_id,
         resumed_from_run_id,
+        resume_fallback_reason: None,
         cwd: worktree_path,
         env: spawn_env,
         terminal_prelude: None,
@@ -1111,7 +1114,7 @@ pub(crate) fn finish_deferred_stage_setup(
         &prepared.cwd,
         &[],
         false,
-        deferred.claude_resume.as_deref(),
+        deferred.resume_session_id.as_deref(),
     )?;
     prepared.agent_provider = provider.as_str().to_string();
     prepared.provider_session_id = provider_session_id;
@@ -1343,11 +1346,10 @@ fn stage_environment_teardown(
         .unwrap_or_default()
 }
 
-/// Build the daemon spawn for a stage run's agent session. For Claude PTY
-/// sessions the returned string is the run's provider session id: a fresh
-/// spawn assigns a new UUID (`--session-id`) and a revision resume reopens
-/// `claude_resume` (`--resume`). Other providers/session types return `None`
-/// — their sessions have no Kanna-known resume handle on this path.
+/// Build the daemon spawn for a stage run's agent session. Claude and Copilot
+/// PTY sessions get a Kanna-assigned id; Claude, Copilot, Codex, and OpenCode
+/// can reopen a recorded id. Headless recovery is deliberately unsupported
+/// here and falls back to a fresh spawn.
 #[allow(clippy::too_many_arguments)]
 fn build_prepared_session(
     provider: AgentProvider,
@@ -1368,7 +1370,7 @@ fn build_prepared_session(
     worktree_path: &str,
     setup: &[String],
     defer_headless_setup: bool,
-    claude_resume: Option<&str>,
+    resume_session_id: Option<&str>,
 ) -> Result<(PreparedSessionSpawn, Option<String>), String> {
     validate_provider_model(provider, model.as_deref())?;
     Ok(match agent_type {
@@ -1398,18 +1400,26 @@ fn build_prepared_session(
                 }
                 provider.executable().to_string()
             };
-            let claude_session = match (provider, claude_resume) {
-                (AgentProvider::Claude, Some(session_id)) => Some(
-                    commands::ClaudeSessionBinding::Resume(session_id.to_string()),
-                ),
-                (AgentProvider::Claude, None) => Some(commands::ClaudeSessionBinding::Assign(
-                    worktree::generate_agent_session_uuid()?,
+            let provider_session = match (provider, resume_session_id) {
+                (
+                    AgentProvider::Claude
+                    | AgentProvider::Copilot
+                    | AgentProvider::Codex
+                    | AgentProvider::Opencode,
+                    Some(session_id),
+                ) => Some(commands::ProviderSessionBinding::Resume(
+                    session_id.to_string(),
                 )),
+                (AgentProvider::Claude | AgentProvider::Copilot, None) => {
+                    Some(commands::ProviderSessionBinding::Assign(
+                        worktree::generate_agent_session_uuid()?,
+                    ))
+                }
                 _ => None,
             };
-            let provider_session_id = claude_session.as_ref().map(|binding| match binding {
-                commands::ClaudeSessionBinding::Assign(session_id)
-                | commands::ClaudeSessionBinding::Resume(session_id) => session_id.clone(),
+            let provider_session_id = provider_session.as_ref().map(|binding| match binding {
+                commands::ProviderSessionBinding::Assign(session_id)
+                | commands::ProviderSessionBinding::Resume(session_id) => session_id.clone(),
             });
             let preamble = build_kanna_preamble(
                 &provider,
@@ -1432,7 +1442,7 @@ fn build_prepared_session(
                 Some(&preamble),
                 mcp_config_path.as_deref(),
                 Some(worktree_path),
-                claude_session.as_ref(),
+                provider_session.as_ref(),
             );
             let full_cmd = build_task_shell_command(
                 &agent_cmd,

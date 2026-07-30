@@ -355,6 +355,16 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Recover a dead task session, preserving provider context when possible
+    Resume {
+        /// The task/pipeline_item ID to resume
+        #[arg(long)]
+        task_id: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Mark a task as blocked by one or more tasks
     Block {
         /// The task/pipeline_item ID to block

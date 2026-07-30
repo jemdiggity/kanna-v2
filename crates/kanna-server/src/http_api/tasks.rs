@@ -274,9 +274,13 @@ pub(super) async fn create_task_with_requested_id(
     enum PreparedCreateOutcome {
         Done(crate::mobile_api::CreateTaskResponse),
         DormantCreated(crate::mobile_api::CreateTaskResponse),
-        Repair {
+        RepairFresh {
             existing: crate::mobile_api::CreateTaskResponse,
             prepared: crate::task_creator::PreparedStageRerun,
+        },
+        RepairResume {
+            existing: crate::mobile_api::CreateTaskResponse,
+            prepared: Box<crate::task_creator::PreparedStageRunSpawn>,
         },
         Spawn {
             prepared: crate::task_creator::PreparedTaskSpawn,
@@ -310,22 +314,49 @@ pub(super) async fn create_task_with_requested_id(
                             &state.config,
                             task_id,
                         )
-                        .and_then(|prepared| {
-                            prepared.map(Ok).unwrap_or_else(|| {
-                                crate::task_creator::prepare_rerun_stage_for_api(
-                                    &db,
-                                    &state.config,
-                                    task_id,
-                                )
-                            })
-                        })
                         .map_err(|error| {
                             (
                                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                                 format!("task spawn repair prepare failed: {error}"),
                             )
                         })?;
-                        return Ok(PreparedCreateOutcome::Repair { existing, prepared });
+                        if let Some(prepared) = prepared {
+                            return Ok(PreparedCreateOutcome::RepairFresh { existing, prepared });
+                        }
+                        let latest = db
+                            .latest_stage_run(task_id)
+                            .map_err(|error| db_write_error("db error", error))?;
+                        if latest.as_ref().is_some_and(|run| {
+                            matches!(run.status.as_str(), "cancelled" | "failed")
+                        }) {
+                            let prepared = crate::task_creator::prepare_resume_task_for_api(
+                                &db,
+                                &state.config,
+                                task_id,
+                            )
+                            .map_err(|error| {
+                                (
+                                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                    format!("task resume repair prepare failed: {error}"),
+                                )
+                            })?;
+                            return Ok(PreparedCreateOutcome::RepairResume {
+                                existing,
+                                prepared: Box::new(prepared),
+                            });
+                        }
+                        let prepared = crate::task_creator::prepare_rerun_stage_for_api(
+                            &db,
+                            &state.config,
+                            task_id,
+                        )
+                        .map_err(|error| {
+                            (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("task spawn repair prepare failed: {error}"),
+                            )
+                        })?;
+                        return Ok(PreparedCreateOutcome::RepairFresh { existing, prepared });
                     }
                     return Ok(PreparedCreateOutcome::Done(existing));
                 }
@@ -471,7 +502,7 @@ pub(super) async fn create_task_with_requested_id(
             state.publish_state_changed(StateChangeScope::Blockers);
             return Ok(Json(created));
         }
-        PreparedCreateOutcome::Repair { existing, prepared } => {
+        PreparedCreateOutcome::RepairFresh { existing, prepared } => {
             let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
                 .await
                 .map_err(|e| {
@@ -491,6 +522,71 @@ pub(super) async fn create_task_with_requested_id(
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                     format!("task spawn repair failed: {error}"),
+                )
+            })?;
+            state.publish_state_changed(StateChangeScope::Tasks);
+            return Ok(Json(existing));
+        }
+        PreparedCreateOutcome::RepairResume { existing, prepared } => {
+            match crate::task_creator::daemon_session_presence(
+                &state.config.daemon_dir,
+                prepared.session_id(),
+            )
+            .await
+            {
+                crate::task_creator::DaemonSessionPresence::Present => {
+                    let db_path = state.config.db_path.clone();
+                    let repair_task_id = existing.task_id.clone();
+                    let restored = super::blocking::run_handler_blocking(
+                        "task create live-session reconciliation",
+                        move || {
+                            crate::http_api::restore_task_run_for_live_session(
+                                &db_path,
+                                &repair_task_id,
+                            )
+                            .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))
+                        },
+                    )
+                    .await?;
+                    if restored {
+                        log::warn!(
+                            "requested-id repair found live daemon session for {}; restored interrupted run instead of spawning",
+                            existing.task_id
+                        );
+                        state.publish_state_changed(StateChangeScope::Tasks);
+                    }
+                    return Ok(Json(existing));
+                }
+                crate::task_creator::DaemonSessionPresence::Unknown => {
+                    return Err((
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        format!(
+                            "could not verify that task session is dead: {}",
+                            existing.task_id
+                        ),
+                    ));
+                }
+                crate::task_creator::DaemonSessionPresence::Absent => {}
+            }
+            let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
+                .await
+                .map_err(|error| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("daemon error: {error}"),
+                    )
+                })?;
+            crate::task_creator::spawn_prepared_stage_run_for_api(
+                &state.config.db_path,
+                &mut daemon,
+                &state.session_replacements,
+                *prepared,
+            )
+            .await
+            .map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("task resume repair failed: {error}"),
                 )
             })?;
             state.publish_state_changed(StateChangeScope::Tasks);

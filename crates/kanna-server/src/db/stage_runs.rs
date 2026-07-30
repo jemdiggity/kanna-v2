@@ -85,7 +85,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, stage, kind, agent, agent_provider, model, status, result, feedback,
                     session_id, provider_session_id, cwd, resumed_from_run_id,
-                    completion_transition, started_at, finished_at
+                    resume_fallback_reason, completion_transition, started_at, finished_at
              FROM stage_run
              WHERE task_id = ?
              ORDER BY datetime(started_at) ASC, id ASC",
@@ -101,7 +101,7 @@ impl Db {
             .query_row(
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
-                        completion_transition, started_at, finished_at
+                        resume_fallback_reason, completion_transition, started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ?
                  ORDER BY datetime(started_at) DESC, id DESC
@@ -131,7 +131,7 @@ impl Db {
             .query_row(
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
-                        completion_transition, started_at, finished_at
+                        resume_fallback_reason, completion_transition, started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ? AND stage = ? AND kind = 'main'
                    AND provider_session_id IS NOT NULL AND cwd IS NOT NULL
@@ -192,6 +192,76 @@ impl Db {
             )?;
         }
         Ok(())
+    }
+
+    pub fn set_stage_run_resume_fallback_reason(
+        &self,
+        run_id: &str,
+        reason: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE stage_run SET resume_fallback_reason = ? WHERE id = ?",
+            (reason, run_id),
+        )?;
+        if rows_affected == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
+    /// Persist a provider session id learned after spawn (for example Codex's
+    /// terminal footer) on both the task and its latest run. The run record is
+    /// the durable resume source; the pipeline-item field remains the legacy
+    /// current-session mirror.
+    pub fn update_latest_stage_run_provider_session_id(
+        &self,
+        task_id: &str,
+        provider_session_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE stage_run
+             SET provider_session_id = ?
+             WHERE id = (
+               SELECT id FROM stage_run
+               WHERE task_id = ?
+               ORDER BY datetime(started_at) DESC, id DESC
+               LIMIT 1
+             )",
+            (provider_session_id, task_id),
+        )?;
+        self.update_pipeline_item_agent_session_id(task_id, Some(provider_session_id))
+    }
+
+    /// Restore a run that the terminal-loss path marked interrupted when the
+    /// daemon proves the original session is still alive. The feedback marker
+    /// identifies current no-verdict interruptions; legacy bare cancellations
+    /// are also recoverable. A live-but-failed agent verdict is never reopened.
+    pub fn restore_latest_interrupted_stage_run(
+        &self,
+        task_id: &str,
+        interruption_feedback: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE stage_run
+             SET status = 'running', result = NULL, feedback = NULL, finished_at = NULL
+             WHERE id = (
+               SELECT id FROM stage_run
+               WHERE task_id = ?
+               ORDER BY datetime(started_at) DESC, id DESC
+               LIMIT 1
+               )
+               AND status IN ('cancelled', 'failed')
+               AND (
+                 feedback = ?
+                 OR (status = 'cancelled' AND result IS NULL AND feedback IS NULL)
+               )
+               AND EXISTS (
+                 SELECT 1 FROM pipeline_item
+                 WHERE id = ? AND closed_at IS NULL
+               )",
+            (task_id, interruption_feedback, task_id),
+        )?;
+        Ok(rows_affected > 0)
     }
 
     /// Finish the task's most recent `running` run, returning its kind so
@@ -395,8 +465,9 @@ fn stage_run_from_row(row: &rusqlite::Row<'_>) -> Result<StageRun, rusqlite::Err
         provider_session_id: row.get(11)?,
         cwd: row.get(12)?,
         resumed_from_run_id: row.get(13)?,
-        completion_transition: row.get(14)?,
-        started_at: row.get(15)?,
-        finished_at: row.get(16)?,
+        resume_fallback_reason: row.get(14)?,
+        completion_transition: row.get(15)?,
+        started_at: row.get(16)?,
+        finished_at: row.get(17)?,
     })
 }

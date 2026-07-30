@@ -10,10 +10,10 @@ use super::prompt::{
     build_revision_resume_message, build_revision_task_prompt, build_target_stage_prompt,
     build_target_stage_prompt_with_instructions, RevisionRound,
 };
-use super::resume::{claude_transcript_exists, current_branch, rev_parse_head};
+use super::resume::{prepare_resume_workspace, same_cwd};
 use super::types::{
     PreparedPostDispatch, PreparedRunWorkspace, PreparedStageRunSpawn, PreparedStageTransition,
-    ResumeWorkspaceSpec, RunWorkspaceSpec,
+    RunWorkspaceSpec,
 };
 use super::worktree::next_fork_branch;
 use super::worktree::resolve_current_source_worktree_branch;
@@ -534,13 +534,15 @@ pub(crate) fn prepare_revision_task_for_api(
     // Prefer resuming the target stage's previous agent session: it already
     // holds the exploration and decision context the feedback refers to.
     // Every failed precondition falls back to today's fresh-fork behavior.
-    if run_kind == "main" {
-        if let Some(prepared) =
-            prepare_revision_resume(db, config, &context, &target_stage, revision_prompt, round)?
+    let resume_fallback_reason = if run_kind == "main" {
+        match prepare_revision_resume(db, config, &context, &target_stage, revision_prompt, round)?
         {
-            return Ok(prepared);
+            ResumePreparation::Resumed(prepared) => return Ok(*prepared),
+            ResumePreparation::Fallback(reason) => Some(reason),
         }
-    }
+    } else {
+        Some("post runs do not have an independently resumable provider session".to_string())
+    };
 
     // Fresh fallback: compose the original task prompt with the reviewer's
     // feedback so the new agent still sees what the task was — a bare
@@ -552,7 +554,7 @@ pub(crate) fn prepare_revision_task_for_api(
         revision_prompt,
         round,
     );
-    prepare_stage_run_for_target_with_provider(
+    let mut prepared = prepare_stage_run_for_target_with_provider(
         db,
         config,
         &context,
@@ -563,14 +565,149 @@ pub(crate) fn prepare_revision_task_for_api(
         Some(&composed_prompt),
         Some(revision_prompt.to_string()),
         loaded.source_task.agent_provider.clone(),
-    )
+    )?;
+    prepared.resume_fallback_reason = resume_fallback_reason;
+    Ok(prepared)
+}
+
+/// Prepare recovery of the latest interrupted run in the task's existing
+/// stage and worktree. The provider transcript is preferred; when any shared
+/// resume precondition fails, the same preparation produces a fresh session
+/// and carries the exact reason into the replacement run record.
+pub(crate) fn prepare_resume_task_for_api(
+    db: &Db,
+    config: &Config,
+    task_id: &str,
+) -> Result<PreparedStageRunSpawn, String> {
+    let identity = load_stage_identity(db, task_id)?;
+    if identity.source_task.closed_at.is_some() {
+        return Err(format!("task is closed: {task_id}"));
+    }
+    let loaded = load_stage_transition_source(identity, task_id)?;
+    let source_task = &loaded.source_task;
+    let run = db
+        .latest_stage_run(task_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .ok_or_else(|| format!("task has no stage run to resume: {task_id}"))?;
+    if !matches!(run.status.as_str(), "cancelled" | "failed") {
+        return Err(format!(
+            "latest run is {}, not cancelled or failed: {}",
+            run.status, task_id
+        ));
+    }
+    let item_stage = source_task
+        .stage
+        .as_deref()
+        .ok_or_else(|| format!("task has no stage: {task_id}"))?;
+    let current_position = resolve_stage_position(&loaded.pipeline, item_stage)
+        .ok_or_else(|| format!("stage not found in pipeline: {item_stage}"))?;
+    let current_owner = match current_position {
+        StagePosition::Stage(index) => index,
+        StagePosition::Post { owner } => owner,
+    };
+    let (target_stage, run_kind, run_owner): (PipelineStage, &'static str, usize) =
+        match resolve_stage_position(&loaded.pipeline, &run.stage)
+            .ok_or_else(|| format!("stage not found in pipeline: {}", run.stage))?
+        {
+            StagePosition::Stage(index) => (loaded.pipeline.stages[index].clone(), "main", index),
+            StagePosition::Post { owner } => (
+                post_as_stage(&loaded.pipeline.stages[owner])
+                    .ok_or_else(|| format!("stage has no post: {}", run.stage))?,
+                "post",
+                owner,
+            ),
+        };
+    if run.kind != run_kind || run_owner != current_owner {
+        return Err(format!(
+            "latest interrupted run is not the task's current stage: {}",
+            run.stage
+        ));
+    }
+    let branch = source_task
+        .branch
+        .as_deref()
+        .ok_or_else(|| format!("task has no branch: {task_id}"))?;
+    let current_worktree = format!("{}/.kanna-worktrees/{branch}", loaded.repo.path);
+    let resume = match run.cwd.as_deref() {
+        Some(run_cwd)
+            if std::path::Path::new(run_cwd).is_dir()
+                && std::path::Path::new(&current_worktree).is_dir()
+                && !same_cwd(run_cwd, &current_worktree) =>
+        {
+            Err("previous run was recorded in a different worktree than the current stage".into())
+        }
+        _ => prepare_resume_workspace(
+            run.agent_provider.as_deref(),
+            source_task.agent_type.as_deref(),
+            run.cwd.as_deref(),
+            run.provider_session_id.as_deref(),
+            &run.id,
+            &current_worktree,
+        ),
+    };
+    let (workspace_spec, final_prompt, resume_fallback_reason) = match resume {
+        Ok((_provider, workspace)) => (
+            RunWorkspaceSpec::Resume(workspace),
+            format!(
+                "Kanna recovered this task after its previous terminal session ended before a \
+                 stage verdict was recorded. Continue the existing task from the preserved \
+                 conversation and worktree context. Review the current state, finish the \
+                 interrupted work, and follow the stage completion instructions. \
+                 Do not restart the task from scratch.\n\nTask reminder:\n{}",
+                source_task.prompt.as_deref().unwrap_or("")
+            ),
+            None,
+        ),
+        Err(reason) => {
+            log::info!("task resume unavailable for {task_id}: {reason}; spawning fresh");
+            let prev_result = previous_stage_result(db, task_id, source_task)?;
+            let prev_main_result = previous_main_stage_result(db, task_id)?;
+            let prompt = build_target_stage_prompt(
+                &loaded.definitions,
+                &loaded.repo.path,
+                &target_stage,
+                source_task.prompt.as_deref().unwrap_or(""),
+                prev_result.as_deref(),
+                prev_main_result.as_deref(),
+                Some(branch),
+                source_task.base_ref.as_deref(),
+                source_task.branch.as_deref(),
+            )?;
+            (RunWorkspaceSpec::Current, prompt, Some(reason))
+        }
+    };
+    let mut prepared = prepare_stage_run_spawn(
+        db,
+        config,
+        &loaded.repo,
+        &loaded.definitions,
+        task_id,
+        &loaded.pipeline_name,
+        &loaded.pipeline,
+        &target_stage,
+        item_stage,
+        run_kind,
+        target_stage.policy.transition,
+        workspace_spec,
+        final_prompt,
+        branch,
+        None,
+        source_task.agent_type.as_deref(),
+        run.agent_provider.clone(),
+        source_task.agent_provider.as_deref(),
+    )?;
+    prepared.resume_fallback_reason = resume_fallback_reason;
+    Ok(prepared)
+}
+
+enum ResumePreparation {
+    Resumed(Box<PreparedStageRunSpawn>),
+    Fallback(String),
 }
 
 /// Try to prepare a revision as a resumed run of the target stage's previous
-/// agent session, in that run's own worktree. Returns `Ok(None)` — fresh-fork
-/// fallback — when any precondition fails: no recorded resumable run, a
-/// non-Claude provider, the worktree or CLI transcript gone, or the worktree
-/// no longer holding exactly the task's committed tip.
+/// provider session. Every unavailable precondition becomes a durable
+/// fresh-spawn reason on the replacement run.
 fn prepare_revision_resume(
     db: &Db,
     config: &Config,
@@ -578,11 +715,11 @@ fn prepare_revision_resume(
     target_stage: &PipelineStage,
     revision_prompt: &str,
     round: Option<RevisionRound>,
-) -> Result<Option<PreparedStageRunSpawn>, String> {
+) -> Result<ResumePreparation, String> {
     let task_id = context.source_task_id;
     let fall_back = |reason: &str| {
         log::info!("revision resume unavailable for task {task_id}: {reason}; forking fresh");
-        Ok(None)
+        Ok(ResumePreparation::Fallback(reason.to_string()))
     };
 
     let run = match db
@@ -592,17 +729,6 @@ fn prepare_revision_resume(
         Some(run) => run,
         None => return fall_back("no stage run recorded a provider session"),
     };
-    if run.agent_provider.as_deref() != Some("claude") {
-        return fall_back("previous run's provider does not support resume");
-    }
-    let (Some(provider_session_id), Some(run_cwd)) =
-        (run.provider_session_id.clone(), run.cwd.clone())
-    else {
-        return fall_back("previous run recorded no session id or cwd");
-    };
-    let Some(resume_head) = rev_parse_head(&run_cwd) else {
-        return fall_back("previous run's worktree is gone");
-    };
     let source_task = context.source_task;
     let Some(current_branch_name) = source_task.branch.as_deref() else {
         return fall_back("task has no branch");
@@ -611,18 +737,18 @@ fn prepare_revision_resume(
         "{}/.kanna-worktrees/{}",
         context.repo.path, current_branch_name
     );
-    let Some(current_head) = rev_parse_head(&current_worktree) else {
-        return fall_back("task's current worktree is gone");
+    let (provider, resume_workspace) = match prepare_resume_workspace(
+        run.agent_provider.as_deref(),
+        source_task.agent_type.as_deref(),
+        run.cwd.as_deref(),
+        run.provider_session_id.as_deref(),
+        &run.id,
+        &current_worktree,
+    ) {
+        Ok(resume) => resume,
+        Err(reason) => return fall_back(&reason),
     };
-    if resume_head != current_head {
-        return fall_back("previous run's worktree diverged from the committed tip");
-    }
-    let Some(resume_branch) = current_branch(&run_cwd) else {
-        return fall_back("previous run's worktree has no checked-out branch");
-    };
-    if !claude_transcript_exists(&run_cwd, &provider_session_id) {
-        return fall_back("no CLI transcript for the previous session");
-    }
+    let provider_session_id = resume_workspace.provider_session_id.clone();
 
     let message = build_revision_resume_message(
         source_task.prompt.as_deref().unwrap_or(""),
@@ -633,8 +759,7 @@ fn prepare_revision_resume(
     );
     // A resumed run continues the recorded run's conversation, so it must
     // resolve to that run's provider — never the agent def's priority list.
-    let explicit_provider = run.agent_provider.clone();
-    let resumed_from_run_id = run.id.clone();
+    let explicit_provider = Some(provider.as_str().to_string());
     let prepared = prepare_stage_run_spawn(
         db,
         config,
@@ -647,12 +772,7 @@ fn prepare_revision_resume(
         &target_stage.name,
         "main",
         target_stage.policy.revision_transition(),
-        RunWorkspaceSpec::Resume(ResumeWorkspaceSpec {
-            cwd: run_cwd,
-            branch: resume_branch,
-            provider_session_id: provider_session_id.clone(),
-            resumed_from_run_id,
-        }),
+        RunWorkspaceSpec::Resume(resume_workspace),
         message,
         current_branch_name,
         Some(revision_prompt.to_string()),
@@ -660,14 +780,12 @@ fn prepare_revision_resume(
         explicit_provider,
         source_task.agent_provider.as_deref(),
     )?;
-    // The stage's current definition must still resolve to a resumable
-    // Claude PTY session; a def that changed provider or session type since
-    // the recorded run cannot continue that run's conversation. Nothing was
-    // created on disk for the resume, so discarding it is safe.
-    if prepared.agent_provider != "claude"
+    // A definition that changed provider or session type since the source run
+    // cannot continue that conversation.
+    if prepared.agent_provider != provider.as_str()
         || prepared.provider_session_id.as_deref() != Some(provider_session_id.as_str())
     {
-        return fall_back("stage no longer resolves to a resumable Claude session");
+        return fall_back("stage no longer resolves to the recorded resumable provider session");
     }
     log::info!(
         "revision resumes task {task_id} stage '{}' from run {} in {}",
@@ -675,7 +793,7 @@ fn prepare_revision_resume(
         run.id,
         prepared.cwd
     );
-    Ok(Some(prepared))
+    Ok(ResumePreparation::Resumed(Box::new(prepared)))
 }
 
 /// How many agent-requested revision rounds a task has spent, and how many

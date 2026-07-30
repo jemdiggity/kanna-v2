@@ -3043,6 +3043,33 @@ fn build_agent_command_registers_opencode_kanna_mcp_with_inline_config() {
 }
 
 #[test]
+fn provider_resume_commands_use_each_cli_native_session_flag() {
+    let session = ProviderSessionBinding::Resume("session-123".to_string());
+    let build = |provider: AgentProvider| {
+        super::build_agent_command(
+            &provider,
+            provider.executable(),
+            "Continue.",
+            None,
+            Some("dontAsk"),
+            &[],
+            &[],
+            None,
+            None,
+            Some("Kanna preamble."),
+            None,
+            None,
+            Some(&session),
+        )
+    };
+
+    assert!(build(AgentProvider::Claude).contains("--resume 'session-123'"));
+    assert!(build(AgentProvider::Copilot).contains("--resume='session-123'"));
+    assert!(build(AgentProvider::Codex).contains(" resume 'session-123' '"));
+    assert!(build(AgentProvider::Opencode).contains("--session 'session-123'"));
+}
+
+#[test]
 fn build_kanna_preamble_names_automatic_and_fallback_mcp_providers() {
     let codex = super::build_kanna_preamble(
         &AgentProvider::Codex,
@@ -4556,6 +4583,17 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
     )
     .unwrap();
 
+    let provider_session_id = prepared
+        .provider_session_id
+        .as_deref()
+        .expect("Copilot PTY spawn should assign a provider session id");
+    match &prepared.session {
+        PreparedSessionSpawn::Pty { args, .. } => assert!(args
+            .last()
+            .expect("Copilot PTY command")
+            .contains(&format!("--session-id='{provider_session_id}'"))),
+        _ => panic!("expected pty session"),
+    }
     let created = db
         .list_pipeline_items("repo-1")
         .unwrap()
@@ -4563,7 +4601,6 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
         .find(|item| item.id == prepared.created_task.task_id)
         .unwrap();
     assert_eq!(created.agent_type.as_deref(), Some("pty"));
-    assert!(matches!(prepared.session, PreparedSessionSpawn::Pty { .. }));
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

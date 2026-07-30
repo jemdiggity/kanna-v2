@@ -1497,9 +1497,10 @@ impl StreamConn {
             )),
             StreamKind::Terminal => {
                 let lease = self.state.terminal_attachments().attach(session_id.clone());
+                let state = Arc::clone(&self.state);
                 tokio::spawn(async move {
                     let _lease = lease;
-                    stream_terminal(daemon_dir, task_id, session_id, frame_tx).await;
+                    stream_terminal(state, daemon_dir, task_id, session_id, frame_tx).await;
                 })
             }
             StreamKind::Companion => unreachable!("companion attach handled above"),
@@ -1833,6 +1834,7 @@ async fn stream_agent_once(
 /// restart/handoff), re-attaches with backoff; the fresh snapshot resyncs the
 /// client instead of leaving it frozen on a dead stream.
 async fn stream_terminal(
+    state: Arc<AppState>,
     daemon_dir: String,
     task_id: String,
     session_id: String,
@@ -1842,6 +1844,7 @@ async fn stream_terminal(
     let mut retry_attempt = 0usize;
     loop {
         match stream_terminal_once(
+            &state,
             &daemon_dir,
             &task_id,
             &session_id,
@@ -1863,6 +1866,7 @@ async fn stream_terminal(
 }
 
 async fn stream_terminal_once(
+    state: &AppState,
     daemon_dir: &str,
     task_id: &str,
     session_id: &str,
@@ -1933,11 +1937,36 @@ async fn stream_terminal_once(
                 return StreamRunEnd::Done;
             }
         }
-        Ok(DaemonEvent::Error { message, .. }) => {
-            let code = if message.contains("session not found") {
-                "session_not_found"
-            } else {
-                "daemon"
+        Ok(DaemonEvent::Error { code, message }) => {
+            let code = match code {
+                Some(kanna_daemon::protocol::ErrorCode::HandoffLost) => {
+                    let reason = format!(
+                        "session lost during daemon handoff; use kanna_resume_task to recover: \
+                         {message}"
+                    );
+                    match crate::http_api::mark_task_session_interrupted(
+                        &state.config().db_path,
+                        task_id,
+                        "failed",
+                        &reason,
+                    ) {
+                        Ok(Some(_)) => {
+                            state.publish_state_changed(
+                                kanna_agent_protocol::StateChangeScope::Tasks,
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            log::warn!(
+                                "[ksp] failed to record handoff-lost task {task_id}: {error}"
+                            );
+                        }
+                    }
+                    "handoff_lost"
+                }
+                Some(kanna_daemon::protocol::ErrorCode::SessionNotFound) => "session_not_found",
+                _ if message.contains("session not found") => "session_not_found",
+                _ => "daemon",
             };
             send_error(code, message).await;
             return StreamRunEnd::Done;
@@ -4164,6 +4193,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handoff_lost_attach_marks_the_running_task_recoverable() {
+        let unique = format!(
+            "ksp-handoff-lost-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let daemon_dir_string = daemon_dir.to_string_lossy().to_string();
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir_string);
+        let _ = std::fs::remove_file(&socket_path);
+
+        let mut config = test_config(&unique, "KSP Handoff Lost");
+        config.daemon_dir = daemon_dir_string.clone();
+        let db = crate::db::Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-handoff-lost",
+            "repo-1",
+            "Continue after handoff",
+            Some("Handoff lost"),
+            "in progress",
+            "2026-07-30 21:09:00",
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-handoff-lost",
+            task_id: "task-handoff-lost",
+            stage: "in progress",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("claude"),
+            model: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-handoff-lost"),
+            provider_session_id: Some("provider-handoff-lost"),
+            cwd: Some("/tmp/handoff-lost-worktree"),
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept daemon connection");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+                DaemonCommand::AttachSnapshot { ref session_id, .. }
+                    if session_id == "task-handoff-lost"
+            ));
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::Error {
+                            code: Some(kanna_daemon::protocol::ErrorCode::HandoffLost),
+                            message: "session lost during daemon handoff: fd missing".to_string(),
+                        })
+                        .unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let state = AppState::new(config);
+        let (frame_tx, mut frame_rx) = mpsc::channel(2);
+        let mut attached_once = false;
+        assert!(matches!(
+            stream_terminal_once(
+                &state,
+                &daemon_dir_string,
+                "task-handoff-lost",
+                "task-handoff-lost",
+                &mut attached_once,
+                &frame_tx,
+            )
+            .await,
+            StreamRunEnd::Done
+        ));
+        assert!(matches!(
+            frame_rx.try_recv(),
+            Ok(ServerFrame::Error { ref code, .. }) if code == "handoff_lost"
+        ));
+        let run = db.latest_stage_run("task-handoff-lost").unwrap().unwrap();
+        assert_eq!(run.status, "failed");
+        assert!(run
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains("kanna_resume_task")));
+
+        daemon.await.unwrap();
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
     async fn terminal_stream_forwards_queued_initial_and_live_status_without_synthesis() {
         let unique = format!(
             "ksp-terminal-status-{}-{}",
@@ -4247,10 +4382,14 @@ mod tests {
             }
         });
 
+        let mut config = test_config(&unique, "KSP Terminal Status");
+        config.daemon_dir = daemon_dir_string.clone();
+        let state = AppState::new(config);
         let (frame_tx, mut frame_rx) = mpsc::channel(8);
         let mut attached_once = false;
         assert!(matches!(
             stream_terminal_once(
+                &state,
                 &daemon_dir_string,
                 "task-status",
                 "daemon-terminal-status",

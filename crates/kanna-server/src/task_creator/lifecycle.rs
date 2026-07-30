@@ -329,6 +329,10 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         Some(prepared.completion_transition.as_str()),
     )
     .map_err(|e| format!("db error: {}", e))?;
+    if let Some(reason) = prepared.resume_fallback_reason.as_deref() {
+        db.set_stage_run_resume_fallback_reason(&run_id, reason)
+            .map_err(|e| format!("db error: {}", e))?;
+    }
 
     spawn_prepared_workspace_teardown_best_effort(daemon, prepared.workspace_teardown).await;
 
@@ -370,6 +374,10 @@ fn record_stage_transition_failure(
             Some(prepared.completion_transition.as_str()),
         )
         .map_err(|db_error| format!("db error: {db_error}"))?;
+        if let Some(reason) = prepared.resume_fallback_reason.as_deref() {
+            db.set_stage_run_resume_fallback_reason(&run_id, reason)
+                .map_err(|db_error| format!("db error: {db_error}"))?;
+        }
         Ok(())
     })();
     match record {
@@ -493,13 +501,16 @@ async fn supervise_teardown_session(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DaemonSessionPresence {
+pub(crate) enum DaemonSessionPresence {
     Present,
     Absent,
     Unknown,
 }
 
-async fn daemon_session_presence(daemon_dir: &str, session_id: &str) -> DaemonSessionPresence {
+pub(crate) async fn daemon_session_presence(
+    daemon_dir: &str,
+    session_id: &str,
+) -> DaemonSessionPresence {
     let Ok(mut daemon) = DaemonClient::connect(daemon_dir).await else {
         return DaemonSessionPresence::Unknown;
     };
@@ -516,12 +527,12 @@ async fn daemon_session_presence(daemon_dir: &str, session_id: &str) -> DaemonSe
         }
         Ok(other) => {
             log::warn!(
-                "unexpected daemon response while checking teardown session {session_id}: {other:?}"
+                "unexpected daemon response while checking task session {session_id}: {other:?}"
             );
             DaemonSessionPresence::Unknown
         }
         Err(error) => {
-            log::warn!("failed to check teardown session {session_id}: {error}");
+            log::warn!("failed to check task session {session_id}: {error}");
             DaemonSessionPresence::Unknown
         }
     }

@@ -54,6 +54,20 @@ async fn set_task_pipeline_posts_camel_case_pipeline_name() {
 }
 
 #[tokio::test]
+async fn resume_task_posts_to_task_action_path_with_empty_json_body() {
+    let response = http_json_response("200 OK", "{\"taskId\":\"task-123\"}");
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let action = resume_task_via_api(&base_url, "task-123").await.unwrap();
+    let request = handle.await.unwrap();
+
+    assert_eq!(action.task_id, "task-123");
+    assert!(request.starts_with("POST /v1/tasks/task-123/actions/resume HTTP/1.1"));
+    assert!(request.contains("content-type: application/json"));
+    assert!(request.ends_with("{}"));
+}
+
+#[tokio::test]
 async fn get_task_via_api_fetches_single_task_path() {
     let response = http_json_response(
         "200 OK",

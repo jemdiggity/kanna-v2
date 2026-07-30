@@ -166,3 +166,8 @@ The CLI remains the shell/script interface; MCP is the structured agent-tool int
 
 - `kanna-cli task send-input --task-id <TASK_ID> --message <MESSAGE> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/input` and prints `{ "ok": true }` as JSON.
 - `kanna-cli task advance-stage --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/advance-stage` and prints the action response as JSON.
+- `kanna-cli task resume --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/resume`. It resumes a dead latest run's provider conversation when its durable transcript and original worktree pass the shared revision-resume checks; otherwise the replacement run records `resumeFallbackReason`.
+- `kanna-cli task rerun-stage --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/rerun-stage`. This is always an explicit fresh provider conversation, not recovery.
+
+The provider support and daemon-loss trigger matrix is documented in
+[`2026-07-30-session-death-recovery.md`](2026-07-30-session-death-recovery.md).

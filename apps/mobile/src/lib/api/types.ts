@@ -212,6 +212,8 @@ export interface TaskLatestRun {
   kind: string;
   status: string;
   summary?: string | null;
+  resumedFromRunId?: string | null;
+  resumeFallbackReason?: string | null;
   finishedAt?: string | null;
 }
 

@@ -21,7 +21,7 @@ fn persist_exit_resume_session_id(
     else {
         return Ok(());
     };
-    db.update_pipeline_item_agent_session_id(&task_id, Some(resume_session_id))
+    db.update_latest_stage_run_provider_session_id(&task_id, resume_session_id)
         .map_err(|e| format!("db error: {e}"))?;
     state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
     Ok(())
@@ -219,17 +219,31 @@ async fn terminal_state_watcher_once(
     {
         DaemonEvent::SessionList { sessions } => {
             for session in sessions {
+                let mut changed = match http_api::restore_task_run_for_live_session(
+                    &config.db_path,
+                    &session.session_id,
+                ) {
+                    Ok(restored) => restored,
+                    Err(error) => {
+                        log::warn!(
+                            "failed to restore live task run for {}: {}",
+                            session.session_id,
+                            error
+                        );
+                        false
+                    }
+                };
                 match apply_watcher_runtime_status(state, &session.session_id, session.status, None)
                 {
-                    Ok(true) => {
-                        state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks)
-                    }
-                    Ok(false) => {}
+                    Ok(status_changed) => changed |= status_changed,
                     Err(error) => log::warn!(
                         "failed to reconcile terminal status for {}: {}",
                         session.session_id,
                         error
                     ),
+                }
+                if changed {
+                    state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
                 }
             }
         }
@@ -563,6 +577,25 @@ mod tests {
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
         seed_plain_task(&config);
+        Db::open(&config.db_path)
+            .unwrap()
+            .insert_stage_run(crate::db::NewStageRun {
+                id: "run-codex-exit",
+                task_id: "task-child",
+                stage: "in progress",
+                kind: "main",
+                agent: None,
+                agent_provider: Some("codex"),
+                model: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some("task-child"),
+                provider_session_id: None,
+                cwd: Some("/tmp/codex-task"),
+                resumed_from_run_id: None,
+            })
+            .unwrap();
         let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
 
         let server = tokio::spawn(async move {
@@ -594,6 +627,16 @@ mod tests {
         server.await.unwrap();
 
         assert_task_agent_session_id(&config, "019d99a5-aa94-7c73-b786-644cc095c037");
+        let run = Db::open(&config.db_path)
+            .unwrap()
+            .latest_stage_run("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            run.provider_session_id.as_deref(),
+            Some("019d99a5-aa94-7c73-b786-644cc095c037")
+        );
+        assert_eq!(run.status, "cancelled");
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
@@ -905,11 +948,8 @@ mod tests {
         .unwrap();
         server.await.unwrap();
 
-        let item = Db::open(&config.db_path)
-            .unwrap()
-            .get_pipeline_item("task-child")
-            .unwrap()
-            .unwrap();
+        let db = Db::open(&config.db_path).unwrap();
+        let item = db.get_pipeline_item("task-child").unwrap().unwrap();
         assert_eq!(item.activity.as_deref(), Some("working"));
         assert!(matches!(
             state_changes.try_recv(),
@@ -1169,6 +1209,24 @@ mod tests {
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
         seed_plain_task(&config);
+        let db = Db::open(&config.db_path).unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-falsely-cancelled",
+            task_id: "task-child",
+            stage: "in progress",
+            kind: "main",
+            agent: None,
+            agent_provider: Some("claude"),
+            model: None,
+            status: "cancelled",
+            result: None,
+            feedback: None,
+            session_id: Some("task-child"),
+            provider_session_id: Some("provider-session"),
+            cwd: Some("/tmp"),
+            resumed_from_run_id: None,
+        })
+        .unwrap();
         let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
 
         let server = tokio::spawn(async move {
@@ -1196,12 +1254,13 @@ mod tests {
         .unwrap();
         server.await.unwrap();
 
-        let item = Db::open(&config.db_path)
-            .unwrap()
-            .get_pipeline_item("task-child")
-            .unwrap()
-            .unwrap();
+        let db = Db::open(&config.db_path).unwrap();
+        let item = db.get_pipeline_item("task-child").unwrap().unwrap();
         assert_eq!(item.activity.as_deref(), Some("working"));
+        assert_eq!(
+            db.latest_stage_run("task-child").unwrap().unwrap().status,
+            "running"
+        );
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
