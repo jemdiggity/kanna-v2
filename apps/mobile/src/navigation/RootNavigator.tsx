@@ -97,6 +97,10 @@ interface RootNavigatorProps {
   e2eTaskSnapshotMarker?: string;
   forceCloudEnabled: boolean;
   initialState: InitialState;
+  notificationTaskRequest?: {
+    key: number;
+    taskId: string;
+  } | null;
   openMachinesRequestKey: number;
   onForceCloudChange(enabled: boolean): void;
   onOpenAccount(): void;
@@ -132,6 +136,7 @@ export default function RootNavigator({
   e2eTaskSnapshotMarker,
   forceCloudEnabled,
   initialState,
+  notificationTaskRequest = null,
   openMachinesRequestKey,
   onForceCloudChange,
   onOpenAccount,
@@ -146,6 +151,7 @@ export default function RootNavigator({
   } | null>(null);
   const pendingTaskRouteRef = useRef<string | null>(null);
   const previousOpenMachinesRequestKeyRef = useRef(openMachinesRequestKey);
+  const handledNotificationRequestKeyRef = useRef<number | null>(null);
 
   const pushPreparedTask = useCallback((taskId: string) => {
     if (!navigationRef.isReady()) return;
@@ -171,6 +177,16 @@ export default function RootNavigator({
     controller.openTask(taskId);
     pushPreparedTask(taskId);
   }, [controller, pushPreparedTask]);
+  useEffect(() => {
+    if (
+      !notificationTaskRequest ||
+      handledNotificationRequestKeyRef.current === notificationTaskRequest.key
+    ) {
+      return;
+    }
+    handledNotificationRequestKeyRef.current = notificationTaskRequest.key;
+    pushTask(notificationTaskRequest.taskId);
+  }, [notificationTaskRequest, pushTask]);
   const pushSearch = useCallback(() => {
     if (navigationRef.isReady()) {
       navigationRef.dispatch(StackActions.push("Search"));

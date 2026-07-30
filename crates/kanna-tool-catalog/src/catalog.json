@@ -65,6 +65,18 @@
       ]
     },
     {
+      "name": "kanna_notify_mobile",
+      "description": "Send an operator-facing push notification to the signed-in Kanna mobile app. Use this for meaningful long-running-task milestones or when the operator needs to act; delivery is handed off immediately and the response reports how many registered devices accepted it. When task_id is present, tapping opens that task.",
+      "method": "POST",
+      "path": "/v1/mobile/notifications",
+      "response": "json",
+      "params": [
+        { "name": "title", "description": "Short notification title shown to the operator.", "type": "string", "required": true, "location": "body" },
+        { "name": "body", "description": "Concise notification message shown to the operator.", "type": "string", "required": true, "location": "body" },
+        { "name": "task_id", "description": "Optional durable Kanna task id to open when the operator taps the notification.", "type": "string", "required": false, "location": "body", "key": "taskId" }
+      ]
+    },
+    {
       "name": "kanna_set_task_notify",
       "description": "Set or clear the task that is notified when this task finishes: that task's terminal receives 'TASK <id> DONE [success|failure|closed]: <title>' as input. The status is one of exactly three words: success (ended cleanly), failure (its terminating run reported failure, or its agent process died), closed (closed before finishing its pipeline \u2014 not a failure). Unlike the creation-time notify_task_id this works on an already-running task, so an orchestrator can adopt tasks it did not create. Omit notify_task_id to stop notifying. For watching many tasks at once, prefer kanna_wait_events.",
       "method": "POST",

@@ -53,4 +53,6 @@ Promotion is production: it must rebuild the exact soaked commit with production
 
 Report the command run, exact version and channel, artifacts, mobile update kind, release URL when published, and any blockers. On failure, include the failing `kd` command and its output honestly.
 
+After a state-changing ship, promotion, or rollback succeeds, send that same concise outcome to the operator with `kanna_notify_mobile`; use the release result as the title, the version/channel and release URL as the body, and this task's `$KANNA_TASK_ID` as `task_id`. A notification handoff failure does not undo an otherwise successful release, but report it explicitly. Do not send a push for status checks, dry-runs, or operations that stopped before publishing.
+
 Record `kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "success", "summary": "<exactly what was or would be shipped>"}` only after the requested operation or safe-default report is complete. Use `"status": "failure"` with the blocked operation and failing output when authorization, compatibility, preflight, build, or publish fails. CLI fallback: `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "<result>"`, or `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "<blocker>"`.

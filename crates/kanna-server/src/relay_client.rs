@@ -55,11 +55,34 @@ pub enum RelayInvoke {
 pub struct RelayCapabilities {
     #[serde(default)]
     pub task_snapshot_publication: Option<TaskSnapshotPublicationCapability>,
+    #[serde(default)]
+    pub mobile_notifications: Option<MobileNotificationsCapability>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TaskSnapshotPublicationCapability {
     pub version: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MobileNotificationsCapability {
+    pub version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileNotificationPayload {
+    pub title: String,
+    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileNotificationDelivery {
+    pub accepted_count: u64,
+    pub failed_count: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -103,6 +126,20 @@ pub enum RelayMessage {
     TaskSnapshotAck {
         id: String,
         ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    #[serde(rename = "mobile_notification_publish")]
+    MobileNotificationPublish {
+        id: String,
+        notification: MobileNotificationPayload,
+    },
+    #[serde(rename = "mobile_notification_ack")]
+    MobileNotificationAck {
+        id: String,
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        delivery: Option<MobileNotificationDelivery>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },

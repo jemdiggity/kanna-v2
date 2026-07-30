@@ -693,6 +693,30 @@ fn typed_set_notify_body_matches_catalog_set_notify_body() {
 }
 
 #[test]
+fn typed_notify_mobile_body_matches_catalog_notify_mobile_body() {
+    let typed_body = serde_json::to_value(crate::models::MobileNotificationRequest {
+        title: "Staging shipped".to_string(),
+        body: "The staging build is ready.".to_string(),
+        task_id: Some("task-1".to_string()),
+    })
+    .unwrap();
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let resolved = kanna_tool_catalog::resolve_request(
+        &catalog,
+        "kanna_notify_mobile",
+        &json!({
+            "title": "Staging shipped",
+            "body": "The staging build is ready.",
+            "task_id": "task-1"
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(resolved.path, "/v1/mobile/notifications");
+    assert_eq!(typed_body, resolved.body);
+}
+
+#[test]
 fn typed_set_pipeline_body_matches_catalog_set_pipeline_body() {
     let typed_body = serde_json::to_value(crate::models::SetTaskPipelineRequest {
         pipeline_name: "single-reviewer".to_string(),

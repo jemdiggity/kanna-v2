@@ -4,10 +4,9 @@ use kanna_agent_protocol::{ServerFrame, StateChangeScope};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-#[cfg(debug_assertions)]
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::{broadcast, Mutex, Notify};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
 
 #[derive(Clone, Copy)]
 pub(super) struct TunneledHttpInvoke;
@@ -30,6 +29,9 @@ pub struct AppState {
     pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
     requested_task_operations: Arc<RequestedTaskOperations>,
     relay_reconnect: Arc<Notify>,
+    relay_mobile_notifications_available: Arc<AtomicBool>,
+    mobile_notification_tx: mpsc::Sender<MobileNotificationRequest>,
+    mobile_notification_rx: Arc<StdMutex<Option<mpsc::Receiver<MobileNotificationRequest>>>>,
     requested_task_mutations: Arc<RequestedTaskMutations>,
     state_changes: broadcast::Sender<ServerFrame>,
     #[cfg(test)]
@@ -50,6 +52,11 @@ pub struct AppState {
     pub(super) revision_requester: Option<TestRevisionRequester>,
     #[cfg(test)]
     pub(super) task_file_resolution_hook: Option<TestTaskFileResolutionHook>,
+}
+
+pub(crate) struct MobileNotificationRequest {
+    pub notification: crate::relay_client::MobileNotificationPayload,
+    pub response: oneshot::Sender<Result<crate::relay_client::MobileNotificationDelivery, String>>,
 }
 
 #[derive(Default)]
@@ -201,6 +208,7 @@ impl AppState {
             );
         }
 
+        let (mobile_notification_tx, mobile_notification_rx) = mpsc::channel(16);
         Self {
             config,
             pairing_session: Arc::new(Mutex::new(None)),
@@ -211,6 +219,9 @@ impl AppState {
             repo_definitions: Arc::new(crate::task_creator::RepoDefinitionsCache::default()),
             requested_task_operations: Arc::new(RequestedTaskOperations::default()),
             relay_reconnect: Arc::new(Notify::new()),
+            relay_mobile_notifications_available: Arc::new(AtomicBool::new(false)),
+            mobile_notification_tx,
+            mobile_notification_rx: Arc::new(StdMutex::new(Some(mobile_notification_rx))),
             requested_task_mutations: Arc::new(RequestedTaskMutations::default()),
             state_changes: broadcast::channel(256).0,
             #[cfg(test)]
@@ -252,6 +263,52 @@ impl AppState {
 
     pub async fn wait_for_cloud_relay_reconnect(&self) {
         self.relay_reconnect.notified().await;
+    }
+
+    pub(crate) fn set_mobile_notifications_available(&self, available: bool) {
+        self.relay_mobile_notifications_available
+            .store(available, Ordering::Release);
+    }
+
+    pub(crate) fn mobile_notifications_available(&self) -> bool {
+        self.relay_mobile_notifications_available
+            .load(Ordering::Acquire)
+    }
+
+    pub(crate) fn take_mobile_notification_requests(
+        &self,
+    ) -> Result<mpsc::Receiver<MobileNotificationRequest>, String> {
+        self.mobile_notification_rx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| "mobile notification relay receiver already taken".to_string())
+    }
+
+    pub(super) async fn queue_mobile_notification(
+        &self,
+        notification: crate::relay_client::MobileNotificationPayload,
+    ) -> Result<crate::relay_client::MobileNotificationDelivery, String> {
+        if !self.mobile_notifications_available() {
+            return Err("mobile notification relay is unavailable".to_string());
+        }
+
+        let (response, result) = oneshot::channel();
+        let handoff = async {
+            self.mobile_notification_tx
+                .send(MobileNotificationRequest {
+                    notification,
+                    response,
+                })
+                .await
+                .map_err(|_| "mobile notification relay is unavailable".to_string())?;
+            result
+                .await
+                .map_err(|_| "mobile notification relay disconnected".to_string())?
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), handoff)
+            .await
+            .map_err(|_| "mobile notification relay timed out".to_string())?
     }
 
     pub(super) fn begin_requested_task_creation(

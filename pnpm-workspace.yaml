@@ -30,6 +30,11 @@ packageExtensions:
   "expo@57.0.6":
     dependencies:
       react-dom: 19.2.3
+  # The React Native Firebase Expo plugin imports this package without
+  # declaring it, which fails under pnpm's strict dependency isolation.
+  "@react-native-firebase/app@26.0.0":
+    dependencies:
+      "@expo/config-plugins": 57.0.6
 patchedDependencies:
   # SDK 57.0.6 pulls expo-modules-jsi 57.0.3, whose unqualified Swift `abs`
   # is ambiguous with React Native's C++ JSI imports under Xcode 26.2/Swift 6.

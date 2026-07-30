@@ -8,6 +8,7 @@ import React, {
 } from "react";
 import {
   AppState,
+  Platform,
   type AppStateStatus,
   SafeAreaView,
   StyleSheet,
@@ -29,6 +30,13 @@ import {
   checkAndFetchUpdate,
   reloadToApplyUpdate
 } from "./lib/updates/otaUpdates";
+import {
+  resolveNotificationTaskId,
+  startMobilePushNotifications,
+  type MobileNotificationTaskTarget
+} from "./lib/notifications/mobilePush";
+import { readExpoConfig } from "./lib/expoConfig";
+import { readKannaExpoExtra } from "./mobileEnvironment";
 import RootNavigator from "./navigation/RootNavigator";
 import { buildInitialNavigationState } from "./navigation/navigationState";
 import {
@@ -80,6 +88,10 @@ export default function App() {
   const [initialized, setInitialized] = useState(false);
   const [initializationError, setInitializationError] = useState<string | null>(null);
   const [updatePromptVisible, setUpdatePromptVisible] = useState(false);
+  const [notificationTaskRequest, setNotificationTaskRequest] = useState<{
+    key: number;
+    target: MobileNotificationTaskTarget;
+  } | null>(null);
   const initialNavigationStateRef = useRef<InitialState | null>(null);
   const lastOtaCheckAtRef = useRef<number | null>(null);
   const hasDownloadedUpdateRef = useRef(false);
@@ -98,6 +110,16 @@ export default function App() {
           .map((task) => `${task.id}:${task.title ?? ""}`)
           .join("\n")
       : undefined;
+  const resolvedNotificationTaskRequest = useMemo(() => {
+    if (!notificationTaskRequest) return null;
+    const taskId = resolveNotificationTaskId(
+      notificationTaskRequest.target,
+      state.recentTasks
+    );
+    return taskId
+      ? { key: notificationTaskRequest.key, taskId }
+      : null;
+  }, [notificationTaskRequest, state.recentTasks]);
 
   const runOtaUpdateCheck = useCallback(async (nowMs = Date.now()) => {
     lastOtaCheckAtRef.current = nowMs;
@@ -218,6 +240,46 @@ export default function App() {
     };
   }, [controller, runOtaUpdateCheck]);
 
+  useEffect(() => {
+    if (
+      Platform.OS !== "ios" ||
+      state.auth.status !== "signedIn" ||
+      !state.mobileDeviceId
+    ) {
+      return;
+    }
+    const mobileExtra = readKannaExpoExtra(readExpoConfig());
+    const relayUrl = mobileExtra?.relayUrl;
+    if (!relayUrl || mobileExtra?.appEnv === "dev") return;
+
+    let disposed = false;
+    let stop: () => void = () => undefined;
+    void startMobilePushNotifications({
+      deviceId: state.mobileDeviceId,
+      getIdToken: (forceRefresh) => model.getAuthIdToken(forceRefresh),
+      relayUrl,
+      onTaskOpen(target) {
+        setNotificationTaskRequest((current) => ({
+          key: (current?.key ?? 0) + 1,
+          target
+        }));
+      }
+    }).then((cleanup) => {
+      if (disposed) {
+        cleanup();
+      } else {
+        stop = cleanup;
+      }
+    }).catch((error: unknown) => {
+      console.error("Mobile notification setup failed:", error);
+    });
+
+    return () => {
+      disposed = true;
+      stop();
+    };
+  }, [model, state.auth.status, state.mobileDeviceId]);
+
   return (
     <SafeAreaView style={styles.safeArea} testID={MOBILE_E2E_IDS.appShell}>
       <View style={styles.shell}>
@@ -236,6 +298,7 @@ export default function App() {
             e2eTaskSnapshotMarker={e2eTaskSnapshotMarker}
             forceCloudEnabled={forceCloudEnabled}
             initialState={initialNavigationStateRef.current}
+            notificationTaskRequest={resolvedNotificationTaskRequest}
             openMachinesRequestKey={openMachinesRequestKey}
             quickReplies={quickReplies}
             quickRepliesHydrated={quickRepliesHydrated}

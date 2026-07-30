@@ -211,6 +211,23 @@ pub(crate) struct SetTaskNotifyRequest {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct MobileNotificationRequest {
+    pub(crate) title: String,
+    pub(crate) body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) task_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MobileNotificationResponse {
+    pub(crate) status: String,
+    pub(crate) accepted_count: u64,
+    pub(crate) failed_count: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SetTaskPipelineRequest {
     pub(crate) pipeline_name: String,
 }
