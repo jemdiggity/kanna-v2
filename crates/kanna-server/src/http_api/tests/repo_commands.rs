@@ -48,6 +48,15 @@ async fn lists_repo_commands_with_revision_and_groups() {
         .expect("commands")
         .iter()
         .any(|command| command["group"] == "configure"));
+    assert!(body["commands"]
+        .as_array()
+        .expect("commands")
+        .iter()
+        .any(|command| {
+            command["id"] == "custom:bucho"
+                && command["label"] == "Kanna部長"
+                && command["group"] == "automation"
+        }));
 }
 
 #[tokio::test]

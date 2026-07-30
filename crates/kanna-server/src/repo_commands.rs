@@ -185,6 +185,10 @@ fn resolve_custom_task_definitions(
             "merge-master",
             include_str!("../../../.kanna/tasks/merge-master/agent.md"),
         ),
+        (
+            "bucho",
+            include_str!("../../../.kanna/tasks/bucho/agent.md"),
+        ),
         ("ship", include_str!("../../../.kanna/tasks/ship/agent.md")),
     ] {
         if let Some(definition) = parse_custom_task(content, slug) {
@@ -229,7 +233,7 @@ fn resolve_custom_task_definitions(
 
 fn ordered_custom_task_slugs(definitions: &BTreeMap<String, CustomTaskDefinition>) -> Vec<String> {
     let mut slugs = Vec::new();
-    for builtin in ["merge-master", "ship"] {
+    for builtin in ["merge-master", "bucho", "ship"] {
         if definitions.contains_key(builtin) {
             slugs.push(builtin.to_string());
         }
@@ -237,7 +241,11 @@ fn ordered_custom_task_slugs(definitions: &BTreeMap<String, CustomTaskDefinition
     slugs.extend(
         definitions
             .keys()
-            .filter(|slug| slug.as_str() != "merge-master" && slug.as_str() != "ship")
+            .filter(|slug| {
+                slug.as_str() != "merge-master"
+                    && slug.as_str() != "bucho"
+                    && slug.as_str() != "ship"
+            })
             .cloned(),
     );
     slugs
@@ -423,7 +431,11 @@ fn custom_task_launch(slug: &str, definition: &CustomTaskDefinition) -> RepoComm
             teardown: definition.teardown.clone().unwrap_or_default(),
         }),
         stage: definition.stage.clone(),
-        singleton_agent: (slug == "merge-master").then(|| "merge".to_string()),
+        singleton_agent: match slug {
+            "merge-master" => Some("merge".to_string()),
+            "bucho" => Some("bucho".to_string()),
+            _ => None,
+        },
     }
 }
 
@@ -534,6 +546,7 @@ mod tests {
             commands,
             vec![
                 ("custom:merge-master", "automation"),
+                ("custom:bucho", "automation"),
                 ("custom:ship", "automation"),
                 ("factory:setup-repo", "configure"),
                 ("factory:create-config", "configure"),
@@ -736,6 +749,33 @@ Deploy safely.
         assert_eq!(launch.agent_type.as_deref(), Some("pty"));
         assert!(launch.prompt.contains("interactive palette mode"));
         assert!(!launch.prompt.contains("git cherry-pick -x"));
+    }
+
+    #[test]
+    fn builtin_bucho_launch_binds_the_bucho_singleton() {
+        let repo_dir = tempfile::tempdir().expect("temporary repository");
+        let repo = Repo {
+            id: "repo-1".to_string(),
+            path: repo_dir.path().to_string_lossy().into_owned(),
+            name: "Kanna".to_string(),
+            default_branch: Some("main".to_string()),
+            remote_url_hash: None,
+            hidden: None,
+            sort_order: None,
+            created_at: None,
+            last_opened_at: None,
+        };
+
+        let launch = resolve_repo_command_launch(&repo, "custom:bucho")
+            .expect("resolve command")
+            .1
+            .expect("bucho launch");
+
+        assert_eq!(launch.display_name, "Kanna部長");
+        assert_eq!(launch.agent.as_deref(), Some("bucho"));
+        assert_eq!(launch.agent_type.as_deref(), Some("pty"));
+        assert_eq!(launch.singleton_agent.as_deref(), Some("bucho"));
+        assert!(launch.prompt.contains("long-running Kanna task manager"));
     }
 
     #[test]

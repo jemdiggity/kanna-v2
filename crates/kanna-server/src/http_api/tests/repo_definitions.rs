@@ -473,6 +473,13 @@ async fn list_agents_reports_the_resolved_repo_override_that_task_creation_uses(
         .find(|agent| agent["name"] == "implement")
         .expect("built-in implement agent");
     assert_eq!(implement["source"], "built_in");
+
+    let bucho = agents
+        .iter()
+        .find(|agent| agent["name"] == "bucho")
+        .expect("built-in bucho agent");
+    assert_eq!(bucho["defaultProvider"], "codex");
+    assert_eq!(bucho["source"], "built_in");
 }
 
 fn run_git(repo: &Path, args: &[&str]) {

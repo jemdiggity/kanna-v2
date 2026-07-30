@@ -2320,6 +2320,28 @@ fn read_agent_definition_loads_builtin_ship_agent_with_codex_first() {
 }
 
 #[test]
+fn read_agent_definition_loads_builtin_bucho_agent_with_codex_first() {
+    let repo_root = init_git_repo_without_provider_fixtures("agent-builtin-bucho");
+
+    let definition = resolve_test_agent_definition(&repo_root, "bucho").unwrap();
+
+    assert_eq!(definition.name, "bucho");
+    assert_eq!(
+        definition.agent_providers.first().map(String::as_str),
+        Some("codex")
+    );
+    assert!(definition.prompt.contains("kanna_wait_events"));
+    assert!(definition.prompt.contains("task.awaiting_input"));
+    assert!(definition.prompt.contains("latestRun"));
+    assert!(definition.prompt.contains("MERGEABLE"));
+    assert!(definition.prompt.contains("git rebase --onto"));
+    assert!(definition.prompt.contains("Ask it to `HOLD`"));
+    assert!(definition.prompt.contains("payload.exhausted"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn read_agent_definition_uses_explicit_builtin_flavor() {
     let repo_root = init_git_repo_without_provider_fixtures("agent-explicit-flavor");
 

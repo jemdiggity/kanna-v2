@@ -1623,10 +1623,10 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
     };
     let pipeline_def =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
-    let display_name = if agent_name == "merge" {
-        Some("Merge Master".to_string())
-    } else {
-        Some(format!("{agent_name} agent"))
+    let display_name = match agent_name {
+        "merge" => Some("Merge Master".to_string()),
+        "bucho" => Some("Kanna部長".to_string()),
+        _ => Some(format!("{agent_name} agent")),
     };
 
     prepare_task_spawn(
