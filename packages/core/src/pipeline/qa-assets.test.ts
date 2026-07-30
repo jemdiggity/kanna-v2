@@ -98,6 +98,23 @@ describe("QA pipeline assets", () => {
     }
   });
 
+  it("ships Kanna部長 as a Codex-first singleton palette task", () => {
+    const agent = parseAgentDefinition(readRepoFile(".kanna/agents/bucho/AGENT.md"));
+    const task = readRepoFile(".kanna/tasks/bucho/agent.md");
+
+    expect(agent.name).toBe("bucho");
+    expect(agent.agent_provider?.[0]).toBe("codex");
+    expect(agent.prompt).toContain("kanna_wait_events");
+    expect(agent.prompt).toContain("kanna_set_task_notify");
+    expect(agent.prompt).toContain("latestRun");
+    expect(agent.prompt).toContain(
+      "short human-readable name or purpose followed by its id in parentheses"
+    );
+    expect(agent.prompt).toContain("Never make a human decode a bare task id");
+    expect(task).toContain("name: Kanna部長");
+    expect(task).toContain("agent: bucho");
+  });
+
   it("keeps the pipeline provider schema aligned with the generated registry", () => {
     const schema = JSON.parse(readRepoFile(".kanna/pipelines/schema.json")) as {
       $defs?: { agentProvider?: { enum?: string[] } };
