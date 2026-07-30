@@ -191,3 +191,51 @@ export async function registerDevice(
     throw err;
   }
 }
+
+export async function registerPushDevice(
+  userId: string,
+  deviceId: string,
+  deviceToken: string
+): Promise<void> {
+  try {
+    const { db } = getFirebaseServices();
+    await db
+      .collection("users")
+      .doc(userId)
+      .collection("pushDevices")
+      .doc(hashPushDeviceId(deviceId))
+      .set({
+        deviceId,
+        token: deviceToken,
+        updatedAt: new Date().toISOString(),
+      }, { merge: true });
+    console.log(
+      `[auth] Registered mobile push device ${deviceId} for user ${userId}`
+    );
+  } catch (err) {
+    console.error("[auth] Failed to register mobile push device:", err);
+    throw err;
+  }
+}
+
+export async function unregisterPushDevice(
+  userId: string,
+  deviceId: string
+): Promise<void> {
+  try {
+    const { db } = getFirebaseServices();
+    await db
+      .collection("users")
+      .doc(userId)
+      .collection("pushDevices")
+      .doc(hashPushDeviceId(deviceId))
+      .delete();
+  } catch (err) {
+    console.error("[auth] Failed to unregister mobile push device:", err);
+    throw err;
+  }
+}
+
+function hashPushDeviceId(deviceId: string): string {
+  return createHash("sha256").update(deviceId, "utf8").digest("hex");
+}

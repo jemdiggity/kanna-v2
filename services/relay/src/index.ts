@@ -6,6 +6,8 @@ import {
   verifyDesktopCredentials,
   revalidateServerAuth,
   registerDevice,
+  registerPushDevice,
+  unregisterPushDevice,
   type ServerAuthProof,
 } from "./auth.js";
 import {
@@ -24,6 +26,10 @@ import {
   handleCloudTaskPublication,
   MAX_TASK_SNAPSHOT_BYTES,
 } from "./cloudTaskPublication.js";
+import {
+  parseMobileNotification,
+  sendMobileNotification,
+} from "./mobileNotifications.js";
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const AUTH_TIMEOUT_MS = 10_000;
@@ -97,6 +103,70 @@ const server = createServer(async (req, res) => {
       }
 
       await registerDevice(userId, parsed.deviceToken);
+      jsonResponse(res, 200, { ok: true });
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/push/register") {
+      const body = await readBody(req);
+      let parsed: { idToken?: string; deviceId?: string; deviceToken?: string };
+
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        jsonResponse(res, 400, { error: "Invalid JSON" });
+        return;
+      }
+
+      if (!parsed.idToken || !parsed.deviceId || !parsed.deviceToken) {
+        jsonResponse(res, 400, {
+          error: "Missing idToken, deviceId, or deviceToken",
+        });
+        return;
+      }
+      if (parsed.deviceId.length > 256 || parsed.deviceToken.length > 4_096) {
+        jsonResponse(res, 400, { error: "Push registration is oversized" });
+        return;
+      }
+
+      const userId = await verifyPhoneToken(parsed.idToken);
+      if (!userId) {
+        jsonResponse(res, 401, { error: "Invalid token" });
+        return;
+      }
+
+      await registerPushDevice(userId, parsed.deviceId, parsed.deviceToken);
+      jsonResponse(res, 200, { ok: true });
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/push/unregister") {
+      const body = await readBody(req);
+      let parsed: { idToken?: string; deviceId?: string };
+
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        jsonResponse(res, 400, { error: "Invalid JSON" });
+        return;
+      }
+
+      if (!parsed.idToken || !parsed.deviceId) {
+        jsonResponse(res, 400, { error: "Missing idToken or deviceId" });
+        return;
+      }
+      if (parsed.deviceId.length > 256) {
+        jsonResponse(res, 400, { error: "Push unregistration is oversized" });
+        return;
+      }
+
+      const userId = await verifyPhoneToken(parsed.idToken);
+      if (!userId) {
+        jsonResponse(res, 401, { error: "Invalid token" });
+        return;
+      }
+
+      await unregisterPushDevice(userId, parsed.deviceId);
       jsonResponse(res, 200, { ok: true });
       return;
     }
@@ -274,6 +344,9 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
               version: 2,
               authModes: ["desktop-secret"],
             },
+            mobileNotifications: {
+              version: 1,
+            },
           } : {}),
         },
       }));
@@ -289,11 +362,67 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       return;
     }
     if (role === "server") {
-      let publication: { type?: unknown; id?: unknown; snapshot?: unknown } | null = null;
+      let publication: {
+        type?: unknown;
+        id?: unknown;
+        snapshot?: unknown;
+        notification?: unknown;
+      } | null = null;
       try {
-        publication = JSON.parse(data) as { type?: unknown; id?: unknown; snapshot?: unknown };
+        publication = JSON.parse(data) as {
+          type?: unknown;
+          id?: unknown;
+          snapshot?: unknown;
+          notification?: unknown;
+        };
       } catch {
         // Non-publication messages retain the router's existing behavior.
+      }
+      if (publication?.type === "mobile_notification_publish") {
+        const id = typeof publication.id === "string" ? publication.id : "";
+        const sendAck = (
+          ok: boolean,
+          delivery?: { acceptedCount: number; failedCount: number },
+          error?: string
+        ) => {
+          if (ws.readyState !== 1) return;
+          ws.send(JSON.stringify({
+            type: "mobile_notification_ack",
+            id,
+            ok,
+            ...(delivery ? { delivery } : {}),
+            ...(error ? { error } : {}),
+          }));
+        };
+        if (serverAuthProof?.kind !== "desktop") {
+          sendAck(false, undefined, "desktop-secret authentication is required");
+          return;
+        }
+        if (!id || !desktopId || Buffer.byteLength(data) > 16_384) {
+          sendAck(false, undefined, "mobile notification is malformed or oversized");
+          return;
+        }
+        if (!await revalidateServerAuth(serverAuthProof, userId!, desktopId)) {
+          sendAck(false, undefined, "desktop credential is no longer authorized");
+          ws.close(4005, "Authentication revoked");
+          return;
+        }
+        try {
+          const notification = parseMobileNotification(publication.notification);
+          const delivery = await sendMobileNotification({
+            userId: userId!,
+            desktopId,
+            notification,
+          });
+          sendAck(true, delivery);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(
+            `[push] Mobile notification rejected for ${userId}/${desktopId}: ${message}`
+          );
+          sendAck(false, undefined, message);
+        }
+        return;
       }
       if (publication?.type === "task_snapshot_publish") {
         const id = typeof publication.id === "string" ? publication.id : "";

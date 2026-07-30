@@ -44,6 +44,7 @@ vi.mock("react-native", async () => {
       children?: import("react").ReactNode;
       [key: string]: unknown;
     }) => visible ? ReactModule.createElement("Modal", props, children) : null,
+    Platform: { OS: "ios" },
     Pressable: "Pressable",
     SafeAreaView: "SafeAreaView",
     StyleSheet: {
@@ -184,6 +185,7 @@ function createModel() {
   const model = {
     client: createClientMock(),
     controller,
+    getAuthIdToken: vi.fn().mockResolvedValue(null),
     initialize: vi.fn().mockResolvedValue(undefined),
     navigator: { tabs: [], utilityActions: [] },
     sessionStore,

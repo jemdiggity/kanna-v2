@@ -14,6 +14,10 @@ describe("mobile app config", () => {
     expect(config.ios?.googleServicesFile).toBe(
       "./firebase/GoogleService-Info.production.plist"
     );
+    expect(config.plugins).toContain("./plugins/withKannaFirebaseMessaging");
+    expect(config.ios?.entitlements).toEqual({
+      "aps-environment": "production"
+    });
     expect(config.extra?.kanna).toMatchObject({
       appEnv: "prod",
       firebase: { projectId: "kanna-build" },
@@ -22,9 +26,9 @@ describe("mobile app config", () => {
         channel: "production",
         manifestUrl: "https://relay.kanna.build/ota/manifest"
       },
-      runtimeVersion: "2.1.2"
+      runtimeVersion: "2.1.3"
     });
-    expect(config.runtimeVersion).toBe("2.1.2");
+    expect(config.runtimeVersion).toBe("2.1.3");
     expect(config.updates).toMatchObject({
       url: "https://relay.kanna.build/ota/manifest",
       requestHeaders: { "expo-channel-name": "production" },
@@ -63,10 +67,16 @@ describe("mobile app config", () => {
       }
     ]);
     expect(config.plugins).toContain("expo-font");
+    expect(config.plugins).not.toContain(
+      "./plugins/withKannaFirebaseMessaging"
+    );
     expect(config.ios?.bundleIdentifier).toBe("build.kanna.app.dev");
     expect(config.ios?.googleServicesFile).toBe(
       "./firebase/GoogleService-Info.production.plist"
     );
+    expect(config.ios?.entitlements).toEqual({
+      "aps-environment": "development"
+    });
     expect(config.extra?.kanna).toMatchObject({
       appEnv: "dev",
       firebase: { projectId: "kanna-local" },
@@ -75,9 +85,9 @@ describe("mobile app config", () => {
         channel: null,
         manifestUrl: null
       },
-      runtimeVersion: "2.1.2"
+      runtimeVersion: "2.1.3"
     });
-    expect(config.runtimeVersion).toBe("2.1.2");
+    expect(config.runtimeVersion).toBe("2.1.3");
     expect(config.updates).toBeUndefined();
   });
 
@@ -97,6 +107,9 @@ describe("mobile app config", () => {
     expect(config.ios?.googleServicesFile).toBe(
       "./firebase/GoogleService-Info.staging.plist"
     );
+    expect(config.ios?.entitlements).toEqual({
+      "aps-environment": "production"
+    });
     expect(config.extra?.kanna).toMatchObject({
       appEnv: "staging",
       firebase: { projectId: "kanna-staging" },
@@ -105,9 +118,9 @@ describe("mobile app config", () => {
         channel: "staging",
         manifestUrl: "https://relay-staging.kanna.build/ota/manifest"
       },
-      runtimeVersion: "2.1.2"
+      runtimeVersion: "2.1.3"
     });
-    expect(config.runtimeVersion).toBe("2.1.2");
+    expect(config.runtimeVersion).toBe("2.1.3");
     expect(config.updates).toMatchObject({
       url: "https://relay-staging.kanna.build/ota/manifest",
       requestHeaders: { "expo-channel-name": "staging" }
@@ -129,6 +142,6 @@ describe("mobile app config", () => {
         recordAudioAndroid: false
       }
     ]);
-    expect(config.runtimeVersion).toBe("2.1.2");
+    expect(config.runtimeVersion).toBe("2.1.3");
   });
 });

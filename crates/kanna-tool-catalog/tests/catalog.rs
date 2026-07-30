@@ -24,6 +24,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_get_task",
             "kanna_wait_task",
             "kanna_wait_events",
+            "kanna_notify_mobile",
             "kanna_set_task_notify",
             "kanna_set_task_pipeline",
             "kanna_task_logs",
@@ -402,6 +403,22 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             ResponseKind::Json,
             "/v1/tasks/task-1/actions/set-parent",
             json!({}),
+        ),
+        (
+            "kanna_notify_mobile",
+            json!({
+                "title": "Staging shipped",
+                "body": "The staging build is ready.",
+                "task_id": "task-1"
+            }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/mobile/notifications",
+            json!({
+                "title": "Staging shipped",
+                "body": "The staging build is ready.",
+                "taskId": "task-1"
+            }),
         ),
         (
             "kanna_set_task_notify",

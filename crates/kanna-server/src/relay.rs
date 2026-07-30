@@ -60,9 +60,12 @@ pub(crate) async fn run_relay_loop(
     http_state: Arc<http_api::AppState>,
 ) -> Result<(), String> {
     let mut publisher = PublisherState::new();
+    let mut mobile_notification_requests = http_state.take_mobile_notification_requests()?;
+    let mut next_mobile_notification_id = 1_u64;
 
     // Reconnection loop
     loop {
+        http_state.set_mobile_notifications_available(false);
         log::info!("Connecting to relay at {}...", config.relay_url);
 
         let (sink, mut stream) = match relay_client::connect_to_relay(&config).await {
@@ -82,6 +85,7 @@ pub(crate) async fn run_relay_loop(
 
         // Track observer tasks per session_id
         let mut observe_tasks: HashMap<String, JoinHandle<()>> = HashMap::new();
+        let mut pending_mobile_notifications = HashMap::new();
         // HTTP invokes dispatch off the read loop; this caps how many run at
         // once so a burst cannot exhaust the blocking pool. Mirrors the KSP
         // request worker's CPU-aware concurrency.
@@ -128,6 +132,37 @@ pub(crate) async fn run_relay_loop(
                             break;
                         }
                         PublisherStep::Wait => {}
+                    }
+                    continue;
+                }
+                request = mobile_notification_requests.recv() => {
+                    let Some(request) = request else {
+                        return Err("mobile notification request channel closed".to_string());
+                    };
+                    if !http_state.mobile_notifications_available() {
+                        let _ = request.response.send(Err(
+                            "mobile notification relay is unavailable".to_string(),
+                        ));
+                        continue;
+                    }
+
+                    let id = format!(
+                        "mobile-notification:{}:{}",
+                        config.desktop_id, next_mobile_notification_id
+                    );
+                    next_mobile_notification_id =
+                        next_mobile_notification_id.wrapping_add(1).max(1);
+                    pending_mobile_notifications.insert(id.clone(), request.response);
+                    let message = RelayMessage::MobileNotificationPublish {
+                        id: id.clone(),
+                        notification: request.notification,
+                    };
+                    if let Err(error) = send_relay_response_message(&sink, message).await {
+                        if let Some(response) = pending_mobile_notifications.remove(&id) {
+                            let _ = response.send(Err(error.clone()));
+                        }
+                        log::error!("Failed to publish mobile notification: {error}");
+                        break;
                     }
                     continue;
                 }
@@ -399,6 +434,11 @@ pub(crate) async fn run_relay_loop(
                                     .task_snapshot_publication
                                     .map(|capability| capability.version),
                             );
+                            http_state.set_mobile_notifications_available(
+                                capabilities
+                                    .mobile_notifications
+                                    .is_some_and(|capability| capability.version >= 1),
+                            );
                         }
                         RelayMessage::TaskSnapshotAck { id, ok, error } => {
                             if let Err(message) =
@@ -411,6 +451,30 @@ pub(crate) async fn run_relay_loop(
                                     error.as_deref().unwrap_or("unknown error")
                                 );
                             }
+                        }
+                        RelayMessage::MobileNotificationAck {
+                            id,
+                            ok,
+                            delivery,
+                            error,
+                        } => {
+                            let Some(response) = pending_mobile_notifications.remove(&id) else {
+                                log::warn!(
+                                    "Ignoring mobile notification ack for unknown request {id}"
+                                );
+                                continue;
+                            };
+                            let result = if ok {
+                                delivery.ok_or_else(|| {
+                                    "relay accepted mobile notification without delivery status"
+                                        .to_string()
+                                })
+                            } else {
+                                Err(error.unwrap_or_else(|| {
+                                    "relay rejected mobile notification".to_string()
+                                }))
+                            };
+                            let _ = response.send(result);
                         }
                         RelayMessage::TunnelEstablish {
                             desktop_id,
@@ -500,7 +564,11 @@ pub(crate) async fn run_relay_loop(
         }
 
         // Clean up all observer tasks on disconnect
+        http_state.set_mobile_notifications_available(false);
         publisher.on_disconnected();
+        for (_, response) in pending_mobile_notifications.drain() {
+            let _ = response.send(Err("mobile notification relay disconnected".to_string()));
+        }
         for (session_id, handle) in observe_tasks.drain() {
             log::info!(
                 "Cleaning up observer for session {} on disconnect",
@@ -806,6 +874,146 @@ mod tests {
             }
             other => panic!("expected terminal_output relay event, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn mobile_notification_endpoint_hands_off_to_capable_relay() {
+        use tokio::time::timeout;
+        use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+        let relay_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind relay stand-in");
+        let relay_address = relay_listener.local_addr().expect("relay address");
+        let unique = format!(
+            "relay-mobile-notification-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let database_path = crate::db::Db::test_db_path(&unique);
+        let config = Config {
+            relay_url: format!("ws://{relay_address}"),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: format!("/tmp/{unique}-daemon"),
+            db_path: database_path.clone(),
+            kanna_cli_path: None,
+            desktop_id: "desktop-push".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Push Test Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            transfer_port: 4455,
+            pairing_store_path: format!("/tmp/{unique}-pairings.json"),
+        };
+        let database = crate::db::Db::open_for_tests(&database_path).expect("open test db");
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+
+        let relay_server = tokio::spawn(async move {
+            let (stream, _) = relay_listener.accept().await.expect("accept relay");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept websocket");
+            let auth = socket
+                .next()
+                .await
+                .expect("auth message")
+                .expect("auth frame");
+            assert!(matches!(auth, TungsteniteMessage::Text(_)));
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "auth_ok",
+                        "userId": "operator-1",
+                        "capabilities": {
+                            "mobileNotifications": { "version": 1 }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send auth ack");
+
+            while let Some(message) = socket.next().await {
+                let TungsteniteMessage::Text(text) = message.expect("relay frame") else {
+                    continue;
+                };
+                let value: serde_json::Value =
+                    serde_json::from_str(&text).expect("parse relay message");
+                if value["type"] != "mobile_notification_publish" {
+                    continue;
+                }
+                assert_eq!(value["notification"]["title"], "Staging shipped");
+                assert_eq!(value["notification"]["body"], "The staging build is ready.");
+                assert_eq!(value["notification"]["taskId"], "task-123");
+                socket
+                    .send(TungsteniteMessage::Text(
+                        serde_json::json!({
+                            "type": "mobile_notification_ack",
+                            "id": value["id"],
+                            "ok": true,
+                            "delivery": {
+                                "acceptedCount": 2,
+                                "failedCount": 0
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .expect("send notification ack");
+                return;
+            }
+            panic!("relay disconnected before mobile notification");
+        });
+
+        let relay_loop = run_relay_loop(config, database, Arc::clone(&state));
+        tokio::pin!(relay_loop);
+        let endpoint_request = async {
+            timeout(Duration::from_secs(2), async {
+                while !state.mobile_notifications_available() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("relay capability was not advertised");
+            http_api::dispatch_http_invoke(
+                Arc::clone(&state),
+                "POST",
+                "/v1/mobile/notifications",
+                serde_json::json!({
+                    "title": "Staging shipped",
+                    "body": "The staging build is ready.",
+                    "taskId": "task-123"
+                }),
+            )
+            .await
+        };
+        tokio::pin!(endpoint_request);
+        let response = tokio::select! {
+            response = &mut endpoint_request => response,
+            result = &mut relay_loop => panic!("relay loop exited early: {result:?}"),
+        };
+        assert_eq!(response.status, 200, "{response:?}");
+        assert_eq!(
+            response.body,
+            Some(serde_json::json!({
+                "status": "accepted",
+                "acceptedCount": 2,
+                "failedCount": 0
+            }))
+        );
+
+        relay_server.await.expect("relay server");
+        let _ = std::fs::remove_file(database_path);
     }
 
     /// Drives the real `observer_loop` against a fake daemon connection and

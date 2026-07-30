@@ -58,6 +58,9 @@ interface ExpoConfig {
     bundleIdentifier: string;
     appleTeamId: string;
     googleServicesFile: string;
+    entitlements: {
+      "aps-environment": "development" | "production";
+    };
     buildNumber?: string;
   };
   runtimeVersion: string;
@@ -125,6 +128,11 @@ export function createExpoConfig(
     scheme: appEnvironment.scheme,
     icon: "./assets/icon.png",
     plugins: [
+      // Dev has no Firebase Apple app/plist matching build.kanna.app.dev.
+      // Do not initialize it with the production native identity.
+      ...(appEnvironment.name === "dev"
+        ? []
+        : ["./plugins/withKannaFirebaseMessaging"]),
       "expo-font",
       [
         "expo-camera",
@@ -148,6 +156,10 @@ export function createExpoConfig(
       bundleIdentifier: appEnvironment.iosBundleId,
       appleTeamId: "GY3LFAA59P",
       googleServicesFile: appEnvironment.iosGoogleServicesFile,
+      entitlements: {
+        "aps-environment":
+          appEnvironment.name === "dev" ? "development" : "production"
+      },
       ...(buildNumber ? { buildNumber } : {})
     },
     runtimeVersion: appEnvironment.runtimeVersion,

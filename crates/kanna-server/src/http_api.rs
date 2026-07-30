@@ -9,6 +9,7 @@ mod e2e_mobile_controls;
 mod e2e_sql;
 mod ksp;
 mod lan_trust;
+mod mobile_notifications;
 mod operator_events;
 mod pairing;
 mod repo_commands;

@@ -67,6 +67,7 @@ export interface AppModel {
   client: KannaClient;
   controller: MobileController;
   initialize(): Promise<void>;
+  getAuthIdToken(forceRefresh?: boolean): Promise<string | null>;
   sessionStore: SessionStore;
   setForceCloud(enabled: boolean): void;
 }
@@ -647,6 +648,9 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   return {
     client,
     controller,
+    getAuthIdToken(forceRefresh) {
+      return authSession.getIdToken(forceRefresh);
+    },
     async initialize() {
       bonjourBrowser.start();
       await hydratePersistedContext();
