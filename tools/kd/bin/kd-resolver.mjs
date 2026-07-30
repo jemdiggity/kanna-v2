@@ -17,6 +17,22 @@ import {
 
 const MAX_COMMAND_OUTPUT = 16_000;
 
+function wrapperPid(env = process.env) {
+  const configured = env.KANNA_KD_WRAPPER_PID?.trim();
+  if (!configured) {
+    return process.ppid;
+  }
+  const pid = Number(configured);
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new Error(
+      `KANNA_KD_WRAPPER_PID must be a positive integer, got ${JSON.stringify(
+        configured
+      )}`
+    );
+  }
+  return pid;
+}
+
 function boundedOutput(value) {
   if (!value) {
     return "";
@@ -100,7 +116,7 @@ async function resolveEntrypoint(entrypoint) {
   createKdInstallationLease({
     cacheRoot,
     identity,
-    pid: process.ppid
+    pid: wrapperPid()
   });
   const resolvedEntrypoint = await ensureKdInstallation({
     cacheRoot,

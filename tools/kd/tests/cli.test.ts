@@ -9,13 +9,13 @@ import {
   readdirSync,
   readlinkSync,
   rmSync,
-  symlinkSync
+  symlinkSync,
+  writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import pkg from "../package.json";
-// @ts-expect-error The checked-in prebuild resolver is intentionally plain ESM.
 import {
   KD_CACHE_ROOT_MARKER,
   validateKdInstallation
@@ -302,10 +302,9 @@ describe("kd CLI", () => {
     const packageRoot = resolve(import.meta.dirname, "..");
     const repoRoot = resolve(packageRoot, "..", "..");
     const tempRoot = mkdtempSync(join(tmpdir(), "kd launcher contract "));
-    const fixtureRepoRoots = [
-      join(tempRoot, "repo one"),
-      join(tempRoot, "repo two")
-    ];
+    const fixtureRepoRoots = Array.from({ length: 8 }, (_, index) =>
+      join(tempRoot, `repo ${index + 1}`)
+    );
     const home = join(tempRoot, "home");
     mkdirSync(home, { recursive: true });
 
@@ -369,10 +368,10 @@ describe("kd CLI", () => {
       const cacheMetadata = readdirSync(cacheRoot).filter((name) =>
         name.startsWith(".")
       );
-      expect(cacheMetadata).toHaveLength(4);
+      expect(cacheMetadata).toHaveLength(10);
       expect(cacheMetadata).toContain(KD_CACHE_ROOT_MARKER);
       expect(cacheMetadata.filter((name) => name.includes(".lease-")))
-        .toHaveLength(2);
+        .toHaveLength(8);
       expect(cacheMetadata.filter((name) => name.endsWith(".used")))
         .toHaveLength(1);
       expect(cacheMetadata.some((name) =>
@@ -401,6 +400,50 @@ describe("kd CLI", () => {
       rmSync(tempRoot, { recursive: true, force: true });
     }
   }, 240_000);
+
+  it("bounds resolver startup and reports a clear timeout", async () => {
+    const packageRoot = resolve(import.meta.dirname, "..");
+    const repoRoot = resolve(packageRoot, "..", "..");
+    const tempRoot = mkdtempSync(join(tmpdir(), "kd resolver timeout "));
+    const fixtureRepoRoot = join(tempRoot, "repo");
+    const home = join(tempRoot, "home");
+    mkdirSync(home, { recursive: true });
+
+    try {
+      copyLauncherFixture(repoRoot, fixtureRepoRoot, {
+        installDependencies: false
+      });
+      writeFileSync(
+        join(fixtureRepoRoot, "tools/kd/bin/kd-resolver.mjs"),
+        [
+          'import { spawn } from "node:child_process";',
+          'process.on("SIGTERM", () => {});',
+          'spawn(process.execPath, ["-e", "setInterval(() => {}, 60_000)"], { stdio: "inherit" });',
+          "setInterval(() => {}, 60_000);",
+          ""
+        ].join("\n")
+      );
+
+      const startedAt = Date.now();
+      const launch = await spawnResult("./kd", ["env", "sync"], {
+        cwd: fixtureRepoRoot,
+        env: {
+          ...cleanLauncherEnv(home),
+          KANNA_KD_RESOLVER_TIMEOUT_MS: "50"
+        },
+        timeoutMs: 5_000
+      });
+
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+      expect(launch.status, launch.stderr).toBe(124);
+      expect(launch.stdout).toBe("");
+      expect(launch.stderr).toContain(
+        "kd resolver timed out after 50ms while resolving kd; terminated the resolver process group"
+      );
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
 
   it("bootstraps dependencies and installs kd from a clean clone", async () => {
     const packageRoot = resolve(import.meta.dirname, "..");
