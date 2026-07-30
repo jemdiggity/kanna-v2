@@ -164,7 +164,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "037_task_event_log");
+    assert_eq!(latest_migration, "038_pipeline_item_initial_pipeline");
 
     let stage_run_sql: String = db
         .conn
@@ -793,6 +793,20 @@ fn open_migrates_origin_main_028_activity_revision() {
     // Rows written before the revision budget existed start with their full
     // budget rather than an exhausted one.
     assert_eq!(item.revision_rounds, 0);
+    let initial_and_current_pipeline: (String, String) = db
+        .conn
+        .query_row(
+            "SELECT initial_pipeline, pipeline
+             FROM pipeline_item
+             WHERE id = 'origin-main-task'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("backfilled creation-time pipeline");
+    assert_eq!(
+        initial_and_current_pipeline,
+        ("default".to_string(), "default".to_string())
+    );
 
     let snapshot = db.ui_snapshot().expect("load migrated ui snapshot");
     assert_eq!(snapshot.entries.len(), 1);
@@ -1621,6 +1635,7 @@ fn insert_pipeline_item_stores_stage_metadata() {
               repo_id TEXT NOT NULL,
               prompt TEXT,
               pipeline TEXT NOT NULL,
+              initial_pipeline TEXT,
               pipeline_def TEXT,
               stage TEXT NOT NULL,
               branch TEXT,
@@ -2286,6 +2301,7 @@ fn task_event_type_names_are_stable() {
             "run.started",
             "run.finished",
             "stage.changed",
+            "task.pipeline_changed",
             "task.closed",
             "task.pr_created",
             "task.revision_requested",

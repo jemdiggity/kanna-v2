@@ -279,6 +279,22 @@ pub struct SetTaskParentRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct SetTaskPipelineRequest {
+    pub pipeline_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SetTaskPipelineResponse {
+    pub task_id: String,
+    pub pipeline_name: String,
+    pub stage: String,
+    pub revision_rounds: i64,
+    pub revision_limit: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskActionResponse {
     pub task_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

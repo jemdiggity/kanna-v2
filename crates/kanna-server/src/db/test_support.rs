@@ -93,6 +93,7 @@ impl Db {
                 updated_at TEXT,
                 closed_at TEXT,
                 pipeline TEXT,
+                initial_pipeline TEXT,
                 agent_provider TEXT,
                 port_offset INTEGER,
                 port_env TEXT,
@@ -269,8 +270,9 @@ impl Db {
         self.conn.execute(
             "INSERT INTO pipeline_item (
                 id, repo_id, prompt, stage, branch, agent_type, activity,
-                pinned, pin_order, display_name, created_at, updated_at, pipeline, agent_provider
-             ) VALUES (?, ?, ?, ?, ?, 'pty', 'idle', 0, NULL, ?, ?, ?, 'default', 'claude')",
+                pinned, pin_order, display_name, created_at, updated_at, pipeline,
+                initial_pipeline, agent_provider
+             ) VALUES (?, ?, ?, ?, ?, 'pty', 'idle', 0, NULL, ?, ?, ?, 'default', 'default', 'claude')",
             (
                 id,
                 repo_id,

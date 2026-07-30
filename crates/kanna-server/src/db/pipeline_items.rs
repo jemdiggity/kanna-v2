@@ -18,7 +18,9 @@ impl Db {
     }
 
     /// Pipeline names most recently chosen by operator-initiated task creates
-    /// in a repo, newest first and deduplicated.
+    /// in a repo, newest first and deduplicated. `initial_pipeline` is
+    /// intentionally immutable: changing an existing task's current pipeline
+    /// must not rewrite the sticky choice used for the next new task.
     ///
     /// This reads the durable task rows and deliberately does not filter on
     /// `closed_at`. The New Task modal's sticky default has to survive the task
@@ -40,13 +42,13 @@ impl Db {
         limit: u32,
     ) -> Result<Vec<String>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT pipeline
+            "SELECT initial_pipeline
              FROM pipeline_item
              WHERE repo_id = ?1
                AND parent_task_id IS NULL
-               AND pipeline IS NOT NULL
-               AND pipeline <> ''
-             GROUP BY pipeline
+               AND initial_pipeline IS NOT NULL
+               AND initial_pipeline <> ''
+             GROUP BY initial_pipeline
              ORDER BY MAX(rowid) DESC
              LIMIT ?2",
         )?;
@@ -488,14 +490,15 @@ impl Db {
     pub fn insert_pipeline_item(&self, item: NewPipelineItem<'_>) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO pipeline_item
-             (id, repo_id, prompt, display_name, pipeline, stage, branch, agent_type, agent_provider,
+             (id, repo_id, prompt, display_name, pipeline, initial_pipeline, stage, branch, agent_type, agent_provider,
               activity, activity_changed_at, port_offset, port_env, agent_spawn_options, base_ref, notify_task_id, parent_task_id, pipeline_def)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?)",
             params![
                 item.id,
                 item.repo_id,
                 item.prompt,
                 item.display_name,
+                item.pipeline,
                 item.pipeline,
                 item.stage,
                 item.branch,
@@ -826,6 +829,73 @@ impl Db {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
         Ok(())
+    }
+
+    /// Replace the task's current pipeline and pinned definition atomically
+    /// with the event that announces the change. The creation-time
+    /// `initial_pipeline` is deliberately untouched so re-pipelining does not
+    /// alter the repo's sticky new-task default.
+    pub fn update_pipeline_item_pipeline(
+        &self,
+        id: &str,
+        expected_stage: &str,
+        pipeline: &str,
+        pipeline_def: &str,
+        revision_rounds: i64,
+        revision_limit: i64,
+    ) -> Result<bool, rusqlite::Error> {
+        self.with_immediate_transaction(|db| {
+            let current = db
+                .conn
+                .query_row(
+                    "SELECT pipeline, pipeline_def, stage
+                     FROM pipeline_item
+                     WHERE id = ? AND closed_at IS NULL",
+                    [id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            if current.2.as_deref() != Some(expected_stage) {
+                return Err(rusqlite::Error::InvalidParameterName(format!(
+                    "task stage changed while setting pipeline: expected {expected_stage}, found {}",
+                    current.2.as_deref().unwrap_or("<none>")
+                )));
+            }
+            if current.0.as_deref() == Some(pipeline)
+                && current.1.as_deref() == Some(pipeline_def)
+            {
+                return Ok(false);
+            }
+
+            let rows_affected = db.conn.execute(
+                "UPDATE pipeline_item
+                 SET pipeline = ?, pipeline_def = ?, updated_at = datetime('now')
+                 WHERE id = ? AND closed_at IS NULL AND stage = ?",
+                (pipeline, pipeline_def, id, expected_stage),
+            )?;
+            if rows_affected == 0 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            db.append_task_event(
+                id,
+                TaskEventKind::PipelineChanged,
+                json!({
+                    "fromPipeline": current.0,
+                    "toPipeline": pipeline,
+                    "stage": expected_stage,
+                    "revisionRounds": revision_rounds,
+                    "revisionLimit": revision_limit,
+                }),
+            )?;
+            Ok(true)
+        })
     }
 
     pub fn update_pipeline_item_stage(&self, id: &str, stage: &str) -> Result<(), rusqlite::Error> {

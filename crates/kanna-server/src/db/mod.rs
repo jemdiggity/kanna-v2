@@ -80,6 +80,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "035_pipeline_item_blocker_revision",
     "036_task_transfer_ownership_leases",
     "037_task_event_log",
+    "038_pipeline_item_initial_pipeline",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1412,6 +1413,15 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         // session. `activity` cannot carry it: it collapses waiting into idle,
         // which is exactly why a task parked on a prompt was invisible.
         add_column(conn, "pipeline_item", "runtime_status", "TEXT")
+    })?;
+
+    run_migration(conn, "038_pipeline_item_initial_pipeline", |conn| {
+        add_column(conn, "pipeline_item", "initial_pipeline", "TEXT")?;
+        conn.execute_batch(
+            "UPDATE pipeline_item
+             SET initial_pipeline = pipeline
+             WHERE initial_pipeline IS NULL;",
+        )
     })?;
 
     Ok(())

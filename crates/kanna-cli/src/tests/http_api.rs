@@ -29,6 +29,31 @@ async fn rerun_stage_posts_to_task_action_path_with_empty_json_body() {
 }
 
 #[tokio::test]
+async fn set_task_pipeline_posts_camel_case_pipeline_name() {
+    let response = http_json_response(
+        "200 OK",
+        r#"{"taskId":"task-123","pipelineName":"single-reviewer","stage":"in progress","revisionRounds":2,"revisionLimit":3}"#,
+    );
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let updated = set_task_pipeline_via_api(
+        &base_url,
+        "task-123",
+        &SetTaskPipelineRequest {
+            pipeline_name: "single-reviewer".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let request = handle.await.unwrap();
+
+    assert_eq!(updated.pipeline_name, "single-reviewer");
+    assert_eq!(updated.revision_rounds, 2);
+    assert!(request.starts_with("POST /v1/tasks/task-123/actions/set-pipeline HTTP/1.1"));
+    assert!(request.ends_with(r#"{"pipelineName":"single-reviewer"}"#));
+}
+
+#[tokio::test]
 async fn get_task_via_api_fetches_single_task_path() {
     let response = http_json_response(
         "200 OK",

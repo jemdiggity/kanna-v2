@@ -29,7 +29,7 @@
     },
     {
       "name": "kanna_get_task",
-      "description": "Fetch one Kanna task's detail: stage, activity, branch, worktree path, blockers, latest stage-run result (latestRun), and the revision-round budget (revisionRounds, revisionLimit).",
+      "description": "Fetch one Kanna task's detail: current pipeline name (pipelineName), stage, activity, branch, worktree path, blockers, latest stage-run result (latestRun), and the revision-round budget (revisionRounds, revisionLimit).",
       "method": "GET",
       "path": "/v1/tasks/{task_id}",
       "response": "json",
@@ -52,7 +52,7 @@
     },
     {
       "name": "kanna_wait_events",
-      "description": "Watch several Kanna tasks at once: blocks until any of them emits an event, then returns every event since your cursor plus a new cursor. This is the tool for orchestrating child tasks — kanna_wait_task blocks on one id and resolves only on finish, so it cannot watch a fan-out. Event types: 'task.created', 'run.started', 'run.finished' (payload.status succeeded/failed/cancelled, payload.result), 'stage.changed', 'task.pr_created', 'task.revision_requested' (payload.exhausted true means the task is parked for its human — stop waiting), 'task.closed', and 'task.awaiting_input' (the agent is parked on an interactive prompt and needs an answer, e.g. via kanna_send_task_input). Call it in a loop, passing back the cursor you were given: events that fire between two calls are delivered on the next one, each exactly once. Omit the cursor on the first call to receive the scope's retained history. An elapsed window returns waitOutcome 'timeout' with no events and a fresh cursor — a normal result, not an error. hasMore true means another batch is already waiting, so call again immediately.",
+      "description": "Watch several Kanna tasks at once: blocks until any of them emits an event, then returns every event since your cursor plus a new cursor. This is the tool for orchestrating child tasks — kanna_wait_task blocks on one id and resolves only on finish, so it cannot watch a fan-out. Event types: 'task.created', 'run.started', 'run.finished' (payload.status succeeded/failed/cancelled, payload.result), 'stage.changed', 'task.pipeline_changed', 'task.pr_created', 'task.revision_requested' (payload.exhausted true means the task is parked for its human — stop waiting), 'task.closed', and 'task.awaiting_input' (the agent is parked on an interactive prompt and needs an answer, e.g. via kanna_send_task_input). Call it in a loop, passing back the cursor you were given: events that fire between two calls are delivered on the next one, each exactly once. Omit the cursor on the first call to receive the scope's retained history. An elapsed window returns waitOutcome 'timeout' with no events and a fresh cursor — a normal result, not an error. hasMore true means another batch is already waiting, so call again immediately.",
       "method": "GET",
       "path": "/v1/task-events",
       "response": "json",
@@ -73,6 +73,17 @@
       "params": [
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}) whose completion should be announced.", "type": "string", "required": true, "location": "path" },
         { "name": "notify_task_id", "description": "Task id that receives the completion message. Omit to clear the notification target.", "type": "string", "required": false, "location": "body", "key": "notifyTaskId" }
+      ]
+    },
+    {
+      "name": "kanna_set_task_pipeline",
+      "description": "Change an open task's pipeline and pin the new pipeline definition. The new pipeline must contain a stage with exactly the task's current stage name; incompatible switches are rejected without changing the task. A running stage run and its live session are left untouched: the newly pinned pipeline governs the task when that run next transitions. Revision rounds already spent carry over, and changing a pipeline does not change the repo's sticky creation-time pipeline choice.",
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/actions/set-pipeline",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}) to re-pipeline.", "type": "string", "required": true, "location": "path" },
+        { "name": "pipeline_name", "description": "Pipeline definition to pin. Retired built-in aliases still resolve (for example, 'default' resolves to 'no-review' unless the repo defines its own 'default' pipeline).", "type": "string", "required": true, "location": "body", "key": "pipelineName" }
       ]
     },
     {

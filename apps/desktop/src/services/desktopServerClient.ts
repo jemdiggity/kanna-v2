@@ -87,6 +87,10 @@ export interface DesktopServerClientHandlersForTests {
   fetchClosedTaskIdentities?: () => MaybePromise<ClosedTaskIdentity[]>;
   patchTask?: (taskId: string, input: PatchDesktopTaskInput) => MaybePromise<void>;
   setTaskParent?: (taskId: string, parentTaskId: string | null) => MaybePromise<void>;
+  setTaskPipeline?: (
+    taskId: string,
+    pipelineName: string,
+  ) => MaybePromise<SetDesktopTaskPipelineResponse>;
   pinTask?: (taskId: string, position: number) => MaybePromise<void>;
   unpinTask?: (taskId: string) => MaybePromise<void>;
   reorderPinnedTasks?: (repoId: string, orderedIds: string[]) => MaybePromise<void>;
@@ -794,6 +798,30 @@ export async function setDesktopTaskParent(taskId: string, parentTaskId: string 
     {
       method: "POST",
       body: { parentTaskId },
+    },
+  );
+}
+
+export interface SetDesktopTaskPipelineResponse {
+  taskId: string;
+  pipelineName: string;
+  stage: string;
+  revisionRounds: number;
+  revisionLimit: number;
+}
+
+export async function setDesktopTaskPipeline(
+  taskId: string,
+  pipelineName: string,
+): Promise<SetDesktopTaskPipelineResponse> {
+  if (clientHandlersForTests?.setTaskPipeline) {
+    return await clientHandlersForTests.setTaskPipeline(taskId, pipelineName);
+  }
+  return await requestJson<SetDesktopTaskPipelineResponse>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/actions/set-pipeline`,
+    {
+      method: "POST",
+      body: { pipelineName },
     },
   );
 }

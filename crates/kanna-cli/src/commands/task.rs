@@ -7,15 +7,15 @@ use crate::api::{
     dependent_tasks_exist_via_api, get_task_via_api, list_repo_tasks_via_api, list_tasks_via_api,
     parse_wait_until, rename_task_via_api, request_revision_via_api, rerun_stage_via_api,
     search_tasks_via_api, send_task_input_via_api, set_task_notify_via_api,
-    set_task_parent_via_api, task_logs_via_api, unblock_task_via_api, wait_task_events_via_api,
-    wait_task_via_api, WaitTaskOutcome,
+    set_task_parent_via_api, set_task_pipeline_via_api, task_logs_via_api, unblock_task_via_api,
+    wait_task_events_via_api, wait_task_via_api, WaitTaskOutcome,
 };
 use crate::commands::{parse_metadata_json, print_json};
 use crate::config::resolve_server_base_url_from_env;
 use crate::models::{
     BlockTaskRequest, CreateTaskRequest, RequestRevisionRequest, SetTaskNotifyRequest,
-    SetTaskParentRequest, TaskCreateOptions, TaskDetail, TaskInputRequest, TaskRenameRequest,
-    TaskStatusRow, TaskSummary,
+    SetTaskParentRequest, SetTaskPipelineRequest, TaskCreateOptions, TaskDetail, TaskInputRequest,
+    TaskRenameRequest, TaskStatusRow, TaskSummary,
 };
 use crate::TaskCommands;
 use kanna_tool_catalog::{wait_resolved_result, wait_timeout_result};
@@ -476,6 +476,24 @@ pub(crate) async fn run(command: TaskCommands) {
                 notify_task_id: notify_task,
             };
             let updated = set_task_notify_via_api(&base_url, &task_id, &request)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {e}");
+                    process::exit(1);
+                });
+            if let Err(e) = print_json(&updated) {
+                eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        TaskCommands::SetPipeline {
+            task_id,
+            pipeline_name,
+            server_url,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let request = SetTaskPipelineRequest { pipeline_name };
+            let updated = set_task_pipeline_via_api(&base_url, &task_id, &request)
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("Error: {e}");
