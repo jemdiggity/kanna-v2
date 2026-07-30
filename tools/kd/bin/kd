@@ -16,11 +16,26 @@ BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 ROOT_DIR="$(cd "$BIN_DIR/../../.." && pwd)"
 KD_DIR="$ROOT_DIR/tools/kd"
 RESOLVER="$KD_DIR/bin/kd-resolver.mjs"
+LAUNCHER="$KD_DIR/bin/kd-launcher.mjs"
 
-DIST_ENTRY="$(node "$RESOLVER" kd)"
+DIST_ENTRY_FILE="$(mktemp "${TMPDIR:-/tmp}/kanna-kd-entry.XXXXXX")"
+cleanup() {
+  rm -f "$DIST_ENTRY_FILE"
+}
+trap cleanup EXIT HUP INT TERM
+
+if node "$LAUNCHER" "$RESOLVER" kd >"$DIST_ENTRY_FILE"; then
+  :
+else
+  RESOLVER_STATUS=$?
+  exit "$RESOLVER_STATUS"
+fi
+IFS= read -r DIST_ENTRY <"$DIST_ENTRY_FILE" || true
 if [[ -z "$DIST_ENTRY" ]]; then
   echo "kd resolver returned an empty entrypoint" >&2
   exit 1
 fi
 
+cleanup
+trap - EXIT HUP INT TERM
 exec node "$DIST_ENTRY" "$@"

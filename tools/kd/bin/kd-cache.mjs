@@ -766,6 +766,18 @@ function quarantineLock(lockRoot) {
   }
 }
 
+function removeAbandonedInstallationArtifacts(cacheRoot, identity) {
+  const prefixes = [
+    `.${identity}.tmp-`,
+    `.${identity}.corrupt-`
+  ];
+  for (const name of readdirSync(cacheRoot)) {
+    if (prefixes.some((prefix) => name.startsWith(prefix))) {
+      rmSync(join(cacheRoot, name), { recursive: true, force: true });
+    }
+  }
+}
+
 async function acquireInstallationLock({
   cacheRoot,
   entryRoot,
@@ -911,6 +923,9 @@ export async function ensureKdInstallation({
   let phase = "validation";
 
   try {
+    phase = "abandoned-artifact-cleanup";
+    removeAbandonedInstallationArtifacts(cacheRoot, identity);
+    phase = "validation";
     if (validateKdInstallation(entryRoot, identity, runtime)) {
       resolvedEntrypoint = join(entryRoot, entrypointPath);
     } else {

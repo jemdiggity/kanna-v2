@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -116,6 +116,35 @@ function createCachedInstallation(cacheRoot, identity, bytes, usedAtMs) {
 
 function cacheIdentity(label) {
   return Buffer.from(label).toString("hex").padEnd(64, "0").slice(0, 64);
+}
+
+function waitForChild(child) {
+  return new Promise((resolvePromise, reject) => {
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+    child.once("close", (status, signal) => {
+      resolvePromise({ status, signal, stdout, stderr });
+    });
+  });
+}
+
+async function waitForFile(path, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for ${path}`);
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
 }
 
 describe("kd installation identity", () => {
@@ -261,6 +290,69 @@ describe("kd installation publication", () => {
     });
 
     expect(resolved).toBe(join(cacheRoot, "failed/bin/kd.js"));
+  });
+
+  it("recovers after a compile process is killed and removes its partial cache", async () => {
+    const fixtureRoot = createRepoFixture();
+    const cacheRoot = join(fixtureRoot, "cache");
+    const identity = "killed-compile";
+    const buildLog = join(fixtureRoot, "builds.log");
+    const buildStartedMarker = join(fixtureRoot, "build-started");
+    const worker = resolve(
+      import.meta.dirname,
+      "fixtures/kd-cache-installer.mjs"
+    );
+    const workerArgs = [
+      worker,
+      cacheRoot,
+      identity,
+      "hang",
+      buildLog,
+      buildStartedMarker
+    ];
+    const killed = spawn(process.execPath, workerArgs, {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const killedResult = waitForChild(killed);
+
+    await waitForFile(buildStartedMarker);
+    killed.kill("SIGKILL");
+    expect((await killedResult).signal).toBe("SIGKILL");
+    expect(existsSync(join(cacheRoot, identity))).toBe(false);
+    expect(
+      readdirSync(cacheRoot).some((name) =>
+        name.startsWith(`.${identity}.tmp-`)
+      )
+    ).toBe(true);
+
+    const retry = spawnSync(
+      process.execPath,
+      [
+        worker,
+        cacheRoot,
+        identity,
+        "complete",
+        buildLog,
+        buildStartedMarker
+      ],
+      {
+        encoding: "utf8",
+        timeout: 10_000
+      }
+    );
+
+    expect(retry.status, retry.stderr).toBe(0);
+    expect(retry.stderr).toContain("Recovering stale kd lock:");
+    expect(retry.stdout.trim()).toBe(join(cacheRoot, identity, "bin/kd.js"));
+    expect(validateKdInstallation(join(cacheRoot, identity), identity, runtime))
+      .toBe(true);
+    expect(
+      readdirSync(cacheRoot).filter((name) =>
+        name.startsWith(`.${identity}.tmp-`) ||
+        name.startsWith(`.${identity}.corrupt-`)
+      )
+    ).toEqual([]);
+    expect(readFileSync(buildLog, "utf8").trim().split("\n")).toHaveLength(2);
   });
 
   it("repairs an invalid final entry under the installation lock", async () => {
