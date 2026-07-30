@@ -116,6 +116,12 @@ fn init_provider_repo(root: &Path) -> PathBuf {
     std::fs::write(
         repo.join(".kanna/config.json"),
         json!({
+            "agentProviders": {
+                "implement": {
+                    "provider": "claude",
+                    "model": "repo-model"
+                }
+            },
             "workspace": {
                 "path": {
                     "prepend": [".kanna/provider-bin"]
@@ -132,7 +138,7 @@ fn init_provider_repo(root: &Path) -> PathBuf {
     .expect("agent definition should be written");
     std::fs::write(
         implement_agent_dir.join("AGENT.md"),
-        "---\nname: implement\ndescription: Test implementation agent\n---\n\nImplement $TASK_PROMPT\n",
+        "---\nname: implement\ndescription: Test implementation agent\nagent_provider: opencode\nmodel: agent-model\n---\n\nImplement $TASK_PROMPT\n",
     )
     .expect("implement agent definition should be written");
     std::fs::write(
@@ -584,6 +590,69 @@ async fn ordered_agent_candidates_fall_back_through_the_http_task_creation_path(
         .await
         .expect("task detail should be JSON");
     assert_eq!(task["agentProvider"], "claude");
+
+    stop_server(&mut server).await;
+    std::fs::remove_dir_all(root).expect("test root should be removed");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn repo_provider_and_model_override_agent_frontmatter_through_http_task_creation() {
+    let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
+    let root = unique_test_root("repo-preference");
+    std::fs::create_dir_all(&root).expect("test root should be created");
+    let repo = init_provider_repo(&root);
+    let ports = ServerPortReservations::new();
+    let port = ports.lan_port();
+    let (config_path, daemon_dir, _) = write_server_config(&root, port, ports.transfer_port());
+    let ServerPortReservations { lan, transfer } = ports;
+    let daemon = tokio::spawn(fake_daemon_until_spawn(daemon_dir));
+    let mut server = start_server(&config_path, &root, port, lan, transfer).await;
+    let client = Client::new();
+    let repo_id = register_repo(&client, port, &repo).await;
+
+    let created = client
+        .post(format!("http://127.0.0.1:{port}/v1/tasks"))
+        .json(&json!({
+            "repoId": repo_id,
+            "prompt": "Use the repo preference",
+            "agent": "implement",
+            "agentType": "agent"
+        }))
+        .send()
+        .await
+        .expect("task creation should reach kanna-server")
+        .error_for_status()
+        .expect("repo preference should override unavailable agent frontmatter")
+        .json::<Value>()
+        .await
+        .expect("task response should be JSON");
+    let task_id = created["taskId"]
+        .as_str()
+        .expect("task response should include an id");
+
+    match daemon.await.expect("fake daemon should finish") {
+        DaemonCommand::SpawnAgent {
+            session_id, params, ..
+        } => {
+            assert_eq!(session_id, task_id);
+            assert_eq!(params.agent_provider, DaemonAgentProvider::Claude);
+            assert_eq!(params.model.as_deref(), Some("repo-model"));
+        }
+        other => panic!("expected repo-preferred headless spawn, got {other:?}"),
+    }
+
+    let task = client
+        .get(format!("http://127.0.0.1:{port}/v1/tasks/{task_id}"))
+        .send()
+        .await
+        .expect("task detail should reach kanna-server")
+        .error_for_status()
+        .expect("task detail should succeed")
+        .json::<Value>()
+        .await
+        .expect("task detail should be JSON");
+    assert_eq!(task["agentProvider"], "claude");
+    assert_eq!(task["model"], "repo-model");
 
     stop_server(&mut server).await;
     std::fs::remove_dir_all(root).expect("test root should be removed");

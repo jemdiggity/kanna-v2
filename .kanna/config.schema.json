@@ -44,6 +44,47 @@
         "type": "string"
       }
     },
+    "agentProviders": {
+      "type": "object",
+      "description": "Repo-level provider and optional model preferences by agent name or * glob. Exact names win; otherwise the matching glob with the most non-* characters wins, with lexical order breaking ties. Provider resolution is explicit task or stage override, then this map, then layered AGENT.md/EXTEND.md frontmatter, then the global default.",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/agentProvider"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["provider"],
+            "properties": {
+              "provider": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/agentProvider"
+                  },
+                  {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": {
+                      "$ref": "#/$defs/agentProvider"
+                    }
+                  }
+                ]
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        ]
+      }
+    },
     "vars": {
       "type": "object",
       "description": "String variables substituted in AGENT.md bodies with $NAME or ${NAME}. Runtime prompt variables such as $BASE_REF, $BRANCH, $KANNA_TASK_ID, $PREV_RESULT, $SOURCE_WORKTREE, and $TASK_PROMPT remain runtime-bound and are not replaced by config vars.",
@@ -133,10 +174,23 @@
         "pr": "draft-pr",
         "merge": "github"
       },
+      "agentProviders": {
+        "review": "codex",
+        "review-*": {
+          "provider": ["codex", "claude"],
+          "model": "gpt-5"
+        }
+      },
       "vars": {
         "MERGE_STRATEGY": "merge",
         "REVIEW_TEAM": "platform"
       }
     }
-  ]
+  ],
+  "$defs": {
+    "agentProvider": {
+      "type": "string",
+      "enum": ["claude", "copilot", "codex", "opencode", "antigravity"]
+    }
+  }
 }

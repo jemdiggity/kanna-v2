@@ -1,3 +1,9 @@
+import {
+  isAgentProvider,
+  splitAgentProviderValue,
+  type AgentProvider,
+} from "./agent-providers.js";
+
 /**
  * Built-in stage display order used when no repo-level override is configured.
  * Stages not listed here sort alphabetically after the listed ones.
@@ -14,6 +20,11 @@ export interface RepoWorkspaceConfig {
   path?: RepoWorkspacePathConfig;
 }
 
+export interface RepoAgentProviderPreference {
+  provider: AgentProvider[];
+  model?: string;
+}
+
 export interface RepoConfig {
   pipeline?: string;
   setup?: string[];
@@ -21,6 +32,7 @@ export interface RepoConfig {
   test?: string[];
   ports?: Record<string, number>;
   flavors?: Record<string, string>;
+  agentProviders?: Record<string, RepoAgentProviderPreference>;
   vars?: Record<string, string>;
   reserved_port_offsets?: number[];
   reserved_ports?: number[];
@@ -70,6 +82,48 @@ export function parseRepoConfig(json: string): RepoConfig {
       }
     }
     if (Object.keys(flavors).length > 0) config.flavors = flavors;
+  }
+
+  if (
+    raw.agentProviders &&
+    typeof raw.agentProviders === "object" &&
+    !Array.isArray(raw.agentProviders)
+  ) {
+    const agentProviders: Record<string, RepoAgentProviderPreference> = {};
+    for (const [pattern, rawPreference] of Object.entries(
+      raw.agentProviders as Record<string, unknown>,
+    )) {
+      if (pattern.trim().length === 0) continue;
+      const providerValue = typeof rawPreference === "string"
+        ? rawPreference
+        : rawPreference && typeof rawPreference === "object" && !Array.isArray(rawPreference)
+          ? (rawPreference as Record<string, unknown>).provider
+          : undefined;
+      if (
+        typeof providerValue !== "string" &&
+        !(
+          Array.isArray(providerValue) &&
+          providerValue.every((provider) => typeof provider === "string")
+        )
+      ) {
+        continue;
+      }
+      const providers = splitAgentProviderValue(providerValue);
+      if (providers.length === 0 || !providers.every(isAgentProvider)) {
+        continue;
+      }
+      const preference: RepoAgentProviderPreference = {
+        provider: providers.filter(isAgentProvider),
+      };
+      if (rawPreference && typeof rawPreference === "object" && !Array.isArray(rawPreference)) {
+        const model = (rawPreference as Record<string, unknown>).model;
+        if (typeof model === "string" && model.length > 0) {
+          preference.model = model;
+        }
+      }
+      agentProviders[pattern] = preference;
+    }
+    if (Object.keys(agentProviders).length > 0) config.agentProviders = agentProviders;
   }
 
   if (raw.vars && typeof raw.vars === "object" && !Array.isArray(raw.vars)) {

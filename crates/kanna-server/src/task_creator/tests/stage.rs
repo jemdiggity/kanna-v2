@@ -51,6 +51,12 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
             serde_json::json!({
                 "teardown": [format!("printf {version}_REPO_TEARDOWN")],
                 "vars": {"PIN_VAR": format!("{version}_VAR")},
+                "agentProviders": {
+                    "reviewer": {
+                        "provider": "opencode",
+                        "model": format!("{lower}-repo-model")
+                    }
+                },
                 "workspace": {
                     "env": {format!("{version}_ENV"): "yes"},
                     "path": {"prepend": [".kanna/test-provider-bin"]}
@@ -173,7 +179,8 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
     .unwrap();
     assert_eq!(run.env.get("V1_ENV").map(String::as_str), Some("yes"));
     assert!(!run.env.contains_key("V2_ENV"));
-    assert_eq!(run.model.as_deref(), Some("v1-model"));
+    assert_eq!(run.agent_provider, "opencode");
+    assert_eq!(run.model.as_deref(), Some("v1-repo-model"));
     assert!(!worktree.join("v1-stage.marker").exists());
     super::super::finish_deferred_stage_setup(&mut run).unwrap();
     assert!(worktree.join("v1-stage.marker").is_file());
