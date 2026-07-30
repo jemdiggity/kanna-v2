@@ -14,6 +14,7 @@ use tokio::sync::{broadcast, Mutex};
 use crate::client::SessionSizes;
 use crate::daemon_lifecycle::{DaemonLifecycle, DaemonLifecycleState};
 use crate::fanout::SessionFanouts;
+use crate::paths::lifecycle_audit;
 use crate::session::{SessionManager, StreamControl};
 use crate::socket::{read_command, write_event};
 use crate::successor_auth::SuccessorAuthorizer;
@@ -21,6 +22,17 @@ use crate::util::error_event;
 use crate::{fd_transfer, pty};
 
 const HANDOFF_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn handoff_response_timeout() -> std::time::Duration {
+    #[cfg(debug_assertions)]
+    if let Some(timeout_ms) = std::env::var("KANNA_TEST_HANDOFF_RESPONSE_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        return std::time::Duration::from_millis(timeout_ms);
+    }
+    HANDOFF_RESPONSE_TIMEOUT
+}
 
 /// The guarantees selected for this transfer. The mode is resolved at the
 /// version boundary and carried explicitly so a legacy response can never be
@@ -283,7 +295,7 @@ async fn request_handoff(
 
     let mut line = String::new();
     use tokio::io::AsyncBufReadExt;
-    tokio::time::timeout(HANDOFF_RESPONSE_TIMEOUT, reader.read_line(&mut line))
+    tokio::time::timeout(handoff_response_timeout(), reader.read_line(&mut line))
         .await
         .map_err(|_| HandoffRequestError::ResponseTimeout)?
         .map_err(|e| {
@@ -517,6 +529,11 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
         pid_path,
         socket_path
     );
+    lifecycle_audit(format_args!(
+        "event=handoff_check pid_file={} socket={}",
+        pid_path.display(),
+        socket_path.display()
+    ));
 
     // Check if the old daemon is running. The pid file is untrusted input:
     // parse it strictly (a negative or oversized value would turn later
@@ -532,11 +549,18 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
             Some(pid) => pid,
             None => {
                 log::info!("[handoff] pid file has invalid content: {:?}", s.trim());
+                lifecycle_audit(format_args!(
+                    "event=handoff_skipped reason=invalid_pid_file content={:?}",
+                    s.trim()
+                ));
                 return HandoffResult::empty();
             }
         },
         Err(e) => {
             log::info!("[handoff] no pid file: {}", e);
+            lifecycle_audit(format_args!(
+                "event=handoff_skipped reason=no_pid_file error={e}"
+            ));
             return HandoffResult::empty();
         }
     };
@@ -553,6 +577,10 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
                 pid_file_pid,
                 observed
             );
+            lifecycle_audit(format_args!(
+                "event=handoff_skipped reason=incumbent_not_running old_pid={} observed={observed:?}",
+                pid_file_pid
+            ));
             return HandoffResult::empty();
         }
     };
@@ -562,6 +590,12 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
         pid_file_pid,
         socket_path
     );
+    lifecycle_audit(format_args!(
+        "event=handoff_attempt old_pid={} mode={} timeout_ms={}",
+        pid_file_pid,
+        HandoffMode::TransactionalV3.label(),
+        handoff_response_timeout().as_millis()
+    ));
 
     // Ambiguous failures retain the pre-connect identity only for liveness
     // reporting. request_handoff returns the authenticated, continuously
@@ -597,6 +631,11 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
                     "[handoff] not attempting legacy fallback after ambiguous {} failure",
                     initial_mode.label()
                 );
+                lifecycle_audit(format_args!(
+                    "event=handoff_aborted old_pid={} mode={} reason={error} incumbent_retained=true",
+                    old_pid,
+                    initial_mode.label()
+                ));
                 return HandoffResult {
                     adopted: vec![],
                     adopted_agents: vec![],
@@ -626,6 +665,11 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
                         legacy_mode.label(),
                         legacy_error
                     );
+                    lifecycle_audit(format_args!(
+                        "event=handoff_aborted old_pid={} mode={} reason={legacy_error} incumbent_retained=true",
+                        old_pid,
+                        legacy_mode.label()
+                    ));
                     return HandoffResult {
                         adopted: vec![],
                         adopted_agents: vec![],
@@ -642,6 +686,11 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
 
     if session_infos.is_empty() {
         log::info!("[handoff] no sessions to adopt");
+        lifecycle_audit(format_args!(
+            "event=handoff_adopted old_pid={} mode={} sessions=[]",
+            old_pid,
+            used_mode.label()
+        ));
         return HandoffResult {
             old_daemon: Some(old_daemon),
             ..HandoffResult::empty()
@@ -683,6 +732,17 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
             fds.len(),
             expected_fds
         );
+        let lost_ids = session_infos
+            .iter()
+            .map(|info| info.session_id.as_str())
+            .collect::<Vec<_>>();
+        lifecycle_audit(format_args!(
+            "event=handoff_aborted old_pid={} mode={} reason=fd_count_mismatch expected_fds={} received_fds={} affected_sessions={lost_ids:?} incumbent_retained=true",
+            old_pid,
+            used_mode.label(),
+            expected_fds,
+            fds.len()
+        ));
         return HandoffResult {
             lost,
             old_daemon: Some(old_daemon),
@@ -752,6 +812,20 @@ pub(crate) async fn attempt_handoff(pid_path: &PathBuf, socket_path: &PathBuf) -
         adopted.len(),
         adopted_agents.len()
     );
+    let adopted_ids = adopted
+        .iter()
+        .map(|(session_id, _, _)| session_id.as_str())
+        .chain(
+            adopted_agents
+                .iter()
+                .map(|(info, _)| info.session_id.as_str()),
+        )
+        .collect::<Vec<_>>();
+    lifecycle_audit(format_args!(
+        "event=handoff_adopted old_pid={} mode={} sessions={adopted_ids:?}",
+        old_pid,
+        used_mode.label()
+    ));
     HandoffResult {
         adopted,
         adopted_agents,
@@ -783,9 +857,27 @@ pub(crate) async fn handle_handoff(
         version,
         protocol::HANDOFF_PROTOCOL_VERSION
     );
+    lifecycle_audit(format_args!(
+        "event=handoff_request_received version={} current_version={}",
+        version,
+        protocol::HANDOFF_PROTOCOL_VERSION
+    ));
+
+    #[cfg(debug_assertions)]
+    if let Some(delay_ms) = std::env::var("KANNA_TEST_HANDOFF_RESPONSE_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|delay_ms| *delay_ms > 0)
+    {
+        log::warn!("[handoff] TEST HOOK: delaying response by {}ms", delay_ms);
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    }
 
     let Some(mode) = handoff_mode_for_version(version) else {
         log::info!("[handoff] version mismatch, rejecting");
+        lifecycle_audit(format_args!(
+            "event=handoff_refused reason=version_mismatch requested_version={version}"
+        ));
         let evt = error_event(
             Some(protocol::ErrorCode::HandoffVersionMismatch),
             format!(
@@ -813,6 +905,9 @@ pub(crate) async fn handle_handoff(
             Ok(authorized) => authorized,
             Err(error) => {
                 log::warn!("[handoff] refusing unauthorized successor: {}", error);
+                lifecycle_audit(format_args!(
+                    "event=handoff_refused reason=unauthorized error={error}"
+                ));
                 let evt = error_event(
                     Some(protocol::ErrorCode::HandoffUnauthorized),
                     format!("handoff successor is not authorized: {error}"),
@@ -826,6 +921,12 @@ pub(crate) async fn handle_handoff(
         authorized_successor.peer.pid,
         authorized_successor.parent.pid
     );
+    lifecycle_audit(format_args!(
+        "event=handoff_authorized successor_pid={} launcher_pid={} mode={}",
+        authorized_successor.peer.pid,
+        authorized_successor.parent.pid,
+        mode.label()
+    ));
 
     // Seal both live registries from snapshot capture through ACK resolution.
     // Spawn/Kill/natural-exit hold read guards around their mutations, so an
@@ -874,6 +975,9 @@ pub(crate) async fn handle_handoff(
         .any(|control| !control.is_quiesced() && !control.is_stopped())
     {
         log::warn!("[handoff] timed out quiescing PTY readers; rolling back");
+        lifecycle_audit(format_args!(
+            "event=handoff_rolled_back reason=pty_reader_quiesce_timeout"
+        ));
         for control in &controls {
             control.resume();
         }
@@ -1059,6 +1163,14 @@ pub(crate) async fn handle_handoff(
         infos.len(),
         dead_count
     );
+    let transfer_ids = infos
+        .iter()
+        .map(|info| info.session_id.clone())
+        .collect::<Vec<_>>();
+    lifecycle_audit(format_args!(
+        "event=handoff_snapshot mode={} live_sessions={transfer_ids:?} skipped_dead={dead_count}",
+        mode.label()
+    ));
 
     #[cfg(debug_assertions)]
     if let Ok(marker_path) = std::env::var("KANNA_DAEMON_TEST_HANDOFF_SNAPSHOT_MARKER") {
@@ -1089,6 +1201,9 @@ pub(crate) async fn handle_handoff(
     let evt = Event::HandoffReady { sessions: infos };
     if let Err(error) = write_event(&mut *writer.lock().await, &evt).await {
         log::error!("[handoff] failed to write HandoffReady: {}", error);
+        lifecycle_audit(format_args!(
+            "event=handoff_rolled_back reason=handoff_ready_write_failed error={error} sessions_retained={transfer_ids:?}"
+        ));
         for control in &controls {
             control.resume();
         }
@@ -1104,6 +1219,9 @@ pub(crate) async fn handle_handoff(
         use tokio::io::AsyncWriteExt;
         if let Err(error) = writer.lock().await.flush().await {
             log::error!("[handoff] failed to flush HandoffReady: {}", error);
+            lifecycle_audit(format_args!(
+                "event=handoff_rolled_back reason=handoff_ready_flush_failed error={error} sessions_retained={transfer_ids:?}"
+            ));
             for control in &controls {
                 control.resume();
             }
@@ -1128,6 +1246,9 @@ pub(crate) async fn handle_handoff(
             Ok(()) => log::info!("[handoff] fds sent successfully"),
             Err(e) => {
                 log::info!("[handoff] failed to send fds: {} (kind={:?})", e, e.kind());
+                lifecycle_audit(format_args!(
+                    "event=handoff_rolled_back reason=fd_send_failed error={e} sessions_retained={transfer_ids:?}"
+                ));
                 for control in &controls {
                     control.resume();
                 }
@@ -1148,6 +1269,10 @@ pub(crate) async fn handle_handoff(
             version: ack_version,
         })) if ack_version == version => {
             log::info!("[handoff] adopting daemon acknowledged handoff");
+            lifecycle_audit(format_args!(
+                "event=handoff_committed successor_pid={} sessions={transfer_ids:?}",
+                authorized_successor.peer.pid
+            ));
             // The transfer is committed: keep the agent registry sealed for
             // the remainder of this (exiting) daemon's life.
             if let Some(seal) = handoff_seal.take() {
@@ -1156,6 +1281,9 @@ pub(crate) async fn handle_handoff(
         }
         Ok(Some(other)) => {
             log::warn!("[handoff] expected HandoffAdopted, got {:?}", other);
+            lifecycle_audit(format_args!(
+                "event=handoff_rolled_back reason=unexpected_ack ack={other:?} sessions_retained={transfer_ids:?}"
+            ));
             for control in &controls {
                 control.resume();
             }
@@ -1167,6 +1295,9 @@ pub(crate) async fn handle_handoff(
         }
         Ok(None) => {
             log::warn!("[handoff] adopting daemon disconnected before ack");
+            lifecycle_audit(format_args!(
+                "event=handoff_rolled_back reason=disconnect_before_ack sessions_retained={transfer_ids:?}"
+            ));
             for control in &controls {
                 control.resume();
             }
@@ -1178,6 +1309,9 @@ pub(crate) async fn handle_handoff(
         }
         Err(_) => {
             log::warn!("[handoff] timed out waiting for adoption ack");
+            lifecycle_audit(format_args!(
+                "event=handoff_rolled_back reason=ack_timeout sessions_retained={transfer_ids:?}"
+            ));
             for control in &controls {
                 control.resume();
             }
@@ -1249,6 +1383,10 @@ pub(crate) async fn handle_handoff(
         "[handoff] complete, exiting in 500ms (pid={})",
         std::process::id()
     );
+    lifecycle_audit(format_args!(
+        "event=handoff_sender_exit successor_pid={} transferred_sessions={transfer_ids:?}",
+        authorized_successor.peer.pid
+    ));
     // Use a blocking thread to exit — std::process::exit from an async context
     // can hang if tokio tasks are still running.
     std::thread::spawn(|| {
