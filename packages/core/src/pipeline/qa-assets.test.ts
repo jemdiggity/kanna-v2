@@ -98,11 +98,11 @@ describe("QA pipeline assets", () => {
     }
   });
 
-  it("ships Kanna部長 as a Codex-first singleton palette task", () => {
-    const agent = parseAgentDefinition(readRepoFile(".kanna/agents/bucho/AGENT.md"));
-    const task = readRepoFile(".kanna/tasks/bucho/agent.md");
+  it("ships Kanna Task Manager as a Codex-first singleton palette task", () => {
+    const agent = parseAgentDefinition(readRepoFile(".kanna/agents/task-manager/AGENT.md"));
+    const task = readRepoFile(".kanna/tasks/task-manager/agent.md");
 
-    expect(agent.name).toBe("bucho");
+    expect(agent.name).toBe("task-manager");
     expect(agent.agent_provider?.[0]).toBe("codex");
     expect(agent.prompt).toContain("kanna_wait_events");
     expect(agent.prompt).toContain("kanna_set_task_notify");
@@ -111,8 +111,8 @@ describe("QA pipeline assets", () => {
       "short human-readable name or purpose followed by its id in parentheses"
     );
     expect(agent.prompt).toContain("Never make a human decode a bare task id");
-    expect(task).toContain("name: Kanna部長");
-    expect(task).toContain("agent: bucho");
+    expect(task).toContain("name: Kanna Task Manager");
+    expect(task).toContain("agent: task-manager");
   });
 
   it("keeps the pipeline provider schema aligned with the generated registry", () => {

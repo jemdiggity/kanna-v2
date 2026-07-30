@@ -2320,12 +2320,12 @@ fn read_agent_definition_loads_builtin_ship_agent_with_codex_first() {
 }
 
 #[test]
-fn read_agent_definition_loads_builtin_bucho_agent_with_codex_first() {
-    let repo_root = init_git_repo_without_provider_fixtures("agent-builtin-bucho");
+fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
+    let repo_root = init_git_repo_without_provider_fixtures("agent-builtin-task-manager");
 
-    let definition = resolve_test_agent_definition(&repo_root, "bucho").unwrap();
+    let definition = resolve_test_agent_definition(&repo_root, "task-manager").unwrap();
 
-    assert_eq!(definition.name, "bucho");
+    assert_eq!(definition.name, "task-manager");
     assert_eq!(
         definition.agent_providers.first().map(String::as_str),
         Some("codex")

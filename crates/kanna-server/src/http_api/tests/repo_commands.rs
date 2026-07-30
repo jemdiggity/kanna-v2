@@ -53,8 +53,8 @@ async fn lists_repo_commands_with_revision_and_groups() {
         .expect("commands")
         .iter()
         .any(|command| {
-            command["id"] == "custom:bucho"
-                && command["label"] == "Kanna部長"
+            command["id"] == "custom:task-manager"
+                && command["label"] == "Kanna Task Manager"
                 && command["group"] == "automation"
         }));
 }

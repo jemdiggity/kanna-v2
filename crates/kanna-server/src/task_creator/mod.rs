@@ -1635,7 +1635,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;
     let display_name = match agent_name {
         "merge" => Some("Merge Master".to_string()),
-        "bucho" => Some("Kanna部長".to_string()),
+        "task-manager" => Some("Kanna Task Manager".to_string()),
         _ => Some(format!("{agent_name} agent")),
     };
 

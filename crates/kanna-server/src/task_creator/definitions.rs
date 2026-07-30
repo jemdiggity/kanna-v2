@@ -940,8 +940,8 @@ const BUILTIN_AGENT_RESOURCES: &[(&str, &str)] = &[
         include_str!("../../../../.kanna/agents/approve/AGENT.md"),
     ),
     (
-        ".kanna/agents/bucho/AGENT.md",
-        include_str!("../../../../.kanna/agents/bucho/AGENT.md"),
+        ".kanna/agents/task-manager/AGENT.md",
+        include_str!("../../../../.kanna/agents/task-manager/AGENT.md"),
     ),
     (
         ".kanna/agents/commit/AGENT.md",
