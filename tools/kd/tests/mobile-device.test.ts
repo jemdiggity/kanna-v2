@@ -1,9 +1,18 @@
+import { mkdir, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  buildMobileDeviceInstallAppCommand,
+  buildMobileDeviceLaunchAppCommand,
   buildMobileDevicePrebuildCommand,
   buildMobileDeviceRelaunchCommand,
+  buildMobileDeviceReleaseBuildCommand,
   buildMobileDeviceRunCommand,
   checkPhysicalDeviceRunPreflight,
+  mobileDeviceDerivedDataPath,
+  resolveMobileIosWorkspace,
+  resolveMobileReleaseAppPath,
   waitForPhysicalDeviceMetroReadiness,
   resolveMobileNativeIdentity,
   parseXcdeviceList,
@@ -229,6 +238,122 @@ describe("physical-device mobile runtime", () => {
       message:
         "Metro is not reachable at http://172.16.0.193:1430/status after 2 attempts. " +
         "\"No script URL provided\" usually means Metro is down, the iPhone cannot reach the printed LAN URL, or Local Network permission is off."
+    });
+  });
+
+  it("builds a Release xcodebuild command that allows automatic provisioning updates", () => {
+    const command = buildMobileDeviceReleaseBuildCommand({
+      repoRoot: "/repo",
+      deviceUdid: "00008130-001015CA1091401C",
+      derivedDataPath: "/repo/.build/mobile/ios-device-staging",
+      nativeIdentity: {
+        appEnv: "staging",
+        bundleId: "build.kanna.app.staging",
+        devClientScheme: "exp+kanna-mobile",
+        displayName: "Kanna Staging"
+      },
+      workspace: {
+        scheme: "KannaStaging",
+        workspacePath: "/repo/apps/mobile/ios/KannaStaging.xcworkspace"
+      }
+    });
+
+    expect(command).toEqual({
+      command: "xcodebuild",
+      args: [
+        "-workspace",
+        "/repo/apps/mobile/ios/KannaStaging.xcworkspace",
+        "-scheme",
+        "KannaStaging",
+        "-configuration",
+        "Release",
+        "-destination",
+        "id=00008130-001015CA1091401C",
+        "-derivedDataPath",
+        "/repo/.build/mobile/ios-device-staging",
+        "-allowProvisioningUpdates",
+        "-allowProvisioningDeviceRegistration",
+        "build"
+      ],
+      cwd: "/repo",
+      env: {
+        KANNA_APP_ENV: "staging"
+      }
+    });
+  });
+
+  it("keeps the Release derived data under .build per environment", () => {
+    expect(mobileDeviceDerivedDataPath("/repo", "staging")).toBe(
+      join("/repo", ".build", "mobile", "ios-device-staging")
+    );
+  });
+
+  it("resolves the generated Xcode workspace and Release app product", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-mobile-workspace-"));
+    await mkdir(join(repoRoot, "apps", "mobile", "ios", "KannaStaging.xcworkspace"), {
+      recursive: true
+    });
+    const derivedDataPath = join(repoRoot, ".build", "mobile", "ios-device-staging");
+    await mkdir(join(derivedDataPath, "Build", "Products", "Release-iphoneos", "KannaStaging.app"), {
+      recursive: true
+    });
+
+    expect(resolveMobileIosWorkspace(repoRoot)).toEqual({
+      scheme: "KannaStaging",
+      workspacePath: join(repoRoot, "apps", "mobile", "ios", "KannaStaging.xcworkspace")
+    });
+    expect(resolveMobileReleaseAppPath(derivedDataPath)).toBe(
+      join(derivedDataPath, "Build", "Products", "Release-iphoneos", "KannaStaging.app")
+    );
+  });
+
+  it("fails clearly when pod install produced no workspace or the build produced no app", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-mobile-no-workspace-"));
+    await mkdir(join(repoRoot, "apps", "mobile", "ios"), { recursive: true });
+
+    expect(() => resolveMobileIosWorkspace(repoRoot)).toThrow(
+      /A missing workspace usually means pod install failed/
+    );
+    expect(() => resolveMobileReleaseAppPath(join(repoRoot, ".build", "missing"))).toThrow(
+      /Expected exactly one \.app/
+    );
+  });
+
+  it("builds devicectl install and launch commands for the Release app", () => {
+    expect(
+      buildMobileDeviceInstallAppCommand({
+        appPath: "/repo/.build/mobile/ios-device-staging/Build/Products/Release-iphoneos/KannaStaging.app",
+        deviceUdid: "00008130-001015CA1091401C"
+      })
+    ).toEqual({
+      command: "xcrun",
+      args: [
+        "devicectl",
+        "device",
+        "install",
+        "app",
+        "--device",
+        "00008130-001015CA1091401C",
+        "/repo/.build/mobile/ios-device-staging/Build/Products/Release-iphoneos/KannaStaging.app"
+      ]
+    });
+    expect(
+      buildMobileDeviceLaunchAppCommand({
+        bundleId: "build.kanna.app.staging",
+        deviceUdid: "00008130-001015CA1091401C"
+      })
+    ).toEqual({
+      command: "xcrun",
+      args: [
+        "devicectl",
+        "device",
+        "process",
+        "launch",
+        "--terminate-existing",
+        "--device",
+        "00008130-001015CA1091401C",
+        "build.kanna.app.staging"
+      ]
     });
   });
 

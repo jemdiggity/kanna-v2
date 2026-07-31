@@ -28,12 +28,17 @@ import { resolveMobileServerUrl } from "../runtime/mobile";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../runtime/mobile-commands";
 import { executeMobileIosArchiveWithContext } from "../runtime/mobile-archive";
 import {
+  buildMobileDeviceInstallAppCommand,
+  buildMobileDeviceLaunchAppCommand,
   buildMobileDevicePrebuildCommand,
-  buildMobileDeviceReleaseInstallCommand,
+  buildMobileDeviceReleaseBuildCommand,
   buildMobileDeviceRelaunchCommand,
   buildMobileDeviceRunCommand,
   checkPhysicalDeviceRunPreflight,
+  mobileDeviceDerivedDataPath,
+  resolveMobileIosWorkspace,
   resolveMobileNativeIdentity,
+  resolveMobileReleaseAppPath,
   resolvePhysicalDevice,
   waitForPhysicalDeviceMetroReadiness,
   type PhysicalDeviceMetroReadinessInput
@@ -904,24 +909,30 @@ function formatPhysicalDeviceInstallSuccess(input: {
   environment: string;
 }): string {
   return [
-    `Installed Kanna mobile on ${input.deviceName}.`,
+    `Installed and launched Kanna mobile on ${input.deviceName}.`,
     `Bundle ID: ${input.bundleId}`,
     `Environment: ${input.environment}`,
     "Metro is not required for this Release install because JavaScript is bundled into the app."
   ].join("\n");
 }
 
+// xcodebuild logs are streamed live and can run to megabytes; keep only the
+// tail (where the failing step and signing errors appear) in the task result.
+function tailCommandResult(result: CommandResult, lines: number): CommandResult {
+  const tail = (text: string): string => text.split("\n").slice(-lines).join("\n");
+  return { exitCode: result.exitCode, stdout: tail(result.stdout), stderr: tail(result.stderr) };
+}
+
 function formatPhysicalDeviceInstallFailure(input: {
   bundleId: string;
   deviceName: string;
   environment: string;
-  phase: "prebuild" | "install";
+  phase: "prebuild" | "build" | "install" | "launch";
   result: CommandResult;
 }): string {
   const output = [input.result.stderr.trim(), input.result.stdout.trim()].filter(Boolean).join("\n");
-  const action = input.phase === "prebuild" ? "prebuild" : "install";
   return [
-    `Failed to ${action} Kanna mobile on ${input.deviceName}.`,
+    `Failed to ${input.phase} Kanna mobile on ${input.deviceName}.`,
     `Bundle ID: ${input.bundleId}`,
     `Environment: ${input.environment}`,
     `Exit code: ${input.result.exitCode}`,
@@ -1250,14 +1261,47 @@ async function executeMobileDeviceReleaseInstall(
     };
   }
 
-  const installCommand = buildMobileDeviceReleaseInstallCommand({
+  const workspace = resolveMobileIosWorkspace(executor.context.repoRoot);
+  const derivedDataPath = mobileDeviceDerivedDataPath(
+    executor.context.repoRoot,
+    nativeIdentity.appEnv
+  );
+  const buildCommand = buildMobileDeviceReleaseBuildCommand({
     repoRoot: executor.context.repoRoot,
     deviceUdid: device.udid,
-    nativeIdentity
+    derivedDataPath,
+    nativeIdentity,
+    workspace
+  });
+  const buildResult = await executor.runner.run(buildCommand.command, buildCommand.args, {
+    cwd: buildCommand.cwd,
+    env: { ...env, ...buildCommand.env },
+    streamOutput: true
+  });
+  if (buildResult.exitCode !== 0) {
+    return {
+      ok: false,
+      message: formatPhysicalDeviceInstallFailure({
+        bundleId: nativeIdentity.bundleId,
+        deviceName: device.name,
+        environment: nativeIdentity.appEnv,
+        phase: "build",
+        result: tailCommandResult(buildResult, 80)
+      }),
+      data: {
+        bundleId: nativeIdentity.bundleId,
+        environment: nativeIdentity.appEnv,
+        device
+      }
+    };
+  }
+
+  const appPath = resolveMobileReleaseAppPath(derivedDataPath);
+  const installCommand = buildMobileDeviceInstallAppCommand({
+    appPath,
+    deviceUdid: device.udid
   });
   const installResult = await executor.runner.run(installCommand.command, installCommand.args, {
-    cwd: installCommand.cwd,
-    env: { ...env, ...installCommand.env },
     streamOutput: true
   });
   if (installResult.exitCode !== 0) {
@@ -1278,6 +1322,32 @@ async function executeMobileDeviceReleaseInstall(
     };
   }
 
+  const launchCommand = buildMobileDeviceLaunchAppCommand({
+    bundleId: nativeIdentity.bundleId,
+    deviceUdid: device.udid
+  });
+  const launchResult = await executor.runner.run(launchCommand.command, launchCommand.args, {
+    streamOutput: true
+  });
+  if (launchResult.exitCode !== 0) {
+    return {
+      ok: false,
+      message: formatPhysicalDeviceInstallFailure({
+        bundleId: nativeIdentity.bundleId,
+        deviceName: device.name,
+        environment: nativeIdentity.appEnv,
+        phase: "launch",
+        result: launchResult
+      }),
+      data: {
+        bundleId: nativeIdentity.bundleId,
+        environment: nativeIdentity.appEnv,
+        device,
+        appPath
+      }
+    };
+  }
+
   return {
     ok: true,
     message: formatPhysicalDeviceInstallSuccess({
@@ -1288,7 +1358,8 @@ async function executeMobileDeviceReleaseInstall(
     data: {
       bundleId: nativeIdentity.bundleId,
       environment: nativeIdentity.appEnv,
-      device
+      device,
+      appPath
     }
   };
 }

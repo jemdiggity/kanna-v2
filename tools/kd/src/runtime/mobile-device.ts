@@ -1,6 +1,6 @@
 import type { CommandRunner } from "./process";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export interface AvailablePhysicalDevice {
@@ -39,10 +39,17 @@ interface BuildMobileDeviceRunCommandInput {
   repoRoot: string;
 }
 
-interface BuildMobileDeviceReleaseInstallCommandInput {
+export interface MobileIosWorkspace {
+  scheme: string;
+  workspacePath: string;
+}
+
+interface BuildMobileDeviceReleaseBuildCommandInput {
+  derivedDataPath: string;
   deviceUdid: string;
   nativeIdentity: MobileNativeIdentity;
   repoRoot: string;
+  workspace: MobileIosWorkspace;
 }
 
 interface BuildMobileDevicePrebuildCommandInput {
@@ -280,27 +287,100 @@ export function buildMobileDeviceRunCommand(
   };
 }
 
-export function buildMobileDeviceReleaseInstallCommand(
-  input: BuildMobileDeviceReleaseInstallCommandInput
+export function resolveMobileIosWorkspace(repoRoot: string): MobileIosWorkspace {
+  const iosDir = join(repoRoot, "apps", "mobile", "ios");
+  const workspaces = existsSync(iosDir)
+    ? readdirSync(iosDir).filter((entry) => entry.endsWith(".xcworkspace"))
+    : [];
+  if (workspaces.length !== 1) {
+    throw new Error(
+      `Expected exactly one .xcworkspace in ${iosDir} after prebuild and pod install, found: ` +
+        `${workspaces.join(", ") || "<none>"}. A missing workspace usually means pod install failed.`
+    );
+  }
+  return {
+    scheme: basename(workspaces[0], ".xcworkspace"),
+    workspacePath: join(iosDir, workspaces[0])
+  };
+}
+
+export function mobileDeviceDerivedDataPath(repoRoot: string, appEnv: MobileAppEnv): string {
+  return join(repoRoot, ".build", "mobile", `ios-device-${appEnv}`);
+}
+
+// Build with xcodebuild directly instead of `expo run:ios`: Expo CLI only
+// passes -allowProvisioningUpdates when the pbxproj has no DEVELOPMENT_TEAM,
+// and prebuild always writes ours (ios.appleTeamId). Without that flag,
+// automatic signing cannot regenerate the provisioning profile when the app's
+// entitlements change (e.g. aps-environment for push), so the build fails
+// against a stale profile. The archive flow already builds this way.
+export function buildMobileDeviceReleaseBuildCommand(
+  input: BuildMobileDeviceReleaseBuildCommandInput
 ): MobileDeviceRunCommand {
   return {
-    command: "pnpm",
+    command: "xcodebuild",
     args: [
-      "--dir",
-      `${input.repoRoot}/apps/mobile`,
-      "exec",
-      "expo",
-      "run:ios",
-      "--configuration",
+      "-workspace",
+      input.workspace.workspacePath,
+      "-scheme",
+      input.workspace.scheme,
+      "-configuration",
       "Release",
-      "--no-bundler",
-      "--device",
-      input.deviceUdid
+      "-destination",
+      `id=${input.deviceUdid}`,
+      "-derivedDataPath",
+      input.derivedDataPath,
+      "-allowProvisioningUpdates",
+      "-allowProvisioningDeviceRegistration",
+      "build"
     ],
     cwd: input.repoRoot,
     env: {
       KANNA_APP_ENV: input.nativeIdentity.appEnv
     }
+  };
+}
+
+export function resolveMobileReleaseAppPath(derivedDataPath: string): string {
+  const productsDir = join(derivedDataPath, "Build", "Products", "Release-iphoneos");
+  const apps = existsSync(productsDir)
+    ? readdirSync(productsDir).filter((entry) => entry.endsWith(".app"))
+    : [];
+  if (apps.length !== 1) {
+    throw new Error(
+      `Expected exactly one .app in ${productsDir} after the Release build, found: ` +
+        `${apps.join(", ") || "<none>"}.`
+    );
+  }
+  return join(productsDir, apps[0]);
+}
+
+export function buildMobileDeviceInstallAppCommand(input: {
+  appPath: string;
+  deviceUdid: string;
+}): Omit<MobileDeviceRunCommand, "cwd" | "env"> {
+  return {
+    command: "xcrun",
+    args: ["devicectl", "device", "install", "app", "--device", input.deviceUdid, input.appPath]
+  };
+}
+
+export function buildMobileDeviceLaunchAppCommand(input: {
+  bundleId: string;
+  deviceUdid: string;
+}): Omit<MobileDeviceRunCommand, "cwd" | "env"> {
+  return {
+    command: "xcrun",
+    args: [
+      "devicectl",
+      "device",
+      "process",
+      "launch",
+      "--terminate-existing",
+      "--device",
+      input.deviceUdid,
+      input.bundleId
+    ]
   };
 }
 

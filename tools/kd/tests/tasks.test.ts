@@ -1156,6 +1156,22 @@ describe("task executors", () => {
 
   it("installs a staging Release app on a physical device without starting Metro", async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-device-staging-install-"));
+    await mkdir(join(repoRoot, "apps", "mobile", "ios", "KannaStaging.xcworkspace"), {
+      recursive: true
+    });
+    await mkdir(
+      join(
+        repoRoot,
+        ".build",
+        "mobile",
+        "ios-device-staging",
+        "Build",
+        "Products",
+        "Release-iphoneos",
+        "KannaStaging.app"
+      ),
+      { recursive: true }
+    );
     const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; cwd?: string }> = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
@@ -1209,7 +1225,7 @@ describe("task executors", () => {
     );
 
     expect(result.ok).toBe(true);
-    expect(result.message).toContain("Installed Kanna mobile on Jerome's iPhone 15.");
+    expect(result.message).toContain("Installed and launched Kanna mobile on Jerome's iPhone 15.");
     expect(result.message).toContain("Bundle ID: build.kanna.app.staging");
     expect(result.message).toContain("Environment: staging");
     expect(result.message).toContain("Metro is not required");
@@ -1219,15 +1235,29 @@ describe("task executors", () => {
       device: {
         name: "Jerome's iPhone 15",
         udid: "00008130-001015CA1091401C"
-      }
+      },
+      appPath: join(
+        repoRoot,
+        ".build",
+        "mobile",
+        "ios-device-staging",
+        "Build",
+        "Products",
+        "Release-iphoneos",
+        "KannaStaging.app"
+      )
     });
     expect(calls.some((call) => call.command === "tmux")).toBe(false);
     expect(calls.some((call) => call.command === "curl")).toBe(false);
     const prebuildIndex = calls.findIndex(
       (call) => call.command === "pnpm" && call.args.includes("prebuild")
     );
+    const buildIndex = calls.findIndex((call) => call.command === "xcodebuild");
     const installIndex = calls.findIndex(
-      (call) => call.command === "pnpm" && call.args.includes("run:ios")
+      (call) => call.command === "xcrun" && call.args.includes("install")
+    );
+    const launchIndex = calls.findIndex(
+      (call) => call.command === "xcrun" && call.args.includes("launch")
     );
     expect(calls[prebuildIndex]).toMatchObject({
       command: "pnpm",
@@ -1243,25 +1273,64 @@ describe("task executors", () => {
       cwd: repoRoot
     });
     expect(calls[prebuildIndex]?.env?.KANNA_APP_ENV).toBe("staging");
-    expect(calls[installIndex]).toMatchObject({
-      command: "pnpm",
+    expect(calls[buildIndex]).toMatchObject({
+      command: "xcodebuild",
       args: [
-        "--dir",
-        `${repoRoot}/apps/mobile`,
-        "exec",
-        "expo",
-        "run:ios",
-        "--configuration",
+        "-workspace",
+        join(repoRoot, "apps", "mobile", "ios", "KannaStaging.xcworkspace"),
+        "-scheme",
+        "KannaStaging",
+        "-configuration",
         "Release",
-        "--no-bundler",
-        "--device",
-        "00008130-001015CA1091401C"
+        "-destination",
+        "id=00008130-001015CA1091401C",
+        "-derivedDataPath",
+        join(repoRoot, ".build", "mobile", "ios-device-staging"),
+        "-allowProvisioningUpdates",
+        "-allowProvisioningDeviceRegistration",
+        "build"
       ],
       cwd: repoRoot
     });
-    expect(calls[installIndex]?.env?.KANNA_APP_ENV).toBe("staging");
-    expect(calls[installIndex]?.env?.REACT_NATIVE_PACKAGER_HOSTNAME).toBeUndefined();
-    expect(calls[installIndex]?.env?.RCT_METRO_PORT).toBeUndefined();
+    expect(calls[buildIndex]?.env?.KANNA_APP_ENV).toBe("staging");
+    expect(calls[buildIndex]?.env?.REACT_NATIVE_PACKAGER_HOSTNAME).toBeUndefined();
+    expect(calls[buildIndex]?.env?.RCT_METRO_PORT).toBeUndefined();
+    expect(calls[installIndex]).toMatchObject({
+      command: "xcrun",
+      args: [
+        "devicectl",
+        "device",
+        "install",
+        "app",
+        "--device",
+        "00008130-001015CA1091401C",
+        join(
+          repoRoot,
+          ".build",
+          "mobile",
+          "ios-device-staging",
+          "Build",
+          "Products",
+          "Release-iphoneos",
+          "KannaStaging.app"
+        )
+      ]
+    });
+    expect(calls[launchIndex]).toMatchObject({
+      command: "xcrun",
+      args: [
+        "devicectl",
+        "device",
+        "process",
+        "launch",
+        "--terminate-existing",
+        "--device",
+        "00008130-001015CA1091401C",
+        "build.kanna.app.staging"
+      ]
+    });
+    expect(launchIndex).toBeGreaterThan(installIndex);
+    expect(installIndex).toBeGreaterThan(buildIndex);
   });
 
   it("blocks staging physical-device launch when the installed staging desktop is absent from the relay", async () => {
