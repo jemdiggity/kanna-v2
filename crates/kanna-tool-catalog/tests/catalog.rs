@@ -85,7 +85,7 @@ fn generated_schema_preserves_required_order_types_and_enums() {
     );
     assert_eq!(
         create_task["inputSchema"]["properties"]["effort"]["description"],
-        json!("Provider-native reasoning effort passed without normalization. Codex uses model_reasoning_effort (minimal|low|medium|high|xhigh); Claude uses --effort (low|medium|high|xhigh|max); Copilot uses --effort (none|minimal|low|medium|high|xhigh|max); OpenCode uses --variant and validates against the selected model; Antigravity uses --effort (low|medium|high). Explicit task effort overrides repo agentProviders effort, then layered agent-definition frontmatter.")
+        json!("Provider-native reasoning effort passed without normalization. Codex uses model_reasoning_effort and validates against the selected model; Claude uses --effort (low|medium|high|xhigh|max); Copilot uses --effort (none|minimal|low|medium|high|xhigh|max); OpenCode uses --variant and validates against the selected model; Antigravity uses --effort (low|medium|high). Explicit task effort overrides repo agentProviders effort, then layered agent-definition frontmatter.")
     );
 
     let list_agents = tools

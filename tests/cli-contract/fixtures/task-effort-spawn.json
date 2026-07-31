@@ -6,8 +6,8 @@
   },
   {
     "provider": "codex",
-    "effort": "xhigh",
-    "ptyFlag": "-c 'model_reasoning_effort=\"xhigh\"'"
+    "effort": "max",
+    "ptyFlag": "-c 'model_reasoning_effort=\"max\"'"
   },
   {
     "provider": "copilot",

@@ -87,9 +87,9 @@ impl AgentProvider {
     }
 
     /// Native CLI control used for an initial reasoning-effort override.
-    /// Values are not normalized across providers: OpenCode variants are
-    /// model-specific, while the other CLIs publish different fixed
-    /// vocabularies.
+    /// Values are not normalized across providers: Codex reasoning efforts
+    /// and OpenCode variants are model-specific, while the other CLIs publish
+    /// different fixed vocabularies.
     pub const fn effort_override(self) -> EffortOverride {
         match self {
             Self::Codex => EffortOverride::Config("model_reasoning_effort"),
@@ -103,10 +103,9 @@ impl AgentProvider {
     /// and must be passed through for the CLI to validate.
     pub const fn effort_values(self) -> Option<&'static [&'static str]> {
         match self {
-            Self::Codex => Some(&["minimal", "low", "medium", "high", "xhigh"]),
+            Self::Codex | Self::Opencode => None,
             Self::Claude => Some(&["low", "medium", "high", "xhigh", "max"]),
             Self::Copilot => Some(&["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
-            Self::Opencode => None,
             Self::Antigravity => Some(&["low", "medium", "high"]),
         }
     }

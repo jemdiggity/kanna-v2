@@ -24,6 +24,11 @@ describe("created-task reasoning effort spawn contract", () => {
       "opencode",
       "antigravity",
     ]);
+    expect(cases.find(({ provider }) => provider === "codex")).toEqual({
+      provider: "codex",
+      effort: "max",
+      ptyFlag: "-c 'model_reasoning_effort=\"max\"'",
+    });
     for (const contract of cases) {
       expect(contract.effort.trim()).toBe(contract.effort);
       expect(contract.effort).not.toBe("");

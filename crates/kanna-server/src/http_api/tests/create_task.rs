@@ -210,6 +210,14 @@ async fn create_task_effort_reaches_every_provider_daemon_spawn_argv() {
         "../../../../../tests/cli-contract/fixtures/task-effort-spawn.json"
     ))
     .unwrap();
+    assert_eq!(
+        contracts
+            .iter()
+            .find(|contract| contract["provider"] == "codex")
+            .and_then(|contract| contract["effort"].as_str()),
+        Some("max"),
+        "Codex integration coverage must exercise a model-specific value outside the old fixed list"
+    );
     for contract in contracts {
         let provider: AgentProvider = serde_json::from_value(contract["provider"].clone()).unwrap();
         let effort = contract["effort"].as_str().unwrap();

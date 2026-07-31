@@ -57,10 +57,7 @@ fn provider_effort_controls_and_native_values_are_explicit() {
         AgentProvider::Antigravity.effort_override(),
         EffortOverride::Flag("--effort")
     );
-    assert_eq!(
-        AgentProvider::Codex.effort_values(),
-        Some(&["minimal", "low", "medium", "high", "xhigh"][..])
-    );
+    assert_eq!(AgentProvider::Codex.effort_values(), None);
     assert_eq!(
         AgentProvider::Claude.effort_values(),
         Some(&["low", "medium", "high", "xhigh", "max"][..])

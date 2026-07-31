@@ -504,6 +504,7 @@ fn effort_validation_uses_provider_native_vocabularies() {
         "effort override must not have leading or trailing whitespace"
     );
     assert!(validate_provider_effort(AgentProvider::Opencode, Some("provider-native")).is_ok());
+    assert!(validate_provider_effort(AgentProvider::Codex, Some("max")).is_ok());
     assert!(validate_provider_effort(AgentProvider::Claude, Some("xhigh")).is_ok());
     assert_eq!(
         validate_provider_effort(AgentProvider::Antigravity, Some("xhigh")).unwrap_err(),
