@@ -29,30 +29,27 @@ Automated coverage added:
   journey now fails on a placeholder `0.0.0 (n)` or malformed Native value, so
   any device/simulator smoke run asserts the real native version.
 
-No build was installed on a device. The clean canonical
-`./kd mobile run --device --staging --install` run failed at `pod install`
-(see below). A second run with a temporary, local-only static-frameworks patch
-(not part of this change) got past pods: its prebuild generated
-`ios/KannaStaging/Info.plist` with `CFBundleShortVersionString` `0.0.68`
-(repository `VERSION`) and `CFBundleVersion` `1` — verifying only the
-config → generated-Info.plist hop — and then failed at Release code signing,
-so nothing reached the iPhone and the rendered About row was never observed.
-The runtime hop (expo-application native values → `BuildIdentity` → panel) is
-covered by `apps/mobile/src/lib/updates/buildIdentity.test.ts`.
+After rebasing onto the mobile signing/install fix, a clean canonical run was
+performed against Jerome's connected iPhone 15:
 
-## Why the full on-device E2E could not run yet
+```sh
+rm -rf apps/mobile/ios
+KANNA_IOS_DEVICE_UDID=00008130-001015CA1091401C \
+  ./kd mobile run --device --staging --install
+```
 
-The canonical clean staging device build currently fails on `main` for reasons
-unrelated to the version source, introduced with the Firebase messaging
-dependency (commit `6744a565`):
+Expo prebuild, CocoaPods installation, the Release build, signing, and device
+installation all succeeded. The installed app is `Kanna Staging`, bundle ID
+`build.kanna.app.staging`, version `0.0.68`, build `1`. The exact built
+artifact also reports runtime `2.1.4`, OTA channel `staging`, and the staging
+manifest URL.
 
-1. `pod install` rejects the Firebase Swift static pods — nothing sets
-   `ios.useFrameworks: "static"` (or modular headers) for the generated
-   Podfile, which upstream expects `expo-build-properties` to provide.
-2. After fixing 1 locally, Release signing fails because the
-   `aps-environment` push entitlement is not registered in the local team
-   provisioning profile for `build.kanna.app.staging`.
-
-Once those follow-ups land, the existing device smoke journey
-(`assertBuildInfoJourney`) asserts the non-`0.0.0` native version on device
-with no further work.
+The command exited nonzero only at its final launch step because iOS reported
+the device as locked (`FBSOpenApplicationErrorDomain` code 7). A subsequent
+`test:e2e:device:release-install` attempt and a direct `devicectl` launch were
+denied for the same reason. Consequently the installed binary and its embedded
+metadata are verified, but the rendered About-this-build journey was not
+observed on device. The runtime hop (expo-application native values →
+`BuildIdentity` → panel) remains covered by
+`apps/mobile/src/lib/updates/buildIdentity.test.ts`, and the existing device
+smoke journey (`assertBuildInfoJourney`) rejects placeholder native versions.
