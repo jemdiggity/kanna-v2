@@ -7,6 +7,7 @@ export const RELEASE_ENV_FILE = ".env.release.local";
 
 export interface LoadReleaseEnvironmentInput {
   repoRoot: string;
+  homeDir: string;
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
 }
@@ -100,21 +101,31 @@ export async function loadReleaseEnvironment(
   input: LoadReleaseEnvironmentInput
 ): Promise<NodeJS.ProcessEnv> {
   const primaryRoot = await resolvePrimaryRepoRoot(input);
-  const envPath = join(primaryRoot, RELEASE_ENV_FILE);
+  const globalEnvPath = join(input.homeDir, ".kanna", RELEASE_ENV_FILE);
+  const localEnvPath = join(primaryRoot, RELEASE_ENV_FILE);
+  const globalEnv = loadDotenvFile(globalEnvPath);
+  const localEnv = loadDotenvFile(localEnvPath);
+  const inherited = definedEnvironment(input.env);
+  return { ...globalEnv, ...localEnv, ...inherited };
+}
+
+function loadDotenvFile(envPath: string): Record<string, string> {
   if (!existsSync(envPath)) {
-    return { ...input.env };
+    return {};
   }
 
   try {
     const source = readFileSync(envPath, "utf8");
     validateDotenv(source, envPath);
-    const fileEnv = parseEnv(source);
-    const inherited = Object.fromEntries(
-      Object.entries(input.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
-    );
-    return { ...fileEnv, ...inherited };
+    return definedEnvironment(parseEnv(source));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to load release environment ${envPath}: ${message}`);
   }
+}
+
+function definedEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined)
+  );
 }

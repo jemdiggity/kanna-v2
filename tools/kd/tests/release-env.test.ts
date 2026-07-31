@@ -25,8 +25,57 @@ function gitWorktreeListRunner(primaryRoot: string, exitCode = 0): CommandRunner
 }
 
 describe("release environment", () => {
+  it("loads the global file when the local file is absent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
+    const home = join(root, "home");
+    const repo = join(root, "repo");
+    await mkdir(join(home, ".kanna"), { recursive: true });
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await writeFile(
+      join(home, ".kanna", ".env.release.local"),
+      "APPLE_KEYCHAIN_PROFILE=global-profile\n"
+    );
+
+    const env = await loadReleaseEnvironment({
+      repoRoot: repo,
+      homeDir: home,
+      env: {},
+      runner: gitWorktreeListRunner(repo)
+    });
+
+    expect(env.APPLE_KEYCHAIN_PROFILE).toBe("global-profile");
+  });
+
+  it("lets the local file override the global file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
+    const home = join(root, "home");
+    const repo = join(root, "repo");
+    await mkdir(join(home, ".kanna"), { recursive: true });
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await writeFile(
+      join(home, ".kanna", ".env.release.local"),
+      "APPLE_KEYCHAIN_PROFILE=global-profile\nGLOBAL_ONLY=global\n"
+    );
+    await writeFile(
+      join(repo, ".env.release.local"),
+      "APPLE_KEYCHAIN_PROFILE=local-profile\nLOCAL_ONLY=local\n"
+    );
+
+    const env = await loadReleaseEnvironment({
+      repoRoot: repo,
+      homeDir: home,
+      env: {},
+      runner: gitWorktreeListRunner(repo)
+    });
+
+    expect(env.APPLE_KEYCHAIN_PROFILE).toBe("local-profile");
+    expect(env.GLOBAL_ONLY).toBe("global");
+    expect(env.LOCAL_ONLY).toBe("local");
+  });
+
   it("loads the primary checkout file for a linked worktree", async () => {
     const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
+    const home = join(root, "home");
     const primary = join(root, "repo");
     const worktree = join(primary, ".kanna-worktrees", "task-123");
     await mkdir(worktree, { recursive: true });
@@ -37,6 +86,7 @@ describe("release environment", () => {
 
     const env = await loadReleaseEnvironment({
       repoRoot: worktree,
+      homeDir: home,
       env: { PATH: "/usr/bin" },
       runner: gitWorktreeListRunner(primary)
     });
@@ -46,33 +96,66 @@ describe("release environment", () => {
     expect(env.PATH).toBe("/usr/bin");
   });
 
-  it("lets inherited environment values override file defaults", async () => {
+  it("lets inherited environment values override both file defaults", async () => {
     const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
-    await mkdir(join(root, ".git"));
-    await writeFile(join(root, ".env.release.local"), "APPLE_KEYCHAIN_PROFILE=file-profile\n");
+    const home = join(root, "home");
+    const repo = join(root, "repo");
+    await mkdir(join(home, ".kanna"), { recursive: true });
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await writeFile(
+      join(home, ".kanna", ".env.release.local"),
+      "APPLE_KEYCHAIN_PROFILE=global-profile\n"
+    );
+    await writeFile(
+      join(repo, ".env.release.local"),
+      "APPLE_KEYCHAIN_PROFILE=local-profile\n"
+    );
 
     const env = await loadReleaseEnvironment({
-      repoRoot: root,
+      repoRoot: repo,
+      homeDir: home,
       env: { APPLE_KEYCHAIN_PROFILE: "shell-profile" },
-      runner: gitWorktreeListRunner(root)
+      runner: gitWorktreeListRunner(repo)
     });
 
     expect(env.APPLE_KEYCHAIN_PROFILE).toBe("shell-profile");
   });
 
-  it("returns an equivalent copy when the file is absent", async () => {
+  it("returns an equivalent copy when both files are absent", async () => {
     const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
-    await mkdir(join(root, ".git"));
+    const home = join(root, "home");
+    const repo = join(root, "repo");
+    await mkdir(join(repo, ".git"), { recursive: true });
     const inherited = { PATH: "/usr/bin" };
 
     const env = await loadReleaseEnvironment({
-      repoRoot: root,
+      repoRoot: repo,
+      homeDir: home,
       env: inherited,
-      runner: gitWorktreeListRunner(root)
+      runner: gitWorktreeListRunner(repo)
     });
 
     expect(env).toEqual(inherited);
     expect(env).not.toBe(inherited);
+  });
+
+  it("fails with the global file path when global dotenv syntax is invalid", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
+    const home = join(root, "home");
+    const repo = join(root, "repo");
+    const globalEnvPath = join(home, ".kanna", ".env.release.local");
+    await mkdir(join(home, ".kanna"), { recursive: true });
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await writeFile(globalEnvPath, "BROKEN LINE\n");
+
+    await expect(
+      loadReleaseEnvironment({
+        repoRoot: repo,
+        homeDir: home,
+        env: {},
+        runner: gitWorktreeListRunner(repo)
+      })
+    ).rejects.toThrow(globalEnvPath);
   });
 
   it("fails with the file path when dotenv syntax is invalid", async () => {
@@ -84,6 +167,7 @@ describe("release environment", () => {
     await expect(
       loadReleaseEnvironment({
         repoRoot: root,
+        homeDir: join(root, "home"),
         env: {},
         runner: gitWorktreeListRunner(root)
       })
@@ -99,6 +183,7 @@ describe("release environment", () => {
     await expect(
       loadReleaseEnvironment({
         repoRoot: root,
+        homeDir: join(root, "home"),
         env: {},
         runner: gitWorktreeListRunner(root)
       })
@@ -109,6 +194,7 @@ describe("release environment", () => {
     await expect(
       loadReleaseEnvironment({
         repoRoot: "/not-a-repo",
+        homeDir: "/fake-home",
         env: {},
         runner: gitWorktreeListRunner("", 128)
       })
@@ -125,6 +211,7 @@ describe("release environment", () => {
 
     const env = await loadReleaseEnvironment({
       repoRoot: root,
+      homeDir: join(root, "home"),
       env: {},
       runner: gitWorktreeListRunner(root)
     });
@@ -148,6 +235,7 @@ describe("release environment", () => {
 
     const env = await loadReleaseEnvironment({
       repoRoot: worktree,
+      homeDir: join(root, "home"),
       env: {},
       runner: nodeCommandRunner
     });
