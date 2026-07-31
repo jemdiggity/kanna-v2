@@ -57,7 +57,7 @@ interface ExpoConfig {
   ios: {
     bundleIdentifier: string;
     appleTeamId: string;
-    googleServicesFile: string;
+    googleServicesFile?: string;
     entitlements: {
       "aps-environment": "development" | "production";
     };
@@ -128,6 +128,10 @@ export function createExpoConfig(
     scheme: appEnvironment.scheme,
     icon: "./assets/icon.png",
     plugins: [
+      // React Native Firebase native packages autolink in every environment,
+      // so their Swift pods always require static frameworks. This Podfile
+      // configuration is separate from environment-specific initialization.
+      "./plugins/withKannaFirebasePodfile",
       // Dev has no Firebase Apple app/plist matching build.kanna.app.dev.
       // Do not initialize it with the production native identity.
       ...(appEnvironment.name === "dev"
@@ -155,7 +159,11 @@ export function createExpoConfig(
     ios: {
       bundleIdentifier: appEnvironment.iosBundleId,
       appleTeamId: "GY3LFAA59P",
-      googleServicesFile: appEnvironment.iosGoogleServicesFile,
+      // Dev has no matching Firebase Apple app. Keep the production and
+      // staging plist wiring intact without copying either plist into dev.
+      ...(appEnvironment.name === "dev"
+        ? {}
+        : { googleServicesFile: appEnvironment.iosGoogleServicesFile }),
       entitlements: {
         "aps-environment":
           appEnvironment.name === "dev" ? "development" : "production"
