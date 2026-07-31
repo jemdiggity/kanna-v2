@@ -164,7 +164,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "039_stage_run_resume_fallback_reason");
+    assert_eq!(latest_migration, "040_stage_run_effort");
 
     let stage_run_sql: String = db
         .conn

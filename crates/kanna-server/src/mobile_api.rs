@@ -949,6 +949,7 @@ mod tests {
                 "terminalCols": 104,
                 "terminalRows": 72,
                 "model": null,
+                "effort": null,
                 "permissionMode": null,
                 "allowedTools": null,
                 "disallowedTools": null,

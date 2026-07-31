@@ -26,6 +26,7 @@ const expectedLiveCliContractTests = [
 const expectedOfflineCliContractTests = [
   "agent-flavor-contracts.test.ts",
   "claude-helper.test.ts",
+  "task-effort-spawn-contract.test.ts",
   "task-model-spawn-contract.test.ts",
 ];
 

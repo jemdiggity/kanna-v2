@@ -2408,7 +2408,10 @@ fn prepare_task_spawn_with_error(
     let create_intent_json = request.create_intent_json.clone();
     let has_requested_task_id = requested_task_id.is_some();
     let resolved = resolve_task_spawn(repo, request, &definitions).map_err(|error| {
-        if error.starts_with("model override") || error.starts_with("effort override") {
+        if error.starts_with("model override")
+            || error.starts_with("effort override")
+            || error.starts_with("effort '")
+        {
             PrepareTaskError::InvalidRequest(error)
         } else {
             PrepareTaskError::Other(error)
@@ -2706,6 +2709,9 @@ fn resolve_task_spawn(
     );
     validate_model_shape(model.as_deref())?;
     validate_effort_shape(effort.as_deref())?;
+    if provider_candidates.len() == 1 {
+        validate_provider_effort(provider_candidates[0], effort.as_deref())?;
+    }
     if model.is_some()
         && provider_candidates
             .iter()

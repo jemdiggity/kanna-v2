@@ -224,6 +224,53 @@ async fn create_task_effort_reaches_every_provider_daemon_spawn_argv() {
 }
 
 #[tokio::test]
+async fn create_task_route_rejects_unsupported_provider_effort_without_persisting_task() {
+    let unique = unique_test_suffix();
+    let repo_root =
+        std::env::temp_dir().join(format!("kanna-http-reject-antigravity-effort-{unique}"));
+    init_test_git_repo(&repo_root);
+    let state =
+        super::test_state_with_seed("desktop-reject-antigravity-effort", "Studio Mac", |db| {
+            db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+                .unwrap();
+        });
+    let app = router(Arc::clone(&state));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "repoId": "repo-1",
+                        "prompt": "Use an unsupported effort override",
+                        "agentProvider": "antigravity",
+                        "agentType": "pty",
+                        "effort": "xhigh"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::str::from_utf8(&body).unwrap(),
+        "effort 'xhigh' is not supported for agent provider 'antigravity' (supported: low, medium, high)"
+    );
+    let db = Db::open(&state.config.db_path).unwrap();
+    assert!(db.list_pipeline_items("repo-1").unwrap().is_empty());
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+    let _ = std::fs::remove_file(&state.config.db_path);
+}
+
+#[tokio::test]
 async fn create_task_route_rejects_invalid_requested_task_ids_before_creation() {
     let create_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let create_calls_for_creator = Arc::clone(&create_calls);

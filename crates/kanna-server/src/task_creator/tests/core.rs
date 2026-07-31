@@ -563,6 +563,61 @@ fn create_task_rejects_model_for_provider_without_a_verified_flag() {
 }
 
 #[test]
+fn create_task_rejects_unsupported_effort_before_persisting_state() {
+    let repo_root = init_git_repo("reject-antigravity-effort");
+    let config = test_config("reject-antigravity-effort");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let error = match prepare_task_for_api_with_error(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Use an unsupported effort override".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("antigravity".to_string()),
+            agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
+            model: None,
+            effort: Some("xhigh".to_string()),
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: None,
+            recovery_snapshot: None,
+            blocker_task_ids: None,
+            notify_task_id: None,
+            parent_task_id: None,
+        },
+        None,
+    ) {
+        Ok(_) => panic!("antigravity xhigh effort should be rejected"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error,
+        PrepareTaskError::InvalidRequest(
+            "effort 'xhigh' is not supported for agent provider 'antigravity' (supported: low, medium, high)"
+                .to_string()
+        )
+    );
+    assert!(db.list_pipeline_items("repo-1").unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn provider_resolution_prefers_explicit_then_stage_then_repo_then_agent_then_fallback() {
     let agent = AgentDefinition {
         name: "review".to_string(),
