@@ -367,11 +367,12 @@ async function resolveDefaultContext(env: NodeJS.ProcessEnv, options: ResolveDef
 }
 
 export async function loadReleaseTaskEnvironment(
-  context: Pick<KdContext, "repoRoot" | "env">,
+  context: Pick<KdContext, "repoRoot" | "homeDir" | "env">,
   runner: CommandRunner
 ): Promise<NodeJS.ProcessEnv> {
   return loadReleaseEnvironment({
     repoRoot: context.repoRoot,
+    homeDir: context.homeDir,
     env: context.env,
     runner
   });
