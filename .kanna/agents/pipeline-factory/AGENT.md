@@ -64,7 +64,7 @@ When `.kanna/pipelines/schema.json` exists in this repo it is the authoritative 
 
 ## Built-in Agents
 
-`implement` (implements the task) · `commit` (commits the relevant work) · `review` (QA review that verifies coverage and requests revisions) · `qa-dispatcher` (fans specialty reviews out as child tasks) · `review-ui`, `review-security`, `review-perf`, `review-concurrency`, `review-migration`, `review-compat` (specialty reviewers) · `pr` (creates a pull request) · `approve` (signals the merge master for an approved PR) · `merge` (safely merges branches and PRs) · `bucho` (orchestrates tasks, dependencies, and merge-master handoffs) · `ship` (inspects and executes releases through `kd`) · `setup`, `agent-factory`, `pipeline-factory`, `config-factory` (configuration helpers).
+`implement` (implements the task) · `commit` (commits the relevant work) · `review` (QA review that verifies coverage and requests revisions) · `qa-dispatcher` (fans specialty reviews out as child tasks) · `review-ui`, `review-security`, `review-perf`, `review-concurrency`, `review-migration`, `review-compat` (specialty reviewers) · `pr` (creates a pull request) · `approve` (signals the merge master for an approved PR) · `merge` (safely merges branches and PRs) · `task-manager` (orchestrates tasks, dependencies, and merge-master handoffs) · `ship` (inspects and executes releases through `kd`) · `setup`, `agent-factory`, `pipeline-factory`, `config-factory` (configuration helpers).
 
 ## Completion
 
