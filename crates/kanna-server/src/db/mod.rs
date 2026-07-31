@@ -1443,7 +1443,6 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         add_column(conn, "stage_run", "effort", "TEXT")
     })?;
 
-
     Ok(())
 }
 

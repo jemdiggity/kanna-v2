@@ -2619,7 +2619,6 @@ fn resolve_agent_effort(
         .or_else(|| agent.and_then(|agent| agent.effort.clone()))
 }
 
-
 fn resolve_task_spawn(
     _repo: &Repo,
     request: TaskCreationRequest,

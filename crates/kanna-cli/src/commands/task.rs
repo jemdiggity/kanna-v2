@@ -7,9 +7,8 @@ use crate::api::{
     dependent_tasks_exist_via_api, get_task_via_api, list_repo_tasks_via_api, list_tasks_via_api,
     notify_mobile_via_api, parse_wait_until, rename_task_via_api, request_revision_via_api,
     rerun_stage_via_api, resume_task_via_api, search_tasks_via_api, send_task_input_via_api,
-    set_task_notify_via_api,
-    set_task_parent_via_api, set_task_pipeline_via_api, task_logs_via_api, unblock_task_via_api,
-    wait_task_events_via_api, wait_task_via_api, WaitTaskOutcome,
+    set_task_notify_via_api, set_task_parent_via_api, set_task_pipeline_via_api, task_logs_via_api,
+    unblock_task_via_api, wait_task_events_via_api, wait_task_via_api, WaitTaskOutcome,
 };
 use crate::commands::{parse_metadata_json, print_json};
 use crate::config::resolve_server_base_url_from_env;
