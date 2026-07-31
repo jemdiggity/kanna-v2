@@ -9,10 +9,10 @@ regressions were introduced around the Firebase mobile push work
 (`6744a565 feat: add agent mobile push notifications`) and are fixed in code:
 
 1. **CocoaPods**: React Native Firebase's Swift pods cannot integrate as plain
-   static libraries; `withKannaFirebaseMessaging` now sets the
-   `ios.useFrameworks: static` Podfile property (the same property
-   `expo-build-properties` sets), so a clean `expo prebuild` + `pod install`
-   succeeds.
+   static libraries; `withKannaFirebasePodfile` now sets the
+   `ios.useFrameworks: static` Podfile property in every environment (the same
+   property `expo-build-properties` sets), so a clean `expo prebuild` +
+   `pod install` succeeds.
 2. **Signing**: the push work added the `aps-environment` entitlement, which
    requires a provisioning profile that includes it. Expo CLI's `run:ios` only
    passes `-allowProvisioningUpdates` when the pbxproj lacks a

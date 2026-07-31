@@ -4,8 +4,9 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
-const plugin = require("../plugins/withKannaFirebaseMessaging.js");
-const { __internal } = plugin;
+const messagingPlugin = require("../plugins/withKannaFirebaseMessaging.js");
+const podfilePlugin = require("../plugins/withKannaFirebasePodfile.js");
+const { __internal } = podfilePlugin;
 
 const mobileProjectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -18,7 +19,7 @@ interface PluginConfig {
   };
 }
 
-describe("withKannaFirebaseMessaging internals", () => {
+describe("Kanna Firebase config plugins", () => {
   it("forces static frameworks so Firebase Swift pods integrate after a clean prebuild", () => {
     const properties = __internal.applyFirebaseStaticFrameworks({
       "expo.jsEngine": "hermes"
@@ -38,7 +39,7 @@ describe("withKannaFirebaseMessaging internals", () => {
   });
 
   it("registers an iOS Podfile-properties mod instead of hand-editing generated files", () => {
-    const config = __internal.withFirebaseStaticFrameworks({
+    const config = podfilePlugin({
       name: "Kanna Staging",
       slug: "kanna-mobile"
     }) as PluginConfig;
@@ -46,22 +47,22 @@ describe("withKannaFirebaseMessaging internals", () => {
     expect(typeof config.mods?.ios?.podfileProperties).toBe("function");
   });
 
-  it("keeps the iOS-only Firebase mods and the static-frameworks mod on the app config", () => {
-    const config = plugin({
+  it("keeps Firebase initialization iOS-only and separate from Podfile configuration", () => {
+    const config = messagingPlugin({
       name: "Kanna Staging",
       slug: "kanna-mobile",
       _internal: { projectRoot: mobileProjectRoot }
     }) as PluginConfig;
 
     // The upstream iOS mods register dangerous (AppDelegate patch) and
-    // xcodeproj (GoogleService plist) mods, and withFirebaseStaticFrameworks
-    // adds the podfileProperties mod; no Android mods may be registered
-    // because there is no Android Firebase app.
+    // xcodeproj (GoogleService plist) mods. Podfile configuration is applied
+    // independently in every environment, and no Android mods may be
+    // registered because there is no Android Firebase app.
     expect(Object.keys(config.mods ?? {})).toEqual(["ios"]);
     expect(Object.keys(config.mods?.ios ?? {}).sort()).toEqual([
       "dangerous",
-      "podfileProperties",
       "xcodeproj"
     ]);
+    expect(config.mods?.ios?.podfileProperties).toBeUndefined();
   });
 });

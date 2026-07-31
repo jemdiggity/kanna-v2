@@ -14,6 +14,7 @@ describe("mobile app config", () => {
     expect(config.ios?.googleServicesFile).toBe(
       "./firebase/GoogleService-Info.production.plist"
     );
+    expect(config.plugins).toContain("./plugins/withKannaFirebasePodfile");
     expect(config.plugins).toContain("./plugins/withKannaFirebaseMessaging");
     expect(config.ios?.entitlements).toEqual({
       "aps-environment": "production"
@@ -67,13 +68,12 @@ describe("mobile app config", () => {
       }
     ]);
     expect(config.plugins).toContain("expo-font");
+    expect(config.plugins).toContain("./plugins/withKannaFirebasePodfile");
     expect(config.plugins).not.toContain(
       "./plugins/withKannaFirebaseMessaging"
     );
     expect(config.ios?.bundleIdentifier).toBe("build.kanna.app.dev");
-    expect(config.ios?.googleServicesFile).toBe(
-      "./firebase/GoogleService-Info.production.plist"
-    );
+    expect(config.ios?.googleServicesFile).toBeUndefined();
     expect(config.ios?.entitlements).toEqual({
       "aps-environment": "development"
     });
@@ -107,6 +107,8 @@ describe("mobile app config", () => {
     expect(config.ios?.googleServicesFile).toBe(
       "./firebase/GoogleService-Info.staging.plist"
     );
+    expect(config.plugins).toContain("./plugins/withKannaFirebasePodfile");
+    expect(config.plugins).toContain("./plugins/withKannaFirebaseMessaging");
     expect(config.ios?.entitlements).toEqual({
       "aps-environment": "production"
     });
