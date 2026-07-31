@@ -34,8 +34,8 @@ use environment::{
 use prompt::{build_stage_prompt, PromptContext};
 use provider::{
     normalize_agent_type, resolve_agent_provider, resolve_agent_provider_candidates,
-    resolve_agent_type, validate_model_shape, validate_provider_model, AgentProvider,
-    AgentSessionType,
+    resolve_agent_type, validate_effort_shape, validate_model_shape, validate_provider_effort,
+    validate_provider_model, AgentProvider, AgentSessionType,
 };
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -456,6 +456,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         provider_workspace_root,
     )?;
     let model = resolve_agent_model(None, repo_preference, agent.as_ref());
+    let effort = resolve_agent_effort(None, repo_preference, agent.as_ref());
     let permission_mode = agent
         .as_ref()
         .and_then(|agent| agent.permission_mode.clone());
@@ -507,6 +508,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         Some(current_stage.policy.transition.as_str()),
         prompt,
         model,
+        effort.clone(),
         permission_mode,
         allowed_tools,
         Vec::new(),
@@ -531,6 +533,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         stage_agent: current_stage.agent.clone(),
         agent_provider: provider.as_str().to_string(),
         model: stage_run_model,
+        effort,
         completion_transition: current_stage.policy.transition,
         provider_session_id,
         cwd: worktree_path,
@@ -640,6 +643,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
             Some(resolved.stage_transition.as_str()),
             resolved.final_prompt,
             resolved.model.clone(),
+            resolved.effort.clone(),
             resolved.permission_mode,
             resolved.allowed_tools,
             resolved.disallowed_tools,
@@ -670,6 +674,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
             stage_agent: resolved.stage_agent,
             agent_provider: provider.as_str().to_string(),
             model: resolved.model,
+            effort: resolved.effort,
             completion_transition: resolved.stage_transition,
             provider_session_id,
             cwd: worktree_path,
@@ -707,6 +712,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
             agent_type: source_task.agent_type.clone().or(request.agent_type),
             initial_terminal_geometry,
             model: request.model,
+            effort: request.effort,
             permission_mode: request.permission_mode,
             allowed_tools: request.allowed_tools.unwrap_or_default(),
             disallowed_tools: request.disallowed_tools.unwrap_or_default(),
@@ -749,6 +755,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
         Some(resolved.stage_transition.as_str()),
         resolved.final_prompt,
         resolved.model.clone(),
+        resolved.effort.clone(),
         resolved.permission_mode,
         resolved.allowed_tools,
         resolved.disallowed_tools,
@@ -780,6 +787,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
         stage_agent: resolved.stage_agent,
         agent_provider: provider.as_str().to_string(),
         model: resolved.model,
+        effort: resolved.effort,
         completion_transition: resolved.stage_transition,
         provider_session_id,
         cwd: worktree_path,
@@ -918,6 +926,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             );
         }
         let model = resolve_agent_model(None, repo_preference, agent.as_ref());
+        let effort = resolve_agent_effort(None, repo_preference, agent.as_ref());
         let permission_mode = agent
             .as_ref()
             .and_then(|agent| agent.permission_mode.clone());
@@ -959,6 +968,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             Some(completion_transition.as_str()),
             final_prompt.clone(),
             model.clone(),
+            effort.clone(),
             permission_mode.clone(),
             allowed_tools.clone(),
             Vec::new(),
@@ -978,6 +988,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             pipeline_name: pipeline_name.to_string(),
             final_prompt: final_prompt.clone(),
             model: stage_run_model.clone(),
+            effort: effort.clone(),
             permission_mode,
             allowed_tools,
             mcp_config_path,
@@ -994,6 +1005,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             session_id,
             provider,
             stage_run_model,
+            effort,
             deferred_setup,
         ))
     })();
@@ -1004,6 +1016,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         session_id,
         provider,
         stage_run_model,
+        stage_run_effort,
         deferred_setup,
     ) = match prepared_session {
         Ok(prepared) => prepared,
@@ -1032,6 +1045,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         stage_agent: target_stage.agent.clone(),
         agent_provider: provider.as_str().to_string(),
         model: stage_run_model,
+        effort: stage_run_effort,
         completion_transition,
         feedback,
         provider_session_id,
@@ -1104,6 +1118,7 @@ pub(crate) fn finish_deferred_stage_setup(
         Some(prepared.completion_transition.as_str()),
         deferred.final_prompt,
         deferred.model,
+        deferred.effort,
         deferred.permission_mode,
         deferred.allowed_tools,
         Vec::new(),
@@ -1360,6 +1375,7 @@ fn build_prepared_session(
     stage_transition: Option<&str>,
     final_prompt: String,
     model: Option<String>,
+    effort: Option<String>,
     permission_mode: Option<String>,
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
@@ -1373,6 +1389,7 @@ fn build_prepared_session(
     resume_session_id: Option<&str>,
 ) -> Result<(PreparedSessionSpawn, Option<String>), String> {
     validate_provider_model(provider, model.as_deref())?;
+    validate_provider_effort(provider, effort.as_deref())?;
     Ok(match agent_type {
         AgentSessionType::Pty => {
             // Keep PTY bootstrap visible and in the provider's shell. Setup
@@ -1434,6 +1451,7 @@ fn build_prepared_session(
                 &executable,
                 &final_prompt,
                 model.as_deref(),
+                effort.as_deref(),
                 permission_mode.as_deref(),
                 &allowed_tools,
                 &disallowed_tools,
@@ -1493,6 +1511,7 @@ fn build_prepared_session(
                     agent_provider: provider,
                     prompt: final_prompt,
                     model,
+                    effort,
                     permission_mode,
                     allowed_tools,
                     disallowed_tools,
@@ -1584,6 +1603,7 @@ pub(crate) fn prepare_task_for_api_with_error(
             agent_type: request.agent_type,
             initial_terminal_geometry,
             model: request.model,
+            effort: request.effort,
             permission_mode: request.permission_mode,
             allowed_tools: request.allowed_tools.unwrap_or_default(),
             disallowed_tools: request.disallowed_tools.unwrap_or_default(),
@@ -1659,6 +1679,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
             agent_type: None,
             initial_terminal_geometry: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
             disallowed_tools: Vec::new(),
@@ -1758,6 +1779,7 @@ completion with status success so Kanna can run the commit post and close this i
             agent_type: dependent.agent_type,
             initial_terminal_geometry: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
             disallowed_tools: Vec::new(),
@@ -1857,6 +1879,9 @@ pub(crate) fn create_dormant_task_for_api_with_error(
     let model = resolve_agent_model(request.model.clone(), repo_preference, agent.as_ref());
     validate_provider_model(provider, model.as_deref())
         .map_err(PrepareTaskError::InvalidRequest)?;
+    let effort = resolve_agent_effort(request.effort.clone(), repo_preference, agent.as_ref());
+    validate_provider_effort(provider, effort.as_deref())
+        .map_err(PrepareTaskError::InvalidRequest)?;
     let permission_mode = request.permission_mode.clone().or_else(|| {
         agent
             .as_ref()
@@ -1870,6 +1895,7 @@ pub(crate) fn create_dormant_task_for_api_with_error(
         .unwrap_or_default();
     let spawn_options_json = serde_json::to_string(&serde_json::json!({
         "model": model,
+        "effort": effort,
         "permissionMode": permission_mode,
         "allowedTools": allowed_tools,
         "disallowedTools": request.disallowed_tools,
@@ -2057,6 +2083,13 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         repo_preference,
         agent.as_ref(),
     );
+    let effort = resolve_agent_effort(
+        create_request
+            .as_ref()
+            .and_then(|request| request.effort.clone()),
+        repo_preference,
+        agent.as_ref(),
+    );
     let permission_mode = create_request
         .as_ref()
         .and_then(|request| request.permission_mode.clone())
@@ -2174,6 +2207,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         Err(error) => return Err(rollback_start(error.into())),
     };
     let stage_run_model = model.clone();
+    let stage_run_effort = effort.clone();
     let (session, provider_session_id) = match build_prepared_session(
         provider,
         agent_type,
@@ -2183,6 +2217,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         Some(stage.policy.transition.as_str()),
         final_prompt,
         model,
+        effort,
         permission_mode,
         allowed_tools,
         disallowed_tools,
@@ -2222,6 +2257,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         stage_agent,
         agent_provider: provider.as_str().to_string(),
         model: stage_run_model,
+        effort: stage_run_effort,
         completion_transition: stage.policy.transition,
         provider_session_id,
         recovery_snapshot,
@@ -2273,6 +2309,7 @@ struct ResolvedTaskSpawn {
     stage_setup: Vec<String>,
     final_prompt: String,
     model: Option<String>,
+    effort: Option<String>,
     permission_mode: Option<String>,
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
@@ -2301,6 +2338,7 @@ struct ResolvedCreateTaskIntent {
     initial_terminal_geometry: Option<(u16, u16)>,
     setup: Vec<String>,
     model: Option<String>,
+    effort: Option<String>,
     permission_mode: Option<String>,
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
@@ -2335,6 +2373,7 @@ fn resolved_create_task_intent_json(
             initial_terminal_geometry: resolved.initial_terminal_geometry,
             setup: new_task_setup_cmds(repo_config, &resolved.stage_setup, &resolved.setup_cmds),
             model: resolved.model.clone(),
+            effort: resolved.effort.clone(),
             permission_mode: resolved.permission_mode.clone(),
             allowed_tools: resolved.allowed_tools.clone(),
             disallowed_tools: resolved.disallowed_tools.clone(),
@@ -2369,13 +2408,17 @@ fn prepare_task_spawn_with_error(
     let create_intent_json = request.create_intent_json.clone();
     let has_requested_task_id = requested_task_id.is_some();
     let resolved = resolve_task_spawn(repo, request, &definitions).map_err(|error| {
-        if error.starts_with("model override") {
+        if error.starts_with("model override")
+            || error.starts_with("effort override")
+            || error.starts_with("effort '")
+        {
             PrepareTaskError::InvalidRequest(error)
         } else {
             PrepareTaskError::Other(error)
         }
     })?;
     let stage_run_model = resolved.model.clone();
+    let stage_run_effort = resolved.effort.clone();
     let provisional_provider = *resolved
         .provider_candidates
         .first()
@@ -2492,6 +2535,7 @@ fn prepare_task_spawn_with_error(
         stage_agent: resolved.stage_agent,
         agent_provider: provider.as_str().to_string(),
         model: stage_run_model,
+        effort: stage_run_effort,
         completion_transition: resolved.stage_transition,
         provider_session_id,
         recovery_snapshot: resolved.recovery_snapshot,
@@ -2523,6 +2567,7 @@ fn record_task_prepare_failure(
             .first()
             .map(|provider| provider.as_str()),
         model: resolved.model.as_deref(),
+        effort: resolved.effort.as_deref(),
         status: "failed",
         result: Some(&result),
         feedback: Some("task preparation failed"),
@@ -2562,6 +2607,16 @@ fn pin_task_pipeline_definition(
     let definition_json =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {e}"))?;
     Ok((pipeline, definition_json))
+}
+
+fn resolve_agent_effort(
+    explicit_effort: Option<String>,
+    repo_preference: Option<&definitions::AgentProviderPreference>,
+    agent: Option<&definitions::AgentDefinition>,
+) -> Option<String> {
+    explicit_effort
+        .or_else(|| repo_preference.and_then(|preference| preference.effort.clone()))
+        .or_else(|| agent.and_then(|agent| agent.effort.clone()))
 }
 
 fn resolve_task_spawn(
@@ -2646,7 +2701,16 @@ fn resolve_task_spawn(
         repo_config.agent_provider_preference(stage_agent.as_deref()),
         agent.as_ref(),
     );
+    let effort = resolve_agent_effort(
+        request.effort,
+        repo_config.agent_provider_preference(stage_agent.as_deref()),
+        agent.as_ref(),
+    );
     validate_model_shape(model.as_deref())?;
+    validate_effort_shape(effort.as_deref())?;
+    if provider_candidates.len() == 1 {
+        validate_provider_effort(provider_candidates[0], effort.as_deref())?;
+    }
     if model.is_some()
         && provider_candidates
             .iter()
@@ -2700,6 +2764,7 @@ fn resolve_task_spawn(
             .unwrap_or_default(),
         final_prompt,
         model,
+        effort,
         permission_mode,
         allowed_tools,
         disallowed_tools,
@@ -2778,6 +2843,7 @@ fn is_pipeline_item_primary_key_violation(error: &rusqlite::Error) -> bool {
 fn agent_spawn_options_json(resolved: &ResolvedTaskSpawn) -> Result<String, String> {
     serde_json::to_string(&serde_json::json!({
         "model": resolved.model,
+        "effort": resolved.effort,
         "permissionMode": resolved.permission_mode,
         "allowedTools": resolved.allowed_tools,
         "disallowedTools": resolved.disallowed_tools,
@@ -3000,6 +3066,7 @@ fn prepare_new_task_session(
         Some(resolved.stage_transition.as_str()),
         resolved.final_prompt.clone(),
         resolved.model.clone(),
+        resolved.effort.clone(),
         resolved.permission_mode.clone(),
         resolved.allowed_tools.clone(),
         resolved.disallowed_tools.clone(),

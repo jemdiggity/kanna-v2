@@ -82,6 +82,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "037_task_event_log",
     "038_pipeline_item_initial_pipeline",
     "039_stage_run_resume_fallback_reason",
+    "040_stage_run_effort",
 ];
 
 #[derive(Debug, Serialize)]
@@ -317,6 +318,7 @@ pub struct StageRun {
     pub agent: Option<String>,
     pub agent_provider: Option<String>,
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub status: String,
     pub result: Option<String>,
     pub feedback: Option<String>,
@@ -349,6 +351,7 @@ pub struct NewStageRun<'a> {
     pub agent: Option<&'a str>,
     pub agent_provider: Option<&'a str>,
     pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
     pub status: &'a str,
     pub result: Option<&'a str>,
     pub feedback: Option<&'a str>,
@@ -685,6 +688,7 @@ fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           agent TEXT,
           agent_provider TEXT,
           model TEXT,
+          effort TEXT,
           status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled')),
           result TEXT,
           feedback TEXT,
@@ -1435,6 +1439,9 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         Ok(())
     })?;
 
+    run_migration(conn, "040_stage_run_effort", |conn| {
+        add_column(conn, "stage_run", "effort", "TEXT")
+    })?;
 
     Ok(())
 }

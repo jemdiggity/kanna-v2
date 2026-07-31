@@ -34,6 +34,12 @@ pub struct AgentProviderSpec {
     pub supports_headless: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffortOverride {
+    Flag(&'static str),
+    Config(&'static str),
+}
+
 impl AgentProvider {
     pub const ALL: [Self; 5] = [
         Self::Claude,
@@ -77,6 +83,30 @@ impl AgentProvider {
             Self::Codex | Self::Opencode => Some("-m"),
             // No supported `agy` model-selection flag has been established.
             Self::Antigravity => None,
+        }
+    }
+
+    /// Native CLI control used for an initial reasoning-effort override.
+    /// Values are not normalized across providers: Codex reasoning efforts
+    /// and OpenCode variants are model-specific, while the other CLIs publish
+    /// different fixed vocabularies.
+    pub const fn effort_override(self) -> EffortOverride {
+        match self {
+            Self::Codex => EffortOverride::Config("model_reasoning_effort"),
+            Self::Opencode => EffortOverride::Flag("--variant"),
+            Self::Claude | Self::Copilot | Self::Antigravity => EffortOverride::Flag("--effort"),
+        }
+    }
+
+    /// Provider-native effort values when the CLI publishes a fixed set.
+    /// `None` means the legal values depend on the selected provider/model
+    /// and must be passed through for the CLI to validate.
+    pub const fn effort_values(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Codex | Self::Opencode => None,
+            Self::Claude => Some(&["low", "medium", "high", "xhigh", "max"]),
+            Self::Copilot => Some(&["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
+            Self::Antigravity => Some(&["low", "medium", "high"]),
         }
     }
 }

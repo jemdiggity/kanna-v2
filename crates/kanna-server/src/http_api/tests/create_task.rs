@@ -52,10 +52,10 @@ async fn create_task_route_uses_task_creator() {
     assert_eq!(created.stage, "in progress");
 }
 
-async fn assert_created_task_model_reaches_daemon_spawn(
+async fn assert_created_task_overrides_reach_daemon_spawn(
     provider: AgentProvider,
-    model: &str,
-    expected_flag: &str,
+    model: Option<(&str, &str)>,
+    effort: Option<(&str, &str)>,
 ) {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -63,19 +63,23 @@ async fn assert_created_task_model_reaches_daemon_spawn(
 
     let unique = unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!(
-        "kanna-http-create-model-{}-{unique}",
+        "kanna-http-create-overrides-{}-{unique}",
         provider.as_str()
     ));
     init_test_git_repo(&repo_root);
     let daemon_dir = std::env::temp_dir().join(format!(
-        "kanna-http-create-model-daemon-{}-{unique}",
+        "kanna-http-create-overrides-daemon-{}-{unique}",
         provider.as_str()
     ));
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).unwrap();
-    let expected_flag = expected_flag.to_string();
+    let expected_flags = [model.map(|(_, flag)| flag), effort.map(|(_, flag)| flag)]
+        .into_iter()
+        .flatten()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     let daemon = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
@@ -91,10 +95,13 @@ async fn assert_created_task_model_reaches_daemon_spawn(
                 ..
             } => {
                 assert_eq!(agent_provider, Some(provider));
-                assert!(
-                    args.join(" ").contains(&expected_flag),
-                    "spawn argv did not contain {expected_flag:?}: {args:?}"
-                );
+                let argv = args.join(" ");
+                for expected_flag in expected_flags {
+                    assert!(
+                        argv.contains(&expected_flag),
+                        "spawn argv did not contain {expected_flag:?}: {args:?}"
+                    );
+                }
                 session_id
             }
             other => panic!("expected PTY Spawn command, got {other:?}"),
@@ -119,7 +126,7 @@ async fn assert_created_task_model_reaches_daemon_spawn(
         firebase_firestore_emulator_host: None,
         daemon_dir: daemon_dir.to_string_lossy().to_string(),
         db_path: Db::test_db_path(&format!(
-            "http-api-create-model-{}-{unique}",
+            "http-api-create-overrides-{}-{unique}",
             provider.as_str()
         )),
         kanna_cli_path: None,
@@ -131,7 +138,7 @@ async fn assert_created_task_model_reaches_daemon_spawn(
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
-        pairing_store_path: format!("/tmp/kanna-pairings-create-model-{unique}.json"),
+        pairing_store_path: format!("/tmp/kanna-pairings-create-overrides-{unique}.json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -139,20 +146,23 @@ async fn assert_created_task_model_reaches_daemon_spawn(
     drop(db);
 
     let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let mut request = serde_json::json!({
+        "repoId": "repo-1",
+        "prompt": format!("Run {} with explicit overrides", provider.as_str()),
+        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+        "agentProvider": provider.as_str(),
+    });
+    if let Some((model, _)) = model {
+        request["model"] = serde_json::json!(model);
+    }
+    if let Some((effort, _)) = effort {
+        request["effort"] = serde_json::json!(effort);
+    }
     let response = app
         .oneshot(
             Request::post("/v1/tasks")
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "repoId": "repo-1",
-                        "prompt": format!("Run {} with an explicit model", provider.as_str()),
-                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
-                        "agentProvider": provider.as_str(),
-                        "model": model
-                    })
-                    .to_string(),
-                ))
+                .body(Body::from(request.to_string()))
                 .unwrap(),
         )
         .await
@@ -169,7 +179,8 @@ async fn assert_created_task_model_reaches_daemon_spawn(
             .unwrap()
             .unwrap();
     assert_eq!(detail.agent_provider.as_deref(), Some(provider.as_str()));
-    assert_eq!(detail.model.as_deref(), Some(model));
+    assert_eq!(detail.model.as_deref(), model.map(|(value, _)| value));
+    assert_eq!(detail.effort.as_deref(), effort.map(|(value, _)| value));
 
     daemon.await.unwrap();
     let _ = std::fs::remove_file(&socket_path);
@@ -179,18 +190,92 @@ async fn assert_created_task_model_reaches_daemon_spawn(
 
 #[tokio::test]
 async fn create_task_model_reaches_claude_and_codex_daemon_spawn_argv() {
-    assert_created_task_model_reaches_daemon_spawn(
+    assert_created_task_overrides_reach_daemon_spawn(
         AgentProvider::Claude,
-        "claude-fable-5",
-        "--model 'claude-fable-5'",
+        Some(("claude-fable-5", "--model 'claude-fable-5'")),
+        None,
     )
     .await;
-    assert_created_task_model_reaches_daemon_spawn(
+    assert_created_task_overrides_reach_daemon_spawn(
         AgentProvider::Codex,
-        "gpt-5.6-codex",
-        "-m 'gpt-5.6-codex'",
+        Some(("gpt-5.6-codex", "-m 'gpt-5.6-codex'")),
+        None,
     )
     .await;
+}
+
+#[tokio::test]
+async fn create_task_effort_reaches_every_provider_daemon_spawn_argv() {
+    let contracts: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../../../tests/cli-contract/fixtures/task-effort-spawn.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        contracts
+            .iter()
+            .find(|contract| contract["provider"] == "codex")
+            .and_then(|contract| contract["effort"].as_str()),
+        Some("max"),
+        "Codex integration coverage must exercise a model-specific value outside the old fixed list"
+    );
+    for contract in contracts {
+        let provider: AgentProvider = serde_json::from_value(contract["provider"].clone()).unwrap();
+        let effort = contract["effort"].as_str().unwrap();
+        let expected_flag = contract["ptyFlag"].as_str().unwrap();
+        assert_created_task_overrides_reach_daemon_spawn(
+            provider,
+            None,
+            Some((effort, expected_flag)),
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn create_task_route_rejects_unsupported_provider_effort_without_persisting_task() {
+    let unique = unique_test_suffix();
+    let repo_root =
+        std::env::temp_dir().join(format!("kanna-http-reject-antigravity-effort-{unique}"));
+    init_test_git_repo(&repo_root);
+    let state =
+        super::test_state_with_seed("desktop-reject-antigravity-effort", "Studio Mac", |db| {
+            db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+                .unwrap();
+        });
+    let app = router(Arc::clone(&state));
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "repoId": "repo-1",
+                        "prompt": "Use an unsupported effort override",
+                        "agentProvider": "antigravity",
+                        "agentType": "pty",
+                        "effort": "xhigh"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::str::from_utf8(&body).unwrap(),
+        "effort 'xhigh' is not supported for agent provider 'antigravity' (supported: low, medium, high)"
+    );
+    let db = Db::open(&state.config.db_path).unwrap();
+    assert!(db.list_pipeline_items("repo-1").unwrap().is_empty());
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+    let _ = std::fs::remove_file(&state.config.db_path);
 }
 
 #[tokio::test]

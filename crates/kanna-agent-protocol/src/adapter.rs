@@ -44,6 +44,8 @@ pub struct SpawnCtx {
     /// process cwd, but some providers need an explicit project-dir flag.
     pub cwd: String,
     pub model: Option<String>,
+    /// Provider-native reasoning-effort / model-variant string.
+    pub effort: Option<String>,
     /// Kanna permission mode (`dontAsk` / `acceptEdits` / `default`); each
     /// adapter maps it onto its provider's flags or config.
     pub permission_mode: Option<String>,

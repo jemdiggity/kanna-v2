@@ -142,6 +142,7 @@ fn spawn_args_pin_the_stream_json_contract() {
         prompt: "fix the bug".to_string(),
         cwd: String::new(),
         model: Some("claude-fable-5".to_string()),
+        effort: Some("xhigh".to_string()),
         permission_mode: Some("acceptEdits".to_string()),
         allowed_tools: vec!["Bash".to_string()],
         disallowed_tools: vec!["Write".to_string(), "Edit".to_string()],
@@ -159,6 +160,7 @@ fn spawn_args_pin_the_stream_json_contract() {
     assert!(args.contains("--input-format stream-json"));
     assert!(args.contains("--permission-mode acceptEdits"));
     assert!(args.contains("--model claude-fable-5"));
+    assert!(args.contains("--effort xhigh"));
     assert!(args.contains("--allowedTools Bash"));
     assert!(args.contains("--disallowedTools Write,Edit"));
     assert!(args.contains("--permission-prompt-tool stdio"));
@@ -189,6 +191,7 @@ fn spawn_args_include_mcp_config_for_initial_and_resume_spawns() {
         prompt: "fix the bug".to_string(),
         cwd: String::new(),
         model: None,
+        effort: None,
         permission_mode: None,
         allowed_tools: vec![],
         disallowed_tools: vec![],
@@ -215,6 +218,7 @@ fn default_spawn_runs_yolo_without_sandbox_or_prompts() {
         prompt: "fix the bug".to_string(),
         cwd: String::new(),
         model: None,
+        effort: None,
         // No enforcing permission mode -> agent mode runs yolo.
         permission_mode: None,
         allowed_tools: vec![],
@@ -239,6 +243,7 @@ fn dont_ask_and_default_modes_are_treated_as_yolo() {
             prompt: "go".to_string(),
             cwd: String::new(),
             model: None,
+            effort: None,
             permission_mode: Some(mode.to_string()),
             allowed_tools: vec![],
             disallowed_tools: vec![],

@@ -48,6 +48,7 @@ pub(crate) struct ResolvedAgentDefinition {
     pub(crate) description: String,
     pub(crate) default_provider: Option<String>,
     pub(crate) default_model: Option<String>,
+    pub(crate) default_effort: Option<String>,
     pub(crate) source: String,
 }
 
@@ -139,6 +140,8 @@ pub(crate) struct CreateTaskRequest {
     pub(crate) agent_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -288,6 +291,7 @@ pub(crate) struct TaskCreateOptions {
     pub(crate) agent_provider: Option<String>,
     pub(crate) agent_type: Option<String>,
     pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
     pub(crate) permission_mode: Option<String>,
     pub(crate) allowed_tool: Vec<String>,
     pub(crate) blocker_task_id: Vec<String>,

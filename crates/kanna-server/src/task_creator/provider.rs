@@ -45,6 +45,22 @@ pub(super) fn validate_model_shape(model: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+pub(super) fn validate_effort_shape(effort: Option<&str>) -> Result<(), String> {
+    let Some(effort) = effort else {
+        return Ok(());
+    };
+    if effort.is_empty() {
+        return Err("effort override must not be empty".to_string());
+    }
+    if effort.trim() != effort {
+        return Err("effort override must not have leading or trailing whitespace".to_string());
+    }
+    if effort.chars().any(char::is_control) {
+        return Err("effort override must not contain control characters".to_string());
+    }
+    Ok(())
+}
+
 pub(super) fn validate_provider_model(
     provider: AgentProvider,
     model: Option<&str>,
@@ -56,6 +72,27 @@ pub(super) fn validate_provider_model(
         ));
     }
     Ok(())
+}
+
+pub(super) fn validate_provider_effort(
+    provider: AgentProvider,
+    effort: Option<&str>,
+) -> Result<(), String> {
+    validate_effort_shape(effort)?;
+    let Some(effort) = effort else {
+        return Ok(());
+    };
+    let Some(values) = provider.effort_values() else {
+        return Ok(());
+    };
+    if values.contains(&effort) {
+        Ok(())
+    } else {
+        Err(format!(
+            "effort '{effort}' is not supported for agent provider '{provider}' (supported: {})",
+            values.join(", ")
+        ))
+    }
 }
 
 pub(super) fn resolve_agent_provider(

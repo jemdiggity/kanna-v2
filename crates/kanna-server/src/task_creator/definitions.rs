@@ -46,6 +46,8 @@ pub(super) struct AgentProviderPreference {
     pub(super) providers: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) effort: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for AgentProviderPreference {
@@ -366,6 +368,7 @@ struct AgentFrontmatter {
     #[serde(default, deserialize_with = "deserialize_optional_yaml_value")]
     agent_provider: Option<YamlValue>,
     model: Option<String>,
+    effort: Option<String>,
     permission_mode: Option<String>,
     allowed_tools: Option<Vec<String>>,
 }
@@ -379,6 +382,8 @@ pub(super) struct AgentDefinition {
     pub(super) agent_providers: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -400,6 +405,7 @@ pub(crate) struct ResolvedAgentDefinition {
     pub(super) description: String,
     pub(super) default_provider: Option<String>,
     pub(super) default_model: Option<String>,
+    pub(super) default_effort: Option<String>,
     pub(super) source: AgentDefinitionSource,
 }
 
@@ -408,6 +414,7 @@ struct AgentExtension {
     description: Option<String>,
     agent_providers: Option<Vec<String>>,
     model: Option<String>,
+    effort: Option<String>,
     permission_mode: Option<String>,
     allowed_tools: Option<Vec<String>>,
 }
@@ -577,6 +584,7 @@ impl RepoDefinitions {
                     description: definition.description,
                     default_provider: definition.agent_providers.into_iter().next(),
                     default_model: definition.model,
+                    default_effort: definition.effort,
                     source,
                 })
             })
@@ -723,11 +731,14 @@ where
 }
 
 fn parse_agent_provider_preference(value: &serde_json::Value) -> Option<AgentProviderPreference> {
-    let (provider, model) = match value {
-        serde_json::Value::String(_) => (value, None),
+    let (provider, model, effort) = match value {
+        serde_json::Value::String(_) => (value, None, None),
         serde_json::Value::Object(raw) => (
             raw.get("provider")?,
             raw.get("model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            raw.get("effort")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
         ),
@@ -751,7 +762,11 @@ fn parse_agent_provider_preference(value: &serde_json::Value) -> Option<AgentPro
             .collect::<Vec<_>>(),
         _ => return None,
     };
-    (!providers.is_empty()).then_some(AgentProviderPreference { providers, model })
+    (!providers.is_empty()).then_some(AgentProviderPreference {
+        providers,
+        model,
+        effort,
+    })
 }
 
 fn read_snapshot_utf8(
@@ -1125,6 +1140,9 @@ fn apply_agent_extension(definition: &mut AgentDefinition, content: &str) -> Res
     if extension.model.is_some() {
         definition.model = extension.model;
     }
+    if extension.effort.is_some() {
+        definition.effort = extension.effort;
+    }
     if extension.permission_mode.is_some() {
         definition.permission_mode = extension.permission_mode;
     }
@@ -1151,6 +1169,7 @@ fn parse_agent_definition(content: &str) -> Result<AgentDefinition, String> {
         prompt: body.trim().to_string(),
         agent_providers: parse_agent_providers(fm.agent_provider)?,
         model: fm.model,
+        effort: fm.effort,
         permission_mode: validate_permission_mode(fm.permission_mode)?,
         allowed_tools: fm.allowed_tools.unwrap_or_default(),
     };
@@ -1177,6 +1196,7 @@ fn parse_agent_extension(content: &str) -> Result<AgentExtension, String> {
         description: fm.description,
         agent_providers,
         model: fm.model,
+        effort: fm.effort,
         permission_mode: validate_permission_mode(fm.permission_mode)?,
         allowed_tools: fm.allowed_tools,
     })

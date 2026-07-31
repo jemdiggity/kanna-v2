@@ -83,6 +83,10 @@ fn generated_schema_preserves_required_order_types_and_enums() {
         create_task["inputSchema"]["properties"]["model"]["description"],
         json!("Model id passed verbatim to the selected agent CLI: Claude uses '--model <id>', Copilot uses '--model=<id>', and Codex/OpenCode use '-m <id>'; Antigravity rejects model overrides. An explicit value overrides agent-definition frontmatter; omit it to use the provider default. Kanna does not maintain a model-id allowlist.")
     );
+    assert_eq!(
+        create_task["inputSchema"]["properties"]["effort"]["description"],
+        json!("Provider-native reasoning effort passed without normalization. Codex uses model_reasoning_effort and validates against the selected model; Claude uses --effort (low|medium|high|xhigh|max); Copilot uses --effort (none|minimal|low|medium|high|xhigh|max); OpenCode uses --variant and validates against the selected model; Antigravity uses --effort (low|medium|high). Explicit task effort overrides repo agentProviders effort, then layered agent-definition frontmatter.")
+    );
 
     let list_agents = tools
         .as_array()
@@ -261,6 +265,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
                 "agent_type": "agent",
                 "agent_provider": "codex",
                 "model": "gpt-5.6-codex",
+                "effort": "xhigh",
                 "blocker_task_ids": ["blocker-1", "blocker-2"]
             }),
             Method::Post,
@@ -273,6 +278,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
                 "agentType": "agent",
                 "agentProvider": "codex",
                 "model": "gpt-5.6-codex",
+                "effort": "xhigh",
                 "blockerTaskIds": ["blocker-1", "blocker-2"]
             }),
         ),

@@ -164,7 +164,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "039_stage_run_resume_fallback_reason");
+    assert_eq!(latest_migration, "040_stage_run_effort");
 
     let stage_run_sql: String = db
         .conn
@@ -1226,6 +1226,7 @@ fn stage_run_lifecycle_inserts_lists_and_finishes_runs() {
             agent: Some("implement"),
             agent_provider: Some("codex"),
             model: Some("gpt-5"),
+            effort: Some("high"),
             status: "running",
             result: None,
             feedback: None,
@@ -1246,6 +1247,7 @@ fn stage_run_lifecycle_inserts_lists_and_finishes_runs() {
     assert_eq!(runs[0].agent.as_deref(), Some("implement"));
     assert_eq!(runs[0].agent_provider.as_deref(), Some("codex"));
     assert_eq!(runs[0].model.as_deref(), Some("gpt-5"));
+    assert_eq!(runs[0].effort.as_deref(), Some("high"));
     assert_eq!(runs[0].status, "running");
     assert_eq!(runs[0].session_id.as_deref(), Some("session-1"));
     assert_eq!(runs[0].completion_transition.as_deref(), Some("auto"));
@@ -1284,6 +1286,7 @@ fn close_pipeline_item_cancels_running_stage_runs() {
         agent: Some("implement"),
         agent_provider: Some("codex"),
         model: None,
+        effort: None,
         status: "running",
         result: None,
         feedback: None,
@@ -1545,6 +1548,7 @@ fn resolves_task_terminal_session_id_from_latest_running_stage_run() {
         agent: None,
         agent_provider: None,
         model: None,
+        effort: None,
         status: "succeeded",
         result: None,
         feedback: None,
@@ -1562,6 +1566,7 @@ fn resolves_task_terminal_session_id_from_latest_running_stage_run() {
         agent: None,
         agent_provider: None,
         model: None,
+        effort: None,
         status: "running",
         result: None,
         feedback: Some("address review feedback"),
@@ -1606,6 +1611,7 @@ fn resolves_task_terminal_session_id_prefers_daemon_mapping_over_provider_uuid_r
         agent: None,
         agent_provider: Some("claude"),
         model: None,
+        effort: None,
         status: "running",
         result: None,
         feedback: None,
@@ -2178,6 +2184,7 @@ fn find_open_agent_task_ignores_closed_singleton() {
         agent: Some("merge"),
         agent_provider: Some("claude"),
         model: None,
+        effort: None,
         status: "succeeded",
         result: None,
         feedback: None,

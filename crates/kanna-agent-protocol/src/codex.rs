@@ -67,6 +67,10 @@ impl CodexAdapter {
             args.push("-m".to_string());
             args.push(model.clone());
         }
+        if let Some(effort) = &ctx.effort {
+            args.push("-c".to_string());
+            args.push(format!("model_reasoning_effort=\"{effort}\""));
+        }
         args.push("--json".to_string());
         args
     }
@@ -281,6 +285,10 @@ impl ProviderAdapter for CodexAdapter {
         if let Some(model) = &ctx.model {
             args.push("-m".to_string());
             args.push(model.clone());
+        }
+        if let Some(effort) = &ctx.effort {
+            args.push("-c".to_string());
+            args.push(format!("model_reasoning_effort=\"{effort}\""));
         }
         args.push("--json".to_string());
         args.push(message.to_string());

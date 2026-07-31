@@ -2,7 +2,8 @@ use super::super::definitions::{
     AgentDefinition, PipelineDefinition, PipelineStageTransition, RepoDefinitions,
 };
 use super::super::provider::{
-    resolve_agent_provider_with, validate_model_shape, validate_provider_model,
+    resolve_agent_provider_with, validate_effort_shape, validate_model_shape,
+    validate_provider_effort, validate_provider_model,
 };
 use super::*;
 
@@ -50,6 +51,7 @@ fn repo_command_template_identity_persists_the_selected_teardown_for_close() {
             terminal_cols: None,
             terminal_rows: None,
             model: launch.model,
+            effort: launch.effort,
             permission_mode: launch.permission_mode,
             allowed_tools: launch.allowed_tools,
             disallowed_tools: launch.disallowed_tools,
@@ -440,6 +442,7 @@ fn provider_resolution_cases_match_shared_contract() {
             prompt: String::new(),
             agent_providers: case.agent.clone(),
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: Vec::new(),
         });
@@ -490,6 +493,26 @@ fn model_validation_checks_shape_without_allowlisting_ids() {
 }
 
 #[test]
+fn effort_validation_uses_provider_native_vocabularies() {
+    assert!(validate_effort_shape(Some("future-model-variant")).is_ok());
+    assert_eq!(
+        validate_effort_shape(Some("")).unwrap_err(),
+        "effort override must not be empty"
+    );
+    assert_eq!(
+        validate_effort_shape(Some(" high")).unwrap_err(),
+        "effort override must not have leading or trailing whitespace"
+    );
+    assert!(validate_provider_effort(AgentProvider::Opencode, Some("provider-native")).is_ok());
+    assert!(validate_provider_effort(AgentProvider::Codex, Some("max")).is_ok());
+    assert!(validate_provider_effort(AgentProvider::Claude, Some("xhigh")).is_ok());
+    assert_eq!(
+        validate_provider_effort(AgentProvider::Antigravity, Some("xhigh")).unwrap_err(),
+        "effort 'xhigh' is not supported for agent provider 'antigravity' (supported: low, medium, high)"
+    );
+}
+
+#[test]
 fn create_task_rejects_model_for_provider_without_a_verified_flag() {
     let repo_root = init_git_repo("reject-antigravity-model");
     let config = test_config("reject-antigravity-model");
@@ -513,6 +536,7 @@ fn create_task_rejects_model_for_provider_without_a_verified_flag() {
             terminal_cols: None,
             terminal_rows: None,
             model: Some("some-model".to_string()),
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -540,6 +564,61 @@ fn create_task_rejects_model_for_provider_without_a_verified_flag() {
 }
 
 #[test]
+fn create_task_rejects_unsupported_effort_before_persisting_state() {
+    let repo_root = init_git_repo("reject-antigravity-effort");
+    let config = test_config("reject-antigravity-effort");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let error = match prepare_task_for_api_with_error(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Use an unsupported effort override".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("antigravity".to_string()),
+            agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
+            model: None,
+            effort: Some("xhigh".to_string()),
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: None,
+            recovery_snapshot: None,
+            blocker_task_ids: None,
+            notify_task_id: None,
+            parent_task_id: None,
+        },
+        None,
+    ) {
+        Ok(_) => panic!("antigravity xhigh effort should be rejected"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error,
+        PrepareTaskError::InvalidRequest(
+            "effort 'xhigh' is not supported for agent provider 'antigravity' (supported: low, medium, high)"
+                .to_string()
+        )
+    );
+    assert!(db.list_pipeline_items("repo-1").unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
 fn provider_resolution_prefers_explicit_then_stage_then_repo_then_agent_then_fallback() {
     let agent = AgentDefinition {
         name: "review".to_string(),
@@ -547,6 +626,7 @@ fn provider_resolution_prefers_explicit_then_stage_then_repo_then_agent_then_fal
         prompt: String::new(),
         agent_providers: vec!["opencode".to_string()],
         model: Some("agent-model".to_string()),
+        effort: None,
         permission_mode: None,
         allowed_tools: Vec::new(),
     };
@@ -614,7 +694,7 @@ fn repo_agent_provider_preferences_resolve_exact_then_most_specific_glob() {
     let config: super::super::definitions::RepoConfig = serde_json::from_value(serde_json::json!({
         "agentProviders": {
             "review-*": "codex",
-            "review-s*": {"provider": "opencode", "model": "glob-model"},
+            "review-s*": {"provider": "opencode", "model": "glob-model", "effort": "high"},
             "review-security": "copilot",
             "qa-dispatcher": "claude"
         }
@@ -630,6 +710,7 @@ fn repo_agent_provider_preferences_resolve_exact_then_most_specific_glob() {
         .unwrap();
     assert_eq!(glob.providers, vec!["opencode"]);
     assert_eq!(glob.model.as_deref(), Some("glob-model"));
+    assert_eq!(glob.effort.as_deref(), Some("high"));
     assert_eq!(
         config
             .agent_provider_preference(Some("review-ui"))
@@ -650,12 +731,14 @@ fn model_resolution_prefers_explicit_then_repo_then_layered_agent_definition() {
         prompt: String::new(),
         agent_providers: vec!["claude".to_string()],
         model: Some("agent-model".to_string()),
+        effort: Some("agent-effort".to_string()),
         permission_mode: None,
         allowed_tools: Vec::new(),
     };
     let preference = super::super::definitions::AgentProviderPreference {
         providers: vec!["codex".to_string()],
         model: Some("repo-model".to_string()),
+        effort: Some("repo-effort".to_string()),
     };
 
     assert_eq!(
@@ -676,6 +759,24 @@ fn model_resolution_prefers_explicit_then_repo_then_layered_agent_definition() {
         Some("agent-model"),
     );
     assert_eq!(super::super::resolve_agent_model(None, None, None), None);
+    assert_eq!(
+        super::super::resolve_agent_effort(
+            Some("explicit-effort".to_string()),
+            Some(&preference),
+            Some(&agent),
+        )
+        .as_deref(),
+        Some("explicit-effort"),
+    );
+    assert_eq!(
+        super::super::resolve_agent_effort(None, Some(&preference), Some(&agent)).as_deref(),
+        Some("repo-effort"),
+    );
+    assert_eq!(
+        super::super::resolve_agent_effort(None, None, Some(&agent)).as_deref(),
+        Some("agent-effort"),
+    );
+    assert_eq!(super::super::resolve_agent_effort(None, None, None), None);
 }
 
 #[test]
@@ -828,6 +929,7 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
             agent_provider: None,
             agent_type: Some("agent".to_string()),
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -2766,6 +2868,7 @@ fn prepare_task_rejects_unsupported_headless_provider_before_persisting_state() 
                 terminal_cols: None,
                 terminal_rows: None,
                 model: None,
+                effort: None,
                 permission_mode: None,
                 allowed_tools: None,
                 disallowed_tools: None,
@@ -2810,6 +2913,7 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
         &AgentProvider::Claude,
         AgentProvider::Claude.executable(),
         "Review the branch.",
+        None,
         None,
         Some("dontAsk"),
         &[],
@@ -2905,6 +3009,7 @@ fn build_agent_command_launches_antigravity_with_prepended_kanna_context() {
         AgentProvider::Antigravity.executable(),
         "Ship the task.",
         None,
+        None,
         Some("dontAsk"),
         &[],
         &[],
@@ -2957,6 +3062,7 @@ fn build_agent_command_registers_codex_kanna_mcp_with_config_overrides() {
         AgentProvider::Codex.executable(),
         "Do work.",
         None,
+        None,
         Some("dontAsk"),
         &[],
         &[],
@@ -2988,6 +3094,7 @@ fn build_agent_command_registers_copilot_kanna_mcp_with_additional_config() {
         AgentProvider::Copilot.executable(),
         "Do work.",
         None,
+        None,
         Some("dontAsk"),
         &[],
         &[],
@@ -3015,6 +3122,7 @@ fn build_agent_command_registers_opencode_kanna_mcp_with_inline_config() {
         &AgentProvider::Opencode,
         AgentProvider::Opencode.executable(),
         "Do work.",
+        None,
         None,
         Some("dontAsk"),
         &[],
@@ -3050,6 +3158,7 @@ fn provider_resume_commands_use_each_cli_native_session_flag() {
             &provider,
             provider.executable(),
             "Continue.",
+            None,
             None,
             Some("dontAsk"),
             &[],
@@ -3168,6 +3277,7 @@ fn prepare_task_defaults_to_pty_session_for_claude_and_codex() {
                 terminal_cols: None,
                 terminal_rows: None,
                 model: Some("model-a".to_string()),
+                effort: None,
                 permission_mode: Some("dontAsk".to_string()),
                 allowed_tools: Some(vec!["Bash".to_string()]),
                 disallowed_tools: None,
@@ -3252,6 +3362,7 @@ fn prepare_task_uses_requested_initial_terminal_geometry() {
             terminal_cols: Some(104),
             terminal_rows: Some(72),
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -3304,6 +3415,7 @@ fn prepare_task_uses_default_initial_terminal_geometry_for_oversized_request() {
             terminal_cols: Some(321),
             terminal_rows: Some(256),
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -3365,6 +3477,7 @@ fn prepare_task_uses_create_request_agent_selector() {
             terminal_cols: None,
             terminal_rows: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -3436,6 +3549,7 @@ fn prepare_task_named_agent_without_provider_uses_configured_default() {
             terminal_cols: None,
             terminal_rows: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -3500,6 +3614,7 @@ fn prepare_task_binds_specialty_agent_on_specialty_review_pipeline() {
             terminal_cols: None,
             terminal_rows: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -3558,6 +3673,7 @@ fn prepare_task_persists_create_spawn_options_and_custom_setup() {
             terminal_cols: None,
             terminal_rows: None,
             model: Some("opus".to_string()),
+            effort: None,
             permission_mode: Some("acceptEdits".to_string()),
             allowed_tools: Some(vec!["Bash".to_string()]),
             disallowed_tools: Some(vec!["WebFetch".to_string()]),
@@ -3640,6 +3756,7 @@ fn prepare_task_for_api_resumes_requested_claude_session() {
             terminal_cols: None,
             terminal_rows: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -3696,6 +3813,7 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
             terminal_cols: Some(104),
             terminal_rows: Some(72),
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -3752,6 +3870,7 @@ fn prepare_task_for_api_uses_requested_task_id() {
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -3798,6 +3917,7 @@ fn create_dormant_task_for_api_uses_requested_task_id() {
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -3853,6 +3973,7 @@ fn dormant_start_preparation_rechecks_open_blockers() {
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -3916,6 +4037,7 @@ fn dormant_task_preserves_explicit_provider_and_model_until_spawn() {
             agent_provider: Some("codex".to_string()),
             agent_type: Some("agent".to_string()),
             model: Some("gpt-5.6-codex".to_string()),
+            effort: Some("xhigh".to_string()),
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -3941,15 +4063,18 @@ fn dormant_task_preserves_explicit_provider_and_model_until_spawn() {
             .unwrap();
     assert_eq!(detail.agent_provider.as_deref(), Some("codex"));
     assert_eq!(detail.model.as_deref(), Some("gpt-5.6-codex"));
+    assert_eq!(detail.effort.as_deref(), Some("xhigh"));
 
     let prepared = prepare_start_dormant_task_for_api(&db, &config, &created.task_id, Vec::new())
         .unwrap()
         .expect("dormant task should become runnable");
     assert_eq!(prepared.agent_provider, "codex");
     assert_eq!(prepared.model.as_deref(), Some("gpt-5.6-codex"));
+    assert_eq!(prepared.effort.as_deref(), Some("xhigh"));
     match prepared.session {
-        PreparedSessionSpawn::Agent { model, .. } => {
+        PreparedSessionSpawn::Agent { model, effort, .. } => {
             assert_eq!(model.as_deref(), Some("gpt-5.6-codex"));
+            assert_eq!(effort.as_deref(), Some("xhigh"));
         }
         PreparedSessionSpawn::Pty { .. } => panic!("expected headless spawn"),
     }
@@ -4006,6 +4131,7 @@ fn dormant_task_composes_repo_preference_with_complete_persisted_spawn_options()
             agent_provider: None,
             agent_type: Some("agent".to_string()),
             model: None,
+            effort: None,
             permission_mode: Some("dontAsk".to_string()),
             allowed_tools: Some(vec!["Read".to_string(), "Bash".to_string()]),
             disallowed_tools: Some(vec!["WebFetch".to_string()]),
@@ -4146,6 +4272,7 @@ fn dormant_start_uses_stored_explicit_agent_provider_and_model() {
             agent_provider: Some("opencode".to_string()),
             agent_type: None,
             model: Some("explicit-model".to_string()),
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -4224,6 +4351,7 @@ fn dormant_start_uses_repo_provider_preference_without_stored_explicit_values() 
             agent_provider: None,
             agent_type: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -4318,6 +4446,7 @@ fn prepare_task_for_api_classifies_requested_task_id_primary_key_collision() {
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -4378,6 +4507,7 @@ fn create_dormant_task_for_api_classifies_requested_task_id_primary_key_collisio
             agent_provider: Some("claude".to_string()),
             agent_type: Some("agent".to_string()),
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -4433,6 +4563,7 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
             terminal_cols: None,
             terminal_rows: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -4506,6 +4637,7 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
             terminal_cols: None,
             terminal_rows: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -4567,6 +4699,7 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
             terminal_cols: None,
             terminal_rows: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -4650,6 +4783,7 @@ fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
             terminal_cols: None,
             terminal_rows: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -4727,6 +4861,7 @@ fn prepare_task_stores_parent_task_id_for_subtasks() {
             terminal_cols: None,
             terminal_rows: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -4777,6 +4912,7 @@ fn prepare_task_rejects_missing_parent_task() {
             terminal_cols: None,
             terminal_rows: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -4917,6 +5053,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
             terminal_cols: None,
             terminal_rows: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -5038,6 +5175,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             terminal_cols: None,
             terminal_rows: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -5063,12 +5201,13 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
     // Claude-first and takes precedence over the configured Copilot default.
     assert_eq!(created_source.agent_provider.as_deref(), Some("claude"));
     assert_eq!(prepared.model, None);
+    assert_eq!(prepared.effort, None);
 
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
     std::fs::write(repo_root.join(".kanna/config.json"), "{}").unwrap();
     std::fs::write(
         repo_root.join(".kanna/agents/implement/EXTEND.md"),
-        "---\nagent_provider: opencode\nmodel: extension-model\n---\n",
+        "---\nagent_provider: opencode\nmodel: extension-model\neffort: medium\n---\n",
     )
     .unwrap();
     publish_origin_main(&repo_root, "publish layered implement preference");
@@ -5089,6 +5228,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             terminal_cols: None,
             terminal_rows: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -5110,6 +5250,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
         .unwrap();
     assert_eq!(created_source.agent_provider.as_deref(), Some("opencode"));
     assert_eq!(prepared.model.as_deref(), Some("extension-model"));
+    assert_eq!(prepared.effort.as_deref(), Some("medium"));
 
     std::fs::write(
         repo_root.join(".kanna/config.json"),
@@ -5117,7 +5258,8 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             "agentProviders": {
                 "implement": {
                     "provider": "codex",
-                    "model": "repo-model"
+                    "model": "repo-model",
+                    "effort": "high"
                 }
             }
         })
@@ -5142,6 +5284,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             terminal_cols: None,
             terminal_rows: None,
             model: None,
+            effort: None,
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -5163,6 +5306,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
         .unwrap();
     assert_eq!(created_source.agent_provider.as_deref(), Some("codex"));
     assert_eq!(prepared.model.as_deref(), Some("repo-model"));
+    assert_eq!(prepared.effort.as_deref(), Some("high"));
 
     let prepared = prepare_task_for_api(
         &db,
@@ -5180,6 +5324,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             terminal_cols: None,
             terminal_rows: None,
             model: Some("explicit-model".to_string()),
+            effort: Some("low".to_string()),
             permission_mode: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -5203,6 +5348,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
 
     assert_eq!(created_source.agent_provider.as_deref(), Some("claude"));
     assert_eq!(prepared.model.as_deref(), Some("explicit-model"));
+    assert_eq!(prepared.effort.as_deref(), Some("low"));
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -5234,6 +5380,7 @@ fn create_task_model_and_provider_precedence_reaches_claude_and_codex_pty_argv()
         terminal_cols: None,
         terminal_rows: None,
         model: None,
+        effort: None,
         permission_mode: None,
         allowed_tools: None,
         disallowed_tools: None,
@@ -5301,6 +5448,7 @@ fn create_task_model_and_provider_precedence_reaches_claude_and_codex_pty_argv()
                 agent_provider: Some(contract.provider.clone()),
                 agent_type: Some("pty".to_string()),
                 model: Some(contract.model.clone()),
+                effort: None,
                 ..request_defaults()
             },
         )
@@ -5329,6 +5477,7 @@ fn create_task_model_and_provider_precedence_reaches_claude_and_codex_pty_argv()
                     agent_provider: Some(contract.provider.clone()),
                     agent_type: Some("agent".to_string()),
                     model: Some(contract.model.clone()),
+                    effort: None,
                     ..request_defaults()
                 },
             )
@@ -5361,6 +5510,120 @@ fn create_task_model_and_provider_precedence_reaches_claude_and_codex_pty_argv()
     .unwrap();
     assert_eq!(provider_default.agent_provider, "codex");
     assert_eq!(provider_default.model, None);
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn create_task_effort_reaches_every_provider_native_pty_control() {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct EffortSpawnContract {
+        provider: String,
+        effort: String,
+        pty_flag: String,
+    }
+
+    let contracts: Vec<EffortSpawnContract> = serde_json::from_str(include_str!(
+        "../../../../../tests/cli-contract/fixtures/task-effort-spawn.json"
+    ))
+    .unwrap();
+    let request_defaults = || CreateTaskRequest {
+        repo_id: String::new(),
+        prompt: String::new(),
+        display_name: None,
+        pipeline_name: None,
+        stage: None,
+        base_ref: None,
+        agent: None,
+        agent_provider: None,
+        agent_type: None,
+        terminal_cols: None,
+        terminal_rows: None,
+        model: None,
+        effort: None,
+        permission_mode: None,
+        allowed_tools: None,
+        disallowed_tools: None,
+        max_turns: None,
+        max_budget_usd: None,
+        setup_cmds: None,
+        task_template: None,
+        resume_session_id: None,
+        recovery_snapshot: None,
+        blocker_task_ids: None,
+        notify_task_id: None,
+        parent_task_id: None,
+    };
+    let repo_root = init_git_repo("create-effort-spawn-contract");
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/effort-agent")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/effort-agent/AGENT.md"),
+        "---\nname: effort-agent\ndescription: Effort spawn fixture\nagent_provider: claude\neffort: medium\n---\nRun $TASK_PROMPT",
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/effort-contract.json"),
+        serde_json::json!({
+            "stages": [{
+                "name": "in progress",
+                "agent": "effort-agent",
+                "prompt": "$TASK_PROMPT",
+                "policy": { "transition": "manual" }
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish effort spawn contract");
+
+    let config = test_config("create-effort-spawn-contract");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let from_definition = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Use definition effort".to_string(),
+            pipeline_name: Some("effort-contract".to_string()),
+            agent_type: Some("pty".to_string()),
+            ..request_defaults()
+        },
+    )
+    .unwrap();
+    assert_eq!(from_definition.effort.as_deref(), Some("medium"));
+
+    for contract in contracts {
+        let prepared = prepare_task_for_api(
+            &db,
+            &config,
+            CreateTaskRequest {
+                repo_id: "repo-1".to_string(),
+                prompt: format!("Use explicit {} effort", contract.provider),
+                pipeline_name: Some("effort-contract".to_string()),
+                agent_provider: Some(contract.provider.clone()),
+                agent_type: Some("pty".to_string()),
+                effort: Some(contract.effort.clone()),
+                ..request_defaults()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(prepared.agent_provider, contract.provider);
+        assert_eq!(prepared.effort.as_deref(), Some(contract.effort.as_str()));
+        match prepared.session {
+            PreparedSessionSpawn::Pty { args, .. } => assert!(
+                args.join(" ").contains(&contract.pty_flag),
+                "created task did not pass effort through to {} PTY argv",
+                contract.provider
+            ),
+            PreparedSessionSpawn::Agent { .. } => panic!("expected PTY spawn"),
+        }
+    }
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

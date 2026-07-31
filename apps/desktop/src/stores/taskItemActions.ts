@@ -105,6 +105,7 @@ export function createTaskItemActions(
       });
       const effectiveAgentProvider = (customTaskAgentProvider ?? realE2eAgentOverride?.agentProvider ?? requestedAgentProviders) as AgentProvider | undefined;
       const resolvedModel = opts?.customTask?.model ?? realE2eAgentOverride?.model ?? opts?.model;
+      const resolvedEffort = opts?.customTask?.effort ?? opts?.effort;
       const baseRef = await resolveCreateBaseRef(repoPath, opts);
       if (!baseRef) {
         context.toast.error("No valid base branch selected");
@@ -123,6 +124,7 @@ export function createTaskItemActions(
         agentProvider: effectiveAgentProvider,
         agentType: effectiveAgentType,
         model: resolvedModel,
+        effort: resolvedEffort,
         permissionMode: opts?.customTask?.permissionMode ?? opts?.permissionMode,
         allowedTools: opts?.customTask?.allowedTools ?? opts?.allowedTools,
         disallowedTools: opts?.customTask?.disallowedTools,

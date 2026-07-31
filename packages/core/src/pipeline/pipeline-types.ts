@@ -53,6 +53,7 @@ export interface AgentDefinition {
   description: string;
   agent_provider?: AgentProvider | AgentProvider[];
   model?: string;
+  effort?: string;
   permission_mode?: "default" | "acceptEdits" | "dontAsk";
   allowed_tools?: string[];
   prompt: string; // markdown body
@@ -69,6 +70,7 @@ export interface AgentExtension {
   description?: string;
   agent_provider?: AgentProvider | AgentProvider[];
   model?: string;
+  effort?: string;
   permission_mode?: "default" | "acceptEdits" | "dontAsk";
   allowed_tools?: string[];
   prompt: string; // markdown body appended to the base prompt

@@ -35,6 +35,6 @@ pub use frames::{
 };
 pub use opencode::OpencodeAdapter;
 pub use providers::{
-    agent_provider_specs, AgentProvider, AgentProviderSpec, AgentSessionType,
+    agent_provider_specs, AgentProvider, AgentProviderSpec, AgentSessionType, EffortOverride,
     PROVIDER_RESOLUTION_CASES_JSON,
 };

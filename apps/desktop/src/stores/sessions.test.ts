@@ -698,6 +698,7 @@ describe("createSessionsApi", () => {
       port_env: JSON.stringify({ KANNA_DEV_PORT: "1421" }),
       agent_spawn_options: JSON.stringify({
         model: "claude-sonnet-test",
+        effort: "high",
         permissionMode: "dontAsk",
         allowedTools: ["Read", "Bash"],
         disallowedTools: ["WebFetch"],
@@ -721,6 +722,7 @@ describe("createSessionsApi", () => {
     expect(mocks.invokeMock).toHaveBeenCalledWith("spawn_agent_session", expect.objectContaining({
       sessionId: "task-1",
       model: "claude-sonnet-test",
+      effort: "high",
       permissionMode: "dontAsk",
       allowedTools: ["Read", "Bash"],
       disallowedTools: ["WebFetch"],

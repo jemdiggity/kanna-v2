@@ -53,6 +53,10 @@ impl OpencodeAdapter {
             args.push("-m".to_string());
             args.push(model.clone());
         }
+        if let Some(effort) = &ctx.effort {
+            args.push("--variant".to_string());
+            args.push(effort.clone());
+        }
         args
     }
 

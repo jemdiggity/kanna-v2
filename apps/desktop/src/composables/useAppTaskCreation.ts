@@ -329,6 +329,7 @@ export function useAppTaskCreation({
             agent: "setup",
             prompt: SETUP_TASK_PROMPT,
             model: agent.model,
+            effort: agent.effort,
             permissionMode: agent.permission_mode,
             allowedTools: agent.allowed_tools,
           },

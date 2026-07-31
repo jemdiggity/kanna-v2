@@ -367,6 +367,7 @@ fn insert_finished_stage_run(db: &Db, task_id: &str, stage: &str, result: &str) 
         agent: Some("test-agent"),
         agent_provider: Some("claude"),
         model: None,
+        effort: None,
         status: "running",
         result: None,
         feedback: None,

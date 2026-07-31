@@ -261,6 +261,10 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         model: Option<String>,
 
+        /// Optional provider-native reasoning effort override
+        #[arg(long)]
+        effort: Option<String>,
+
         /// Optional permission mode override
         #[arg(long)]
         permission_mode: Option<String>,

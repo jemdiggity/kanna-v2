@@ -27,6 +27,7 @@ describe("parseAgentMd", () => {
 name: Code Review
 description: Reviews code for quality
 model: opus
+effort: high
 permission_mode: acceptEdits
 execution_mode: agent
 allowed_tools:
@@ -49,6 +50,7 @@ You are a code reviewer. Review the code carefully.
     expect(result!.name).toBe("Code Review");
     expect(result!.description).toBe("Reviews code for quality");
     expect(result!.model).toBe("opus");
+    expect(result!.effort).toBe("high");
     expect(result!.permissionMode).toBe("acceptEdits");
     expect(result!.executionMode).toBe("agent");
     expect(result!.allowedTools).toEqual(["Read", "Grep"]);
@@ -100,6 +102,7 @@ Do the thing.
     expect(result!.prompt).toBe("Just a prompt with no frontmatter.");
     expect(result!.description).toBeUndefined();
     expect(result!.model).toBeUndefined();
+    expect(result!.effort).toBeUndefined();
     expect(result!.permissionMode).toBeUndefined();
   });
 

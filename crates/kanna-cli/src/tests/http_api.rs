@@ -435,6 +435,7 @@ async fn create_task_via_api_posts_default_agent_type_without_agent_provider_whe
         agent_provider: None,
         agent_type: None,
         model: None,
+        effort: None,
         permission_mode: None,
         allowed_tool: Vec::new(),
         blocker_task_id: Vec::new(),

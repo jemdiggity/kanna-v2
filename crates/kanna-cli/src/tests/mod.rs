@@ -172,6 +172,7 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("agent_provider", "agent_provider"),
                     ("agent_type", "agent_type"),
                     ("model", "model"),
+                    ("effort", "effort"),
                     ("permission_mode", "permission_mode"),
                     ("notify_task_id", "notify_task"),
                     ("parent_task_id", "parent_task"),

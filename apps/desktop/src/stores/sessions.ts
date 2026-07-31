@@ -263,6 +263,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       const parsed = JSON.parse(raw) as AgentSpawnRecoveryOptions;
       return {
         model: typeof parsed.model === "string" ? parsed.model : null,
+        effort: typeof parsed.effort === "string" ? parsed.effort : null,
         permissionMode: typeof parsed.permissionMode === "string" ? parsed.permissionMode : null,
         allowedTools: Array.isArray(parsed.allowedTools)
           ? parsed.allowedTools.filter((tool): tool is string => typeof tool === "string")
@@ -400,6 +401,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       permissionFlags,
       mcpConfigPath,
       model: options?.model,
+      effort: options?.effort,
       allowedTools: options?.allowedTools,
       disallowedTools: options?.disallowedTools,
       maxTurns: options?.maxTurns,
@@ -501,6 +503,7 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         mcpConfigPath: mcpConfigPath ?? null,
         permissionMode: spawnOptions.permissionMode ?? null,
         model: spawnOptions.model ?? null,
+        effort: spawnOptions.effort ?? null,
         allowedTools: spawnOptions.allowedTools ?? null,
         disallowedTools: spawnOptions.disallowedTools ?? null,
         maxTurns: spawnOptions.maxTurns ?? null,
@@ -514,6 +517,8 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       agentProvider,
       portEnv,
       worktreePath,
+      model: spawnOptions.model ?? undefined,
+      effort: spawnOptions.effort ?? undefined,
       ...(item.agent_session_id ? { resumeSessionId: item.agent_session_id } : {}),
     });
   }

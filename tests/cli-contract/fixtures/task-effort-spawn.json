@@ -1,0 +1,27 @@
+[
+  {
+    "provider": "claude",
+    "effort": "xhigh",
+    "ptyFlag": "--effort 'xhigh'"
+  },
+  {
+    "provider": "codex",
+    "effort": "max",
+    "ptyFlag": "-c 'model_reasoning_effort=\"max\"'"
+  },
+  {
+    "provider": "copilot",
+    "effort": "xhigh",
+    "ptyFlag": "--effort 'xhigh'"
+  },
+  {
+    "provider": "opencode",
+    "effort": "xhigh",
+    "ptyFlag": "--variant 'xhigh'"
+  },
+  {
+    "provider": "antigravity",
+    "effort": "high",
+    "ptyFlag": "--effort 'high'"
+  }
+]

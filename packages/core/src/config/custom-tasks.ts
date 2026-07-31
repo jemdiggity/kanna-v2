@@ -13,6 +13,7 @@ export interface CustomTaskConfig {
   agent?: string;
   agentProvider?: AgentProvider;
   model?: string;
+  effort?: string;
   permissionMode?: "dontAsk" | "acceptEdits" | "default";
   executionMode?: "pty" | "agent";
   allowedTools?: string[];
@@ -51,6 +52,7 @@ Available frontmatter fields (all optional, defaults shown):
 - agent: name of an existing \`.kanna/agents/<name>/AGENT.md\` to run
 - agent_provider: ${AGENT_PROVIDER_PROMPT_UNION} (optional)
 - model: null (uses Kanna default)
+- effort: null (uses the selected provider's default)
 - permission_mode: "dontAsk" | "acceptEdits" | "default" (default: provider-specific yolo-equivalent: Claude -> --dangerously-skip-permissions, Copilot -> --yolo, Codex -> --yolo, OpenCode -> --dangerously-skip-permissions)
 - execution_mode: "pty" | "agent" (default: pty; legacy "sdk" is accepted as "agent")
 - allowed_tools: [] (empty = all allowed)
@@ -145,6 +147,9 @@ export function parseAgentMd(content: string, dirName: string): CustomTaskConfig
 
   if (typeof fm.model === "string") {
     config.model = fm.model;
+  }
+  if (typeof fm.effort === "string") {
+    config.effort = fm.effort;
   }
 
   // A task template spawns exactly one agent, so it resolves to a single provider.

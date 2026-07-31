@@ -43,6 +43,7 @@ name: My Agent
 description: Does something useful
 agent_provider: codex
 model: gpt-5
+effort: high
 permission_mode: dontAsk
 allowed_tools:
   - Bash
@@ -56,6 +57,7 @@ You are a helpful agent. Do the task.
     expect(result.description).toBe("Does something useful");
     expect(result.agent_provider).toEqual(["codex"]);
     expect(result.model).toBe("gpt-5");
+    expect(result.effort).toBe("high");
     expect(result.permission_mode).toBe("dontAsk");
     expect(result.allowed_tools).toEqual(["Bash", "Read"]);
     expect(result.prompt).toBe("You are a helpful agent. Do the task.");
@@ -74,6 +76,7 @@ Do the minimal thing.
     expect(result.description).toBe("A simple agent");
     expect(result.agent_provider).toBeUndefined();
     expect(result.model).toBeUndefined();
+    expect(result.effort).toBeUndefined();
     expect(result.permission_mode).toBeUndefined();
     expect(result.prompt).toBe("Do the minimal thing.");
   });
@@ -309,6 +312,7 @@ describe("parseAgentExtension", () => {
     expect(ext.prompt).toBe("## Extra Rules\n\nAlways run the full test suite.");
     expect(ext.description).toBeUndefined();
     expect(ext.model).toBeUndefined();
+    expect(ext.effort).toBeUndefined();
     expect(ext.permission_mode).toBeUndefined();
     expect(ext.allowed_tools).toBeUndefined();
     expect(ext.agent_provider).toBeUndefined();
@@ -318,6 +322,7 @@ describe("parseAgentExtension", () => {
     const content = `---
 description: Stricter review agent
 model: opus
+effort: high
 permission_mode: acceptEdits
 allowed_tools:
   - Bash
@@ -329,6 +334,7 @@ Extra instructions.
     const ext = parseAgentExtension(content);
     expect(ext.description).toBe("Stricter review agent");
     expect(ext.model).toBe("opus");
+    expect(ext.effort).toBe("high");
     expect(ext.permission_mode).toBe("acceptEdits");
     expect(ext.allowed_tools).toEqual(["Bash"]);
     expect(ext.agent_provider).toEqual(["claude"]);
@@ -374,6 +380,7 @@ describe("applyAgentExtension", () => {
     name: "review",
     description: "Reviews branches",
     model: "sonnet",
+    effort: "medium",
     permission_mode: "default" as const,
     allowed_tools: ["Read"],
     agent_provider: ["codex", "claude"],
@@ -390,6 +397,7 @@ describe("applyAgentExtension", () => {
     expect(merged.name).toBe("review");
     expect(merged.description).toBe("Reviews branches");
     expect(merged.model).toBe("sonnet");
+    expect(merged.effort).toBe("medium");
     expect(merged.permission_mode).toBe("default");
     expect(merged.allowed_tools).toEqual(["Read"]);
     expect(merged.agent_provider).toEqual(["codex", "claude"]);
@@ -399,6 +407,7 @@ describe("applyAgentExtension", () => {
     const content = `---
 description: Stricter review
 model: opus
+effort: xhigh
 permission_mode: dontAsk
 allowed_tools:
   - Bash
@@ -410,6 +419,7 @@ Extra.
     const merged = applyAgentExtension(base, parseAgentExtension(content));
     expect(merged.description).toBe("Stricter review");
     expect(merged.model).toBe("opus");
+    expect(merged.effort).toBe("xhigh");
     expect(merged.permission_mode).toBe("dontAsk");
     expect(merged.allowed_tools).toEqual(["Bash"]);
     expect(merged.agent_provider).toEqual(["claude"]);

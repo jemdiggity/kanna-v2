@@ -40,6 +40,7 @@ export function generateId(): string {
 export interface PtySpawnOptions {
   agentProvider?: AgentProvider;
   model?: string;
+  effort?: string;
   permissionMode?: string;
   allowedTools?: string[];
   disallowedTools?: string[];
@@ -56,6 +57,7 @@ export interface PtySpawnOptions {
 
 export interface AgentSpawnRecoveryOptions {
   model?: string | null;
+  effort?: string | null;
   permissionMode?: string | null;
   allowedTools?: string[] | null;
   disallowedTools?: string[] | null;
@@ -111,6 +113,7 @@ export interface CreateItemOptions {
   customTask?: import("@kanna/core").CustomTaskConfig;
   agentProvider?: AgentProvider;
   model?: string;
+  effort?: string;
   permissionMode?: string;
   allowedTools?: string[];
   displayName?: string | null;

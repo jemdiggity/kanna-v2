@@ -88,6 +88,7 @@ pub(super) async fn run_repo_command(
             terminal_cols: None,
             terminal_rows: None,
             model: launch.model,
+            effort: launch.effort,
             permission_mode: launch.permission_mode,
             allowed_tools: launch.allowed_tools,
             disallowed_tools: launch.disallowed_tools,
