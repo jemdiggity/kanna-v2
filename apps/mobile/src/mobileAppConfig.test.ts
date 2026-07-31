@@ -96,7 +96,10 @@ describe("mobile app config", () => {
   });
 
   it("produces the staging identity from KANNA_APP_ENV", () => {
-    const config = createExpoConfig({ KANNA_APP_ENV: "staging" });
+    const config = createExpoConfig({
+      KANNA_APP_ENV: "staging",
+      KANNA_APP_VERSION: "0.1.0"
+    });
 
     expect(config.name).toBe("Kanna Staging");
     expect(config.scheme).toBe("kanna-staging");
@@ -137,17 +140,23 @@ describe("mobile app config", () => {
     expect(resolveMobileAppEnvironment("qa").name).toBe("prod");
   });
 
-  it("defaults the native version from the repository VERSION source", () => {
-    const config = createExpoConfig({ KANNA_APP_ENV: "staging" }, () => "3.4.5");
+  it("defaults the dev native version from the repository VERSION source", () => {
+    const config = createExpoConfig({ KANNA_APP_ENV: "dev" }, () => "3.4.5");
 
     expect(config.version).toBe("3.4.5");
     expect(config.ios?.buildNumber).toBeUndefined();
   });
 
-  it("prefers an explicit KANNA_APP_VERSION over the repository VERSION", () => {
-    const config = createExpoConfig({ KANNA_APP_VERSION: "1.2.3" }, () => {
-      throw new Error("must not read the repository VERSION when overridden");
-    });
+  it("prefers an explicit staging KANNA_APP_VERSION over the repository VERSION", () => {
+    const config = createExpoConfig(
+      {
+        KANNA_APP_ENV: "staging",
+        KANNA_APP_VERSION: "1.2.3"
+      },
+      () => {
+        throw new Error("must not read the repository VERSION when overridden");
+      }
+    );
 
     expect(config.version).toBe("1.2.3");
   });

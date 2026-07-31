@@ -7,27 +7,37 @@ Expo `version` when `KANNA_APP_VERSION` was present (production archives), so
 Expo fell back to the private-workspace placeholder version `0.0.0` in
 `apps/mobile/package.json`, and "About this build" reported `0.0.0 (1)`.
 
-`app.config.ts` now defaults the native version from the repository `VERSION`
-file — the same release source `tools/kd/src/runtime/mobile-archive.ts` reads —
-with an explicit `KANNA_APP_VERSION` still taking precedence, preserving the
-production archive's `--version`/default semantics. Because this changes the
-native config output (`CFBundleShortVersionString`) of every rebuilt binary,
-`runtimeVersion` was bumped to `2.1.4` in every environment per AGENTS.md.
+`app.config.ts` now uses an explicit `KANNA_APP_VERSION` when supplied and
+otherwise defaults from the repository `VERSION` file — the same release
+source `tools/kd/src/runtime/mobile-archive.ts` reads. Production archives keep
+their existing explicit-override/default behavior, and dev builds therefore
+have a deterministic non-placeholder fallback.
+
+Staging is different: its active release series may be ahead of production
+`VERSION`. Before any physical staging build, kd downloads the authoritative
+`desktop-staging/latest-staging.json` channel pointer and converts a version
+such as `0.1.0-staging.2` to the native marketing version `0.1.0`. It fails
+closed before prebuild when the channel is unavailable or malformed rather
+than guessing from local tags. An explicit `KANNA_APP_VERSION` bypasses that
+lookup. The native runtime remains `2.1.4` in every environment.
 
 ## Verification status
 
 Automated coverage added:
 
-- `apps/mobile/src/mobileAppConfig.test.ts` — VERSION fallback, explicit
-  `KANNA_APP_VERSION` precedence, blank-override fallback, walk-up file
-  resolution, and loud failure on an empty `VERSION`.
+- `apps/mobile/src/mobileAppConfig.test.ts` — deterministic VERSION fallback,
+  explicit staging `KANNA_APP_VERSION` precedence, blank-override fallback,
+  walk-up file resolution, and loud failure on an empty `VERSION`.
 - `tools/kd/src/runtime/mobile-archive.test.ts` — production archive default
   version comes from `VERSION`, and explicit `--version` still wins.
-- `tools/kd/tests/mobile-device.test.ts` — device build env intentionally does
-  not set `KANNA_APP_VERSION`.
+- `tools/kd/tests/release.test.ts` — active staging channel resolution,
+  prerelease-suffix removal, invalid-manifest rejection, and network failure.
+- `tools/kd/tests/tasks.test.ts` — resolved staging versions reach dev-client
+  and Release prebuild/build environments, while explicit overrides bypass
+  channel resolution.
 - `apps/mobile/e2e/specs/smoke/profile-connection.e2e.ts` — the About-this-build
-  journey now fails on a placeholder `0.0.0 (n)` or malformed Native value, so
-  any device/simulator smoke run asserts the real native version.
+  journey fails on a placeholder or malformed Native value and can assert an
+  exact expected native version/build.
 
 After rebasing onto the mobile signing/install fix, a clean canonical run was
 performed against Jerome's connected iPhone 15:
@@ -38,18 +48,18 @@ KANNA_IOS_DEVICE_UDID=00008130-001015CA1091401C \
   ./kd mobile run --device --staging --install
 ```
 
-Expo prebuild, CocoaPods installation, the Release build, signing, and device
-installation all succeeded. The installed app is `Kanna Staging`, bundle ID
-`build.kanna.app.staging`, version `0.0.68`, build `1`. The exact built
-artifact also reports runtime `2.1.4`, OTA channel `staging`, and the staging
-manifest URL.
+The active channel was `0.1.0-staging.2`. Expo prebuild, CocoaPods installation,
+the Release build, signing, device installation, and launch all succeeded. The
+installed app and exact built artifact report `Kanna Staging`, bundle ID
+`build.kanna.app.staging`, native version `0.1.0` build `1`, runtime `2.1.4`,
+OTA channel `staging`, and the staging manifest URL. The independent
+`test:e2e:device:release-install` launch check also passed.
 
-The command exited nonzero only at its final launch step because iOS reported
-the device as locked (`FBSOpenApplicationErrorDomain` code 7). A subsequent
-`test:e2e:device:release-install` attempt and a direct `devicectl` launch were
-denied for the same reason. Consequently the installed binary and its embedded
-metadata are verified, but the rendered About-this-build journey was not
-observed on device. The runtime hop (expo-application native values →
-`BuildIdentity` → panel) remains covered by
-`apps/mobile/src/lib/updates/buildIdentity.test.ts`, and the existing device
-smoke journey (`assertBuildInfoJourney`) rejects placeholder native versions.
+The rendered About-this-build journey could not be observed automatically in
+this run. CoreDevice could inspect and launch the paired iPhone, but the Appium
+XCUITest transport reported no accessible real devices and rejected the exact
+UDID before session creation. The committed journey now supports the required
+exact assertion (`0.1.0 (1)`, runtime `2.1.4`, staging identity/channel,
+`Embedded bundle`) once the phone is visible to XCUITest. The underlying
+expo-application native-values → `BuildIdentity` → panel hop remains covered by
+`apps/mobile/src/lib/updates/buildIdentity.test.ts`.

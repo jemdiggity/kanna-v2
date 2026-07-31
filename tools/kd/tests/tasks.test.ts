@@ -1113,7 +1113,10 @@ describe("task executors", () => {
           }
         }
       },
-      { resolveLanAddress: () => "172.16.0.193" }
+      {
+        resolveLanAddress: () => "172.16.0.193",
+        resolveStagingMarketingVersion: async () => "0.1.0"
+      }
     );
 
     expect(result.ok).toBe(true);
@@ -1150,7 +1153,9 @@ describe("task executors", () => {
     expect(calls[tmuxMobileIndex]?.args.join(" ")).toContain("EXPO_PUBLIC_FIREBASE_PROJECT_ID='kanna-staging'");
     expect(calls[tmuxMobileIndex]?.args.join(" ")).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='wss://relay-staging.kanna.build'");
     expect(calls[prebuildIndex]?.env?.KANNA_APP_ENV).toBe("staging");
+    expect(calls[prebuildIndex]?.env?.KANNA_APP_VERSION).toBe("0.1.0");
     expect(calls[installIndex]?.env?.KANNA_APP_ENV).toBe("staging");
+    expect(calls[installIndex]?.env?.KANNA_APP_VERSION).toBe("0.1.0");
     expect(calls[installIndex]?.env?.REACT_NATIVE_PACKAGER_HOSTNAME).toBe("172.16.0.193");
   });
 
@@ -1218,8 +1223,14 @@ describe("task executors", () => {
             KANNA_MOBILE_PORT: "1430",
             KANNA_MOBILE_SERVER_PORT: "48120",
             KANNA_APP_ENV: "dev",
+            KANNA_APP_VERSION: "9.8.7",
             KANNA_IOS_PHYSICAL_DEVICE_NAME: "Jerome's iPhone 15"
           }
+        }
+      },
+      {
+        resolveStagingMarketingVersion: async () => {
+          throw new Error("must not resolve the channel when explicitly overridden");
         }
       }
     );
@@ -1273,6 +1284,7 @@ describe("task executors", () => {
       cwd: repoRoot
     });
     expect(calls[prebuildIndex]?.env?.KANNA_APP_ENV).toBe("staging");
+    expect(calls[prebuildIndex]?.env?.KANNA_APP_VERSION).toBe("9.8.7");
     expect(calls[buildIndex]).toMatchObject({
       command: "xcodebuild",
       args: [
@@ -1293,6 +1305,7 @@ describe("task executors", () => {
       cwd: repoRoot
     });
     expect(calls[buildIndex]?.env?.KANNA_APP_ENV).toBe("staging");
+    expect(calls[buildIndex]?.env?.KANNA_APP_VERSION).toBe("9.8.7");
     expect(calls[buildIndex]?.env?.REACT_NATIVE_PACKAGER_HOSTNAME).toBeUndefined();
     expect(calls[buildIndex]?.env?.RCT_METRO_PORT).toBeUndefined();
     expect(calls[installIndex]).toMatchObject({
@@ -1398,6 +1411,7 @@ describe("task executors", () => {
       },
       {
         resolveLanAddress: () => "172.16.0.193",
+        resolveStagingMarketingVersion: async () => "0.1.0",
         listStagingRelayActiveDesktopIds: async () => new Set(["desktop-worktree-staging"])
       }
     );

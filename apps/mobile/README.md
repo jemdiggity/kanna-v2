@@ -36,6 +36,14 @@ the JavaScript packaged in the installed native binary. **Development bundle
 (Metro)** means a dev-client session is loading JavaScript from Metro rather
 than Expo Updates.
 
+Physical staging builds started with `./kd mobile run --device --staging`
+resolve the active `desktop-staging/latest-staging.json` release pointer and
+embed its marketing version after removing the `-staging.N` suffix. The build
+fails before prebuild if that authoritative pointer is unavailable or invalid;
+it does not substitute the production `VERSION` or a possibly stale local tag.
+An explicit `KANNA_APP_VERSION` still takes precedence. Dev builds use the
+checked-in repository `VERSION` as their deterministic fallback.
+
 ## Production iOS Archive
 
 Use the repo-native wrapper for App Store Connect builds:

@@ -800,6 +800,77 @@ function parseManifestVersion(raw: string): string | null {
   }
 }
 
+async function readActiveStagingVersion(
+  input: ReleaseStatusInput,
+  repoSlug: string
+): Promise<{ version: string | null; error: string | null }> {
+  const manifestDir = mkdtempSync(join(tmpdir(), "kanna-release-status-"));
+  try {
+    const download = await input.runner.run(
+      "gh",
+      [
+        "release",
+        "download",
+        STAGING_CHANNEL_TAG,
+        "--repo",
+        repoSlug,
+        "--pattern",
+        STAGING_MANIFEST_NAME,
+        "--dir",
+        manifestDir,
+        "--clobber"
+      ],
+      { cwd: input.repoRoot, env: input.env }
+    );
+    if (download.exitCode !== 0) {
+      return {
+        version: null,
+        error: download.stderr.trim() || download.stdout.trim() || "GitHub release download failed."
+      };
+    }
+    const manifestPath = join(manifestDir, STAGING_MANIFEST_NAME);
+    if (!existsSync(manifestPath)) {
+      return { version: null, error: `${STAGING_MANIFEST_NAME} was not downloaded.` };
+    }
+    const version = parseManifestVersion(readFileSync(manifestPath, "utf8"));
+    return version
+      ? { version, error: null }
+      : { version: null, error: `${STAGING_MANIFEST_NAME} has no valid version.` };
+  } finally {
+    rmSync(manifestDir, { recursive: true, force: true });
+  }
+}
+
+export function stagingMarketingVersion(stagingVersion: string): string {
+  const match = /^(\d+\.\d+\.\d+)-staging\.\d+$/.exec(stagingVersion.trim());
+  if (!match?.[1]) {
+    throw new Error(
+      `Invalid active staging version ${JSON.stringify(stagingVersion)}; expected X.Y.Z-staging.N.`
+    );
+  }
+  return match[1];
+}
+
+export async function resolveActiveStagingMarketingVersion(
+  input: ReleaseStatusInput
+): Promise<string> {
+  const remoteUrl = await mustRun(
+    input.runner,
+    "git",
+    ["remote", "get-url", "origin"],
+    input.repoRoot,
+    input.env
+  );
+  const repoSlug = releaseRepoSlug(remoteUrl);
+  const active = await readActiveStagingVersion(input, repoSlug);
+  if (!active.version) {
+    throw new Error(
+      `Could not resolve the active staging version from ${STAGING_CHANNEL_TAG}/${STAGING_MANIFEST_NAME}: ${active.error}`
+    );
+  }
+  return stagingMarketingVersion(active.version);
+}
+
 async function countCommits(input: ReleaseStatusInput, range: string): Promise<number | null> {
   const result = await input.runner.run("git", ["rev-list", "--count", range], { cwd: input.repoRoot, env: input.env });
   if (result.exitCode !== 0) return null;
@@ -826,43 +897,35 @@ export async function releaseStatus(input: ReleaseStatusInput): Promise<ReleaseS
   }
 
   let staging: ReleaseStatusResult["staging"] = null;
-  const manifestDir = mkdtempSync(join(tmpdir(), "kanna-release-status-"));
-  try {
-    const download = await input.runner.run(
+  const activeStaging = await readActiveStagingVersion(input, repoSlug);
+  const version = activeStaging.version;
+  if (version) {
+    const tag = stagingTag(version);
+    let commit: string | null = null;
+    let sourceBranch: string | null = null;
+    const stagingView = await input.runner.run(
       "gh",
-      ["release", "download", STAGING_CHANNEL_TAG, "--repo", repoSlug, "--pattern", STAGING_MANIFEST_NAME, "--dir", manifestDir, "--clobber"],
-      { cwd: input.repoRoot, env: input.env }
-    );
-    const manifestPath = join(manifestDir, STAGING_MANIFEST_NAME);
-    if (download.exitCode === 0 && existsSync(manifestPath)) {
-      const version = parseManifestVersion(readFileSync(manifestPath, "utf8"));
-      if (version) {
-        const tag = stagingTag(version);
-        let commit: string | null = null;
-        let sourceBranch: string | null = null;
-        const stagingView = await input.runner.run("gh", ["release", "view", tag, "--repo", repoSlug, "--json", "targetCommitish,body"], {
-          cwd: input.repoRoot,
-          env: input.env
-        });
-        if (stagingView.exitCode === 0) {
-          try {
-            commit = parseTargetCommitish(stagingView.stdout);
-          } catch {
-            commit = null;
-          }
-          sourceBranch = parseSourceBranch(stagingView.stdout);
-        }
-        staging = {
-          version,
-          tag,
-          commit,
-          sourceBranch,
-          commitsBehindMain: commit ? await countCommits(input, `${commit}..origin/main`) : null
-        };
+      ["release", "view", tag, "--repo", repoSlug, "--json", "targetCommitish,body"],
+      {
+        cwd: input.repoRoot,
+        env: input.env
       }
+    );
+    if (stagingView.exitCode === 0) {
+      try {
+        commit = parseTargetCommitish(stagingView.stdout);
+      } catch {
+        commit = null;
+      }
+      sourceBranch = parseSourceBranch(stagingView.stdout);
     }
-  } finally {
-    rmSync(manifestDir, { recursive: true, force: true });
+    staging = {
+      version,
+      tag,
+      commit,
+      sourceBranch,
+      commitsBehindMain: commit ? await countCommits(input, `${commit}..origin/main`) : null
+    };
   }
 
   let releaseBranch: ReleaseStatusResult["releaseBranch"] = null;

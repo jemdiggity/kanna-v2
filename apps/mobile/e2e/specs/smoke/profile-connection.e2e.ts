@@ -424,6 +424,7 @@ export async function assertBuildInfoJourney(
   expected: {
     channel: string;
     environment: string;
+    nativeVersion?: string;
     runningSource: string;
     runtimeVersion: string;
   }
@@ -452,6 +453,9 @@ export async function assertBuildInfoJourney(
       `Expected About this build to report a real native version (x.y.z (build)), got ${native}`
     );
   }
+  if (expected.nativeVersion && native !== expected.nativeVersion) {
+    throw new Error(`Expected Native to be ${expected.nativeVersion}, got ${native}`);
+  }
 
   await assertBuildInfoValue(ui.getBuildInfoRuntime(), "Runtime", expected.runtimeVersion);
   await assertBuildInfoValue(ui.getBuildInfoEnvironment(), "Environment", expected.environment);
@@ -475,6 +479,16 @@ export async function assertBuildInfoJourney(
       timeoutMsg: "Expected the OTA update ID copy control to report Copied"
     }
   );
+}
+
+export async function runBuildInfoJourney(
+  driver: Browser,
+  expected: Parameters<typeof assertBuildInfoJourney>[1]
+): Promise<void> {
+  await (await driver.$(selectors.appShell)).waitForDisplayed({
+    timeout: SCREEN_TIMEOUT_MS
+  });
+  await assertBuildInfoJourney(createProfileMachinesUi(driver), expected);
 }
 
 async function assertBuildInfoValue(

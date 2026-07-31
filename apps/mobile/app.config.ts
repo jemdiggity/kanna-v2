@@ -97,10 +97,10 @@ const OTA_CODE_SIGNING_CERTIFICATE = "./certs/ota-codesign.pem";
 const OTA_CODE_SIGNING_KEY_ID = "kanna-mobile-ota-v1";
 
 // The native CFBundleShortVersionString source of truth. An explicit
-// KANNA_APP_VERSION (production archives) wins; every other build falls back
-// to the repository VERSION file — the release version source mobile-archive
-// also reads. Without the fallback, Expo would embed the package.json
-// placeholder version 0.0.0 into dev/staging installs.
+// KANNA_APP_VERSION (production archives and kd staging device builds) wins.
+// Other local builds fall back to the repository VERSION file — the release
+// version source mobile-archive also reads. Kd must supply the active staging
+// marketing version because that series may be ahead of VERSION.
 export function readRepoVersion(startDir: string = process.cwd()): string {
   let dir = resolve(startDir);
   for (;;) {
@@ -133,7 +133,8 @@ export function createExpoConfig(
   readNativeVersionFallback: () => string = readRepoVersion
 ): ExpoConfig {
   const appEnvironment = resolveMobileAppEnvironment(env.KANNA_APP_ENV);
-  const version = env.KANNA_APP_VERSION?.trim() || readNativeVersionFallback();
+  const explicitVersion = env.KANNA_APP_VERSION?.trim();
+  const version = explicitVersion || readNativeVersionFallback();
   const buildNumber = env.KANNA_IOS_BUILD_NUMBER?.trim();
   const otaManifestUrl = resolveOtaManifestUrl(appEnvironment);
   const updates =

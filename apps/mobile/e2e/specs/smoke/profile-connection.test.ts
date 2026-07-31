@@ -469,6 +469,7 @@ describe("About this build journey", () => {
       runtimeVersion: "2.1.2",
       environment: "dev",
       channel: "None",
+      nativeVersion: "1.8.0 (214)",
       runningSource: "Development bundle (Metro)"
     });
 
@@ -519,6 +520,40 @@ describe("About this build journey", () => {
         runningSource: "Embedded bundle"
       })
     ).rejects.toThrow(/real native version/);
+  });
+
+  it("rejects a valid native version that differs from the exact expected build", async () => {
+    const value = (text: string) => ({
+      ...createElement(),
+      getText: vi.fn(async () => text)
+    });
+    const scrollable = {
+      ...createElement(),
+      scrollIntoView: vi.fn(async () => undefined)
+    };
+
+    await expect(
+      assertBuildInfoJourney({
+        getMoreTab: async () => createElement(),
+        getMoreScreen: async () => createElement(),
+        getBuildInfoToggle: async () => scrollable,
+        getBuildInfoDetails: async () => scrollable,
+        getBuildInfoNative: async () => value("0.1.1 (1)"),
+        getBuildInfoRuntime: async () => value("2.1.4"),
+        getBuildInfoEnvironment: async () => value("staging"),
+        getBuildInfoChannel: async () => value("staging"),
+        getBuildInfoRunningSource: async () => value("Embedded bundle"),
+        getBuildInfoUpdateId: async () => createElement(false),
+        getBuildInfoCopyHint: async () => createElement(false),
+        waitUntil: createWaitUntil()
+      }, {
+        runtimeVersion: "2.1.4",
+        environment: "staging",
+        channel: "staging",
+        nativeVersion: "0.1.0 (1)",
+        runningSource: "Embedded bundle"
+      })
+    ).rejects.toThrow(/Expected Native to be 0.1.0 \(1\), got 0.1.1 \(1\)/);
   });
 
   it("exercises copy feedback when the running source is an OTA update", async () => {
