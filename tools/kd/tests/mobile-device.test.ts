@@ -109,6 +109,9 @@ describe("physical-device mobile runtime", () => {
         KANNA_APP_ENV: "staging"
       }
     });
+    // No KANNA_APP_VERSION here: device builds embed the repository VERSION
+    // through app.config's fallback; only production archives override it.
+    expect(command.env).not.toHaveProperty("KANNA_APP_VERSION");
   });
 
   it("builds and launches through the worktree Metro on the Mac LAN IP with native identity env", () => {

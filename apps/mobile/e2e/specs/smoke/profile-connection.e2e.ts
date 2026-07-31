@@ -445,8 +445,12 @@ export async function assertBuildInfoJourney(
   await details.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
 
   const native = await readBuildInfoValue(await ui.getBuildInfoNative(), "Native");
-  if (!native) {
-    throw new Error("Expected About this build to render a Native value");
+  // A 0.0.0 native version means the build embedded the package.json
+  // placeholder instead of the repository VERSION source.
+  if (!/^\d+\.\d+\.\d+ \(\d+\)$/.test(native) || native.startsWith("0.0.0 ")) {
+    throw new Error(
+      `Expected About this build to report a real native version (x.y.z (build)), got ${native}`
+    );
   }
 
   await assertBuildInfoValue(ui.getBuildInfoRuntime(), "Runtime", expected.runtimeVersion);

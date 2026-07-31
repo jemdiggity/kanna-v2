@@ -488,6 +488,39 @@ describe("About this build journey", () => {
     ]);
   });
 
+  it("rejects a placeholder 0.0.0 native version", async () => {
+    const value = (text: string) => ({
+      ...createElement(),
+      getText: vi.fn(async () => text)
+    });
+    const scrollable = {
+      ...createElement(),
+      scrollIntoView: vi.fn(async () => undefined)
+    };
+
+    await expect(
+      assertBuildInfoJourney({
+        getMoreTab: async () => createElement(),
+        getMoreScreen: async () => createElement(),
+        getBuildInfoToggle: async () => scrollable,
+        getBuildInfoDetails: async () => scrollable,
+        getBuildInfoNative: async () => value("0.0.0 (1)"),
+        getBuildInfoRuntime: async () => value("2.1.2"),
+        getBuildInfoEnvironment: async () => value("staging"),
+        getBuildInfoChannel: async () => value("staging"),
+        getBuildInfoRunningSource: async () => value("Embedded bundle"),
+        getBuildInfoUpdateId: async () => createElement(false),
+        getBuildInfoCopyHint: async () => createElement(false),
+        waitUntil: createWaitUntil()
+      }, {
+        runtimeVersion: "2.1.2",
+        environment: "staging",
+        channel: "staging",
+        runningSource: "Embedded bundle"
+      })
+    ).rejects.toThrow(/real native version/);
+  });
+
   it("exercises copy feedback when the running source is an OTA update", async () => {
     const updateId = "84667f93-5c7b-45fb-9f78-7045160cb842";
     let copied = false;
