@@ -65,6 +65,7 @@ pub(super) async fn run_repo_command(
             repo_id,
             agent.to_string(),
             launch.prompt,
+            crate::task_creator::SingletonAgentOverrides::default(),
         )
         .await?;
         return Ok(Json(RunRepoCommandResponse {

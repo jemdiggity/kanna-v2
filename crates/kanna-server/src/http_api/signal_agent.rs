@@ -2,6 +2,7 @@ use super::state::{db_write_error, AppState};
 use super::task_input::submit_task_input;
 use crate::config::Config;
 use crate::db::Db;
+use crate::task_creator::{PrepareTaskError, SingletonAgentOverrides};
 use axum::extract::State;
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
@@ -11,6 +12,14 @@ use std::sync::Arc;
 #[serde(rename_all = "camelCase")]
 pub(super) struct SignalAgentRequest {
     message: String,
+    /// Provider the singleton agent should run as when this signal creates it,
+    /// overriding the agent definition's own candidates and the configured
+    /// default.
+    #[serde(default)]
+    agent_provider: Option<String>,
+    /// Provider-native reasoning effort for the created singleton agent.
+    #[serde(default)]
+    effort: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -25,9 +34,18 @@ pub(super) async fn signal_agent(
     axum::extract::Path((repo_id, agent)): axum::extract::Path<(String, String)>,
     Json(payload): Json<SignalAgentRequest>,
 ) -> Result<Json<SignalAgentResponse>, (axum::http::StatusCode, String)> {
-    signal_agent_request(state, repo_id, agent, payload.message)
-        .await
-        .map(Json)
+    signal_agent_request(
+        state,
+        repo_id,
+        agent,
+        payload.message,
+        SingletonAgentOverrides {
+            agent_provider: payload.agent_provider,
+            effort: payload.effort,
+        },
+    )
+    .await
+    .map(Json)
 }
 
 pub(super) async fn signal_agent_request(
@@ -35,6 +53,7 @@ pub(super) async fn signal_agent_request(
     repo_id: String,
     agent: String,
     message: String,
+    overrides: SingletonAgentOverrides,
 ) -> Result<SignalAgentResponse, (axum::http::StatusCode, String)> {
     let message = message.trim();
     if message.is_empty() {
@@ -84,8 +103,9 @@ pub(super) async fn signal_agent_request(
             &repo_id,
             &agent,
             message,
+            overrides,
         )
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(prepare_singleton_error)?;
         db.pin_pipeline_item_at_top(&repo_id, prepared.task_id())
             .map_err(|e| db_write_error("db error", e))?;
         prepared
@@ -98,6 +118,18 @@ pub(super) async fn signal_agent_request(
         task_id,
         created: true,
     })
+}
+
+/// A rejected provider or effort override is the caller's mistake, so it must
+/// read as a bad request rather than a server failure.
+fn prepare_singleton_error(error: PrepareTaskError) -> (axum::http::StatusCode, String) {
+    match error {
+        PrepareTaskError::InvalidRequest(error) => (axum::http::StatusCode::BAD_REQUEST, error),
+        other => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            other.to_string(),
+        ),
+    }
 }
 
 fn spawn_signal_agent_task_detached(

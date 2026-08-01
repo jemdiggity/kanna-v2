@@ -189,6 +189,8 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("repo_id", "repo_id"),
                     ("agent", "agent"),
                     ("message", "message"),
+                    ("agent_provider", "agent_provider"),
+                    ("effort", "effort"),
                 ],
             },
         ),

@@ -35,6 +35,15 @@ pub(super) struct TaskCreationRequest {
     pub(super) parent_task_id: Option<String>,
 }
 
+/// Caller-supplied overrides for a repo-scoped singleton agent task. They are
+/// only consulted when the signal creates the task: an already-running
+/// singleton keeps the provider and effort its session was spawned with.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SingletonAgentOverrides {
+    pub(crate) agent_provider: Option<String>,
+    pub(crate) effort: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PrepareTaskError {
     RequestedTaskIdAlreadyExists,
