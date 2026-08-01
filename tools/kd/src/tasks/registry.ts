@@ -77,12 +77,9 @@ import {
 } from "../runtime/release";
 import { loadReleaseEnvironment } from "../runtime/release-env";
 import {
-  beginRustCacheBuild,
+  applyRustCacheEnvironment,
   getRustCacheStatus,
-  noteRustCacheRecordMiss,
-  recordRustCache,
-  warmRustCache,
-  withRustCacheLifecycleLock
+  installRustCache
 } from "../runtime/rust-cache";
 import { executeRustTests } from "../runtime/rust-test";
 import { buildDesktopSidecars } from "../runtime/sidecars";
@@ -363,7 +360,7 @@ async function resolveDefaultContext(env: NodeJS.ProcessEnv, options: ResolveDef
   const resolvedEnv = options.firebaseEnvFrom
     ? { ...env, ...resolveFirebaseEnvFromReference(repoRoot, options.firebaseEnvFrom) }
     : env;
-  return resolveKdContext({
+  const context = resolveKdContext({
     repoRoot,
     homeDir,
     env: resolvedEnv,
@@ -375,6 +372,11 @@ async function resolveDefaultContext(env: NodeJS.ProcessEnv, options: ResolveDef
     daemonDirOverride: options.daemonDirOverride,
     transferRootOverride: options.transferRootOverride
   });
+  // Every Cargo command kd spawns — sidecars, Rust tests, and the Tauri dev
+  // window — inherits this environment. Release commands strip it again in
+  // loadReleaseEnvironment.
+  const cache = applyRustCacheEnvironment({ repoRoot, homeDir, env: context.env });
+  return { ...context, env: cache.env };
 }
 
 export async function loadReleaseTaskEnvironment(
@@ -1984,24 +1986,29 @@ export const taskDefinitions = [
     }
   },
   {
-    id: "rust-cache.warm",
-    description: "Warm the private Cargo build tree from a compatible Kanache donor.",
+    id: "rust-cache.install",
+    description: "Install the pinned kache compiler cache and create this repository's store.",
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
-      const result = await warmRustCache({
+      const result = await installRustCache({
         repoRoot: context.repoRoot,
         homeDir: context.homeDir,
         env: context.env,
-        runner: nodeCommandRunner,
-        commit: context.commit
+        runner: nodeCommandRunner
       });
-      return { ok: true, message: result.message, data: result };
+      return {
+        ok: true,
+        message: result.eligible
+          ? `Installed kache ${result.version} at ${result.binary}.`
+          : `Rust build cache disabled (${result.category}); nothing installed.`,
+        data: result
+      };
     }
   },
   {
     id: "rust-cache.status",
-    description: "Show Kanache installation, manifest, and recent cache events.",
+    description: "Show the pinned kache installation, this repository's store, and cache stats.",
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
@@ -2009,8 +2016,7 @@ export const taskDefinitions = [
         repoRoot: context.repoRoot,
         homeDir: context.homeDir,
         env: context.env,
-        runner: nodeCommandRunner,
-        commit: context.commit
+        runner: nodeCommandRunner
       });
       return { ok: true, message: formatJsonResult(status), data: status };
     }
@@ -2021,24 +2027,12 @@ export const taskDefinitions = [
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
-      const cache = {
-        repoRoot: context.repoRoot,
-        homeDir: context.homeDir,
-        env: context.env,
-        runner: nodeCommandRunner,
-        commit: context.commit
+      const staged = await buildDesktopSidecars(nodeCommandRunner, context.repoRoot, context.env);
+      return {
+        ok: true,
+        message: `Built and staged ${staged.length} sidecars.`,
+        data: { staged }
       };
-      return withRustCacheLifecycleLock(cache, async (ownerEnv) => {
-        const ownedCache = { ...cache, env: ownerEnv };
-        await beginRustCacheBuild(ownedCache);
-        const staged = await buildDesktopSidecars(nodeCommandRunner, context.repoRoot);
-        await recordRustCache(ownedCache, "sidecars");
-        return {
-          ok: true,
-          message: `Built and staged ${staged.length} sidecars.`,
-          data: { staged }
-        };
-      });
     }
   },
   {
@@ -2285,33 +2279,10 @@ export const taskDefinitions = [
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
-      const cache = {
+      return executeRustTests({
         repoRoot: context.repoRoot,
-        homeDir: context.homeDir,
         env: context.env,
-        runner: nodeCommandRunner,
-        commit: context.commit
-      };
-      return withRustCacheLifecycleLock(cache, async (ownerEnv) => {
-        const ownedCache = { ...cache, env: ownerEnv };
-        return executeRustTests({
-          repoRoot: context.repoRoot,
-          env: ownerEnv,
-          runner: nodeCommandRunner,
-          cache: {
-            async begin() {
-              await beginRustCacheBuild(ownedCache);
-            },
-            async record() {
-              const devStatus = await getDevStatus(nodeCommandRunner, context.tmux);
-              if (devStatus.running) {
-                noteRustCacheRecordMiss(ownedCache, "dev-active");
-                return;
-              }
-              await recordRustCache(ownedCache, "all");
-            }
-          }
-        });
+        runner: nodeCommandRunner
       });
     },
   },

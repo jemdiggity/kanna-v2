@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseEnv } from "node:util";
 import type { CommandRunner } from "./process";
+import { stripRustCacheEnvironment } from "./rust-cache-policy";
 
 export const RELEASE_ENV_FILE = ".env.release.local";
 
@@ -106,7 +107,9 @@ export async function loadReleaseEnvironment(
   const globalEnv = loadDotenvFile(globalEnvPath);
   const localEnv = loadDotenvFile(localEnvPath);
   const inherited = definedEnvironment(input.env);
-  return { ...globalEnv, ...localEnv, ...inherited };
+  // Release, signing, and packaging must be reproducible with no compiler cache
+  // present, so no Kanna-managed or ambient wrapper reaches Bazel or Cargo here.
+  return stripRustCacheEnvironment({ ...globalEnv, ...localEnv, ...inherited });
 }
 
 function loadDotenvFile(envPath: string): Record<string, string> {

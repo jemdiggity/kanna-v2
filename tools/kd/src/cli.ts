@@ -515,8 +515,8 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "build" && command === "sidecars") {
     return { taskId: "build.sidecars", input: {} };
   }
-  if (group === "rust-cache" && command === "warm") {
-    return { taskId: "rust-cache.warm", input: {} };
+  if (group === "rust-cache" && command === "install") {
+    return { taskId: "rust-cache.install", input: {} };
   }
   if (group === "rust-cache" && command === "status") {
     return { taskId: "rust-cache.status", input: {} };
@@ -660,7 +660,7 @@ const helpTopics: Record<string, string[]> = {
     "  clean [--all] [--dry] [--shared-rust-build]",
     "  build desktop",
     "  build sidecars",
-    "  rust-cache warm|status",
+    "  rust-cache install|status",
     "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>] [--branch main|release/X.Y]",
     "  release promote <staging-version> [--dry-run] [--arm64|--x86_64]",
     "  release cut [--major|--minor|--patch]",
@@ -966,18 +966,18 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd rust-cache <command>",
     "",
     "Commands:",
-    "  rust-cache warm",
+    "  rust-cache install",
     "  rust-cache status"
   ],
-  "rust-cache warm": [
-    "Usage: kd rust-cache warm",
+  "rust-cache install": [
+    "Usage: kd rust-cache install",
     "",
-    "Warm the private Cargo build tree from a compatible Kanache donor."
+    "Install the pinned kache compiler cache and create this repository's store."
   ],
   "rust-cache status": [
     "Usage: kd rust-cache status",
     "",
-    "Show the pinned Kanache tool, current manifest, and recent cache events."
+    "Show the pinned kache installation, this repository's store, and cache stats."
   ],
   release: [
     "Usage: kd release <command>",

@@ -184,15 +184,63 @@ worktree's cwd, ports, database, daemon directory, and tmux identity.
 
 ### Rust build cache
 
-Kanache worktree warming is enabled by default for local macOS development. Kanna-managed worktree setup runs `./kd rust-cache warm` after environment sync. Kanache copies compatible Cargo intermediates from a clean worktree with the same Rust build-input identity into the destination's private `.build/cargo-build`, including across TypeScript/mobile/docs-only commits. Kd excludes the generated `apps/desktop/src-tauri/binaries` staging root identically when recording and warming exclusion-aware manifests so final sidecars remain private to the producing build. A true legacy manifest with neither the input hash nor exclusions field can still warm only an exact-HEAD worktree with an empty requested exclusion set; reseed it to gain exclusion-aware cross-commit matching. A missing, incompatible, or refused donor is a normal cache miss and falls back to a cold private build.
+Kanna uses [`kache`](https://github.com/kunobi-ninja/kache) as a content-addressed
+compiler cache, pinned by exact version and per-architecture SHA-256 in
+`tools/kd/src/runtime/rust-cache-policy.ts`. Kanna-managed worktree setup runs
+`./kd rust-cache install` after environment sync, which downloads the pinned
+release, verifies its checksum before extracting it, and publishes it into
+`~/Library/Caches/kanna/tools/kache/<version>/`. Every Cargo command `kd`
+spawns — sidecars, `./kd test rust`, and the Tauri dev window — then runs with
+`RUSTC_WRAPPER` pointing at that binary.
 
-Unset, blank, `KANNA_RUST_CACHE=on`, and `KANNA_RUST_CACHE=kanache` enable the cache on macOS outside CI. Set `KANNA_RUST_CACHE=off` for an immediate local rollback; CI and non-macOS environments remain disabled. A clean recent main checkout whose dev session is stopped can run `./kd test rust` once to seed both the implicit host and explicit Apple target layouts for every branch with unchanged Rust inputs. Use `./kd rust-cache status` to inspect the pinned revision, current manifest, matching mode, and recent local measurements. The rollout evidence and isolation boundaries are documented in `docs/superpowers/specs/2026-07-20-default-kanache-worktree-cache-design.md`.
+Each Cargo invocation keeps its own private `.build` and `.build/cargo-build`.
+A cache hit is materialized into that private tree, so worktrees share
+compilation results without ever sharing Cargo's mutable fingerprint state. The
+store is per repository, at
+`~/Library/Caches/kanna/rust-kache/<repository-id>/`, capped at 10 GiB with LRU
+eviction, local-only (no remote or planner), and configured not to cache
+user-facing executables so sidecars and Tauri `externalBin` inputs are always
+produced in and staged from the current checkout.
 
-Kanache is development-only. Release builds remain Bazel-only and never install or execute Kanache.
+Restores are hash-verified (`KACHE_VERIFY_RESTORES=always`) and mismatches are
+quarantined. This is a rollout safeguard: one `./kd test rust` run during
+adoption linked a stale `kanna-runtime-defaults` rlib that predated a commit in
+its own history, and the mechanism was never identified. If you hit a build
+failure that looks like code that should exist is missing, capture the store
+entry before clearing anything and see
+[`docs/specs/safe-rust-build-caching.md`](../specs/safe-rust-build-caching.md).
+
+**The cache is hermetic, not incremental.** Kache strips `-C incremental` from
+every invocation it handles, so `kd` sets `CARGO_INCREMENTAL=0` to match. That
+trade is deliberate — it is what makes results reusable across worktrees — but
+it is not free. Measured on this repo: a cold private tree against a warm store
+restores 96.5% of cacheable invocations and cuts sidecar build CPU by 56%, and
+`.build/cargo-build` shrinks from 3.2 GiB to 1.9 GiB with the `incremental`
+trees empty. In exchange, **a one-line workspace edit rebuilds about 3.5×
+slower** (2.80 s → 9.87 s for `./kd build sidecars`).
+
+If you are in a tight edit/compile loop on a single worktree, export
+`KANNA_RUST_CACHE=off` in that shell to get Cargo incremental back immediately.
+Nothing needs rebuilding to switch modes beyond what Cargo would rebuild anyway.
+
+Unset, blank, `KANNA_RUST_CACHE=on`, and `KANNA_RUST_CACHE=kache` enable the
+cache on macOS outside CI. Set `KANNA_RUST_CACHE=off` for an immediate local
+rollback — the next Cargo command runs against rustc directly from the same
+private build tree, with no layout migration. CI and non-macOS environments are
+always disabled. Use `./kd rust-cache status` to inspect the pin, this
+repository's store, and hit/miss stats. The evaluation behind this design is in
+[`docs/specs/safe-rust-build-caching.md`](../specs/safe-rust-build-caching.md).
+
+The cache is development-only. Release builds remain Bazel-only:
+`loadReleaseEnvironment` strips `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`,
+`CARGO_INCREMENTAL`, and every `KACHE_*` variable, including any inherited from
+the caller's shell.
 
 ### First build in a worktree
 
-The first `./kd dev up` in a fresh worktree reuses a Kanache donor with the same Rust build inputs and generated-output exclusion set when one is available, even when only TypeScript/mobile/docs commits differ. Older donors must be recorded again after an exact-commit build before they can seed the new exclusion-aware flow. Otherwise it compiles ~523 Rust crates into its private build tree (the daemon builds quickly, but the full Tauri app takes several minutes). Subsequent builds are incremental within that worktree.
+The first `./kd dev up` in a fresh worktree compiles ~523 Rust crates. With a
+warm store most of those are restored rather than compiled; with a cold store
+the daemon builds quickly but the full Tauri app takes several minutes.
 
 ## Physical iPhone development
 

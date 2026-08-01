@@ -1063,17 +1063,15 @@ describe("kd CLI", () => {
   });
 
   it("parses rust-cache commands", () => {
-    expect(parseCliArgs(["rust-cache", "warm"])).toEqual({
-      taskId: "rust-cache.warm",
+    expect(parseCliArgs(["rust-cache", "install"])).toEqual({
+      taskId: "rust-cache.install",
       input: {}
     });
     expect(parseCliArgs(["rust-cache", "status"])).toEqual({
       taskId: "rust-cache.status",
       input: {}
     });
-    expect(() => parseCliArgs(["rust-cache", "record", "--layouts", "all"])).toThrow(
-      "Unknown command"
-    );
+    expect(() => parseCliArgs(["rust-cache", "warm"])).toThrow("Unknown command");
   });
 
   it("parses remote doctor commands", () => {
