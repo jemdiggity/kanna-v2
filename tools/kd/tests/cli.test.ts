@@ -1071,7 +1071,15 @@ describe("kd CLI", () => {
       taskId: "rust-cache.status",
       input: {}
     });
-    expect(() => parseCliArgs(["rust-cache", "warm"])).toThrow("Unknown command");
+    // `warm` is the pre-kache spelling that origin/main's setup list still runs;
+    // it must keep resolving while older branches are open.
+    expect(parseCliArgs(["rust-cache", "warm"])).toEqual({
+      taskId: "rust-cache.install",
+      input: {}
+    });
+    expect(() => parseCliArgs(["rust-cache", "record", "--layouts", "all"])).toThrow(
+      "Unknown command"
+    );
   });
 
   it("parses remote doctor commands", () => {

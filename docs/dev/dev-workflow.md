@@ -187,7 +187,10 @@ worktree's cwd, ports, database, daemon directory, and tmux identity.
 Kanna uses [`kache`](https://github.com/kunobi-ninja/kache) as a content-addressed
 compiler cache, pinned by exact version and per-architecture SHA-256 in
 `tools/kd/src/runtime/rust-cache-policy.ts`. Kanna-managed worktree setup runs
-`./kd rust-cache install` after environment sync, which downloads the pinned
+`./kd rust-cache warm` after environment sync — a deprecated alias for
+`install`, kept because repo config is read from the origin/main snapshot rather
+than the task branch, so it must work on both old and new `kd` during the
+changeover (see the spec below). It downloads the pinned
 release, verifies its checksum before extracting it, and publishes it into
 `~/Library/Caches/kanna/tools/kache/<version>/`. Every Cargo command `kd`
 spawns — sidecars, `./kd test rust`, and the Tauri dev window — then runs with

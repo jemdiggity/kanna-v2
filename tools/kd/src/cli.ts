@@ -515,7 +515,20 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "build" && command === "sidecars") {
     return { taskId: "build.sidecars", input: {} };
   }
-  if (group === "rust-cache" && command === "install") {
+  // TEMPORARY COMPATIBILITY SHIM — remove once no branch predating the kache
+  // migration is still open.
+  //
+  // Repo config, including `setup`, is read from the origin/main snapshot rather
+  // than the task branch (RepoDefinitionSnapshot::resolve reads
+  // refs/remotes/origin/<default_branch>), so a forked worktree runs main's
+  // setup list against the branch's own kd. Config and code therefore cross the
+  // stage boundary independently and cannot be changed atomically: `warm` is the
+  // Kanache-era spelling main still invokes, and it must keep resolving here or
+  // this branch cannot transition. For the same reason main's config keeps
+  // saying `warm` — it is the only spelling both this kd and every older kd
+  // accept — so branches cut before this change keep transitioning after it
+  // merges.
+  if (group === "rust-cache" && (command === "install" || command === "warm")) {
     return { taskId: "rust-cache.install", input: {} };
   }
   if (group === "rust-cache" && command === "status") {
@@ -967,7 +980,10 @@ const helpTopics: Record<string, string[]> = {
     "",
     "Commands:",
     "  rust-cache install",
-    "  rust-cache status"
+    "  rust-cache status",
+    "",
+    "`rust-cache warm` is a deprecated alias for `install`, kept while branches",
+    "predating the kache migration are still open."
   ],
   "rust-cache install": [
     "Usage: kd rust-cache install",

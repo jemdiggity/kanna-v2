@@ -147,6 +147,30 @@ construction, release stripping) and `tools/kd/src/runtime/rust-cache.ts`
 Commands are `./kd rust-cache install` and `./kd rust-cache status`;
 `KANNA_RUST_CACHE=off` is the one-variable rollback.
 
+### Changeover compatibility (temporary)
+
+Repo config — including `setup` — is read from the origin/main snapshot, not the
+task branch (`RepoDefinitionSnapshot::resolve` reads
+`refs/remotes/origin/<default_branch>`). A forked stage worktree therefore runs
+*main's* setup list against *its own branch's* `kd`, so config and code cross the
+stage boundary independently and cannot be changed atomically. Two consequences,
+both load-bearing:
+
+1. `kd` accepts `rust-cache warm` as an alias for `install`. Without it this
+   branch could not transition at all: main's setup still invokes `warm`, and
+   dropping the verb failed the review-stage fork with
+   `Unknown command: rust-cache warm` before the agent started.
+2. **`.kanna/config.json` deliberately still says `warm`.** It is the only
+   spelling accepted by both this `kd` (via the alias) and every `kd` predating
+   this change. Switching it to `install` would break the reverse direction:
+   every branch cut before this one would fork, run main's new `install` against
+   a `kd` that only knows `warm`, and fail identically.
+
+Remove the alias and switch the config to `install` together, once no branch
+predating this change is still open — not before, and not one without the other.
+`tools/kd/tests/kanna-config.test.ts` guards this by resolving every `./kd`
+command in origin/main's config against this branch's parser.
+
 The remainder of this document is the original 2026-07-18 investigation. Its
 measurements, correctness reproductions, and rejected shortcuts still hold; only
 its adoption verdict has been superseded.
