@@ -109,6 +109,10 @@ describe("physical-device mobile runtime", () => {
         KANNA_APP_ENV: "staging"
       }
     });
+    // The command contributes native identity only. The task executor merges
+    // the active staging KANNA_APP_VERSION (or an explicit override) into the
+    // complete prebuild environment.
+    expect(command.env).not.toHaveProperty("KANNA_APP_VERSION");
   });
 
   it("builds and launches through the worktree Metro on the Mac LAN IP with native identity env", () => {

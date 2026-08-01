@@ -4,6 +4,8 @@
 // and the typed runtime layer (src/mobileEnvironment.ts), keeping one data
 // source. Do NOT import ./src/mobileEnvironment here.
 import environments from "./src/mobileEnvironments.json";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 type KannaAppEnvironmentName = "dev" | "staging" | "prod";
 type OtaChannel = "staging" | "production";
@@ -49,7 +51,7 @@ export function resolveMobileAppEnvironment(
 interface ExpoConfig {
   name: string;
   slug: string;
-  version?: string;
+  version: string;
   scheme: string;
   icon: string;
   plugins: Array<string | [string, Record<string, unknown>]>;
@@ -94,15 +96,45 @@ const OTA_MANIFEST_PATH = "/ota/manifest";
 const OTA_CODE_SIGNING_CERTIFICATE = "./certs/ota-codesign.pem";
 const OTA_CODE_SIGNING_KEY_ID = "kanna-mobile-ota-v1";
 
+// The native CFBundleShortVersionString source of truth. An explicit
+// KANNA_APP_VERSION (production archives and kd staging device builds) wins.
+// Other local builds fall back to the repository VERSION file — the release
+// version source mobile-archive also reads. Kd must supply the active staging
+// marketing version because that series may be ahead of VERSION.
+export function readRepoVersion(startDir: string = process.cwd()): string {
+  let dir = resolve(startDir);
+  for (;;) {
+    const candidate = join(dir, "VERSION");
+    if (existsSync(candidate)) {
+      const version = readFileSync(candidate, "utf8").trim();
+      if (!version) {
+        throw new Error(
+          `Repository VERSION file at ${candidate} is empty; fix it or set KANNA_APP_VERSION explicitly.`
+        );
+      }
+      return version;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) {
+      throw new Error(
+        `Could not find a repository VERSION file above ${startDir}; set KANNA_APP_VERSION explicitly.`
+      );
+    }
+    dir = parent;
+  }
+}
+
 export function createExpoConfig(
   env: {
     KANNA_APP_ENV?: string;
     KANNA_APP_VERSION?: string;
     KANNA_IOS_BUILD_NUMBER?: string;
-  }
+  },
+  readNativeVersionFallback: () => string = readRepoVersion
 ): ExpoConfig {
   const appEnvironment = resolveMobileAppEnvironment(env.KANNA_APP_ENV);
-  const version = env.KANNA_APP_VERSION?.trim();
+  const explicitVersion = env.KANNA_APP_VERSION?.trim();
+  const version = explicitVersion || readNativeVersionFallback();
   const buildNumber = env.KANNA_IOS_BUILD_NUMBER?.trim();
   const otaManifestUrl = resolveOtaManifestUrl(appEnvironment);
   const updates =
@@ -124,7 +156,7 @@ export function createExpoConfig(
   return {
     name: appEnvironment.displayName,
     slug: "kanna-mobile",
-    ...(version ? { version } : {}),
+    version,
     scheme: appEnvironment.scheme,
     icon: "./assets/icon.png",
     plugins: [

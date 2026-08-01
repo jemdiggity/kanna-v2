@@ -6,7 +6,8 @@ import { parseCliArgs } from "../cli";
 import {
   buildMobileIosArchivePlan,
   executeMobileIosArchiveWithContext,
-  parseXcodeMajorVersion
+  parseXcodeMajorVersion,
+  type MobileIosArchivePlan
 } from "./mobile-archive";
 import type { CommandRunner } from "./process";
 
@@ -155,7 +156,13 @@ describe("kd mobile archive", () => {
     );
 
     expect(result.ok).toBe(true);
-    expect(result.message).toContain("Dry run: mobile production archive");
+    expect(result.message).toContain("Dry run: mobile production archive 0.0.67 (45)");
+    const plan = result.data as MobileIosArchivePlan;
+    expect(plan.version).toBe("0.0.67");
+    expect(plan.commands[0]?.env).toMatchObject({
+      KANNA_APP_VERSION: "0.0.67",
+      KANNA_IOS_BUILD_NUMBER: "45"
+    });
     expect(calls).toEqual(["xcodebuild -version"]);
   });
 });

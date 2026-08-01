@@ -1,6 +1,10 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   createExpoConfig,
+  readRepoVersion,
   resolveMobileAppEnvironment
 } from "../app.config";
 
@@ -92,7 +96,10 @@ describe("mobile app config", () => {
   });
 
   it("produces the staging identity from KANNA_APP_ENV", () => {
-    const config = createExpoConfig({ KANNA_APP_ENV: "staging" });
+    const config = createExpoConfig({
+      KANNA_APP_ENV: "staging",
+      KANNA_APP_VERSION: "0.1.0"
+    });
 
     expect(config.name).toBe("Kanna Staging");
     expect(config.scheme).toBe("kanna-staging");
@@ -131,6 +138,57 @@ describe("mobile app config", () => {
 
   it("falls back to prod for unknown KANNA_APP_ENV values", () => {
     expect(resolveMobileAppEnvironment("qa").name).toBe("prod");
+  });
+
+  it("defaults the dev native version from the repository VERSION source", () => {
+    const config = createExpoConfig({ KANNA_APP_ENV: "dev" }, () => "3.4.5");
+
+    expect(config.version).toBe("3.4.5");
+    expect(config.ios?.buildNumber).toBeUndefined();
+  });
+
+  it("prefers an explicit staging KANNA_APP_VERSION over the repository VERSION", () => {
+    const config = createExpoConfig(
+      {
+        KANNA_APP_ENV: "staging",
+        KANNA_APP_VERSION: "1.2.3"
+      },
+      () => {
+        throw new Error("must not read the repository VERSION when overridden");
+      }
+    );
+
+    expect(config.version).toBe("1.2.3");
+  });
+
+  it("treats a blank KANNA_APP_VERSION as unset", () => {
+    const config = createExpoConfig({ KANNA_APP_VERSION: "   " }, () => "3.4.5");
+
+    expect(config.version).toBe("3.4.5");
+  });
+
+  it("embeds the real repository VERSION for canonical builds", () => {
+    const repoVersion = readRepoVersion();
+
+    expect(repoVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(repoVersion).not.toBe("0.0.0");
+    expect(createExpoConfig({}).version).toBe(repoVersion);
+  });
+
+  it("finds the VERSION file by walking up from a nested directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-version-"));
+    await writeFile(join(root, "VERSION"), "7.8.9\n");
+    const nested = join(root, "apps", "mobile");
+    await mkdir(nested, { recursive: true });
+
+    expect(readRepoVersion(nested)).toBe("7.8.9");
+  });
+
+  it("fails loudly when the VERSION file is empty", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-version-empty-"));
+    await writeFile(join(root, "VERSION"), "  \n");
+
+    expect(() => readRepoVersion(root)).toThrow(/is empty/);
   });
 
   it("configures QR-only camera access and a new native runtime", () => {

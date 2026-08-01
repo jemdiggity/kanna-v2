@@ -15,7 +15,9 @@ import {
   releaseSeriesBranch,
   releaseSeriesFromVersion,
   releaseStatus,
+  resolveActiveStagingMarketingVersion,
   shipRelease,
+  stagingMarketingVersion,
   updaterAssetName,
   updaterBundleTargetForLabel,
   updaterSignatureName,
@@ -1491,6 +1493,93 @@ describe("release cut", () => {
 
       await expect(cutReleaseBranch({ repoRoot, bump: "minor", env: {}, runner })).rejects.toThrow(/release\/1\.3 already exists/);
       expect(calls.some((call) => call.command === "git" && call.args[0] === "push")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("active staging marketing version", () => {
+  it("strips the staging prerelease suffix from the active channel version", () => {
+    expect(stagingMarketingVersion("0.1.0-staging.2")).toBe("0.1.0");
+  });
+
+  it("rejects a channel version that is not a staging prerelease", () => {
+    expect(() => stagingMarketingVersion("0.1.0")).toThrow(/expected X.Y.Z-staging.N/);
+    expect(() => stagingMarketingVersion("latest")).toThrow(/expected X.Y.Z-staging.N/);
+  });
+
+  it("resolves the authoritative active staging channel manifest", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-staging-version-"));
+    try {
+      const runner: CommandRunner = {
+        async run(command, args) {
+          if (command === "git") {
+            return {
+              exitCode: 0,
+              stdout: "git@github.com:tampopogk/kanna.git\n",
+              stderr: ""
+            };
+          }
+          const dirIndex = args.indexOf("--dir");
+          writeFileSync(
+            join(args[dirIndex + 1] ?? "", "latest-staging.json"),
+            '{"version":"0.1.0-staging.2"}\n'
+          );
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+      };
+
+      await expect(
+        resolveActiveStagingMarketingVersion({ repoRoot: root, env: {}, runner })
+      ).resolves.toBe("0.1.0");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the active staging channel is unavailable", async () => {
+    const runner: CommandRunner = {
+      async run(command) {
+        return command === "git"
+          ? {
+              exitCode: 0,
+              stdout: "git@github.com:tampopogk/kanna.git\n",
+              stderr: ""
+            }
+          : { exitCode: 1, stdout: "", stderr: "network unavailable" };
+      }
+    };
+
+    await expect(
+      resolveActiveStagingMarketingVersion({ repoRoot: "/repo", env: {}, runner })
+    ).rejects.toThrow(/active staging version.*network unavailable/);
+  });
+
+  it("fails closed when the active staging channel version is malformed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kd-staging-version-invalid-"));
+    try {
+      const runner: CommandRunner = {
+        async run(command, args) {
+          if (command === "git") {
+            return {
+              exitCode: 0,
+              stdout: "git@github.com:tampopogk/kanna.git\n",
+              stderr: ""
+            };
+          }
+          const dirIndex = args.indexOf("--dir");
+          writeFileSync(
+            join(args[dirIndex + 1] ?? "", "latest-staging.json"),
+            '{"version":"0.1.0"}\n'
+          );
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+      };
+
+      await expect(
+        resolveActiveStagingMarketingVersion({ repoRoot: root, env: {}, runner })
+      ).rejects.toThrow(/expected X.Y.Z-staging.N/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

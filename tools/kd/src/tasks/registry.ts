@@ -69,7 +69,12 @@ import {
   listStagingRelayActiveDesktopIds,
   type StagingRelayActiveDesktopIdsInput
 } from "../runtime/staging-relay";
-import { cutReleaseBranch, releaseStatus, shipRelease } from "../runtime/release";
+import {
+  cutReleaseBranch,
+  releaseStatus,
+  resolveActiveStagingMarketingVersion,
+  shipRelease
+} from "../runtime/release";
 import { loadReleaseEnvironment } from "../runtime/release-env";
 import {
   beginRustCacheBuild,
@@ -327,6 +332,7 @@ export interface DevDownExecutionOptions {
 
 export interface MobileDeviceRunExecutionOptions {
   resolveLanAddress?: () => string | undefined;
+  resolveStagingMarketingVersion?: () => Promise<string>;
   metroReadiness?: Pick<PhysicalDeviceMetroReadinessInput, "attempts" | "delayMs">;
   readInstalledStagingDesktopStatus?: (runner: CommandRunner) => Promise<ProductionDesktopStatus | null>;
   listStagingRelayActiveDesktopIds?: (input: StagingRelayActiveDesktopIdsInput) => Promise<Set<string> | null>;
@@ -968,12 +974,18 @@ export async function executeMobileDeviceRunWithContext(
     requestedUdid: executor.context.env.KANNA_IOS_DEVICE_UDID?.trim() || undefined,
     requestedName: executor.context.env.KANNA_IOS_PHYSICAL_DEVICE_NAME?.trim() || undefined
   });
+  const buildEnv = await mobileDeviceBuildEnv(
+    input,
+    executor,
+    device.udid,
+    options.resolveStagingMarketingVersion
+  );
   if (input.install) {
-    return executeMobileDeviceReleaseInstall(input, executor, device);
+    return executeMobileDeviceReleaseInstall(input, executor, device, buildEnv);
   }
 
   const lanHost = requireMobileDeviceLanHost(options);
-  const launch = prepareMobileDeviceLaunch(input, executor, lanHost, device.udid);
+  const launch = prepareMobileDeviceLaunch(input, executor, lanHost, buildEnv);
   await launch.resetTmux();
   await startTmuxSession(executor.runner, executor.context.tmux, launch.plan.windows);
   if (input.staging) {
@@ -1227,12 +1239,35 @@ function mobileDeviceInstallEnv(
   };
 }
 
+async function mobileDeviceBuildEnv(
+  input: MobileRunInput,
+  executor: ExecutorInput,
+  deviceUdid: string,
+  resolveStagingVersion?: () => Promise<string>
+): Promise<NodeJS.ProcessEnv> {
+  const env = mobileDeviceInstallEnv(input, executor, deviceUdid);
+  if (!input.staging || env.KANNA_APP_VERSION?.trim()) {
+    return env;
+  }
+
+  const version = await (
+    resolveStagingVersion ??
+    (() =>
+      resolveActiveStagingMarketingVersion({
+        repoRoot: executor.context.repoRoot,
+        env,
+        runner: executor.runner
+      }))
+  )();
+  return { ...env, KANNA_APP_VERSION: version };
+}
+
 async function executeMobileDeviceReleaseInstall(
   input: MobileRunInput,
   executor: ExecutorInput,
-  device: Awaited<ReturnType<typeof resolvePhysicalDevice>>
+  device: Awaited<ReturnType<typeof resolvePhysicalDevice>>,
+  env: NodeJS.ProcessEnv
 ): Promise<TaskResult> {
-  const env = mobileDeviceInstallEnv(input, executor, device.udid);
   const nativeIdentity = resolveMobileNativeIdentity(env);
   const prebuildCommand = buildMobileDevicePrebuildCommand({
     repoRoot: executor.context.repoRoot,
@@ -1368,19 +1403,13 @@ function prepareMobileDeviceLaunch(
   input: MobileRunInput,
   executor: ExecutorInput,
   lanHost: string,
-  deviceUdid: string
+  env: NodeJS.ProcessEnv
 ): {
   env: NodeJS.ProcessEnv;
   plan: ReturnType<typeof buildDevPlan>;
   resetTmux: () => Promise<void>;
 } {
   if (input.staging) {
-    const env: NodeJS.ProcessEnv = {
-      ...executor.context.env,
-      KANNA_CLOUD_ENV: "staging",
-      KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "staging",
-      KANNA_IOS_DEVICE_UDID: deviceUdid
-    };
     const mobilePlan = buildProductionMobilePlan({
       repoRoot: executor.context.repoRoot,
       env,
@@ -1395,14 +1424,6 @@ function prepareMobileDeviceLaunch(
   }
 
   if (input.production) {
-    const production = resolveKdEnvironment("prod");
-    const env: NodeJS.ProcessEnv = {
-      ...executor.context.env,
-      KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "prod",
-      KANNA_IOS_DEVICE_UDID: deviceUdid,
-      EXPO_PUBLIC_KANNA_RELAY_URL:
-        executor.context.env.EXPO_PUBLIC_KANNA_RELAY_URL ?? production.relayUrl
-    };
     const plan = buildProductionMobilePlan({
       repoRoot: executor.context.repoRoot,
       env,
@@ -1416,11 +1437,6 @@ function prepareMobileDeviceLaunch(
     };
   }
 
-  const env: NodeJS.ProcessEnv = {
-    ...executor.context.env,
-    KANNA_APP_ENV: executor.context.env.KANNA_APP_ENV ?? "dev",
-    KANNA_IOS_DEVICE_UDID: deviceUdid
-  };
   const devPorts = requireMobileDeviceDevPorts(executor.context.ports);
   const firebaseConfigPath = writeFirebaseEmulatorConfig(executor.context.repoRoot, devPorts);
   writeTauriLocalConfig(executor.context.repoRoot, devPorts.KANNA_DEV_PORT);
