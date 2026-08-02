@@ -1007,6 +1007,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
+    /// The premise the MCP-layer activity debounce is built on. The daemon
+    /// classifies each frame on its own, so one mid-redraw frame that loses the
+    /// busy marker arrives here as a lone `Idle` between two `Busy` events —
+    /// and this layer, correctly, stores it: `activity` is a record of the
+    /// latest verdict, not a judgement about whether that verdict is plausible.
+    /// A task read taken inside that window sees `unread` for an agent that
+    /// never stopped, which is exactly what `kanna-mcp` confirms before
+    /// reporting (see `crates/kanna-mcp/tests/activity_debounce.rs`).
+    #[tokio::test]
+    async fn watcher_parks_activity_at_unread_for_a_single_spurious_idle_frame() {
+        let unique = unique_name("terminal-watcher-spurious-idle");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+        let state = http_api::AppState::new(config.clone());
+        let db_path = config.db_path.clone();
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe(&listener).await;
+            for status in [
+                kanna_daemon::protocol::SessionStatus::Busy,
+                kanna_daemon::protocol::SessionStatus::Idle,
+            ] {
+                write_event(
+                    &mut subscriber,
+                    &DaemonEvent::StatusChanged {
+                        session_id: "task-child".to_string(),
+                        status,
+                        waiting_prompt_snippet: None,
+                    },
+                )
+                .await;
+            }
+            let spurious_stop = await_activity(&db_path, "unread").await;
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::StatusChanged {
+                    session_id: "task-child".to_string(),
+                    status: kanna_daemon::protocol::SessionStatus::Busy,
+                    waiting_prompt_snippet: None,
+                },
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+            spurious_stop
+        });
+
+        terminal_state_watcher_once(
+            &state,
+            &session_replacements::SessionReplacements::default(),
+        )
+        .await
+        .unwrap();
+        let spurious_stop = server.await.unwrap();
+
+        assert!(
+            spurious_stop,
+            "a single idle frame should reach a task read as a stopped-looking activity"
+        );
+        let item = Db::open(&config.db_path)
+            .unwrap()
+            .get_pipeline_item("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            item.activity.as_deref(),
+            Some("working"),
+            "the next frame carrying the busy marker should undo the misread"
+        );
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    /// Waits for the watcher to persist `activity`, which it does from its own
+    /// task, and reports whether it got there before the wait ran out.
+    async fn await_activity(db_path: &str, expected: &str) -> bool {
+        for _ in 0..400 {
+            let activity = Db::open(db_path)
+                .unwrap()
+                .get_pipeline_item("task-child")
+                .unwrap()
+                .and_then(|item| item.activity);
+            if activity.as_deref() == Some(expected) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
     #[tokio::test]
     async fn watcher_applies_attached_busy_as_working() {
         let unique = unique_name("terminal-watcher-attached-busy");

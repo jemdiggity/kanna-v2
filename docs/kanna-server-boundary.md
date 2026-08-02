@@ -75,6 +75,39 @@ polling each child. It is cursor-based, not snapshot-diffed:
   never inferred from a session going quiet; see
   [2026-07-29-awaiting-input-detection-e2e-gap.md](2026-07-29-awaiting-input-detection-e2e-gap.md).
 
+## Activity Confirmation in `kanna-mcp`
+
+`pipeline_item.activity` is written from the daemon's per-frame verdict, and
+that classifier is stateless: `claude_status_from_lines` decides Busy from the
+literal "esc to interrupt" marker being present in the frame it was handed, with
+no hysteresis and no minimum dwell. A frame captured mid-redraw can lose the
+marker, fall through to the trailing-prompt test, and classify a mid-turn agent
+as idle — which the server correctly stores, because `activity` records the
+latest verdict rather than judging it. An orchestrator polling `activity` to
+decide whether a child stopped can therefore read a stop that never happened.
+
+`kanna-mcp` smooths that at the point of consumption, asymmetrically:
+
+- A `working` sample is returned as-is. Reporting busy promptly is never the
+  misread being guarded against.
+- A stopped-looking sample (`idle` or `unread`) is re-read once after
+  `ACTIVITY_CONFIRM_DELAY` (1s, two daemon detection windows), and the fresher
+  sample is what the caller sees. So `kanna_get_task` costs one extra `GET` plus
+  1s **only** when the first read already looked stopped; `kanna_wait_task`
+  confirms the same way before resolving `until: finished`. A task that is
+  closed is exempt: closure is a database fact, not a frame classification.
+- The confirmation reports whatever it finds and never rewrites one activity
+  value into another, so the three-way vocabulary is unchanged and `unread`
+  keeps meaning "output nobody has read yet" rather than "stopped" — a busy
+  agent can carry `unread`.
+- It smooths Busy/Idle only. `waiting` stays a positive match on prompt chrome
+  in the daemon; nothing here turns quiet into blocked.
+
+The event feed is not debounced: events are appended by the writes that change
+the state they describe, and suppressing one would drop it rather than delay it.
+`kanna-cli` does not confirm either — it is the shell interface, where a human
+reads the value in context.
+
 ## Dynamic Pipeline Changes
 
 `POST /v1/tasks/{task_id}/actions/set-pipeline` and
