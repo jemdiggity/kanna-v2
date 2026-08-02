@@ -690,9 +690,10 @@ fn provider_resolution_prefers_explicit_then_stage_then_repo_then_agent_then_fal
 }
 
 #[test]
-fn repo_agent_provider_preferences_resolve_exact_then_most_specific_glob() {
+fn repo_agent_provider_preferences_resolve_exact_then_most_specific_glob_then_wildcard() {
     let config: super::super::definitions::RepoConfig = serde_json::from_value(serde_json::json!({
         "agentProviders": {
+            "*": "antigravity",
             "review-*": "codex",
             "review-s*": {"provider": "opencode", "model": "glob-model", "effort": "high"},
             "review-security": "copilot",
@@ -718,9 +719,13 @@ fn repo_agent_provider_preferences_resolve_exact_then_most_specific_glob() {
             .providers,
         vec!["codex"],
     );
-    assert!(config
-        .agent_provider_preference(Some("implement"))
-        .is_none());
+    assert_eq!(
+        config
+            .agent_provider_preference(Some("implement"))
+            .unwrap()
+            .providers,
+        vec!["antigravity"],
+    );
 }
 
 #[test]
