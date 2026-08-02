@@ -7,7 +7,7 @@ on:
     paths:
       - ".kanna/config.schema.json"
       - ".github/workflows/config-schema-pages.yml"
-      - "tools/kandev/**"
+      - "tools/kd/**"
   workflow_dispatch:
 
 permissions:
