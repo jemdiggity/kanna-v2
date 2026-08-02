@@ -86,7 +86,8 @@ async fn get_task_via_api_fetches_single_task_path() {
                 "worktreePath": null,
                 "commitsAhead": 0,
                 "commitsBehind": 0,
-                "dirty": false
+                "dirty": false,
+                "childTaskIds": ["child-open", "child-closed"]
             }"#,
     );
     let (base_url, handle) = serve_single_http_response(response).await;
@@ -96,6 +97,15 @@ async fn get_task_via_api_fetches_single_task_path() {
 
     assert_eq!(task.id, "task-123");
     assert_eq!(task.activity.as_deref(), Some("unread"));
+    assert_eq!(
+        task.child_task_ids.as_deref(),
+        Some(["child-open".to_string(), "child-closed".to_string()].as_slice())
+    );
+    assert_eq!(
+        serde_json::to_value(&task).unwrap()["childTaskIds"],
+        json!(["child-open", "child-closed"]),
+        "the typed CLI must not drop the downward task view when it re-serializes the response"
+    );
     assert!(request.starts_with("GET /v1/tasks/task-123 HTTP/1.1"));
 }
 

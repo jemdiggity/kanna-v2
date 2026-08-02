@@ -98,6 +98,11 @@ pub(crate) struct TaskDetail {
     pub(crate) revision_rounds: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) revision_limit: Option<i64>,
+    /// Direct children returned by a current server, including closed tasks.
+    /// Keep this optional so a CLI talking to an older server does not turn an
+    /// unavailable downward view into a misleading empty child set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) child_task_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
