@@ -216,7 +216,7 @@ describe("rust cache environment application", () => {
     const result = applyRustCacheEnvironment({
       repoRoot,
       homeDir,
-      env: { PATH: "/usr/bin" },
+      env: { PATH: "/usr/bin", KANNA_RUST_CACHE: "on" },
       platform: "darwin",
       arch: "arm64"
     });
@@ -237,25 +237,26 @@ describe("rust cache environment application", () => {
 
   it("stays inert when the pinned tool is not installed", () => {
     const { repoRoot, homeDir } = fixture();
-    const env = { PATH: "/usr/bin" };
     const result = applyRustCacheEnvironment({
       repoRoot,
       homeDir,
-      env,
+      env: { PATH: "/usr/bin", KANNA_RUST_CACHE: "on" },
       platform: "darwin",
       arch: "arm64"
     });
     expect(result.state).toMatchObject({ active: false, category: "not-installed" });
-    expect(result.env).toBe(env);
+    expect(result.env.RUSTC_WRAPPER).toBeUndefined();
+    expect(result.env.PATH).toBe("/usr/bin");
   });
 
-  it("stays inert when opted out, in CI, or off a supported host", () => {
+  it("stays inert by default, when opted out, in CI, or off a supported host", () => {
     const { repoRoot, homeDir } = fixture();
     install(homeDir);
     for (const [env, category] of [
+      [{}, "disabled-by-default"],
       [{ KANNA_RUST_CACHE: "off" }, "disabled"],
       [{ KANNA_RUST_CACHE: "kanache" }, "invalid-mode"],
-      [{ CI: "true" }, "disabled-in-ci"]
+      [{ KANNA_RUST_CACHE: "on", CI: "true" }, "disabled-in-ci"]
     ] as const) {
       const result = applyRustCacheEnvironment({
         repoRoot,
@@ -271,11 +272,81 @@ describe("rust cache environment application", () => {
     const linux = applyRustCacheEnvironment({
       repoRoot,
       homeDir,
-      env: {},
+      env: { KANNA_RUST_CACHE: "on" },
       platform: "linux",
       arch: "arm64"
     });
     expect(linux.state).toMatchObject({ active: false, category: "unsupported-platform" });
+  });
+
+  it("opting out of an inherited active environment restores direct incremental builds", () => {
+    const { repoRoot, homeDir } = fixture();
+    install(homeDir);
+    // kd environments nest: a shell spawned by kd already carries the active
+    // cache settings, so opting out has to undo them, not merely report off.
+    const active = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { PATH: "/usr/bin", KANNA_RUST_CACHE: "on" },
+      platform: "darwin",
+      arch: "arm64"
+    });
+    expect(active.state.active).toBe(true);
+
+    const optedOut = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { ...active.env, KANNA_RUST_CACHE: "off" },
+      platform: "darwin",
+      arch: "arm64"
+    });
+    expect(optedOut.state).toMatchObject({ active: false, category: "disabled" });
+    expect(optedOut.env.RUSTC_WRAPPER).toBeUndefined();
+    expect(optedOut.env.CARGO_INCREMENTAL).toBeUndefined();
+    expect(optedOut.env.KACHE_CACHE_DIR).toBeUndefined();
+    expect(Object.keys(optedOut.env).some((key) => key.startsWith("KACHE_"))).toBe(false);
+    expect(optedOut.env.PATH).toBe("/usr/bin");
+  });
+
+  it("drops ambient wrappers and disable switches that would survive an active resolution", () => {
+    const { repoRoot, homeDir } = fixture();
+    const binary = install(homeDir);
+    const result = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: {
+        PATH: "/usr/bin",
+        KANNA_RUST_CACHE: "on",
+        // Cargo nests this inside RUSTC_WRAPPER, so it would still run.
+        RUSTC_WORKSPACE_WRAPPER: "/bin/false",
+        CARGO_BUILD_RUSTC_WRAPPER: "/bin/false",
+        CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER: "/bin/false",
+        // kache honours this and would silently pass every compile through.
+        KACHE_DISABLED: "1",
+        KACHE_CACHE_DIR: "/somewhere/else"
+      },
+      platform: "darwin",
+      arch: "arm64"
+    });
+    expect(result.state.active).toBe(true);
+    expect(result.env.RUSTC_WRAPPER).toBe(binary);
+    expect(result.env.RUSTC_WORKSPACE_WRAPPER).toBeUndefined();
+    expect(result.env.CARGO_BUILD_RUSTC_WRAPPER).toBeUndefined();
+    expect(result.env.CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER).toBeUndefined();
+    expect(result.env.KACHE_DISABLED).toBeUndefined();
+    expect(result.env.KACHE_CACHE_DIR).toBe(
+      resolveRustCacheStorePath({ repoRoot, homeDir, env: {} })
+    );
+  });
+
+  it("is idempotent: reapplying yields the same environment", () => {
+    const { repoRoot, homeDir } = fixture();
+    install(homeDir);
+    const input = { repoRoot, homeDir, platform: "darwin" as const, arch: "arm64" };
+    const once = applyRustCacheEnvironment({ ...input, env: { PATH: "/usr/bin", KANNA_RUST_CACHE: "on" } });
+    const twice = applyRustCacheEnvironment({ ...input, env: once.env });
+    expect(twice.env).toEqual(once.env);
+    expect(twice.state).toEqual(once.state);
   });
 });
 
@@ -295,7 +366,7 @@ describe("rust cache commands", () => {
     const result = await installRustCache({
       repoRoot,
       homeDir,
-      env: {},
+      env: { KANNA_RUST_CACHE: "on" },
       platform: "darwin",
       arch: "arm64",
       runner: fakeInstallRunner()
@@ -334,7 +405,7 @@ describe("rust cache commands", () => {
     const status = await getRustCacheStatus({
       repoRoot,
       homeDir,
-      env: {},
+      env: { KANNA_RUST_CACHE: "on" },
       platform: "darwin",
       arch: "arm64",
       runner: {

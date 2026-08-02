@@ -184,58 +184,60 @@ worktree's cwd, ports, database, daemon directory, and tmux identity.
 
 ### Rust build cache
 
-Kanna uses [`kache`](https://github.com/kunobi-ninja/kache) as a content-addressed
-compiler cache, pinned by exact version and per-architecture SHA-256 in
-`tools/kd/src/runtime/rust-cache-policy.ts`. Kanna-managed worktree setup runs
-`./kd rust-cache warm` after environment sync — a deprecated alias for
-`install`, kept because repo config is read from the origin/main snapshot rather
-than the task branch, so it must work on both old and new `kd` during the
-changeover (see the spec below). It downloads the pinned
-release, verifies its checksum before extracting it, and publishes it into
-`~/Library/Caches/kanna/tools/kache/<version>/`. Every Cargo command `kd`
-spawns — sidecars, `./kd test rust`, and the Tauri dev window — then runs with
-`RUSTC_WRAPPER` pointing at that binary.
+Kanna can use [`kache`](https://github.com/kunobi-ninja/kache) as a
+content-addressed compiler cache, pinned by exact version and per-architecture
+SHA-256 in `tools/kd/src/runtime/rust-cache-policy.ts`.
 
-Each Cargo invocation keeps its own private `.build` and `.build/cargo-build`.
-A cache hit is materialized into that private tree, so worktrees share
-compilation results without ever sharing Cargo's mutable fingerprint state. The
-store is per repository, at
-`~/Library/Caches/kanna/rust-kache/<repository-id>/`, capped at 10 GiB with LRU
-eviction, local-only (no remote or planner), and configured not to cache
+**It is off by default and must be opted into.** Its key selection is not
+demonstrated by canonical automation — exercising the real pinned binary needs a
+network download that `pnpm test` and `./kd test all` deliberately avoid — so
+turning it on is a deliberate choice rather than a default. (An `E0432` failure
+originally blamed on kache turned out to be Kanna's own integration tests
+compiling fixtures into the repository's Cargo build directory; that is fixed and
+was never a cache defect.) Details in
+[`docs/2026-08-02-kache-cache-key-e2e-gap.md`](../2026-08-02-kache-cache-key-e2e-gap.md).
+
+To opt in for a shell:
+
+```sh
+export KANNA_RUST_CACHE=on
+./kd rust-cache install     # downloads and checksum-verifies the pinned release
+./kd rust-cache status      # pin, store path, hit/miss stats
+```
+
+`KANNA_RUST_CACHE=on` also enables it for CI-less macOS builds `kd` spawns —
+sidecars, `./kd test rust`, and the Tauri dev window. Anything else leaves Cargo
+running against rustc directly.
+
+When enabled, each Cargo invocation keeps its own private `.build` and
+`.build/cargo-build`; hits are materialized into that private tree, so worktrees
+share compilation results without sharing Cargo's mutable fingerprint state. The
+store is per repository at `~/Library/Caches/kanna/rust-kache/<repository-id>/`,
+capped at 10 GiB with LRU eviction, local-only, and configured not to cache
 user-facing executables so sidecars and Tauri `externalBin` inputs are always
 produced in and staged from the current checkout.
 
-Restores are hash-verified (`KACHE_VERIFY_RESTORES=always`) and mismatches are
-quarantined. This is a rollout safeguard: one `./kd test rust` run during
-adoption linked a stale `kanna-runtime-defaults` rlib that predated a commit in
-its own history, and the mechanism was never identified. If you hit a build
-failure that looks like code that should exist is missing, capture the store
-entry before clearing anything and see
-[`docs/specs/safe-rust-build-caching.md`](../specs/safe-rust-build-caching.md).
+Enabling it is hermetic, not incremental: kache strips `-C incremental` from
+every invocation it handles, so `kd` sets `CARGO_INCREMENTAL=0` to match.
+Measured on this repo, a cold private tree against a warm store restores 96.5%
+of cacheable invocations and cuts sidecar build CPU by 56%, and
+`.build/cargo-build` shrinks from 3.2 GiB to 1.9 GiB — in exchange, a one-line
+workspace edit rebuilds about 3.5x slower (2.80 s to 9.87 s).
 
-**The cache is hermetic, not incremental.** Kache strips `-C incremental` from
-every invocation it handles, so `kd` sets `CARGO_INCREMENTAL=0` to match. That
-trade is deliberate — it is what makes results reusable across worktrees — but
-it is not free. Measured on this repo: a cold private tree against a warm store
-restores 96.5% of cacheable invocations and cuts sidecar build CPU by 56%, and
-`.build/cargo-build` shrinks from 3.2 GiB to 1.9 GiB with the `incremental`
-trees empty. In exchange, **a one-line workspace edit rebuilds about 3.5×
-slower** (2.80 s → 9.87 s for `./kd build sidecars`).
+Environment resolution is authoritative: `kd` scrubs every compiler-wrapper and
+`KACHE_*` control it owns before deciding, on both the enabled and disabled
+paths. Setting `KANNA_RUST_CACHE=off` inside a kd-spawned shell therefore really
+restores direct incremental compilation instead of leaving an inherited wrapper
+in place, and an ambient `RUSTC_WORKSPACE_WRAPPER` or `KACHE_DISABLED` cannot
+ride along into an enabled build.
 
-If you are in a tight edit/compile loop on a single worktree, export
-`KANNA_RUST_CACHE=off` in that shell to get Cargo incremental back immediately.
-Nothing needs rebuilding to switch modes beyond what Cargo would rebuild anyway.
-
-Unset, blank, `KANNA_RUST_CACHE=on`, and `KANNA_RUST_CACHE=kache` enable the
-cache on macOS outside CI. Set `KANNA_RUST_CACHE=off` for an immediate local
-rollback — the next Cargo command runs against rustc directly from the same
-private build tree, with no layout migration. CI and non-macOS environments are
-always disabled. Use `./kd rust-cache status` to inspect the pin, this
-repository's store, and hit/miss stats. The evaluation behind this design is in
-[`docs/specs/safe-rust-build-caching.md`](../specs/safe-rust-build-caching.md).
+If you previously built with the cache enabled, run `./kd clean --all` once in
+that worktree: a poisoned artifact in the private tree is one Cargo considers
+fresh, and nothing invalidates it automatically.
 
 The cache is development-only. Release builds remain Bazel-only:
 `loadReleaseEnvironment` strips `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`,
+`CARGO_BUILD_RUSTC_WRAPPER`, `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`,
 `CARGO_INCREMENTAL`, and every `KACHE_*` variable, including any inherited from
 the caller's shell.
 

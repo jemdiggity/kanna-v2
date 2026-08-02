@@ -1,15 +1,23 @@
 # Safe Rust Build Caching Across Kanna Worktrees
 
-**Status:** Adopted, 2026-08-01. Supersedes the 2026-07-18 recommendation
-recorded below.<br>
+**Status:** Adopted opt-in, 2026-08-02. Supersedes the 2026-07-18
+recommendation recorded below.<br>
 **Toolchain tested:** `rustc 1.93.1`, `cargo 1.93.1`,
 `aarch64-apple-darwin`<br>
 **Decision:** Keep Cargo's mutable build directory isolated per worktree; never
-restore a raw shared `build.build-dir`; keep release builds Bazel-only. Ship
-`kache` 0.12.0 as the `RUSTC_WRAPPER` for **every** rustc invocation `kd`
-spawns, accepting the loss of Cargo incremental compilation in exchange for
-hermetic, content-addressed results that are reusable across worktrees. Retire
-the Kanache donor-warming experiment.
+restore a raw shared `build.build-dir`; keep release builds Bazel-only. Retire
+the Kanache donor-warming experiment. Ship `kache` 0.12.0 as the `RUSTC_WRAPPER`
+for every rustc invocation `kd` spawns **when a developer opts in with
+`KANNA_RUST_CACHE=on`**, accepting the loss of Cargo incremental compilation in
+exchange for hermetic, content-addressed results reusable across worktrees.
+
+**The default is off.** An `E0432` failure first blamed on kache turned out to be
+Kanna's own integration tests compiling fixtures into the repository's Cargo
+build directory — the shared-build-dir hazard this document reproduces. That is
+fixed. The cache stays opt-in because its key selection is still unproven by
+canonical automation, not because it is known bad. See "The cache is opt-in"
+below and
+[`docs/2026-08-02-kache-cache-key-e2e-gap.md`](../2026-08-02-kache-cache-key-e2e-gap.md).
 
 ## Decision update, 2026-08-01
 
@@ -96,40 +104,60 @@ that shell and get Cargo incremental back immediately, at the cost of a private
 incremental tree. Do not reintroduce a dependency-only dispatcher to split the
 difference; that configuration is what failed the disk and wall-time gates.
 
-### One unexplained stale restore, and the safeguard it bought
+### The cache is opt-in, and the E0432 incident was our own build-dir leak
 
-Adoption is not a clean bill of health. The first end-to-end `./kd test rust`
-under the wrapper failed in the `kanna-daemon` doctest:
+Two `./kd test all` runs failed in the `kanna-daemon` doctest with
+`error[E0432]: unresolved import kanna_runtime_defaults::session_id`, linking a
+`kanna-runtime-defaults` rlib with no `session_id` symbols even though commit
+`09d03c23` — which moved `session_id.rs` into that crate — is an ancestor of the
+tested commit. An earlier revision of this document attributed that to kache
+serving a logically stale entry.
 
-```text
-error[E0432]: unresolved import `kanna_runtime_defaults::session_id`
-  --> crates/daemon/src/lib.rs:18:9
-```
+**That attribution was wrong.** The failure reproduces with the cache disabled.
 
-The `libkanna_runtime_defaults-507d58a7b131d487.rlib` that rustdoc linked was
-514 KiB and contained zero `session_id` symbols, while the same Cargo unit hash
-rebuilt from a cold tree produces a 645 KiB rlib with 21. Commit `09d03c23`
-moved `session_id.rs` from `crates/daemon` into `crates/runtime-defaults`, so
-the linked artifact predated a commit that is an ancestor of `HEAD`. Cargo's
-unit hash does not cover source content, so a wrong artifact under the right
-filename is invisible to Cargo — this is the same *shape* as the shared
-`build-dir` reproduction below, though not the same cause.
+The cause was Kanna's own test suite. Cargo resolves `CARGO_BUILD_BUILD_DIR`
+from the environment before a checkout's `.cargo/config.toml`, and `kd` exports
+it for every worktree, so `tools/kd/tests/rust-cache.integration.test.ts` — which
+compiles disposable Cargo fixtures — wrote its intermediates into the real
+repository's `.build/cargo-build`. Measured: 19 foreign probe crates in the
+repository's `debug/deps`. That is exactly the shared-build-dir hazard
+reproduced below: two source roots in one fingerprint tree, silently returning
+stale artifacts while reporting units `Fresh`. `./kd test all` runs `pnpm test`
+before the rust lane, so the rust lane always built against a poisoned tree —
+which is why it never reproduced when run alone, and why a cold rebuild always
+fixed it. The same unit hash `b7a37aed3c6a9c04` produced an 859 KiB rlib without
+`session_id` during `./kd test all` and a correct 975 KiB rlib after
+`cargo clean -p kanna-runtime-defaults`.
 
-It did not reproduce. A cold-tree `cargo test -p kanna-daemon --doc` passed and
-produced the correct rlib; replaying the preceding `./kd build sidecars`
-produced no host `kanna-runtime-defaults` rlib at all. Two hypotheses were
-tested and **disproved**: the explicit-target sidecar build does not emit that
-host artifact, and kache's daemon socket is per store directory
-(`<store>/daemon.sock`), so there is no cross-store daemon contamination. The
-mechanism remains unidentified.
+The fix is `isolatedCargoEnv()`, which strips `CARGO_BUILD_BUILD_DIR`,
+`CARGO_BUILD_TARGET_DIR`, and `CARGO_TARGET_DIR` from every fixture build;
+leakage afterwards is zero, with a regression test asserting a fixture resolves
+its build directory inside itself even when a shared one is exported. **This
+document's own conclusion is the lesson: a shared Cargo build directory produces
+symptoms that look like a compiler-cache defect.**
 
-The response is `KACHE_VERIFY_RESTORES=always`, which hash-verifies every
-restored blob and quarantines mismatches. It is a rollout safeguard, not a
-steady-state claim: a cache that can silently substitute a stale object is
-strictly worse than no cache, so verification stays on until either the
-mechanism is understood or a run of comparable length produces no mismatch. If
-this recurs, capture the store entry and `kache why-miss` output before
-clearing anything — a second data point is worth more than a fast green build.
+A review diagnostic did observe kache serving key `e32d03ef3851f383` while the
+correct entry `d14e9a65ec856b5b` was present, with
+`kache doctor --verify --checksums` reporting 1200/1200 valid. That was measured
+in an already-poisoned tree and is consistent with kache faithfully serving what
+Cargo asked for — it keys off the rustc invocation and dep-info Cargo produces,
+so corrupted fingerprint state yields a wrong-but-self-consistent key. It is not
+evidence of a kache defect, and it is not proof that kache's selection is sound.
+
+Note also that `KACHE_VERIFY_RESTORES=always` would not have caught a genuine
+selection fault: it verifies a restored blob against the digest recorded for the
+key kache chose, not that the key matches current sources. It stays on as
+defence in depth, not as the reason the cache is safe.
+
+**The cache remains opt-in** (`KANNA_RUST_CACHE=on`; unset means off). Nothing
+now demonstrates kache is unsafe, but nothing in canonical automation
+demonstrates its key selection is sound either, and turning it on is a product
+call to make deliberately with the measured trade in hand rather than a default
+inherited from a misdiagnosis. See
+[`docs/2026-08-02-kache-cache-key-e2e-gap.md`](../2026-08-02-kache-cache-key-e2e-gap.md).
+
+Any worktree that ran the integration tests before this fix may hold foreign
+crates and a poisoned fingerprint tree; run `./kd clean --all` once there.
 
 What did **not** change: the correctness boundary. Cargo's build directory
 stays checkout-private, hits are materialized into that private tree, executable
@@ -144,8 +172,10 @@ The shipped shape is in `tools/kd/src/runtime/rust-cache-policy.ts` (pinned
 version, per-architecture asset and SHA-256, store layout, environment
 construction, release stripping) and `tools/kd/src/runtime/rust-cache.ts`
 (verified bootstrap, repository identity, environment application, status).
-Commands are `./kd rust-cache install` and `./kd rust-cache status`;
-`KANNA_RUST_CACHE=off` is the one-variable rollback.
+Commands are `./kd rust-cache install` and `./kd rust-cache status`. The cache is
+off unless `KANNA_RUST_CACHE=on`; opting in is
+`KANNA_RUST_CACHE=on ./kd rust-cache install` followed by `KANNA_RUST_CACHE=on`
+on the builds that should use it.
 
 ### Changeover compatibility (temporary)
 
@@ -1006,9 +1036,12 @@ Release portability gate:
 4. Assert no wrapper invocation and no packaged/staged path outside the
    checkout-private `.build` and Tauri staging directories.
 
-Rollback: unset the cache feature and wrapper environment. Because Cargo's
-build-dir never moved, builds immediately continue from isolated state. The
-kache directory can be deleted later with an explicit exact-path cleanup.
+Rollback: unset `KANNA_RUST_CACHE`, which is also the default. Because Cargo's
+build-dir never moved, builds immediately continue from isolated state, and
+`applyRustCacheEnvironment` scrubs the wrapper variables it owns so an inherited
+kd environment reverts to direct incremental compilation rather than silently
+staying wrapped. The kache directory can be deleted later with an explicit
+exact-path cleanup.
 
 ## Migration and rollback
 

@@ -20,7 +20,8 @@ import {
   resolveKacheDownloadUrl,
   resolveKachePaths,
   resolveRustCacheEligibility,
-  resolveRustCacheStore
+  resolveRustCacheStore,
+  stripRustCacheEnvironment
 } from "./rust-cache-policy";
 import type { KacheArtifact, RustCacheEligibility } from "./rust-cache-policy";
 
@@ -89,19 +90,34 @@ export function resolveRustCacheStorePath(input: RustCacheRuntimeInput): string 
 let warnedMissingBinary = false;
 
 /**
- * Layers the compiler cache onto a command environment. The cache is an
- * accelerator, never a requirement: an ineligible platform, an explicit opt-out,
- * or a missing pinned binary all return the environment untouched so Cargo runs
- * against rustc directly.
+ * Resolves the compiler-cache environment for a command, authoritatively.
+ *
+ * The result is a pure function of the resolution, not of what the caller
+ * happened to inherit: every wrapper and cache control kd owns is scrubbed
+ * first, on both the active and inactive paths. That matters because kd
+ * environments nest. A kd-spawned shell already carries `RUSTC_WRAPPER` and
+ * `CARGO_INCREMENTAL=0`, so a plain merge would let `KANNA_RUST_CACHE=off`
+ * report inactive while still routing Cargo through kache and suppressing
+ * incremental compilation — the documented opt-out would not actually opt out.
+ * Scrubbing also drops ambient hostility that would otherwise survive an active
+ * resolution: an inherited `RUSTC_WORKSPACE_WRAPPER` runs nested inside our
+ * wrapper rather than being replaced by it, and an inherited `KACHE_DISABLED`
+ * would silently neuter the cache we just enabled.
+ *
+ * Applying this twice yields the same environment as applying it once.
  */
 export function applyRustCacheEnvironment(
   input: RustCacheRuntimeInput
 ): RustCacheEnvironmentResult {
   const paths = resolveKachePaths(input.homeDir);
   const eligibility = rustCacheEligibility(input);
+  // Cargo's default incremental behaviour is restored by removing our override,
+  // not by setting a value, so an opt-out returns to plain incremental builds.
+  const base = stripRustCacheEnvironment(input.env);
+
   if (!eligibility.enabled) {
     return {
-      env: input.env,
+      env: base,
       state: {
         active: false,
         category: eligibility.category,
@@ -115,21 +131,18 @@ export function applyRustCacheEnvironment(
     if (!warnedMissingBinary) {
       warnedMissingBinary = true;
       console.warn(
-        `[kd] Rust build cache is off: kache ${KACHE_VERSION} is not installed. Run ./kd rust-cache install.`
+        `[kd] Rust build cache is on but kache ${KACHE_VERSION} is not installed. Run ./kd rust-cache install.`
       );
     }
     return {
-      env: input.env,
+      env: base,
       state: { active: false, category: "not-installed", binary: paths.binary }
     };
   }
 
   const store = resolveRustCacheStorePath(input);
   return {
-    env: {
-      ...input.env,
-      ...buildRustCacheEnvironment({ binary: paths.binary, store })
-    },
+    env: { ...base, ...buildRustCacheEnvironment({ binary: paths.binary, store }) },
     state: { active: true, store, binary: paths.binary }
   };
 }

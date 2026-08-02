@@ -35,12 +35,23 @@ export const KACHE_ARTIFACTS: Record<string, KacheArtifact> = {
 export const KACHE_MAX_SIZE = "10GiB";
 
 /**
- * Cargo wrapper and cache variables that must never survive into a release,
- * signing, packaging, or Bazel invocation.
+ * Every compiler-wrapper and cache control kd owns.
+ *
+ * Cargo reads the wrapper from four places, and `RUSTC_WORKSPACE_WRAPPER` is
+ * *nested* inside `RUSTC_WRAPPER` rather than overridden by it, so setting only
+ * `RUSTC_WRAPPER` still lets an inherited workspace wrapper run. The
+ * `CARGO_BUILD_*` forms are the environment spelling of `build.rustc-wrapper`
+ * and `build.rustc-workspace-wrapper` and bind just as strongly.
+ *
+ * These are scrubbed before every resolution and before every release
+ * invocation, so a build's compiler wrapper is always exactly what kd decided
+ * and never a leftover from an outer shell or an earlier resolution.
  */
 export const RUST_CACHE_ENVIRONMENT_KEYS = [
   "RUSTC_WRAPPER",
   "RUSTC_WORKSPACE_WRAPPER",
+  "CARGO_BUILD_RUSTC_WRAPPER",
+  "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
   "CARGO_INCREMENTAL"
 ] as const;
 
@@ -76,15 +87,16 @@ export function resolveRustCacheStore(homeDir: string, repositoryId: string): st
   return join(homeDir, "Library", "Caches", "kanna", "rust-kache", repositoryId);
 }
 
+/**
+ * Opt-in. See `resolveRustCacheEligibility` for why the default is off.
+ */
 export function parseRustCacheMode(value: string | undefined): {
   enabled: boolean;
   warning?: string;
 } {
   const normalized = value?.trim().toLowerCase();
-  if (!normalized || normalized === "on" || normalized === "kache") {
-    return { enabled: true };
-  }
-  if (normalized === "off") return { enabled: false };
+  if (normalized === "on" || normalized === "kache") return { enabled: true };
+  if (!normalized || normalized === "off") return { enabled: false };
   return {
     enabled: false,
     warning: `Unknown KANNA_RUST_CACHE value ${JSON.stringify(value)}; cache disabled.`
@@ -95,10 +107,32 @@ export type RustCacheEligibility =
   | { enabled: true }
   | {
       enabled: false;
-      category: "disabled" | "invalid-mode" | "unsupported-platform" | "disabled-in-ci";
+      category:
+        | "disabled"
+        | "disabled-by-default"
+        | "invalid-mode"
+        | "unsupported-platform"
+        | "disabled-in-ci";
       warning?: string;
     };
 
+/**
+ * The cache is OFF unless a developer opts in with `KANNA_RUST_CACHE=on`.
+ *
+ * Not because kache is known bad: an `E0432` failure originally blamed on it was
+ * traced to Kanna's own integration tests compiling fixtures into the
+ * repository's Cargo build directory, and it reproduces with the cache disabled.
+ * That is fixed (see `isolatedCargoEnv` in
+ * `tests/rust-cache.integration.test.ts`).
+ *
+ * It is off because nothing in canonical automation demonstrates that kache's
+ * source-to-key selection is sound — exercising the real pinned binary across
+ * two source revisions needs a network download that `pnpm test` and
+ * `./kd test all` deliberately avoid. Enabling it is a deliberate product call
+ * with a measured trade (96.5% restore rate and 56% less sidecar CPU against a
+ * ~3.5x slower one-line edit), not a default inherited from a misdiagnosis.
+ * See docs/2026-08-02-kache-cache-key-e2e-gap.md.
+ */
 export function resolveRustCacheEligibility(input: {
   mode: string | undefined;
   platform: NodeJS.Platform;
@@ -107,9 +141,11 @@ export function resolveRustCacheEligibility(input: {
 }): RustCacheEligibility {
   const mode = parseRustCacheMode(input.mode);
   if (!mode.enabled) {
-    return mode.warning
-      ? { enabled: false, category: "invalid-mode", warning: mode.warning }
-      : { enabled: false, category: "disabled" };
+    if (mode.warning) return { enabled: false, category: "invalid-mode", warning: mode.warning };
+    return {
+      enabled: false,
+      category: input.mode?.trim() ? "disabled" : "disabled-by-default"
+    };
   }
   if (input.platform !== "darwin" || !resolveKacheArtifact(input.arch)) {
     return { enabled: false, category: "unsupported-platform" };
@@ -130,13 +166,11 @@ export interface RustCacheEnvironmentInput {
  * it handles, so Cargo is told the same thing rather than being left to record
  * incremental fingerprints that rustc never honours.
  *
- * `KACHE_VERIFY_RESTORES=always` is a deliberate rollout safeguard, not a
- * steady-state requirement. During adoption a `./kd test rust` run linked a
- * `kanna-runtime-defaults` rlib that predated the commit moving `session_id`
- * into that crate; it did not reproduce from a cold tree and the mechanism was
- * never identified. A silently wrong restore is the one failure this cache must
- * never have, so restores are hash-verified — and mismatches quarantined —
- * until there is evidence to relax it.
+ * `KACHE_VERIFY_RESTORES=always` verifies that a restored blob matches the
+ * digest recorded for the key kache selected. It does NOT verify that the
+ * selected key corresponds to the current sources, which is the boundary that
+ * actually failed — so it is defence in depth behind the opt-in default, never
+ * the reason the cache is safe.
  */
 export function buildRustCacheEnvironment(input: RustCacheEnvironmentInput): Record<string, string> {
   return {

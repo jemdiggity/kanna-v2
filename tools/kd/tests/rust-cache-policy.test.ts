@@ -50,8 +50,15 @@ describe("kache tool manifest", () => {
 });
 
 describe("rust cache mode", () => {
-  it("defaults to enabled and accepts the explicit backend name", () => {
-    expect(parseRustCacheMode(undefined)).toEqual({ enabled: true });
+  it("is opt-in: unset and blank stay disabled", () => {
+    // kache 0.12.0 can serve a logically stale entry, so the cache must never
+    // be reached without a developer explicitly asking for it.
+    expect(parseRustCacheMode(undefined)).toEqual({ enabled: false });
+    expect(parseRustCacheMode("")).toEqual({ enabled: false });
+    expect(parseRustCacheMode("   ")).toEqual({ enabled: false });
+  });
+
+  it("enables only on an explicit opt-in", () => {
     expect(parseRustCacheMode("on")).toEqual({ enabled: true });
     expect(parseRustCacheMode(" Kache ")).toEqual({ enabled: true });
   });
@@ -70,10 +77,21 @@ describe("rust cache mode", () => {
 });
 
 describe("rust cache eligibility", () => {
-  const base = { mode: undefined, platform: "darwin" as NodeJS.Platform, arch: "arm64", ci: undefined };
+  const base = { mode: "on", platform: "darwin" as NodeJS.Platform, arch: "arm64", ci: undefined };
 
-  it("enables on a supported macOS host outside CI", () => {
+  it("enables on a supported macOS host outside CI when opted in", () => {
     expect(resolveRustCacheEligibility(base)).toEqual({ enabled: true });
+  });
+
+  it("stays off by default, distinguishing the default from an explicit opt-out", () => {
+    expect(resolveRustCacheEligibility({ ...base, mode: undefined })).toEqual({
+      enabled: false,
+      category: "disabled-by-default"
+    });
+    expect(resolveRustCacheEligibility({ ...base, mode: "off" })).toEqual({
+      enabled: false,
+      category: "disabled"
+    });
   });
 
   it("disables on an unsupported platform or architecture", () => {
@@ -114,13 +132,19 @@ describe("rust cache environment", () => {
     });
   });
 
-  it("strips every Kanna-managed and ambient cache variable for release builds", () => {
+  it("strips every wrapper spelling Cargo honours, plus ambient cache controls", () => {
     const stripped = stripRustCacheEnvironment({
       PATH: "/usr/bin",
       RUSTC_WRAPPER: "/tools/kache",
-      RUSTC_WORKSPACE_WRAPPER: "/hostile/sccache",
+      // Cargo nests the workspace wrapper inside RUSTC_WRAPPER rather than
+      // replacing it, and the CARGO_BUILD_* forms are the env spelling of
+      // build.rustc-wrapper — all four have to go.
+      RUSTC_WORKSPACE_WRAPPER: "/bin/false",
+      CARGO_BUILD_RUSTC_WRAPPER: "/bin/false",
+      CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER: "/bin/false",
       CARGO_INCREMENTAL: "0",
       KACHE_CACHE_DIR: "/store",
+      KACHE_DISABLED: "1",
       KACHE_S3_BUCKET: "someone-elses-bucket",
       KANNA_BUILD_BRANCH: "main"
     });
