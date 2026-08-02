@@ -43,6 +43,9 @@ pub(super) struct TaskEventsQuery {
     cursor: Option<String>,
     /// Comma-separated task ids or branch names. Omit to watch a whole repo.
     task_ids: Option<String>,
+    /// Watch this task's direct children instead of naming their ids — the
+    /// scope a fan-out can still express after losing the ids it created.
+    parent_task_id: Option<String>,
     repo_id: Option<String>,
     timeout_secs: Option<u64>,
     limit: Option<i64>,
@@ -86,6 +89,20 @@ fn resolve_scope(
         return Ok(TaskEventScope::Tasks(resolved));
     }
 
+    // Narrower than a repo and, unlike an id list, still nameable by a parent
+    // that no longer remembers what it created. Resolved to an id here and
+    // matched by `parent_task_id` at query time, so children created after this
+    // call started are picked up by the very next read.
+    if let Some(parent_task_id) = query
+        .parent_task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let resolved = resolve_existing_task_id(db, parent_task_id)?;
+        return Ok(TaskEventScope::Children(resolved));
+    }
+
     if let Some(repo_id) = query
         .repo_id
         .as_deref()
@@ -97,8 +114,8 @@ fn resolve_scope(
 
     Err((
         axum::http::StatusCode::BAD_REQUEST,
-        "task_ids or repo_id is required: an unscoped event feed would hand an \
-         orchestrator every other task's events too"
+        "task_ids, parent_task_id or repo_id is required: an unscoped event feed \
+         would hand an orchestrator every other task's events too"
             .to_string(),
     ))
 }

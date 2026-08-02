@@ -23,7 +23,7 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - `POST /v1/tasks/{task_id}/actions/set-pipeline` (re-pin an open task to a compatible pipeline definition)
 - `GET /v1/tasks/recent`
 - `GET /v1/tasks/search?query=...`
-- `GET /v1/task-events?taskIds=...|repoId=...&cursor=...&timeoutSecs=...&limit=...` (multi-task event feed; blocks server-side until an event arrives or the window elapses)
+- `GET /v1/task-events?taskIds=...|parentTaskId=...|repoId=...&cursor=...&timeoutSecs=...&limit=...` (multi-task event feed; blocks server-side until an event arrives or the window elapses)
 - `POST /v1/tasks`
 - `POST /v1/tasks/{task_id}/input`
 - `POST /v1/tasks/{task_id}/actions/complete-stage`
@@ -74,6 +74,25 @@ polling each child. It is cursor-based, not snapshot-diffed:
   is a positive match on a prompt the agent CLI rendered. It is deliberately
   never inferred from a session going quiet; see
   [2026-07-29-awaiting-input-detection-e2e-gap.md](2026-07-29-awaiting-input-detection-e2e-gap.md).
+
+Three scopes, in precedence order: `taskIds`, then `parentTaskId`, then
+`repoId`. `parentTaskId` exists because the other two do not cover a fan-out
+that lost the ids it created — an id list dies with the context that held it,
+and a repo scope hands the caller every other task's events to filter.
+It is evaluated per query against `pipeline_item.parent_task_id`, not
+snapshotted, so a task adopted mid-watch is in scope on the very next call. It
+covers direct children only and excludes the parent's own events, which makes it
+exactly the set `GET /v1/tasks/{task_id}` reports as `childTaskIds`.
+
+## Task Parentage
+
+`pipeline_item.parent_task_id` is read from both ends: `GET /v1/tasks/{task_id}`
+returns `parentTaskId` upward and `childTaskIds` downward. `childTaskIds` lists
+direct children oldest first and **includes closed ones** — parentage is
+durable, and a finished child is exactly what a fan-out orchestrator reconciles,
+so an empty list means "nothing was dispatched" rather than "everything already
+finished". This is deliberately unlike `GET /v1/tasks/search` and
+`GET /v1/repos/{repo_id}/tasks`, which list open tasks only.
 
 ## Activity Confirmation in `kanna-mcp`
 

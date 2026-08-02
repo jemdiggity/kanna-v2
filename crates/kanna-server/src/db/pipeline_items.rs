@@ -607,6 +607,25 @@ impl Db {
         )
     }
 
+    /// Direct children of `parent_id`, oldest first — the downward read of the
+    /// parentage `pipeline_item.parent_task_id` records upward.
+    ///
+    /// Deliberately **includes closed children**. Parentage is durable and a
+    /// fan-out orchestrator reconciles finished work: a filter on
+    /// `closed_at IS NULL` would hide exactly the children it needs and make an
+    /// empty result indistinguishable from "no children were ever created".
+    /// Grandchildren are not included; this is the direct-child set, so it
+    /// matches the `parent_task_id` scope of the task-event feed exactly.
+    pub fn list_child_task_ids(&self, parent_id: &str) -> Result<Vec<String>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM pipeline_item
+             WHERE parent_task_id = ?
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([parent_id], |row| row.get(0))?;
+        rows.collect()
+    }
+
     pub fn pipeline_item_parent(&self, id: &str) -> Result<Option<String>, rusqlite::Error> {
         self.conn
             .query_row(

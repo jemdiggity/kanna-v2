@@ -951,6 +951,119 @@ async fn set_task_parent_route_sets_and_clears_parent() {
     assert_eq!(db.pipeline_item_parent("child-1").unwrap(), None);
 }
 
+/// The downward read of parentage, which `parentTaskId` alone cannot answer.
+/// A fan-out orchestrator that lost the ids it created — compaction, a resumed
+/// session — rediscovers them from its own task detail.
+///
+/// The closed child is the point of the test, not a corner of it: a finished
+/// child is exactly the one an orchestrator must reconcile, so filtering it out
+/// would make an empty `childTaskIds` mean either "nothing dispatched" or
+/// "everything already finished" with no way to tell them apart.
+#[tokio::test]
+async fn get_task_route_reports_child_task_ids_including_closed_children() {
+    let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        for (id, created_at) in [
+            ("parent-1", "2026-04-17 07:00:00"),
+            ("child-open", "2026-04-17 08:00:00"),
+            ("child-closed", "2026-04-17 09:00:00"),
+            ("grandchild-1", "2026-04-17 10:00:00"),
+            ("unrelated-1", "2026-04-17 11:00:00"),
+        ] {
+            db.insert_test_pipeline_item(
+                id,
+                "repo-1",
+                "prompt",
+                Some(id),
+                "in progress",
+                created_at,
+            )
+            .unwrap();
+        }
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+
+    // Attach through the real route, so the parentage under test is the one an
+    // agent actually writes.
+    for (child, parent) in [
+        ("child-open", "parent-1"),
+        ("child-closed", "parent-1"),
+        ("grandchild-1", "child-open"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!("/v1/tasks/{child}/actions/set-parent"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "parentTaskId": parent }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "set parent of {child}");
+    }
+
+    Db::open(&db_path)
+        .unwrap()
+        .close_pipeline_item("child-closed")
+        .unwrap();
+
+    let detail = get_task_detail(&app, "parent-1").await;
+    assert_eq!(
+        detail.child_task_ids,
+        vec!["child-open".to_string(), "child-closed".to_string()],
+        "childTaskIds must list direct children oldest first, closed ones included"
+    );
+    assert_eq!(detail.parent_task_id, None);
+
+    // Direct children only: the parent's view stops at its own fan-out, which
+    // is what makes it the same set the parentTaskId event scope delivers.
+    let child = get_task_detail(&app, "child-open").await;
+    assert_eq!(child.child_task_ids, vec!["grandchild-1".to_string()]);
+    assert_eq!(child.parent_task_id.as_deref(), Some("parent-1"));
+
+    // A closed child is still readable and still knows its parent, so the
+    // orchestrator can walk back up from anything it rediscovers.
+    let closed = get_task_detail(&app, "child-closed").await;
+    assert!(closed.closed_at.is_some());
+    assert_eq!(closed.parent_task_id.as_deref(), Some("parent-1"));
+
+    // A task nobody parented reports an empty list, not the repo.
+    let unrelated = get_task_detail(&app, "unrelated-1").await;
+    assert!(unrelated.child_task_ids.is_empty());
+
+    // Branch names resolve here as everywhere else a task id is accepted.
+    let by_branch = get_task_detail(&app, "branch-parent-1").await;
+    assert_eq!(by_branch.child_task_ids, detail.child_task_ids);
+}
+
+async fn get_task_detail(app: &axum::Router, task_id: &str) -> crate::mobile_api::TaskDetail {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/v1/tasks/{task_id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "GET task {task_id}");
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    // Decoded through the wire type: this asserts the camelCase `childTaskIds`
+    // key the catalog documents actually ships, not just an in-process struct.
+    let json: serde_json::Value = from_slice(&bytes).unwrap();
+    assert!(
+        json.get("childTaskIds").is_some(),
+        "task detail must expose childTaskIds: {json}"
+    );
+    serde_json::from_value(json).unwrap()
+}
+
 #[tokio::test]
 async fn set_task_parent_route_rejects_cycles_self_and_cross_repo() {
     let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {

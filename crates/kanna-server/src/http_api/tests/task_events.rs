@@ -287,6 +287,208 @@ async fn repo_scope_watches_tasks_the_caller_did_not_name() {
     );
 }
 
+/// One orchestrator, its own children, and nobody else's. Everything here is
+/// reachable from the parent's own id — the point of the scope is that an agent
+/// which lost the ids it created (compaction, a resumed session) can still name
+/// something narrower than the whole repo.
+fn seed_parentage(db: &Db) {
+    db.insert_test_repo("repo-events", "Events Repo")
+        .expect("insert repo");
+    for (task_id, created_at) in [
+        ("parent-1", "2026-07-29 00:00:00"),
+        ("child-a", "2026-07-29 00:01:00"),
+        ("child-b", "2026-07-29 00:02:00"),
+        // Same repo, no parent yet: adopted mid-test to prove the scope is
+        // re-resolved rather than snapshotted at the first call.
+        ("stranger", "2026-07-29 00:03:00"),
+    ] {
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-events",
+            "work",
+            Some(task_id),
+            "in progress",
+            created_at,
+        )
+        .expect("insert task");
+    }
+    for child in ["child-a", "child-b"] {
+        db.update_pipeline_item_parent(child, Some("parent-1"))
+            .expect("set parent");
+    }
+}
+
+fn parentage_router() -> (Router, String) {
+    let state = test_state_with_seed("desktop-parentage", "Parentage", seed_parentage);
+    let db_path = state.config().db_path.clone();
+    (router(state), db_path)
+}
+
+/// The scope a fan-out can express after forgetting what it created: name
+/// yourself, receive your children. It must wake on a child's append like any
+/// other scope, pick up a task adopted after the watch began, and never hand
+/// back the parent's own events — the parent is the caller, not a child.
+#[tokio::test]
+async fn watching_by_parent_delivers_child_events_without_naming_ids() {
+    let (router, db_path) = parentage_router();
+    let watch = "/v1/task-events?parentTaskId=parent-1";
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        start_run(&db, "run-a1", "child-a", "in progress");
+        // Neither of these belongs to the caller's fan-out: the parent's own
+        // progress, and a sibling it never adopted.
+        db.update_pipeline_item_stage("parent-1", "review")
+            .expect("advance parent stage");
+        db.update_pipeline_item_stage("stranger", "review")
+            .expect("advance stranger stage");
+    }
+
+    let first = get_json_body(&router, &format!("{watch}&timeoutSecs=1")).await;
+    assert_eq!(
+        event_pairs(&first),
+        vec![("child-a".to_string(), "run.started".to_string())],
+        "watching by parent must deliver the children's events and only those"
+    );
+    let mut cursor = cursor_of(&first);
+
+    // A blocked wait on this scope must be woken by the append, exactly as a
+    // named-id wait is: an orchestrator that switches to the parent scope must
+    // not silently trade its latency for convenience.
+    let writer_db_path = db_path.clone();
+    let writer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let db = Db::open(&writer_db_path).expect("open db");
+        db.finish_stage_run("run-a1", "succeeded", Some("done"), None)
+            .expect("finish run");
+        start_run(&db, "run-b1", "child-b", "in progress");
+    });
+    let started = std::time::Instant::now();
+    let blocked = tokio::time::timeout(
+        Duration::from_secs(20),
+        get_json_body(&router, &format!("{watch}&cursor={cursor}&timeoutSecs=15")),
+    )
+    .await
+    .expect("blocked wait returned");
+    let blocked_for = started.elapsed();
+    writer.await.expect("writer");
+    assert!(
+        blocked_for < Duration::from_secs(4),
+        "a parent-scoped wait must be woken by the append, not by the re-check \
+         tick (took {blocked_for:?})"
+    );
+    assert_eq!(
+        event_pairs(&blocked),
+        vec![
+            ("child-a".to_string(), "run.finished".to_string()),
+            ("child-b".to_string(), "run.started".to_string()),
+        ]
+    );
+    cursor = cursor_of(&blocked);
+
+    // Adopted after the watch began. The scope is a query, not a snapshot, so
+    // the new child's events arrive without the caller re-scoping.
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_parent("stranger", Some("parent-1"))
+            .expect("adopt");
+        start_run(&db, "run-s1", "stranger", "in progress");
+    }
+    let after_adoption =
+        get_json_body(&router, &format!("{watch}&cursor={cursor}&timeoutSecs=1")).await;
+    assert_eq!(
+        event_pairs(&after_adoption),
+        vec![("stranger".to_string(), "run.started".to_string())],
+        "a task adopted mid-watch must be in scope on the next call"
+    );
+
+    // Replayed from the beginning: the parent's own stage change is still
+    // absent, and the adopted task's pre-adoption event now matches the scope —
+    // parentage is evaluated as it stands, not as it stood when the event fired.
+    let replayed = get_json_body(&router, &format!("{watch}&timeoutSecs=1")).await;
+    assert_eq!(
+        event_pairs(&replayed),
+        vec![
+            ("child-a".to_string(), "run.started".to_string()),
+            ("stranger".to_string(), "stage.changed".to_string()),
+            ("child-a".to_string(), "run.finished".to_string()),
+            ("child-b".to_string(), "run.started".to_string()),
+            ("stranger".to_string(), "run.started".to_string()),
+        ]
+    );
+}
+
+/// Scope precedence, stated once so neither client has to guess: named ids beat
+/// the parent scope, the parent scope beats the repo, and asking for none of
+/// them is refused rather than answered with everything.
+#[tokio::test]
+async fn parent_scope_sits_between_named_ids_and_the_whole_repo() {
+    let (router, db_path) = parentage_router();
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("advance child stage");
+        db.update_pipeline_item_stage("stranger", "review")
+            .expect("advance stranger stage");
+    }
+
+    // Named ids win: the parent scope does not widen an explicit id list.
+    let named = get_json_body(
+        &router,
+        "/v1/task-events?taskIds=stranger&parentTaskId=parent-1&timeoutSecs=1",
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&named),
+        vec![("stranger".to_string(), "stage.changed".to_string())]
+    );
+
+    // The parent scope wins over the repo: the sibling's event is not in it.
+    let parented = get_json_body(
+        &router,
+        "/v1/task-events?parentTaskId=parent-1&repoId=repo-events&timeoutSecs=1",
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&parented),
+        vec![("child-a".to_string(), "stage.changed".to_string())]
+    );
+
+    // Branch names resolve here too, or a watcher holding a branch would
+    // silently observe an empty feed.
+    let by_branch = get_json_body(
+        &router,
+        "/v1/task-events?parentTaskId=branch-parent-1&timeoutSecs=1",
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&by_branch),
+        vec![("child-a".to_string(), "stage.changed".to_string())]
+    );
+
+    let unknown_parent = router
+        .clone()
+        .oneshot(
+            Request::get("/v1/task-events?parentTaskId=nope&timeoutSecs=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("request");
+    assert_eq!(unknown_parent.status(), StatusCode::NOT_FOUND);
+
+    // A parent with no children is an empty feed, not an error: a fan-out that
+    // has not dispatched yet must be able to start watching first.
+    let childless = get_json_body(
+        &router,
+        "/v1/task-events?parentTaskId=stranger&timeoutSecs=1",
+    )
+    .await;
+    assert_eq!(childless["waitOutcome"], serde_json::json!("timeout"));
+    assert_eq!(event_pairs(&childless), Vec::new());
+}
+
 #[tokio::test]
 async fn task_ids_accept_branch_names_and_reject_unknown_tasks() {
     let (router, db_path) = events_router();

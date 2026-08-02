@@ -106,11 +106,21 @@ impl TaskEvent {
     }
 }
 
-/// Which tasks a reader cares about. An orchestrator names its children; a
-/// human-facing tool may watch a whole repo.
+/// Which tasks a reader cares about. An orchestrator names its children, or
+/// names *itself* and gets whatever it fanned out; a human-facing tool may
+/// watch a whole repo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskEventScope {
     Tasks(Vec<String>),
+    /// Every task whose `parent_task_id` is this task — the scope an
+    /// orchestrator that lost its id list can still name. Resolved per query
+    /// rather than snapshotted, so a child created while the caller is blocked
+    /// is in scope for the same call.
+    ///
+    /// Direct children only, and the parent's own events are excluded: this is
+    /// exactly the set `TaskDetail::child_task_ids` reports, so ids and events
+    /// reconcile against each other without a second rule.
+    Children(String),
     Repo(String),
 }
 
@@ -124,6 +134,9 @@ impl TaskEventScope {
                 let placeholders = vec!["?"; task_ids.len()].join(", ");
                 format!("task_id IN ({placeholders})")
             }
+            Self::Children(_) => {
+                "task_id IN (SELECT id FROM pipeline_item WHERE parent_task_id = ?)".to_string()
+            }
             Self::Repo(_) => {
                 "task_id IN (SELECT id FROM pipeline_item WHERE repo_id = ?)".to_string()
             }
@@ -136,6 +149,7 @@ impl TaskEventScope {
                 .iter()
                 .map(|task_id| SqlValue::Text(task_id.clone()))
                 .collect(),
+            Self::Children(parent_task_id) => vec![SqlValue::Text(parent_task_id.clone())],
             Self::Repo(repo_id) => vec![SqlValue::Text(repo_id.clone())],
         }
     }

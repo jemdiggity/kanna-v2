@@ -102,6 +102,7 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                 command_path: &["task", "wait-events"],
                 param_args: &[
                     ("task_ids", "task_id"),
+                    ("parent_task_id", "parent_task_id"),
                     ("repo_id", "repo_id"),
                     ("cursor", "cursor"),
                     ("timeout_secs", "timeout_secs"),
