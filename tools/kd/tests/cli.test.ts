@@ -559,11 +559,11 @@ describe("kd CLI", () => {
 
     await expect(runCli(["pages", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("pages build-schema"));
-    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("pages publish-schema"));
+    expect(log).not.toHaveBeenLastCalledWith(expect.stringContaining("pages publish-schema"));
 
-    await expect(runCli(["pages", "publish-schema", "--help"])).resolves.toBe(0);
-    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd pages publish-schema"));
-    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Deploy from a branch"));
+    await expect(runCli(["pages", "build-schema", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd pages build-schema"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("config-schema-pages.yml"));
 
     await expect(runCli(["not-a-command", "--help"])).resolves.toBe(1);
     expect(error).toHaveBeenLastCalledWith("Unknown help topic: not-a-command");
@@ -1107,14 +1107,9 @@ describe("kd CLI", () => {
       taskId: "pages.build-schema",
       input: { outDir: ".build/pages-schema" }
     });
-    expect(parseCliArgs(["pages", "publish-schema"])).toEqual({
-      taskId: "pages.publish-schema",
-      input: { dryRun: false }
-    });
-    expect(parseCliArgs(["pages", "publish-schema", "--dry-run"])).toEqual({
-      taskId: "pages.publish-schema",
-      input: { dryRun: true }
-    });
+    // `pages publish-schema` was removed: the repository's Pages source is "GitHub
+    // Actions", so a gh-pages branch push would serve nothing.
+    expect(() => parseCliArgs(["pages", "publish-schema"])).toThrow(/Unknown command/);
     expect(parseCliArgs(["release", "ship", "--dry-run", "--minor", "--arm64", "--staging"])).toEqual({
       taskId: "release.ship",
       input: { dryRun: true, minor: true, arm64: true, staging: true }

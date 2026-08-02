@@ -174,8 +174,12 @@ acknowledging transferred descriptors.
   it — read only from the open repo, never from bundled resources), and
   `tasks/{slug}/agent.md` templates. Its `config.schema.json` is the public
   schema served at
-  `https://schemas.kanna.build/config.schema.json`; publish it with
-  `./kd pages publish-schema` (see `docs/dev/dev-workflow.md`).
+  `https://schemas.kanna.build/config.schema.json`; merging a change to it on
+  `main` publishes it automatically via
+  `.github/workflows/config-schema-pages.yml`, which builds the artifact with
+  `./kd pages build-schema` and deploys it to Pages. There is no publish
+  command — the repo's Pages source is "GitHub Actions" (see
+  `docs/dev/dev-workflow.md`).
   Provider/model precedence is an explicit task or stage override, then the
   repo's matching `agentProviders` entry, then layered `AGENT.md`/`EXTEND.md`
   frontmatter, then the global default provider setting. Exact map keys beat

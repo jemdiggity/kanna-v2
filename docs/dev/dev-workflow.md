@@ -95,9 +95,7 @@ identity are documented in detail in
 ./kd release ship --dry-run            # build/sign without publishing
 ./kd release ship --release            # tag, publish, upload manifest
 ./kd release ship --staging --release  # staging channel prerelease
-./kd pages build-schema --out-dir <dir>  # build the config-schema Pages artifact
-./kd pages publish-schema --dry-run      # report the publish plan, without touching origin
-./kd pages publish-schema                # publish the artifact to gh-pages on origin
+./kd pages build-schema --out-dir <dir>  # build the config-schema Pages artifact (CI runs this)
 ```
 
 See [Release](release.md). Never run `firebase deploy` or `pnpm exec tauri`
@@ -123,25 +121,31 @@ override them by name.
 
 ### Publishing the config schema
 
-`./kd pages build-schema --out-dir <dir>` stages `config.schema.json` plus the
-`schemas.kanna.build` `CNAME` into a Pages artifact directory;
-`./kd pages publish-schema` publishes it. Publication is branch-based, not
-artifact-based, because artifact deploys require GitHub Actions: the command
-commits the built artifact as a single orphan commit in a throwaway git
-worktree on a uniquely named temporary branch, then force-pushes it to
-`gh-pages` on `origin`. The caller's worktree, index, branches, and stash
-namespace are never touched, and each publish replaces the branch's content
-rather than stacking history.
+Publishing is automatic, and there is no `kd` command that publishes.
+`.github/workflows/config-schema-pages.yml` runs on pushes to `main` that touch
+`.kanna/config.schema.json`, the workflow file, or `tools/kd/**`. It runs
+`./kd pages build-schema --out-dir .build/pages-schema` — which stages
+`config.schema.json` plus the `schemas.kanna.build` `CNAME` into an artifact
+directory — then deploys that artifact with `actions/upload-pages-artifact` and
+`actions/deploy-pages`.
 
-It refuses to run while `config.schema.json` has uncommitted changes, so what is
-published always matches a committed revision. Verify with
-`./kd pages publish-schema --dry-run`, which builds and reports exactly what
-would be committed and pushed without contacting `origin`.
+That deploy path requires the repository's Pages source to be **"GitHub
+Actions"**, which is how this repo is configured, along with the
+`schemas.kanna.build` custom domain. Both are human-applied repository settings.
+Branch-based publishing (a `gh-pages` push) is mutually exclusive with it and
+would serve nothing; the `kd pages publish-schema` command that did that was
+removed for exactly that reason.
 
-Publishing only becomes visible after a human applies the one-time repository
-setting the command cannot: GitHub repo Settings → Pages → Source must change
-from "GitHub Actions" to "Deploy from a branch", branch `gh-pages`, folder
-`/ (root)`.
+Consequences worth knowing:
+
+- Merging a `config.schema.json` change to `main` publishes it. Nothing else is
+  needed, and nobody has to remember a manual step.
+- The schema only goes live from `main`, so a branch build cannot publish.
+- To republish without a schema change — after a failed run, say — re-run the
+  workflow: `gh workflow run config-schema-pages.yml`, or use the Actions tab
+  (it declares `workflow_dispatch`).
+- `./kd pages build-schema --out-dir <dir>` still runs locally, and is the way
+  to inspect exactly what CI would upload.
 
 ## Debugging map
 
