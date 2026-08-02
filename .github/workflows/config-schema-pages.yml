@@ -27,6 +27,14 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      # `./kd` bootstraps its dependencies through pnpm, so both must exist
+      # before it runs. Without these the step fails with `spawnSync pnpm ENOENT`.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - uses: actions/configure-pages@v5
       - name: Build Pages artifact
         run: ./kd pages build-schema --out-dir .build/pages-schema
