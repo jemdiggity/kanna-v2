@@ -1383,6 +1383,9 @@ describe("buildTerminalDocument", () => {
   it("accumulates sub-cell alt-screen drags and forwards opposite directions as wheel up", () => {
     const { terminal, viewport, window, messages } = createExecutedTerminalDocument();
     terminal.useAlternateBuffer();
+    // Already panned to the top of the frame, so the drag has no clipped rows
+    // left to uncover and every pixel reaches the TUI.
+    viewport.scrollTop = 0;
 
     viewport.dispatchEvent(
       createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
@@ -1421,10 +1424,213 @@ describe("buildTerminalDocument", () => {
 
     expect(terminal.scrollToLineCalls).toEqual([79]);
     expect(terminal.wheelEvents).toEqual([]);
+    expect(viewport.scrollTop).toBe(156);
     const inputs = messages
       .map((message) => JSON.parse(message) as { type: string })
       .filter((message) => message.type === "terminal-input");
     expect(inputs).toEqual([]);
+  });
+
+  it("uncovers the alt-screen rows clipped above the composer before forwarding wheel input", () => {
+    const { terminal, viewport, window, messages } = createExecutedTerminalDocument();
+    terminal.useAlternateBuffer();
+    expect(viewport.scrollTop).toBe(156);
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    const touchMove = createTouchEvent(window, "touchmove", [
+      { clientX: 220, clientY: 300 }
+    ]);
+    viewport.dispatchEvent(touchMove);
+
+    // 60px of downward drag is absorbed by the 156px of frame the composer
+    // safe region hides, so nothing is replayed to the TUI.
+    expect(viewport.scrollTop).toBe(96);
+    expect(terminal.wheelEvents).toEqual([]);
+    expect(terminal.scrollToLineCalls).toEqual([]);
+    expect(
+      messages
+        .map((message) => JSON.parse(message) as { type: string })
+        .filter((message) => message.type === "terminal-input")
+    ).toEqual([]);
+    expect(touchMove.defaultPrevented).toBe(true);
+  });
+
+  it("chains the drag left over past a fully uncovered alt-screen frame to the PTY", () => {
+    const { terminal, viewport, window, messages } = createExecutedTerminalDocument();
+    terminal.useAlternateBuffer();
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 432 }])
+    );
+
+    // 192px of drag: 156px uncovers the frame, the remaining 36px is two
+    // 18px cells of wheel-up replayed to the TUI.
+    expect(viewport.scrollTop).toBe(0);
+    expect(terminal.wheelEvents).toEqual([
+      expect.objectContaining({ deltaMode: 1, deltaY: -1 }),
+      expect.objectContaining({ deltaMode: 1, deltaY: -1 })
+    ]);
+    const inputs = messages
+      .map((message) => JSON.parse(message) as { type: string; dataB64?: string })
+      .filter((message) => message.type === "terminal-input");
+    expect(inputs).toHaveLength(1);
+    expect(
+      Buffer.from(inputs[0].dataB64 ?? "", "base64").toString("latin1")
+    ).toBe("\u001b[<64;1;1M\u001b[<64;1;1M");
+  });
+
+  it("holds an uncovered alt-screen frame in place while the TUI keeps redrawing", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.useAlternateBuffer();
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 300 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchend", [], undefined, [
+        { clientX: 220, clientY: 300 }
+      ])
+    );
+    expect(viewport.scrollTop).toBe(96);
+
+    window.__appendTerminalChunk({ chunksB64: [b64("redrawn frame")] });
+
+    expect(viewport.scrollTop).toBe(96);
+  });
+
+  it("hands the viewport back to the safe region when the TUI leaves the alternate screen", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.useAlternateBuffer();
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 300 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchend", [], undefined, [
+        { clientX: 220, clientY: 300 }
+      ])
+    );
+    expect(viewport.scrollTop).toBe(96);
+
+    // The agent exits, restoring the normal buffer: its closing output must
+    // not stay stranded under the composer.
+    terminal.useNormalBuffer();
+    window.__appendTerminalChunk({ chunksB64: [b64("agent exited\n")] });
+
+    expect(viewport.scrollTop).toBe(156);
+
+    window.__appendTerminalChunk({ chunksB64: [b64("final summary\n")] });
+    expect(viewport.scrollTop).toBe(156);
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 300 }])
+    );
+    window.__appendTerminalChunk({ chunksB64: [b64("still following\n")] });
+
+    expect(viewport.scrollTop).toBe(156);
+  });
+
+  it("releases a pan once the alternate-screen frame stops overflowing", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.useAlternateBuffer();
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 300 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchend", [], undefined, [
+        { clientX: 220, clientY: 300 }
+      ])
+    );
+    expect(viewport.scrollTop).toBe(96);
+
+    // The frame comes to fit the safe region exactly — the keyboard closed —
+    // so the next drag has nothing left to pan.
+    Object.defineProperty(viewport, "scrollHeight", {
+      configurable: true,
+      value: 844
+    });
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 300 }])
+    );
+
+    // It overflows again: alignment must own the viewport rather than stay
+    // stranded on the pan that no longer has anything to hold.
+    Object.defineProperty(viewport, "scrollHeight", {
+      configurable: true,
+      value: 1000
+    });
+    window.__appendTerminalChunk({ chunksB64: [b64("redrawn frame")] });
+
+    expect(viewport.scrollTop).toBe(156);
+  });
+
+  it("re-pins the alt-screen frame to the composer safe region when dragged back down", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.useAlternateBuffer();
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 300 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchend", [], undefined, [
+        { clientX: 220, clientY: 300 }
+      ])
+    );
+    expect(viewport.scrollTop).toBe(96);
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 300 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 200 }])
+    );
+
+    expect(viewport.scrollTop).toBe(156);
+
+    window.__appendTerminalChunk({ chunksB64: [b64("redrawn frame")] });
+
+    expect(viewport.scrollTop).toBe(156);
+  });
+
+  it("re-pins an uncovered alt-screen frame when the terminal state is replaced", () => {
+    const { terminal, viewport, window } = createExecutedTerminalDocument();
+    terminal.useAlternateBuffer();
+
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchstart", [{ clientX: 220, clientY: 240 }])
+    );
+    viewport.dispatchEvent(
+      createTouchEvent(window, "touchmove", [{ clientX: 220, clientY: 300 }])
+    );
+    expect(viewport.scrollTop).toBe(96);
+
+    window.__replaceTerminalState({ chunksB64: [b64("fresh session")] });
+
+    expect(viewport.scrollTop).toBe(156);
   });
 
   it("ignores terminal data emitted outside an alt-screen scroll dispatch", () => {

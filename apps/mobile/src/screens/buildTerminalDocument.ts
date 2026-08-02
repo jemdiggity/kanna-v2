@@ -168,6 +168,7 @@ export function buildTerminalDocument({
       const fitAddon = new FitAddonCtor();
       let bottomInset = ${initialBottomInset};
       let stickyToBottom = true;
+      let viewportPinnedToBottom = true;
       let pinnedCols = 0;
       let pinnedRows = 0;
       let fontScale = 1;
@@ -798,11 +799,51 @@ export function buildTerminalDocument({
         return false;
       }
 
+      function maxViewportScrollTop() {
+        return Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+      }
+
       function alignViewportToSafeRegion() {
-        viewport.scrollTop = Math.max(
+        // A pan only owns the viewport for as long as the alternate screen is
+        // up. Once the TUI restores the normal buffer — an exiting agent
+        // emitting ESC[?1049l, which is when its closing output matters most —
+        // drags drive xterm's scrollback again and never touch scrollTop, so
+        // the safe region has to take the viewport back or the bottom rows
+        // stay stranded under the composer.
+        if (!isAlternateScreen()) {
+          viewportPinnedToBottom = true;
+        }
+        // Otherwise a drag that panned the grid away from the bottom keeps it
+        // there; realigning would yank the rows the user just uncovered back
+        // off-screen on the TUI's next redraw.
+        if (!viewportPinnedToBottom) {
+          return;
+        }
+        viewport.scrollTop = maxViewportScrollTop();
+      }
+
+      // The rendered grid is as tall as the PTY, which exceeds the band left
+      // above the composer whenever the session has more rows than fit. Pan
+      // that overflow with the drag and report how much of it was consumed.
+      function panTerminalViewport(deltaY) {
+        const maxScrollTop = maxViewportScrollTop();
+        if (maxScrollTop <= 0) {
+          // Nothing is clipped, so there is no pan to own the viewport with —
+          // leave the safe region in charge rather than stranding a frame that
+          // has since come to fit (e.g. the keyboard closed).
+          touchScroll.viewportPanPx = 0;
+          viewportPinnedToBottom = true;
+          return;
+        }
+        const nextScrollTop = clamp(
+          touchScroll.viewportScrollTop + deltaY,
           0,
-          viewport.scrollHeight - viewport.clientHeight
+          maxScrollTop
         );
+        viewport.scrollTop = nextScrollTop;
+        touchScroll.viewportPanPx =
+          nextScrollTop - touchScroll.viewportScrollTop;
+        viewportPinnedToBottom = nextScrollTop >= maxScrollTop - 1;
       }
 
       function scheduleViewportAlignment() {
@@ -965,6 +1006,8 @@ export function buildTerminalDocument({
             x: touch.clientX,
             y: touch.clientY,
             scrollLeft: viewport.scrollLeft,
+            viewportScrollTop: viewport.scrollTop,
+            viewportPanPx: 0,
             terminalScrollLine: term.buffer.active.viewportY,
             altScreenForwardedPx: 0
           };
@@ -1039,11 +1082,16 @@ export function buildTerminalDocument({
 
           if (touchScroll.axis === "vertical") {
             if (isAlternateScreen()) {
-              forwardAltScreenDrag(touch, deltaY);
+              // No scrollback to move here, so the drag first pans whatever
+              // part of the live frame is clipped above the composer, and
+              // only the leftover reaches the TUI.
+              panTerminalViewport(deltaY);
+              forwardAltScreenDrag(touch, deltaY - touchScroll.viewportPanPx);
             } else {
               // Track consumed drag distance so entering the alternate screen
               // mid-gesture only forwards movement made after the switch.
-              touchScroll.altScreenForwardedPx = deltaY;
+              touchScroll.altScreenForwardedPx =
+                deltaY - touchScroll.viewportPanPx;
               const { height } = cellDimensions();
               const targetLine = Math.round(clamp(
                 touchScroll.terminalScrollLine + deltaY / height,
@@ -1106,16 +1154,18 @@ export function buildTerminalDocument({
       }
 
       // The alternate screen buffer has no scrollback, so drags cannot move
-      // xterm's own viewport. Fullscreen TUIs (Claude Code) own scrolling
-      // there: replay the drag as wheel events so xterm encodes them into
-      // whatever the TUI negotiated (mouse reports, arrow-key fallback) and
-      // forward the resulting bytes to the desktop PTY.
-      function forwardAltScreenDrag(touch, deltaY) {
+      // xterm's own viewport. Fullscreen TUIs own scrolling there: replay the
+      // drag left over after panning as wheel events so xterm encodes them
+      // into whatever the TUI negotiated (mouse reports, arrow-key fallback)
+      // and forward the resulting bytes to the desktop PTY. TUIs that ignore
+      // wheel reports (Claude Code as of 2.1.220) simply drop them, which is
+      // why panning has to come first.
+      function forwardAltScreenDrag(touch, residualY) {
         const { height } = cellDimensions();
         if (!height) {
           return;
         }
-        const pendingPx = deltaY - touchScroll.altScreenForwardedPx;
+        const pendingPx = residualY - touchScroll.altScreenForwardedPx;
         const lines = Math.trunc(pendingPx / height);
         if (lines === 0) {
           return;
@@ -1390,6 +1440,7 @@ export function buildTerminalDocument({
 
       window.__replaceTerminalState = function replaceTerminalState(state) {
         clearTerminalSelection();
+        viewportPinnedToBottom = true;
         const shouldStick = shouldFollowTerminalBottom();
         term.reset();
         ${enableE2EInspection ? "resetTerminalFrameDiagnostics();" : ""}
