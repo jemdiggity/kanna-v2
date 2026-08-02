@@ -21,6 +21,7 @@ apps/desktop/src-tauri/binaries/
 apps/mobile/.expo/
 apps/mobile/ios/
 .claude/settings.local.json
+/.kanna/setup.local.sh
 .superpowers/
 bazel-*
 .firebase-*.kanna.json
