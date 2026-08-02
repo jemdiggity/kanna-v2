@@ -12,9 +12,10 @@ for every rustc invocation `kd` spawns **when a developer opts in with
 exchange for hermetic, content-addressed results reusable across worktrees.
 
 **The default is off.** An `E0432` failure first blamed on kache turned out to be
-Kanna's own integration tests compiling fixtures into the repository's Cargo
-build directory — the shared-build-dir hazard this document reproduces. That is
-fixed. The cache stays opt-in because its key selection is still unproven by
+two of Kanna's own test fixtures — the kd real-Cargo integration tests and the
+daemon's archived previous-release cross-version fixture — compiling into the
+repository's Cargo build directory, the shared-build-dir hazard this document
+reproduces. Both are fixed. The cache stays opt-in because its key selection is still unproven by
 canonical automation, not because it is known bad. See "The cache is opt-in"
 below and
 [`docs/2026-08-02-kache-cache-key-e2e-gap.md`](../2026-08-02-kache-cache-key-e2e-gap.md).
@@ -115,12 +116,23 @@ serving a logically stale entry.
 
 **That attribution was wrong.** The failure reproduces with the cache disabled.
 
-The cause was Kanna's own test suite. Cargo resolves `CARGO_BUILD_BUILD_DIR`
-from the environment before a checkout's `.cargo/config.toml`, and `kd` exports
-it for every worktree, so `tools/kd/tests/rust-cache.integration.test.ts` — which
-compiles disposable Cargo fixtures — wrote its intermediates into the real
-repository's `.build/cargo-build`. Measured: 19 foreign probe crates in the
-repository's `debug/deps`. That is exactly the shared-build-dir hazard
+The cause was Kanna's own test suite, in two independent fixtures. Cargo resolves
+`CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`, and `CARGO_BUILD_BUILD_DIR` from
+the environment before a checkout's `.cargo/config.toml`, and `kd` exports
+`CARGO_BUILD_BUILD_DIR` for every worktree. First,
+`tools/kd/tests/rust-cache.integration.test.ts` — which compiles disposable Cargo
+fixtures — wrote its intermediates into the real repository's
+`.build/cargo-build`: 19 foreign probe crates in `debug/deps`. Second, and the
+leak that actually produced the observed `E0432`,
+`crates/daemon/tests/support/previous_daemon.rs` builds the archived
+`v0.1.0-staging.1` release in a nested Cargo process; it set its own
+`CARGO_TARGET_DIR` but inherited `CARGO_BUILD_BUILD_DIR`, so that archive — whose
+`kanna-runtime-defaults` predates `session_id` — wrote
+`libkanna_runtime_defaults-b7a37aed3c6a9c04.rlib` into the active worktree.
+Those are two genuinely different revisions of one crate in a single fingerprint
+tree. The second fixture caches its binary under `.build/daemon-cross-version`,
+so a verification run that does not clear that cache skips the nested build and
+cannot observe the leak. That is exactly the shared-build-dir hazard
 reproduced below: two source roots in one fingerprint tree, silently returning
 stale artifacts while reporting units `Fresh`. `./kd test all` runs `pnpm test`
 before the rust lane, so the rust lane always built against a poisoned tree —
@@ -129,12 +141,16 @@ fixed it. The same unit hash `b7a37aed3c6a9c04` produced an 859 KiB rlib without
 `session_id` during `./kd test all` and a correct 975 KiB rlib after
 `cargo clean -p kanna-runtime-defaults`.
 
-The fix is `isolatedCargoEnv()`, which strips `CARGO_BUILD_BUILD_DIR`,
-`CARGO_BUILD_TARGET_DIR`, and `CARGO_TARGET_DIR` from every fixture build;
-leakage afterwards is zero, with a regression test asserting a fixture resolves
-its build directory inside itself even when a shared one is exported. **This
-document's own conclusion is the lesson: a shared Cargo build directory produces
-symptoms that look like a compiler-cache defect.**
+Both are fixed the same way — clear every inherited spelling, then apply the
+fixture's own private paths: `isolatedCargoEnv()` in the kd suite and
+`isolated_cargo_build()` in the daemon fixture, the latter now setting a
+fixture-private `CARGO_TARGET_DIR` **and** `CARGO_BUILD_BUILD_DIR`. With both
+isolated, a cold `./kd test all` leaks nothing into `debug/deps`. Regression
+tests cover each and were verified to fail when the isolation is reverted.
+**This document's own conclusion is the lesson: a shared Cargo build directory
+produces symptoms that look like a compiler-cache defect — and one fixture
+hiding behind a cached artifact is enough to make the diagnosis look settled
+when it is not.**
 
 A review diagnostic did observe kache serving key `e32d03ef3851f383` while the
 correct entry `d14e9a65ec856b5b` was present, with
@@ -156,8 +172,10 @@ call to make deliberately with the measured trade in hand rather than a default
 inherited from a misdiagnosis. See
 [`docs/2026-08-02-kache-cache-key-e2e-gap.md`](../2026-08-02-kache-cache-key-e2e-gap.md).
 
-Any worktree that ran the integration tests before this fix may hold foreign
-crates and a poisoned fingerprint tree; run `./kd clean --all` once there.
+Any worktree that ran either fixture before this fix may hold foreign crates and
+a poisoned fingerprint tree; run `./kd clean --all` once there. To verify this
+area specifically, clear both `.build/cargo-build` and `.build/daemon-cross-version`
+first, or the cached fixture binary masks the nested build.
 
 What did **not** change: the correctness boundary. Cargo's build directory
 stays checkout-private, hits are materialized into that private tree, executable

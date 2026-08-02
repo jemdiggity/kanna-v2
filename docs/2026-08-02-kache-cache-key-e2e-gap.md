@@ -16,14 +16,31 @@ This was attributed to kache serving a logically stale entry. **That attribution
 was wrong, and the evidence that settles it is that the failure reproduces with
 the cache disabled.**
 
-The actual cause was in this repository's own test suite. Cargo resolves
-`CARGO_BUILD_BUILD_DIR` from the environment *before* a checkout's
-`.cargo/config.toml`, and `kd` exports that variable for every worktree.
-`tools/kd/tests/rust-cache.integration.test.ts` compiled its disposable Cargo
-fixtures with an inherited `process.env`, so those fixtures wrote their
-intermediates into **the real repository's `.build/cargo-build`**. Measured
-directly: running that file with the variable set left **19 foreign probe crates
-in the repository's `debug/deps`**.
+The actual cause was in this repository's own test suite — in **two independent
+fixtures**, both leaking the same way. Cargo resolves `CARGO_TARGET_DIR`,
+`CARGO_BUILD_TARGET_DIR`, and `CARGO_BUILD_BUILD_DIR` from the environment
+*before* a checkout's `.cargo/config.toml`, and `kd` exports
+`CARGO_BUILD_BUILD_DIR` for every worktree:
+
+1. **`tools/kd/tests/rust-cache.integration.test.ts`** compiled its disposable
+   Cargo fixtures with an inherited `process.env`, so they wrote into **the real
+   repository's `.build/cargo-build`**. Measured: running that file with the
+   variable set left **19 foreign probe crates in the repository's
+   `debug/deps`**.
+2. **`crates/daemon/tests/support/previous_daemon.rs`** builds an archived
+   previous release (`v0.1.0-staging.1`) in a nested Cargo process. It set its
+   own `CARGO_TARGET_DIR` but *inherited* `CARGO_BUILD_BUILD_DIR`, so the
+   archive — whose `crates/runtime-defaults/src/lib.rs` has no `session_id`
+   module — wrote `dep-lib-kanna_runtime_defaults` and
+   `libkanna_runtime_defaults-b7a37aed3c6a9c04.rlib` into the active worktree's
+   build directory. This is the leak that actually produced the observed
+   `E0432`: the archive and the current sources are genuinely *different source
+   revisions of the same crate*, sharing one fingerprint tree.
+
+The second fixture was missed on the first pass because its build is cached at
+`.build/daemon-cross-version/<commit>-<os>-<arch>/target/debug/kanna-daemon`; once
+that binary exists the nested build is skipped, so a verification run that does
+not clear it cannot observe the leak.
 
 That is precisely the shared-build-dir hazard documented in
 [`docs/specs/safe-rust-build-caching.md`](specs/safe-rust-build-caching.md) — two
@@ -39,11 +56,21 @@ every observation:
   `session_id` symbols during `./kd test all`, and a correct 975 KiB rlib with
   them after `cargo clean -p kanna-runtime-defaults`.
 
-The fix is `isolatedCargoEnv()` in that test file, which strips
-`CARGO_BUILD_BUILD_DIR`, `CARGO_BUILD_TARGET_DIR`, and `CARGO_TARGET_DIR` from
-every fixture build. After it, the same run leaks **zero** foreign crates and a
-regression test asserts a fixture's `cargo metadata` reports a build directory
-inside the fixture even when a shared one is exported.
+Both are fixed the same way — remove every inherited spelling, then apply the
+fixture's own private paths:
+
+- `isolatedCargoEnv()` in `tools/kd/tests/rust-cache.integration.test.ts`.
+- `isolated_cargo_build()` in `crates/daemon/tests/support/previous_daemon.rs`,
+  which now clears all three variables and sets a fixture-private
+  `CARGO_TARGET_DIR` **and** `CARGO_BUILD_BUILD_DIR`.
+
+With both isolated, a cold `./kd test all` leaves zero foreign crates in the
+repository's `debug/deps`. Regression tests cover each: a kd integration test
+asserts a fixture's `cargo metadata` resolves inside the fixture even when a
+shared directory is exported, and `crates/daemon/tests/fixture_isolation.rs`
+drives real nested Cargo builds asserting an outer build/target directory stays
+empty and that an archived older revision cannot break a later current-source
+build. Both were verified to fail when the isolation is reverted.
 
 ### What this means for the earlier diagnosis
 
@@ -108,6 +135,18 @@ filesystem:
   compilation`** — proves `KANNA_RUST_CACHE=off` inside a kd-spawned shell really
   reverts to direct incremental builds.
 
+`crates/daemon/tests/fixture_isolation.rs`, driving real nested Cargo builds:
+
+- **`nested_fixture_build_leaves_the_outer_cargo_directories_untouched`** —
+  exports all three directory variables the way a kd worktree does, runs a build
+  through `isolated_cargo_build()`, and asserts the outer build and target
+  directories stay empty.
+- **`an_older_archive_cannot_poison_a_later_current_source_build`** — builds an
+  archived revision without `session_id` and then a current revision that needs
+  it, in that order, against an exported shared build directory; the current
+  build must succeed. Reverting the isolation makes both fail with
+  "wrote into the outer/shared Cargo build directory".
+
 Unit coverage in `rust-cache.test.ts` and `rust-cache-policy.test.ts` pins the
 opt-in default, the enabled→off transition, ambient `KACHE_DISABLED`, hostile
 `RUSTC_WORKSPACE_WRAPPER` / `CARGO_BUILD_RUSTC_*` wrappers, and idempotence.
@@ -115,6 +154,15 @@ opt-in default, the enabled→off transition, ambient `KACHE_DISABLED`, hostile
 
 ## Existing worktrees
 
-Any worktree that ran the integration tests before this fix may hold foreign
-crates and a poisoned fingerprint tree in `.build/cargo-build`, and Cargo will
-consider those units fresh. Run `./kd clean --all` once in such a worktree.
+Any worktree that ran either fixture before this fix may hold foreign crates and
+a poisoned fingerprint tree in `.build/cargo-build`, and Cargo will consider
+those units fresh. Run `./kd clean --all` once in such a worktree.
+
+When verifying this specifically, clear **both** caches first — the private build
+tree *and* the previous-daemon fixture binary — or the nested build is skipped
+and the leak cannot reappear:
+
+```sh
+rm -rf .build/cargo-build .build/daemon-cross-version
+./kd test all
+```

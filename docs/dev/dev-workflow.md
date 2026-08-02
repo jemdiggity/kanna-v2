@@ -192,9 +192,10 @@ SHA-256 in `tools/kd/src/runtime/rust-cache-policy.ts`.
 demonstrated by canonical automation — exercising the real pinned binary needs a
 network download that `pnpm test` and `./kd test all` deliberately avoid — so
 turning it on is a deliberate choice rather than a default. (An `E0432` failure
-originally blamed on kache turned out to be Kanna's own integration tests
-compiling fixtures into the repository's Cargo build directory; that is fixed and
-was never a cache defect.) Details in
+originally blamed on kache turned out to be two of Kanna's own test fixtures —
+the kd real-Cargo integration tests and the daemon's previous-release
+cross-version fixture — compiling into the repository's Cargo build directory.
+Both are fixed and neither was a cache defect.) Details in
 [`docs/2026-08-02-kache-cache-key-e2e-gap.md`](../2026-08-02-kache-cache-key-e2e-gap.md).
 
 To opt in for a shell:
@@ -231,9 +232,12 @@ restores direct incremental compilation instead of leaving an inherited wrapper
 in place, and an ambient `RUSTC_WORKSPACE_WRAPPER` or `KACHE_DISABLED` cannot
 ride along into an enabled build.
 
-If you previously built with the cache enabled, run `./kd clean --all` once in
-that worktree: a poisoned artifact in the private tree is one Cargo considers
-fresh, and nothing invalidates it automatically.
+If you previously built with the cache enabled, or ran the test suite before the
+fixture-isolation fix, run `./kd clean --all` once in that worktree: a poisoned
+artifact in the private tree is one Cargo considers fresh, and nothing
+invalidates it automatically. When verifying that area, also remove
+`.build/daemon-cross-version` — the previous-daemon fixture caches its built
+binary there and skips the nested build when it exists.
 
 The cache is development-only. Release builds remain Bazel-only:
 `loadReleaseEnvironment` strips `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`,
