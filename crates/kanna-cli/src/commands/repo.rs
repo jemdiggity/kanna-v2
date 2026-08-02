@@ -12,8 +12,16 @@ pub(crate) fn build_add_repo_request(path: String, name: Option<String>) -> AddR
     AddRepoRequest { path, name }
 }
 
-pub(crate) fn build_signal_agent_request(message: String) -> SignalAgentRequest {
-    SignalAgentRequest { message }
+pub(crate) fn build_signal_agent_request(
+    message: String,
+    agent_provider: Option<String>,
+    effort: Option<String>,
+) -> SignalAgentRequest {
+    SignalAgentRequest {
+        message,
+        agent_provider,
+        effort,
+    }
 }
 
 pub(crate) async fn run(command: RepoCommands) {
@@ -68,10 +76,12 @@ pub(crate) async fn run(command: RepoCommands) {
                 repo_id,
                 agent,
                 message,
+                agent_provider,
+                effort,
                 server_url,
             } => {
                 let base_url = resolve_server_base_url_from_env(server_url.as_deref());
-                let request = build_signal_agent_request(message);
+                let request = build_signal_agent_request(message, agent_provider, effort);
                 let response = signal_agent_via_api(&base_url, &repo_id, &agent, &request)
                     .await
                     .unwrap_or_else(|e| {

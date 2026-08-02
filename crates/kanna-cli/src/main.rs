@@ -120,6 +120,16 @@ pub(crate) enum RepoAgentCommands {
         #[arg(long)]
         message: String,
 
+        /// Agent provider override, applied only when this signal creates the
+        /// agent's task
+        #[arg(long)]
+        agent_provider: Option<String>,
+
+        /// Provider-native reasoning effort override, applied only when this
+        /// signal creates the agent's task
+        #[arg(long)]
+        effort: Option<String>,
+
         /// Override the local Kanna server base URL
         #[arg(long)]
         server_url: Option<String>,

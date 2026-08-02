@@ -71,12 +71,30 @@ fn builds_send_task_input_payload() {
 
 #[test]
 fn builds_signal_agent_payload() {
-    let request = build_signal_agent_request("Please merge task task-1".to_string());
+    let request = build_signal_agent_request("Please merge task task-1".to_string(), None, None);
 
     assert_eq!(
         serde_json::to_value(request).unwrap(),
         json!({
             "message": "Please merge task task-1",
+        })
+    );
+}
+
+#[test]
+fn builds_signal_agent_payload_with_provider_and_effort_overrides() {
+    let request = build_signal_agent_request(
+        "Please merge task task-1".to_string(),
+        Some("claude".to_string()),
+        Some("high".to_string()),
+    );
+
+    assert_eq!(
+        serde_json::to_value(request).unwrap(),
+        json!({
+            "message": "Please merge task task-1",
+            "agentProvider": "claude",
+            "effort": "high",
         })
     );
 }

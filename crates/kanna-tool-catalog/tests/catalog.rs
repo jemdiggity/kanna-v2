@@ -331,6 +331,24 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             }),
         ),
         (
+            "kanna_signal_agent",
+            json!({
+                "repo_id": "repo-1",
+                "agent": "merge",
+                "message": "MERGE task-1 -> main: ready",
+                "agent_provider": "claude",
+                "effort": "high"
+            }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/repos/repo-1/agents/merge/signal",
+            json!({
+                "message": "MERGE task-1 -> main: ready",
+                "agentProvider": "claude",
+                "effort": "high"
+            }),
+        ),
+        (
             "kanna_send_task_input",
             json!({ "task_id": "task-1", "input": "continue" }),
             Method::Post,

@@ -311,6 +311,216 @@ async fn signal_agent_route_creates_pinned_agent_task_when_absent() {
 }
 
 #[tokio::test]
+async fn signal_agent_route_creates_agent_task_with_requested_provider_and_effort() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!(
+        "kanna-signal-agent-overrides-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("{unique}-repo"));
+    init_test_git_repo(&repo_root);
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let session_id = match command {
+            DaemonCommand::Spawn {
+                session_id, args, ..
+            } => {
+                assert!(
+                    args.iter().any(|arg| arg.contains("--effort 'high'")),
+                    "spawn args should carry the requested effort: {args:?}"
+                );
+                session_id
+            }
+            other => panic!("expected a pty spawn command, got {other:?}"),
+        };
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&unique),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    // The point of the override: the configured default would pick another
+    // provider for this singleton agent.
+    db.set_setting("defaultAgentProvider", "codex").unwrap();
+    drop(db);
+
+    let state = Arc::new(super::AppState::new(config.clone()));
+    let mut state_changes = state.subscribe_state_changes();
+    let app = super::router(Arc::clone(&state));
+    let response = app
+        .oneshot(
+            Request::post("/v1/repos/repo-1/agents/merge/signal")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "message": "MERGE task-ready -> main: ready",
+                        "agentProvider": "claude",
+                        "effort": "high"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(body["created"], true);
+    let task_id = body["taskId"].as_str().expect("task id");
+    expect_task_state_changed(&mut state_changes).await;
+    daemon_server.await.unwrap();
+    expect_task_state_changed(&mut state_changes).await;
+
+    let db = Db::open(&config.db_path).unwrap();
+    let task = db.get_pipeline_item(task_id).unwrap().unwrap();
+    assert_eq!(task.agent_provider.as_deref(), Some("claude"));
+    let mut runs = db.list_stage_runs_for_task(task_id).unwrap();
+    for _ in 0..20 {
+        if !runs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        runs = db.list_stage_runs_for_task(task_id).unwrap();
+    }
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].agent.as_deref(), Some("merge"));
+    assert_eq!(runs[0].agent_provider.as_deref(), Some("claude"));
+    assert_eq!(runs[0].effort.as_deref(), Some("high"));
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[tokio::test]
+async fn signal_agent_route_rejects_effort_the_requested_provider_rejects() {
+    let unique = format!(
+        "kanna-signal-agent-bad-effort-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let repo_root = std::env::temp_dir().join(format!("{unique}-repo"));
+    init_test_git_repo(&repo_root);
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&unique),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let response = app
+        .oneshot(
+            Request::post("/v1/repos/repo-1/agents/merge/signal")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "message": "MERGE task-ready -> main: ready",
+                        "agentProvider": "claude",
+                        "effort": "turbo"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let message = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        message.contains("effort 'turbo'"),
+        "rejection should name the unsupported effort: {message}"
+    );
+
+    // A rejected override must not leave a half-created singleton behind.
+    let db = Db::open(&config.db_path).unwrap();
+    assert!(db
+        .find_open_agent_task("repo-1", "merge")
+        .unwrap()
+        .is_none());
+
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[tokio::test]
 async fn signal_agent_route_detaches_creation_spawn_from_request_future() {
     use kanna_daemon::protocol::Command as DaemonCommand;
     use tokio::io::{AsyncBufReadExt, BufReader};

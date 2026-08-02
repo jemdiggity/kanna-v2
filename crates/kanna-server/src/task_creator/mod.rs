@@ -45,7 +45,7 @@ use types::{
 };
 pub(crate) use types::{
     PrepareTaskError, PreparedStageRerun, PreparedStageRunSpawn, PreparedStageTransition,
-    PreparedTaskSpawn, PreparedWorkspaceTeardown,
+    PreparedTaskSpawn, PreparedWorkspaceTeardown, SingletonAgentOverrides,
 };
 use worktree::{
     create_worktree, fetch_start_point, generate_task_id, merge_branches_into_worktree,
@@ -1625,12 +1625,22 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
     repo_id: &str,
     agent_name: &str,
     message: &str,
-) -> Result<PreparedTaskSpawn, String> {
+    overrides: SingletonAgentOverrides,
+) -> Result<PreparedTaskSpawn, PrepareTaskError> {
     let repo = db
         .get_repo(repo_id)
         .map_err(|e| format!("db error: {}", e))?
         .ok_or_else(|| format!("repo not found: {}", repo_id))?;
-    let default_provider = read_default_agent_provider_setting(db)?;
+    // An explicit provider is the caller's whole point, so it must not compete
+    // with the configured default — same precedence create-task uses.
+    let explicit_provider = overrides
+        .agent_provider
+        .filter(|provider| !provider.trim().is_empty());
+    let default_provider = if explicit_provider.is_none() {
+        read_default_agent_provider_setting(db)?
+    } else {
+        None
+    };
     let pipeline_name = format!("singleton-{agent_name}");
     let pipeline = definitions::PipelineDefinition {
         name: Some(pipeline_name.clone()),
@@ -1659,7 +1669,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
         _ => Some(format!("{agent_name} agent")),
     };
 
-    prepare_task_spawn(
+    prepare_task_spawn_with_error(
         db,
         config,
         &repo,
@@ -1674,12 +1684,12 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
             stored_base_ref: None,
             stage_override: None,
             agent: None,
-            explicit_provider: None,
+            explicit_provider,
             default_provider,
             agent_type: None,
             initial_terminal_geometry: None,
             model: None,
-            effort: None,
+            effort: overrides.effort.filter(|effort| !effort.trim().is_empty()),
             permission_mode: None,
             allowed_tools: Vec::new(),
             disallowed_tools: Vec::new(),

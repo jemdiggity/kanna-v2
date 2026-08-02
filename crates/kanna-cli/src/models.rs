@@ -32,6 +32,12 @@ pub(crate) struct AddRepoRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SignalAgentRequest {
     pub(crate) message: String,
+    /// Only honored when the signal creates the singleton agent task; a
+    /// running agent keeps the provider its session was spawned with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) agent_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) effort: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]

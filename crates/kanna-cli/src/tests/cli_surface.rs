@@ -557,7 +557,7 @@ fn typed_create_body_matches_catalog_create_task_body() {
 
 #[test]
 fn typed_signal_agent_body_matches_catalog_signal_agent_body() {
-    let request = build_signal_agent_request("Please review task task-1".to_string());
+    let request = build_signal_agent_request("Please review task task-1".to_string(), None, None);
     let typed_body = serde_json::to_value(request).unwrap();
     let catalog = kanna_tool_catalog::bundled_catalog();
     let resolved = kanna_tool_catalog::resolve_request(
@@ -572,6 +572,75 @@ fn typed_signal_agent_body_matches_catalog_signal_agent_body() {
     .unwrap();
 
     assert_eq!(typed_body, resolved.body);
+}
+
+#[test]
+fn typed_signal_agent_overrides_match_catalog_signal_agent_body() {
+    let request = build_signal_agent_request(
+        "Please merge task task-1".to_string(),
+        Some("claude".to_string()),
+        Some("high".to_string()),
+    );
+    let typed_body = serde_json::to_value(request).unwrap();
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let resolved = kanna_tool_catalog::resolve_request(
+        &catalog,
+        "kanna_signal_agent",
+        &json!({
+            "repo_id": "repo-1",
+            "agent": "merge",
+            "message": "Please merge task task-1",
+            "agent_provider": "claude",
+            "effort": "high",
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(typed_body, resolved.body);
+}
+
+#[test]
+fn parses_repo_agent_signal_provider_and_effort_overrides() {
+    let cli = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "repo",
+        "agent",
+        "signal",
+        "--repo-id",
+        "repo-1",
+        "--agent",
+        "merge",
+        "--message",
+        "merge all open",
+        "--agent-provider",
+        "claude",
+        "--effort",
+        "high",
+    ])
+    .unwrap();
+    match cli.command {
+        crate::Commands::Repo {
+            command:
+                crate::RepoCommands::Agent {
+                    command:
+                        crate::RepoAgentCommands::Signal {
+                            repo_id,
+                            agent,
+                            message,
+                            agent_provider,
+                            effort,
+                            ..
+                        },
+                },
+        } => {
+            assert_eq!(repo_id, "repo-1");
+            assert_eq!(agent, "merge");
+            assert_eq!(message, "merge all open");
+            assert_eq!(agent_provider.as_deref(), Some("claude"));
+            assert_eq!(effort.as_deref(), Some("high"));
+        }
+        _ => panic!("expected repo agent signal command"),
+    }
 }
 
 #[test]

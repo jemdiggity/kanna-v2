@@ -165,14 +165,16 @@
     },
     {
       "name": "kanna_signal_agent",
-      "description": "Find or create a singleton task for an agent in a repo and send it a message.",
+      "description": "Find or create a singleton task for an agent in a repo and send it a message. The response's 'created' says which happened: the provider and effort overrides below only apply to a task this call creates, because an already-running singleton keeps the session it was spawned with.",
       "method": "POST",
       "path": "/v1/repos/{repo_id}/agents/{agent}/signal",
       "response": "json",
       "params": [
         { "name": "repo_id", "description": "Repository id from kanna_list_repos.", "type": "string", "required": true, "location": "path" },
         { "name": "agent", "description": "Agent definition name to signal (e.g. 'merge-master').", "type": "string", "required": true, "location": "path" },
-        { "name": "message", "description": "Message delivered to the agent's terminal session as input.", "type": "string", "required": true, "location": "body" }
+        { "name": "message", "description": "Message delivered to the agent's terminal session as input.", "type": "string", "required": true, "location": "body" },
+        { "name": "agent_provider", "description": "Explicit agent provider id for a singleton task this call creates: 'claude', 'copilot', 'codex', 'opencode', or 'antigravity'. It overrides the agent definition's own provider candidates and the configured user default, so pass it to run e.g. the merge agent as claude when the default would pick another provider. Ignored when the agent's task is already running.", "type": "string", "required": false, "location": "body", "key": "agentProvider" },
+        { "name": "effort", "description": "Provider-native reasoning effort for a singleton task this call creates, passed without normalization. Codex uses model_reasoning_effort and validates against the selected model; Claude uses --effort (low|medium|high|xhigh|max); Copilot uses --effort (none|minimal|low|medium|high|xhigh|max); OpenCode uses --variant; Antigravity uses --effort (low|medium|high). Ignored when the agent's task is already running.", "type": "string", "required": false, "location": "body" }
       ]
     },
     {

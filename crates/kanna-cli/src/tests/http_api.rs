@@ -217,6 +217,8 @@ async fn signal_agent_posts_message_to_repo_agent_signal_path() {
         "merge",
         &SignalAgentRequest {
             message: "Please merge task task-1".to_string(),
+            agent_provider: None,
+            effort: None,
         },
     )
     .await
