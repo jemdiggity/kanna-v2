@@ -121,6 +121,35 @@ describe("release environment", () => {
     expect(env.APPLE_KEYCHAIN_PROFILE).toBe("shell-profile");
   });
 
+  it("strips every compiler-wrapper and cache control, including Cargo's config aliases", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
+    const home = join(root, "home");
+    const repo = join(root, "repo");
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await writeFile(join(repo, ".env.release.local"), "RUSTC_WRAPPER=/from/dotenv\n");
+
+    const env = await loadReleaseEnvironment({
+      repoRoot: repo,
+      homeDir: home,
+      // A release invoked from a kd shell inherits the active cache environment,
+      // and a hostile caller can add wrappers Cargo honours just as strongly.
+      env: {
+        PATH: "/usr/bin",
+        RUSTC_WRAPPER: "/tools/kache",
+        RUSTC_WORKSPACE_WRAPPER: "/bin/false",
+        CARGO_BUILD_RUSTC_WRAPPER: "/bin/false",
+        CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER: "/bin/false",
+        CARGO_INCREMENTAL: "0",
+        KACHE_CACHE_DIR: "/store",
+        KACHE_DISABLED: "1",
+        APPLE_KEYCHAIN_PROFILE: "kanna"
+      },
+      runner: gitWorktreeListRunner(repo)
+    });
+
+    expect(env).toEqual({ PATH: "/usr/bin", APPLE_KEYCHAIN_PROFILE: "kanna" });
+  });
+
   it("returns an equivalent copy when both files are absent", async () => {
     const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
     const home = join(root, "home");

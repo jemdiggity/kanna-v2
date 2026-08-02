@@ -1,560 +1,449 @@
-import {
-  appendFileSync,
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  utimesSync,
-  writeFileSync
-} from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { dirname, join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
-  appendRustCacheEvent,
-  beginRustCacheBuild,
-  ensureKanacheBinary,
+  applyRustCacheEnvironment,
+  ensureKacheBinary,
   getRustCacheStatus,
-  recordRustCache,
-  readRustCacheEvents,
-  warmRustCache,
-  withRustCacheBuild,
-  withRustCacheLifecycleLock
+  installRustCache,
+  repositoryIdentity,
+  resolveRustCacheStorePath
 } from "../src/runtime/rust-cache";
-import type { RustCacheRuntimeInput } from "../src/runtime/rust-cache";
 import {
-  KANACHE_REPOSITORY,
-  KANACHE_REVISION,
-  resolveKanachePaths
+  KACHE_ARTIFACTS,
+  KACHE_VERSION,
+  resolveKachePaths
 } from "../src/runtime/rust-cache-policy";
 import type { CommandRunner } from "../src/runtime/process";
 
-function fakeRuntimeInput(input: {
-  calls?: string[];
-  clean?: boolean;
-  host?: string;
-} = {}): RustCacheRuntimeInput {
-  const root = mkdtempSync(join(tmpdir(), "kd-kanache-lifecycle-"));
-  const home = join(root, "home");
-  const repoRoot = join(root, "repo");
-  mkdirSync(repoRoot, { recursive: true });
-  const binary = resolveKanachePaths(home).binary;
-  mkdirSync(join(binary, ".."), { recursive: true });
-  writeFileSync(binary, "fake");
+const roots: string[] = [];
 
+afterEach(() => {
+  for (const root of roots.splice(0)) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function scratch(prefix: string): string {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  roots.push(root);
+  return root;
+}
+
+const ARM64_ARTIFACT = KACHE_ARTIFACTS.arm64!;
+const ARCHIVE_BODY = "kache-archive";
+
+/**
+ * A pin whose checksum matches what the fake `curl` writes, so the happy path
+ * reaches extraction. The real pinned checksums are asserted for shape by the
+ * policy test and were verified against the published `.sha256` assets.
+ */
+const MATCHING_PIN = {
+  ...ARM64_ARTIFACT,
+  sha256: createHash("sha256").update(ARCHIVE_BODY).digest("hex")
+};
+
+interface FakeInstallOptions {
+  version?: string;
+  calls?: string[];
+}
+
+/**
+ * Stands in for the pinned release: `curl` writes an archive body, `tar`
+ * extracts a fake executable, and the executable reports a version.
+ */
+function fakeInstallRunner(options: FakeInstallOptions = {}): CommandRunner {
+  const body = ARCHIVE_BODY;
   return {
-    repoRoot,
-    homeDir: home,
-    env: { KANNA_RUST_CACHE: "on" },
-    platform: "darwin",
-    commit: "abc",
-    runner: {
-      async run(command, args) {
-        const renderedCommand = command === binary ? "kanache" : command;
-        input.calls?.push(`${renderedCommand} ${args.join(" ")}`);
-        if (command === "git" && args.includes("status")) {
-          return {
-            exitCode: 0,
-            stdout: input.clean === false ? " M Cargo.toml\n" : "",
-            stderr: ""
-          };
-        }
-        if (command === "git" && args.at(-1) === "--git-common-dir") {
-          return { exitCode: 0, stdout: join(root, ".git") + "\n", stderr: "" };
-        }
-        if (command === "rustc") {
-          return {
-            exitCode: 0,
-            stdout: `host: ${input.host ?? "aarch64-apple-darwin"}\n`,
-            stderr: ""
-          };
-        }
+    async run(command, args) {
+      options.calls?.push(`${command} ${args.join(" ")}`);
+      if (command === "curl") {
+        const output = args[args.indexOf("--output") + 1]!;
+        writeFileSync(output, body);
         return { exitCode: 0, stdout: "", stderr: "" };
       }
+      if (command === "tar") {
+        const destination = args[args.indexOf("-C") + 1]!;
+        mkdirSync(destination, { recursive: true });
+        writeFileSync(join(destination, "kache"), "#!/bin/sh\n");
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      return {
+        exitCode: 0,
+        stdout: `kache ${options.version ?? KACHE_VERSION}\n`,
+        stderr: ""
+      };
     }
   };
 }
 
-describe("Kanache runtime", () => {
-  it("installs the pinned locked revision into an atomic version root", async () => {
-    const home = mkdtempSync(join(tmpdir(), "kd-kanache-home-"));
-    const calls: Array<{ command: string; args: string[] }> = [];
-    const runner: CommandRunner = {
-      async run(command, args) {
-        calls.push({ command, args });
-        if (command === "cargo") {
-          const root = args[args.indexOf("--root") + 1]!;
-          mkdirSync(join(root, "bin"), { recursive: true });
-          writeFileSync(join(root, "bin", "kanache"), "#!/bin/sh\n");
-          chmodSync(join(root, "bin", "kanache"), 0o755);
-        }
-        return {
-          exitCode: 0,
-          stdout: command === "cargo" ? "" : "kanache 0.1.0\n",
-          stderr: ""
-        };
-      }
-    };
+describe("kache bootstrap", () => {
+  it("refuses to publish an archive whose checksum does not match the pin", async () => {
+    const home = scratch("kd-kache-home-");
+    await expect(
+      ensureKacheBinary({ homeDir: home, runner: fakeInstallRunner(), arch: "arm64" })
+    ).rejects.toThrow(/checksum mismatch/);
+    expect(existsSync(resolveKachePaths(home).binary)).toBe(false);
+  });
 
-    const binary = await ensureKanacheBinary({ homeDir: home, runner });
+  it("leaves no partial install behind after a failed verification", async () => {
+    const home = scratch("kd-kache-home-");
+    const parent = dirname(resolveKachePaths(home).versionRoot);
+    await expect(
+      ensureKacheBinary({ homeDir: home, runner: fakeInstallRunner(), arch: "arm64" })
+    ).rejects.toThrow();
+    expect(existsSync(parent) ? readdirSync(parent) : []).toEqual([]);
+  });
 
-    expect(binary).toBe(resolveKanachePaths(home).binary);
+  it("rejects an architecture with no pinned release", async () => {
+    const home = scratch("kd-kache-home-");
+    await expect(
+      ensureKacheBinary({ homeDir: home, runner: fakeInstallRunner(), arch: "arm" })
+    ).rejects.toThrow(/no pinned kache/);
+  });
+
+  it("downloads the pinned asset over HTTPS and verifies the reported version", async () => {
+    const home = scratch("kd-kache-home-");
+    const calls: string[] = [];
+    const binary = await ensureKacheBinary({
+      homeDir: home,
+      runner: fakeInstallRunner({ calls }),
+      arch: "arm64",
+      artifact: MATCHING_PIN
+    });
+    expect(binary).toBe(resolveKachePaths(home).binary);
     expect(existsSync(binary)).toBe(true);
-    expect(calls[0]).toMatchObject({
-      command: "cargo",
-      args: expect.arrayContaining([
-        "install",
-        "--git",
-        KANACHE_REPOSITORY,
-        "--rev",
-        KANACHE_REVISION,
-        "--locked",
-        "--root"
-      ])
-    });
-    expect(calls[1]?.command).toContain(`.install-${KANACHE_REVISION}-`);
-    expect(calls[1]?.args).toEqual(["--version"]);
+    const download = calls.find((call) => call.startsWith("curl"));
+    expect(download).toContain("--proto =https");
+    expect(download).toContain(
+      `https://github.com/kunobi-ninja/kache/releases/download/v${KACHE_VERSION}/${MATCHING_PIN.asset}`
+    );
+    expect(calls.some((call) => call.includes("--version"))).toBe(true);
+    // The verified archive must not be left inside the published tool root.
+    expect(existsSync(join(resolveKachePaths(home).versionRoot, MATCHING_PIN.asset))).toBe(false);
   });
 
-  it("writes JSONL and ignores malformed historical lines", () => {
-    const home = mkdtempSync(join(tmpdir(), "kd-kanache-events-"));
-    appendRustCacheEvent(home, {
-      timestamp: "2026-07-20T00:00:00.000Z",
-      repository: "repo",
-      commit: "abc",
-      destination: "/repo/wt",
-      layouts: ["host"],
-      outcome: "miss",
-      category: "no-donor",
-      wallMs: 3,
-      allocationDeltaBytes: 0
-    });
-    appendFileSync(resolveKanachePaths(home).events, "not json\n");
-    const warnings: string[] = [];
-    expect(
-      readRustCacheEvents(home, "repo", 10, (warning) => warnings.push(warning))
-    ).toHaveLength(1);
-    expect(warnings).toEqual(["Ignored malformed Kanache event log line 2."]);
+  it("rejects a binary that does not report the pinned version", async () => {
+    const home = scratch("kd-kache-home-");
+    await expect(
+      ensureKacheBinary({
+        homeDir: home,
+        runner: fakeInstallRunner({ version: "0.1.0" }),
+        arch: "arm64",
+        artifact: MATCHING_PIN
+      })
+    ).rejects.toThrow(new RegExp(`did not report version ${KACHE_VERSION}`));
+    expect(existsSync(resolveKachePaths(home).binary)).toBe(false);
   });
 
-  it("clears donor eligibility locally even when caching is disabled", async () => {
-    const cache = fakeRuntimeInput();
-    const marker = join(cache.repoRoot, ".build", "cargo-build", ".kanache-success");
-    mkdirSync(join(marker, ".."), { recursive: true });
-    writeFileSync(marker, "old-success");
-    cache.env.KANNA_RUST_CACHE = "off";
-
-    const result = await beginRustCacheBuild(cache);
-
-    expect(result).toMatchObject({ outcome: "record-miss", category: "disabled" });
-    expect(existsSync(marker)).toBe(false);
-  });
-
-  it("disables every Kanache entry point in CI without running tools", async () => {
+  it("reuses an already published tool without downloading again", async () => {
+    const home = scratch("kd-kache-home-");
+    const paths = resolveKachePaths(home);
+    mkdirSync(dirname(paths.binary), { recursive: true });
+    writeFileSync(paths.binary, "#!/bin/sh\n");
     const calls: string[] = [];
-    const cache = fakeRuntimeInput({ calls });
-    cache.env.CI = "false";
-    const marker = join(cache.repoRoot, ".build", "cargo-build", ".kanache-success");
-    mkdirSync(join(marker, ".."), { recursive: true });
-    writeFileSync(marker, "old-success");
-
-    expect(await warmRustCache(cache)).toMatchObject({ category: "disabled-in-ci" });
-    expect(await beginRustCacheBuild(cache)).toMatchObject({ category: "disabled-in-ci" });
-    expect(existsSync(marker)).toBe(false);
-    expect(await recordRustCache(cache, "all")).toMatchObject({
-      category: "disabled-in-ci"
+    const binary = await ensureKacheBinary({
+      homeDir: home,
+      runner: fakeInstallRunner({ calls }),
+      arch: "arm64"
     });
-    expect(await getRustCacheStatus(cache)).toMatchObject({
-      enabled: false,
-      category: "disabled-in-ci"
-    });
+    expect(binary).toBe(paths.binary);
     expect(calls).toEqual([]);
   });
+});
 
-  it("disables Kanache on non-macOS hosts without running tools", async () => {
-    const calls: string[] = [];
-    const cache = fakeRuntimeInput({ calls });
-    cache.platform = "linux";
+describe("repository identity", () => {
+  function worktree(root: string, name: string, commonDirectory: string): string {
+    const path = join(root, name);
+    mkdirSync(join(commonDirectory, "worktrees", name), { recursive: true });
+    writeFileSync(join(commonDirectory, "worktrees", name, "commondir"), "../..\n");
+    mkdirSync(path, { recursive: true });
+    writeFileSync(join(path, ".git"), `gitdir: ${join(commonDirectory, "worktrees", name)}\n`);
+    return path;
+  }
 
-    expect(await warmRustCache(cache)).toMatchObject({
-      outcome: "miss",
-      category: "unsupported-platform"
-    });
-    expect(calls).toEqual([]);
+  it("gives every worktree of a repository the same store", () => {
+    const root = scratch("kd-kache-repo-");
+    const commonDirectory = join(root, "primary", ".git");
+    mkdirSync(commonDirectory, { recursive: true });
+    const primary = join(root, "primary");
+    const first = worktree(root, "task-a", commonDirectory);
+    const second = worktree(root, "task-b", commonDirectory);
+
+    expect(repositoryIdentity(first)).toBe(repositoryIdentity(primary));
+    expect(repositoryIdentity(second)).toBe(repositoryIdentity(primary));
   });
 
-  it("tries ranked exact-HEAD donors until Kanache publishes", async () => {
-    const root = mkdtempSync(join(tmpdir(), "kd-kanache-warm-"));
-    const home = join(root, "home");
-    const current = join(root, "current");
-    const first = join(root, "first");
-    const second = join(root, "second");
-    for (const path of [current, first, second]) {
-      mkdirSync(join(path, ".build", "cargo-build"), { recursive: true });
-    }
-    rmSync(join(current, ".build"), { recursive: true, force: true });
+  it("gives a different repository a different store", () => {
+    const root = scratch("kd-kache-repo-");
+    const first = join(root, "one");
+    const second = join(root, "two");
+    mkdirSync(join(first, ".git"), { recursive: true });
+    mkdirSync(join(second, ".git"), { recursive: true });
+    expect(repositoryIdentity(first)).not.toBe(repositoryIdentity(second));
+  });
 
-    const binary = resolveKanachePaths(home).binary;
-    mkdirSync(join(binary, ".."), { recursive: true });
-    writeFileSync(binary, "fake");
-    for (const [path, created] of [
-      [first, 20],
-      [second, 10]
+  it("resolves the store under the Kanna cache root", () => {
+    const root = scratch("kd-kache-repo-");
+    const repoRoot = join(root, "repo");
+    mkdirSync(join(repoRoot, ".git"), { recursive: true });
+    expect(resolveRustCacheStorePath({ repoRoot, homeDir: "/home/kanna", env: {} })).toBe(
+      `/home/kanna/Library/Caches/kanna/rust-kache/${repositoryIdentity(repoRoot)}`
+    );
+  });
+});
+
+describe("rust cache environment application", () => {
+  function fixture(): { repoRoot: string; homeDir: string } {
+    const root = scratch("kd-kache-env-");
+    const repoRoot = join(root, "repo");
+    mkdirSync(join(repoRoot, ".git"), { recursive: true });
+    return { repoRoot, homeDir: join(root, "home") };
+  }
+
+  function install(homeDir: string): string {
+    const paths = resolveKachePaths(homeDir);
+    mkdirSync(dirname(paths.binary), { recursive: true });
+    writeFileSync(paths.binary, "#!/bin/sh\n");
+    return paths.binary;
+  }
+
+  it("points Cargo at the pinned wrapper and this repository's store", () => {
+    const { repoRoot, homeDir } = fixture();
+    const binary = install(homeDir);
+    const result = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { PATH: "/usr/bin", KANNA_RUST_CACHE: "on" },
+      platform: "darwin",
+      arch: "arm64"
+    });
+    expect(result.state).toEqual({
+      active: true,
+      binary,
+      store: resolveRustCacheStorePath({ repoRoot, homeDir, env: {} })
+    });
+    expect(result.env.RUSTC_WRAPPER).toBe(binary);
+    expect(result.env.KACHE_CACHE_DIR).toBe(
+      resolveRustCacheStorePath({ repoRoot, homeDir, env: {} })
+    );
+    expect(result.env.KACHE_LOCAL_ONLY).toBe("1");
+    expect(result.env.KACHE_CACHE_EXECUTABLES).toBe("0");
+    expect(result.env.CARGO_INCREMENTAL).toBe("0");
+    expect(result.env.PATH).toBe("/usr/bin");
+  });
+
+  it("stays inert when the pinned tool is not installed", () => {
+    const { repoRoot, homeDir } = fixture();
+    const result = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { PATH: "/usr/bin", KANNA_RUST_CACHE: "on" },
+      platform: "darwin",
+      arch: "arm64"
+    });
+    expect(result.state).toMatchObject({ active: false, category: "not-installed" });
+    expect(result.env.RUSTC_WRAPPER).toBeUndefined();
+    expect(result.env.PATH).toBe("/usr/bin");
+  });
+
+  it("stays inert by default, when opted out, in CI, or off a supported host", () => {
+    const { repoRoot, homeDir } = fixture();
+    install(homeDir);
+    for (const [env, category] of [
+      [{}, "disabled-by-default"],
+      [{ KANNA_RUST_CACHE: "off" }, "disabled"],
+      [{ KANNA_RUST_CACHE: "kanache" }, "invalid-mode"],
+      [{ KANNA_RUST_CACHE: "on", CI: "true" }, "disabled-in-ci"]
     ] as const) {
-      writeFileSync(
-        join(path, ".build/cargo-build/.kanache-manifest.json"),
-        JSON.stringify({
-          profiles: ["dev"],
-          targets: ["host", "aarch64-apple-darwin"],
-          extra_inputs: [],
-          created_unix_nanos: created
-        })
-      );
-      writeFileSync(join(path, ".build/cargo-build/.kanache-success"), "marker");
+      const result = applyRustCacheEnvironment({
+        repoRoot,
+        homeDir,
+        env,
+        platform: "darwin",
+        arch: "arm64"
+      });
+      expect(result.state).toMatchObject({ active: false, category });
+      expect(result.env.RUSTC_WRAPPER).toBeUndefined();
     }
 
-    const warmCalls: string[][] = [];
-    const fullCommit = "abc1234000000000000000000000000000000000";
-    const runner: CommandRunner = {
-      async run(command, args) {
-        if (command === "git" && args.join(" ") === "worktree list --porcelain") {
-          return {
-            exitCode: 0,
-            stdout: [
-              `worktree ${current}`,
-              `HEAD ${fullCommit}`,
-              "",
-              `worktree ${first}`,
-              `HEAD ${fullCommit}`,
-              "",
-              `worktree ${second}`,
-              `HEAD ${fullCommit}`,
-              ""
-            ].join("\n"),
-            stderr: ""
-          };
-        }
-        if (command === "git" && args.at(-1) === "--git-common-dir") {
-          return { exitCode: 0, stdout: join(root, ".git") + "\n", stderr: "" };
-        }
-        if (command === "git" && args.join(" ") === "rev-parse HEAD") {
-          return { exitCode: 0, stdout: `${fullCommit}\n`, stderr: "" };
-        }
-        if (command === "rustc") {
-          return { exitCode: 0, stdout: "host: aarch64-apple-darwin\n", stderr: "" };
-        }
-        if (command === binary) {
-          warmCalls.push(args);
-          if (warmCalls.length === 1) {
-            return { exitCode: 1, stdout: "", stderr: "donor dirty" };
-          }
-          mkdirSync(join(current, ".build", "cargo-build"), { recursive: true });
-          return { exitCode: 0, stdout: "warmed files=100 elapsed_ms=7\n", stderr: "" };
-        }
-        return { exitCode: 1, stdout: "", stderr: "unexpected command" };
-      }
-    };
-
-    const result = await warmRustCache({
-      repoRoot: current,
-      homeDir: home,
+    const linux = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
       env: { KANNA_RUST_CACHE: "on" },
-      platform: "darwin",
-      runner,
-      commit: "abc1234"
+      platform: "linux",
+      arch: "arm64"
     });
-
-    expect(result).toMatchObject({
-      ok: true,
-      outcome: "hit",
-      donor: realpathSync(second),
-      matchingMode: "head"
-    });
-    expect(warmCalls).toHaveLength(2);
-    for (const args of warmCalls) {
-      expect(args).not.toContain("--exclude-rust-input-root");
-      expect(args).not.toContain("apps/desktop/src-tauri/binaries");
-    }
-    expect(
-      readFileSync(resolveKanachePaths(home).events, "utf8")
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line))
-        .filter((event) => event.donor)
-        .map((event) => event.matchingMode)
-    ).toEqual(["head", "head"]);
+    expect(linux.state).toMatchObject({ active: false, category: "unsupported-platform" });
   });
 
-  it("offers different-HEAD hash manifests but excludes different-HEAD legacy manifests", async () => {
-    const root = mkdtempSync(join(tmpdir(), "kd-kanache-input-hash-warm-"));
-    const home = join(root, "home");
-    const current = join(root, "current");
-    const hashed = join(root, "hashed");
-    const hashedAliasParent = join(root, "hashed-alias-parent");
-    const hashedAlias = `${hashedAliasParent}/../hashed`;
-    const legacy = join(root, "legacy");
-    mkdirSync(current, { recursive: true });
-    mkdirSync(hashedAliasParent, { recursive: true });
-    for (const path of [hashed, legacy]) {
-      mkdirSync(join(path, ".build", "cargo-build"), { recursive: true });
-      writeFileSync(join(path, ".build/cargo-build/.kanache-success"), "marker");
-    }
-    writeFileSync(
-      join(hashed, ".build/cargo-build/.kanache-manifest.json"),
-      JSON.stringify({
-        profiles: ["dev"],
-        targets: ["host", "aarch64-apple-darwin"],
-        extra_inputs: [],
-        rust_build_inputs_blake3: "same-rust-inputs",
-        created_unix_nanos: 20
-      })
-    );
-    writeFileSync(
-      join(legacy, ".build/cargo-build/.kanache-manifest.json"),
-      JSON.stringify({
-        profiles: ["dev"],
-        targets: ["host", "aarch64-apple-darwin"],
-        extra_inputs: [],
-        created_unix_nanos: 10
-      })
-    );
-
-    const binary = resolveKanachePaths(home).binary;
-    mkdirSync(join(binary, ".."), { recursive: true });
-    writeFileSync(binary, "fake");
-    const fullCommit = "abc1234000000000000000000000000000000000";
-    const donorCommit = "def5678000000000000000000000000000000000";
-    const warmCalls: string[][] = [];
-    const runner: CommandRunner = {
-      async run(command, args) {
-        if (command === "git" && args.join(" ") === "worktree list --porcelain") {
-          return {
-            exitCode: 0,
-            stdout: [
-              `worktree ${current}`,
-              `HEAD ${fullCommit}`,
-              "",
-              `worktree ${hashedAlias}`,
-              `HEAD ${donorCommit}`,
-              "",
-              `worktree ${legacy}`,
-              `HEAD ${donorCommit}`,
-              ""
-            ].join("\n"),
-            stderr: ""
-          };
-        }
-        if (command === "git" && args.at(-1) === "--git-common-dir") {
-          return { exitCode: 0, stdout: join(root, ".git") + "\n", stderr: "" };
-        }
-        if (command === "git" && args.join(" ") === "rev-parse HEAD") {
-          return { exitCode: 0, stdout: `${fullCommit}\n`, stderr: "" };
-        }
-        if (command === "rustc") {
-          return { exitCode: 0, stdout: "host: aarch64-apple-darwin\n", stderr: "" };
-        }
-        if (command === binary) {
-          warmCalls.push(args);
-          mkdirSync(join(current, ".build", "cargo-build"), { recursive: true });
-          return { exitCode: 0, stdout: "warmed files=100 elapsed_ms=7\n", stderr: "" };
-        }
-        return { exitCode: 1, stdout: "", stderr: "unexpected command" };
-      }
-    };
-
-    const result = await warmRustCache({
-      repoRoot: current,
-      homeDir: home,
-      env: { KANNA_RUST_CACHE: "on" },
+  it("opting out of an inherited active environment restores direct incremental builds", () => {
+    const { repoRoot, homeDir } = fixture();
+    install(homeDir);
+    // kd environments nest: a shell spawned by kd already carries the active
+    // cache settings, so opting out has to undo them, not merely report off.
+    const active = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { PATH: "/usr/bin", KANNA_RUST_CACHE: "on" },
       platform: "darwin",
-      runner,
-      commit: "abc1234"
+      arch: "arm64"
     });
+    expect(active.state.active).toBe(true);
 
-    expect(result).toMatchObject({
-      ok: true,
-      outcome: "hit",
-      donor: realpathSync(hashed),
-      matchingMode: "input-hash"
+    const optedOut = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { ...active.env, KANNA_RUST_CACHE: "off" },
+      platform: "darwin",
+      arch: "arm64"
     });
-    expect(warmCalls).toHaveLength(1);
-    expect(warmCalls[0]?.[1]).toBe(realpathSync(hashed));
-    expect(warmCalls[0]?.[1]).not.toBe(legacy);
-    expect(warmCalls[0]).toContain("--exclude-rust-input-root");
-    expect(warmCalls[0]).toContain("apps/desktop/src-tauri/binaries");
-    expect(readFileSync(resolveKanachePaths(home).events, "utf8")).toContain(
-      '"matchingMode":"input-hash"'
+    expect(optedOut.state).toMatchObject({ active: false, category: "disabled" });
+    expect(optedOut.env.RUSTC_WRAPPER).toBeUndefined();
+    expect(optedOut.env.CARGO_INCREMENTAL).toBeUndefined();
+    expect(optedOut.env.KACHE_CACHE_DIR).toBeUndefined();
+    expect(Object.keys(optedOut.env).some((key) => key.startsWith("KACHE_"))).toBe(false);
+    expect(optedOut.env.PATH).toBe("/usr/bin");
+  });
+
+  it("drops ambient wrappers and disable switches that would survive an active resolution", () => {
+    const { repoRoot, homeDir } = fixture();
+    const binary = install(homeDir);
+    const result = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: {
+        PATH: "/usr/bin",
+        KANNA_RUST_CACHE: "on",
+        // Cargo nests this inside RUSTC_WRAPPER, so it would still run.
+        RUSTC_WORKSPACE_WRAPPER: "/bin/false",
+        CARGO_BUILD_RUSTC_WRAPPER: "/bin/false",
+        CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER: "/bin/false",
+        // kache honours this and would silently pass every compile through.
+        KACHE_DISABLED: "1",
+        KACHE_CACHE_DIR: "/somewhere/else"
+      },
+      platform: "darwin",
+      arch: "arm64"
+    });
+    expect(result.state.active).toBe(true);
+    expect(result.env.RUSTC_WRAPPER).toBe(binary);
+    expect(result.env.RUSTC_WORKSPACE_WRAPPER).toBeUndefined();
+    expect(result.env.CARGO_BUILD_RUSTC_WRAPPER).toBeUndefined();
+    expect(result.env.CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER).toBeUndefined();
+    expect(result.env.KACHE_DISABLED).toBeUndefined();
+    expect(result.env.KACHE_CACHE_DIR).toBe(
+      resolveRustCacheStorePath({ repoRoot, homeDir, env: {} })
     );
   });
 
-  it("cold-falls back without installing or deleting an existing destination", async () => {
-    const root = mkdtempSync(join(tmpdir(), "kd-kanache-existing-"));
-    mkdirSync(join(root, ".build", "cargo-build"), { recursive: true });
-    writeFileSync(join(root, ".build", "cargo-build", "keep"), "user data");
+  it("is idempotent: reapplying yields the same environment", () => {
+    const { repoRoot, homeDir } = fixture();
+    install(homeDir);
+    const input = { repoRoot, homeDir, platform: "darwin" as const, arch: "arm64" };
+    const once = applyRustCacheEnvironment({ ...input, env: { PATH: "/usr/bin", KANNA_RUST_CACHE: "on" } });
+    const twice = applyRustCacheEnvironment({ ...input, env: once.env });
+    expect(twice.env).toEqual(once.env);
+    expect(twice.state).toEqual(once.state);
+  });
+});
+
+describe("rust cache commands", () => {
+  function fixture(): { repoRoot: string; homeDir: string } {
+    const root = scratch("kd-kache-command-");
+    const repoRoot = join(root, "repo");
+    mkdirSync(join(repoRoot, ".git"), { recursive: true });
+    return { repoRoot, homeDir: join(root, "home") };
+  }
+
+  it("install creates the repository store next to the verified tool", async () => {
+    const { repoRoot, homeDir } = fixture();
+    const paths = resolveKachePaths(homeDir);
+    mkdirSync(dirname(paths.binary), { recursive: true });
+    writeFileSync(paths.binary, "#!/bin/sh\n");
+    const result = await installRustCache({
+      repoRoot,
+      homeDir,
+      env: { KANNA_RUST_CACHE: "on" },
+      platform: "darwin",
+      arch: "arm64",
+      runner: fakeInstallRunner()
+    });
+    expect(result).toEqual({
+      version: KACHE_VERSION,
+      binary: paths.binary,
+      store: resolveRustCacheStorePath({ repoRoot, homeDir, env: {} }),
+      eligible: true
+    });
+    expect(existsSync(result.store)).toBe(true);
+  });
+
+  it("install does nothing when the cache is disabled", async () => {
+    const { repoRoot, homeDir } = fixture();
     const calls: string[] = [];
-
-    const result = await warmRustCache({
-      repoRoot: root,
-      homeDir: join(root, "home"),
-      env: { KANNA_RUST_CACHE: "on" },
+    const result = await installRustCache({
+      repoRoot,
+      homeDir,
+      env: { KANNA_RUST_CACHE: "off" },
       platform: "darwin",
-      commit: "abc",
-      runner: {
-        async run(command) {
-          calls.push(command);
-          return { exitCode: 1, stdout: "", stderr: "" };
-        }
-      }
+      arch: "arm64",
+      runner: fakeInstallRunner({ calls })
     });
-
-    expect(result).toMatchObject({
-      ok: true,
-      outcome: "miss",
-      category: "destination-exists"
-    });
-    expect(readFileSync(join(root, ".build", "cargo-build", "keep"), "utf8")).toBe(
-      "user data"
-    );
+    expect(result).toMatchObject({ eligible: false, category: "disabled" });
     expect(calls).toEqual([]);
-    expect(
-      readFileSync(resolveKanachePaths(join(root, "home")).events, "utf8")
-    ).toContain('"category":"destination-exists"');
+    expect(existsSync(result.store)).toBe(false);
   });
 
-  it("brackets a successful bounded build and records the narrow layout", async () => {
-    const calls: string[] = [];
-    const cache = fakeRuntimeInput({ calls, clean: true, host: "aarch64-apple-darwin" });
-    const value = await withRustCacheBuild(
-      cache,
-      "sidecars",
-      async () => {
-        calls.push("BUILD");
-        return { ok: true };
-      },
-      (result) => result.ok
-    );
-
-    expect(value).toEqual({ ok: true });
-    expect(calls).toEqual([
-      `kanache manifest begin ${cache.repoRoot}`,
-      "BUILD",
-      "git status --porcelain=v1 --untracked-files=all",
-      "rustc -vV",
-      `kanache manifest record ${cache.repoRoot} --profile dev --target aarch64-apple-darwin --exclude-rust-input-root apps/desktop/src-tauri/binaries`
-    ]);
-  });
-
-  it("does not record a failed bounded build", async () => {
-    const calls: string[] = [];
-    const result = await withRustCacheBuild(
-      fakeRuntimeInput({ calls, clean: true }),
-      "all",
-      async () => {
-        calls.push("BUILD");
-        return { ok: false };
-      },
-      (value) => value.ok
-    );
-
-    expect(result).toEqual({ ok: false });
-    expect(calls.filter((call) => call.includes("manifest record"))).toEqual([]);
-  });
-
-  it("records why a dirty checkout was not published as a donor", async () => {
-    const cache = fakeRuntimeInput({ clean: false });
-
-    const result = await recordRustCache(cache, "all");
-
-    expect(result).toMatchObject({ outcome: "record-miss", category: "dirty-worktree" });
-    expect(readFileSync(resolveKanachePaths(cache.homeDir).events, "utf8")).toContain(
-      '"category":"dirty-worktree"'
-    );
-  });
-
-  it("status reports enablement, pin, current manifest, and recent events", async () => {
-    const status = await getRustCacheStatus(fakeRuntimeInput({ clean: true }));
-
-    expect(status).toMatchObject({ enabled: true, revision: KANACHE_REVISION });
-    expect(status).toHaveProperty("binary");
-    expect(status).toHaveProperty("events");
-  });
-
-  it("serializes bounded builds while allowing the owning process to reenter", async () => {
-    const cache = fakeRuntimeInput();
-    const order: string[] = [];
-    let releaseFirst: (() => void) | undefined;
-    const firstMayFinish = new Promise<void>((resolve) => {
-      releaseFirst = resolve;
+  it("status reports the pin, the store, and cache stats without writing", async () => {
+    const { repoRoot, homeDir } = fixture();
+    const paths = resolveKachePaths(homeDir);
+    mkdirSync(dirname(paths.binary), { recursive: true });
+    writeFileSync(paths.binary, "#!/bin/sh\n");
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
+    const status = await getRustCacheStatus({
+      repoRoot,
+      homeDir,
+      env: { KANNA_RUST_CACHE: "on" },
+      platform: "darwin",
+      arch: "arm64",
+      runner: {
+        async run(command, args, options) {
+          calls.push({ command, args, env: options?.env });
+          return { exitCode: 0, stdout: "Store: 1.0 MiB / 10.0 GiB\n", stderr: "" };
+        }
+      }
     });
-
-    const first = withRustCacheLifecycleLock(
-      cache,
-      async (ownerEnv) => {
-        order.push("first-enter");
-        await withRustCacheLifecycleLock(
-          { ...cache, env: ownerEnv },
-          async () => order.push("nested-enter"),
-          { pollMs: 5, timeoutMs: 500 }
-        );
-        await firstMayFinish;
-        order.push("first-exit");
-      },
-      { pollMs: 5, timeoutMs: 500 }
-    );
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    const second = withRustCacheLifecycleLock(
-      cache,
-      async () => order.push("second-enter"),
-      { pollMs: 5, timeoutMs: 500 }
-    );
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(order).toEqual(["first-enter", "nested-enter"]);
-
-    releaseFirst?.();
-    await Promise.all([first, second]);
-    expect(order).toEqual([
-      "first-enter",
-      "nested-enter",
-      "first-exit",
-      "second-enter"
-    ]);
+    expect(status).toMatchObject({
+      enabled: true,
+      version: KACHE_VERSION,
+      installed: true,
+      binary: paths.binary,
+      store: resolveRustCacheStorePath({ repoRoot, homeDir, env: {} }),
+      stats: "Store: 1.0 MiB / 10.0 GiB"
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.args).toEqual(["stats"]);
+    expect(calls[0]!.env?.KACHE_CACHE_DIR).toBe(status.store);
+    expect(calls[0]!.env?.KACHE_MAX_SIZE).toBe(status.maxSize);
+    // Reading status must not create the store.
+    expect(existsSync(status.store)).toBe(false);
   });
 
-  it("fails closed instead of deleting an unverifiable owner file", async () => {
-    const cache = fakeRuntimeInput();
-    const lockDirectory = join(cache.repoRoot, ".build", ".kanache-lifecycle-lock");
-    const ownerFile = join(lockDirectory, "owner.json");
-    mkdirSync(lockDirectory, { recursive: true });
-    writeFileSync(ownerFile, "partially-written-owner");
-    const old = new Date(Date.now() - 10_000);
-    utimesSync(lockDirectory, old, old);
-
-    await expect(
-      withRustCacheLifecycleLock(cache, async () => undefined, {
-        pollMs: 5,
-        timeoutMs: 20
-      })
-    ).rejects.toThrow("timed out waiting");
-    expect(readFileSync(ownerFile, "utf8")).toBe("partially-written-owner");
-  });
-
-  it("fails closed instead of recovering an ownerless lock directory", async () => {
-    const cache = fakeRuntimeInput();
-    const lockDirectory = join(cache.repoRoot, ".build", ".kanache-lifecycle-lock");
-    mkdirSync(lockDirectory, { recursive: true });
-    const old = new Date(Date.now() - 10_000);
-    utimesSync(lockDirectory, old, old);
-
-    await expect(
-      withRustCacheLifecycleLock(cache, async () => undefined, {
-        pollMs: 5,
-        timeoutMs: 20
-      })
-    ).rejects.toThrow("timed out waiting");
-    expect(existsSync(lockDirectory)).toBe(true);
+  it("status reports an uninstalled tool without invoking it", async () => {
+    const { repoRoot, homeDir } = fixture();
+    const calls: string[] = [];
+    const status = await getRustCacheStatus({
+      repoRoot,
+      homeDir,
+      env: { KANNA_RUST_CACHE: "off" },
+      platform: "darwin",
+      arch: "arm64",
+      runner: fakeInstallRunner({ calls })
+    });
+    expect(status).toMatchObject({ enabled: false, category: "disabled", installed: false });
+    expect(status.stats).toBeUndefined();
+    expect(calls).toEqual([]);
   });
 });

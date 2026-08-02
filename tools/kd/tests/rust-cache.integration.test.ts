@@ -4,45 +4,43 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  realpathSync,
+  readdirSync,
   rmSync,
-  statSync,
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  warmRustCache,
-  withRustCacheBuild
-} from "../src/runtime/rust-cache";
-import type { RustCacheRuntimeInput } from "../src/runtime/rust-cache";
-import {
-  KANACHE_REPOSITORY,
-  resolveKanachePaths
-} from "../src/runtime/rust-cache-policy";
+import { applyRustCacheEnvironment, repositoryIdentity } from "../src/runtime/rust-cache";
+import { resolveKachePaths } from "../src/runtime/rust-cache-policy";
+import { loadReleaseEnvironment } from "../src/runtime/release-env";
 import { nodeCommandRunner } from "../src/runtime/process";
-
-interface IntegrationFixture {
-  root: string;
-  repo: string;
-  home: string;
-  log: string;
-  head: string;
-  hostTarget: string;
-  env: NodeJS.ProcessEnv;
-  cache: RustCacheRuntimeInput;
-}
 
 const roots: string[] = [];
 const describeMac = process.platform === "darwin" ? describe : describe.skip;
-const LEGACY_KANACHE_REVISION = "6107c7b533a77a0c7c190b75c0284e7501c6edbf";
 
 afterEach(() => {
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+/**
+ * Cargo resolves its build and target directories from the environment *before*
+ * a checkout's `.cargo/config.toml`, and kd exports `CARGO_BUILD_BUILD_DIR` for
+ * every worktree. A test that inherits `process.env` therefore compiles its
+ * disposable fixture into the *real* repository's build directory, mixing two
+ * unrelated source roots in one Cargo fingerprint tree — the shared-build-dir
+ * hazard that `docs/specs/safe-rust-build-caching.md` shows silently returning
+ * stale artifacts. Every fixture build must own its directories.
+ */
+export function isolatedCargoEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const isolated = { ...env };
+  delete isolated.CARGO_BUILD_BUILD_DIR;
+  delete isolated.CARGO_BUILD_TARGET_DIR;
+  delete isolated.CARGO_TARGET_DIR;
+  return isolated;
+}
 
 async function run(
   command: string,
@@ -58,510 +56,381 @@ async function run(
   return result.stdout.trim();
 }
 
-function fakeKanacheSource(): string {
-  return `#!/usr/bin/env node
-const fs = require("node:fs");
-const path = require("node:path");
-const args = process.argv.slice(2);
-const log = process.env.FAKE_KANACHE_LOG;
-fs.appendFileSync(log, JSON.stringify({ command: "kanache", args }) + "\\n");
-
-if (args[0] === "warm") {
-  const donor = args[1];
-  const destination = args[2];
-  const manifest = JSON.parse(fs.readFileSync(
-    path.join(donor, ".build", "cargo-build", ".kanache-manifest.json"),
-    "utf8"
-  ));
-  const requestedExclusions = [];
-  for (let index = 3; index < args.length; index += 1) {
-    if (args[index] === "--exclude-rust-input-root") {
-      requestedExclusions.push(args[index + 1]);
-    }
-  }
-  const recordedExclusions = manifest.rust_build_input_exclusions || [];
-  if (JSON.stringify(requestedExclusions) !== JSON.stringify(recordedExclusions)) {
-    process.stderr.write("Rust build-input exclusions mismatch\\n");
-    process.exit(28);
-  }
-  const refused = new Set((process.env.FAKE_KANACHE_REFUSE || "").split(path.delimiter));
-  if (refused.has(donor)) {
-    process.stderr.write("configured donor refusal\\n");
-    process.exit(23);
-  }
-  const expectedRustHash = process.env.FAKE_KANACHE_DESTINATION_RUST_HASH;
-  if (expectedRustHash) {
-    if (manifest.rust_build_inputs_blake3 !== expectedRustHash) {
-      process.stderr.write("Rust build-input hash mismatch\\n");
-      process.exit(27);
-    }
-  }
-  const buildRoot = path.join(destination, ".build", "cargo-build");
-  if (fs.existsSync(buildRoot)) {
-    process.stderr.write("destination already exists\\n");
-    process.exit(24);
-  }
-  fs.mkdirSync(buildRoot, { recursive: true });
-  fs.copyFileSync(
-    path.join(donor, ".build", "cargo-build", ".kanache-manifest.json"),
-    path.join(buildRoot, ".kanache-manifest.json")
-  );
-  fs.writeFileSync(path.join(buildRoot, "published-from"), donor + "\\n");
-  process.stdout.write("warmed files=1 elapsed_ms=1\\n");
-  process.exit(0);
-}
-
-if (args[0] === "manifest" && args[1] === "begin") {
-  const marker = path.join(args[2], ".build", "cargo-build", ".kanache-success");
-  if (fs.existsSync(marker)) {
-    process.stderr.write("begin observed stale success marker\\n");
-    process.exit(25);
-  }
-  process.exit(0);
-}
-
-if (args[0] === "manifest" && args[1] === "record") {
-  const repo = args[2];
-  const targets = [];
-  const exclusions = [];
-  for (let index = 3; index < args.length; index += 1) {
-    if (args[index] === "--target") targets.push(args[index + 1]);
-    if (args[index] === "--exclude-rust-input-root") exclusions.push(args[index + 1]);
-  }
-  const buildRoot = path.join(repo, ".build", "cargo-build");
-  fs.mkdirSync(buildRoot, { recursive: true });
-  fs.writeFileSync(
-    path.join(buildRoot, ".kanache-manifest.json"),
-    JSON.stringify({
-      profiles: ["dev"],
-      targets,
-      extra_inputs: [],
-      rust_build_input_exclusions: exclusions,
-      created_unix_nanos: Date.now() * 1000000
-    })
-  );
-  fs.writeFileSync(path.join(buildRoot, ".kanache-success"), "recorded\\n");
-  process.exit(0);
-}
-
-process.stderr.write("unsupported fake Kanache invocation: " + args.join(" ") + "\\n");
-process.exit(26);
-`;
-}
-
-async function createFixture(): Promise<IntegrationFixture> {
-  const root = mkdtempSync(join(tmpdir(), "kd-kanache-integration-"));
-  roots.push(root);
-  const repo = join(root, "repo");
-  const home = join(root, "home");
-  const log = join(root, "processes.jsonl");
-  mkdirSync(repo, { recursive: true });
-
-  await run("git", ["init", "-b", "main"], { cwd: repo });
-  await run("git", ["config", "user.email", "kd-tests@kanna.build"], { cwd: repo });
-  await run("git", ["config", "user.name", "Kanna kd tests"], { cwd: repo });
-  writeFileSync(join(repo, ".gitignore"), ".build/\n");
-  writeFileSync(join(repo, "fixture.txt"), "first\n");
-  await run("git", ["add", "."], { cwd: repo });
-  await run("git", ["commit", "-m", "fixture base"], { cwd: repo });
-  writeFileSync(join(repo, "fixture.txt"), "second\n");
-  await run("git", ["add", "."], { cwd: repo });
-  await run("git", ["commit", "-m", "fixture head"], { cwd: repo });
-
-  const head = await run("git", ["rev-parse", "HEAD"], { cwd: repo });
-  const rustc = await run("rustc", ["-vV"], { cwd: repo });
-  const hostTarget = rustc
-    .split("\n")
-    .find((line) => line.startsWith("host: "))
-    ?.slice("host: ".length);
-  if (!hostTarget) throw new Error("rustc -vV did not report a host target");
-
-  const binary = resolveKanachePaths(home).binary;
+/**
+ * Stands in for the pinned kache binary: records the environment Cargo handed
+ * the wrapper, then execs the real rustc so the build still succeeds.
+ */
+function installWrapperProbe(homeDir: string, log: string): string {
+  const binary = resolveKachePaths(homeDir).binary;
   mkdirSync(dirname(binary), { recursive: true });
-  writeFileSync(binary, fakeKanacheSource());
-  chmodSync(binary, 0o755);
-  const env = {
-    ...process.env,
-    CI: "",
-    KANNA_RUST_CACHE: "on",
-    FAKE_KANACHE_LOG: log
-  };
-
-  return {
-    root,
-    repo,
-    home,
-    log,
-    head,
-    hostTarget,
-    env,
-    cache: {
-      repoRoot: repo,
-      homeDir: home,
-      env,
-      runner: nodeCommandRunner,
-      commit: head,
-      platform: "darwin"
-    }
-  };
-}
-
-async function addWorktree(
-  fixture: IntegrationFixture,
-  name: string,
-  revision = fixture.head
-): Promise<string> {
-  const path = join(fixture.root, name);
-  await run("git", ["worktree", "add", "--detach", path, revision], {
-    cwd: fixture.repo
-  });
-  return path;
-}
-
-function writeDonor(
-  fixture: IntegrationFixture,
-  path: string,
-  createdUnixNanos: number,
-  rustBuildInputsBlake3?: string,
-  includeExclusions = true
-): void {
-  const buildRoot = join(path, ".build", "cargo-build");
-  mkdirSync(buildRoot, { recursive: true });
   writeFileSync(
-    join(buildRoot, ".kanache-manifest.json"),
-    JSON.stringify({
-      profiles: ["dev"],
-      targets: ["host", fixture.hostTarget],
-      extra_inputs: [],
-      ...(rustBuildInputsBlake3 ? { rust_build_inputs_blake3: rustBuildInputsBlake3 } : {}),
-      ...(includeExclusions
-        ? { rust_build_input_exclusions: ["apps/desktop/src-tauri/binaries"] }
-        : {}),
-      created_unix_nanos: createdUnixNanos
-    })
+    binary,
+    `#!/usr/bin/env node
+const { appendFileSync } = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const [rustc, ...args] = process.argv.slice(2);
+appendFileSync(${JSON.stringify(log)}, JSON.stringify({
+  cacheDir: process.env.KACHE_CACHE_DIR,
+  localOnly: process.env.KACHE_LOCAL_ONLY,
+  cacheExecutables: process.env.KACHE_CACHE_EXECUTABLES,
+  verifyRestores: process.env.KACHE_VERIFY_RESTORES,
+  maxSize: process.env.KACHE_MAX_SIZE,
+  cargoIncremental: process.env.CARGO_INCREMENTAL,
+  incrementalFlag: args.some((value) => value.startsWith("incremental=")),
+}) + "\\n");
+const result = spawnSync(rustc, args, { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`,
+    { mode: 0o755 }
   );
-  writeFileSync(join(buildRoot, ".kanache-success"), "eligible\n");
+  chmodSync(binary, 0o755);
+  return binary;
 }
 
-function readProcessLog(fixture: IntegrationFixture): Array<{
-  command: string;
-  args: string[];
-}> {
-  if (!existsSync(fixture.log)) return [];
-  return readFileSync(fixture.log, "utf8")
-    .trim()
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as { command: string; args: string[] });
+interface Fixture {
+  root: string;
+  repoRoot: string;
+  homeDir: string;
+  log: string;
 }
 
-describeMac("Kanache Git worktree integration", () => {
-  it("uses exact-HEAD donors from the same repository and falls back after refusal", async () => {
-    const fixture = await createFixture();
-    const refused = await addWorktree(fixture, "refused");
-    const accepted = await addWorktree(fixture, "accepted");
-    const wrongHead = await addWorktree(fixture, "wrong-head", "HEAD^");
-    const foreignCandidate = await addWorktree(fixture, "foreign-candidate");
-    for (const [path, created] of [
-      [foreignCandidate, 40],
-      [wrongHead, 35],
-      [refused, 30],
-      [accepted, 20]
-    ] as const) {
-      writeDonor(fixture, path, created);
-    }
-
-    const foreignRepo = join(fixture.root, "foreign-repo");
-    await run("git", ["clone", "--no-local", fixture.repo, foreignRepo], {
-      cwd: fixture.root
-    });
-    writeFileSync(join(foreignCandidate, ".git"), `gitdir: ${join(foreignRepo, ".git")}\n`);
-
-    const canonicalRefused = realpathSync(refused);
-    const canonicalAccepted = realpathSync(accepted);
-    const canonicalWrongHead = realpathSync(wrongHead);
-    const canonicalForeignCandidate = realpathSync(foreignCandidate);
-
-    const result = await warmRustCache({
-      ...fixture.cache,
-      env: {
-        ...fixture.env,
-        FAKE_KANACHE_REFUSE: canonicalRefused
-      }
-    });
-
-    expect(result.category).toBe("warmed");
-    expect(result).toMatchObject({
-      ok: true,
-      outcome: "hit",
-      donor: canonicalAccepted,
-      matchingMode: "head"
-    });
-    expect(readFileSync(join(fixture.repo, ".build/cargo-build/published-from"), "utf8").trim())
-      .toBe(canonicalAccepted);
-    const warmDonors = readProcessLog(fixture)
-      .filter((entry) => entry.args[0] === "warm")
-      .map((entry) => entry.args[1]);
-    expect(warmDonors).toEqual([canonicalRefused, canonicalAccepted]);
-    expect(warmDonors).not.toContain(canonicalWrongHead);
-    expect(warmDonors).not.toContain(canonicalForeignCandidate);
-    for (const entry of readProcessLog(fixture).filter((entry) => entry.args[0] === "warm")) {
-      expect(entry.args).toContain("--exclude-rust-input-root");
-      expect(entry.args).toContain("apps/desktop/src-tauri/binaries");
-    }
-  });
-
-  it("warms a true legacy exact-HEAD donor without requested exclusions", async () => {
-    const fixture = await createFixture();
-    const legacy = await addWorktree(fixture, "legacy-exact-head");
-    writeDonor(fixture, legacy, 10, undefined, false);
-
-    const canonicalLegacy = realpathSync(legacy);
-    const result = await warmRustCache(fixture.cache);
-
-    expect(result).toMatchObject({
-      ok: true,
-      outcome: "hit",
-      donor: canonicalLegacy,
-      matchingMode: "head"
-    });
-    const warm = readProcessLog(fixture).find((entry) => entry.args[0] === "warm");
-    expect(warm?.args[1]).toBe(canonicalLegacy);
-    expect(warm?.args).not.toContain("--exclude-rust-input-root");
-  });
-
-  it("offers a different-HEAD hash donor and excludes a different-HEAD legacy donor", async () => {
-    const fixture = await createFixture();
-    const hashed = await addWorktree(fixture, "hashed", "HEAD^");
-    const legacy = await addWorktree(fixture, "legacy", "HEAD^");
-    writeDonor(fixture, hashed, 20, "same-rust-inputs");
-    writeDonor(fixture, legacy, 10, undefined, false);
-
-    const canonicalHashed = realpathSync(hashed);
-    const canonicalLegacy = realpathSync(legacy);
-    const result = await warmRustCache({
-      ...fixture.cache,
-      env: {
-        ...fixture.env,
-        FAKE_KANACHE_DESTINATION_RUST_HASH: "same-rust-inputs"
-      }
-    });
-
-    expect(result).toMatchObject({
-      ok: true,
-      outcome: "hit",
-      donor: canonicalHashed,
-      matchingMode: "input-hash"
-    });
-    const warmDonors = readProcessLog(fixture)
-      .filter((entry) => entry.args[0] === "warm")
-      .map((entry) => entry.args[1]);
-    expect(warmDonors).toEqual([canonicalHashed]);
-    expect(warmDonors).not.toContain(canonicalLegacy);
-    expect(readFileSync(resolveKanachePaths(fixture.home).events, "utf8")).toContain(
-      '"matchingMode":"input-hash"'
-    );
-  });
-
-  it("does not invoke Kanache or delete an existing destination", async () => {
-    const fixture = await createFixture();
-    const donor = await addWorktree(fixture, "donor");
-    writeDonor(fixture, donor, 10);
-    const keep = join(fixture.repo, ".build", "cargo-build", "keep");
-    mkdirSync(dirname(keep), { recursive: true });
-    writeFileSync(keep, "private destination\n");
-
-    const result = await warmRustCache(fixture.cache);
-
-    expect(result).toMatchObject({ outcome: "miss", category: "destination-exists" });
-    expect(readFileSync(keep, "utf8")).toBe("private destination\n");
-    expect(readProcessLog(fixture)).toEqual([]);
-  });
-
-  it("wires begin, a real build process, and record around donor publication", async () => {
-    const fixture = await createFixture();
-    const marker = join(fixture.repo, ".build", "cargo-build", ".kanache-success");
-    mkdirSync(dirname(marker), { recursive: true });
-    writeFileSync(marker, "stale\n");
-
-    const result = await withRustCacheBuild(
-      fixture.cache,
-      "all",
-      async () => {
-        const build = await nodeCommandRunner.run(
-          process.execPath,
-          [
-            "-e",
-            `const fs=require("node:fs");fs.appendFileSync(process.env.FAKE_KANACHE_LOG, JSON.stringify({command:"build",args:[]})+"\\n");fs.mkdirSync(".build/cargo-build",{recursive:true});fs.writeFileSync(".build/cargo-build/build-output","built\\n");`
-          ],
-          { cwd: fixture.repo, env: fixture.env }
-        );
-        return build;
-      },
-      (build) => build.exitCode === 0
-    );
-
-    expect(result.exitCode).toBe(0);
-    expect(readProcessLog(fixture).map((entry) => entry.command + " " + entry.args.slice(0, 2).join(" ")))
-      .toEqual([
-        `kanache manifest begin`,
-        "build ",
-        `kanache manifest record`
-      ]);
-    expect(existsSync(marker)).toBe(true);
-    expect(
-      JSON.parse(
-        readFileSync(join(fixture.repo, ".build/cargo-build/.kanache-manifest.json"), "utf8")
-      )
-    ).toMatchObject({
-      profiles: ["dev"],
-      targets: expect.arrayContaining(["host", fixture.hostTarget]),
-      rust_build_input_exclusions: ["apps/desktop/src-tauri/binaries"]
-    });
-    expect(readFileSync(join(fixture.repo, ".build/cargo-build/build-output"), "utf8"))
-      .toBe("built\n");
-  });
-});
-
-it.skipIf(
-  process.platform !== "darwin" || process.env.KANNA_REAL_KANACHE_ACCEPTANCE !== "1"
-)("warms a real Cargo sibling with the pinned Kanache revision", async () => {
-  const root = mkdtempSync(join(tmpdir(), "kd-kanache-acceptance-"));
+async function fixture(): Promise<Fixture> {
+  const root = mkdtempSync(join(tmpdir(), "kd-kache-integration-"));
   roots.push(root);
-  const repo = join(root, "repo");
-  const home = join(root, "home");
-  mkdirSync(join(repo, "native", "src"), { recursive: true });
-  mkdirSync(join(repo, ".cargo"), { recursive: true });
-  await run("git", ["init", "-b", "main"], { cwd: repo });
-  await run("git", ["config", "user.email", "kd-tests@kanna.build"], { cwd: repo });
-  await run("git", ["config", "user.name", "Kanna kd tests"], { cwd: repo });
-  writeFileSync(join(repo, ".gitignore"), ".build/\n");
+  const repoRoot = join(root, "repo");
+  const homeDir = join(root, "home");
+  mkdirSync(join(repoRoot, "src"), { recursive: true });
+  mkdirSync(join(repoRoot, ".cargo"), { recursive: true });
   writeFileSync(
-    join(repo, ".cargo", "config.toml"),
+    join(repoRoot, "Cargo.toml"),
+    '[package]\nname = "kd-kache-probe"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n'
+  );
+  writeFileSync(join(repoRoot, "src", "lib.rs"), "pub fn probe() -> u32 { 1 }\n");
+  // Kanna's real Cargo layout: private final artifacts, private intermediates.
+  writeFileSync(
+    join(repoRoot, ".cargo", "config.toml"),
     '[build]\ntarget-dir = ".build"\nbuild-dir = ".build/cargo-build"\n'
   );
+  await run("git", ["init", "--quiet", repoRoot]);
+  const log = join(root, "wrapper.jsonl");
+  writeFileSync(log, "");
+  return { root, repoRoot, homeDir, log };
+}
+
+describeMac("kache Cargo wiring", () => {
+  it("routes every rustc invocation through the pinned wrapper with Kanna's store settings", async () => {
+    const { repoRoot, homeDir, log } = await fixture();
+    const binary = installWrapperProbe(homeDir, log);
+
+    const cache = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { ...isolatedCargoEnv(), KANNA_RUST_CACHE: "on", CI: "" },
+      platform: "darwin",
+      arch: process.arch
+    });
+    expect(cache.state.active).toBe(true);
+
+    await run("cargo", ["build"], { cwd: repoRoot, env: cache.env });
+
+    const invocations = readFileSync(log, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(invocations.length).toBeGreaterThan(0);
+    for (const invocation of invocations) {
+      expect(invocation.cacheDir).toBe(
+        join(homeDir, "Library", "Caches", "kanna", "rust-kache", repositoryIdentity(repoRoot))
+      );
+      expect(invocation.localOnly).toBe("1");
+      expect(invocation.cacheExecutables).toBe("0");
+      expect(invocation.verifyRestores).toBe("always");
+      expect(invocation.maxSize).toBe("10GiB");
+      expect(invocation.cargoIncremental).toBe("0");
+      // Hermetic compilation: Cargo must never ask rustc for incremental state.
+      expect(invocation.incrementalFlag).toBe(false);
+    }
+
+    expect(cache.env.RUSTC_WRAPPER).toBe(binary);
+    // Cargo still creates the layout directory; it must stay empty, because
+    // incremental state is the disk cost hermetic caching trades away.
+    const incremental = join(repoRoot, ".build", "cargo-build", "debug", "incremental");
+    expect(existsSync(incremental) ? readdirSync(incremental) : []).toEqual([]);
+    expect(existsSync(join(repoRoot, ".build", "debug", "libkd_kache_probe.rlib"))).toBe(true);
+  }, 120_000);
+
+  it("builds directly against rustc when the cache is opted out", async () => {
+    const { repoRoot, homeDir, log } = await fixture();
+    installWrapperProbe(homeDir, log);
+
+    const cache = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { ...isolatedCargoEnv(), KANNA_RUST_CACHE: "off" },
+      platform: "darwin",
+      arch: process.arch
+    });
+    expect(cache.state.active).toBe(false);
+    expect(cache.env.RUSTC_WRAPPER).toBeUndefined();
+
+    await run("cargo", ["build"], { cwd: repoRoot, env: cache.env });
+    expect(readFileSync(log, "utf8")).toBe("");
+  }, 120_000);
+
+  it("gives sibling worktrees of one repository the same store", async () => {
+    const { root, repoRoot } = await fixture();
+    const worktree = join(root, "worktrees", "task-a");
+    mkdirSync(dirname(worktree), { recursive: true });
+    await run("git", ["-C", repoRoot, "add", "."]);
+    await run("git", ["-C", repoRoot, "-c", "user.email=kd@kanna", "-c", "user.name=kd", "commit", "--quiet", "-m", "probe"]);
+    await run("git", ["-C", repoRoot, "worktree", "add", "--quiet", "-b", "task-a", worktree]);
+
+    expect(repositoryIdentity(worktree)).toBe(repositoryIdentity(repoRoot));
+  }, 120_000);
+
+  it("strips the wrapper from the release environment", async () => {
+    const { repoRoot, homeDir, log } = await fixture();
+    installWrapperProbe(homeDir, log);
+
+    const cache = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: {
+        PATH: process.env.PATH ?? "",
+        KANNA_RUST_CACHE: "on",
+        KACHE_S3_BUCKET: "inherited"
+      },
+      platform: "darwin",
+      arch: process.arch
+    });
+    expect(cache.state.active).toBe(true);
+
+    const releaseEnv = await loadReleaseEnvironment({
+      repoRoot,
+      homeDir,
+      env: cache.env,
+      runner: nodeCommandRunner
+    });
+    expect(releaseEnv.RUSTC_WRAPPER).toBeUndefined();
+    expect(releaseEnv.RUSTC_WORKSPACE_WRAPPER).toBeUndefined();
+    expect(releaseEnv.CARGO_INCREMENTAL).toBeUndefined();
+    expect(Object.keys(releaseEnv).some((key) => key.startsWith("KACHE_"))).toBe(false);
+    expect(releaseEnv.PATH).toBe(process.env.PATH);
+  }, 120_000);
+});
+
+/**
+ * A two-crate workspace shaped like the incident: `defaults` gains a `session_id`
+ * module at revision 2, and `consumer` re-exports it, so a `defaults` rlib built
+ * from revision 1 makes `consumer` fail to compile with E0432 — exactly how the
+ * stale restore surfaced in `./kd test all`.
+ */
+async function twoRevisionFixture(): Promise<Fixture> {
+  const root = mkdtempSync(join(tmpdir(), "kd-kache-revision-"));
+  roots.push(root);
+  const repoRoot = join(root, "repo");
+  const homeDir = join(root, "home");
+  for (const crate of ["defaults", "consumer"]) {
+    mkdirSync(join(repoRoot, crate, "src"), { recursive: true });
+  }
+  mkdirSync(join(repoRoot, ".cargo"), { recursive: true });
   writeFileSync(
-    join(repo, "Cargo.toml"),
-    '[workspace]\nmembers = ["native"]\nresolver = "3"\n'
+    join(repoRoot, "Cargo.toml"),
+    '[workspace]\nmembers = ["defaults", "consumer"]\nresolver = "2"\n'
   );
   writeFileSync(
-    join(repo, "native", "Cargo.toml"),
-    '[package]\nname = "kanache-acceptance"\nversion = "0.1.0"\nedition = "2024"\n'
+    join(repoRoot, "defaults", "Cargo.toml"),
+    '[package]\nname = "kd-probe-defaults"\nversion = "0.1.0"\nedition = "2021"\n'
   );
   writeFileSync(
-    join(repo, "native", "src", "main.rs"),
-    'fn main() { println!("real pinned Kanache acceptance"); }\n'
+    join(repoRoot, "consumer", "Cargo.toml"),
+    '[package]\nname = "kd-probe-consumer"\nversion = "0.1.0"\nedition = "2021"\n\n' +
+      '[dependencies]\nkd-probe-defaults = { path = "../defaults" }\n'
   );
-  await run("cargo", ["generate-lockfile"], { cwd: repo });
-  await run("git", ["add", "."], { cwd: repo });
-  await run("git", ["commit", "-m", "acceptance fixture"], { cwd: repo });
-  const head = await run("git", ["rev-parse", "HEAD"], { cwd: repo });
-  const rustc = await run("rustc", ["-vV"], { cwd: repo });
-  const hostTarget = rustc
-    .split("\n")
-    .find((line) => line.startsWith("host: "))
-    ?.slice("host: ".length);
-  if (!hostTarget) throw new Error("rustc -vV did not report a host target");
-  const env = { ...process.env, KANNA_RUST_CACHE: "on" };
-  const donorCache: RustCacheRuntimeInput = {
-    repoRoot: repo,
-    homeDir: home,
-    env,
-    runner: nodeCommandRunner,
-    commit: head
-  };
+  writeFileSync(
+    join(repoRoot, ".cargo", "config.toml"),
+    '[build]\ntarget-dir = ".build"\nbuild-dir = ".build/cargo-build"\n'
+  );
+  await run("git", ["init", "--quiet", repoRoot]);
+  const log = join(root, "wrapper.jsonl");
+  writeFileSync(log, "");
+  return { root, repoRoot, homeDir, log };
+}
 
-  const legacyRoot = join(root, "legacy-kanache");
-  await run(
-    "cargo",
-    [
-      "install",
-      "--git",
-      KANACHE_REPOSITORY,
-      "--rev",
-      LEGACY_KANACHE_REVISION,
-      "--locked",
-      "--root",
-      legacyRoot
-    ],
-    { cwd: repo, env }
+function writeRevision(repoRoot: string, revision: 1 | 2): void {
+  if (revision === 1) {
+    writeFileSync(join(repoRoot, "defaults", "src", "lib.rs"), "pub fn base() -> u32 { 1 }\n");
+    writeFileSync(
+      join(repoRoot, "consumer", "src", "lib.rs"),
+      "pub fn use_base() -> u32 { kd_probe_defaults::base() }\n"
+    );
+    return;
+  }
+  writeFileSync(
+    join(repoRoot, "defaults", "src", "session_id.rs"),
+    "pub fn validate(id: &str) -> bool { !id.is_empty() }\n"
   );
-  const legacyBinary = join(legacyRoot, "bin", "kanache");
-  await run("cargo", ["build"], { cwd: repo, env });
-  await run("cargo", ["build", "--target", hostTarget], { cwd: repo, env });
-  await run(
-    legacyBinary,
-    [
-      "manifest",
-      "record",
-      repo,
-      "--profile",
-      "dev",
-      "--target",
-      "host",
-      "--target",
-      hostTarget
-    ],
-    { cwd: repo, env }
+  writeFileSync(
+    join(repoRoot, "defaults", "src", "lib.rs"),
+    "pub mod session_id;\npub fn base() -> u32 { 1 }\n"
   );
-  const legacyManifest = JSON.parse(
-    readFileSync(join(repo, ".build/cargo-build/.kanache-manifest.json"), "utf8")
-  ) as Record<string, unknown>;
-  expect(legacyManifest).not.toHaveProperty("rust_build_inputs_blake3");
-  expect(legacyManifest).not.toHaveProperty("rust_build_input_exclusions");
+  writeFileSync(
+    join(repoRoot, "consumer", "src", "lib.rs"),
+    "pub use kd_probe_defaults::session_id;\n"
+  );
+}
 
-  const exactHeadSibling = join(root, "exact-head-sibling");
-  await run("git", ["worktree", "add", "--detach", exactHeadSibling, head], { cwd: repo });
-  const legacyWarm = await warmRustCache({ ...donorCache, repoRoot: exactHeadSibling });
-  expect(legacyWarm).toMatchObject({
-    outcome: "hit",
-    category: "warmed",
-    matchingMode: "head"
+/**
+ * Stands in for a cache that mis-selects a key: after each `defaults` compile it
+ * overwrites the fresh outputs with the recorded revision-1 ones. Both `.rmeta`
+ * and `.rlib` are replaced, because rustc resolves imports from the metadata —
+ * restoring only the archive is invisible to a normal build, which is why the
+ * real incident surfaced in rustdoc, where the rlib is linked directly.
+ */
+function installStaleRestoringCache(homeDir: string, log: string, staleDir: string): string {
+  const binary = resolveKachePaths(homeDir).binary;
+  mkdirSync(dirname(binary), { recursive: true });
+  writeFileSync(
+    binary,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const [rustc, ...args] = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, "invoked\\n");
+const result = spawnSync(rustc, args, { stdio: "inherit" });
+const outIndex = args.indexOf("--out-dir");
+if (outIndex !== -1) {
+  const outDir = args[outIndex + 1];
+  for (const stale of fs.readdirSync(${JSON.stringify(staleDir)})) {
+    for (const produced of fs.readdirSync(outDir)) {
+      const sameKind = produced.endsWith(path.extname(stale));
+      if (sameKind && produced.startsWith("libkd_probe_defaults")) {
+        fs.copyFileSync(path.join(${JSON.stringify(staleDir)}, stale), path.join(outDir, produced));
+      }
+    }
+  }
+}
+process.exit(result.status ?? 1);
+`,
+    { mode: 0o755 }
+  );
+  chmodSync(binary, 0o755);
+  return binary;
+}
+
+describeMac("fixture builds stay out of the real repository's build directory", () => {
+  it("strips inherited Cargo build/target directories", () => {
+    const isolated = isolatedCargoEnv({
+      PATH: "/usr/bin",
+      CARGO_BUILD_BUILD_DIR: "/repo/.build/cargo-build",
+      CARGO_BUILD_TARGET_DIR: "/repo/.build",
+      CARGO_TARGET_DIR: "/repo/.build"
+    });
+    expect(isolated).toEqual({ PATH: "/usr/bin" });
   });
-  expect(existsSync(join(exactHeadSibling, ".build/cargo-build"))).toBe(true);
 
-  const donorBuild = await withRustCacheBuild(
-    donorCache,
-    "all",
-    async () => {
-      const implicit = await nodeCommandRunner.run("cargo", ["build"], { cwd: repo, env });
-      if (implicit.exitCode !== 0) return implicit;
-      return nodeCommandRunner.run("cargo", ["build", "--target", hostTarget], {
-        cwd: repo,
-        env
-      });
-    },
-    (result) => result.exitCode === 0
-  );
-  expect(donorBuild.exitCode, donorBuild.stderr).toBe(0);
-  expect(existsSync(join(repo, ".build/cargo-build/.kanache-success"))).toBe(true);
+  it("compiles a fixture into the fixture's own build directory", async () => {
+    const { repoRoot } = await fixture();
+    // Simulates `./kd test all`, where vitest inherits kd's worktree env. If the
+    // fixture honoured that, two unrelated source roots would share one Cargo
+    // fingerprint tree and the real repository could be handed a stale artifact.
+    const inherited = {
+      ...isolatedCargoEnv(),
+      CARGO_BUILD_BUILD_DIR: "/nonexistent/shared/cargo-build"
+    };
+    const metadata = JSON.parse(
+      await run("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
+        cwd: repoRoot,
+        env: isolatedCargoEnv(inherited)
+      })
+    ) as { build_directory?: string; target_directory?: string };
 
-  const sibling = join(root, "sibling");
-  await run("git", ["worktree", "add", "--detach", sibling, head], { cwd: repo });
-  writeFileSync(join(sibling, "web.ts"), "export const nonRustChange = true;\n");
-  await run("git", ["add", "web.ts"], { cwd: sibling });
-  await run("git", ["commit", "-m", "non-Rust-only change"], { cwd: sibling });
-  const warm = await warmRustCache({ ...donorCache, repoRoot: sibling });
-  expect(warm).toMatchObject({
-    outcome: "hit",
-    category: "warmed",
-    matchingMode: "input-hash"
-  });
-  const siblingImplicitBuild = await nodeCommandRunner.run("cargo", ["build"], {
-    cwd: sibling,
-    env
-  });
-  expect(siblingImplicitBuild.exitCode, siblingImplicitBuild.stderr).toBe(0);
-  const siblingExplicitBuild = await nodeCommandRunner.run(
-    "cargo",
-    ["build", "--target", hostTarget],
-    { cwd: sibling, env }
-  );
-  expect(siblingExplicitBuild.exitCode, siblingExplicitBuild.stderr).toBe(0);
+    expect(metadata.build_directory ?? "").toContain(repoRoot);
+    expect(metadata.target_directory ?? "").toContain(repoRoot);
+  }, 120_000);
+});
 
-  const donorBinary = join(repo, ".build", "debug", "kanache-acceptance");
-  const siblingBinary = join(sibling, ".build", "debug", "kanache-acceptance");
-  expect(existsSync(donorBinary)).toBe(true);
-  expect(existsSync(siblingBinary)).toBe(true);
-  expect(statSync(donorBinary).ino).not.toBe(statSync(siblingBinary).ino);
-}, 600_000);
+describeMac("stale-revision restores cannot reach a default build", () => {
+  it("does not restore a revision-1 artifact into a revision-2 build", async () => {
+    const { root, repoRoot, homeDir, log } = await twoRevisionFixture();
+
+    // Record a real revision-1 rlib, then poison the cache with it.
+    writeRevision(repoRoot, 1);
+    await run("cargo", ["build", "-p", "kd-probe-defaults"], {
+      cwd: repoRoot,
+      env: isolatedCargoEnv()
+    });
+    const depsDir = join(repoRoot, ".build", "cargo-build", "debug", "deps");
+    const staleDir = join(root, "stale");
+    mkdirSync(staleDir, { recursive: true });
+    const recorded = readdirSync(depsDir).filter(
+      (f) => f.startsWith("libkd_probe_defaults") && (f.endsWith(".rlib") || f.endsWith(".rmeta"))
+    );
+    expect(recorded.length).toBeGreaterThan(0);
+    for (const file of recorded) {
+      writeFileSync(join(staleDir, file), readFileSync(join(depsDir, file)));
+    }
+    installStaleRestoringCache(homeDir, log, staleDir);
+
+    // Advance the sources, then build the way a developer actually does.
+    writeRevision(repoRoot, 2);
+    rmSync(join(repoRoot, ".build", "cargo-build"), { recursive: true, force: true });
+
+    const cache = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { ...isolatedCargoEnv(), CI: "" },
+      platform: "darwin",
+      arch: process.arch
+    });
+
+    // Build first, so that a regression is demonstrated by its consequence and
+    // not merely by a policy assertion: if the default ever reaches the cache
+    // again, this build fails with `E0432: unresolved import ...session_id`,
+    // exactly as `./kd test all` did.
+    await run("cargo", ["build", "-p", "kd-probe-consumer"], { cwd: repoRoot, env: cache.env });
+
+    // Opt-in only: kache 0.12.0 can mis-select a key, so the default resolution
+    // must not reach the cache at all.
+    expect(cache.state).toMatchObject({ active: false, category: "disabled-by-default" });
+    expect(readFileSync(log, "utf8")).toBe("");
+    const rebuilt = readdirSync(join(repoRoot, ".build", "cargo-build", "debug", "deps")).find(
+      (f) => f.startsWith("libkd_probe_defaults") && f.endsWith(".rlib")
+    );
+    expect(rebuilt).toBeDefined();
+  }, 180_000);
+
+  it("opting out of an inherited active environment restores incremental compilation", async () => {
+    const { repoRoot, homeDir, log } = await twoRevisionFixture();
+    writeRevision(repoRoot, 2);
+    installWrapperProbe(homeDir, log);
+
+    const active = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { ...isolatedCargoEnv(), KANNA_RUST_CACHE: "on", CI: "" },
+      platform: "darwin",
+      arch: process.arch
+    });
+    expect(active.state.active).toBe(true);
+
+    // A kd-spawned shell inherits `active.env`; opting out inside it must undo
+    // the wrapper and restore Cargo's own incremental compilation.
+    const optedOut = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { ...active.env, KANNA_RUST_CACHE: "off" },
+      platform: "darwin",
+      arch: process.arch
+    });
+    expect(optedOut.state).toMatchObject({ active: false, category: "disabled" });
+
+    await run("cargo", ["build", "-p", "kd-probe-consumer"], { cwd: repoRoot, env: optedOut.env });
+
+    expect(readFileSync(log, "utf8")).toBe("");
+    const incremental = join(repoRoot, ".build", "cargo-build", "debug", "incremental");
+    expect(existsSync(incremental)).toBe(true);
+    expect(readdirSync(incremental).length).toBeGreaterThan(0);
+  }, 180_000);
+});

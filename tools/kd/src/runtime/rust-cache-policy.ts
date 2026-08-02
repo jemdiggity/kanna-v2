@@ -1,49 +1,102 @@
 import { join } from "node:path";
 
-export const KANACHE_REPOSITORY = "https://github.com/jemdiggity/kanache";
-export const KANACHE_REVISION = "a8496326bc0a3551d3a2d78caa425ed474e816ae";
-export const KANACHE_PROFILE = "dev";
-export const KANACHE_RUST_INPUT_EXCLUSIONS = [
-  "apps/desktop/src-tauri/binaries"
+export const KACHE_VERSION = "0.12.0";
+export const KACHE_RELEASE_BASE_URL = "https://github.com/kunobi-ninja/kache/releases/download";
+
+/**
+ * Pinned per-architecture release assets. Kanna never discovers a cache binary
+ * from PATH and never bootstraps one on a release critical path: the exact
+ * archive and its SHA-256 are committed here so an unexpected upstream change
+ * fails the checksum instead of silently entering the compiler.
+ */
+export interface KacheArtifact {
+  target: string;
+  asset: string;
+  sha256: string;
+}
+
+export const KACHE_ARTIFACTS: Record<string, KacheArtifact> = {
+  arm64: {
+    target: "aarch64-apple-darwin",
+    asset: "kache-aarch64-apple-darwin.tar.gz",
+    sha256: "a425cfc46792e0c0eec45cde87000709ef8bab99c7980353bc9c7f3ab702503c"
+  },
+  x64: {
+    target: "x86_64-apple-darwin",
+    asset: "kache-x86_64-apple-darwin.tar.gz",
+    sha256: "7e3f6f6e4eb67a68ee4891e1808e6c30e13cc460d8a074a76379019f393eeef1"
+  }
+};
+
+/**
+ * Upstream defaults to 50 GiB, which is too large once Kanna imports several
+ * repositories and each gets its own store.
+ */
+export const KACHE_MAX_SIZE = "10GiB";
+
+/**
+ * Every compiler-wrapper and cache control kd owns.
+ *
+ * Cargo reads the wrapper from four places, and `RUSTC_WORKSPACE_WRAPPER` is
+ * *nested* inside `RUSTC_WRAPPER` rather than overridden by it, so setting only
+ * `RUSTC_WRAPPER` still lets an inherited workspace wrapper run. The
+ * `CARGO_BUILD_*` forms are the environment spelling of `build.rustc-wrapper`
+ * and `build.rustc-workspace-wrapper` and bind just as strongly.
+ *
+ * These are scrubbed before every resolution and before every release
+ * invocation, so a build's compiler wrapper is always exactly what kd decided
+ * and never a leftover from an outer shell or an earlier resolution.
+ */
+export const RUST_CACHE_ENVIRONMENT_KEYS = [
+  "RUSTC_WRAPPER",
+  "RUSTC_WORKSPACE_WRAPPER",
+  "CARGO_BUILD_RUSTC_WRAPPER",
+  "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+  "CARGO_INCREMENTAL"
 ] as const;
 
-export interface KanachePaths {
-  revision: string;
+export interface KachePaths {
+  version: string;
   versionRoot: string;
   binary: string;
-  events: string;
 }
 
-export interface WorktreeEntry {
-  path: string;
-  head: string;
+export function resolveKachePaths(homeDir: string): KachePaths {
+  const versionRoot = join(homeDir, "Library", "Caches", "kanna", "tools", "kache", KACHE_VERSION);
+  return {
+    version: KACHE_VERSION,
+    versionRoot,
+    binary: join(versionRoot, "bin", "kache")
+  };
 }
 
-export interface KanacheManifestSummary {
-  profiles: string[];
-  targets: string[];
-  extraInputs: unknown[];
-  rustBuildInputsBlake3?: string;
-  rustBuildInputExclusions?: string[];
-  createdUnixNanos: number;
+export function resolveKacheArtifact(arch: string): KacheArtifact | undefined {
+  return KACHE_ARTIFACTS[arch];
 }
 
-export type RustCacheMatchingMode = "head" | "input-hash";
-
-export interface DonorCandidate extends WorktreeEntry {
-  manifest: KanacheManifestSummary;
-  matchingMode: RustCacheMatchingMode;
+export function resolveKacheDownloadUrl(artifact: KacheArtifact): string {
+  return `${KACHE_RELEASE_BASE_URL}/v${KACHE_VERSION}/${artifact.asset}`;
 }
 
+/**
+ * One content store per repository. A global store is theoretically safe when
+ * keys are correct, but per-repository scope keeps attribution, capping, and
+ * rollback simple, and stops one imported repository evicting another.
+ */
+export function resolveRustCacheStore(homeDir: string, repositoryId: string): string {
+  return join(homeDir, "Library", "Caches", "kanna", "rust-kache", repositoryId);
+}
+
+/**
+ * Opt-in. See `resolveRustCacheEligibility` for why the default is off.
+ */
 export function parseRustCacheMode(value: string | undefined): {
   enabled: boolean;
   warning?: string;
 } {
   const normalized = value?.trim().toLowerCase();
-  if (!normalized || normalized === "on" || normalized === "kanache") {
-    return { enabled: true };
-  }
-  if (normalized === "off") return { enabled: false };
+  if (normalized === "on" || normalized === "kache") return { enabled: true };
+  if (!normalized || normalized === "off") return { enabled: false };
   return {
     enabled: false,
     warning: `Unknown KANNA_RUST_CACHE value ${JSON.stringify(value)}; cache disabled.`
@@ -54,22 +107,47 @@ export type RustCacheEligibility =
   | { enabled: true }
   | {
       enabled: false;
-      category: "disabled" | "invalid-mode" | "unsupported-platform" | "disabled-in-ci";
+      category:
+        | "disabled"
+        | "disabled-by-default"
+        | "invalid-mode"
+        | "unsupported-platform"
+        | "disabled-in-ci";
       warning?: string;
     };
 
+/**
+ * The cache is OFF unless a developer opts in with `KANNA_RUST_CACHE=on`.
+ *
+ * Not because kache is known bad: an `E0432` failure originally blamed on it was
+ * traced to Kanna's own integration tests compiling fixtures into the
+ * repository's Cargo build directory, and it reproduces with the cache disabled.
+ * That is fixed (see `isolatedCargoEnv` in
+ * `tests/rust-cache.integration.test.ts`).
+ *
+ * It is off because nothing in canonical automation demonstrates that kache's
+ * source-to-key selection is sound — exercising the real pinned binary across
+ * two source revisions needs a network download that `pnpm test` and
+ * `./kd test all` deliberately avoid. Enabling it is a deliberate product call
+ * with a measured trade (96.5% restore rate and 56% less sidecar CPU against a
+ * ~3.5x slower one-line edit), not a default inherited from a misdiagnosis.
+ * See docs/2026-08-02-kache-cache-key-e2e-gap.md.
+ */
 export function resolveRustCacheEligibility(input: {
   mode: string | undefined;
   platform: NodeJS.Platform;
+  arch: string;
   ci: string | undefined;
 }): RustCacheEligibility {
   const mode = parseRustCacheMode(input.mode);
   if (!mode.enabled) {
-    return mode.warning
-      ? { enabled: false, category: "invalid-mode", warning: mode.warning }
-      : { enabled: false, category: "disabled" };
+    if (mode.warning) return { enabled: false, category: "invalid-mode", warning: mode.warning };
+    return {
+      enabled: false,
+      category: input.mode?.trim() ? "disabled" : "disabled-by-default"
+    };
   }
-  if (input.platform !== "darwin") {
+  if (input.platform !== "darwin" || !resolveKacheArtifact(input.arch)) {
     return { enabled: false, category: "unsupported-platform" };
   }
   if (input.ci?.trim()) {
@@ -78,105 +156,45 @@ export function resolveRustCacheEligibility(input: {
   return { enabled: true };
 }
 
-export function resolveKanachePaths(homeDir: string): KanachePaths {
-  const versionRoot = join(
-    homeDir,
-    "Library",
-    "Caches",
-    "kanna",
-    "tools",
-    "kanache",
-    KANACHE_REVISION
+export interface RustCacheEnvironmentInput {
+  binary: string;
+  store: string;
+}
+
+/**
+ * Kache compiles hermetically: it strips `-C incremental` from every invocation
+ * it handles, so Cargo is told the same thing rather than being left to record
+ * incremental fingerprints that rustc never honours.
+ *
+ * `KACHE_VERIFY_RESTORES=always` verifies that a restored blob matches the
+ * digest recorded for the key kache selected. It does NOT verify that the
+ * selected key corresponds to the current sources, which is the boundary that
+ * actually failed — so it is defence in depth behind the opt-in default, never
+ * the reason the cache is safe.
+ */
+export function buildRustCacheEnvironment(input: RustCacheEnvironmentInput): Record<string, string> {
+  return {
+    RUSTC_WRAPPER: input.binary,
+    CARGO_INCREMENTAL: "0",
+    KACHE_CACHE_DIR: input.store,
+    KACHE_LOCAL_ONLY: "1",
+    KACHE_CACHE_EXECUTABLES: "0",
+    KACHE_VERIFY_RESTORES: "always",
+    KACHE_MAX_SIZE
+  };
+}
+
+/**
+ * Removes every Kanna-managed compiler cache variable, plus any `KACHE_*`
+ * inherited from the caller's shell, so a release build cannot be steered by an
+ * ambient wrapper.
+ */
+export function stripRustCacheEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(env).filter(
+      ([key]) =>
+        !key.startsWith("KACHE_") &&
+        !(RUST_CACHE_ENVIRONMENT_KEYS as readonly string[]).includes(key)
+    )
   );
-  return {
-    revision: KANACHE_REVISION,
-    versionRoot,
-    binary: join(versionRoot, "bin", "kanache"),
-    events: join(homeDir, "Library", "Caches", "kanna", "kanache", "events.jsonl")
-  };
-}
-
-export function parseWorktreeList(output: string): WorktreeEntry[] {
-  return output.split(/\n\n+/).flatMap((record) => {
-    const lines = record.split("\n");
-    if (lines.some((line) => line === "bare" || line.startsWith("prunable "))) return [];
-    const path = lines.find((line) => line.startsWith("worktree "))?.slice(9);
-    const head = lines.find((line) => line.startsWith("HEAD "))?.slice(5);
-    return path && head ? [{ path, head }] : [];
-  });
-}
-
-export function parseKanacheManifest(raw: string): KanacheManifestSummary {
-  const value = JSON.parse(raw) as Record<string, unknown>;
-  const profiles = Array.isArray(value.profiles)
-    ? value.profiles.filter((item): item is string => typeof item === "string")
-    : [];
-  const targets = Array.isArray(value.targets)
-    ? value.targets.filter((item): item is string => typeof item === "string")
-    : [];
-  const extraInputs = Array.isArray(value.extra_inputs) ? value.extra_inputs : [];
-  const rustBuildInputsBlake3 =
-    typeof value.rust_build_inputs_blake3 === "string" &&
-    value.rust_build_inputs_blake3.length > 0
-      ? value.rust_build_inputs_blake3
-      : undefined;
-  let rustBuildInputExclusions: string[] | undefined;
-  if ("rust_build_input_exclusions" in value) {
-    if (
-      !Array.isArray(value.rust_build_input_exclusions) ||
-      !value.rust_build_input_exclusions.every(
-        (item): item is string => typeof item === "string" && item.length > 0
-      )
-    ) {
-      throw new Error("Kanache donor has invalid Rust build-input exclusions.");
-    }
-    rustBuildInputExclusions = value.rust_build_input_exclusions;
-  }
-
-  if (profiles.length !== 1 || profiles[0] !== KANACHE_PROFILE) {
-    throw new Error("Kanache donor must contain only profile dev.");
-  }
-  if (
-    targets.length === 0 ||
-    targets.some((target) => target !== "host" && !target.endsWith("-apple-darwin"))
-  ) {
-    throw new Error("Kanache donor has unsupported targets.");
-  }
-  if (extraInputs.length !== 0) {
-    throw new Error("Kanache donor extra inputs are unsupported by the initial Kanna rollout.");
-  }
-
-  const created = Number(value.created_unix_nanos);
-  if (!Number.isFinite(created)) {
-    throw new Error("Kanache donor has no creation timestamp.");
-  }
-
-  return {
-    profiles,
-    targets: [...new Set(targets)].sort(),
-    extraInputs,
-    ...(rustBuildInputsBlake3 ? { rustBuildInputsBlake3 } : {}),
-    ...(rustBuildInputExclusions ? { rustBuildInputExclusions } : {}),
-    createdUnixNanos: created
-  };
-}
-
-function coverage(candidate: DonorCandidate, hostTarget: string): number {
-  const host = candidate.manifest.targets.includes("host");
-  const explicit = candidate.manifest.targets.includes(hostTarget);
-  return host && explicit ? 3 : host ? 2 : explicit ? 1 : 0;
-}
-
-export function rankDonors(
-  candidates: DonorCandidate[],
-  hostTarget: string
-): DonorCandidate[] {
-  return candidates
-    .filter((candidate) => coverage(candidate, hostTarget) > 0)
-    .sort(
-      (left, right) =>
-        coverage(right, hostTarget) - coverage(left, hostTarget) ||
-        right.manifest.createdUnixNanos - left.manifest.createdUnixNanos ||
-        (left.path < right.path ? -1 : left.path > right.path ? 1 : 0)
-    );
 }

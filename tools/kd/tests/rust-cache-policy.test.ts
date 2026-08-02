@@ -1,213 +1,153 @@
 import { describe, expect, it } from "vitest";
 import {
-  KANACHE_REVISION,
-  parseKanacheManifest,
+  KACHE_ARTIFACTS,
+  KACHE_MAX_SIZE,
+  KACHE_VERSION,
+  buildRustCacheEnvironment,
   parseRustCacheMode,
-  parseWorktreeList,
-  rankDonors,
+  resolveKacheArtifact,
+  resolveKacheDownloadUrl,
+  resolveKachePaths,
   resolveRustCacheEligibility,
-  resolveKanachePaths
+  resolveRustCacheStore,
+  stripRustCacheEnvironment
 } from "../src/runtime/rust-cache-policy";
 
-describe("rust cache policy", () => {
-  it("enables Kanache by default and accepts the documented override values", () => {
-    expect(parseRustCacheMode(undefined)).toEqual({ enabled: true });
-    expect(parseRustCacheMode("  ")).toEqual({ enabled: true });
-    expect(parseRustCacheMode("on")).toEqual({ enabled: true });
-    expect(parseRustCacheMode("kanache")).toEqual({ enabled: true });
-    expect(parseRustCacheMode("off")).toEqual({ enabled: false });
-    expect(parseRustCacheMode("mystery")).toEqual({
-      enabled: false,
-      warning: "Unknown KANNA_RUST_CACHE value \"mystery\"; cache disabled."
-    });
+describe("kache tool manifest", () => {
+  it("pins one verified macOS release asset per supported architecture", () => {
+    expect(Object.keys(KACHE_ARTIFACTS).sort()).toEqual(["arm64", "x64"]);
+    for (const [arch, artifact] of Object.entries(KACHE_ARTIFACTS)) {
+      expect(artifact.asset).toBe(`kache-${artifact.target}.tar.gz`);
+      expect(artifact.sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(resolveKacheArtifact(arch)).toBe(artifact);
+    }
   });
 
-  it.each([
-    [{ mode: undefined, platform: "darwin", ci: undefined }, { enabled: true }],
-    [{ mode: "on", platform: "darwin", ci: undefined }, { enabled: true }],
-    [{ mode: "kanache", platform: "darwin", ci: "  " }, { enabled: true }],
-    [
-      { mode: "on", platform: "darwin", ci: "false" },
-      { enabled: false, category: "disabled-in-ci" }
-    ],
-    [
-      { mode: "on", platform: "linux", ci: undefined },
-      { enabled: false, category: "unsupported-platform" }
-    ],
-    [
-      { mode: "off", platform: "linux", ci: "true" },
-      { enabled: false, category: "disabled" }
-    ]
-  ] as const)("resolves runtime eligibility for %o", (input, expected) => {
-    expect(resolveRustCacheEligibility(input)).toEqual(expected);
-  });
-
-  it("preserves invalid-mode precedence over platform and CI gates", () => {
-    expect(
-      resolveRustCacheEligibility({ mode: "mystery", platform: "linux", ci: "true" })
-    ).toEqual({
-      enabled: false,
-      category: "invalid-mode",
-      warning: "Unknown KANNA_RUST_CACHE value \"mystery\"; cache disabled."
-    });
-  });
-
-  it("pins the binary and event log below the Kanna cache root", () => {
-    expect(resolveKanachePaths("/Users/tester")).toEqual({
-      revision: KANACHE_REVISION,
-      versionRoot: `/Users/tester/Library/Caches/kanna/tools/kanache/${KANACHE_REVISION}`,
-      binary: `/Users/tester/Library/Caches/kanna/tools/kanache/${KANACHE_REVISION}/bin/kanache`,
-      events: "/Users/tester/Library/Caches/kanna/kanache/events.jsonl"
-    });
-  });
-
-  it("parses Git porcelain without accepting bare or prunable entries", () => {
-    expect(
-      parseWorktreeList(
-        [
-          "worktree /repo",
-          "HEAD abc123",
-          "branch refs/heads/main",
-          "",
-          "worktree /repo/.kanna-worktrees/task-one",
-          "HEAD abc123",
-          "detached",
-          "",
-          "worktree /missing",
-          "HEAD abc123",
-          "prunable gitdir file points to non-existent location",
-          ""
-        ].join("\n")
-      )
-    ).toEqual([
-      { path: "/repo", head: "abc123" },
-      { path: "/repo/.kanna-worktrees/task-one", head: "abc123" }
-    ]);
-  });
-
-  it("accepts only Kanna dev manifests with no extra inputs", () => {
-    const current = parseKanacheManifest(
-      JSON.stringify({
-        profiles: ["dev"],
-        targets: ["aarch64-apple-darwin", "host"],
-        extra_inputs: [],
-        rust_build_inputs_blake3: "rust-input-identity",
-        rust_build_input_exclusions: ["apps/desktop/src-tauri/binaries"],
-        created_unix_nanos: 42
-      })
+  it("builds download URLs from the pinned version only", () => {
+    const artifact = KACHE_ARTIFACTS.arm64!;
+    expect(resolveKacheDownloadUrl(artifact)).toBe(
+      `https://github.com/kunobi-ninja/kache/releases/download/v${KACHE_VERSION}/${artifact.asset}`
     );
-    expect(current).toMatchObject({
-      targets: ["aarch64-apple-darwin", "host"],
-      rustBuildInputsBlake3: "rust-input-identity",
-      rustBuildInputExclusions: ["apps/desktop/src-tauri/binaries"]
-    });
-    expect(
-      parseKanacheManifest(
-        JSON.stringify({
-          profiles: ["dev"],
-          targets: ["aarch64-apple-darwin", "host"],
-          extra_inputs: [],
-          created_unix_nanos: 42
-        })
-      )
-    ).toEqual({
-      profiles: ["dev"],
-      targets: ["aarch64-apple-darwin", "host"],
-      extraInputs: [],
-      createdUnixNanos: 42
-    });
-    expect(() =>
-      parseKanacheManifest(
-        JSON.stringify({
-          profiles: ["release"],
-          targets: ["host"],
-          extra_inputs: [],
-          created_unix_nanos: 1
-        })
-      )
-    ).toThrow("profile dev");
-    expect(() =>
-      parseKanacheManifest(
-        JSON.stringify({
-          profiles: ["dev"],
-          targets: ["host"],
-          extra_inputs: [{ path: ".env" }],
-          created_unix_nanos: 1
-        })
-      )
-    ).toThrow("extra inputs");
   });
 
-  it("prefers both layouts, then host, then explicit target, newest first", () => {
-    expect(
-      rankDonors(
-        [
-          {
-            path: "/explicit",
-            head: "abc",
-            matchingMode: "head",
-            manifest: {
-              profiles: ["dev"],
-              targets: ["aarch64-apple-darwin"],
-              extraInputs: [],
-              createdUnixNanos: 30
-            }
-          },
-          {
-            path: "/both-old",
-            head: "abc",
-            matchingMode: "head",
-            manifest: {
-              profiles: ["dev"],
-              targets: ["aarch64-apple-darwin", "host"],
-              extraInputs: [],
-              createdUnixNanos: 10
-            }
-          },
-          {
-            path: "/host",
-            head: "abc",
-            matchingMode: "head",
-            manifest: {
-              profiles: ["dev"],
-              targets: ["host"],
-              extraInputs: [],
-              createdUnixNanos: 40
-            }
-          },
-          {
-            path: "/both-new",
-            head: "abc",
-            matchingMode: "head",
-            manifest: {
-              profiles: ["dev"],
-              targets: ["aarch64-apple-darwin", "host"],
-              extraInputs: [],
-              createdUnixNanos: 20
-            }
-          }
-        ],
-        "aarch64-apple-darwin"
-      ).map((donor) => donor.path)
-    ).toEqual(["/both-new", "/both-old", "/host", "/explicit"]);
+  it("installs into a Kanna-owned per-version tooling root", () => {
+    const paths = resolveKachePaths("/home/kanna");
+    expect(paths.versionRoot).toBe(
+      `/home/kanna/Library/Caches/kanna/tools/kache/${KACHE_VERSION}`
+    );
+    expect(paths.binary).toBe(`${paths.versionRoot}/bin/kache`);
   });
 
-  it("breaks otherwise-equal donor rankings by path", () => {
-    expect(
-      rankDonors(
-        ["/zeta", "/alpha"].map((path) => ({
-          path,
-          head: "abc",
-          matchingMode: "head" as const,
-          manifest: {
-            profiles: ["dev"],
-            targets: ["host"],
-            extraInputs: [],
-            createdUnixNanos: 10
-          }
-        })),
-        "aarch64-apple-darwin"
-      ).map((donor) => donor.path)
-    ).toEqual(["/alpha", "/zeta"]);
+  it("scopes the content store per repository", () => {
+    expect(resolveRustCacheStore("/home/kanna", "abc123")).toBe(
+      "/home/kanna/Library/Caches/kanna/rust-kache/abc123"
+    );
+  });
+
+  it("has no unsupported architecture", () => {
+    expect(resolveKacheArtifact("arm")).toBeUndefined();
+  });
+});
+
+describe("rust cache mode", () => {
+  it("is opt-in: unset and blank stay disabled", () => {
+    // kache 0.12.0 can serve a logically stale entry, so the cache must never
+    // be reached without a developer explicitly asking for it.
+    expect(parseRustCacheMode(undefined)).toEqual({ enabled: false });
+    expect(parseRustCacheMode("")).toEqual({ enabled: false });
+    expect(parseRustCacheMode("   ")).toEqual({ enabled: false });
+  });
+
+  it("enables only on an explicit opt-in", () => {
+    expect(parseRustCacheMode("on")).toEqual({ enabled: true });
+    expect(parseRustCacheMode(" Kache ")).toEqual({ enabled: true });
+  });
+
+  it("disables on opt-out", () => {
+    expect(parseRustCacheMode("off")).toEqual({ enabled: false });
+  });
+
+  it("disables with a warning on an unknown value", () => {
+    // "kanache" was the retired donor-warming backend; it must fail visibly
+    // rather than silently enabling a cache that no longer exists.
+    const parsed = parseRustCacheMode("kanache");
+    expect(parsed.enabled).toBe(false);
+    expect(parsed.warning).toContain("kanache");
+  });
+});
+
+describe("rust cache eligibility", () => {
+  const base = { mode: "on", platform: "darwin" as NodeJS.Platform, arch: "arm64", ci: undefined };
+
+  it("enables on a supported macOS host outside CI when opted in", () => {
+    expect(resolveRustCacheEligibility(base)).toEqual({ enabled: true });
+  });
+
+  it("stays off by default, distinguishing the default from an explicit opt-out", () => {
+    expect(resolveRustCacheEligibility({ ...base, mode: undefined })).toEqual({
+      enabled: false,
+      category: "disabled-by-default"
+    });
+    expect(resolveRustCacheEligibility({ ...base, mode: "off" })).toEqual({
+      enabled: false,
+      category: "disabled"
+    });
+  });
+
+  it("disables on an unsupported platform or architecture", () => {
+    expect(resolveRustCacheEligibility({ ...base, platform: "linux" })).toEqual({
+      enabled: false,
+      category: "unsupported-platform"
+    });
+    expect(resolveRustCacheEligibility({ ...base, arch: "arm" })).toEqual({
+      enabled: false,
+      category: "unsupported-platform"
+    });
+  });
+
+  it("disables in CI so release-shaped builds never depend on a cache", () => {
+    expect(resolveRustCacheEligibility({ ...base, ci: "true" })).toEqual({
+      enabled: false,
+      category: "disabled-in-ci"
+    });
+    expect(resolveRustCacheEligibility({ ...base, ci: "  " })).toEqual({ enabled: true });
+  });
+
+  it("reports an invalid mode ahead of platform support", () => {
+    const eligibility = resolveRustCacheEligibility({ ...base, mode: "maybe", platform: "linux" });
+    expect(eligibility).toMatchObject({ enabled: false, category: "invalid-mode" });
+  });
+});
+
+describe("rust cache environment", () => {
+  it("configures a local-only, capped, executable-free store and disables incremental", () => {
+    expect(buildRustCacheEnvironment({ binary: "/tools/kache", store: "/store" })).toEqual({
+      RUSTC_WRAPPER: "/tools/kache",
+      CARGO_INCREMENTAL: "0",
+      KACHE_CACHE_DIR: "/store",
+      KACHE_LOCAL_ONLY: "1",
+      KACHE_CACHE_EXECUTABLES: "0",
+      KACHE_VERIFY_RESTORES: "always",
+      KACHE_MAX_SIZE: KACHE_MAX_SIZE
+    });
+  });
+
+  it("strips every wrapper spelling Cargo honours, plus ambient cache controls", () => {
+    const stripped = stripRustCacheEnvironment({
+      PATH: "/usr/bin",
+      RUSTC_WRAPPER: "/tools/kache",
+      // Cargo nests the workspace wrapper inside RUSTC_WRAPPER rather than
+      // replacing it, and the CARGO_BUILD_* forms are the env spelling of
+      // build.rustc-wrapper — all four have to go.
+      RUSTC_WORKSPACE_WRAPPER: "/bin/false",
+      CARGO_BUILD_RUSTC_WRAPPER: "/bin/false",
+      CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER: "/bin/false",
+      CARGO_INCREMENTAL: "0",
+      KACHE_CACHE_DIR: "/store",
+      KACHE_DISABLED: "1",
+      KACHE_S3_BUCKET: "someone-elses-bucket",
+      KANNA_BUILD_BRANCH: "main"
+    });
+    expect(stripped).toEqual({ PATH: "/usr/bin", KANNA_BUILD_BRANCH: "main" });
   });
 });

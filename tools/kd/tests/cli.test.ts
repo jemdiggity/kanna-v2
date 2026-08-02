@@ -1063,12 +1063,18 @@ describe("kd CLI", () => {
   });
 
   it("parses rust-cache commands", () => {
-    expect(parseCliArgs(["rust-cache", "warm"])).toEqual({
-      taskId: "rust-cache.warm",
+    expect(parseCliArgs(["rust-cache", "install"])).toEqual({
+      taskId: "rust-cache.install",
       input: {}
     });
     expect(parseCliArgs(["rust-cache", "status"])).toEqual({
       taskId: "rust-cache.status",
+      input: {}
+    });
+    // `warm` is the pre-kache spelling that origin/main's setup list still runs;
+    // it must keep resolving while older branches are open.
+    expect(parseCliArgs(["rust-cache", "warm"])).toEqual({
+      taskId: "rust-cache.install",
       input: {}
     });
     expect(() => parseCliArgs(["rust-cache", "record", "--layouts", "all"])).toThrow(

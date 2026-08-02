@@ -515,8 +515,21 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "build" && command === "sidecars") {
     return { taskId: "build.sidecars", input: {} };
   }
-  if (group === "rust-cache" && command === "warm") {
-    return { taskId: "rust-cache.warm", input: {} };
+  // TEMPORARY COMPATIBILITY SHIM — remove once no branch predating the kache
+  // migration is still open.
+  //
+  // Repo config, including `setup`, is read from the origin/main snapshot rather
+  // than the task branch (RepoDefinitionSnapshot::resolve reads
+  // refs/remotes/origin/<default_branch>), so a forked worktree runs main's
+  // setup list against the branch's own kd. Config and code therefore cross the
+  // stage boundary independently and cannot be changed atomically: `warm` is the
+  // Kanache-era spelling main still invokes, and it must keep resolving here or
+  // this branch cannot transition. For the same reason main's config keeps
+  // saying `warm` — it is the only spelling both this kd and every older kd
+  // accept — so branches cut before this change keep transitioning after it
+  // merges.
+  if (group === "rust-cache" && (command === "install" || command === "warm")) {
+    return { taskId: "rust-cache.install", input: {} };
   }
   if (group === "rust-cache" && command === "status") {
     return { taskId: "rust-cache.status", input: {} };
@@ -660,7 +673,7 @@ const helpTopics: Record<string, string[]> = {
     "  clean [--all] [--dry] [--shared-rust-build]",
     "  build desktop",
     "  build sidecars",
-    "  rust-cache warm|status",
+    "  rust-cache install|status",
     "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>] [--branch main|release/X.Y]",
     "  release promote <staging-version> [--dry-run] [--arm64|--x86_64]",
     "  release cut [--major|--minor|--patch]",
@@ -966,18 +979,21 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd rust-cache <command>",
     "",
     "Commands:",
-    "  rust-cache warm",
-    "  rust-cache status"
-  ],
-  "rust-cache warm": [
-    "Usage: kd rust-cache warm",
+    "  rust-cache install",
+    "  rust-cache status",
     "",
-    "Warm the private Cargo build tree from a compatible Kanache donor."
+    "`rust-cache warm` is a deprecated alias for `install`, kept while branches",
+    "predating the kache migration are still open."
+  ],
+  "rust-cache install": [
+    "Usage: kd rust-cache install",
+    "",
+    "Install the pinned kache compiler cache and create this repository's store."
   ],
   "rust-cache status": [
     "Usage: kd rust-cache status",
     "",
-    "Show the pinned Kanache tool, current manifest, and recent cache events."
+    "Show the pinned kache installation, this repository's store, and cache stats."
   ],
   release: [
     "Usage: kd release <command>",

@@ -74,13 +74,17 @@ export function stageSidecars(input: StageSidecarsInput): string[] {
   });
 }
 
-export async function buildDesktopSidecars(runner: CommandRunner, repoRoot: string): Promise<string[]> {
+export async function buildDesktopSidecars(
+  runner: CommandRunner,
+  repoRoot: string,
+  baseEnv: NodeJS.ProcessEnv = process.env
+): Promise<string[]> {
   const rustc = await runner.run("rustc", ["-vV"], { cwd: repoRoot });
   if (rustc.exitCode !== 0) {
     throw new Error(`rustc -vV failed: ${rustc.stderr}`);
   }
   const target = parseRustHostTarget(rustc.stdout);
-  const env = { ...process.env };
+  const env = { ...baseEnv };
   delete env.CARGO_TARGET_DIR;
 
   for (const [command, args] of buildSidecarCargoCommands(target)) {

@@ -35,9 +35,7 @@ pub fn binary() -> PathBuf {
     let _lock = BuildLock::acquire(&root, &binary);
     if !binary.is_file() {
         materialize_archive(&repo, &root);
-        let status = Command::new("cargo")
-            .current_dir(root.join("source"))
-            .env("CARGO_TARGET_DIR", root.join("target"))
+        let status = isolated_cargo_build(&root.join("source"), &root)
             .args([
                 "build",
                 "--locked",
@@ -51,6 +49,38 @@ pub fn binary() -> PathBuf {
         assert!(status.success(), "previous daemon fixture build failed");
     }
     binary
+}
+
+/// Every environment spelling Cargo consults for its output directories, in
+/// precedence order over a checkout's `.cargo/config.toml`.
+pub const CARGO_DIRECTORY_ENV: [&str; 3] = [
+    "CARGO_TARGET_DIR",
+    "CARGO_BUILD_TARGET_DIR",
+    "CARGO_BUILD_BUILD_DIR",
+];
+
+/// A `cargo` invocation that compiles `source` strictly into `root`.
+///
+/// Cargo reads these variables *before* the checkout's `.cargo/config.toml`, and
+/// `kd` exports `CARGO_BUILD_BUILD_DIR` for every worktree. Inheriting them here
+/// would compile the archived previous-release source into the *active*
+/// worktree's build directory: that archive's `kanna-runtime-defaults` predates
+/// the commit adding `session_id`, so it writes a `kanna_runtime_defaults` rlib
+/// without that module into a tree the current sources also build into, and a
+/// later current-source compile links the stale artifact and fails with
+/// `E0432: no session_id in the root`. Two source revisions must never share one
+/// Cargo fingerprint tree, so the inherited spellings are removed before the
+/// fixture's own private directories are applied.
+pub fn isolated_cargo_build(source: &Path, root: &Path) -> Command {
+    let mut command = Command::new("cargo");
+    command.current_dir(source);
+    for key in CARGO_DIRECTORY_ENV {
+        command.env_remove(key);
+    }
+    command
+        .env("CARGO_TARGET_DIR", root.join("target"))
+        .env("CARGO_BUILD_BUILD_DIR", root.join("cargo-build"));
+    command
 }
 
 fn command_stdout(command: &mut Command) -> String {
