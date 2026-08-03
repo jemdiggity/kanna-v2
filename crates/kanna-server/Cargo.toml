@@ -13,7 +13,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 jsonwebtoken = "9"
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 futures-util = "0.3"
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+rusqlite = { version = "0.32.1", features = ["bundled", "hooks"] }
 log = "0.4"
 libc = "0.2"
 flexi_logger = "0.31"

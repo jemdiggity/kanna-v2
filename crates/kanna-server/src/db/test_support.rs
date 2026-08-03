@@ -5,6 +5,8 @@ use super::{
 use crate::db::CURRENT_SCHEMA_MIGRATIONS;
 use rusqlite::Connection;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 impl Db {
     pub fn test_db_path(suffix: &str) -> String {
@@ -23,6 +25,20 @@ impl Db {
         let db = Self { conn };
         db.init_test_schema()?;
         Ok(db)
+    }
+
+    pub fn count_test_sqlite_progress(&self, every_ops: i32, counter: Arc<AtomicUsize>) {
+        self.conn.progress_handler(
+            every_ops,
+            Some(move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        );
+    }
+
+    pub fn clear_test_sqlite_progress_handler(&self) {
+        self.conn.progress_handler(0, None::<fn() -> bool>);
     }
 
     #[cfg(test)]

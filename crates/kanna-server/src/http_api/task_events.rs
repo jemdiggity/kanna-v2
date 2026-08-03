@@ -268,12 +268,21 @@ fn read_legacy_parent_batch_with_hook(
         ));
     }
 
-    let (head_seq, members, mut candidates) = db
+    let (head_seq, members, mut candidates, cursor_is_valid) = db
         .with_read_transaction(|db| {
             // The head read establishes the WAL snapshot before membership is
-            // observed. The candidate query below therefore cannot see an
-            // adoption or reparent that the membership calculation did not.
+            // observed. Validate cursor state against that same snapshot before
+            // doing membership or candidate work; a forged future cursor must
+            // not trigger a potentially expensive compatibility scan.
             let head_seq = db.latest_task_event_seq()?;
+            if legacy
+                .watermarks
+                .values()
+                .any(|watermark| *watermark > head_seq)
+                || legacy.event_seq.is_some_and(|seq| seq > head_seq)
+            {
+                return Ok((head_seq, Vec::new(), Vec::new(), false));
+            }
             let members = db.list_child_task_ids(parent_task_id)?;
             after_membership_read();
             let after_seq = legacy.event_seq.unwrap_or_else(|| {
@@ -283,21 +292,16 @@ fn read_legacy_parent_batch_with_hook(
                     .min()
                     .unwrap_or(0)
             });
-            let candidates = db.list_parent_task_events_indexed(
-                parent_task_id,
+            let candidates = db.list_task_event_candidates_bounded(
+                &members,
                 after_seq,
                 head_seq,
                 LEGACY_CURSOR_SCAN_LIMIT + 1,
             )?;
-            Ok((head_seq, members, candidates))
+            Ok((head_seq, members, candidates, true))
         })
         .map_err(db_error)?;
-    if legacy
-        .watermarks
-        .values()
-        .any(|watermark| *watermark > head_seq)
-        || legacy.event_seq.is_some_and(|seq| seq > head_seq)
-    {
+    if !cursor_is_valid {
         return Err(invalid_cursor());
     }
 

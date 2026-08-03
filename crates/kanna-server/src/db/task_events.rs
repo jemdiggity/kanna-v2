@@ -22,6 +22,8 @@
 use super::Db;
 use rusqlite::{types::Value as SqlValue, OptionalExtension};
 use serde_json::{json, Value};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::sync::LazyLock;
 use tokio::sync::Notify;
 
@@ -103,6 +105,30 @@ impl TaskEvent {
             "payload": self.payload,
             "createdAt": self.created_at,
         })
+    }
+}
+
+/// Reverse sequence ordering turns `BinaryHeap` into a min-heap. Task-event
+/// sequences are unique, so no secondary ordering key is needed.
+struct PendingTaskEvent(TaskEvent);
+
+impl PartialEq for PendingTaskEvent {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.seq == other.0.seq
+    }
+}
+
+impl Eq for PendingTaskEvent {}
+
+impl PartialOrd for PendingTaskEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PendingTaskEvent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other.0.seq.cmp(&self.0.seq)
     }
 }
 
@@ -240,32 +266,35 @@ impl Db {
         rows.collect()
     }
 
-    /// Parent-scoped events using the relationship index first and then the
-    /// per-task event index. This is the legacy p1 upgrade path, where an
-    /// adopted child has a zero watermark: starting at the global sequence
-    /// index would otherwise walk unrelated retained history before applying
-    /// the parent filter.
-    pub fn list_parent_task_events_indexed(
+    /// Globally ordered events for a known parent-membership snapshot, with
+    /// candidate work bounded by `task_ids.len() + limit` index hits.
+    ///
+    /// This is the legacy p1 upgrade path. Starting from the global sequence
+    /// index can walk unrelated retained history for a sparse parent, while a
+    /// relationship-first join makes SQLite sort the parent's entire retained
+    /// history before applying its global limit. Instead, seed a merge heap
+    /// with one indexed row per child and replenish only the child whose row
+    /// was consumed. The compatibility path is therefore bounded even when a
+    /// child has dense retained history, without sacrificing sparse parents.
+    pub fn list_task_event_candidates_bounded(
         &self,
-        parent_task_id: &str,
+        task_ids: &[String],
         after_seq: i64,
         head_seq: i64,
         limit: i64,
     ) -> Result<Vec<TaskEvent>, rusqlite::Error> {
+        if task_ids.is_empty() || limit <= 0 {
+            return Ok(Vec::new());
+        }
         let mut stmt = self.conn.prepare(
-            "SELECT event.seq, event.task_id, event.type, event.payload, event.created_at
-             FROM pipeline_item AS item INDEXED BY idx_pipeline_item_parent_created_id
-             JOIN task_event AS event INDEXED BY idx_task_event_task_seq
-               ON event.task_id = item.id
-             WHERE item.parent_task_id = ?1
-               AND event.seq > ?2
-               AND event.seq <= ?3
-             ORDER BY event.seq ASC
-             LIMIT ?4",
+            "SELECT seq, task_id, type, payload, created_at
+             FROM task_event INDEXED BY idx_task_event_task_seq
+             WHERE task_id = ?1 AND seq > ?2 AND seq <= ?3
+             ORDER BY seq ASC
+             LIMIT 1",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![parent_task_id, after_seq, head_seq, limit],
-            |row| {
+        let read_next = |stmt: &mut rusqlite::Statement<'_>, task_id: &str, after_seq: i64| {
+            stmt.query_row(rusqlite::params![task_id, after_seq, head_seq], |row| {
                 let payload: Option<String> = row.get(3)?;
                 Ok(TaskEvent {
                     seq: row.get(0)?,
@@ -276,9 +305,30 @@ impl Db {
                         .unwrap_or_else(|| json!({})),
                     created_at: row.get(4)?,
                 })
-            },
-        )?;
-        rows.collect()
+            })
+            .optional()
+        };
+
+        let mut pending = BinaryHeap::with_capacity(task_ids.len());
+        for task_id in task_ids {
+            if let Some(event) = read_next(&mut stmt, task_id, after_seq)? {
+                pending.push(PendingTaskEvent(event));
+            }
+        }
+
+        let mut events = Vec::with_capacity(limit as usize);
+        while events.len() < limit as usize {
+            let Some(PendingTaskEvent(event)) = pending.pop() else {
+                break;
+            };
+            let task_id = event.task_id.clone();
+            let event_seq = event.seq;
+            events.push(event);
+            if let Some(next) = read_next(&mut stmt, &task_id, event_seq)? {
+                pending.push(PendingTaskEvent(next));
+            }
+        }
+        Ok(events)
     }
 
     /// Attach (or clear) the task that receives this task's completion

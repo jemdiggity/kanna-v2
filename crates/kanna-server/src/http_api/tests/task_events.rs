@@ -11,6 +11,8 @@ use crate::db::NewStageRun;
 use axum::Router;
 use base64::Engine;
 use serde_json::Value;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 fn seed_orchestration(db: &Db) {
@@ -977,6 +979,83 @@ async fn legacy_p1_sparse_parent_ignores_large_unrelated_retained_history() {
     .await;
     assert!(event_pairs(&empty).is_empty());
     assert!(cursor_of(&empty).starts_with("p3."));
+}
+
+#[tokio::test]
+async fn legacy_p1_dense_parent_candidate_work_is_page_bounded() {
+    let (_router, db_path) = parentage_router();
+    let conn = rusqlite::Connection::open(&db_path).expect("open bulk writer");
+    conn.execute_batch(
+        "WITH RECURSIVE generated(value) AS (
+             SELECT 1 UNION ALL SELECT value + 1 FROM generated WHERE value < 20000
+         )
+         INSERT INTO task_event (task_id, type, payload)
+         SELECT 'child-a', 'stage.changed', NULL FROM generated;",
+    )
+    .expect("insert dense parent history");
+    drop(conn);
+
+    let cursor = legacy_parent_cursor("parent-1", serde_json::Map::new());
+    let reader = Db::open(&db_path).expect("open bounded reader");
+    let progress_calls = Arc::new(AtomicUsize::new(0));
+    reader.count_test_sqlite_progress(100, Arc::clone(&progress_calls));
+    let batch = crate::http_api::task_events::read_legacy_parent_batch_for_test(
+        &reader,
+        "parent-1",
+        &cursor,
+        500,
+        || {},
+    )
+    .expect("bounded dense-parent batch");
+    reader.clear_test_sqlite_progress_handler();
+
+    assert_eq!(batch["events"].as_array().expect("events").len(), 500);
+    assert_eq!(batch["hasMore"], serde_json::json!(true));
+    let progress_calls = progress_calls.load(Ordering::Relaxed);
+    assert!(
+        progress_calls < 1_000,
+        "one legacy page used at least {} SQLite VM instructions; candidate work likely \
+         visited/sorted the full 20,000-event parent history",
+        progress_calls * 100
+    );
+}
+
+#[tokio::test]
+async fn legacy_p1_future_state_is_rejected_before_candidate_work() {
+    let (_router, db_path) = parentage_router();
+    let future_cursors = [
+        serde_json::json!({
+            "parent_task_id": "parent-1",
+            "watermarks": { "child-a": i64::MAX },
+        }),
+        serde_json::json!({
+            "parent_task_id": "parent-1",
+            "watermarks": {},
+            "event_seq": i64::MAX,
+        }),
+    ]
+    .map(|payload| {
+        format!(
+            "p1.{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
+        )
+    });
+    let reader = Db::open(&db_path).expect("open snapshot reader");
+
+    for cursor in future_cursors {
+        let error = crate::http_api::task_events::read_legacy_parent_batch_for_test(
+            &reader,
+            "parent-1",
+            &cursor,
+            500,
+            || panic!("future cursor reached membership/candidate work"),
+        )
+        .expect_err("future p1 cursor must be rejected");
+        assert_eq!(
+            error,
+            "cursor is not a valid cursor returned by this endpoint"
+        );
+    }
 }
 
 #[tokio::test]
