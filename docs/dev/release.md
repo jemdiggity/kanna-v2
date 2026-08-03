@@ -27,14 +27,13 @@ These are intentionally separate:
 ```sh
 bazel build //:kanna_app_arm64            # unsigned app
 bazel build -c opt //:release_apps        # release-shaped apps
-bazel build --config=notarize -c opt //:release   # signed + notarized DMGs
 ```
 
-Outputs land in `bazel-bin/release/`. Notarization needs `APPLE_ID` /
-`APPLE_PASSWORD` / `APPLE_TEAM_ID` (or `APPLE_KEYCHAIN_PROFILE`) exported in
-the invoking shell. The checked-in `.bazelrc` shares a disk/repository cache
-across worktrees under `~/Library/Caches/kanna-bazel/` without sharing the
-live output tree.
+These Bazel targets are useful for development diagnostics only. Shipping and
+notarization always go through `kd`, which owns credential preflight and the
+release safety checks. The checked-in `.bazelrc` shares a disk/repository cache
+across worktrees under `~/Library/Caches/kanna-bazel/` without sharing the live
+output tree.
 
 Because Kanna is distributed as a signed macOS app, all dependencies must be
 vendored or statically linked (e.g. `git2` vendors libgit2 + OpenSSL) — never
@@ -55,25 +54,43 @@ on the `desktop-staging` pointer release. Roll back by repointing:
 
 ### Local release environment
 
-`kd release ship` and `kd release promote` load optional release defaults from
-`.env.release.local` in the primary repository checkout. The same file is used
-from every linked worktree. Explicitly exported environment variables override
-file values.
-
-Store notarization credentials in macOS Keychain:
+Notarization uses a named credential stored in an explicitly selected,
+file-based macOS Keychain. Run the one-time setup or migration command:
 
 ```sh
-xcrun notarytool store-credentials kanna-notarization
+./kd release setup-notarization
 ```
 
-Then create the ignored local file with only the profile name:
+The command defaults to profile `kanna-notarization` in the current user's
+default login Keychain. It securely prompts through `notarytool`, validates the
+credential with Apple before saving it, then writes only these non-secret
+selectors to `~/.kanna/.env.release.local` with mode `0600`:
 
 ```dotenv
-APPLE_KEYCHAIN_PROFILE=kanna-notarization
+APPLE_KEYCHAIN_PROFILE="kanna-notarization"
+APPLE_KEYCHAIN_PATH="/Users/example/Library/Keychains/login.keychain-db"
 ```
 
-Keep the file mode at `0600`. Do not store an Apple app-specific password in
-the file.
+Use `--profile <name>` or `--keychain <absolute-path>` when a different named
+profile or file-based Keychain is required. Existing credentials saved with
+`notarytool --sync` live in the data-protection Keychain and cannot be copied or
+extracted; rerun the setup command and enter the credential once so it is saved
+in the selected file-based Keychain.
+
+`kd release ship` and non-dry-run promotions validate that exact profile and
+Keychain using `notarytool history` before starting the release build. Missing
+config, a missing Keychain file or profile, a locked/inaccessible Keychain, and
+credentials rejected by Apple produce distinct safe diagnostics. If the login
+Keychain is locked, unlock it normally and retry; never put its password in an
+environment file.
+
+Optional non-sensitive release defaults may remain in the ignored
+`.env.release.local` in the primary repository checkout and are shared by its
+linked worktrees. The notarization profile and Keychain path are machine-local
+and are rejected in that repository file. Explicitly exported selector values
+override `~/.kanna` values. Apple IDs, app-specific passwords, API private keys,
+and other secrets must never be stored in either plaintext file; the release
+path does not forward direct Apple credential variables into Bazel.
 
 ## Cloud services
 

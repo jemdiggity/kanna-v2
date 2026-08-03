@@ -77,18 +77,19 @@ This path now follows the `rules_tauri` Tauri + Vite + Vue example shape:
 
 This is the release path. It is not intended to replace `./kd dev up` for local development.
 
-Release packaging remains available on top of that app graph:
+Release packaging, notarization, and publishing are owned by `kd`; do not run
+the release Bazel targets directly:
 
 ```sh
-bazel build -c opt //:release_apps
-bazel build -c opt //:release_signed_dmgs
-bazel build --config=notarize -c opt //:release
+./kd release setup-notarization  # one-time machine setup/migration
+./kd release ship --dry-run      # build and sign without notarizing/publishing
+./kd release ship --release      # preflight, build, notarize, and publish
 ```
 
-Release outputs land in `bazel-bin/release/`:
-
-- `Kanna-arm64-notarized.dmg`
-- `Kanna-x86_64-notarized.dmg`
+The setup command stores the credential in the user's explicit file-based
+Keychain. Only the profile name and absolute Keychain path are written to
+`~/.kanna/.env.release.local`; Apple IDs, passwords, and API private keys never
+belong in plaintext release config.
 
 The checked-in `.bazelrc` enables shared caches so Bazel work is reused across
 worktrees without sharing `output_base`:
@@ -99,20 +100,6 @@ build --repository_cache=~/Library/Caches/kanna-bazel/repository-cache
 ```
 
 That shares cacheable Bazel action results and downloaded external repositories across worktrees. It does not share the live local output tree (`output_base`, `bazel-out`, or `bazel-bin`), which remains isolated per worktree.
-
-For notarization, export either:
-
-- `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID`
-- or `APPLE_KEYCHAIN_PROFILE`
-
-Then run the `--config=notarize` build from that shell so Bazel forwards the credentials into the notarization actions.
-
-The release script uses the Bazel graph too:
-
-```sh
-./kd release ship --dry-run
-./kd release ship --release
-```
 
 Local maintenance workflows also go through `kd`:
 

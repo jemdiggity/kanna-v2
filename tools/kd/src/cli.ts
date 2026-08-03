@@ -377,6 +377,24 @@ function parseFlagInput(
       index += 1;
       continue;
     }
+    if (arg === "--profile") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--profile requires a value");
+      }
+      input.profile = value;
+      index += 1;
+      continue;
+    }
+    if (arg === "--keychain") {
+      const value = rest[index + 1];
+      if (!value) {
+        throw new Error("--keychain requires a value");
+      }
+      input.keychain = value;
+      index += 1;
+      continue;
+    }
     if (arg === "--") {
       input.extraArgs = rest.slice(index + 1);
       break;
@@ -544,6 +562,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
     }
     return { taskId: "release.promote", input: { version, ...parseFlagInput(flags, {}) } };
   }
+  if (group === "release" && command === "setup-notarization") {
+    return { taskId: "release.setup-notarization", input: parseFlagInput(rest, {}) };
+  }
   if (group === "release" && command === "cut") {
     return { taskId: "release.cut", input: parseFlagInput(rest, {}) };
   }
@@ -673,6 +694,7 @@ const helpTopics: Record<string, string[]> = {
     "  rust-cache install|status",
     "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>] [--branch main|release/X.Y]",
     "  release promote <staging-version> [--dry-run] [--arm64|--x86_64]",
+    "  release setup-notarization [--profile <name>] [--keychain <absolute-path>]",
     "  release cut [--major|--minor|--patch]",
     "  release status",
     "  cloud deploy --staging|--production [--relay]",
@@ -997,6 +1019,7 @@ const helpTopics: Record<string, string[]> = {
     "Commands:",
     "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>] [--branch main|release/X.Y]",
     "  release promote <staging-version> [--dry-run] [--arm64|--x86_64]",
+    "  release setup-notarization [--profile <name>] [--keychain <absolute-path>]",
     "  release cut [--major|--minor|--patch]",
     "  release status"
   ],
@@ -1012,6 +1035,12 @@ const helpTopics: Record<string, string[]> = {
     "Promote a soaked staging prerelease (e.g. 1.2.4-staging.3) into the production release of the same commit.",
     "Rebuilds that exact commit with production identity, then tags, publishes, and repoints the updater manifest.",
     "Requires the checkout and origin/main to still be at the staging build's commit. --dry-run rehearses without publishing."
+  ],
+  "release setup-notarization": [
+    "Usage: kd release setup-notarization [--profile <name>] [--keychain <absolute-path>]",
+    "",
+    "Securely prompt for Apple notarization credentials, validate them, and store the named profile in an explicit file-based Keychain.",
+    "Defaults to profile kanna-notarization and the current user's default login Keychain. Writes only the profile name and Keychain path to ~/.kanna/.env.release.local."
   ],
   "release cut": [
     "Usage: kd release cut [--major|--minor|--patch]",

@@ -1,13 +1,21 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import { loadReleaseEnvironment } from "../src/runtime/release-env";
+import {
+  loadReleaseEnvironment,
+  writeMachineNotarizationSelectors
+} from "../src/runtime/release-env";
 import { nodeCommandRunner, type CommandRunner } from "../src/runtime/process";
 
 const execFileAsync = promisify(execFile);
+
+async function writePrivateFile(path: string, contents: string): Promise<void> {
+  await writeFile(path, contents, { mode: 0o600 });
+  await chmod(path, 0o600);
+}
 
 function gitWorktreeListRunner(primaryRoot: string, exitCode = 0): CommandRunner {
   return {
@@ -31,9 +39,9 @@ describe("release environment", () => {
     const repo = join(root, "repo");
     await mkdir(join(home, ".kanna"), { recursive: true });
     await mkdir(join(repo, ".git"), { recursive: true });
-    await writeFile(
+    await writePrivateFile(
       join(home, ".kanna", ".env.release.local"),
-      "APPLE_KEYCHAIN_PROFILE=global-profile\n"
+      `APPLE_KEYCHAIN_PROFILE=global-profile\nAPPLE_KEYCHAIN_PATH=${join(root, "login.keychain-db")}\n`
     );
 
     const env = await loadReleaseEnvironment({
@@ -44,21 +52,22 @@ describe("release environment", () => {
     });
 
     expect(env.APPLE_KEYCHAIN_PROFILE).toBe("global-profile");
+    expect(env.APPLE_KEYCHAIN_PATH).toBe(join(root, "login.keychain-db"));
   });
 
-  it("lets the local file override the global file", async () => {
+  it("lets repository defaults override non-sensitive machine defaults", async () => {
     const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
     const home = join(root, "home");
     const repo = join(root, "repo");
     await mkdir(join(home, ".kanna"), { recursive: true });
     await mkdir(join(repo, ".git"), { recursive: true });
-    await writeFile(
+    await writePrivateFile(
       join(home, ".kanna", ".env.release.local"),
-      "APPLE_KEYCHAIN_PROFILE=global-profile\nGLOBAL_ONLY=global\n"
+      "APPLE_KEYCHAIN_PROFILE=global-profile\nRELEASE_DEFAULT=global\nGLOBAL_ONLY=global\n"
     );
     await writeFile(
       join(repo, ".env.release.local"),
-      "APPLE_KEYCHAIN_PROFILE=local-profile\nLOCAL_ONLY=local\n"
+      "RELEASE_DEFAULT=local\nLOCAL_ONLY=local\n"
     );
 
     const env = await loadReleaseEnvironment({
@@ -68,7 +77,8 @@ describe("release environment", () => {
       runner: gitWorktreeListRunner(repo)
     });
 
-    expect(env.APPLE_KEYCHAIN_PROFILE).toBe("local-profile");
+    expect(env.APPLE_KEYCHAIN_PROFILE).toBe("global-profile");
+    expect(env.RELEASE_DEFAULT).toBe("local");
     expect(env.GLOBAL_ONLY).toBe("global");
     expect(env.LOCAL_ONLY).toBe("local");
   });
@@ -81,7 +91,7 @@ describe("release environment", () => {
     await mkdir(worktree, { recursive: true });
     await writeFile(
       join(primary, ".env.release.local"),
-      'APPLE_KEYCHAIN_PROFILE="kanna-notarization"\nRELEASE_DEFAULT=file\n'
+      "RELEASE_DEFAULT=file\n"
     );
 
     const env = await loadReleaseEnvironment({
@@ -91,34 +101,107 @@ describe("release environment", () => {
       runner: gitWorktreeListRunner(primary)
     });
 
-    expect(env.APPLE_KEYCHAIN_PROFILE).toBe("kanna-notarization");
     expect(env.RELEASE_DEFAULT).toBe("file");
     expect(env.PATH).toBe("/usr/bin");
   });
 
-  it("lets inherited environment values override both file defaults", async () => {
+  it("lets inherited selector values override machine-local selector defaults", async () => {
     const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
     const home = join(root, "home");
     const repo = join(root, "repo");
     await mkdir(join(home, ".kanna"), { recursive: true });
     await mkdir(join(repo, ".git"), { recursive: true });
-    await writeFile(
+    await writePrivateFile(
       join(home, ".kanna", ".env.release.local"),
-      "APPLE_KEYCHAIN_PROFILE=global-profile\n"
-    );
-    await writeFile(
-      join(repo, ".env.release.local"),
-      "APPLE_KEYCHAIN_PROFILE=local-profile\n"
+      `APPLE_KEYCHAIN_PROFILE=global-profile\nAPPLE_KEYCHAIN_PATH=${join(root, "global.keychain-db")}\n`
     );
 
     const env = await loadReleaseEnvironment({
       repoRoot: repo,
       homeDir: home,
-      env: { APPLE_KEYCHAIN_PROFILE: "shell-profile" },
+      env: {
+        APPLE_KEYCHAIN_PROFILE: "shell-profile",
+        APPLE_KEYCHAIN_PATH: join(root, "shell.keychain-db")
+      },
       runner: gitWorktreeListRunner(repo)
     });
 
     expect(env.APPLE_KEYCHAIN_PROFILE).toBe("shell-profile");
+    expect(env.APPLE_KEYCHAIN_PATH).toBe(join(root, "shell.keychain-db"));
+  });
+
+  it("rejects notarization selectors in the repository file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
+    await mkdir(join(root, ".git"));
+    await writeFile(
+      join(root, ".env.release.local"),
+      "APPLE_KEYCHAIN_PROFILE=repo-profile\nAPPLE_KEYCHAIN_PATH=/tmp/repo.keychain-db\n"
+    );
+
+    await expect(loadReleaseEnvironment({
+      repoRoot: root,
+      homeDir: join(root, "home"),
+      env: {},
+      runner: gitWorktreeListRunner(root)
+    })).rejects.toThrow(/machine-local.*cannot be set in repository file/);
+  });
+
+  it.each(["APPLE_PASSWORD", "TAURI_PRIVATE_KEY_PASSWORD", "GH_TOKEN"])(
+    "rejects plaintext release credential %s from release config",
+    async (credentialKey) => {
+      const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
+      const home = join(root, "home");
+      await mkdir(join(home, ".kanna"), { recursive: true });
+      await mkdir(join(root, "repo", ".git"), { recursive: true });
+      await writePrivateFile(
+        join(home, ".kanna", ".env.release.local"),
+        `${credentialKey}=must-not-be-printed\n`
+      );
+
+      await expect(loadReleaseEnvironment({
+        repoRoot: join(root, "repo"),
+        homeDir: home,
+        env: {},
+        runner: gitWorktreeListRunner(join(root, "repo"))
+      })).rejects.toThrow(new RegExp(`Plaintext release credentials.*${credentialKey}`));
+    }
+  );
+
+  it("rejects permissive machine selector config and points to migration", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
+    const home = join(root, "home");
+    const repo = join(root, "repo");
+    await mkdir(join(home, ".kanna"), { recursive: true });
+    await mkdir(join(repo, ".git"), { recursive: true });
+    const envPath = join(home, ".kanna", ".env.release.local");
+    await writeFile(envPath, "APPLE_KEYCHAIN_PROFILE=profile\n", { mode: 0o644 });
+    await chmod(envPath, 0o644);
+
+    await expect(loadReleaseEnvironment({
+      repoRoot: repo,
+      homeDir: home,
+      env: {},
+      runner: gitWorktreeListRunner(repo)
+    })).rejects.toThrow(/owner-only \(0600\).*setup-notarization/);
+  });
+
+  it("writes only selectors to machine config and repairs its mode", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
+    const home = join(root, "home");
+    await mkdir(join(home, ".kanna"), { recursive: true });
+    const envPath = join(home, ".kanna", ".env.release.local");
+    await writeFile(envPath, "RELEASE_DEFAULT=keep\nAPPLE_KEYCHAIN_PROFILE=old\n", { mode: 0o644 });
+
+    expect(writeMachineNotarizationSelectors({
+      homeDir: home,
+      profile: "new-profile",
+      keychainPath: "/Users/test/Library/Keychains/login.keychain-db"
+    })).toBe(envPath);
+
+    expect(await readFile(envPath, "utf8")).toBe(
+      'RELEASE_DEFAULT=keep\nAPPLE_KEYCHAIN_PROFILE="new-profile"\nAPPLE_KEYCHAIN_PATH="/Users/test/Library/Keychains/login.keychain-db"\n'
+    );
+    expect((await stat(envPath)).mode & 0o777).toBe(0o600);
   });
 
   it("strips every compiler-wrapper and cache control, including Cargo's config aliases", async () => {
@@ -235,7 +318,7 @@ describe("release environment", () => {
     await mkdir(join(root, ".git"));
     await writeFile(
       join(root, ".env.release.local"),
-      'APPLE_KEYCHAIN_PROFILE="profile" # local profile\nRELEASE_NOTES="line one\nline two"\n'
+      'RELEASE_DEFAULT="value" # local default\nRELEASE_NOTES="line one\nline two"\n'
     );
 
     const env = await loadReleaseEnvironment({
@@ -245,7 +328,7 @@ describe("release environment", () => {
       runner: gitWorktreeListRunner(root)
     });
 
-    expect(env.APPLE_KEYCHAIN_PROFILE).toBe("profile");
+    expect(env.RELEASE_DEFAULT).toBe("value");
     expect(env.RELEASE_NOTES).toBe("line one\nline two");
   });
 
@@ -260,7 +343,7 @@ describe("release environment", () => {
     await execFileAsync("git", ["add", "README.md"], { cwd: primary });
     await execFileAsync("git", ["commit", "-m", "fixture"], { cwd: primary });
     await execFileAsync("git", ["worktree", "add", "-b", "feature", worktree], { cwd: primary });
-    await writeFile(join(primary, ".env.release.local"), "APPLE_KEYCHAIN_PROFILE=real-profile\n");
+    await writeFile(join(primary, ".env.release.local"), "RELEASE_DEFAULT=real-default\n");
 
     const env = await loadReleaseEnvironment({
       repoRoot: worktree,
@@ -269,6 +352,6 @@ describe("release environment", () => {
       runner: nodeCommandRunner
     });
 
-    expect(env.APPLE_KEYCHAIN_PROFILE).toBe("real-profile");
+    expect(env.RELEASE_DEFAULT).toBe("real-default");
   });
 });

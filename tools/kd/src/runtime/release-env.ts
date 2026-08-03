@@ -1,10 +1,37 @@
-import { existsSync, readFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "node:fs";
 import { join } from "node:path";
 import { parseEnv } from "node:util";
 import type { CommandRunner } from "./process";
 import { stripRustCacheEnvironment } from "./rust-cache-policy";
 
 export const RELEASE_ENV_FILE = ".env.release.local";
+export const NOTARIZATION_PROFILE_ENV = "APPLE_KEYCHAIN_PROFILE";
+export const NOTARIZATION_KEYCHAIN_ENV = "APPLE_KEYCHAIN_PATH";
+
+const NOTARIZATION_SELECTOR_KEYS = new Set([
+  NOTARIZATION_PROFILE_ENV,
+  NOTARIZATION_KEYCHAIN_ENV
+]);
+const UNSAFE_PLAINTEXT_RELEASE_KEYS = new Set([
+  "APPLE_ID",
+  "APPLE_PASSWORD",
+  "APPLE_TEAM_ID",
+  "APPLE_API_KEY",
+  "APPLE_API_PRIVATE_KEY",
+  "TAURI_PRIVATE_KEY_PASSWORD",
+  "KANNA_GITHUB_TOKEN",
+  "GH_TOKEN",
+  "GITHUB_TOKEN"
+]);
 
 export interface LoadReleaseEnvironmentInput {
   repoRoot: string;
@@ -104,15 +131,20 @@ export async function loadReleaseEnvironment(
   const primaryRoot = await resolvePrimaryRepoRoot(input);
   const globalEnvPath = join(input.homeDir, ".kanna", RELEASE_ENV_FILE);
   const localEnvPath = join(primaryRoot, RELEASE_ENV_FILE);
-  const globalEnv = loadDotenvFile(globalEnvPath);
-  const localEnv = loadDotenvFile(localEnvPath);
+  const globalEnv = loadDotenvFile(globalEnvPath, "machine");
+  const localEnv = loadDotenvFile(localEnvPath, "repository");
   const inherited = definedEnvironment(input.env);
   // Release, signing, and packaging must be reproducible with no compiler cache
   // present, so no Kanna-managed or ambient wrapper reaches Bazel or Cargo here.
   return stripRustCacheEnvironment({ ...globalEnv, ...localEnv, ...inherited });
 }
 
-function loadDotenvFile(envPath: string): Record<string, string> {
+type ReleaseEnvironmentScope = "machine" | "repository";
+
+function loadDotenvFile(
+  envPath: string,
+  scope: ReleaseEnvironmentScope
+): Record<string, string> {
   if (!existsSync(envPath)) {
     return {};
   }
@@ -120,11 +152,95 @@ function loadDotenvFile(envPath: string): Record<string, string> {
   try {
     const source = readFileSync(envPath, "utf8");
     validateDotenv(source, envPath);
-    return definedEnvironment(parseEnv(source));
+    const parsed = definedEnvironment(parseEnv(source));
+    validateReleaseEnvironmentFile(parsed, envPath, scope);
+    if (
+      scope === "machine" &&
+      [...NOTARIZATION_SELECTOR_KEYS].some((key) => parsed[key] !== undefined)
+    ) {
+      const permissions = statSync(envPath).mode & 0o777;
+      if ((permissions & 0o077) !== 0) {
+        throw new Error(
+          `Notarization selector config must be owner-only (0600), but ${envPath} is mode ${permissions.toString(8).padStart(4, "0")}. Run ./kd release setup-notarization to migrate it safely.`
+        );
+      }
+    }
+    return parsed;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to load release environment ${envPath}: ${message}`);
   }
+}
+
+function validateReleaseEnvironmentFile(
+  parsed: Record<string, string>,
+  envPath: string,
+  scope: ReleaseEnvironmentScope
+): void {
+  const unsafeKeys = Object.keys(parsed).filter((key) =>
+    UNSAFE_PLAINTEXT_RELEASE_KEYS.has(key)
+  );
+  if (unsafeKeys.length > 0) {
+    throw new Error(
+      `Plaintext release credentials are not allowed in ${envPath}: ${unsafeKeys.join(", ")}. Store notarization credentials with ./kd release setup-notarization and keep other secrets in their supported secure stores.`
+    );
+  }
+
+  if (scope === "repository") {
+    const selectors = Object.keys(parsed).filter((key) =>
+      NOTARIZATION_SELECTOR_KEYS.has(key)
+    );
+    if (selectors.length > 0) {
+      throw new Error(
+        `Notarization selectors are machine-local and cannot be set in repository file ${envPath}: ${selectors.join(", ")}. Move them to ~/.kanna/${RELEASE_ENV_FILE}.`
+      );
+    }
+  }
+}
+
+export function writeMachineNotarizationSelectors(input: {
+  homeDir: string;
+  profile: string;
+  keychainPath: string;
+}): string {
+  const kannaDir = join(input.homeDir, ".kanna");
+  const envPath = join(kannaDir, RELEASE_ENV_FILE);
+  mkdirSync(kannaDir, { recursive: true, mode: 0o700 });
+  chmodSync(kannaDir, 0o700);
+
+  const source = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+  validateDotenv(source, envPath);
+  const parsed = definedEnvironment(parseEnv(source));
+  validateReleaseEnvironmentFile(parsed, envPath, "machine");
+  for (const key of NOTARIZATION_SELECTOR_KEYS) {
+    if (parsed[key]?.includes("\n") || parsed[key]?.includes("\r")) {
+      throw new Error(`Invalid multiline notarization selector ${key} in ${envPath}.`);
+    }
+  }
+
+  const retainedLines = source
+    .split(/\r?\n/)
+    .filter((line) => {
+      const assignment = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line);
+      return !assignment?.[1] || !NOTARIZATION_SELECTOR_KEYS.has(assignment[1]);
+    });
+  while (retainedLines.at(-1) === "") retainedLines.pop();
+  const updated = [
+    ...retainedLines,
+    `${NOTARIZATION_PROFILE_ENV}=${JSON.stringify(input.profile)}`,
+    `${NOTARIZATION_KEYCHAIN_ENV}=${JSON.stringify(input.keychainPath)}`,
+    ""
+  ].join("\n");
+  const tempPath = `${envPath}.tmp-${process.pid}`;
+  try {
+    writeFileSync(tempPath, updated, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    chmodSync(tempPath, 0o600);
+    renameSync(tempPath, envPath);
+  } finally {
+    rmSync(tempPath, { force: true });
+  }
+  chmodSync(envPath, 0o600);
+  return envPath;
 }
 
 function definedEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {

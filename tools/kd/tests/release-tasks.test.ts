@@ -25,12 +25,16 @@ import { getTaskDefinition } from "../src/tasks/registry";
 interface Fixture {
   primary: string;
   worktree: string;
+  keychain: string;
+  home: string;
 }
 
 async function createFixture(): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "kanna-release-tasks-"));
   const primary = join(root, "repo");
   const worktree = join(primary, ".kanna-worktrees", "task-123");
+  const home = join(root, "home");
+  await mkdir(join(home, ".kanna"), { recursive: true });
   await mkdir(join(worktree, ".kanna"), { recursive: true });
   await mkdir(join(worktree, "apps", "desktop", "src-tauri"), { recursive: true });
   await writeFile(join(worktree, ".kanna", "config.json"), "{}\n");
@@ -39,16 +43,26 @@ async function createFixture(): Promise<Fixture> {
     '{"identifier":"build.kanna.test"}\n'
   );
   await mkdir(primary, { recursive: true });
+  const keychain = join(root, "login.keychain-db");
+  await writeFile(keychain, "keychain fixture\n");
   await writeFile(
     join(primary, ".env.release.local"),
-    "APPLE_KEYCHAIN_PROFILE=file-profile\nRELEASE_DEFAULT=file\n"
+    "RELEASE_DEFAULT=file\n"
   );
-  return { primary, worktree };
+  return { primary, worktree, keychain, home };
 }
 
-function mockGitContext(fixture: Fixture): void {
+function mockGitContext(
+  fixture: Fixture,
+  notaryResult?: { exitCode: number; stdout: string; stderr: string }
+): void {
+  vi.stubEnv("HOME", fixture.home);
   vi.spyOn(nodeCommandRunner, "run").mockImplementation(async (command, args) => {
-    expect(command).toBe("git");
+    if (command === "xcrun" && args[0] === "notarytool") {
+      if (!notaryResult) throw new Error("unexpected notarytool preflight");
+      return notaryResult;
+    }
+    if (command !== "git") throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
     const key = args.join(" ");
     if (key === "rev-parse --show-toplevel") {
       return { exitCode: 0, stdout: `${fixture.worktree}\n`, stderr: "" };
@@ -152,6 +166,33 @@ describe("release task environment integration", () => {
     expect(nodeCommandRunner.run).not.toHaveBeenCalledWith(
       "git",
       ["worktree", "list", "--porcelain"],
+      expect.anything()
+    );
+  });
+
+  it("stops before the ship/build/publish boundary when the selected profile is missing", async () => {
+    const fixture = await createFixture();
+    vi.stubEnv("APPLE_KEYCHAIN_PATH", fixture.keychain);
+    mockGitContext(fixture, {
+      exitCode: 69,
+      stdout: "",
+      stderr: "No Keychain password item found for profile: shell-profile"
+    });
+
+    await expect(getTaskDefinition("release.ship").execute(
+      { cwd: fixture.worktree, env: {} },
+      { staging: true, release: true, patch: true }
+    )).rejects.toThrow(/profile is missing from the selected Keychain/);
+
+    expect(releaseMocks.shipRelease).not.toHaveBeenCalled();
+    expect(nodeCommandRunner.run).not.toHaveBeenCalledWith(
+      expect.stringMatching(/^(?:bazel|gh)$/),
+      expect.anything(),
+      expect.anything()
+    );
+    expect(nodeCommandRunner.run).not.toHaveBeenCalledWith(
+      "git",
+      expect.arrayContaining(["tag"]),
       expect.anything()
     );
   });
