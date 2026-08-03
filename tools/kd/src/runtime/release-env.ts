@@ -40,6 +40,12 @@ export interface LoadReleaseEnvironmentInput {
   runner: CommandRunner;
 }
 
+interface ResolvePrimaryRepoRootInput {
+  repoRoot: string;
+  env: NodeJS.ProcessEnv;
+  runner: CommandRunner;
+}
+
 function validateDotenv(source: string, envPath: string): void {
   let pendingQuote: "'" | '"' | undefined;
   let pendingLine = 0;
@@ -105,7 +111,7 @@ function assertOnlyCommentFollows(value: string, envPath: string, line: number):
   }
 }
 
-async function resolvePrimaryRepoRoot(input: LoadReleaseEnvironmentInput): Promise<string> {
+async function resolvePrimaryRepoRoot(input: ResolvePrimaryRepoRootInput): Promise<string> {
   const result = await input.runner.run(
     "git",
     ["worktree", "list", "--porcelain"],
@@ -241,6 +247,65 @@ export function writeMachineNotarizationSelectors(input: {
   }
   chmodSync(envPath, 0o600);
   return envPath;
+}
+
+export async function migrateLegacyRepositoryNotarizationSelectors(input: {
+  repoRoot: string;
+  env: NodeJS.ProcessEnv;
+  runner: CommandRunner;
+}): Promise<string | undefined> {
+  const primaryRoot = await resolvePrimaryRepoRoot(input);
+  const envPath = join(primaryRoot, RELEASE_ENV_FILE);
+  if (!existsSync(envPath)) {
+    return undefined;
+  }
+
+  const source = readFileSync(envPath, "utf8");
+  validateDotenv(source, envPath);
+  const parsed = definedEnvironment(parseEnv(source));
+  if (![...NOTARIZATION_SELECTOR_KEYS].some((key) => parsed[key] !== undefined)) {
+    return undefined;
+  }
+
+  const updated = removeDotenvAssignments(source, NOTARIZATION_SELECTOR_KEYS);
+  const permissions = statSync(envPath).mode & 0o777;
+  const tempPath = `${envPath}.tmp-${process.pid}`;
+  try {
+    writeFileSync(tempPath, updated, { encoding: "utf8", mode: permissions, flag: "wx" });
+    chmodSync(tempPath, permissions);
+    renameSync(tempPath, envPath);
+  } finally {
+    rmSync(tempPath, { force: true });
+  }
+  return envPath;
+}
+
+function removeDotenvAssignments(source: string, keys: ReadonlySet<string>): string {
+  const retainedLines: string[] = [];
+  let skippedQuote: "'" | '"' | undefined;
+
+  for (const line of source.split(/\r?\n/)) {
+    if (skippedQuote) {
+      if (findClosingQuote(line, skippedQuote, 0) >= 0) {
+        skippedQuote = undefined;
+      }
+      continue;
+    }
+
+    const assignment = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (!assignment?.[1] || !keys.has(assignment[1])) {
+      retainedLines.push(line);
+      continue;
+    }
+
+    const value = (assignment[2] ?? "").trimStart();
+    const quote = value[0];
+    if ((quote === '"' || quote === "'") && findClosingQuote(value, quote, 1) < 0) {
+      skippedQuote = quote;
+    }
+  }
+
+  return retainedLines.join("\n");
 }
 
 function definedEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {

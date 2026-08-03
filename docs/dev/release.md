@@ -75,7 +75,9 @@ Use `--profile <name>` or `--keychain <absolute-path>` when a different named
 profile or file-based Keychain is required. Existing credentials saved with
 `notarytool --sync` live in the data-protection Keychain and cannot be copied or
 extracted; rerun the setup command and enter the credential once so it is saved
-in the selected file-based Keychain.
+in the selected file-based Keychain. After validation succeeds, setup also
+removes legacy notarization selector assignments from the primary checkout's
+`.env.release.local` while preserving its comments and other release defaults.
 
 `kd release ship` and non-dry-run promotions validate that exact profile and
 Keychain using `notarytool history` before starting the release build. Missing

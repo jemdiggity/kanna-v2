@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
@@ -126,8 +126,10 @@ describe("notarization credential selection", () => {
 describe("notarization setup", () => {
   it("stores credentials interactively before writing owner-only machine selectors", async () => {
     const root = await mkdtemp(join(tmpdir(), "kanna-notary-setup-"));
+    const primary = join(root, "repo");
     const homeDir = join(root, "home");
     const keychainPath = join(root, "login.keychain-db");
+    await mkdir(primary);
     await writeFile(keychainPath, "keychain fixture\n");
     const calls: Array<{
       command: string;
@@ -139,6 +141,9 @@ describe("notarization setup", () => {
         calls.push({ command, args, interactive: options?.interactive });
         if (command === "security") {
           return { exitCode: 0, stdout: `    \"${keychainPath}\"\n`, stderr: "" };
+        }
+        if (command === "git") {
+          return { exitCode: 0, stdout: `worktree ${primary}\nHEAD abc123\n\n`, stderr: "" };
         }
         return { exitCode: 0, stdout: "", stderr: "" };
       }
@@ -173,6 +178,11 @@ describe("notarization setup", () => {
           "--validate"
         ],
         interactive: true
+      },
+      {
+        command: "git",
+        args: ["worktree", "list", "--porcelain"],
+        interactive: undefined
       }
     ]);
     expect(await readFile(result.configPath, "utf8")).toContain(

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,6 +20,7 @@ vi.mock("../src/runtime/release", async (importOriginal) => {
 });
 
 import { nodeCommandRunner } from "../src/runtime/process";
+import { loadReleaseEnvironment } from "../src/runtime/release-env";
 import { getTaskDefinition } from "../src/tasks/registry";
 
 interface Fixture {
@@ -194,6 +195,80 @@ describe("release task environment integration", () => {
       "git",
       expect.arrayContaining(["tag"]),
       expect.anything()
+    );
+  });
+
+  it("migrates legacy repository selectors before ship and promote preflight", async () => {
+    const fixture = await createFixture();
+    vi.stubEnv("APPLE_KEYCHAIN_PROFILE", undefined);
+    await writeFile(
+      join(fixture.primary, ".env.release.local"),
+      [
+        "# Keep repository release defaults here.",
+        "RELEASE_DEFAULT=keep",
+        "APPLE_KEYCHAIN_PROFILE=legacy-profile",
+        `export APPLE_KEYCHAIN_PATH=${fixture.keychain}`,
+        "LOCAL_ONLY=preserved",
+        ""
+      ].join("\n")
+    );
+    mockGitContext(fixture, { exitCode: 0, stdout: '{"history":[]}', stderr: "" });
+
+    await getTaskDefinition("release.setup-notarization").execute(
+      { cwd: fixture.worktree, env: {} },
+      { profile: "migrated-profile", keychain: fixture.keychain }
+    );
+
+    expect(await readFile(join(fixture.primary, ".env.release.local"), "utf8")).toBe(
+      "# Keep repository release defaults here.\nRELEASE_DEFAULT=keep\nLOCAL_ONLY=preserved\n"
+    );
+    const loaded = await loadReleaseEnvironment({
+      repoRoot: fixture.worktree,
+      homeDir: fixture.home,
+      env: {},
+      runner: nodeCommandRunner
+    });
+    expect(loaded).toEqual(expect.objectContaining({
+      APPLE_KEYCHAIN_PROFILE: "migrated-profile",
+      APPLE_KEYCHAIN_PATH: fixture.keychain,
+      RELEASE_DEFAULT: "keep",
+      LOCAL_ONLY: "preserved"
+    }));
+
+    await getTaskDefinition("release.ship").execute(
+      { cwd: fixture.worktree, env: {} },
+      { staging: true, release: true, patch: true, arm64: true }
+    );
+    await getTaskDefinition("release.promote").execute(
+      { cwd: fixture.worktree, env: {} },
+      { version: "1.2.3-staging.1", arm64: true }
+    );
+
+    expect(releaseMocks.shipRelease).toHaveBeenCalledTimes(2);
+    for (const call of releaseMocks.shipRelease.mock.calls) {
+      expect(call[0]).toEqual(expect.objectContaining({
+        env: expect.objectContaining({
+          APPLE_KEYCHAIN_PROFILE: "migrated-profile",
+          APPLE_KEYCHAIN_PATH: fixture.keychain,
+          RELEASE_DEFAULT: "keep",
+          LOCAL_ONLY: "preserved"
+        })
+      }));
+    }
+    expect(nodeCommandRunner.run).toHaveBeenCalledWith(
+      "xcrun",
+      [
+        "notarytool",
+        "history",
+        "--keychain-profile",
+        "migrated-profile",
+        "--keychain",
+        fixture.keychain,
+        "--output-format",
+        "json",
+        "--no-progress"
+      ],
+      expect.objectContaining({ cwd: fixture.worktree })
     );
   });
 });
