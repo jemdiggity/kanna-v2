@@ -1,11 +1,14 @@
 import {
   chmodSync,
-  existsSync,
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync
 } from "node:fs";
 import { join } from "node:path";
@@ -105,25 +108,84 @@ export function loadReleaseEnvironment(
 }
 
 function loadDotenvFile(envPath: string): Record<string, string> {
-  if (!existsSync(envPath)) {
-    return {};
-  }
-
   try {
-    const source = readFileSync(envPath, "utf8");
+    const source = readMachineReleaseFile(envPath, true);
+    if (source === undefined) {
+      return {};
+    }
     validateDotenv(source, envPath);
     const parsed = definedEnvironment(parseEnv(source));
     validateReleaseEnvironmentFile(parsed, envPath);
-    const permissions = statSync(envPath).mode & 0o777;
-    if ((permissions & 0o077) !== 0) {
-      throw new Error(
-        `Machine-local release environment must be owner-only (0600), but ${envPath} is mode ${permissions.toString(8).padStart(4, "0")}. Run chmod 600 ${envPath} before retrying.`
-      );
-    }
     return parsed;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to load release environment ${envPath}: ${message}`);
+  }
+}
+
+function readMachineReleaseFile(
+  envPath: string,
+  requireOwnerOnly: boolean
+): string | undefined {
+  let descriptor: number;
+  try {
+    descriptor = openSync(
+      envPath,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    );
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return undefined;
+    }
+    if (code === "ELOOP") {
+      throw new Error(
+        `Machine-local release environment must be a regular file, not a symbolic link: ${envPath}`
+      );
+    }
+    throw error;
+  }
+
+  try {
+    const openedFile = fstatSync(descriptor);
+    if (!openedFile.isFile()) {
+      throw new Error(
+        `Machine-local release environment must be a regular file: ${envPath}`
+      );
+    }
+
+    const permissions = openedFile.mode & 0o777;
+    if (requireOwnerOnly && (permissions & 0o077) !== 0) {
+      throw new Error(
+        `Machine-local release environment must be owner-only (0600), but ${envPath} is mode ${permissions.toString(8).padStart(4, "0")}. Run chmod 600 ${envPath} before retrying.`
+      );
+    }
+    const source = readFileSync(descriptor, "utf8");
+
+    let configuredPath;
+    try {
+      configuredPath = lstatSync(envPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(
+          `Machine-local release environment changed while it was being opened: ${envPath}`
+        );
+      }
+      throw error;
+    }
+    if (
+      configuredPath.isSymbolicLink()
+      || !configuredPath.isFile()
+      || configuredPath.dev !== openedFile.dev
+      || configuredPath.ino !== openedFile.ino
+    ) {
+      throw new Error(
+        `Machine-local release environment must remain the same regular, non-symlinked file while it is read: ${envPath}`
+      );
+    }
+    return source;
+  } finally {
+    closeSync(descriptor);
   }
 }
 
@@ -152,7 +214,7 @@ export function writeMachineNotarizationSelectors(input: {
   mkdirSync(kannaDir, { recursive: true, mode: 0o700 });
   chmodSync(kannaDir, 0o700);
 
-  const source = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+  const source = readMachineReleaseFile(envPath, false) ?? "";
   validateDotenv(source, envPath);
   const parsed = definedEnvironment(parseEnv(source));
   validateReleaseEnvironmentFile(parsed, envPath);

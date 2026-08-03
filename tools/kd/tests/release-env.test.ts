@@ -1,4 +1,12 @@
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  stat,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
@@ -25,7 +33,7 @@ async function writePrivateFile(path: string, contents: string): Promise<void> {
 }
 
 describe("release environment", () => {
-  it("loads the sole machine-global release environment", async () => {
+  it("loads a valid 0600 regular machine-global release environment", async () => {
     const { root, home, globalEnvPath } = await createFixture();
     await writePrivateFile(
       globalEnvPath,
@@ -39,6 +47,17 @@ describe("release environment", () => {
       APPLE_KEYCHAIN_PATH: join(root, "login.keychain-db"),
       RELEASE_DEFAULT: "global"
     }));
+  });
+
+  it("rejects a machine-global release environment symlinked to a repository file", async () => {
+    const { root, home, globalEnvPath } = await createFixture();
+    const repositoryEnvPath = join(root, "repo", ".env.release.local");
+    await mkdir(join(root, "repo"), { recursive: true });
+    await writePrivateFile(repositoryEnvPath, "APPLE_KEYCHAIN_PROFILE=repository-profile\n");
+    await symlink(repositoryEnvPath, globalEnvPath);
+
+    expect(() => loadReleaseEnvironment({ homeDir: home, env: {} }))
+      .toThrow(/regular file, not a symbolic link/);
   });
 
   it("never reads a primary-checkout or worktree release file", async () => {
