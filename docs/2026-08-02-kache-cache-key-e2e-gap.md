@@ -1,7 +1,9 @@
 # kache cache-key selection: E2E gap
 
 **Date:** 2026-08-02<br>
-**Status:** Open. The Rust compiler cache is opt-in (`KANNA_RUST_CACHE=on`).
+**Status:** Closed for cross-revision selection, 2026-08-02. Narrowed, not
+eliminated — see "What the closure does and does not cover". The Rust compiler
+cache is now on by default; `KANNA_RUST_CACHE=off` is the escape hatch.
 
 ## Correction first: the E0432 incident was not a kache defect
 
@@ -85,33 +87,115 @@ evidence of a kache key-selection bug.
 
 It is also not proof that kache's selection is *sound*. That is the gap below.
 
-## What is still not covered
+## The gap as originally stated
 
-Kanna has no automated test that exercises the **real pinned `kache` binary**
-across two source revisions and asserts that an artifact compiled from the older
-revision is never selected for the newer one. Nothing now suggests that boundary
-is broken, but nothing in canonical automation demonstrates it holds either.
+Kanna had no automated test that exercised the **real pinned `kache` binary**
+across two source revisions and asserted that an artifact compiled from the older
+revision is never selected for the newer one. Nothing suggested that boundary was
+broken, but nothing in canonical automation demonstrated it held either — and a
+single hand-run probe (a `defaults` crate gaining a `session_id` module, a
+`consumer` crate re-exporting it, cold private tree against a warm store) is not
+a proof.
 
-Exercising the real binary in canonical automation requires a network download
-of the pinned release, which `pnpm test` and `./kd test all` deliberately do not
-do. Closing this gap means solving the tool-provisioning problem, and then
-driving two source revisions plus a warm shared store through a real build.
+The stated obstacle was tool provisioning: exercising the real binary appeared to
+require a network download of the pinned release, which `pnpm test` and
+`./kd test all` deliberately do not do.
 
-A targeted probe against the real pinned binary — a `defaults` crate gaining a
-`session_id` module, a `consumer` crate re-exporting it, cold private tree
-against a warm store — compiled correctly with zero hits. One passing probe is
-not a proof.
+## How it was closed
 
-## Why the default is still off
+The obstacle was mis-stated. The *test* never needed to download anything —
+`./kd rust-cache install` does, and it runs from this repository's `setup` list.
+More to the point, the pinned binary's presence is the same condition as the
+cache being able to affect a build at all: when it is absent,
+`applyRustCacheEnvironment` resolves `not-installed` and falls back to direct
+rustc. So a suite gated on the installed binary is not a coverage hole — it runs
+wherever the risk exists, and skips exactly where there is none.
 
-The correction above removes the demonstrated reason to distrust kache, but it
-does not by itself establish the positive case, and the incident that prompted
-adoption review is only now understood. The cache stays opt-in
-(`KANNA_RUST_CACHE=on`) until someone decides deliberately to flip it, with the
-root cause known and the measured trade in hand: a cold private tree against a
-warm store restores 96.5% of cacheable invocations and cuts sidecar build CPU by
-56%, while a one-line workspace edit rebuilds about 3.5x slower. That is a
-product call, not a correctness blocker.
+`tools/kd/tests/rust-cache.integration.test.ts` now contains, under
+**`pinned kache selects cache keys per source revision`**:
+
+- **`never serves an artifact compiled from a different revision`** — the
+  incident's own shape, driven through the real binary in five builds, each from
+  a cold private tree against a progressively warmer store. It populates the
+  store at revision 1; rebuilds revision 1 cold and asserts a hit, so nothing
+  after that can pass vacuously; advances to revision 2, where a stale selection
+  fails with `E0432: unresolved import ...session_id`; rebuilds revision 2 cold
+  and asserts it restores *its own* entry, so the previous step cannot be
+  satisfied by a cache that never hits; and finally reverts to revision 1, the
+  direction that compiles cleanly against a revision-2 archive and is caught only
+  because the fixture's executable prints which revision it was linked against.
+- **`keys on the compiler invocation, not only on the sources`** — identical
+  sources under different `RUSTFLAGS` must not share an entry.
+
+The store is disposable: the fixture home symlinks the pinned tool root, so the
+real binary runs while `KACHE_CACHE_DIR` resolves under the fixture's own home
+and no developer's store is read or written.
+
+The negative control moved rather than disappeared. The former
+`does not restore a revision-1 artifact into a revision-2 build` asserted that
+the *default* never reached the cache, which the flipped default makes
+meaningless. It is now
+**`fails with E0432 when the cache serves a revision-1 artifact to revision 2`**:
+it installs a deliberately mis-selecting cache at the pinned path and asserts the
+fixture fails loudly with the incident's exact signature. Without it, "the real
+binary passed" would only establish that the probe is insensitive.
+
+### `./kd test all` is itself a cross-revision check on the real graph
+
+Worth knowing, because it was not designed as one. The daemon's previous-release
+fixture (`crates/daemon/tests/support/previous_daemon.rs`) compiles the archived
+`v0.1.0-staging.1` tree in a nested Cargo process. `isolated_cargo_build()` gives
+it private target and build directories — that was the E0432 fix — but it
+inherits `RUSTC_WRAPPER` and `KACHE_CACHE_DIR` from the kd environment, as it
+should. So with the cache on by default, every `./kd test all` compiles two
+genuinely different revisions of `kanna-runtime-defaults` (the archive has no
+`session_id`; current sources do) through one shared content store, and then runs
+the daemon doctest where the original failure surfaced.
+
+Verified on this change, from a cold `.build/cargo-build` **and**
+`.build/daemon-cross-version`: the run passed end to end, and the store holds
+three distinct `kanna_runtime_defaults` entries of different sizes, all reachable
+within it. The only `E0432` anywhere in the log is the negative control asserting
+its own.
+
+This is real-graph evidence, not a substitute for the tests above — it is
+incidental to the fixture's design and would stop being true if the fixture
+started scrubbing the wrapper. Do not treat it as the coverage; treat it as a
+reason to look hard at any future change that isolates the fixture further.
+
+## What the closure does and does not cover
+
+Covered: cross-revision source selection in both directions, against the real
+pinned binary, with restore liveness and probe sensitivity both proven rather
+than assumed; and rustflags key separation.
+
+Not covered, and narrower than the original gap:
+
+- Feature-set, target-triple, and toolchain-version discrimination. These were
+  measured by hand during the canary and are not automated.
+- The full Kanna graph through the real binary. The fixture is a two-crate
+  workspace; the shipped measurements on the real sidecar graph are in
+  `docs/specs/safe-rust-build-caching.md`, but they are measurements, not
+  assertions.
+- The provisioning path itself — download, checksum, version check — is unit
+  tested with a fake runner, not exercised against the network.
+- CI. The cache is disabled there outright, so the suite skips; that is
+  consistent, not a hole.
+
+## Why the default is on
+
+The measured trade was accepted: a cold private tree against a warm store
+restores 96.5% of cacheable invocations and cuts sidecar build CPU by 56%, and
+the private build tree shrinks 41% per worktree, while a one-line workspace edit
+rebuilds several times slower — re-measured at the new default as 5.47 s to
+15.87 s wall and 7.4x the CPU. That is a product call about which cost to pay,
+made with the root cause of the E0432 incident known and the key-selection
+boundary now covered by test rather than by argument.
+
+`KACHE_VERIFY_RESTORES=always` stays on. It guarantees a restored blob matches
+the digest recorded for the key kache chose — it never proved the key was the
+right one, and now does not need to. It is defence in depth against a corrupt or
+truncated entry, and must not be traded for restore speed.
 
 ## Regression coverage added meanwhile
 
@@ -121,16 +205,16 @@ filesystem:
 - **`strips inherited Cargo build/target directories`** and **`compiles a fixture
   into the fixture's own build directory`** — the guard for the actual defect
   above.
-- **`does not restore a revision-1 artifact into a revision-2 build`** — builds a
-  two-crate workspace at revision 1, records its `.rlib` *and* `.rmeta`, installs
-  a stub cache that restores those over every later `defaults` compile, advances
-  the sources, and builds with the default resolution. The build runs before the
-  assertions, so a regression shows up as its consequence: flipping the default
-  on makes this fail with
-  `error[E0432]: unresolved import kd_probe_defaults::session_id`. Both metadata
-  and archive are restored by the stub because rustc resolves imports from
-  `.rmeta`; overwriting only the archive is invisible to a normal build, which is
-  why the original failure surfaced in rustdoc, where the rlib is linked.
+- **`fails with E0432 when the cache serves a revision-1 artifact to revision 2`**
+  — builds a two-crate workspace at revision 1, records its `.rlib` *and*
+  `.rmeta`, installs a stub cache at the pinned path that restores those over
+  every later `defaults` compile, advances the sources, and builds with the
+  default resolution. It asserts the build fails with
+  `error[E0432]: unresolved import kd_probe_defaults::session_id`, which is what
+  makes it the sensitivity control for the real-binary suite. Both metadata and
+  archive are restored by the stub because rustc resolves imports from `.rmeta`;
+  overwriting only the archive is invisible to a normal build, which is why the
+  original failure surfaced in rustdoc, where the rlib is linked.
 - **`opting out of an inherited active environment restores incremental
   compilation`** — proves `KANNA_RUST_CACHE=off` inside a kd-spawned shell really
   reverts to direct incremental builds.
@@ -148,7 +232,9 @@ filesystem:
   "wrote into the outer/shared Cargo build directory".
 
 Unit coverage in `rust-cache.test.ts` and `rust-cache-policy.test.ts` pins the
-opt-in default, the enabled→off transition, ambient `KACHE_DISABLED`, hostile
+default-on resolution, the enabled→off transition, the fallback to direct rustc
+when the pinned tool is absent (the condition the real-binary suite is gated on),
+`KACHE_VERIFY_RESTORES=always`, ambient `KACHE_DISABLED`, hostile
 `RUSTC_WORKSPACE_WRAPPER` / `CARGO_BUILD_RUSTC_*` wrappers, and idempotence.
 `release-env.test.ts` pins release stripping of every wrapper spelling.
 
