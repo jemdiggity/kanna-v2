@@ -127,11 +127,15 @@ export function applyRustCacheEnvironment(
     };
   }
 
+  // The cache is on by default, so this is the state of any checkout that has
+  // not run setup. Fall back to direct rustc rather than downloading a compiler
+  // wrapper from inside an arbitrary build, and say both ways out once.
   if (!existsSync(paths.binary)) {
     if (!warnedMissingBinary) {
       warnedMissingBinary = true;
       console.warn(
-        `[kd] Rust build cache is on but kache ${KACHE_VERSION} is not installed. Run ./kd rust-cache install.`
+        `[kd] Rust build cache is on but kache ${KACHE_VERSION} is not installed; building without it. ` +
+          `Run ./kd rust-cache install, or set KANNA_RUST_CACHE=off to silence this.`
       );
     }
     return {

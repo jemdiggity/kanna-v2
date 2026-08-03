@@ -6,9 +6,10 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { applyRustCacheEnvironment, repositoryIdentity } from "../src/runtime/rust-cache";
@@ -233,6 +234,11 @@ async function twoRevisionFixture(): Promise<Fixture> {
   for (const crate of ["defaults", "consumer"]) {
     mkdirSync(join(repoRoot, crate, "src"), { recursive: true });
   }
+  // The consumer also builds an executable, so the `defaults` rlib is linked and
+  // not merely read as metadata. The original incident surfaced in rustdoc for
+  // exactly that reason: a stale rlib behind a current rmeta is invisible to an
+  // ordinary library build.
+  mkdirSync(join(repoRoot, "consumer", "src", "bin"), { recursive: true });
   mkdirSync(join(repoRoot, ".cargo"), { recursive: true });
   writeFileSync(
     join(repoRoot, "Cargo.toml"),
@@ -257,13 +263,23 @@ async function twoRevisionFixture(): Promise<Fixture> {
   return { root, repoRoot, homeDir, log };
 }
 
+/**
+ * `base()` deliberately returns a different value per revision, so the built
+ * executable reports which revision's `defaults` archive it was actually linked
+ * against. That catches a stale restore in the direction E0432 cannot: reverting
+ * a checkout to revision 1 still compiles cleanly against a revision-2 rlib,
+ * because revision 2 is a superset of the API revision 1 uses.
+ */
 function writeRevision(repoRoot: string, revision: 1 | 2): void {
+  const probe = join(repoRoot, "consumer", "src", "bin", "probe.rs");
   if (revision === 1) {
+    rmSync(join(repoRoot, "defaults", "src", "session_id.rs"), { force: true });
     writeFileSync(join(repoRoot, "defaults", "src", "lib.rs"), "pub fn base() -> u32 { 1 }\n");
     writeFileSync(
       join(repoRoot, "consumer", "src", "lib.rs"),
       "pub fn use_base() -> u32 { kd_probe_defaults::base() }\n"
     );
+    writeFileSync(probe, 'fn main() { println!("{}", kd_probe_consumer::use_base()); }\n');
     return;
   }
   writeFileSync(
@@ -272,11 +288,18 @@ function writeRevision(repoRoot: string, revision: 1 | 2): void {
   );
   writeFileSync(
     join(repoRoot, "defaults", "src", "lib.rs"),
-    "pub mod session_id;\npub fn base() -> u32 { 1 }\n"
+    "pub mod session_id;\npub fn base() -> u32 { 2 }\n"
   );
   writeFileSync(
     join(repoRoot, "consumer", "src", "lib.rs"),
-    "pub use kd_probe_defaults::session_id;\n"
+    "pub use kd_probe_defaults::session_id;\npub fn use_base() -> u32 { kd_probe_defaults::base() }\n"
+  );
+  // Reads through the linked rlib, so a revision-1 archive behind a revision-2
+  // metadata file fails here rather than passing silently.
+  writeFileSync(
+    probe,
+    'fn main() { assert!(kd_probe_consumer::session_id::validate("x")); ' +
+      'println!("{}", kd_probe_consumer::use_base()); }\n'
   );
 }
 
@@ -351,11 +374,19 @@ describeMac("fixture builds stay out of the real repository's build directory", 
   }, 120_000);
 });
 
-describeMac("stale-revision restores cannot reach a default build", () => {
-  it("does not restore a revision-1 artifact into a revision-2 build", async () => {
+describeMac("the two-revision fixture detects a mis-selected cache key", () => {
+  /**
+   * The negative control for the real-binary suite below. A cache that selects
+   * the wrong key is indistinguishable from a correct one unless the harness can
+   * actually observe the fault, so this installs a deliberately broken cache at
+   * the pinned path — it restores recorded revision-1 outputs over every fresh
+   * `defaults` compile — and proves the fixture fails loudly. Without this, "the
+   * real binary passed" would only mean the probe is insensitive.
+   */
+  it("fails with E0432 when the cache serves a revision-1 artifact to revision 2", async () => {
     const { root, repoRoot, homeDir, log } = await twoRevisionFixture();
 
-    // Record a real revision-1 rlib, then poison the cache with it.
+    // Record a real revision-1 rlib and rmeta, then poison the cache with them.
     writeRevision(repoRoot, 1);
     await run("cargo", ["build", "-p", "kd-probe-defaults"], {
       cwd: repoRoot,
@@ -373,7 +404,8 @@ describeMac("stale-revision restores cannot reach a default build", () => {
     }
     installStaleRestoringCache(homeDir, log, staleDir);
 
-    // Advance the sources, then build the way a developer actually does.
+    // Advance the sources, then build the way a developer actually does — with
+    // no KANNA_RUST_CACHE set at all, which is now an enabled cache.
     writeRevision(repoRoot, 2);
     rmSync(join(repoRoot, ".build", "cargo-build"), { recursive: true, force: true });
 
@@ -384,21 +416,16 @@ describeMac("stale-revision restores cannot reach a default build", () => {
       platform: "darwin",
       arch: process.arch
     });
+    expect(cache.state.active).toBe(true);
 
-    // Build first, so that a regression is demonstrated by its consequence and
-    // not merely by a policy assertion: if the default ever reaches the cache
-    // again, this build fails with `E0432: unresolved import ...session_id`,
-    // exactly as `./kd test all` did.
-    await run("cargo", ["build", "-p", "kd-probe-consumer"], { cwd: repoRoot, env: cache.env });
-
-    // Opt-in only: kache 0.12.0 can mis-select a key, so the default resolution
-    // must not reach the cache at all.
-    expect(cache.state).toMatchObject({ active: false, category: "disabled-by-default" });
-    expect(readFileSync(log, "utf8")).toBe("");
-    const rebuilt = readdirSync(join(repoRoot, ".build", "cargo-build", "debug", "deps")).find(
-      (f) => f.startsWith("libkd_probe_defaults") && f.endsWith(".rlib")
-    );
-    expect(rebuilt).toBeDefined();
+    const result = await nodeCommandRunner.run("cargo", ["build", "-p", "kd-probe-consumer"], {
+      cwd: repoRoot,
+      env: cache.env
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("E0432");
+    expect(result.stderr).toContain("session_id");
+    expect(readFileSync(log, "utf8")).not.toBe("");
   }, 180_000);
 
   it("opting out of an inherited active environment restores incremental compilation", async () => {
@@ -433,4 +460,158 @@ describeMac("stale-revision restores cannot reach a default build", () => {
     expect(existsSync(incremental)).toBe(true);
     expect(readdirSync(incremental).length).toBeGreaterThan(0);
   }, 180_000);
+});
+
+/**
+ * The cross-revision key-selection suite, run against the **real pinned kache
+ * binary** rather than a stub.
+ *
+ * It is gated on that binary already being installed at its pinned path, which
+ * is exactly the condition under which the cache can affect a build: when it is
+ * absent `applyRustCacheEnvironment` resolves `not-installed` and falls back to
+ * direct rustc (pinned by "stays inert when the pinned tool is not installed" in
+ * `rust-cache.test.ts`). So the gate is a biconditional, not a coverage hole —
+ * the suite runs wherever the risk exists. `./kd rust-cache install` is what
+ * puts the binary there, and it runs from this repository's `setup` list, so a
+ * developer machine that builds through `kd` has it.
+ *
+ * The store is disposable: the fixture home symlinks the pinned tool root, so
+ * the real binary runs while `KACHE_CACHE_DIR` still resolves under the
+ * fixture's own home and no developer's store is read or written.
+ */
+const pinnedKache = resolveKachePaths(homedir());
+const describeRealKache =
+  process.platform === "darwin" && existsSync(pinnedKache.binary) ? describe : describe.skip;
+
+function linkPinnedKache(homeDir: string): void {
+  const fixture = resolveKachePaths(homeDir);
+  mkdirSync(dirname(fixture.versionRoot), { recursive: true });
+  symlinkSync(pinnedKache.versionRoot, fixture.versionRoot);
+}
+
+interface CacheEntry {
+  crate: string;
+  hits: number;
+}
+
+/**
+ * `kache list` prints one fixed-width row per stored entry. Sizes carry a unit
+ * ("7.0 KiB"), so the columns are read from the end, where they are unambiguous.
+ */
+async function listCacheEntries(store: string): Promise<CacheEntry[]> {
+  const stdout = await run(pinnedKache.binary, ["list"], {
+    env: { ...isolatedCargoEnv(), KACHE_CACHE_DIR: store, KACHE_LOCAL_ONLY: "1" }
+  });
+  return stdout
+    .split("\n")
+    .map((line) => line.trim().split(/\s+/))
+    .filter((columns) => columns[0]?.startsWith("kd_probe_"))
+    .map((columns) => ({ crate: columns[0]!, hits: Number(columns.at(-3)) }))
+    .filter((entry) => Number.isFinite(entry.hits));
+}
+
+function defaultsEntries(entries: CacheEntry[]): CacheEntry[] {
+  return entries.filter((entry) => entry.crate === "kd_probe_defaults");
+}
+
+function totalHits(entries: CacheEntry[]): number {
+  return entries.reduce((sum, entry) => sum + entry.hits, 0);
+}
+
+describeRealKache("pinned kache selects cache keys per source revision", () => {
+  it("never serves an artifact compiled from a different revision", async () => {
+    const { repoRoot, homeDir } = await twoRevisionFixture();
+    linkPinnedKache(homeDir);
+
+    // No KANNA_RUST_CACHE at all: this is the default a developer now gets.
+    const cache = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { ...isolatedCargoEnv(), CI: "" },
+      platform: "darwin",
+      arch: process.arch
+    });
+    const state = cache.state;
+    if (!state.active) throw new Error(`pinned cache inactive: ${JSON.stringify(state)}`);
+    expect(state.binary).toBe(resolveKachePaths(homeDir).binary);
+
+    const build = (): Promise<string> => run("cargo", ["build"], { cwd: repoRoot, env: cache.env });
+    const coldTree = (): void => rmSync(join(repoRoot, ".build"), { recursive: true, force: true });
+    const linkedRevision = (): Promise<string> =>
+      run(join(repoRoot, ".build", "debug", "probe"), []);
+
+    // 1. Populate the store from revision 1.
+    writeRevision(repoRoot, 1);
+    await build();
+
+    // 2. Cold private tree, warm store. The restore path has to be live, or
+    //    every assertion after this one passes vacuously.
+    coldTree();
+    await build();
+    expect(await linkedRevision()).toBe("1");
+    const afterRevision1 = await listCacheEntries(state.store);
+    expect(defaultsEntries(afterRevision1)).toHaveLength(1);
+    expect(totalHits(afterRevision1)).toBeGreaterThan(0);
+
+    // 3. The incident, reproduced as a build: advance the sources against a
+    //    store that holds only revision 1. Serving that entry fails to compile
+    //    with `E0432: unresolved import ...session_id` — the negative control
+    //    above proves this fixture reports exactly that.
+    writeRevision(repoRoot, 2);
+    coldTree();
+    await build();
+    expect(await linkedRevision()).toBe("2");
+    const afterRevision2 = await listCacheEntries(state.store);
+    expect(defaultsEntries(afterRevision2)).toHaveLength(2);
+
+    // 4. Revision 2 must restore its *own* entry on a second cold tree. Without
+    //    this, step 3 would be satisfied by a cache that simply never hits.
+    coldTree();
+    await build();
+    expect(await linkedRevision()).toBe("2");
+    const afterRevision2Restore = await listCacheEntries(state.store);
+    expect(defaultsEntries(afterRevision2Restore)).toHaveLength(2);
+    expect(totalHits(afterRevision2Restore)).toBeGreaterThan(totalHits(afterRevision2));
+
+    // 5. The reverse direction, which is an ordinary branch switch: revision 1
+    //    sources against a store holding both revisions. Revision 2's archive
+    //    still satisfies revision 1's imports, so only the linked value tells
+    //    the truth here.
+    writeRevision(repoRoot, 1);
+    coldTree();
+    await build();
+    expect(await linkedRevision()).toBe("1");
+    const afterRevert = await listCacheEntries(state.store);
+    expect(defaultsEntries(afterRevert)).toHaveLength(2);
+    expect(totalHits(afterRevert)).toBeGreaterThan(totalHits(afterRevision2Restore));
+  }, 300_000);
+
+  it("keys on the compiler invocation, not only on the sources", async () => {
+    // Sources are one input among several. This pins the next most likely way to
+    // get a logically stale artifact with a physically valid blob: identical
+    // sources compiled under different flags must not share an entry.
+    const { repoRoot, homeDir } = await twoRevisionFixture();
+    linkPinnedKache(homeDir);
+    writeRevision(repoRoot, 1);
+
+    const cache = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { ...isolatedCargoEnv(), CI: "" },
+      platform: "darwin",
+      arch: process.arch
+    });
+    const state = cache.state;
+    if (!state.active) throw new Error(`pinned cache inactive: ${JSON.stringify(state)}`);
+
+    await run("cargo", ["build"], { cwd: repoRoot, env: cache.env });
+    expect(defaultsEntries(await listCacheEntries(state.store))).toHaveLength(1);
+
+    rmSync(join(repoRoot, ".build"), { recursive: true, force: true });
+    await run("cargo", ["build"], {
+      cwd: repoRoot,
+      env: { ...cache.env, RUSTFLAGS: "--cfg kd_probe_alt" }
+    });
+    expect(defaultsEntries(await listCacheEntries(state.store))).toHaveLength(2);
+  }, 300_000);
 });
