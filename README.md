@@ -122,12 +122,11 @@ Local maintenance workflows also go through `kd`:
 ./kd build desktop
 ./kd build sidecars
 ./kd pages build-schema --out-dir .build/pages-schema
-./kd pages publish-schema --dry-run
 ```
 
-`./kd pages publish-schema` publishes `.kanna/config.schema.json` (plus its `schemas.kanna.build` `CNAME`) to <https://schemas.kanna.build/config.schema.json>. It commits the built artifact as a single orphan commit in a throwaway git worktree and force-pushes it to the `gh-pages` branch on `origin`, leaving the current worktree untouched. Run it with `--dry-run` first: that builds and reports exactly what would be committed and pushed without contacting `origin`.
+`.kanna/config.schema.json` (plus its `schemas.kanna.build` `CNAME`) is published to <https://schemas.kanna.build/config.schema.json> by CI, not by hand: `.github/workflows/config-schema-pages.yml` runs on pushes to `main` that touch the schema, the workflow, or `tools/kd/**`, builds the artifact with `./kd pages build-schema`, and deploys it with `actions/upload-pages-artifact` + `actions/deploy-pages`. Merging a schema change is all it takes.
 
-Publishing has no visible effect until a human applies the one-time repository setting the command cannot: GitHub repo Settings → Pages → Source must be "Deploy from a branch", branch `gh-pages`, folder `/ (root)`.
+The repository's Pages source is "GitHub Actions" with a `schemas.kanna.build` custom domain, which is what makes that artifact deploy work. To republish without a schema change, re-run the workflow (`gh workflow run config-schema-pages.yml`). `./kd pages build-schema --out-dir <dir>` runs locally to inspect exactly what CI uploads.
 
 ## License
 
