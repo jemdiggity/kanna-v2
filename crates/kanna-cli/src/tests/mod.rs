@@ -43,6 +43,13 @@ struct TypedToolSurface {
 fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
     BTreeMap::from([
         (
+            "kanna_info",
+            TypedToolSurface {
+                command_path: &["info"],
+                param_args: &[],
+            },
+        ),
+        (
             "kanna_list_repos",
             TypedToolSurface {
                 command_path: &["repo", "list"],

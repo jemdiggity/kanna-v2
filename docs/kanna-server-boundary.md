@@ -35,6 +35,31 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - `POST /v1/tasks/{task_id}/actions/set-notify`
 - `POST /v1/pairing/sessions`
 
+## Agent Runtime Identity
+
+`kanna_info` is a catalog-declared, parameterless client tool backed by
+`GET /v1/status`; `kanna-cli info` exposes the same result when MCP is not
+available. The result deliberately keeps three identities separate:
+
+- `clientAdapter` identifies `kanna-mcp` or `kanna-cli`; MCP results include
+  the adapter's MCP protocol version.
+- `connection` is client-owned metadata: the exact effective HTTP base URL the
+  client is using and its parsed host/port.
+- `serverStatus` is an allow-listed snapshot of authoritative server state,
+  environment, build version, safe desktop identity, capabilities, and
+  write-path health. `lanAdvertisedEndpoint` separately reports the host/port
+  advertised by that server, which need not match the actual loopback or relay
+  transport endpoint.
+
+The catalog crate owns the status allowlist shared by CLI and MCP. It never
+passes the raw `/v1/status` object through, so `pairingCode`, compatibility
+aliases, credentials, database paths, unknown future fields, and arbitrary
+HTTP error bodies cannot enter the tool result. If status cannot be fetched or
+decoded, the tool retains adapter and effective-connection metadata and sets
+`serverStatus.available` to `false` with an explicit error; it does not infer
+an environment or version. The server route itself is unchanged, preserving
+existing mobile and status consumers.
+
 ## Agent Definition Discovery
 
 `GET /v1/repos/{repo_id}/agents` and the catalog-backed

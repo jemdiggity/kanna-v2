@@ -44,6 +44,20 @@ fn dependent_tasks_exist_requires_task_id() {
 
 #[test]
 fn parses_new_repo_and_task_subcommands() {
+    let cli = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "info",
+        "--server-url",
+        "http://127.0.0.1:48121",
+    ])
+    .unwrap();
+    match cli.command {
+        crate::Commands::Info { server_url } => {
+            assert_eq!(server_url.as_deref(), Some("http://127.0.0.1:48121"));
+        }
+        _ => panic!("expected info command"),
+    }
+
     let cli = crate::Cli::try_parse_from(["kanna-cli", "guide", "--json"]).unwrap();
     match cli.command {
         crate::Commands::Guide { json, .. } => assert!(json),

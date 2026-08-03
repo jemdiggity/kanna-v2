@@ -2995,6 +2995,9 @@ fn build_agent_command_adds_claude_kanna_preamble_as_system_prompt() {
     assert!(!command.contains("{{MCP_STATUS}}"));
     assert!(command.contains("Claude is launched with this config via `--mcp-config`"));
     assert!(command.contains("kanna-cli guide"));
+    assert!(command.contains("call `kanna_info`"));
+    assert!(command.contains("run `kanna-cli info`"));
+    assert!(command.contains("Never assume the default endpoint"));
     assert!(command.contains("You are not running inside a Kanna sandbox"));
     let mcp_index = command
         .find("Prefer the `kanna_*` MCP tools")

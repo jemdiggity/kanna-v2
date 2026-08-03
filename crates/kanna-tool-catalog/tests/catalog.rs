@@ -1,7 +1,8 @@
 use kanna_tool_catalog::{
-    bundled_catalog, clamp_wait_timeout_secs, resolve_request, wait_resolved_result,
-    wait_timeout_result, Catalog, Method, ParamLoc, ParamType, ResponseKind, WaitUntil,
-    CLIENT_TOOL_CALL_BUDGET_SECS, DEFAULT_WAIT_TIMEOUT_SECS, MAX_WAIT_TIMEOUT_SECS,
+    bundled_catalog, clamp_wait_timeout_secs, resolve_request, runtime_info_snapshot,
+    wait_resolved_result, wait_timeout_result, Catalog, Method, ParamLoc, ParamType, ResponseKind,
+    RuntimeAdapterIdentity, WaitUntil, CLIENT_TOOL_CALL_BUDGET_SECS, DEFAULT_WAIT_TIMEOUT_SECS,
+    MAX_WAIT_TIMEOUT_SECS,
 };
 use serde_json::json;
 use std::fs;
@@ -18,6 +19,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
     assert_eq!(
         names,
         vec![
+            "kanna_info",
             "kanna_list_repos",
             "kanna_add_repo",
             "kanna_list_recent_tasks",
@@ -52,6 +54,18 @@ fn bundled_catalog_parses_and_declares_all_tools() {
 #[test]
 fn generated_schema_preserves_required_order_types_and_enums() {
     let tools = bundled_catalog().tools_list_value();
+    let info = tools
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|tool| tool["name"] == "kanna_info")
+        .expect("info tool");
+    assert_eq!(
+        info["inputSchema"],
+        json!({ "type": "object", "properties": {} })
+    );
+    assert_eq!(info["annotations"], json!({ "readOnlyHint": true }));
+
     let create_task = tools
         .as_array()
         .expect("tools array")
@@ -113,6 +127,63 @@ fn generated_schema_preserves_required_order_types_and_enums() {
     let until = &wait["inputSchema"]["properties"]["until"];
     assert_eq!(until["type"], json!("string"));
     assert_eq!(until["enum"], json!(["finished", "closed"]));
+}
+
+#[test]
+fn runtime_info_snapshot_allow_lists_status_and_keeps_identity_boundaries_separate() {
+    let info = runtime_info_snapshot(
+        "http://127.0.0.1:49199",
+        RuntimeAdapterIdentity {
+            name: "kanna-mcp",
+            version: "0.1.0",
+            mcp_protocol_version: Some("2025-11-25"),
+            task_id: Some("task-safe"),
+        },
+        Ok(json!({
+            "state": "running",
+            "desktopId": "desktop-safe",
+            "desktopName": "Safe Mac",
+            "version": "9.8.7-staging.1",
+            "environment": "staging",
+            "serverVersion": "ignored-alias",
+            "lanHost": "10.0.0.4",
+            "lanPort": 48121,
+            "pairingCode": "PAIR-SECRET",
+            "kspStreamVersion": 2,
+            "writePathHealth": {
+                "healthy": true,
+                "status": "healthy",
+                "activeWorkspaceCommands": 0,
+                "maxWorkspaceCommands": 4,
+                "longRunningWorkspaceCommands": 0,
+                "oldestWorkspaceCommandSeconds": null
+            },
+            "authToken": "AUTH-SECRET",
+            "databasePath": "/private/kanna.db"
+        })),
+    );
+
+    assert_eq!(
+        info["connection"]["effectiveBaseUrl"],
+        "http://127.0.0.1:49199"
+    );
+    assert_eq!(info["connection"]["port"], 49199);
+    assert_eq!(info["serverStatus"]["environment"], "staging");
+    assert_eq!(info["serverStatus"]["version"], "9.8.7-staging.1");
+    assert_eq!(
+        info["lanAdvertisedEndpoint"],
+        json!({ "host": "10.0.0.4", "port": 48121 })
+    );
+    assert_eq!(info["taskContext"]["taskId"], "task-safe");
+    let rendered = info.to_string();
+    for forbidden in [
+        "PAIR-SECRET",
+        "AUTH-SECRET",
+        "/private/kanna.db",
+        "pairingCode",
+    ] {
+        assert!(!rendered.contains(forbidden), "leaked {forbidden}");
+    }
 }
 
 #[test]
@@ -179,6 +250,14 @@ fn generated_tools_mark_get_tools_read_only() {
 fn resolves_expected_requests_for_every_bundled_tool() {
     let catalog = bundled_catalog();
     let cases = [
+        (
+            "kanna_info",
+            json!({}),
+            Method::Get,
+            ResponseKind::RuntimeInfo,
+            "/v1/status",
+            json!({}),
+        ),
         (
             "kanna_list_repos",
             json!({}),
@@ -853,7 +932,7 @@ fn preserves_validation_error_strings() {
         .expect_err("unknown tool should fail");
     assert!(unknown_tool.starts_with("unknown tool: kanna_unknown"));
     assert!(
-        unknown_tool.contains("available tools: kanna_list_repos,"),
+        unknown_tool.contains("available tools: kanna_info, kanna_list_repos,"),
         "unknown tool error should list available tools: {unknown_tool}"
     );
 }
@@ -901,7 +980,8 @@ fn load_catalog_uses_override_and_falls_back_with_warning() {
     .expect("write override");
 
     let loaded = kanna_tool_catalog::load_catalog(&root);
-    assert_eq!(loaded.catalog.tools[0].name, "kanna_test_tool");
+    assert_eq!(loaded.catalog.tools[0].name, "kanna_info");
+    assert_eq!(loaded.catalog.tools[1].name, "kanna_test_tool");
     assert_eq!(
         loaded.watch_source.as_deref(),
         Some(override_path.as_path())
@@ -911,11 +991,50 @@ fn load_catalog_uses_override_and_falls_back_with_warning() {
     fs::write(&override_path, "{").expect("write invalid override");
     let loaded = kanna_tool_catalog::load_catalog(&root);
     assert!(loaded.warning.expect("warning").contains("failed to parse"));
-    assert_eq!(loaded.catalog.tools[0].name, "kanna_list_repos");
+    assert_eq!(loaded.catalog.tools[0].name, "kanna_info");
     assert_eq!(
         loaded.watch_source.as_deref(),
         Some(override_path.as_path())
     );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn catalog_override_cannot_replace_safe_kanna_info_declaration() {
+    let root = std::env::temp_dir().join(format!(
+        "kanna-tool-catalog-info-override-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join(".kanna")).expect("create .kanna");
+    fs::write(
+        root.join(".kanna/mcp-tools.json"),
+        r#"{
+          "tools": [{
+            "name": "kanna_info",
+            "description": "Unsafe raw status passthrough",
+            "method": "GET",
+            "path": "/v1/status",
+            "response": "json",
+            "params": [{
+              "name": "leak",
+              "type": "string",
+              "required": false,
+              "location": "query"
+            }]
+          }]
+        }"#,
+    )
+    .expect("write override");
+
+    let loaded = kanna_tool_catalog::load_catalog(&root);
+    let info = loaded.catalog.tools.first().expect("required info tool");
+    assert_eq!(info.name, "kanna_info");
+    assert_eq!(info.path, "/v1/status");
+    assert_eq!(info.response_kind, ResponseKind::RuntimeInfo);
+    assert!(info.params.is_empty());
+    assert!(info.description.contains("authoritative server"));
 
     let _ = fs::remove_dir_all(&root);
 }

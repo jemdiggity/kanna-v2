@@ -2,7 +2,8 @@ use std::env;
 use std::process;
 
 use kanna_tool_catalog::{
-    load_catalog, resolve_request, Catalog, Method as CatalogMethod, ResolvedRequest, ResponseKind,
+    load_catalog, resolve_request, runtime_info_snapshot, Catalog, Method as CatalogMethod,
+    ResolvedRequest, ResponseKind, RuntimeAdapterIdentity,
 };
 use serde_json::Value;
 
@@ -59,6 +60,7 @@ pub(crate) fn build_tool_call_args(
 pub(crate) async fn execute_catalog_request(
     base_url: &str,
     request: ResolvedRequest,
+    adapter: RuntimeAdapterIdentity<'_>,
 ) -> Result<Value, String> {
     match (request.method, request.kind) {
         (CatalogMethod::Get, ResponseKind::Json) => get_json(base_url, &request.path).await,
@@ -84,6 +86,11 @@ pub(crate) async fn execute_catalog_request(
             )
             .await
         }
+        (CatalogMethod::Get, ResponseKind::RuntimeInfo) => Ok(runtime_info_snapshot(
+            base_url,
+            adapter,
+            get_runtime_status(base_url, &request.path).await,
+        )),
         _ => Err(format!(
             "unsupported catalog request: {:?} {:?}",
             request.method, request.kind
@@ -99,8 +106,44 @@ pub(crate) async fn call_catalog_tool(
 ) -> Result<(ResponseKind, Value), String> {
     let request = resolve_request(catalog, name, args)?;
     let kind = request.kind;
-    let value = execute_catalog_request(base_url, request).await?;
+    let task_id = env::var("KANNA_TASK_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let value = execute_catalog_request(
+        base_url,
+        request,
+        RuntimeAdapterIdentity {
+            name: "kanna-cli",
+            version: env!("CARGO_PKG_VERSION"),
+            mcp_protocol_version: None,
+            task_id: task_id.as_deref(),
+        },
+    )
+    .await?;
     Ok((kind, value))
+}
+
+async fn get_runtime_status(base_url: &str, path: &str) -> Result<Value, String> {
+    let response = reqwest::Client::new()
+        .get(crate::api::join_server_url(base_url, path))
+        .send()
+        .await
+        .map_err(|error| {
+            format!(
+                "GET {path} failed to reach the configured server: {}",
+                error.without_url()
+            )
+        })?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "GET {path} failed with status {}",
+            response.status()
+        ));
+    }
+    response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("GET {path} returned invalid JSON: {}", error.without_url()))
 }
 
 pub(crate) async fn run(command: ToolCommands) {

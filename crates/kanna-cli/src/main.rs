@@ -16,6 +16,12 @@ pub(crate) struct Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Commands {
+    /// Report the client and authoritative connected Kanna server identity
+    Info {
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Print the generated Kanna task manual for the current spawned task
     Guide {
         /// Print machine-readable JSON
@@ -536,6 +542,9 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Info { server_url } => {
+            commands::info::run(server_url.as_deref()).await;
+        }
         Commands::Guide { json, server_url } => {
             commands::guide::run(json, server_url.as_deref()).await;
         }

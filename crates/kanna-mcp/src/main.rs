@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 use kanna_tool_catalog::{
     clamp_wait_timeout_secs, encode_path_segment, load_catalog, resolve_request,
-    wait_resolved_result, wait_timeout_result, Catalog, Method, ResolvedRequest, ResponseKind,
-    WaitUntil,
+    runtime_info_snapshot, wait_resolved_result, wait_timeout_result, Catalog, Method,
+    ResolvedRequest, ResponseKind, RuntimeAdapterIdentity, WaitUntil,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
 const DEFAULT_SERVER_BASE_URL: &str = "http://127.0.0.1:48120";
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 
 #[derive(Parser)]
 #[command(name = "kanna-mcp")]
@@ -96,7 +97,7 @@ async fn handle_mcp_request(message: Value, base_url: &str, catalog: &SharedCata
         "initialize" => mcp_response(
             id,
             serde_json::json!({
-                "protocolVersion": "2025-11-25",
+                "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": true } },
                 "serverInfo": {
                     "name": "kanna-mcp",
@@ -303,6 +304,32 @@ async fn get_text(base_url: &str, path: &str) -> Result<String, String> {
         .map_err(|e| format!("GET {path} returned invalid text: {e}"))
 }
 
+/// Runtime introspection must return connection metadata even when status is
+/// unavailable, and must not echo an arbitrary HTTP error body. The shared
+/// catalog sanitizer handles the successful JSON body.
+async fn get_runtime_status(base_url: &str, path: &str) -> Result<Value, String> {
+    let response = reqwest::Client::new()
+        .get(join_server_url(base_url, path))
+        .send()
+        .await
+        .map_err(|error| {
+            format!(
+                "GET {path} failed to reach the configured server: {}",
+                error.without_url()
+            )
+        })?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "GET {path} failed with status {}",
+            response.status()
+        ));
+    }
+    response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("GET {path} returned invalid JSON: {}", error.without_url()))
+}
+
 /// Waits are bounded by `clamp_wait_timeout_secs` and hand back the task's
 /// latest detail when the window elapses, so the answer always reaches the
 /// agent inside its client's tools/call budget instead of being killed there.
@@ -380,7 +407,20 @@ async fn handle_mcp_tool_call(
             .map_err(|_| "catalog lock poisoned".to_string())?;
         resolve_request(&catalog, name, &args)?
     };
-    execute_resolved_request(base_url, request).await
+    let task_id = env::var("KANNA_TASK_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    execute_resolved_request(
+        base_url,
+        request,
+        RuntimeAdapterIdentity {
+            name: "kanna-mcp",
+            version: env!("CARGO_PKG_VERSION"),
+            mcp_protocol_version: Some(MCP_PROTOCOL_VERSION),
+            task_id: task_id.as_deref(),
+        },
+    )
+    .await
 }
 
 async fn maybe_augment_create_task_args(
@@ -424,6 +464,7 @@ fn augment_create_task_args(args: Value, current_task: Option<&Value>) -> Result
 async fn execute_resolved_request(
     base_url: &str,
     request: ResolvedRequest,
+    adapter: RuntimeAdapterIdentity<'_>,
 ) -> Result<Value, String> {
     match (request.method, request.kind) {
         (Method::Get, ResponseKind::Json) => {
@@ -449,6 +490,11 @@ async fn execute_resolved_request(
             )
             .await
         }
+        (Method::Get, ResponseKind::RuntimeInfo) => Ok(runtime_info_snapshot(
+            base_url,
+            adapter,
+            get_runtime_status(base_url, &request.path).await,
+        )),
         _ => Err(format!(
             "unsupported tool request: {:?} {:?}",
             request.method, request.kind
@@ -651,6 +697,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "kanna_info",
                 "kanna_list_repos",
                 "kanna_add_repo",
                 "kanna_list_recent_tasks",
@@ -828,7 +875,8 @@ mod tests {
         poll_catalog_reload(&root, &watch_path, &catalog, &stdout, &mut state).unwrap();
 
         let tools = catalog.read().unwrap().tools_list_value();
-        assert_eq!(tools[0]["name"], json!("kanna_custom_ping"));
+        assert_eq!(tools[0]["name"], json!("kanna_info"));
+        assert_eq!(tools[1]["name"], json!("kanna_custom_ping"));
         let output = String::from_utf8(stdout.lock().unwrap().clone()).unwrap();
         assert_eq!(
             output,
