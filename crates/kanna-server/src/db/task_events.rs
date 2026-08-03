@@ -94,6 +94,12 @@ pub struct TaskEvent {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildTaskEvent {
+    pub event: TaskEvent,
+    pub parent_revision: i64,
+}
+
 impl TaskEvent {
     pub fn to_json(&self) -> Value {
         json!({
@@ -226,71 +232,86 @@ impl Db {
 
     /// Read one parent-scoped page against a single membership snapshot.
     ///
-    /// A parent cursor has one watermark per child rather than one global
-    /// watermark. That distinction is what lets an adopted task replay older
-    /// retained events without replaying events already delivered for existing
-    /// children. Membership and events must be read in the same transaction:
-    /// otherwise an adoption between those reads could be recorded in the
-    /// cursor without its retained events having been considered.
+    /// A parent cursor has a global event watermark plus sparse per-child
+    /// backfill watermarks for children adopted after its membership revision.
+    /// Membership and events must be read in the same transaction: otherwise
+    /// an adoption between those reads could be folded into the returned cursor
+    /// without its retained events having been considered.
     pub fn list_child_task_events(
         &self,
         parent_task_id: &str,
         after_seq_by_task: &std::collections::BTreeMap<String, i64>,
+        after_parent_revision: Option<i64>,
+        default_after_seq: i64,
         limit: i64,
-    ) -> Result<(i64, Vec<String>, Vec<TaskEvent>), rusqlite::Error> {
+    ) -> Result<(i64, i64, Vec<ChildTaskEvent>), rusqlite::Error> {
         let transaction = self.conn.unchecked_transaction()?;
         let head_seq =
             transaction.query_row("SELECT COALESCE(MAX(seq), 0) FROM task_event", [], |row| {
                 row.get(0)
             })?;
-        let child_task_ids = {
-            let mut stmt = transaction.prepare(
-                "SELECT id FROM pipeline_item
-                 WHERE parent_task_id = ?
-                 ORDER BY created_at ASC, id ASC",
-            )?;
-            let rows = stmt.query_map([parent_task_id], |row| row.get(0))?;
-            rows.collect::<Result<Vec<String>, _>>()?
-        };
+        let parent_revision = transaction.query_row(
+            "SELECT COALESCE(MAX(revision), 0) FROM task_parent_revision",
+            [],
+            |row| row.get(0),
+        )?;
+        let effective_parent_revision = after_parent_revision.unwrap_or(parent_revision);
 
-        let events = if child_task_ids.is_empty() {
-            Vec::new()
-        } else {
-            let child_predicates =
-                vec!["(task_id = ? AND seq > ?)"; child_task_ids.len()].join(" OR ");
-            let sql = format!(
-                "SELECT seq, task_id, type, payload, created_at
-                 FROM task_event
-                 WHERE seq <= ? AND ({child_predicates})
-                 ORDER BY seq ASC
-                 LIMIT ?"
-            );
-            let mut params = vec![SqlValue::Integer(head_seq)];
-            for task_id in &child_task_ids {
-                params.push(SqlValue::Text(task_id.clone()));
-                params.push(SqlValue::Integer(
-                    after_seq_by_task.get(task_id).copied().unwrap_or(0),
-                ));
-            }
-            params.push(SqlValue::Integer(limit));
-
-            let mut stmt = transaction.prepare(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+        // Keep the SQL shape, bind count, and returned cursor independent of
+        // total fan-out cardinality. Expanded OR predicates exceed SQLite's
+        // expression-depth limit around 1,000 children. The membership revision
+        // makes the relational default exact: established children use the
+        // global watermark, while later adoptees use a sparse backfill watermark
+        // (or zero until their retained history has drained).
+        let watermarks_json = serde_json::to_string(after_seq_by_task)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+        let mut stmt = transaction.prepare(
+            "WITH watermarks(task_id, after_seq) AS (
+                 SELECT key, CAST(value AS INTEGER) FROM json_each(?1)
+             )
+             SELECT event.seq, event.task_id, event.type, event.payload, event.created_at,
+                    child.parent_revision
+             FROM task_event AS event
+             JOIN pipeline_item AS child ON child.id = event.task_id
+             LEFT JOIN watermarks AS watermark ON watermark.task_id = event.task_id
+             WHERE child.parent_task_id = ?2
+               AND event.seq <= ?3
+               AND event.seq > COALESCE(
+                   watermark.after_seq,
+                   CASE WHEN child.parent_revision > ?4 THEN 0 ELSE ?5 END
+               )
+             ORDER BY event.seq ASC
+             LIMIT ?6",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                watermarks_json,
+                parent_task_id,
+                head_seq,
+                effective_parent_revision,
+                default_after_seq,
+                limit
+            ],
+            |row| {
                 let payload: Option<String> = row.get(3)?;
-                Ok(TaskEvent {
-                    seq: row.get(0)?,
-                    task_id: row.get(1)?,
-                    event_type: row.get(2)?,
-                    payload: payload
-                        .and_then(|payload| serde_json::from_str(&payload).ok())
-                        .unwrap_or_else(|| json!({})),
-                    created_at: row.get(4)?,
+                Ok(ChildTaskEvent {
+                    event: TaskEvent {
+                        seq: row.get(0)?,
+                        task_id: row.get(1)?,
+                        event_type: row.get(2)?,
+                        payload: payload
+                            .and_then(|payload| serde_json::from_str(&payload).ok())
+                            .unwrap_or_else(|| json!({})),
+                        created_at: row.get(4)?,
+                    },
+                    parent_revision: row.get(5)?,
                 })
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
+            },
+        )?;
+        let events = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
         transaction.commit()?;
-        Ok((head_seq, child_task_ids, events))
+        Ok((head_seq, parent_revision, events))
     }
 
     /// Attach (or clear) the task that receives this task's completion

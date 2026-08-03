@@ -101,6 +101,7 @@ impl Db {
                 notify_task_id TEXT,
                 notified_at TEXT,
                 parent_task_id TEXT,
+                parent_revision INTEGER NOT NULL DEFAULT 0,
                 agent_session_id TEXT,
                 agent_spawn_options TEXT,
                 teardown_started_at TEXT,
@@ -205,6 +206,31 @@ impl Db {
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE INDEX idx_task_event_task_seq ON task_event(task_id, seq);
+
+            CREATE TABLE task_parent_revision (
+                revision INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL
+            );
+            CREATE INDEX idx_task_parent_revision_task_id
+            ON task_parent_revision(task_id);
+            CREATE TRIGGER trg_pipeline_item_parent_revision_insert
+            AFTER INSERT ON pipeline_item
+            WHEN NEW.parent_task_id IS NOT NULL
+            BEGIN
+                INSERT INTO task_parent_revision (task_id) VALUES (NEW.id);
+                UPDATE pipeline_item
+                SET parent_revision = last_insert_rowid()
+                WHERE id = NEW.id;
+            END;
+            CREATE TRIGGER trg_pipeline_item_parent_revision_update
+            AFTER UPDATE OF parent_task_id ON pipeline_item
+            WHEN OLD.parent_task_id IS NOT NEW.parent_task_id
+            BEGIN
+                INSERT INTO task_parent_revision (task_id) VALUES (NEW.id);
+                UPDATE pipeline_item
+                SET parent_revision = last_insert_rowid()
+                WHERE id = NEW.id;
+            END;
 
             CREATE TABLE task_transfer (
                 id TEXT PRIMARY KEY,

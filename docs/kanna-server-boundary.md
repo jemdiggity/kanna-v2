@@ -60,8 +60,10 @@ polling each child. It is cursor-based, not snapshot-diffed:
 
 - Event order is `task_event.seq` (`INTEGER PRIMARY KEY AUTOINCREMENT`). SQLite
   allows one writer at a time, so a `seq` cannot be committed out of order.
-  Fixed task/repo cursors are a single sequence watermark; parent cursors are
-  opaque and hold one sequence watermark per current child. Callers pass back
+  Fixed task/repo cursors are a single sequence watermark. Parent cursors are
+  opaque and bind a global event watermark to a parent-membership revision,
+  with sparse per-child backfills only for tasks adopted after that revision;
+  cursor size does not scale with the established fan-out. Callers pass back
   the cursor they were given unchanged; events that fire between two calls
   arrive on the next one.
 - Omitting the cursor returns the scope's retained history (14 days), so a

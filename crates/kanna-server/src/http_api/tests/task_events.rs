@@ -9,6 +9,7 @@
 use super::*;
 use crate::db::NewStageRun;
 use axum::Router;
+use base64::Engine;
 use serde_json::Value;
 use std::time::Duration;
 
@@ -51,10 +52,16 @@ async fn get_json_body(router: &Router, uri: &str) -> Value {
         .oneshot(Request::get(uri).body(Body::empty()).unwrap())
         .await
         .expect("request");
-    assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
+    let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET {uri}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
     from_slice(&bytes).expect("json body")
 }
 
@@ -504,6 +511,245 @@ async fn parent_cursor_keeps_older_retained_events_for_a_later_adoptee() {
         child_seq,
         "the regression requires the outside event at N immediately before the child at N+1"
     );
+}
+
+/// Servers before the per-child cursor shipped returned a numeric sequence for
+/// parent scopes. An agent can carry that cursor across an upgrade, so the
+/// first new-server response must neither replay acknowledged events nor keep
+/// returning a numeric cursor that cannot preserve later adoption semantics.
+#[tokio::test]
+async fn legacy_numeric_parent_cursor_deduplicates_then_upgrades_to_opaque() {
+    let (router, db_path) = parentage_router();
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("first child event");
+    }
+    let acknowledged =
+        get_json_body(&router, "/v1/task-events?taskIds=child-a&timeoutSecs=1").await;
+    let legacy_cursor = cursor_of(&acknowledged);
+    assert!(legacy_cursor.parse::<i64>().is_ok(), "fixed scope cursor");
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("child-b", "review")
+            .expect("event after legacy cursor");
+    }
+    let upgraded = get_json_body(
+        &router,
+        &format!("/v1/task-events?parentTaskId=parent-1&cursor={legacy_cursor}&timeoutSecs=1"),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&upgraded),
+        vec![("child-b".to_string(), "stage.changed".to_string())],
+        "the event acknowledged by the numeric cursor must not replay"
+    );
+    let opaque_cursor = cursor_of(&upgraded);
+    assert!(opaque_cursor.starts_with("p2."));
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("child-a", "pr")
+            .expect("event after opaque cursor");
+    }
+    let next = get_json_body(
+        &router,
+        &format!("/v1/task-events?parentTaskId=parent-1&cursor={opaque_cursor}&timeoutSecs=1"),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&next),
+        vec![("child-a".to_string(), "stage.changed".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn legacy_p1_parent_cursor_drains_without_replay_then_compacts_to_p2() {
+    let (router, db_path) = parentage_router();
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("acknowledged child event");
+    }
+    let acknowledged =
+        get_json_body(&router, "/v1/task-events?taskIds=child-a&timeoutSecs=1").await;
+    let acknowledged_seq = acknowledged["events"][0]["seq"]
+        .as_i64()
+        .expect("event seq");
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("child-b", "review")
+            .expect("pending child event");
+    }
+    let legacy_payload = serde_json::json!({
+        "parent_task_id": "parent-1",
+        "watermarks": {
+            "child-a": acknowledged_seq,
+            "child-b": 0,
+        }
+    });
+    let legacy_cursor = format!(
+        "p1.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(legacy_payload.to_string())
+    );
+
+    let upgraded = get_json_body(
+        &router,
+        &format!("/v1/task-events?parentTaskId=parent-1&cursor={legacy_cursor}&timeoutSecs=1"),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&upgraded),
+        vec![("child-b".to_string(), "stage.changed".to_string())]
+    );
+    assert!(cursor_of(&upgraded).starts_with("p2."));
+}
+
+/// Parent pages use the same opaque cursor for both continuation and scope
+/// binding. Draining a small page size must lose/replay nothing, and that
+/// cursor must not be accepted by another parent or a fixed task/repo scope.
+#[tokio::test]
+async fn parent_scope_paginates_without_replay_and_binds_opaque_cursor() {
+    let (router, db_path) = parentage_router();
+    {
+        let db = Db::open(&db_path).expect("open db");
+        start_run(&db, "run-a1", "child-a", "in progress");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("advance first child");
+        start_run(&db, "run-b1", "child-b", "in progress");
+        db.update_pipeline_item_stage("child-b", "review")
+            .expect("advance second child");
+    }
+
+    let first = get_json_body(
+        &router,
+        "/v1/task-events?parentTaskId=parent-1&limit=2&timeoutSecs=1",
+    )
+    .await;
+    assert_eq!(first["hasMore"], serde_json::json!(true));
+    let parent_cursor = cursor_of(&first);
+
+    let second = get_json_body(
+        &router,
+        &format!(
+            "/v1/task-events?parentTaskId=parent-1&limit=2&cursor={parent_cursor}&timeoutSecs=1"
+        ),
+    )
+    .await;
+    assert_eq!(second["hasMore"], serde_json::json!(false));
+    let delivered = event_pairs(&first)
+        .into_iter()
+        .chain(event_pairs(&second))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        delivered,
+        vec![
+            ("child-a".to_string(), "run.started".to_string()),
+            ("child-a".to_string(), "stage.changed".to_string()),
+            ("child-b".to_string(), "run.started".to_string()),
+            ("child-b".to_string(), "stage.changed".to_string()),
+        ]
+    );
+
+    let drained_cursor = cursor_of(&second);
+    let drained = get_json_body(
+        &router,
+        &format!(
+            "/v1/task-events?parentTaskId=parent-1&limit=2&cursor={drained_cursor}&timeoutSecs=0"
+        ),
+    )
+    .await;
+    assert_eq!(drained["waitOutcome"], serde_json::json!("timeout"));
+    assert!(event_pairs(&drained).is_empty());
+
+    for path in [
+        format!("/v1/task-events?parentTaskId=stranger&cursor={drained_cursor}&timeoutSecs=0"),
+        format!("/v1/task-events?taskIds=child-a&cursor={drained_cursor}&timeoutSecs=0"),
+        format!("/v1/task-events?repoId=repo-events&cursor={drained_cursor}&timeoutSecs=0"),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .expect("request");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+fn seed_high_cardinality_parent(db: &Db) {
+    db.insert_test_repo("repo-many-children", "Many Children")
+        .expect("insert repo");
+    db.insert_test_pipeline_item(
+        "parent-many",
+        "repo-many-children",
+        "parent",
+        Some("parent"),
+        "in progress",
+        "2026-07-29 00:00:00",
+    )
+    .expect("insert parent");
+    for index in 0..1_100 {
+        let child_id = format!("child-{index:04}");
+        db.insert_test_pipeline_item(
+            &child_id,
+            "repo-many-children",
+            "child",
+            Some(&child_id),
+            "in progress",
+            "2026-07-29 00:01:00",
+        )
+        .expect("insert child");
+        db.update_pipeline_item_parent(&child_id, Some("parent-many"))
+            .expect("set parent");
+    }
+}
+
+/// SQLite's bundled expression depth is lower than a realistic fan-out. The
+/// parent query must remain one bounded relational statement instead of
+/// compiling one predicate per child, including when its opaque cursor is fed
+/// back on the next long-poll recheck.
+#[tokio::test]
+async fn parent_scope_handles_more_children_than_sqlite_expression_depth() {
+    let state = test_state_with_seed(
+        "desktop-many-task-events",
+        "Many Task Events",
+        seed_high_cardinality_parent,
+    );
+    let db_path = state.config().db_path.clone();
+    let router = router(state);
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("child-1099", "review")
+            .expect("append event");
+    }
+
+    let first = get_json_body(
+        &router,
+        "/v1/task-events?parentTaskId=parent-many&limit=1&timeoutSecs=1",
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&first),
+        vec![("child-1099".to_string(), "stage.changed".to_string())]
+    );
+    assert_eq!(first["hasMore"], serde_json::json!(false));
+    assert!(
+        cursor_of(&first).len() < 512,
+        "the opaque cursor must not grow with all 1,100 children"
+    );
+
+    let drained = get_json_body(
+        &router,
+        &format!(
+            "/v1/task-events?parentTaskId=parent-many&limit=1&cursor={}&timeoutSecs=0",
+            cursor_of(&first)
+        ),
+    )
+    .await;
+    assert_eq!(drained["waitOutcome"], serde_json::json!("timeout"));
+    assert!(event_pairs(&drained).is_empty());
 }
 
 /// Scope precedence, stated once so neither client has to guess: named ids beat

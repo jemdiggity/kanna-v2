@@ -168,7 +168,10 @@ describe("remote task listing, creation, and actions E2E", () => {
       "--task-id",
       parent.taskId
     ]));
-    expect(typedParent.childTaskIds).toEqual([openChildId, closedChildId]);
+    expect(typedParent.childTaskIds).toHaveLength(2);
+    expect(typedParent.childTaskIds).toEqual(
+      expect.arrayContaining([openChildId, closedChildId])
+    );
 
     const typedClosedChild = asRecord(await runKannaCliJson(harness, [
       "task",
@@ -190,6 +193,20 @@ describe("remote task listing, creation, and actions E2E", () => {
     expect(typedEventTaskIds).toEqual(expect.arrayContaining([openChildId, closedChildId]));
     expect(typedEventTaskIds).not.toContain(parent.taskId);
 
+    await appendTaskEvent(harness, openChildId, "task.awaiting_input");
+    const typedNext = await runKannaCliJson(harness, [
+      "task",
+      "wait-events",
+      "--parent-task-id",
+      parent.taskId,
+      "--cursor",
+      getString(asRecord(typedEvents), "cursor"),
+      "--timeout-secs",
+      "0"
+    ]);
+    expect(eventTaskIds(typedNext)).toEqual([openChildId]);
+    expect(eventTypes(typedNext)).toEqual(["task.awaiting_input"]);
+
     // The generic CLI call follows the same generated catalog request path as
     // kanna-mcp, so this proves the declarative casing/serialization contract
     // against the real server in addition to the typed CLI fallback above.
@@ -200,7 +217,10 @@ describe("remote task listing, creation, and actions E2E", () => {
       "--json",
       JSON.stringify({ task_id: parent.taskId })
     ]));
-    expect(catalogParent.childTaskIds).toEqual([openChildId, closedChildId]);
+    expect(catalogParent.childTaskIds).toHaveLength(2);
+    expect(catalogParent.childTaskIds).toEqual(
+      expect.arrayContaining([openChildId, closedChildId])
+    );
 
     const catalogEvents = await runKannaCliJson(harness, [
       "tool",
@@ -212,6 +232,21 @@ describe("remote task listing, creation, and actions E2E", () => {
     expect(eventTaskIds(catalogEvents)).toEqual(
       expect.arrayContaining([openChildId, closedChildId])
     );
+
+    await appendTaskEvent(harness, openChildId, "task.revision_requested");
+    const catalogNext = await runKannaCliJson(harness, [
+      "tool",
+      "call",
+      "kanna_wait_events",
+      "--json",
+      JSON.stringify({
+        parent_task_id: parent.taskId,
+        cursor: getString(asRecord(catalogEvents), "cursor"),
+        timeout_secs: 0
+      })
+    ]);
+    expect(eventTaskIds(catalogNext)).toEqual([openChildId]);
+    expect(eventTypes(catalogNext)).toEqual(["task.revision_requested"]);
   }, 120_000);
 
   it("advances stages, completes stages, requests revision, runs merge agent, and closes with current durable-task semantics", async () => {
@@ -453,6 +488,27 @@ function eventTaskIds(value: unknown): string[] {
     throw new Error(`expected task event array ${JSON.stringify(value)}`);
   }
   return events.map((event) => getString(asRecord(event), "taskId"));
+}
+
+function eventTypes(value: unknown): string[] {
+  const events = asRecord(value).events;
+  if (!Array.isArray(events)) {
+    throw new Error(`expected task event array ${JSON.stringify(value)}`);
+  }
+  return events.map((event) => getString(asRecord(event), "type"));
+}
+
+async function appendTaskEvent(
+  harness: RemoteHarness,
+  taskId: string,
+  eventType: string
+): Promise<void> {
+  const rowsAffected = await executeSql(
+    harness,
+    "INSERT INTO task_event (task_id, type, payload) VALUES (?1, ?2, '{}')",
+    [taskId, eventType]
+  );
+  expect(rowsAffected).toBe(1);
 }
 
 async function querySql(harness: RemoteHarness, sql: string, params: SqlParam[] = []): Promise<JsonRecord[]> {

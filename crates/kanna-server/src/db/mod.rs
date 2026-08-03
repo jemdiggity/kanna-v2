@@ -31,7 +31,9 @@ pub use operator_events::NewOperatorEvent;
 #[allow(unused_imports)]
 pub use stage_runs::FinishedStageRun;
 #[allow(unused_imports)]
-pub use task_events::{appended as task_event_appended, TaskEvent, TaskEventKind, TaskEventScope};
+pub use task_events::{
+    appended as task_event_appended, ChildTaskEvent, TaskEvent, TaskEventKind, TaskEventScope,
+};
 #[allow(unused_imports)]
 pub use transfers::{
     NewTaskTransfer, NewTaskTransferProvenance, PendingIncomingTransfer, TaskTransfer,
@@ -84,6 +86,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "039_stage_run_resume_fallback_reason",
     "040_stage_run_effort",
     "041_pipeline_item_parentage_index",
+    "042_pipeline_item_parent_revision",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1448,6 +1451,58 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_pipeline_item_parent_created_id
              ON pipeline_item(parent_task_id, created_at, id);",
+        )
+    })?;
+
+    run_migration(conn, "042_pipeline_item_parent_revision", |conn| {
+        add_column(
+            conn,
+            "pipeline_item",
+            "parent_revision",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS task_parent_revision (
+                revision INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE
+            );
+
+            INSERT INTO task_parent_revision (task_id)
+            SELECT id FROM pipeline_item
+            WHERE parent_task_id IS NOT NULL
+            ORDER BY created_at ASC, id ASC;
+
+            CREATE INDEX IF NOT EXISTS idx_task_parent_revision_task_id
+            ON task_parent_revision(task_id);
+
+            UPDATE pipeline_item
+            SET parent_revision = COALESCE(
+                (SELECT MAX(revision) FROM task_parent_revision
+                 WHERE task_id = pipeline_item.id),
+                0
+            );
+
+            CREATE TRIGGER IF NOT EXISTS trg_pipeline_item_parent_revision_insert
+            AFTER INSERT ON pipeline_item
+            WHEN NEW.parent_task_id IS NOT NULL
+            BEGIN
+                INSERT INTO task_parent_revision (task_id) VALUES (NEW.id);
+                UPDATE pipeline_item
+                SET parent_revision = last_insert_rowid()
+                WHERE id = NEW.id;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_pipeline_item_parent_revision_update
+            AFTER UPDATE OF parent_task_id ON pipeline_item
+            WHEN OLD.parent_task_id IS NOT NEW.parent_task_id
+            BEGIN
+                INSERT INTO task_parent_revision (task_id) VALUES (NEW.id);
+                UPDATE pipeline_item
+                SET parent_revision = last_insert_rowid()
+                WHERE id = NEW.id;
+            END;
+            "#,
         )
     })?;
 
