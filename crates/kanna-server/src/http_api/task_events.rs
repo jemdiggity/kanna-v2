@@ -28,7 +28,7 @@ use axum::Json;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -234,9 +234,9 @@ fn encode_v3_cursor(
 }
 
 /// Drain one bounded slice of a deployed p1 cursor. This path exists only for
-/// forward compatibility: it validates every client-supplied task id against
-/// the current parent, scans via the global `seq > ?` hot path, never adds map
-/// entries, and upgrades to constant-size p3 as soon as the uneven legacy
+/// forward compatibility: stale map entries cannot widen the current-parent
+/// SQL scope, scans use the global `seq > ?` hot path, and the cursor upgrades
+/// to constant-size p3 as soon as the current members' uneven legacy
 /// watermarks converge.
 fn read_legacy_parent_batch(
     db: &Db,
@@ -252,49 +252,46 @@ fn read_legacy_parent_batch(
         ));
     }
 
-    let members = db
-        .list_child_task_ids(parent_task_id)
-        .map_err(db_error)?
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+    let head_seq = db.latest_task_event_seq().map_err(db_error)?;
     if legacy
         .watermarks
-        .keys()
-        .any(|task_id| !members.contains(task_id))
+        .values()
+        .any(|watermark| *watermark > head_seq)
     {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            "legacy parent cursor contains a task outside its parent scope".to_string(),
-        ));
+        return Err(invalid_cursor());
     }
 
-    // An empty p1 map is already equivalent to a fresh global cursor.
-    if legacy.watermarks.is_empty() {
+    let members = db.list_child_task_ids(parent_task_id).map_err(db_error)?;
+    if members.is_empty() {
         return read_sequence_batch(db, scope, 0, limit, Some(parent_task_id));
     }
 
-    let floor = legacy.watermarks.values().copied().min().unwrap_or(0);
-    let ceiling = legacy.watermarks.values().copied().max().unwrap_or(0);
-    let head_seq = db.latest_task_event_seq().map_err(db_error)?;
-    if ceiling > head_seq {
-        return Err(invalid_cursor());
-    }
+    // A p1 map captured membership at issuance. Entries for children since
+    // reparented away are legitimate but irrelevant to the current scope;
+    // conversely, a current child absent from the map was adopted later and
+    // retains p1's zero-watermark delivery semantics during this upgrade.
+    let current_watermarks = members
+        .iter()
+        .map(|task_id| {
+            (
+                task_id.as_str(),
+                legacy.watermarks.get(task_id).copied().unwrap_or(0),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let floor = current_watermarks.values().copied().min().unwrap_or(0);
+    let ceiling = current_watermarks.values().copied().max().unwrap_or(0);
     let mut candidates = db
         .list_task_events(scope, floor, head_seq, LEGACY_CURSOR_SCAN_LIMIT + 1)
         .map_err(db_error)?;
     let scan_has_more = candidates.len() as i64 > LEGACY_CURSOR_SCAN_LIMIT;
     candidates.truncate(LEGACY_CURSOR_SCAN_LIMIT as usize);
 
-    let missing_member_watermark = ceiling;
     let mut delivered = Vec::new();
     let mut processed_seq = floor;
     let mut stopped_at_page_limit = false;
     for event in candidates {
-        let watermark = legacy
-            .watermarks
-            .get(&event.task_id)
-            .copied()
-            .unwrap_or(missing_member_watermark);
+        let watermark = legacy.watermarks.get(&event.task_id).copied().unwrap_or(0);
         if event.seq > watermark {
             if delivered.len() as i64 == limit {
                 stopped_at_page_limit = true;
@@ -314,11 +311,11 @@ fn read_legacy_parent_batch(
     let cursor = if can_upgrade {
         encode_v3_cursor(parent_task_id, processed_seq)?
     } else {
-        let watermarks = legacy
-            .watermarks
-            .iter()
-            .map(|(task_id, watermark)| (task_id.clone(), (*watermark).max(processed_seq)))
-            .collect();
+        let mut watermarks = legacy.watermarks.clone();
+        for task_id in members {
+            let watermark = watermarks.entry(task_id).or_insert(0);
+            *watermark = (*watermark).max(processed_seq);
+        }
         encode_parent_cursor(
             PARENT_CURSOR_V1_PREFIX,
             &ParentTaskEventsCursorV1 {

@@ -600,7 +600,118 @@ async fn legacy_p1_parent_cursor_drains_without_replay_then_compacts_to_p3() {
 }
 
 #[tokio::test]
-async fn parent_cursor_rejects_oversized_forged_and_nonmember_legacy_state() {
+async fn legacy_p1_parent_cursor_survives_a_child_reparented_away_before_compaction() {
+    let (router, db_path) = parentage_router();
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("acknowledged child event");
+    }
+    let acknowledged =
+        get_json_body(&router, "/v1/task-events?taskIds=child-a&timeoutSecs=1").await;
+    let acknowledged_seq = acknowledged["events"][0]["seq"]
+        .as_i64()
+        .expect("event seq");
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("child-b", "review")
+            .expect("pending child event");
+        db.update_pipeline_item_parent("child-a", None)
+            .expect("reparent acknowledged child away");
+    }
+    let legacy_payload = serde_json::json!({
+        "parent_task_id": "parent-1",
+        "watermarks": {
+            "child-a": acknowledged_seq,
+            "child-b": 0,
+        }
+    });
+    let legacy_cursor = format!(
+        "p1.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(legacy_payload.to_string())
+    );
+
+    let upgraded = get_json_body(
+        &router,
+        &format!("/v1/task-events?parentTaskId=parent-1&cursor={legacy_cursor}&timeoutSecs=1"),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&upgraded),
+        vec![("child-b".to_string(), "stage.changed".to_string())]
+    );
+    assert!(cursor_of(&upgraded).starts_with("p3."));
+}
+
+#[tokio::test]
+async fn legacy_p1_parent_cursor_paginates_an_adopted_child_then_compacts_once() {
+    let (router, db_path) = parentage_router();
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("first established child event");
+        db.update_pipeline_item_stage("stranger", "review")
+            .expect("first retained adoptee event");
+        db.update_pipeline_item_stage("stranger", "pr")
+            .expect("second retained adoptee event");
+        db.update_pipeline_item_stage("child-b", "review")
+            .expect("second established child event");
+    }
+    let established = get_json_body(
+        &router,
+        "/v1/task-events?taskIds=child-a,child-b&timeoutSecs=1",
+    )
+    .await;
+    let established_events = established["events"].as_array().expect("events array");
+    let watermark = |task_id: &str| {
+        established_events
+            .iter()
+            .find(|event| event["taskId"] == task_id)
+            .and_then(|event| event["seq"].as_i64())
+            .expect("established child watermark")
+    };
+    let legacy_payload = serde_json::json!({
+        "parent_task_id": "parent-1",
+        "watermarks": {
+            "child-a": watermark("child-a"),
+            "child-b": watermark("child-b"),
+        }
+    });
+    let legacy_cursor = format!(
+        "p1.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(legacy_payload.to_string())
+    );
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_parent("stranger", Some("parent-1"))
+            .expect("adopt child after p1 issuance");
+    }
+    let watch = "/v1/task-events?parentTaskId=parent-1&limit=1&timeoutSecs=0";
+
+    let first = get_json_body(&router, &format!("{watch}&cursor={legacy_cursor}")).await;
+    assert_eq!(
+        event_pairs(&first),
+        vec![("stranger".to_string(), "stage.changed".to_string())]
+    );
+    assert_eq!(first["hasMore"], serde_json::json!(true));
+    assert!(cursor_of(&first).starts_with("p1."));
+
+    let second = get_json_body(&router, &format!("{watch}&cursor={}", cursor_of(&first))).await;
+    assert_eq!(
+        event_pairs(&second),
+        vec![("stranger".to_string(), "stage.changed".to_string())]
+    );
+    assert_eq!(second["hasMore"], serde_json::json!(false));
+    assert!(cursor_of(&second).starts_with("p3."));
+    assert_ne!(first["events"][0]["seq"], second["events"][0]["seq"]);
+
+    let drained = get_json_body(&router, &format!("{watch}&cursor={}", cursor_of(&second))).await;
+    assert!(event_pairs(&drained).is_empty());
+    assert_eq!(cursor_of(&drained), cursor_of(&second));
+}
+
+#[tokio::test]
+async fn parent_cursor_rejects_oversized_and_future_state() {
     let (router, _db_path) = parentage_router();
 
     let oversized = format!(
@@ -645,29 +756,6 @@ async fn parent_cursor_rejects_oversized_forged_and_nonmember_legacy_state() {
         )
         .await
         .expect("oversized p1 request");
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-    let nonmember_cursor = format!(
-        "p1.{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
-            serde_json::json!({
-                "parent_task_id": "parent-1",
-                "watermarks": { "stranger": 0 },
-            })
-            .to_string()
-        )
-    );
-    let response = router
-        .clone()
-        .oneshot(
-            Request::get(format!(
-                "/v1/task-events?parentTaskId=parent-1&cursor={nonmember_cursor}&timeoutSecs=0"
-            ))
-            .body(Body::empty())
-            .unwrap(),
-        )
-        .await
-        .expect("nonmember p1 request");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let future_cursor = format!(
