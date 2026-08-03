@@ -10,6 +10,7 @@ import {
   fetchDesktopRepoCommands,
   runDesktopRepoCommand,
   fetchDesktopSnapshot,
+  fetchDesktopTaskDetail,
   fetchIncomingTransferCleanupCandidates,
   fetchPendingIncomingTransfers,
   getDesktopSetting,
@@ -84,6 +85,34 @@ describe("desktopServerClient", () => {
         headers: undefined,
         body: undefined,
       },
+    );
+  });
+
+  it("fetches current task detail from the encoded task endpoint", async () => {
+    const detail = {
+      id: "task/parked",
+      stage: "review",
+      closedAt: null,
+      latestRun: {
+        stage: "review",
+        kind: "main",
+        status: "failed",
+        summary: "Parked for human review: budget spent.",
+        resumedFromRunId: null,
+        resumeFallbackReason: null,
+        finishedAt: "2026-08-03T00:00:00Z",
+      },
+      revisionRounds: 3,
+      revisionLimit: 3,
+      childTaskIds: ["closed-specialty-child"],
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(detail), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchDesktopTaskDetail("task/parked")).resolves.toEqual(detail);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:48121/v1/tasks/task%2Fparked",
+      { method: "GET", headers: undefined, body: undefined },
     );
   });
 

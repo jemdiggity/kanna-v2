@@ -85,6 +85,7 @@ export interface DesktopServerClientHandlersForTests {
     ownerToken?: string,
   ) => MaybePromise<boolean>;
   fetchClosedTaskIdentities?: () => MaybePromise<ClosedTaskIdentity[]>;
+  fetchTaskDetail?: (taskId: string) => MaybePromise<DesktopTaskDetail>;
   patchTask?: (taskId: string, input: PatchDesktopTaskInput) => MaybePromise<void>;
   setTaskParent?: (taskId: string, parentTaskId: string | null) => MaybePromise<void>;
   setTaskPipeline?: (
@@ -197,6 +198,33 @@ async function requestOptionalJson<T>(
 export async function fetchDesktopSnapshot(): Promise<DesktopSnapshot> {
   if (snapshotFetcherForTests) return await snapshotFetcherForTests();
   return await requestJson<DesktopSnapshot>("/v1/snapshot", { retryMs: 15_000 });
+}
+
+export interface DesktopTaskLatestRun {
+  stage: string;
+  kind: string;
+  status: string;
+  summary: string | null;
+  resumedFromRunId: string | null;
+  resumeFallbackReason: string | null;
+  finishedAt: string | null;
+}
+
+export interface DesktopTaskDetail {
+  id: string;
+  stage: string | null;
+  closedAt: string | null;
+  latestRun: DesktopTaskLatestRun | null;
+  revisionRounds: number;
+  revisionLimit: number;
+  childTaskIds: string[];
+}
+
+export async function fetchDesktopTaskDetail(taskId: string): Promise<DesktopTaskDetail> {
+  if (clientHandlersForTests?.fetchTaskDetail) {
+    return await clientHandlersForTests.fetchTaskDetail(taskId);
+  }
+  return await requestJson<DesktopTaskDetail>(`/v1/tasks/${encodeURIComponent(taskId)}`);
 }
 
 export interface CreateDesktopTaskRequest {

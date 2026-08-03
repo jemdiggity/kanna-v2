@@ -29,6 +29,7 @@ export interface RequestRevisionOptions {
 }
 
 export function createPipelineApi(context: StoreContext): PipelineApi {
+  const revisionRequestsInFlight = new Set<string>();
   interface TaskActionResponse {
     taskId: string;
     followTask?: boolean;
@@ -341,7 +342,12 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     const item = context.state.items.value.find((candidate) => candidate.id === taskId);
     if (!item) return false;
     if (item.closed_at != null) return false;
+    if (revisionRequestsInFlight.has(taskId)) {
+      context.toast.warning(context.tt("toasts.revisionAlreadyStarting"));
+      return false;
+    }
 
+    revisionRequestsInFlight.add(taskId);
     try {
       const response = await postTaskAction(taskId, "request-revision", {
         targetStage: options.targetStage,
@@ -361,6 +367,8 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       console.error("[store] requestRevision: server action failed:", error);
       context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
       return false;
+    } finally {
+      revisionRequestsInFlight.delete(taskId);
     }
   }
 
