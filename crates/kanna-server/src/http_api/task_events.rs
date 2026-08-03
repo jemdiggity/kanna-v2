@@ -8,17 +8,17 @@
 //! - `cursor` omitted → the caller is starting fresh and gets the scope's
 //!   retained history from the beginning, so events that fired before the first
 //!   call are not lost.
-//! - Events available → return them immediately. Fixed scopes return the last
-//!   delivered `seq`; a parent scope returns an opaque cursor containing a
-//!   global event watermark, a membership revision, and only the sparse
-//!   backfills for later adoptees. `hasMore` says another batch is already
-//!   waiting, so the caller loops without waiting.
-//! - Nothing available → block until an event arrives or the window elapses,
-//!   then return an empty list and advance each current member to the head read
-//!   *before* the query. A task adopted at a later membership revision starts
-//!   from its sparse backfill watermark (initially zero), so retained history
-//!   remains eligible even when its sequence numbers are older than events
-//!   already delivered for existing children.
+//! - Events available → return them immediately. Fixed scopes return a numeric
+//!   sequence; a parent scope returns the same global sequence bound to the
+//!   parent id in a constant-size opaque cursor. `hasMore` says another batch
+//!   is already waiting, so the caller loops without waiting.
+//! - Nothing available → advance to the global head read before the query and
+//!   block until an event arrives or the window elapses. Each recheck advances
+//!   again, so unrelated retained history is never rescanned by a drained poll.
+//! - Parent membership is evaluated at each read checkpoint. Reparenting never
+//!   rewinds the global sequence: events at or below an acknowledged checkpoint
+//!   do not become eligible later, while events after it are included whenever
+//!   the child is in the parent scope at the next read.
 
 use super::state::AppState;
 use super::task_blockers::resolve_existing_task_id;
@@ -28,7 +28,7 @@ use axum::Json;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,6 +36,12 @@ use std::time::Duration;
 /// gets it in batches with `hasMore` set rather than one unbounded page.
 const DEFAULT_EVENT_LIMIT: i64 = 100;
 const MAX_EVENT_LIMIT: i64 = 500;
+/// Keeps invalid public GET requests and legacy cursor decoding bounded. New
+/// parent cursors are normally under 100 bytes; this larger allowance exists
+/// only so deployed p1 cursors can make one bounded forward-upgrade pass.
+const MAX_CURSOR_LEN: usize = 32 * 1024;
+const MAX_LEGACY_PARENT_WATERMARKS: usize = 500;
+const LEGACY_CURSOR_SCAN_LIMIT: i64 = 500;
 
 /// Backstop re-check while blocked. In-process appends wake the waiter
 /// immediately (`db::task_events::appended`); this bounds latency for the rare
@@ -57,34 +63,34 @@ pub(super) struct TaskEventsQuery {
     limit: Option<i64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum TaskEventsCursor {
     Sequence(i64),
     ParentV1(ParentTaskEventsCursorV1),
-    ParentV2(ParentTaskEventsCursorV2),
+    ParentV3(ParentTaskEventsCursorV3),
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ParentTaskEventsCursorV1 {
     parent_task_id: String,
     watermarks: BTreeMap<String, i64>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct ParentTaskEventsCursorV2 {
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ParentTaskEventsCursorV3 {
     parent_task_id: String,
     event_seq: i64,
-    parent_revision: i64,
-    backfills: BTreeMap<String, i64>,
 }
 
 const PARENT_CURSOR_V1_PREFIX: &str = "p1.";
-const PARENT_CURSOR_V2_PREFIX: &str = "p2.";
+const PARENT_CURSOR_V3_PREFIX: &str = "p3.";
 
-fn invalid_cursor(cursor: &str) -> (axum::http::StatusCode, String) {
+fn invalid_cursor() -> (axum::http::StatusCode, String) {
     (
         axum::http::StatusCode::BAD_REQUEST,
-        format!("cursor is not a cursor returned by this endpoint: {cursor}"),
+        "cursor is not a valid cursor returned by this endpoint".to_string(),
     )
 }
 
@@ -94,25 +100,38 @@ fn parse_cursor(
     let Some(cursor) = cursor.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
-    if let Some(encoded) = cursor.strip_prefix(PARENT_CURSOR_V2_PREFIX) {
+    if cursor.len() > MAX_CURSOR_LEN {
+        return Err(invalid_cursor());
+    }
+    if let Some(encoded) = cursor.strip_prefix(PARENT_CURSOR_V3_PREFIX) {
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(encoded)
-            .map_err(|_| invalid_cursor(cursor))?;
-        let parsed = serde_json::from_slice(&bytes).map_err(|_| invalid_cursor(cursor))?;
-        return Ok(Some(TaskEventsCursor::ParentV2(parsed)));
+            .map_err(|_| invalid_cursor())?;
+        let parsed: ParentTaskEventsCursorV3 =
+            serde_json::from_slice(&bytes).map_err(|_| invalid_cursor())?;
+        if parsed.event_seq < 0 {
+            return Err(invalid_cursor());
+        }
+        return Ok(Some(TaskEventsCursor::ParentV3(parsed)));
     }
     if let Some(encoded) = cursor.strip_prefix(PARENT_CURSOR_V1_PREFIX) {
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(encoded)
-            .map_err(|_| invalid_cursor(cursor))?;
-        let parsed = serde_json::from_slice(&bytes).map_err(|_| invalid_cursor(cursor))?;
+            .map_err(|_| invalid_cursor())?;
+        let parsed: ParentTaskEventsCursorV1 =
+            serde_json::from_slice(&bytes).map_err(|_| invalid_cursor())?;
+        if parsed.watermarks.len() > MAX_LEGACY_PARENT_WATERMARKS
+            || parsed.watermarks.values().any(|seq| *seq < 0)
+        {
+            return Err(invalid_cursor());
+        }
         return Ok(Some(TaskEventsCursor::ParentV1(parsed)));
     }
-    cursor
-        .parse::<i64>()
-        .map(TaskEventsCursor::Sequence)
-        .map(Some)
-        .map_err(|_| invalid_cursor(cursor))
+    let sequence = cursor.parse::<i64>().map_err(|_| invalid_cursor())?;
+    if sequence < 0 {
+        return Err(invalid_cursor());
+    }
+    Ok(Some(TaskEventsCursor::Sequence(sequence)))
 }
 
 fn encode_parent_cursor<T: Serialize>(
@@ -194,13 +213,166 @@ struct EventBatch {
     has_more: bool,
 }
 
-enum ParentReadState {
-    V1(BTreeMap<String, i64>),
-    V2 {
-        event_seq: i64,
-        parent_revision: Option<i64>,
-        backfills: BTreeMap<String, i64>,
-    },
+fn db_error(error: rusqlite::Error) -> (axum::http::StatusCode, String) {
+    (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        format!("db error: {error}"),
+    )
+}
+
+fn encode_v3_cursor(
+    parent_task_id: &str,
+    event_seq: i64,
+) -> Result<String, (axum::http::StatusCode, String)> {
+    encode_parent_cursor(
+        PARENT_CURSOR_V3_PREFIX,
+        &ParentTaskEventsCursorV3 {
+            parent_task_id: parent_task_id.to_string(),
+            event_seq,
+        },
+    )
+}
+
+/// Drain one bounded slice of a deployed p1 cursor. This path exists only for
+/// forward compatibility: it validates every client-supplied task id against
+/// the current parent, scans via the global `seq > ?` hot path, never adds map
+/// entries, and upgrades to constant-size p3 as soon as the uneven legacy
+/// watermarks converge.
+fn read_legacy_parent_batch(
+    db: &Db,
+    scope: &TaskEventScope,
+    parent_task_id: &str,
+    legacy: &ParentTaskEventsCursorV1,
+    limit: i64,
+) -> Result<EventBatch, (axum::http::StatusCode, String)> {
+    if legacy.parent_task_id != parent_task_id {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "cursor belongs to a different parent_task_id scope".to_string(),
+        ));
+    }
+
+    let members = db
+        .list_child_task_ids(parent_task_id)
+        .map_err(db_error)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if legacy
+        .watermarks
+        .keys()
+        .any(|task_id| !members.contains(task_id))
+    {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "legacy parent cursor contains a task outside its parent scope".to_string(),
+        ));
+    }
+
+    // An empty p1 map is already equivalent to a fresh global cursor.
+    if legacy.watermarks.is_empty() {
+        return read_sequence_batch(db, scope, 0, limit, Some(parent_task_id));
+    }
+
+    let floor = legacy.watermarks.values().copied().min().unwrap_or(0);
+    let ceiling = legacy.watermarks.values().copied().max().unwrap_or(0);
+    let head_seq = db.latest_task_event_seq().map_err(db_error)?;
+    if ceiling > head_seq {
+        return Err(invalid_cursor());
+    }
+    let mut candidates = db
+        .list_task_events(scope, floor, head_seq, LEGACY_CURSOR_SCAN_LIMIT + 1)
+        .map_err(db_error)?;
+    let scan_has_more = candidates.len() as i64 > LEGACY_CURSOR_SCAN_LIMIT;
+    candidates.truncate(LEGACY_CURSOR_SCAN_LIMIT as usize);
+
+    let missing_member_watermark = ceiling;
+    let mut delivered = Vec::new();
+    let mut processed_seq = floor;
+    let mut stopped_at_page_limit = false;
+    for event in candidates {
+        let watermark = legacy
+            .watermarks
+            .get(&event.task_id)
+            .copied()
+            .unwrap_or(missing_member_watermark);
+        if event.seq > watermark {
+            if delivered.len() as i64 == limit {
+                stopped_at_page_limit = true;
+                break;
+            }
+            delivered.push(event.clone());
+        }
+        processed_seq = event.seq;
+    }
+
+    let fully_scanned = !scan_has_more && !stopped_at_page_limit;
+    if fully_scanned {
+        processed_seq = head_seq;
+    }
+    let can_upgrade = processed_seq >= ceiling;
+    let has_more = !fully_scanned;
+    let cursor = if can_upgrade {
+        encode_v3_cursor(parent_task_id, processed_seq)?
+    } else {
+        let watermarks = legacy
+            .watermarks
+            .iter()
+            .map(|(task_id, watermark)| (task_id.clone(), (*watermark).max(processed_seq)))
+            .collect();
+        encode_parent_cursor(
+            PARENT_CURSOR_V1_PREFIX,
+            &ParentTaskEventsCursorV1 {
+                parent_task_id: parent_task_id.to_string(),
+                watermarks,
+            },
+        )?
+    };
+
+    Ok(EventBatch {
+        events: delivered.iter().map(|event| event.to_json()).collect(),
+        cursor,
+        has_more,
+    })
+}
+
+fn read_sequence_batch(
+    db: &Db,
+    scope: &TaskEventScope,
+    after_seq: i64,
+    limit: i64,
+    parent_task_id: Option<&str>,
+) -> Result<EventBatch, (axum::http::StatusCode, String)> {
+    // Read the head first: the returned cursor must never be ahead of the rows
+    // the same call looked at.
+    let head_seq = db.latest_task_event_seq().map_err(db_error)?;
+    if after_seq > head_seq {
+        return Err(invalid_cursor());
+    }
+    // The lower bound stays a plain range constraint on task_event's INTEGER
+    // PRIMARY KEY. Scope filtering happens after that indexable cut, so a
+    // drained long poll performs work proportional to new rows, not history.
+    let mut events = db
+        .list_task_events(scope, after_seq, head_seq, limit + 1)
+        .map_err(db_error)?;
+    let has_more = events.len() as i64 > limit;
+    events.truncate(limit as usize);
+    let cursor_seq = if has_more {
+        events.last().map(|event| event.seq).unwrap_or(after_seq)
+    } else {
+        // The query proved there are no more matching rows through this head;
+        // skipping unrelated rows prevents every recheck from scanning them.
+        head_seq
+    };
+    let cursor = if let Some(parent_task_id) = parent_task_id {
+        encode_v3_cursor(parent_task_id, cursor_seq)?
+    } else {
+        cursor_seq.to_string()
+    };
+    Ok(EventBatch {
+        events: events.iter().map(|event| event.to_json()).collect(),
+        cursor,
+        has_more,
+    })
 }
 
 fn read_batch(
@@ -209,148 +381,39 @@ fn read_batch(
     cursor: Option<&TaskEventsCursor>,
     limit: i64,
 ) -> Result<EventBatch, (axum::http::StatusCode, String)> {
-    let db = Db::open(db_path).map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db error: {e}"),
-        )
-    })?;
+    let db = Db::open(db_path).map_err(db_error)?;
     if let TaskEventScope::Children(parent_task_id) = scope {
-        let state = match cursor {
-            Some(TaskEventsCursor::ParentV1(cursor)) => {
-                if cursor.parent_task_id != *parent_task_id {
+        return match cursor {
+            Some(TaskEventsCursor::ParentV1(legacy)) => {
+                read_legacy_parent_batch(&db, scope, parent_task_id, legacy, limit)
+            }
+            Some(TaskEventsCursor::ParentV3(parent_cursor)) => {
+                if parent_cursor.parent_task_id != *parent_task_id {
                     return Err((
                         axum::http::StatusCode::BAD_REQUEST,
                         "cursor belongs to a different parent_task_id scope".to_string(),
                     ));
                 }
-                ParentReadState::V1(cursor.watermarks.clone())
-            }
-            Some(TaskEventsCursor::ParentV2(cursor)) => {
-                if cursor.parent_task_id != *parent_task_id {
-                    return Err((
-                        axum::http::StatusCode::BAD_REQUEST,
-                        "cursor belongs to a different parent_task_id scope".to_string(),
-                    ));
-                }
-                ParentReadState::V2 {
-                    event_seq: cursor.event_seq,
-                    parent_revision: Some(cursor.parent_revision),
-                    backfills: cursor.backfills.clone(),
-                }
-            }
-            // Older servers returned one numeric sequence for this scope. Use
-            // it as the default watermark for the current membership snapshot
-            // so an in-flight pre-upgrade client does not replay events it
-            // already acknowledged. The returned v2 cursor binds that snapshot
-            // to a membership revision, so tasks adopted afterwards still
-            // receive their retained history.
-            Some(TaskEventsCursor::Sequence(seq)) => ParentReadState::V2 {
-                event_seq: *seq,
-                parent_revision: None,
-                backfills: BTreeMap::new(),
-            },
-            None => ParentReadState::V2 {
-                event_seq: 0,
-                parent_revision: None,
-                backfills: BTreeMap::new(),
-            },
-        };
-        let (watermarks, after_parent_revision, default_after_seq) = match &state {
-            // v1 explicitly names every established child. Treat all current
-            // membership as established and let the map override the zero
-            // default until that legacy page is fully drained into v2.
-            ParentReadState::V1(watermarks) => (watermarks, Some(i64::MAX), 0),
-            ParentReadState::V2 {
-                event_seq,
-                parent_revision,
-                backfills,
-            } => (backfills, *parent_revision, *event_seq),
-        };
-        let (head_seq, current_parent_revision, mut events) = db
-            .list_child_task_events(
-                parent_task_id,
-                watermarks,
-                after_parent_revision,
-                default_after_seq,
-                limit + 1,
-            )
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("db error: {e}"),
+                read_sequence_batch(
+                    &db,
+                    scope,
+                    parent_cursor.event_seq,
+                    limit,
+                    Some(parent_task_id),
                 )
-            })?;
-        let has_more = events.len() as i64 > limit;
-        events.truncate(limit as usize);
-
-        let cursor = match state {
-            ParentReadState::V1(mut watermarks) if has_more => {
-                for child_event in &events {
-                    watermarks.insert(child_event.event.task_id.clone(), child_event.event.seq);
-                }
-                encode_parent_cursor(
-                    PARENT_CURSOR_V1_PREFIX,
-                    &ParentTaskEventsCursorV1 {
-                        parent_task_id: parent_task_id.clone(),
-                        watermarks,
-                    },
-                )?
             }
-            ParentReadState::V1(_) => encode_parent_cursor(
-                PARENT_CURSOR_V2_PREFIX,
-                &ParentTaskEventsCursorV2 {
-                    parent_task_id: parent_task_id.clone(),
-                    event_seq: head_seq,
-                    parent_revision: current_parent_revision,
-                    backfills: BTreeMap::new(),
-                },
-            )?,
-            ParentReadState::V2 {
-                mut event_seq,
-                parent_revision,
-                mut backfills,
-            } => {
-                let effective_parent_revision = parent_revision.unwrap_or(current_parent_revision);
-                for child_event in &events {
-                    if child_event.parent_revision > effective_parent_revision {
-                        backfills.insert(child_event.event.task_id.clone(), child_event.event.seq);
-                    } else {
-                        event_seq = child_event.event.seq;
-                    }
-                }
-                if !has_more {
-                    event_seq = head_seq;
-                    backfills.clear();
-                }
-                encode_parent_cursor(
-                    PARENT_CURSOR_V2_PREFIX,
-                    &ParentTaskEventsCursorV2 {
-                        parent_task_id: parent_task_id.clone(),
-                        event_seq,
-                        parent_revision: if has_more {
-                            effective_parent_revision
-                        } else {
-                            current_parent_revision
-                        },
-                        backfills,
-                    },
-                )?
+            // Numeric parent cursors were returned by the first deployed
+            // implementation. Their global watermark maps exactly to p3.
+            Some(TaskEventsCursor::Sequence(seq)) => {
+                read_sequence_batch(&db, scope, *seq, limit, Some(parent_task_id))
             }
+            None => read_sequence_batch(&db, scope, 0, limit, Some(parent_task_id)),
         };
-        return Ok(EventBatch {
-            events: events
-                .iter()
-                .map(|child_event| child_event.event.to_json())
-                .collect(),
-            cursor,
-            has_more,
-        });
     }
 
     let after_seq = match cursor {
         Some(TaskEventsCursor::Sequence(seq)) => *seq,
-        Some(TaskEventsCursor::ParentV1(_) | TaskEventsCursor::ParentV2(_)) => {
+        Some(TaskEventsCursor::ParentV1(_) | TaskEventsCursor::ParentV3(_)) => {
             return Err((
                 axum::http::StatusCode::BAD_REQUEST,
                 "parent-scoped cursor cannot be used with a fixed task or repo scope".to_string(),
@@ -358,43 +421,14 @@ fn read_batch(
         }
         None => 0,
     };
-    // Read the head first: the returned cursor must never be ahead of the rows
-    // the same call looked at.
-    let head_seq = db.latest_task_event_seq().map_err(|e| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            format!("db error: {e}"),
-        )
-    })?;
-    // Read one past the limit so `hasMore` reports whether a batch is really
-    // waiting, rather than guessing from a full page.
-    let mut events = db
-        .list_task_events(scope, after_seq, head_seq, limit + 1)
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("db error: {e}"),
-            )
-        })?;
-    let has_more = events.len() as i64 > limit;
-    events.truncate(limit as usize);
-    let cursor = events
-        .last()
-        .map(|event| event.seq)
-        .unwrap_or(head_seq)
-        .to_string();
-    Ok(EventBatch {
-        events: events.iter().map(|event| event.to_json()).collect(),
-        cursor,
-        has_more,
-    })
+    read_sequence_batch(&db, scope, after_seq, limit, None)
 }
 
 pub(super) async fn wait_task_events(
     State(state): State<Arc<AppState>>,
     Query(query): Query<TaskEventsQuery>,
 ) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
-    let after_seq = parse_cursor(query.cursor.as_deref())?;
+    let mut cursor = parse_cursor(query.cursor.as_deref())?;
     let limit = query
         .limit
         .unwrap_or(DEFAULT_EVENT_LIMIT)
@@ -425,8 +459,8 @@ pub(super) async fn wait_task_events(
         // wake this call, not wait for the next re-check.
         let mut appended = Box::pin(crate::db::task_event_appended());
         appended.as_mut().enable();
-        let batch = read_batch(&db_path, &scope, after_seq.as_ref(), limit)?;
-        if !batch.events.is_empty() {
+        let batch = read_batch(&db_path, &scope, cursor.as_ref(), limit)?;
+        if !batch.events.is_empty() || batch.has_more {
             return Ok(Json(json!({
                 "waitOutcome": "events",
                 "cursor": batch.cursor.to_string(),
@@ -450,6 +484,10 @@ pub(super) async fn wait_task_events(
                 ),
             })));
         }
+        // Advance the in-flight checkpoint before waiting. Without this, every
+        // five-second recheck would rescan unrelated rows between the caller's
+        // original cursor and the latest head.
+        cursor = parse_cursor(Some(&batch.cursor))?;
         let _ = tokio::time::timeout(
             (deadline - now).min(Duration::from_secs(WAIT_RECHECK_SECS)),
             appended,

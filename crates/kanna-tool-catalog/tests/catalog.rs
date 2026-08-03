@@ -604,10 +604,11 @@ fn wait_events_is_scoped_cursored_and_bounded_by_the_client_budget() {
         .description;
     assert!(
         description.contains("opaque cursor")
-            && description.contains("parent-membership revision")
-            && description.contains("without making the cursor grow with the whole fan-out")
-            && description.contains("older than events already returned"),
-        "the parent scope must document why later adoption cannot lose retained events: {description}"
+            && description.contains("constant-size cursor")
+            && description.contains("read checkpoint")
+            && description.contains("never rewinds acknowledged events")
+            && description.contains("without cursor growth"),
+        "the parent scope must document its bounded reparenting semantics: {description}"
     );
 }
 

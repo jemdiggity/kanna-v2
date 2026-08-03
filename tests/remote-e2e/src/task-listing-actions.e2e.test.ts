@@ -192,6 +192,9 @@ describe("remote task listing, creation, and actions E2E", () => {
     const typedEventTaskIds = eventTaskIds(typedEvents);
     expect(typedEventTaskIds).toEqual(expect.arrayContaining([openChildId, closedChildId]));
     expect(typedEventTaskIds).not.toContain(parent.taskId);
+    const typedCursor = getString(asRecord(typedEvents), "cursor");
+    expect(typedCursor.startsWith("p3.")).toBe(true);
+    expect(typedCursor.length).toBeLessThan(128);
 
     await appendTaskEvent(harness, openChildId, "task.awaiting_input");
     const typedNext = await runKannaCliJson(harness, [
@@ -200,12 +203,13 @@ describe("remote task listing, creation, and actions E2E", () => {
       "--parent-task-id",
       parent.taskId,
       "--cursor",
-      getString(asRecord(typedEvents), "cursor"),
+      typedCursor,
       "--timeout-secs",
       "0"
     ]);
     expect(eventTaskIds(typedNext)).toEqual([openChildId]);
     expect(eventTypes(typedNext)).toEqual(["task.awaiting_input"]);
+    expect(getString(asRecord(typedNext), "cursor").length).toBeLessThan(128);
 
     // The generic CLI call follows the same generated catalog request path as
     // kanna-mcp, so this proves the declarative casing/serialization contract
@@ -232,6 +236,9 @@ describe("remote task listing, creation, and actions E2E", () => {
     expect(eventTaskIds(catalogEvents)).toEqual(
       expect.arrayContaining([openChildId, closedChildId])
     );
+    const catalogCursor = getString(asRecord(catalogEvents), "cursor");
+    expect(catalogCursor.startsWith("p3.")).toBe(true);
+    expect(catalogCursor.length).toBeLessThan(128);
 
     await appendTaskEvent(harness, openChildId, "task.revision_requested");
     const catalogNext = await runKannaCliJson(harness, [
@@ -241,12 +248,13 @@ describe("remote task listing, creation, and actions E2E", () => {
       "--json",
       JSON.stringify({
         parent_task_id: parent.taskId,
-        cursor: getString(asRecord(catalogEvents), "cursor"),
+        cursor: catalogCursor,
         timeout_secs: 0
       })
     ]);
     expect(eventTaskIds(catalogNext)).toEqual([openChildId]);
     expect(eventTypes(catalogNext)).toEqual(["task.revision_requested"]);
+    expect(getString(asRecord(catalogNext), "cursor").length).toBeLessThan(128);
   }, 120_000);
 
   it("advances stages, completes stages, requests revision, runs merge agent, and closes with current durable-task semantics", async () => {

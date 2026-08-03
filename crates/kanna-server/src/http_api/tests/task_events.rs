@@ -393,10 +393,9 @@ async fn watching_by_parent_delivers_child_events_without_naming_ids() {
     );
     cursor = cursor_of(&blocked);
 
-    // The stranger emits an event while outside the subtree, then the parent
-    // gets an empty batch. The cursor may advance the current children, but it
-    // has no watermark for the stranger, so that retained event becomes
-    // relevant if the task is adopted before the next call.
+    // The stranger emits an event while outside the subtree. The empty read is
+    // a global checkpoint: adopting the task later must not rewind that cursor
+    // and replay history the caller already advanced past.
     {
         let db = Db::open(&db_path).expect("open db");
         db.update_pipeline_item_stage("stranger", "pr")
@@ -412,15 +411,8 @@ async fn watching_by_parent_delivers_child_events_without_naming_ids() {
             .expect("adopt");
     }
     let after_adoption =
-        get_json_body(&router, &format!("{watch}&cursor={cursor}&timeoutSecs=1")).await;
-    assert_eq!(
-        event_pairs(&after_adoption),
-        vec![
-            ("stranger".to_string(), "stage.changed".to_string()),
-            ("stranger".to_string(), "stage.changed".to_string()),
-        ],
-        "a task adopted after a timeout must surface all retained pre-adoption events"
-    );
+        get_json_body(&router, &format!("{watch}&cursor={cursor}&timeoutSecs=0")).await;
+    assert!(event_pairs(&after_adoption).is_empty());
     cursor = cursor_of(&after_adoption);
 
     // Future events use the same cursor normally after adoption.
@@ -435,9 +427,8 @@ async fn watching_by_parent_delivers_child_events_without_naming_ids() {
         vec![("stranger".to_string(), "run.started".to_string())]
     );
 
-    // Replayed from the beginning: the parent's own stage change is still
-    // absent, and the adopted task's pre-adoption event now matches the scope —
-    // parentage is evaluated as it stands, not as it stood when the event fired.
+    // Starting without a cursor still means retained history for the membership
+    // as it exists now. Checkpoint semantics only affect cursor reuse.
     let replayed = get_json_body(&router, &format!("{watch}&timeoutSecs=1")).await;
     assert_eq!(
         event_pairs(&replayed),
@@ -452,71 +443,72 @@ async fn watching_by_parent_delivers_child_events_without_naming_ids() {
     );
 }
 
-/// A parent cursor cannot be one global sequence: an outside task can emit at
-/// N, an existing child can emit at N+1 and advance that watermark, and the
-/// outside task can then be adopted. Its retained event at N must still be
-/// delivered without replaying the existing child's event at N+1.
+/// Parent membership is evaluated at each read checkpoint. An away/back round
+/// trip cannot rewind the global sequence and replay acknowledged events; an
+/// event after the checkpoint remains eligible when the child is back in scope
+/// at the next read.
 #[tokio::test]
-async fn parent_cursor_keeps_older_retained_events_for_a_later_adoptee() {
+async fn parent_cursor_handles_reparent_away_and_back_without_replay_or_skip() {
     let (router, db_path) = parentage_router();
     let watch = "/v1/task-events?parentTaskId=parent-1";
-
-    let initial = get_json_body(&router, &format!("{watch}&timeoutSecs=0")).await;
-    assert!(event_pairs(&initial).is_empty());
-    let initial_cursor = cursor_of(&initial);
-
     {
         let db = Db::open(&db_path).expect("open db");
-        db.update_pipeline_item_stage("stranger", "review")
-            .expect("outside task emits at N");
         db.update_pipeline_item_stage("child-a", "review")
-            .expect("existing child emits at N+1");
+            .expect("acknowledged event");
     }
-
-    let before_adoption = get_json_body(
-        &router,
-        &format!("{watch}&cursor={initial_cursor}&timeoutSecs=1"),
-    )
-    .await;
+    let acknowledged = get_json_body(&router, &format!("{watch}&timeoutSecs=1")).await;
     assert_eq!(
-        event_pairs(&before_adoption),
+        event_pairs(&acknowledged),
         vec![("child-a".to_string(), "stage.changed".to_string())]
     );
-    let child_seq = before_adoption["events"][0]["seq"]
-        .as_i64()
-        .expect("child event seq");
-    let cursor_after_child = cursor_of(&before_adoption);
+    let cursor = cursor_of(&acknowledged);
 
     {
         let db = Db::open(&db_path).expect("open db");
-        db.update_pipeline_item_parent("stranger", Some("parent-1"))
-            .expect("adopt outside task");
+        db.update_pipeline_item_parent("child-a", None)
+            .expect("reparent away");
+        db.update_pipeline_item_stage("child-a", "pr")
+            .expect("new event during round trip");
+        db.update_pipeline_item_parent("child-a", Some("parent-1"))
+            .expect("reparent back");
     }
+    let after_round_trip =
+        get_json_body(&router, &format!("{watch}&cursor={cursor}&timeoutSecs=1")).await;
+    assert_eq!(
+        event_pairs(&after_round_trip),
+        vec![("child-a".to_string(), "stage.changed".to_string())],
+        "the acknowledged review event must not replay and the new pr event must not be skipped"
+    );
 
-    let after_adoption = get_json_body(
+    // If a read checkpoint occurs while the task is away, its outside event is
+    // deliberately ineligible and remains behind that checkpoint after return.
+    let cursor = cursor_of(&after_round_trip);
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_parent("child-a", None)
+            .expect("reparent away again");
+        db.update_pipeline_item_stage("child-a", "done")
+            .expect("outside event");
+    }
+    let away = get_json_body(&router, &format!("{watch}&cursor={cursor}&timeoutSecs=0")).await;
+    assert!(event_pairs(&away).is_empty());
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_parent("child-a", Some("parent-1"))
+            .expect("return after checkpoint");
+    }
+    let returned = get_json_body(
         &router,
-        &format!("{watch}&cursor={cursor_after_child}&timeoutSecs=1"),
+        &format!("{watch}&cursor={}&timeoutSecs=0", cursor_of(&away)),
     )
     .await;
-    assert_eq!(
-        event_pairs(&after_adoption),
-        vec![("stranger".to_string(), "stage.changed".to_string())],
-        "adoption must make the retained event at N eligible after N+1 was delivered"
-    );
-    let adopted_seq = after_adoption["events"][0]["seq"]
-        .as_i64()
-        .expect("adopted event seq");
-    assert_eq!(
-        adopted_seq + 1,
-        child_seq,
-        "the regression requires the outside event at N immediately before the child at N+1"
-    );
+    assert!(event_pairs(&returned).is_empty());
 }
 
 /// Servers before the per-child cursor shipped returned a numeric sequence for
 /// parent scopes. An agent can carry that cursor across an upgrade, so the
 /// first new-server response must neither replay acknowledged events nor keep
-/// returning a numeric cursor that cannot preserve later adoption semantics.
+/// returning a numeric cursor that is not bound to the parent scope.
 #[tokio::test]
 async fn legacy_numeric_parent_cursor_deduplicates_then_upgrades_to_opaque() {
     let (router, db_path) = parentage_router();
@@ -547,7 +539,7 @@ async fn legacy_numeric_parent_cursor_deduplicates_then_upgrades_to_opaque() {
         "the event acknowledged by the numeric cursor must not replay"
     );
     let opaque_cursor = cursor_of(&upgraded);
-    assert!(opaque_cursor.starts_with("p2."));
+    assert!(opaque_cursor.starts_with("p3."));
 
     {
         let db = Db::open(&db_path).expect("open db");
@@ -566,7 +558,7 @@ async fn legacy_numeric_parent_cursor_deduplicates_then_upgrades_to_opaque() {
 }
 
 #[tokio::test]
-async fn legacy_p1_parent_cursor_drains_without_replay_then_compacts_to_p2() {
+async fn legacy_p1_parent_cursor_drains_without_replay_then_compacts_to_p3() {
     let (router, db_path) = parentage_router();
     {
         let db = Db::open(&db_path).expect("open db");
@@ -604,7 +596,151 @@ async fn legacy_p1_parent_cursor_drains_without_replay_then_compacts_to_p2() {
         event_pairs(&upgraded),
         vec![("child-b".to_string(), "stage.changed".to_string())]
     );
-    assert!(cursor_of(&upgraded).starts_with("p2."));
+    assert!(cursor_of(&upgraded).starts_with("p3."));
+}
+
+#[tokio::test]
+async fn parent_cursor_rejects_oversized_forged_and_nonmember_legacy_state() {
+    let (router, _db_path) = parentage_router();
+
+    let oversized = format!(
+        "/v1/task-events?parentTaskId=parent-1&cursor={}&timeoutSecs=0",
+        "x".repeat(33 * 1024)
+    );
+    let response = router
+        .clone()
+        .oneshot(Request::get(oversized).body(Body::empty()).unwrap())
+        .await
+        .expect("oversized cursor request");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .expect("bounded error body");
+    assert!(
+        body.len() < 256,
+        "an invalid cursor must not be echoed back"
+    );
+
+    let too_many_watermarks = (0..501)
+        .map(|index| (format!("forged-{index}"), serde_json::json!(0)))
+        .collect::<serde_json::Map<_, _>>();
+    let oversized_map_cursor = format!(
+        "p1.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "parent_task_id": "parent-1",
+                "watermarks": too_many_watermarks,
+            })
+            .to_string()
+        )
+    );
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(format!(
+                "/v1/task-events?parentTaskId=parent-1&cursor={oversized_map_cursor}&timeoutSecs=0"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .expect("oversized p1 request");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let nonmember_cursor = format!(
+        "p1.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "parent_task_id": "parent-1",
+                "watermarks": { "stranger": 0 },
+            })
+            .to_string()
+        )
+    );
+    let response = router
+        .clone()
+        .oneshot(
+            Request::get(format!(
+                "/v1/task-events?parentTaskId=parent-1&cursor={nonmember_cursor}&timeoutSecs=0"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .expect("nonmember p1 request");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let future_cursor = format!(
+        "p3.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "parent_task_id": "parent-1",
+                "event_seq": i64::MAX,
+            })
+            .to_string()
+        )
+    );
+    let response = router
+        .oneshot(
+            Request::get(format!(
+                "/v1/task-events?parentTaskId=parent-1&cursor={future_cursor}&timeoutSecs=0"
+            ))
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .expect("future p3 request");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn drained_parent_cursor_advances_past_large_unrelated_history() {
+    let (router, db_path) = parentage_router();
+    let initial = get_json_body(
+        &router,
+        "/v1/task-events?parentTaskId=parent-1&timeoutSecs=0",
+    )
+    .await;
+    let initial_cursor = cursor_of(&initial);
+
+    let conn = rusqlite::Connection::open(&db_path).expect("open db");
+    conn.execute_batch(
+        "WITH RECURSIVE generated(value) AS (
+                 SELECT 1
+                 UNION ALL
+                 SELECT value + 1 FROM generated WHERE value < 10000
+             )
+             INSERT INTO task_event (task_id, type, payload)
+             SELECT 'stranger', 'stage.changed', NULL FROM generated;",
+    )
+    .expect("insert unrelated retained history");
+    let head: i64 = conn
+        .query_row("SELECT MAX(seq) FROM task_event", [], |row| row.get(0))
+        .expect("read head");
+    drop(conn);
+
+    let drained = get_json_body(
+        &router,
+        &format!("/v1/task-events?parentTaskId=parent-1&cursor={initial_cursor}&timeoutSecs=0"),
+    )
+    .await;
+    assert!(event_pairs(&drained).is_empty());
+    let cursor = cursor_of(&drained);
+    assert!(cursor.starts_with("p3."));
+    assert!(cursor.len() < 128, "cursor must stay constant-size");
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor.strip_prefix("p3.").expect("p3 cursor"))
+        .expect("decode p3 cursor");
+    let payload: Value = serde_json::from_slice(&decoded).expect("parse p3 cursor");
+    assert_eq!(payload["event_seq"], serde_json::json!(head));
+
+    let rechecked = get_json_body(
+        &router,
+        &format!("/v1/task-events?parentTaskId=parent-1&cursor={cursor}&timeoutSecs=0"),
+    )
+    .await;
+    assert!(event_pairs(&rechecked).is_empty());
+    assert_eq!(cursor_of(&rechecked), cursor);
 }
 
 /// Parent pages use the same opaque cursor for both continuation and scope

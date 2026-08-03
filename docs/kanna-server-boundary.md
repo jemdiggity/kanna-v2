@@ -60,12 +60,11 @@ polling each child. It is cursor-based, not snapshot-diffed:
 
 - Event order is `task_event.seq` (`INTEGER PRIMARY KEY AUTOINCREMENT`). SQLite
   allows one writer at a time, so a `seq` cannot be committed out of order.
-  Fixed task/repo cursors are a single sequence watermark. Parent cursors are
-  opaque and bind a global event watermark to a parent-membership revision,
-  with sparse per-child backfills only for tasks adopted after that revision;
-  cursor size does not scale with the established fan-out. Callers pass back
-  the cursor they were given unchanged; events that fire between two calls
-  arrive on the next one.
+  Fixed task/repo cursors are a single sequence watermark. Parent cursors bind
+  that same global watermark to the parent id; they are constant-size and do
+  not contain child ids or membership history. Callers pass back the cursor
+  they were given unchanged; events that fire between two calls arrive on the
+  next one.
 - Omitting the cursor returns the scope's retained history (14 days), so a
   watcher that starts after its children does not lose their early events.
 - Events are appended by the same DB writes that change the state they describe
@@ -83,19 +82,22 @@ Three scopes, in precedence order: `taskIds`, then `parentTaskId`, then
 `repoId`. `parentTaskId` exists because the other two do not cover a fan-out
 that lost the ids it created — an id list dies with the context that held it,
 and a repo scope hands the caller every other task's events to filter.
-It is evaluated per query against `pipeline_item.parent_task_id`, not
-snapshotted, so a task adopted mid-watch is in scope on the very next call. It
-covers direct children only and excludes the parent's own events, which makes it
+It is evaluated per read against `pipeline_item.parent_task_id`, so a task
+created or adopted mid-watch is in scope at the next checkpoint. It covers
+direct children only and excludes the parent's own events, which makes it
 exactly the set `GET /v1/tasks/{task_id}` reports as `childTaskIds`.
 
-Because that membership can change, a parent-scoped cursor tracks current
-children independently. A response advances each current child's watermark as
-far as that response inspected it; a task adopted after the response has no
-watermark and starts from retained history. Thus if an outside task emits at
-sequence N, an existing child emits and is returned at N+1, and the outside
-task is then adopted, its event at N is still returned. Children removed from
-the parent are removed when the next response snapshots membership. Fixed
-task-id and repo scopes continue to use one sequence watermark.
+Reparenting uses read-checkpoint semantics. Every response advances one global
+sequence after evaluating the membership that exists for that read. Moving a
+child away and back never rewinds the sequence or replays acknowledged events;
+an event after the checkpoint is eligible if the child is back under the parent
+at the next read. An event that was outside the scope when an intervening empty
+read advanced past it stays ineligible after the child returns. Omitting the
+cursor is the explicit way to request retained history for current membership.
+The hot query always starts with the indexable `task_event.seq > ?` range and
+uses `idx_pipeline_item_parent_created_id` for membership, so an empty long poll
+advances past unrelated rows instead of rescanning retained history on every
+recheck.
 
 ## Task Parentage
 

@@ -94,12 +94,6 @@ pub struct TaskEvent {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChildTaskEvent {
-    pub event: TaskEvent,
-    pub parent_revision: i64,
-}
-
 impl TaskEvent {
     pub fn to_json(&self) -> Value {
         json!({
@@ -187,10 +181,17 @@ impl Db {
     /// *before* querying events so the cursor handed back never outruns the
     /// rows actually returned.
     pub fn latest_task_event_seq(&self) -> Result<i64, rusqlite::Error> {
-        self.conn
-            .query_row("SELECT COALESCE(MAX(seq), 0) FROM task_event", [], |row| {
-                row.get(0)
-            })
+        // `sqlite_sequence` preserves the highest AUTOINCREMENT allocation even
+        // when retention deletes every event. `MAX(task_event.seq)` would fall
+        // backwards to zero and make a drained response rewind a valid cursor.
+        self.conn.query_row(
+            "SELECT COALESCE(
+                 (SELECT seq FROM sqlite_sequence WHERE name = 'task_event'),
+                 0
+             )",
+            [],
+            |row| row.get(0),
+        )
     }
 
     /// Events in `scope` with `after_seq < seq <= head_seq`, oldest first.
@@ -201,9 +202,18 @@ impl Db {
         head_seq: i64,
         limit: i64,
     ) -> Result<Vec<TaskEvent>, rusqlite::Error> {
+        // For a dynamic parent scope, SQLite otherwise prefers one
+        // `idx_task_event_task_seq` probe per child. `NOT INDEXED` still permits
+        // the INTEGER PRIMARY KEY range seek, and forces work to start at the
+        // global cursor instead of scaling with total fan-out on a drained poll.
+        let event_source = if matches!(scope, TaskEventScope::Children(_)) {
+            "task_event NOT INDEXED"
+        } else {
+            "task_event"
+        };
         let sql = format!(
             "SELECT seq, task_id, type, payload, created_at
-             FROM task_event
+             FROM {event_source}
              WHERE seq > ? AND seq <= ? AND {}
              ORDER BY seq ASC
              LIMIT ?",
@@ -228,90 +238,6 @@ impl Db {
             })
         })?;
         rows.collect()
-    }
-
-    /// Read one parent-scoped page against a single membership snapshot.
-    ///
-    /// A parent cursor has a global event watermark plus sparse per-child
-    /// backfill watermarks for children adopted after its membership revision.
-    /// Membership and events must be read in the same transaction: otherwise
-    /// an adoption between those reads could be folded into the returned cursor
-    /// without its retained events having been considered.
-    pub fn list_child_task_events(
-        &self,
-        parent_task_id: &str,
-        after_seq_by_task: &std::collections::BTreeMap<String, i64>,
-        after_parent_revision: Option<i64>,
-        default_after_seq: i64,
-        limit: i64,
-    ) -> Result<(i64, i64, Vec<ChildTaskEvent>), rusqlite::Error> {
-        let transaction = self.conn.unchecked_transaction()?;
-        let head_seq =
-            transaction.query_row("SELECT COALESCE(MAX(seq), 0) FROM task_event", [], |row| {
-                row.get(0)
-            })?;
-        let parent_revision = transaction.query_row(
-            "SELECT COALESCE(MAX(revision), 0) FROM task_parent_revision",
-            [],
-            |row| row.get(0),
-        )?;
-        let effective_parent_revision = after_parent_revision.unwrap_or(parent_revision);
-
-        // Keep the SQL shape, bind count, and returned cursor independent of
-        // total fan-out cardinality. Expanded OR predicates exceed SQLite's
-        // expression-depth limit around 1,000 children. The membership revision
-        // makes the relational default exact: established children use the
-        // global watermark, while later adoptees use a sparse backfill watermark
-        // (or zero until their retained history has drained).
-        let watermarks_json = serde_json::to_string(after_seq_by_task)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
-        let mut stmt = transaction.prepare(
-            "WITH watermarks(task_id, after_seq) AS (
-                 SELECT key, CAST(value AS INTEGER) FROM json_each(?1)
-             )
-             SELECT event.seq, event.task_id, event.type, event.payload, event.created_at,
-                    child.parent_revision
-             FROM task_event AS event
-             JOIN pipeline_item AS child ON child.id = event.task_id
-             LEFT JOIN watermarks AS watermark ON watermark.task_id = event.task_id
-             WHERE child.parent_task_id = ?2
-               AND event.seq <= ?3
-               AND event.seq > COALESCE(
-                   watermark.after_seq,
-                   CASE WHEN child.parent_revision > ?4 THEN 0 ELSE ?5 END
-               )
-             ORDER BY event.seq ASC
-             LIMIT ?6",
-        )?;
-        let rows = stmt.query_map(
-            rusqlite::params![
-                watermarks_json,
-                parent_task_id,
-                head_seq,
-                effective_parent_revision,
-                default_after_seq,
-                limit
-            ],
-            |row| {
-                let payload: Option<String> = row.get(3)?;
-                Ok(ChildTaskEvent {
-                    event: TaskEvent {
-                        seq: row.get(0)?,
-                        task_id: row.get(1)?,
-                        event_type: row.get(2)?,
-                        payload: payload
-                            .and_then(|payload| serde_json::from_str(&payload).ok())
-                            .unwrap_or_else(|| json!({})),
-                        created_at: row.get(4)?,
-                    },
-                    parent_revision: row.get(5)?,
-                })
-            },
-        )?;
-        let events = rows.collect::<Result<Vec<_>, _>>()?;
-        drop(stmt);
-        transaction.commit()?;
-        Ok((head_seq, parent_revision, events))
     }
 
     /// Attach (or clear) the task that receives this task's completion
