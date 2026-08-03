@@ -144,6 +144,105 @@ async fn handle_mcp_request(message: Value, base_url: &str, catalog: &SharedCata
     }
 }
 
+/// How long a stopped-looking `activity` sample has to survive before this
+/// layer reports it.
+///
+/// The daemon classifies each rendered terminal frame on its own — no
+/// hysteresis, no dwell, no memory of the previous frame (see
+/// `claude_status_from_lines` in `crates/daemon/src/headless_terminal.rs`). Busy
+/// hangs off the literal "esc to interrupt" marker being present in that one
+/// frame, so a frame captured mid-redraw can drop it, fall through to the
+/// trailing-prompt test, and classify a mid-turn agent as idle. That verdict
+/// reaches this layer as a task whose `activity` flipped to a stopped-looking
+/// value for a single detection window, and an orchestrator polling `activity`
+/// to decide whether an agent stopped acts on it.
+///
+/// The daemon re-classifies at most every `STATUS_DETECTION_THROTTLE_MS` (500ms
+/// in `crates/daemon/src/session.rs`), and flushes a quiet-session status on the
+/// same interval, so a misread is corrected within one throttle window whether
+/// or not the session is producing output. Waiting two windows means the confirm
+/// read sees a *fresh* classification rather than the same frame's verdict read
+/// twice.
+const ACTIVITY_CONFIRM_DELAY: Duration = Duration::from_millis(1_000);
+
+/// `activity` values an orchestrator can read as "this agent is no longer
+/// working".
+///
+/// `unread` is not itself a liveness claim — it means output nobody has read
+/// yet, and a busy agent can carry it — but both of these are what the daemon's
+/// per-frame verdict turns `working` into when the busy marker goes missing, so
+/// both are worth confirming. Confirming preserves the vocabulary: the confirm
+/// read reports whatever it finds, and never rewrites one value into another.
+fn activity_looks_stopped(task: &Value) -> bool {
+    matches!(
+        task.get("activity").and_then(Value::as_str),
+        Some("idle" | "unread")
+    )
+}
+
+fn task_is_closed(task: &Value) -> bool {
+    task.get("closedAt").is_some_and(|value| !value.is_null())
+}
+
+/// A closed task is stopped as a matter of record rather than of frame
+/// classification, so it never needs confirming.
+fn task_looks_stopped(task: &Value) -> bool {
+    !task_is_closed(task) && activity_looks_stopped(task)
+}
+
+/// Whether a response carries at least one task that reads as stopped.
+///
+/// Both shapes the catalog's GET routes produce are covered: the single task
+/// detail behind `kanna_get_task`, and the `TaskSummary` arrays behind
+/// `kanna_list_recent_tasks`, `kanna_search_tasks`, and
+/// `kanna_list_repo_tasks`. A list is exactly as capable of carrying a
+/// mid-redraw misread as a detail read is, and an orchestrator that lists its
+/// children to see which ones are still going would act on it the same way.
+fn response_looks_stopped(value: &Value) -> bool {
+    match value {
+        Value::Array(tasks) => tasks.iter().any(task_looks_stopped),
+        _ => task_looks_stopped(value),
+    }
+}
+
+/// Confirms a stopped-looking response by re-reading the same route once, after
+/// the daemon has had time to classify a fresh frame, and returns the fresher
+/// response.
+///
+/// The smoothing is deliberately one-sided. A response with nothing
+/// stopped-looking in it is returned immediately: a busy sample is never the
+/// misread this guards against, and delaying it would buy nothing.
+///
+/// Cost, when the confirmation does fire: `ACTIVITY_CONFIRM_DELAY` plus exactly
+/// one extra `GET` of the same route — one re-read for the whole response, not
+/// one per task, so a 200-task listing costs the same as a single detail read.
+/// For `kanna_get_task` that is paid only when the task being asked about
+/// already looked stopped. For the three list routes it is paid whenever *any*
+/// task in the response looks stopped, which is the common case for a repo
+/// listing, so those tools should be budgeted at roughly +1s per call.
+///
+/// A failed confirmation is not a confirmation. Rather than fall back to the
+/// unconfirmed first sample — which would surface the exact false stop this
+/// exists to suppress — the tool call fails, and the agent can call again.
+async fn confirm_stopped_activity(
+    base_url: &str,
+    path: &str,
+    value: Value,
+) -> Result<Value, String> {
+    if !response_looks_stopped(&value) {
+        return Ok(value);
+    }
+    tokio::time::sleep(ACTIVITY_CONFIRM_DELAY).await;
+    get_json::<Value>(base_url, path).await.map_err(|error| {
+        format!(
+            "a task read as stopped and the confirming re-read of {path} failed, so it was not \
+             reported: {error}. kanna-mcp never reports a stop it could not confirm, because the \
+             daemon's per-frame classifier can report a working agent as idle for one frame. \
+             Call the tool again."
+        )
+    })
+}
+
 fn task_matches_wait_until(task: &Value, until: WaitUntil) -> bool {
     let closed = task.get("closedAt").is_some_and(|value| !value.is_null());
     match until {
@@ -220,9 +319,22 @@ async fn wait_task(
     let path = format!("/v1/tasks/{}", encode_path_segment(task_id));
     loop {
         let task: Value = get_json(base_url, &path).await?;
-        if task_matches_wait_until(&task, until) {
-            return Ok(wait_resolved_result(task));
-        }
+        // A `Finished` match is read off `activity`, which the daemon writes per
+        // frame, so it is confirmed exactly like a task read before the caller
+        // is told its child stopped. A `Closed` match is a database fact and is
+        // exempt inside `confirm_stopped_activity`. If the stop does not hold,
+        // the fresher sample keeps the wait running; if it cannot be confirmed
+        // at all, the `?` fails the call rather than resolving the wait on an
+        // unconfirmed stop.
+        let task = if task_matches_wait_until(&task, until) {
+            let task = confirm_stopped_activity(base_url, &path, task).await?;
+            if task_matches_wait_until(&task, until) {
+                return Ok(wait_resolved_result(task));
+            }
+            task
+        } else {
+            task
+        };
         let now = tokio::time::Instant::now();
         if now >= deadline {
             return Ok(wait_timeout_result(task, task_id, timeout_secs));
@@ -314,7 +426,10 @@ async fn execute_resolved_request(
     request: ResolvedRequest,
 ) -> Result<Value, String> {
     match (request.method, request.kind) {
-        (Method::Get, ResponseKind::Json) => get_json(base_url, &request.path).await,
+        (Method::Get, ResponseKind::Json) => {
+            let value: Value = get_json(base_url, &request.path).await?;
+            confirm_stopped_activity(base_url, &request.path, value).await
+        }
         (Method::Get, ResponseKind::Text) => {
             get_text(base_url, &request.path).await.map(Value::String)
         }
@@ -721,6 +836,392 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// The daemon's per-frame classifier has no hysteresis, so one mid-redraw frame
+/// can report a working agent as idle. These tests drive the real stdio
+/// JSON-RPC surface against a real HTTP server that scripts that sequence, so
+/// the catalog routing, the confirmation read, and the tool-result envelope are
+/// exercised together. `crates/kanna-mcp/tests/activity_debounce.rs` drives the
+/// same sequence across real processes — daemon protocol fixture, real
+/// `kanna-server`, real `kanna-mcp` — and `tests/stdio_http.rs` covers the three
+/// task-list routes and the failed-confirmation path over real HTTP.
+#[cfg(test)]
+mod activity_debounce_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn task_with_activity(activity: &str) -> Value {
+        json!({
+            "id": "child-1",
+            "repoId": "repo-1",
+            "title": "Specialty review",
+            "stage": "review",
+            "branch": "task-child-1",
+            "activity": activity,
+            "closedAt": null
+        })
+    }
+
+    /// One scripted reply. `Serves` hands back a body; `Fails` is the
+    /// confirmation read losing the server — the case where there is no second
+    /// sample to confirm against.
+    #[derive(Clone)]
+    enum Reply {
+        Serves(Value),
+        Fails,
+    }
+
+    /// Serves `GET` from a script of replies, one per request, repeating the
+    /// last one. That is how a flapping classifier reads to this layer:
+    /// consecutive reads of the same route disagree.
+    async fn spawn_scripted_task_server(script: Vec<Reply>) -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted task server");
+        let addr = listener.local_addr().expect("local addr");
+        let reads = Arc::new(AtomicUsize::new(0));
+        let served = reads.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buffer = vec![0u8; 4096];
+                if socket.read(&mut buffer).await.is_err() {
+                    continue;
+                }
+                let index = served.fetch_add(1, Ordering::SeqCst);
+                let response = match script.get(index).or_else(|| script.last()) {
+                    Some(Reply::Serves(body)) => {
+                        let body = body.to_string();
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    }
+                    Some(Reply::Fails) | None => {
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 9\r\nConnection: close\r\n\r\nno daemon"
+                            .to_string()
+                    }
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        (format!("http://{addr}"), reads)
+    }
+
+    fn serving(script: Vec<Value>) -> Vec<Reply> {
+        script.into_iter().map(Reply::Serves).collect()
+    }
+
+    async fn call_tool_raw(
+        base_url: &str,
+        catalog: &SharedCatalog,
+        name: &str,
+        arguments: Value,
+    ) -> Value {
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments }
+        })
+        .to_string();
+        let rendered = handle_mcp_line(&line, base_url, catalog)
+            .await
+            .expect("tool call handled")
+            .expect("tool call response line");
+        let parsed: Value = serde_json::from_str(&rendered).expect("json-rpc response");
+        assert!(parsed.get("error").is_none(), "{parsed}");
+        parsed
+    }
+
+    async fn call_tool(
+        base_url: &str,
+        catalog: &SharedCatalog,
+        name: &str,
+        arguments: Value,
+    ) -> Value {
+        let parsed = call_tool_raw(base_url, catalog, name, arguments).await;
+        let text = parsed["result"]["content"][0]["text"]
+            .as_str()
+            .expect("tool result text")
+            .to_string();
+        assert!(
+            parsed["result"]["isError"] != json!(true),
+            "tool call should not be an error result: {text}"
+        );
+        serde_json::from_str(&text).expect("tool result json")
+    }
+
+    /// Returns the error text of a tool call that must have failed.
+    async fn call_tool_expecting_error(
+        base_url: &str,
+        catalog: &SharedCatalog,
+        name: &str,
+        arguments: Value,
+    ) -> String {
+        let parsed = call_tool_raw(base_url, catalog, name, arguments).await;
+        let text = parsed["result"]["content"][0]["text"]
+            .as_str()
+            .expect("tool result text")
+            .to_string();
+        assert_eq!(
+            parsed["result"]["isError"],
+            json!(true),
+            "an unconfirmed stop must fail the call rather than be reported: {text}"
+        );
+        text
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_single_stopped_looking_read_between_working_reads_is_not_reported_as_stopped() {
+        let (base_url, reads) = spawn_scripted_task_server(serving(vec![
+            task_with_activity("unread"),
+            task_with_activity("working"),
+        ]))
+        .await;
+        let catalog = shared_bundled_catalog();
+
+        let task = call_tool(
+            &base_url,
+            &catalog,
+            "kanna_get_task",
+            json!({ "task_id": "child-1" }),
+        )
+        .await;
+
+        assert_eq!(
+            task["activity"],
+            json!("working"),
+            "one dropped busy marker must not surface as a stopped agent"
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_that_holds_is_reported_within_the_confirmation_delay() {
+        let (base_url, reads) =
+            spawn_scripted_task_server(serving(vec![task_with_activity("unread")])).await;
+        let catalog = shared_bundled_catalog();
+
+        let started = tokio::time::Instant::now();
+        let task = call_tool(
+            &base_url,
+            &catalog,
+            "kanna_get_task",
+            json!({ "task_id": "child-1" }),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            task["activity"],
+            json!("unread"),
+            "a confirmed stop keeps its own activity value; the debounce does not rewrite it"
+        );
+        assert!(
+            elapsed >= ACTIVITY_CONFIRM_DELAY && elapsed < ACTIVITY_CONFIRM_DELAY * 3,
+            "a genuine stop should surface one confirmation delay later, took {elapsed:?}"
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_working_read_is_reported_immediately_and_costs_no_extra_request() {
+        let (base_url, reads) =
+            spawn_scripted_task_server(serving(vec![task_with_activity("working")])).await;
+        let catalog = shared_bundled_catalog();
+
+        let started = tokio::time::Instant::now();
+        let task = call_tool(
+            &base_url,
+            &catalog,
+            "kanna_get_task",
+            json!({ "task_id": "child-1" }),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(task["activity"], json!("working"));
+        assert!(
+            elapsed < ACTIVITY_CONFIRM_DELAY,
+            "reporting busy must stay prompt, took {elapsed:?}"
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_closed_task_is_reported_without_a_confirmation_read() {
+        let mut closed = task_with_activity("unread");
+        closed["closedAt"] = json!("2026-08-02 10:00:00");
+        let (base_url, reads) = spawn_scripted_task_server(serving(vec![closed])).await;
+        let catalog = shared_bundled_catalog();
+
+        let started = tokio::time::Instant::now();
+        let task = call_tool(
+            &base_url,
+            &catalog,
+            "kanna_get_task",
+            json!({ "task_id": "child-1" }),
+        )
+        .await;
+
+        assert_eq!(task["activity"], json!("unread"));
+        assert!(started.elapsed() < ACTIVITY_CONFIRM_DELAY);
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waiting_on_a_task_does_not_resolve_on_a_single_stopped_looking_read() {
+        let (base_url, _) = spawn_scripted_task_server(serving(vec![
+            task_with_activity("unread"),
+            task_with_activity("working"),
+            task_with_activity("working"),
+            task_with_activity("unread"),
+        ]))
+        .await;
+        let catalog = shared_bundled_catalog();
+
+        let result = call_tool(
+            &base_url,
+            &catalog,
+            "kanna_wait_task",
+            json!({ "task_id": "child-1", "timeout_secs": 30, "poll_secs": 1 }),
+        )
+        .await;
+
+        assert_eq!(
+            result["waitOutcome"],
+            json!("resolved"),
+            "the wait should still resolve once a stop holds: {result}"
+        );
+        assert_eq!(result["activity"], json!("unread"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_whose_confirmation_read_fails_is_not_reported_at_all() {
+        let (base_url, reads) = spawn_scripted_task_server(vec![
+            Reply::Serves(task_with_activity("unread")),
+            Reply::Fails,
+        ])
+        .await;
+        let catalog = shared_bundled_catalog();
+
+        let error = call_tool_expecting_error(
+            &base_url,
+            &catalog,
+            "kanna_get_task",
+            json!({ "task_id": "child-1" }),
+        )
+        .await;
+
+        assert!(
+            !error.contains("\"activity\""),
+            "the unconfirmed sample must not be handed back in the failure: {error}"
+        );
+        assert!(
+            error.contains("could not confirm") || error.contains("confirming re-read"),
+            "the failure should say the stop went unconfirmed: {error}"
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waiting_does_not_resolve_when_the_confirmation_read_fails() {
+        let (base_url, _) = spawn_scripted_task_server(vec![
+            Reply::Serves(task_with_activity("unread")),
+            Reply::Fails,
+        ])
+        .await;
+        let catalog = shared_bundled_catalog();
+
+        let error = call_tool_expecting_error(
+            &base_url,
+            &catalog,
+            "kanna_wait_task",
+            json!({ "task_id": "child-1", "timeout_secs": 30, "poll_secs": 1 }),
+        )
+        .await;
+
+        assert!(
+            !error.contains("\"waitOutcome\": \"resolved\""),
+            "an unconfirmed stop must not resolve the wait: {error}"
+        );
+    }
+
+    fn task_list(activities: [&str; 2]) -> Value {
+        Value::Array(
+            activities
+                .iter()
+                .enumerate()
+                .map(|(index, activity)| {
+                    let mut task = task_with_activity(activity);
+                    task["id"] = json!(format!("child-{}", index + 1));
+                    task
+                })
+                .collect(),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transient_stop_in_a_task_list_is_replaced_by_the_fresh_working_sample() {
+        let (base_url, reads) = spawn_scripted_task_server(serving(vec![
+            task_list(["working", "unread"]),
+            task_list(["working", "working"]),
+        ]))
+        .await;
+        let catalog = shared_bundled_catalog();
+
+        let tasks = call_tool(&base_url, &catalog, "kanna_list_recent_tasks", json!({})).await;
+
+        assert_eq!(
+            tasks[1]["activity"],
+            json!("working"),
+            "a listing must not leak a mid-redraw misread either: {tasks}"
+        );
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            2,
+            "one re-read confirms the whole list, however many tasks it holds"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_list_of_only_working_tasks_costs_no_extra_request() {
+        let (base_url, reads) =
+            spawn_scripted_task_server(serving(vec![task_list(["working", "working"])])).await;
+        let catalog = shared_bundled_catalog();
+
+        let started = tokio::time::Instant::now();
+        let tasks = call_tool(&base_url, &catalog, "kanna_list_recent_tasks", json!({})).await;
+
+        assert_eq!(tasks[0]["activity"], json!("working"));
+        assert!(started.elapsed() < ACTIVITY_CONFIRM_DELAY);
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_list_whose_confirmation_read_fails_is_not_reported_at_all() {
+        let (base_url, _) = spawn_scripted_task_server(vec![
+            Reply::Serves(task_list(["working", "unread"])),
+            Reply::Fails,
+        ])
+        .await;
+        let catalog = shared_bundled_catalog();
+
+        let error =
+            call_tool_expecting_error(&base_url, &catalog, "kanna_list_recent_tasks", json!({}))
+                .await;
+
+        assert!(
+            !error.contains("\"activity\""),
+            "the unconfirmed listing must not be handed back in the failure: {error}"
+        );
     }
 }
 
