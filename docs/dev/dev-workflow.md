@@ -121,6 +121,63 @@ repo (and dogfooded by this repo on itself):
 Built-in agents/pipelines ship as Tauri bundled resources; per-repo files
 override them by name.
 
+### Machine-local workspace setup
+
+The final `setup` command optionally runs `.kanna/setup.local.sh` from the
+repository's **primary checkout**. The primary checkout is deliberate: ignored
+files are not copied by `git worktree add`, so one local hook there is shared by
+every current and future task worktree. A missing, non-executable, or failing
+hook is ignored and cannot block task creation or a stage transition.
+
+Start from the committed template, from either the primary checkout or a task
+worktree:
+
+```sh
+primary_checkout="$(git rev-parse --git-common-dir)/.."
+cp .kanna/setup.local.sh.example "$primary_checkout/.kanna/setup.local.sh"
+chmod +x "$primary_checkout/.kanna/setup.local.sh"
+```
+
+Then edit the two values at the top of the ignored local copy. For example, a
+machine with an external volume mounted at `/Volumes/BUILD_DISK` can set
+`external_volume=/Volumes/BUILD_DISK` and choose a repository-specific
+directory such as `/Volumes/BUILD_DISK/kanna-builds/kanna-7` for
+`external_build_root`. The hook uses the current worktree directory name below
+that root, so `task-abc` and `task-def` get different Cargo target and build
+directories. Never point two worktrees at the same external directory: Cargo
+fingerprint state is mutable and sharing it can silently reuse artifacts from
+another checkout.
+
+If `.build` is already a real directory and its external destination does not
+exist, the template migrates that directory intact before replacing it with a
+symlink. If both locations contain state, it leaves the local directory alone
+and prints a warning; it never merges or deletes build artifacts implicitly.
+The one-time migration may take a while for a large build tree, while later
+fresh-worktree runs only create a directory and symlink.
+
+Do not eject the volume during a build. An ejection makes the symlink dangling
+immediately and the next build fails visibly at `.build`; rerun the local hook
+afterward. When setup finds its own dangling link while the volume is absent, it
+replaces only the link with an empty local `.build` directory and preserves the
+external artifacts. After remounting, setup relinks an empty fallback; if new
+local artifacts were produced meanwhile, it leaves them in place for an
+explicit manual choice.
+
+Cargo's `.cargo/config.toml` resolves `.build` and `.build/cargo-build` relative
+to the worktree, and kd's sidecar staging reads final binaries through that same
+worktree-private path, so the symlink preserves both Cargo isolation and the
+private sidecar provenance boundary. `./kd clean`, however, removes a live
+symlink itself rather than following it, so the external directory and its
+artifacts remain. Its `existsSync` guard skips an already-dangling symlink; the
+local hook repairs that case on its next run. Remove the exact worktree
+directory on the external volume explicitly when the artifacts are no longer
+wanted; the next setup otherwise relinks it.
+
+The setup list comes from `origin/main` but runs against the forked branch. This
+hook invocation does not depend on a tracked script in that branch: branches
+cut before the hook landed either find the primary checkout's machine-local
+script or take the exit-zero no-op path, so they remain transition-compatible.
+
 ### Publishing the config schema
 
 `./kd pages build-schema --out-dir <dir>` stages `config.schema.json` plus the

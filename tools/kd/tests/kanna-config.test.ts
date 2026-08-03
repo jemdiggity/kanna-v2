@@ -1,5 +1,17 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readlinkSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseCliArgs } from "../src/cli";
@@ -10,6 +22,8 @@ interface KannaRepoConfig {
 }
 
 const root = resolve(import.meta.dirname, "../../..");
+const localSetupCommand =
+  'local_setup="$(git rev-parse --git-common-dir 2>/dev/null)/../.kanna/setup.local.sh"; [ ! -x "$local_setup" ] || "$local_setup" || true';
 
 function readOriginMainConfig(): KannaRepoConfig | undefined {
   try {
@@ -45,7 +59,105 @@ describe("Kanna repository cache defaults", () => {
     // compatibility alias) and every pre-kache kd accept, so branches cut before
     // this change keep transitioning after it merges. Switch to `install` only
     // once no such branch is open, together with removing the alias in cli.ts.
-    expect(config.setup).toEqual(["pnpm install", "./kd env sync", "./kd rust-cache warm"]);
+    expect(config.setup).toEqual([
+      "pnpm install",
+      "./kd env sync",
+      "./kd rust-cache warm",
+      localSetupCommand
+    ]);
+  });
+
+  it("runs one shared machine-local hook without letting it block setup", () => {
+    const fixture = mkdtempSync(resolve(tmpdir(), "kanna-local-setup-"));
+    const repo = resolve(fixture, "repo");
+    const worktree = resolve(fixture, "worktree");
+    const localHook = resolve(repo, ".kanna", "setup.local.sh");
+    const marker = resolve(worktree, "hook-ran");
+
+    try {
+      mkdirSync(repo);
+      execFileSync("git", ["init", "--initial-branch=main"], { cwd: repo, stdio: "ignore" });
+      writeFileSync(resolve(repo, "tracked.txt"), "fixture\n");
+      execFileSync("git", ["add", "tracked.txt"], { cwd: repo, stdio: "ignore" });
+      execFileSync(
+        "git",
+        ["-c", "user.name=Kanna Test", "-c", "user.email=test@kanna.invalid", "commit", "-m", "fixture"],
+        { cwd: repo, stdio: "ignore" }
+      );
+      execFileSync("git", ["worktree", "add", "-b", "fixture-worktree", worktree], {
+        cwd: repo,
+        stdio: "ignore"
+      });
+
+      expect(() =>
+        execFileSync("/bin/sh", ["-c", localSetupCommand], { cwd: worktree, stdio: "ignore" })
+      ).not.toThrow();
+
+      mkdirSync(resolve(repo, ".kanna"));
+      writeFileSync(localHook, `#!/bin/sh\nprintf ran > "$PWD/hook-ran"\nexit 23\n`);
+      expect(() =>
+        execFileSync("/bin/sh", ["-c", localSetupCommand], { cwd: worktree, stdio: "ignore" })
+      ).not.toThrow();
+      expect(existsSync(marker)).toBe(false);
+
+      chmodSync(localHook, 0o755);
+      expect(() =>
+        execFileSync("/bin/sh", ["-c", localSetupCommand], { cwd: worktree, stdio: "ignore" })
+      ).not.toThrow();
+      expect(readFileSync(marker, "utf8")).toBe("ran");
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps external build storage isolated and repairs an unmounted-volume link", () => {
+    const fixture = mkdtempSync(resolve(tmpdir(), "kanna-external-build-"));
+    const repo = resolve(fixture, "repo");
+    const volume = resolve(fixture, "external-volume");
+    const unmountedVolume = resolve(fixture, "external-volume-unmounted");
+    const localHook = resolve(fixture, "setup.local.sh");
+    const localBuild = resolve(repo, ".build");
+    const externalBuild = resolve(volume, "kanna-builds", "kanna", "repo");
+
+    try {
+      mkdirSync(repo);
+      mkdirSync(volume);
+      execFileSync("git", ["init", "--initial-branch=main"], { cwd: repo, stdio: "ignore" });
+      mkdirSync(localBuild);
+      writeFileSync(resolve(localBuild, "artifact.txt"), "keep me\n");
+
+      const template = readFileSync(resolve(root, ".kanna", "setup.local.sh.example"), "utf8");
+      writeFileSync(
+        localHook,
+        template.replace(
+          'external_volume="/path/to/external-volume"',
+          `external_volume="${volume}"`
+        )
+      );
+
+      execFileSync("/bin/sh", [localHook], { cwd: repo, stdio: "ignore" });
+      expect(lstatSync(localBuild).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(localBuild)).toBe(externalBuild);
+      expect(readFileSync(resolve(externalBuild, "artifact.txt"), "utf8")).toBe("keep me\n");
+
+      renameSync(volume, unmountedVolume);
+      execFileSync("/bin/sh", [localHook], { cwd: repo, stdio: "ignore" });
+      expect(lstatSync(localBuild).isDirectory()).toBe(true);
+      expect(lstatSync(localBuild).isSymbolicLink()).toBe(false);
+      expect(
+        readFileSync(
+          resolve(unmountedVolume, "kanna-builds", "kanna", "repo", "artifact.txt"),
+          "utf8"
+        )
+      ).toBe("keep me\n");
+
+      renameSync(unmountedVolume, volume);
+      execFileSync("/bin/sh", [localHook], { cwd: repo, stdio: "ignore" });
+      expect(lstatSync(localBuild).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(localBuild)).toBe(externalBuild);
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
   });
 
   it("keeps teardown on private workspace cleanup", () => {
