@@ -475,13 +475,22 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
                 "agentProvider": "claude",
                 "branch": "task-task-1",
                 "prUrl": null,
-                "closedAt": null
+                "closedAt": null,
+                "latestRun": { "id": "run-review-1" }
             }),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/task-1",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({ "latestRun": { "id": "run-review-1" } }),
         },
         ExpectedRequest {
             method: "POST",
             path: "/v1/tasks/task-1/actions/complete-stage",
             body: Some(json!({
+                "runId": "run-review-1",
                 "status": "success",
                 "summary": "QA passed",
                 "metadata": { "review": "stdio-http" }
@@ -528,7 +537,7 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
     );
 
     let observed = server.join().expect("fixture server");
-    assert_eq!(observed.len(), 3);
+    assert_eq!(observed.len(), 4);
     assert_eq!(responses.len(), 4);
     assert_eq!(responses[0]["result"]["serverInfo"]["name"], "kanna-mcp");
     assert_eq!(
@@ -547,7 +556,8 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
             "agentProvider": "claude",
             "branch": "task-task-1",
             "prUrl": null,
-            "closedAt": null
+            "closedAt": null,
+            "latestRun": { "id": "run-review-1" }
         })
     );
     assert_eq!(

@@ -276,16 +276,18 @@ describe("remote task listing, creation, and actions E2E", () => {
     const source = await createScriptedTask(harness, {
       displayName: "Approval lineage override source"
     });
-    await invokeDesktop(
-      harness,
-      "POST",
-      `/v1/tasks/${source.taskId}/actions/complete-stage`,
-      {
+    await runKannaCliJson(harness, [
+      "tool",
+      "call",
+      "kanna_complete_stage",
+      "--json",
+      JSON.stringify({
+        task_id: source.taskId,
         status: "failure",
         summary: "Needs human input; original criteria are not mergeable",
         disposition: "needs_human_input"
-      }
-    );
+      })
+    ]);
     await waitForLatestRunStatus(harness, source.taskId, "failed");
     expect(await executeSql(
       harness,
@@ -308,30 +310,51 @@ describe("remote task listing, creation, and actions E2E", () => {
       null
     )).rejects.toThrow(/approval held/i);
 
-    const mergeResponse = asActionResponse(await invokeDesktop(
+    const mergeReceiver = asRecord(await invokeDesktop(
       harness,
       "POST",
-      `/v1/repos/${source.repoId}/agents/merge/signal`,
+      "/v1/tasks",
       {
-        message: "Start the deterministic merge queue",
-        agentProvider: "codex"
+        repoId: source.repoId,
+        prompt: "Run deterministic merge receiver",
+        displayName: "Deterministic merge receiver",
+        agentProvider: "codex",
+        agentType: "pty"
       }
     ));
-    const mergeOutput = collectTerminalEvents(harness, mergeResponse.taskId);
+    const mergeTaskId = getString(mergeReceiver, "taskId");
+    expect(await executeSql(
+      harness,
+      "UPDATE stage_run SET agent = 'merge' WHERE task_id = ?1",
+      [mergeTaskId]
+    )).toBe(1);
+    expect(await executeSql(
+      harness,
+      "INSERT INTO agent_signal_protocol (task_id, merge_handoff_version) VALUES (?1, 1)",
+      [mergeTaskId]
+    )).toBe(1);
+    const mergeOutput = collectTerminalEvents(harness, mergeTaskId);
     try {
       await waitForTerminalOutput(mergeOutput, "SCRIPT_READY");
 
-      const override = asRecord(await invokeLanJson(
+      await expect(invokeLanJson(
         harness,
         "POST",
         `/v1/tasks/${source.taskId}/actions/override-approval`,
         { reason: "Ship the independently reviewed diagnostic fix" },
         { "x-kanna-human-action": "approval-override" }
+      )).rejects.toThrow(/401.*native desktop authentication/i);
+
+      const override = asRecord(await invokeDesktop(
+        harness,
+        "POST",
+        `/v1/tasks/${source.taskId}/actions/override-approval`,
+        { reason: "Ship the independently reviewed diagnostic fix" }
       ));
       expect(override.state).toBe("overridden");
       expect(asRecord(override.overrideRecord)).toMatchObject({
-        actor: harness.desktopId,
-        channel: "desktop_loopback",
+        actor: "authenticated-relay-client",
+        channel: "authenticated_relay",
         reason: "Ship the independently reviewed diagnostic fix"
       });
 
@@ -344,11 +367,23 @@ describe("remote task listing, creation, and actions E2E", () => {
       expect(asRecord(persisted.approvalGate)).toMatchObject({
         state: "overridden",
         overrideRecord: {
-          actor: harness.desktopId,
-          channel: "desktop_loopback",
+          actor: "authenticated-relay-client",
+          channel: "authenticated_relay",
           reason: "Ship the independently reviewed diagnostic fix"
         }
       });
+
+      await invokeDesktop(
+        harness,
+        "POST",
+        `/v1/tasks/${source.taskId}/actions/advance-stage`,
+        null
+      );
+      await waitForCondition(async () => {
+        const run = await latestRunRow(harness, source.taskId);
+        return run.stage === "approve" && run.kind === "post" && run.status === "running";
+      }, 15_000, `task ${source.taskId} did not start its approve post`);
+      const sourceTask = await taskRow(harness, source.taskId);
 
       await runKannaCliJson(harness, [
         "task",
@@ -356,7 +391,7 @@ describe("remote task listing, creation, and actions E2E", () => {
         "--task-id",
         source.taskId,
         "--branch",
-        `task-${source.taskId}`,
+        getString(sourceTask, "branch"),
         "--target",
         "main",
         "--summary",
@@ -367,7 +402,7 @@ describe("remote task listing, creation, and actions E2E", () => {
         15_000
       );
       expect(output).toContain('"state":"overridden"');
-      expect(output).toContain('"channel":"desktop_loopback"');
+      expect(output).toContain('"channel":"authenticated_relay"');
       expect(output).toContain("Ship the independently reviewed diagnostic fix");
     } finally {
       mergeOutput.close();
@@ -420,6 +455,7 @@ describe("remote task listing, creation, and actions E2E", () => {
     const successTask = await createScriptedTask(harness, {
       displayName: "Remote complete success task"
     });
+    const successRun = await latestRunRow(harness, successTask.taskId);
     await setPipelineDefinition(
       harness,
       successTask.taskId,
@@ -432,6 +468,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       "POST",
       `/v1/tasks/${successTask.taskId}/actions/complete-stage`,
       {
+        runId: successRun.id,
         status: "success",
         summary: "implemented over relay",
         metadata: { coverage: "remote-e2e" }
@@ -448,6 +485,7 @@ describe("remote task listing, creation, and actions E2E", () => {
     const failureTask = await createScriptedTask(harness, {
       displayName: "Remote complete failure task"
     });
+    const failureRun = await latestRunRow(harness, failureTask.taskId);
     await setPipelineDefinition(
       harness,
       failureTask.taskId,
@@ -460,6 +498,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       "POST",
       `/v1/tasks/${failureTask.taskId}/actions/complete-stage`,
       {
+        runId: failureRun.id,
         status: "failure",
         summary: "tests failed over relay",
         metadata: { failing: "remote-e2e" }
@@ -736,7 +775,7 @@ async function taskRow(harness: RemoteHarness, taskId: string): Promise<JsonReco
 async function latestRunRow(harness: RemoteHarness, taskId: string): Promise<JsonRecord> {
   const rows = await querySql(
     harness,
-    `SELECT stage, kind, status, feedback
+    `SELECT id, stage, kind, status, feedback
        FROM stage_run
       WHERE task_id = ?1
       ORDER BY started_at DESC, id DESC

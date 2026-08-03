@@ -330,6 +330,10 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         Some(prepared.completion_transition.as_str()),
     )
     .map_err(|e| format!("db error: {}", e))?;
+    if prepared.run_kind == "post" && prepared.run_stage == "approve" {
+        db.record_approval_authorization(&task_id, &run_id)
+            .map_err(|e| format!("approval authorization error: {e}"))?;
+    }
     if let Some(reason) = prepared.resume_fallback_reason.as_deref() {
         db.set_stage_run_resume_fallback_reason(&run_id, reason)
             .map_err(|e| format!("db error: {}", e))?;
@@ -604,6 +608,10 @@ pub(crate) async fn dispatch_prepared_post_for_api(
                 Some(prepared.fallback.completion_transition.as_str()),
             )
             .map_err(|e| format!("db error: {}", e))?;
+            if prepared.run_stage == "approve" {
+                db.record_approval_authorization(&task_id, &run_id)
+                    .map_err(|e| format!("approval authorization error: {e}"))?;
+            }
             Ok(crate::mobile_api::TaskActionResponse {
                 task_id,
                 follow_task: None,

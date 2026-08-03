@@ -175,7 +175,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "043_task_approval_atomic_projection");
+    assert_eq!(latest_migration, "045_agent_signal_protocol");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -2499,6 +2499,51 @@ fn approval_override_records_actor_channel_reason_and_does_not_cover_new_holds()
         "override-2"
     );
     assert_eq!(gate.override_record.unwrap().id, "override-2");
+}
+
+#[test]
+fn restoring_a_live_interrupted_run_removes_its_mechanical_failure_hold() {
+    let db = Db::open_for_tests(&Db::test_db_path("approval-restored-interruption")).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-approval",
+        "repo-1",
+        "Recover the live session",
+        Some("Recover the live session"),
+        "in progress",
+        "2026-08-04 00:00:00",
+    )
+    .unwrap();
+    insert_approval_test_run(
+        &db,
+        "run-interrupted",
+        "in progress",
+        "main",
+        "running",
+        "interrupted run",
+    );
+    let marker = "agent session disappeared before a verdict was recorded";
+    db.finish_stage_run("run-interrupted", "failed", None, Some(marker))
+        .unwrap();
+    assert_eq!(
+        db.task_approval_gate("task-approval").unwrap().state,
+        ApprovalGateState::Held
+    );
+
+    assert!(db
+        .restore_latest_interrupted_stage_run("task-approval", marker)
+        .unwrap());
+    assert_eq!(
+        db.task_approval_gate("task-approval").unwrap().state,
+        ApprovalGateState::Eligible
+    );
+    assert_eq!(
+        db.latest_stage_run("task-approval")
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
 }
 
 #[test]

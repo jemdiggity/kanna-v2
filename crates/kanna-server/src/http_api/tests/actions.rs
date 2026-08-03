@@ -40,6 +40,27 @@ async fn wait_for_stage_run(db: &Db, task_id: &str, expected_stage: &str) -> cra
     panic!("task {task_id} never recorded a run for stage {expected_stage}");
 }
 
+fn insert_running_pr_run(db: &Db, task_id: &str, run_id: &str) {
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: run_id,
+        task_id,
+        stage: "pr",
+        kind: "main",
+        agent: Some("pr"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some(task_id),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+}
+
 async fn recv_state_change_scope(
     rx: &mut tokio::sync::broadcast::Receiver<kanna_agent_protocol::ServerFrame>,
 ) -> kanna_agent_protocol::StateChangeScope {
@@ -1802,6 +1823,7 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
     .unwrap();
     db.update_test_pipeline_item_stage_context("task-a", "task-a-stage", "default", None, "claude")
         .unwrap();
+    insert_running_pr_run(&db, "task-a", "task-a-pr-run");
     drop(db);
 
     // The pr-stage agent has already rebased, renamed, and committed on the
@@ -2002,6 +2024,7 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "task-a-pr-run",
                         "status": "success",
                         "summary": "PR is ready",
                         "metadata": { "pr_url": "https://github.com/acme/repo/pull/7" }
@@ -2127,6 +2150,7 @@ async fn complete_pr_stage_without_pr_url_leaves_dormant_dependent_unstarted() {
     .unwrap();
     db.update_test_pipeline_item_stage_context("task-a", "task-a", "default", None, "claude")
         .unwrap();
+    insert_running_pr_run(&db, "task-a", "task-a-pr-run");
     drop(db);
 
     let app = super::router(Arc::new(super::AppState::new(config.clone())));
@@ -2162,6 +2186,7 @@ async fn complete_pr_stage_without_pr_url_leaves_dormant_dependent_unstarted() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "task-a-pr-run",
                         "status": "success",
                         "summary": "PR is ready"
                     })
@@ -2249,6 +2274,7 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
     .unwrap();
     db.update_test_pipeline_item_stage_context("task-a", "task-a-stage", "default", None, "claude")
         .unwrap();
+    insert_running_pr_run(&db, "task-a", "task-a-pr-run");
     drop(db);
 
     let blocker_worktree_path = repo_root.join(".kanna-worktrees").join("task-a-stage");
@@ -3638,6 +3664,7 @@ async fn complete_stage_waits_for_competing_advance_stage_mutation() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "test-only-run",
                         "status": "success",
                         "summary": "competing completion",
                     })
@@ -4812,6 +4839,7 @@ async fn complete_stage_route_uses_stage_completer() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "test-stage-completer-run",
                         "status": "success",
                         "summary": "review passed",
                         "metadata": { "coverage": "sufficient" }
@@ -4880,6 +4908,7 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "run-1",
                         "status": "success",
                         "summary": "implemented",
                         "metadata": { "pr_url": "https://github.com/acme/repo/pull/41" }
@@ -4914,6 +4943,78 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
         Some("https://github.com/acme/repo/pull/41")
     );
     assert_eq!(item.pr_number, Some(41));
+}
+
+#[tokio::test]
+async fn delayed_completion_cannot_finish_a_replacement_run() {
+    let state = super::test_state_with_seed("desktop-stale-completion", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Replace the failed run",
+            Some("Replace the failed run"),
+            "in progress",
+            "2026-08-04 00:00:00",
+        )
+        .unwrap();
+        let insert = |id: &str, status: &str| {
+            db.insert_stage_run(crate::db::NewStageRun {
+                id,
+                task_id: "task-1",
+                stage: "in progress",
+                kind: "main",
+                agent: Some("implement"),
+                agent_provider: Some("codex"),
+                model: None,
+                effort: None,
+                status,
+                result: None,
+                feedback: None,
+                session_id: Some("task-1"),
+                provider_session_id: None,
+                cwd: None,
+                resumed_from_run_id: None,
+            })
+            .unwrap();
+        };
+        // Deliberately reverse lexical id order: insertion lineage, not UUID
+        // ordering within SQLite's one-second timestamp precision, is current.
+        insert("zz-run-old", "failed");
+        insert("aa-run-replacement", "running");
+    });
+    let db_path = state.config.db_path.clone();
+    let response = super::router(state)
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "runId": "zz-run-old",
+                        "status": "success",
+                        "summary": "late success from the replaced process"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let db = Db::open(&db_path).unwrap();
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(
+        runs.iter()
+            .find(|run| run.id == "aa-run-replacement")
+            .unwrap()
+            .status,
+        "running"
+    );
+    assert_eq!(
+        db.task_approval_gate("task-1").unwrap().state,
+        crate::db::ApprovalGateState::Held
+    );
 }
 
 #[tokio::test]
@@ -4967,6 +5068,7 @@ async fn complete_stage_route_parses_pr_url_from_summary_fallback() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "run-1",
                         "status": "success",
                         "summary": "Created PR https://github.com/acme/repo/pull/7 from add-feature."
                     })
@@ -5172,6 +5274,7 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "run-post",
                         "status": "success",
                         "summary": "cleaned up and committed"
                     })
@@ -5224,6 +5327,7 @@ async fn complete_stage_missing_task_returns_not_found() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "missing-run",
                         "status": "success",
                         "summary": "done"
                     })
@@ -5259,6 +5363,7 @@ async fn complete_stage_for_already_closed_task_is_idempotent() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "closed-run",
                         "status": "success",
                         "summary": "done again"
                     })
@@ -5510,6 +5615,7 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": post_run.id,
                         "status": "success",
                         "summary": "PR approved and merge master signaled"
                     })
@@ -5805,6 +5911,7 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
     .unwrap();
     db.update_test_pipeline_item_stage_context("task-a", "task-a-stage", "default", None, "claude")
         .unwrap();
+    insert_running_pr_run(&db, "task-a", "task-a-pr-run");
     drop(db);
 
     let blocker_worktree_path = commit_branch_change(
@@ -6025,6 +6132,7 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
     .unwrap();
     db.update_test_pipeline_item_stage_context("task-a", "task-a-stage", "default", None, "claude")
         .unwrap();
+    insert_running_pr_run(&db, "task-a", "task-a-pr-run");
     drop(db);
 
     let blocker_worktree_path = commit_branch_change(
@@ -6149,6 +6257,7 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "task-a-pr-run",
                         "status": "success",
                         "summary": "PR is ready",
                         "metadata": { "pr_url": "https://github.com/acme/repo/pull/7" }

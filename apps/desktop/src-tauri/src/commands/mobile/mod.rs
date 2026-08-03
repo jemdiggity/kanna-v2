@@ -398,6 +398,59 @@ pub async fn desktop_cloud_credential(
     })
 }
 
+/// Record a deliberate desktop approval override without exposing the
+/// desktop credential to webview JavaScript or to task-agent HTTP clients.
+#[tauri::command]
+pub async fn override_approval_hold(
+    app: tauri::AppHandle,
+    task_id: String,
+    reason: String,
+) -> Result<serde_json::Value, String> {
+    let manager = app.state::<MobileServerManager>();
+    let (api_base_url, config_path) = {
+        let state = manager.inner.lock().await;
+        if !state.started {
+            return Err("kanna-server is not running".to_string());
+        }
+        (state.api_base_url.clone(), state.config_path.clone())
+    };
+    let credential = desktop_credential(&config_path)?;
+    let mut url = reqwest::Url::parse(&api_base_url)
+        .map_err(|error| format!("invalid kanna-server URL: {error}"))?;
+    url.path_segments_mut()
+        .map_err(|_| "kanna-server URL cannot be a base URL".to_string())?
+        .extend([
+            "v1",
+            "tasks",
+            task_id.as_str(),
+            "actions",
+            "override-approval",
+        ]);
+    let response = manager
+        .client
+        .post(url)
+        .header("x-kanna-human-action", "approval-override")
+        .header("x-kanna-desktop-secret", credential.desktop_secret)
+        .json(&serde_json::json!({ "reason": reason }))
+        .send()
+        .await
+        .map_err(|error| format!("approval override request failed: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("failed to read approval override response: {error}"))?;
+    if !status.is_success() {
+        return Err(if body.trim().is_empty() {
+            format!("approval override request failed with {status}")
+        } else {
+            body
+        });
+    }
+    serde_json::from_str(&body)
+        .map_err(|error| format!("failed to decode approval override response: {error}"))
+}
+
 fn resolved_db_path(state: &MobileServerState) -> Result<PathBuf, String> {
     if let Ok(path) = std::env::var("KANNA_DB_PATH") {
         return Ok(PathBuf::from(path));

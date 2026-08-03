@@ -588,6 +588,7 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": revision_run.id,
                         "status": "success",
                         "summary": "revision complete"
                     })
@@ -1509,6 +1510,7 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "prevmain-impl-run",
                         "status": "success",
                         "summary": format!("Implemented the fix. {DECLINED_MARKER}")
                     })
@@ -1534,7 +1536,7 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(post_run.is_some(), "the commit post was not dispatched");
+    let post_run = post_run.expect("the commit post was not dispatched");
 
     // 2. The commit post reports its own, different result and finishes,
     //    which performs the transition into the review stage.
@@ -1544,7 +1546,7 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
             Request::post("/v1/tasks/prevmain-1/actions/complete-stage")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::json!({ "status": "success", "summary": COMMIT_SUMMARY })
+                    serde_json::json!({ "runId": post_run.id, "status": "success", "summary": COMMIT_SUMMARY })
                         .to_string(),
                 ))
                 .unwrap(),

@@ -159,6 +159,16 @@ pub(super) async fn run_merge_agent(
         })
         .await?
     };
+    {
+        let state = Arc::clone(&state);
+        let merge_task_id = prepared.task_id().to_string();
+        super::blocking::run_handler_blocking("merge protocol record", move || {
+            let db = Db::open(&state.config.db_path).map_err(|e| db_write_error("db error", e))?;
+            db.set_merge_handoff_protocol(&merge_task_id, 1)
+                .map_err(|e| db_write_error("db error", e))
+        })
+        .await?;
+    }
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
         .map_err(|e| {
@@ -1345,12 +1355,13 @@ pub(super) async fn complete_stage(
         )
     })?;
 
-    let (task_id, finished_run) = {
+    let (task_id, finished_run, already_closed) = {
         let state = Arc::clone(&state);
         let payload_status = payload.status;
         let payload_summary = payload.summary;
         let payload_metadata = payload.metadata;
         let payload_disposition = payload.disposition;
+        let payload_run_id = payload.run_id;
         super::blocking::run_handler_blocking("stage completion record", move || {
             let db = Db::open(&state.config.db_path).map_err(|e| {
                 (
@@ -1367,35 +1378,61 @@ pub(super) async fn complete_stage(
                         format!("task not found: {}", task_id),
                     )
                 })?;
+            if db
+                .get_pipeline_item(&task_id)
+                .map_err(|e| db_write_error("db error", e))?
+                .is_some_and(|item| item.closed_at.is_some())
+            {
+                return Ok((task_id, None, true));
+            }
             let run_status = if payload_status == "success" {
                 "succeeded"
             } else {
                 "failed"
             };
-            let finished_run = db
-                .finish_latest_running_stage_run(
-                    &task_id,
-                    run_status,
-                    Some(&stage_result),
-                    Some(&payload_summary),
-                )
-                .map_err(|e| db_write_error("db error", e))?;
-            // A parked task has no running run (its last verdict finished it).
-            // An agent may recover after reporting failure — e.g. the commit
-            // post cleans up and reports success — and that late verdict must
-            // both stick and keep its run identity, or a corrected post would
-            // never perform its deferred transition.
-            let finished_run = match finished_run {
-                Some(run) => Some(run),
-                None => db
-                    .refinish_latest_stage_run(
-                        &task_id,
-                        run_status,
-                        Some(&stage_result),
-                        Some(&payload_summary),
+            let current_run = db
+                .latest_stage_run(&task_id)
+                .map_err(|e| db_write_error("db error", e))?
+                .ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::CONFLICT,
+                        format!("task has no stage run to complete: {task_id}"),
                     )
-                    .map_err(|e| db_write_error("db error", e))?,
-            };
+                })?;
+            if current_run.id != payload_run_id {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!(
+                        "stale stage completion for run {payload_run_id}; current run is {}",
+                        current_run.id
+                    ),
+                ));
+            }
+            if !matches!(
+                current_run.status.as_str(),
+                "running" | "succeeded" | "failed"
+            ) {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!(
+                        "stage run {payload_run_id} cannot be completed from status {}",
+                        current_run.status
+                    ),
+                ));
+            }
+            db.finish_stage_run(
+                &payload_run_id,
+                run_status,
+                Some(&stage_result),
+                Some(&payload_summary),
+            )
+            .map_err(|e| db_write_error("db error", e))?;
+            let finished_run = Some(crate::db::FinishedStageRun {
+                id: current_run.id,
+                stage: current_run.stage,
+                kind: current_run.kind,
+                completion_transition: current_run.completion_transition,
+            });
             if let Some(run) = finished_run.as_ref() {
                 let logical_stage = db
                     .get_pipeline_item(&task_id)
@@ -1422,10 +1459,18 @@ pub(super) async fn complete_stage(
                         .map_err(|e| db_write_error("db error", e))?;
                 }
             }
-            Ok((task_id, finished_run))
+            Ok((task_id, finished_run, false))
         })
         .await?
     };
+
+    if already_closed {
+        return Ok(Json(crate::mobile_api::TaskActionResponse {
+            task_id,
+            follow_task: None,
+            revision_budget: None,
+        }));
+    }
 
     if !should_auto_advance {
         state.publish_state_changed(StateChangeScope::Tasks);

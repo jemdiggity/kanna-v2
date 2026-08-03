@@ -51,6 +51,18 @@ pub struct ExplicitStageDisposition<'a> {
     pub summary: &'a str,
 }
 
+#[derive(Debug, Clone)]
+pub struct ApprovalAuthorization {
+    pub run_id: String,
+    pub task_id: String,
+    pub repo_id: String,
+    pub branch: String,
+    pub target: String,
+    pub pr_url: Option<String>,
+    pub approval: ApprovalGate,
+    pub delivered_at: Option<String>,
+}
+
 impl ApprovalGate {
     pub fn permits_approval(&self) -> bool {
         matches!(self.state, ApprovalGateState::Eligible)
@@ -60,6 +72,123 @@ impl ApprovalGate {
 }
 
 impl Db {
+    pub fn record_approval_authorization(
+        &self,
+        task_id: &str,
+        run_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let task = self
+            .get_pipeline_item(task_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let repo = self
+            .get_repo(&task.repo_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let branch = task.branch.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let target = task
+            .base_ref
+            .or(repo.default_branch)
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let approval = self.task_approval_gate(task_id)?;
+        if !approval.permits_approval() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let approval_json = serde_json::to_string(&approval)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        self.conn.execute(
+            "INSERT INTO task_approval_authorization
+               (run_id, task_id, repo_id, branch, target, pr_url, approval_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(run_id) DO NOTHING",
+            (
+                run_id,
+                task_id,
+                task.repo_id,
+                branch,
+                target,
+                task.pr_url,
+                approval_json,
+            ),
+        )?;
+        Ok(())
+    }
+
+    pub fn approval_authorization(
+        &self,
+        task_id: &str,
+        run_id: &str,
+    ) -> Result<Option<ApprovalAuthorization>, rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .query_row(
+                "SELECT run_id, task_id, repo_id, branch, target, pr_url,
+                        approval_json, delivered_at
+                 FROM task_approval_authorization
+                 WHERE task_id = ? AND run_id = ?",
+                (task_id, run_id),
+                |row| {
+                    let approval_json: String = row.get(6)?;
+                    let approval = serde_json::from_str(&approval_json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            approval_json.len(),
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                    Ok(ApprovalAuthorization {
+                        run_id: row.get(0)?,
+                        task_id: row.get(1)?,
+                        repo_id: row.get(2)?,
+                        branch: row.get(3)?,
+                        target: row.get(4)?,
+                        pr_url: row.get(5)?,
+                        approval,
+                        delivered_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn mark_approval_authorization_delivered(
+        &self,
+        run_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE task_approval_authorization
+             SET delivered_at = COALESCE(delivered_at, datetime('now'))
+             WHERE run_id = ?",
+            [run_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_merge_handoff_protocol(
+        &self,
+        task_id: &str,
+        version: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO agent_signal_protocol (task_id, merge_handoff_version)
+             VALUES (?, ?)
+             ON CONFLICT(task_id) DO UPDATE SET merge_handoff_version = excluded.merge_handoff_version",
+            (task_id, version),
+        )?;
+        Ok(())
+    }
+
+    pub fn merge_handoff_protocol(&self, task_id: &str) -> Result<i64, rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT merge_handoff_version FROM agent_signal_protocol WHERE task_id = ?",
+                [task_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+
     pub fn task_approval_gate(&self, task_id: &str) -> Result<ApprovalGate, rusqlite::Error> {
         let unresolved = self.approval_holds(task_id, false)?;
         if !unresolved.is_empty() {

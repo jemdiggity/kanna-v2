@@ -11,6 +11,7 @@ use std::sync::Arc;
 pub(super) const DEVICE_ID_HEADER: &str = "x-kanna-device-id";
 pub(super) const DEVICE_SECRET_HEADER: &str = "x-kanna-device-secret";
 pub(super) const HUMAN_ACTION_HEADER: &str = "x-kanna-human-action";
+pub(super) const DESKTOP_SECRET_HEADER: &str = "x-kanna-desktop-secret";
 pub(super) const APPROVAL_OVERRIDE_ACTION: &str = "approval-override";
 
 /// Marker inserted when a genuine LAN request presented a paired device's
@@ -22,9 +23,9 @@ pub(super) struct TrustedLanDeviceAccess;
 struct TrustedLanDeviceIdentity(String);
 
 /// Deliberate human authority for approval overrides. This extractor is not
-/// used by ordinary advance routes and the required header is absent from the
-/// generated agent/MCP/SDK surface, so an agent cannot turn a repeated advance
-/// into consent accidentally.
+/// used by ordinary advance routes. Direct desktop loopback requests must
+/// additionally prove the secret retained by the native Tauri process; paired
+/// devices and authenticated relay clients already have transport identity.
 #[derive(Debug, Clone)]
 pub(super) struct HumanApprovalOverrideAccess {
     pub(super) actor: String,
@@ -86,6 +87,14 @@ impl FromRequestParts<Arc<AppState>> for HumanApprovalOverrideAccess {
         parts: &mut Parts,
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
+        privileged_task_access(&parts.extensions)?;
+
+        if parts.extensions.get::<TunneledHttpInvoke>().is_some() {
+            return Ok(Self {
+                actor: "authenticated-relay-client".into(),
+                channel: "authenticated_relay".into(),
+            });
+        }
         let deliberate = parts
             .headers
             .get(HUMAN_ACTION_HEADER)
@@ -97,25 +106,42 @@ impl FromRequestParts<Arc<AppState>> for HumanApprovalOverrideAccess {
                 "approval override requires an explicit human action".into(),
             ));
         }
-        privileged_task_access(&parts.extensions)?;
-
-        if parts.extensions.get::<TunneledHttpInvoke>().is_some() {
-            return Ok(Self {
-                actor: "authenticated-relay-client".into(),
-                channel: "authenticated_relay".into(),
-            });
-        }
         if let Some(identity) = parts.extensions.get::<TrustedLanDeviceIdentity>() {
             return Ok(Self {
                 actor: identity.0.clone(),
                 channel: "paired_lan_device".into(),
             });
         }
+        let presented_secret = parts
+            .headers
+            .get(DESKTOP_SECRET_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        let expected_secret = state.config.desktop_secret.as_deref().unwrap_or_default();
+        if expected_secret.is_empty() || !secrets_match(presented_secret, expected_secret) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "desktop approval override requires native desktop authentication".into(),
+            ));
+        }
         Ok(Self {
             actor: state.config.desktop_id.clone(),
-            channel: "desktop_loopback".into(),
+            channel: "authenticated_desktop".into(),
         })
     }
+}
+
+fn secrets_match(presented: &str, expected: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let presented = Sha256::digest(presented.as_bytes());
+    let expected = Sha256::digest(expected.as_bytes());
+    presented
+        .iter()
+        .zip(expected.iter())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
 }
 
 fn unauthorized_privileged_task() -> (StatusCode, String) {

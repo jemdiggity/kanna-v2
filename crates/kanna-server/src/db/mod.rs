@@ -91,6 +91,8 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "041_pipeline_item_parentage_index",
     "042_task_approval_lineage",
     "043_task_approval_atomic_projection",
+    "044_task_approval_authorization",
+    "045_agent_signal_protocol",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1549,7 +1551,47 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         create_task_approval_lineage_schema(conn)
     })?;
 
+    run_migration(conn, "044_task_approval_authorization", |conn| {
+        create_task_approval_authorization_schema(conn)
+    })?;
+
+    run_migration(conn, "045_agent_signal_protocol", |conn| {
+        create_agent_signal_protocol_schema(conn)
+    })?;
+
     Ok(())
+}
+
+fn create_task_approval_authorization_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS task_approval_authorization (
+          run_id TEXT PRIMARY KEY REFERENCES stage_run(id) ON DELETE CASCADE,
+          task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+          repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
+          branch TEXT NOT NULL,
+          target TEXT NOT NULL,
+          pr_url TEXT,
+          approval_json TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          delivered_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_approval_authorization_task
+          ON task_approval_authorization(task_id, created_at);
+        "#,
+    )
+}
+
+fn create_agent_signal_protocol_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS agent_signal_protocol (
+          task_id TEXT PRIMARY KEY REFERENCES pipeline_item(id) ON DELETE CASCADE,
+          merge_handoff_version INTEGER NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        "#,
+    )
 }
 
 fn create_task_approval_lineage_schema(conn: &Connection) -> Result<(), rusqlite::Error> {

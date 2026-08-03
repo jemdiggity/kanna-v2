@@ -104,7 +104,10 @@ pub(crate) async fn call_catalog_tool(
     name: &str,
     args: &Value,
 ) -> Result<(ResponseKind, Value), String> {
-    let request = resolve_request(catalog, name, args)?;
+    let mut request = resolve_request(catalog, name, args)?;
+    if name == "kanna_complete_stage" {
+        bind_request_to_latest_run(base_url, &mut request).await?;
+    }
     let kind = request.kind;
     let task_id = env::var("KANNA_TASK_ID")
         .ok()
@@ -121,6 +124,29 @@ pub(crate) async fn call_catalog_tool(
     )
     .await?;
     Ok((kind, value))
+}
+
+async fn bind_request_to_latest_run(
+    base_url: &str,
+    request: &mut ResolvedRequest,
+) -> Result<(), String> {
+    let task_path = request
+        .path
+        .strip_suffix("/actions/complete-stage")
+        .ok_or_else(|| "complete-stage request path is not canonical".to_string())?;
+    let task: Value = get_json(base_url, task_path).await?;
+    let run_id = task
+        .get("latestRun")
+        .and_then(|run| run.get("id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "task has no stage run to complete".to_string())?;
+    let body = request
+        .body
+        .as_object_mut()
+        .ok_or_else(|| "complete-stage request body must be an object".to_string())?;
+    body.insert("runId".to_string(), Value::String(run_id.to_string()));
+    Ok(())
 }
 
 async fn get_runtime_status(base_url: &str, path: &str) -> Result<Value, String> {

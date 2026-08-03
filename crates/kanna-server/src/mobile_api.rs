@@ -137,6 +137,7 @@ pub struct TaskDetail {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskLatestRun {
+    pub id: String,
     pub stage: String,
     pub kind: String,
     pub status: String,
@@ -246,6 +247,9 @@ pub struct CreateTaskResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CompleteStageRequest {
+    /// Exact run whose verdict is being recorded. Completion is never applied
+    /// to whichever run happens to be latest after a rerun/revision race.
+    pub run_id: String,
     pub status: String,
     pub summary: String,
     pub metadata: Option<serde_json::Value>,
@@ -804,6 +808,7 @@ fn map_task_latest_run(run: crate::db::StageRun) -> TaskLatestRun {
         // `{status, summary, metadata}` verdict JSON; pass it through as-is.
         .or_else(|| run.result.clone());
     TaskLatestRun {
+        id: run.id,
         stage: run.stage,
         kind: run.kind,
         status: run.status,

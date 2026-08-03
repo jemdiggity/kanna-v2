@@ -9,12 +9,14 @@ use crate::config::resolve_server_base_url;
 use crate::models::CompleteStageRequest;
 
 pub(crate) fn build_complete_stage_request(
+    run_id: String,
     status: String,
     summary: String,
     metadata: Option<Value>,
     disposition: Option<String>,
 ) -> CompleteStageRequest {
     CompleteStageRequest {
+        run_id,
         status,
         summary,
         metadata,
@@ -71,8 +73,25 @@ pub(crate) async fn run(
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect::<Vec<_>>();
     let base_url = resolve_server_base_url(&borrowed_pairs, server_url);
-    let request =
-        build_complete_stage_request(status.clone(), summary.clone(), metadata_value, disposition);
+    let run_id = crate::api::get_task_via_api(&base_url, &task_id)
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("Error: failed to bind stage completion to the active run: {error}");
+            process::exit(1);
+        })
+        .latest_run
+        .map(|run| run.id)
+        .unwrap_or_else(|| {
+            eprintln!("Error: task has no stage run to complete: {task_id}");
+            process::exit(1);
+        });
+    let request = build_complete_stage_request(
+        run_id,
+        status.clone(),
+        summary.clone(),
+        metadata_value,
+        disposition,
+    );
     let response = complete_stage_via_api(&base_url, &task_id, &request)
         .await
         .unwrap_or_else(|e| {

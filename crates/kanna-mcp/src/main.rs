@@ -401,12 +401,15 @@ async fn handle_mcp_tool_call(
     args: Value,
 ) -> Result<Value, String> {
     let args = maybe_augment_create_task_args(base_url, name, args).await?;
-    let request = {
+    let mut request = {
         let catalog = catalog
             .read()
             .map_err(|_| "catalog lock poisoned".to_string())?;
         resolve_request(&catalog, name, &args)?
     };
+    if name == "kanna_complete_stage" {
+        bind_request_to_latest_run(base_url, &mut request).await?;
+    }
     let task_id = env::var("KANNA_TASK_ID")
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -421,6 +424,29 @@ async fn handle_mcp_tool_call(
         },
     )
     .await
+}
+
+async fn bind_request_to_latest_run(
+    base_url: &str,
+    request: &mut ResolvedRequest,
+) -> Result<(), String> {
+    let task_path = request
+        .path
+        .strip_suffix("/actions/complete-stage")
+        .ok_or_else(|| "complete-stage request path is not canonical".to_string())?;
+    let task: Value = get_json(base_url, task_path).await?;
+    let run_id = task
+        .get("latestRun")
+        .and_then(|run| run.get("id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "task has no stage run to complete".to_string())?;
+    let body = request
+        .body
+        .as_object_mut()
+        .ok_or_else(|| "complete-stage request body must be an object".to_string())?;
+    body.insert("runId".to_string(), Value::String(run_id.to_string()));
+    Ok(())
 }
 
 async fn maybe_augment_create_task_args(

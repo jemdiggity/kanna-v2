@@ -337,19 +337,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     const normalizedReason = reason.trim();
     if (!normalizedReason) return false;
     try {
-      const serverBaseUrl = await resolveLocalServerBaseUrl();
-      const response = await fetch(
-        `${serverBaseUrl}/v1/tasks/${encodeURIComponent(taskId)}/actions/override-approval`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-kanna-human-action": "approval-override",
-          },
-          body: JSON.stringify({ reason: normalizedReason }),
-        },
-      );
-      if (!response.ok) throw new Error(await response.text());
+      await invoke("override_approval_hold", { taskId, reason: normalizedReason });
       await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
       return true;
     } catch (error) {

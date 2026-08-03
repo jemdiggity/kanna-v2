@@ -287,29 +287,54 @@ revision or rerun supersedes stale failure. An inferred success, a main result
 from another stage, or any commit/PR/approve post cannot resolve it. A later
 hold is newer than an existing override and requires a new decision.
 
-The generic repo-agent signal endpoint rejects both the former automated
-`MERGE ... [TASK ...]` shape and caller-built `KANNA_MERGE_HANDOFF` messages
-for the `merge` singleton. This compatibility guard makes pre-gate approve
-agents fail closed instead of bypassing the projection. Human conversation is
-still typed directly into the merge task; task-bound pipeline handoffs use the
-dedicated route.
+The generic repo-agent signal endpoint rejects natural-language agent requests
+and caller-built `KANNA_MERGE_HANDOFF` messages for the `merge` singleton. It
+accepts only the exact former automated `MERGE ... [TASK ...]` shape from a
+surviving pre-upgrade approve session, parses its task id and candidate, and
+routes it through the same server-owned gate as the dedicated endpoint. Human
+conversation is still typed directly into the merge task; new task-bound
+pipeline handoffs use the dedicated route.
 
 `POST /v1/tasks/{task_id}/actions/override-approval` is deliberately absent
-from the MCP/tool catalog and agent CLI. It requires a non-empty reason and the
-`x-kanna-human-action: approval-override` header. The server records identity
-honestly from the authenticated surface: the desktop instance id for loopback,
-the paired device id for LAN, or the authenticated relay channel when no
-person-level identity exists. Repeating the ordinary advance action is never
-an override.
+from the MCP/tool catalog and agent CLI. It requires a non-empty reason. Direct
+desktop loopback requests additionally require both the explicit
+`x-kanna-human-action: approval-override` marker and the desktop secret held by
+the native Tauri process; the webview and task agents never receive that
+secret. Paired LAN devices require their device credential and the explicit
+marker. An authenticated relay invocation is itself the authenticated remote
+human channel. The server records identity honestly as the desktop instance,
+paired device, or authenticated relay channel when no person-level identity
+exists. Repeating the ordinary advance action is never an override.
 
 Approval posts must call the catalog-backed
 `POST /v1/tasks/{task_id}/actions/signal-merge-handoff`, not generic singleton
-signaling. The server checks the gate again and constructs the canonical
+signaling. The server requires the task's currently running approve post and a
+durable authorization snapshot captured when that post began, binds the
+candidate repo/branch/target/PR to the task, checks the gate again under the
+task mutation lease, and constructs the canonical
 `KANNA_MERGE_HANDOFF` JSON delivered to the merge singleton. Its `approval`
 member is machine-readable `eligible` or `overridden`; the latter carries the
 durable override record. A caller cannot supply or forge that member. The
 bundled merge agent holds legacy agent-sent merge lines and malformed override
 handoffs as defense in depth.
+
+Upgrade compatibility is negotiated per surviving merge singleton. New merge
+sessions record protocol version 1 and receive `KANNA_MERGE_HANDOFF`. A session
+created before this contract has no capability row and receives the old
+server-validated `MERGE ... [TASK ...]` form for clean eligible lineages only;
+an override requires restarting that singleton. A surviving old approve post
+may submit its exact legacy structured line through the generic signal route,
+but the server parses it and runs the same task-bound authorization checks.
+Natural-language agent calls to the generic merge signal route are rejected;
+natural-language operator input typed directly into the merge terminal remains
+interactive authority.
+
+Stage completion is bound to a concrete run. The HTTP request includes
+`runId`; Kanna MCP and CLI clients obtain the latest run immediately before
+posting and add it automatically. Once the task mutation lease is acquired,
+the server rejects a completion whose run is no longer current. A delayed
+success from a replaced rerun therefore cannot finish or resolve the newer
+run's lineage.
 
 ## Local Consumer Model
 

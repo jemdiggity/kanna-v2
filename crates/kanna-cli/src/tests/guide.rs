@@ -24,6 +24,7 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
         revision_limit: None,
         child_task_ids: None,
         approval_gate: None,
+        latest_run: None,
     };
 
     let guide = render_guide_markdown(&GuideContext {
@@ -77,6 +78,7 @@ fn guide_markdown_tells_manual_stages_the_user_advances_the_pipeline() {
         revision_limit: None,
         child_task_ids: None,
         approval_gate: None,
+        latest_run: None,
     };
 
     let guide = render_guide_markdown(&GuideContext {

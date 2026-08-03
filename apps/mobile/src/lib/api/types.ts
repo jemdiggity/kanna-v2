@@ -209,6 +209,7 @@ export interface TaskSummary {
 }
 
 export interface TaskLatestRun {
+  id: string;
   stage: string;
   kind: string;
   status: string;

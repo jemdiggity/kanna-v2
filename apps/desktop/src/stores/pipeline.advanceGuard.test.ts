@@ -114,12 +114,7 @@ describe("advanceStage running-post guard", () => {
     );
   });
 
-  it("records a deliberate desktop override with the required marker and reason", async () => {
-    const fetchMock = vi.fn(async () => new Response(
-      JSON.stringify({ state: "overridden", holds: [] }),
-      { status: 200 },
-    ));
-    vi.stubGlobal("fetch", fetchMock);
+  it("records a deliberate override through the native desktop authority bridge", async () => {
     const reloadSnapshot = vi.fn(async () => undefined);
     const context = {
       state: {
@@ -135,17 +130,10 @@ describe("advanceStage running-post guard", () => {
       "task-1",
       "  Accept the diagnostic-only scope  ",
     )).resolves.toBe(true);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48120/v1/tasks/task-1/actions/override-approval",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-kanna-human-action": "approval-override",
-        },
-        body: JSON.stringify({ reason: "Accept the diagnostic-only scope" }),
-      },
-    );
+    expect(invokeMock).toHaveBeenCalledWith("override_approval_hold", {
+      taskId: "task-1",
+      reason: "Accept the diagnostic-only scope",
+    });
     expect(reloadSnapshot).toHaveBeenCalledTimes(1);
   });
 });

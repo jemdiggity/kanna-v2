@@ -153,7 +153,7 @@ function requestChanges() {
   openRequestChangesComposer();
 }
 
-defineExpose({ zIndex, bringToFront, dismiss, requestChanges });
+defineExpose({ zIndex, bringToFront, dismiss, requestChanges, approveReview });
 
 // Escape is handled by the centralized dismiss handler in useKeyboardShortcuts
 // (capture phase), which respects modal priority (e.g. closes shortcuts menu first).

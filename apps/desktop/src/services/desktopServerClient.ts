@@ -201,6 +201,7 @@ export async function fetchDesktopSnapshot(): Promise<DesktopSnapshot> {
 }
 
 export interface DesktopTaskLatestRun {
+  id: string;
   stage: string;
   kind: string;
   status: string;

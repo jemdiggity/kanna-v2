@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn builds_complete_stage_payload() {
     let request = build_complete_stage_request(
+        "run-1".to_string(),
         "success".to_string(),
         "review passed".to_string(),
         Some(json!({ "coverage": "sufficient" })),
@@ -12,6 +13,7 @@ fn builds_complete_stage_payload() {
     assert_eq!(
         serde_json::to_value(request).unwrap(),
         json!({
+            "runId": "run-1",
             "status": "success",
             "summary": "review passed",
             "metadata": { "coverage": "sufficient" },
@@ -22,6 +24,7 @@ fn builds_complete_stage_payload() {
 #[test]
 fn builds_structured_non_merge_candidate_stage_payload() {
     let request = build_complete_stage_request(
+        "run-2".to_string(),
         "success".to_string(),
         "diagnostic work committed".to_string(),
         None,
@@ -31,6 +34,7 @@ fn builds_structured_non_merge_candidate_stage_payload() {
     assert_eq!(
         serde_json::to_value(request).unwrap(),
         json!({
+            "runId": "run-2",
             "status": "success",
             "summary": "diagnostic work committed",
             "disposition": "not_merge_candidate",

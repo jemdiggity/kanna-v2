@@ -57,12 +57,18 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   the projection as `approvalGate`.
 - **Explicit human override**:
   `POST /v1/tasks/{task_id}/actions/override-approval` requires an authenticated
-  human-action header and a reason, and records the available actor, channel,
-  and time. Ordinary advance requests and agent tools cannot claim it.
+  native desktop, paired device, or relay channel and a reason, and records the
+  available actor, channel, and time. Direct desktop and paired-device calls
+  also carry an explicit human-action marker. Ordinary advance requests and
+  agent tools cannot claim it.
 - **Gated merge handoff**:
   `POST /v1/tasks/{task_id}/actions/signal-merge-handoff` rechecks the gate and
-  creates the machine-readable singleton message. It refuses unresolved holds
-  and includes the complete override record when one exists.
+  requires an active authorized approve post, binds the handoff to that task's
+  repo/branch/target/PR, and creates the machine-readable singleton message.
+  It refuses unresolved holds and includes the complete override record when
+  one exists. Surviving pre-upgrade approve and merge sessions use a
+  server-validated eligible-only legacy envelope; overrides require a
+  protocol-v1 merge session.
 - Later: a verdict UI on tasks parked at `pr` (request-changes composer →
   request-revision; approve button → advance). Forge-blind — it fires
   stage actions. Line-anchored diff feedback is a follow-up (needs an

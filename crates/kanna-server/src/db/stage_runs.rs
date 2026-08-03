@@ -91,7 +91,7 @@ impl Db {
                     resume_fallback_reason, completion_transition, started_at, finished_at
              FROM stage_run
              WHERE task_id = ?
-             ORDER BY datetime(started_at) ASC, id ASC",
+             ORDER BY rowid ASC",
         )?;
         let rows = stmt.query_map([task_id], stage_run_from_row)?;
         rows.collect()
@@ -107,7 +107,7 @@ impl Db {
                         resume_fallback_reason, completion_transition, started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ?
-                 ORDER BY datetime(started_at) DESC, id DESC
+                 ORDER BY rowid DESC
                  LIMIT 1",
                 [task_id],
                 stage_run_from_row,
@@ -138,7 +138,7 @@ impl Db {
                  FROM stage_run
                  WHERE task_id = ? AND stage = ? AND kind = 'main'
                    AND provider_session_id IS NOT NULL AND cwd IS NOT NULL
-                 ORDER BY datetime(started_at) DESC, id DESC
+                 ORDER BY rowid DESC
                  LIMIT 1",
                 [task_id, stage],
                 stage_run_from_row,
@@ -227,7 +227,7 @@ impl Db {
              WHERE id = (
                SELECT id FROM stage_run
                WHERE task_id = ?
-               ORDER BY datetime(started_at) DESC, id DESC
+               ORDER BY rowid DESC
                LIMIT 1
              )",
             (provider_session_id, task_id),
@@ -250,7 +250,7 @@ impl Db {
              WHERE id = (
                SELECT id FROM stage_run
                WHERE task_id = ?
-               ORDER BY datetime(started_at) DESC, id DESC
+               ORDER BY rowid DESC
                LIMIT 1
                )
                AND status IN ('cancelled', 'failed')
@@ -264,6 +264,19 @@ impl Db {
                )",
             (task_id, interruption_feedback, task_id),
         )?;
+        if rows_affected > 0 {
+            self.conn.execute(
+                "DELETE FROM task_approval_hold
+                 WHERE run_id = (
+                   SELECT id FROM stage_run
+                   WHERE task_id = ?
+                   ORDER BY rowid DESC
+                   LIMIT 1
+                 )
+                   AND kind = 'failed_result'",
+                [task_id],
+            )?;
+        }
         Ok(rows_affected > 0)
     }
 
@@ -283,55 +296,7 @@ impl Db {
                 "SELECT id, stage, kind, completion_transition
                  FROM stage_run
                  WHERE task_id = ? AND status = 'running'
-                 ORDER BY datetime(started_at) DESC, id DESC
-                 LIMIT 1",
-                [task_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                    ))
-                },
-            )
-            .optional();
-        let run = match run_result {
-            Ok(run) => run,
-            Err(err) if is_missing_stage_run_table(&err) => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        let Some((run_id, stage, kind, completion_transition)) = run else {
-            return Ok(None);
-        };
-        self.finish_stage_run(&run_id, status, result, feedback)?;
-        Ok(Some(FinishedStageRun {
-            id: run_id,
-            stage,
-            kind,
-            completion_transition,
-        }))
-    }
-
-    /// Re-finish the task's most recent already-finished run with a late
-    /// verdict. A parked task has no running run: an agent that reported
-    /// failure, fixed the problem, and reported success would otherwise lose
-    /// the verdict (and, for posts, the deferred transition). The latest
-    /// verdict wins.
-    pub fn refinish_latest_stage_run(
-        &self,
-        task_id: &str,
-        status: &str,
-        result: Option<&str>,
-        feedback: Option<&str>,
-    ) -> Result<Option<FinishedStageRun>, rusqlite::Error> {
-        let run_result = self
-            .conn
-            .query_row(
-                "SELECT id, stage, kind, completion_transition
-                 FROM stage_run
-                 WHERE task_id = ? AND status IN ('succeeded', 'failed')
-                 ORDER BY datetime(started_at) DESC, id DESC
+                 ORDER BY rowid DESC
                  LIMIT 1",
                 [task_id],
                 |row| {
@@ -413,7 +378,7 @@ impl Db {
                 "SELECT status
                  FROM stage_run
                  WHERE task_id = ? AND status IN ('succeeded', 'failed')
-                 ORDER BY datetime(finished_at) DESC, datetime(started_at) DESC, id DESC
+                 ORDER BY rowid DESC
                  LIMIT 1",
                 [task_id],
                 |row| row.get(0),
@@ -440,7 +405,7 @@ impl Db {
                    AND status IN ('succeeded', 'failed')
                    AND result IS NOT NULL
                    AND (?2 IS NULL OR kind = ?2)
-                 ORDER BY datetime(finished_at) DESC, datetime(started_at) DESC, id DESC
+                 ORDER BY rowid DESC
                  LIMIT 1",
                 rusqlite::params![task_id, kind],
                 |row| row.get(0),

@@ -248,7 +248,8 @@ agent-created child are not different kinds of things.
 - `POST /v1/tasks/{id}/actions/advance-stage` — start the next stage's run in
   place (kill/finish the current agent session, spawn the next stage's agent
   in the task's worktree, update `stage`, insert a `stage_run`).
-- `POST /v1/tasks/{id}/actions/complete-stage` — record the run result; on
+- `POST /v1/tasks/{id}/actions/complete-stage` — record the run result for the
+  required `runId` (stale/replaced run ids are rejected); on
   `success` with `transition: auto`, advance. On `failure`, mark the run
   failed and park the task.
 - `POST /v1/tasks/{id}/actions/request-revision` — insert a run for the
