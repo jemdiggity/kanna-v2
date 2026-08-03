@@ -12,11 +12,13 @@ pub(crate) fn build_complete_stage_request(
     status: String,
     summary: String,
     metadata: Option<Value>,
+    disposition: Option<String>,
 ) -> CompleteStageRequest {
     CompleteStageRequest {
         status,
         summary,
         metadata,
+        disposition,
     }
 }
 
@@ -39,6 +41,7 @@ pub(crate) async fn run(
     status: String,
     summary: String,
     metadata: Option<String>,
+    disposition: Option<String>,
     server_url: Option<&str>,
 ) {
     // Validate status
@@ -47,6 +50,13 @@ pub(crate) async fn run(
             "Error: --status must be \"success\" or \"failure\", got \"{}\"",
             status
         );
+        process::exit(1);
+    }
+    if disposition
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "needs_human_input" | "not_merge_candidate"))
+    {
+        eprintln!("Error: --disposition must be \"needs_human_input\" or \"not_merge_candidate\"");
         process::exit(1);
     }
 
@@ -61,7 +71,8 @@ pub(crate) async fn run(
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect::<Vec<_>>();
     let base_url = resolve_server_base_url(&borrowed_pairs, server_url);
-    let request = build_complete_stage_request(status.clone(), summary.clone(), metadata_value);
+    let request =
+        build_complete_stage_request(status.clone(), summary.clone(), metadata_value, disposition);
     let response = complete_stage_via_api(&base_url, &task_id, &request)
         .await
         .unwrap_or_else(|e| {

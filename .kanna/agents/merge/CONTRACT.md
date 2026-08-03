@@ -2,15 +2,18 @@
 
 The `merge` role is a repo-scoped merge master. It consumes merge requests delivered as session input.
 
-Required input:
+Required automated input:
 
 ```text
-MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>
+KANNA_MERGE_HANDOFF {"version":1,...,"approval":{"state":"eligible"|"overridden",...}}
 ```
 
 Required behavior:
 
-- It must parse the source branch and target branch from structured `MERGE` lines.
+- It must parse the source branch, target branch, and approval state from
+  canonical `KANNA_MERGE_HANDOFF` JSON.
+- It must HOLD a `held` handoff, an overridden handoff missing durable override
+  details, or a legacy agent-sent `MERGE ... [TASK ...]` line.
 - It may accept natural-language operator requests only after resolving them into concrete branches or PRs.
 - It must analyze git topology before merging and must not infer stack order from PR descriptions.
 - Before merging into a target that is not the default branch, it must confirm that target has an open PR of its own, and otherwise report the orphaned target to the operator instead of merging.

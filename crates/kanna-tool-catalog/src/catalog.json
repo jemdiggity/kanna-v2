@@ -174,7 +174,7 @@
     },
     {
       "name": "kanna_signal_agent",
-      "description": "Find or create a singleton task for an agent in a repo and send it a message. The response's 'created' says which happened: the provider and effort overrides below only apply to a task this call creates, because an already-running singleton keeps the session it was spawned with.",
+      "description": "Find or create a singleton task for an agent in a repo and send it a message. The response's 'created' says which happened: the provider and effort overrides below only apply to a task this call creates, because an already-running singleton keeps the session it was spawned with. Pipeline approval must use kanna_signal_merge_handoff: the generic merge signal rejects legacy MERGE ... [TASK ...] and caller-built KANNA_MERGE_HANDOFF messages because they lack server-owned lineage state.",
       "method": "POST",
       "path": "/v1/repos/{repo_id}/agents/{agent}/signal",
       "response": "json",
@@ -184,6 +184,20 @@
         { "name": "message", "description": "Message delivered to the agent's terminal session as input.", "type": "string", "required": true, "location": "body" },
         { "name": "agent_provider", "description": "Explicit agent provider id for a singleton task this call creates: 'claude', 'copilot', 'codex', 'opencode', or 'antigravity'. It overrides the agent definition's own provider candidates and the configured user default, so pass it to run e.g. the merge agent as claude when the default would pick another provider. Ignored when the agent's task is already running.", "type": "string", "required": false, "location": "body", "key": "agentProvider" },
         { "name": "effort", "description": "Provider-native reasoning effort for a singleton task this call creates, passed without normalization. Codex uses model_reasoning_effort and validates against the selected model; Claude uses --effort (low|medium|high|xhigh|max); Copilot uses --effort (none|minimal|low|medium|high|xhigh|max); OpenCode uses --variant; Antigravity uses --effort (low|medium|high). Ignored when the agent's task is already running.", "type": "string", "required": false, "location": "body" }
+      ]
+    },
+    {
+      "name": "kanna_signal_merge_handoff",
+      "description": "Signal the repo's merge singleton for an approved task through the server-owned lineage gate. The server rejects unresolved holds and builds a canonical KANNA_MERGE_HANDOFF message containing either eligible approval state or the durable human override record; callers cannot supply or forge that state.",
+      "method": "POST",
+      "path": "/v1/tasks/{task_id}/actions/signal-merge-handoff",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "description": "Approved Kanna task id (stable across stages) or one of its branch names.", "type": "string", "required": true, "location": "path" },
+        { "name": "branch", "description": "Resolved PR head branch.", "type": "string", "required": true, "location": "body" },
+        { "name": "target", "description": "Resolved PR base branch.", "type": "string", "required": true, "location": "body" },
+        { "name": "pr_url", "description": "Resolved pull-request URL when one exists.", "type": "string", "required": false, "location": "body", "key": "prUrl" },
+        { "name": "summary", "description": "Concise task or PR summary for the merge queue.", "type": "string", "required": true, "location": "body" }
       ]
     },
     {
@@ -220,7 +234,7 @@
     },
     {
       "name": "kanna_advance_stage",
-      "description": "Advance a Kanna task to the next pipeline stage. If the current stage declares a post, the post prompt runs in the current agent session first and its success triggers the transition. A transition forks a fresh branch and worktree from the committed tip and starts the next stage's agent there; the task id stays the same. Advancing past the final stage closes the task.",
+      "description": "Advance a Kanna task to the next pipeline stage. If the current stage declares a post, the post prompt runs in the current agent session first and its success triggers the transition. A transition forks a fresh branch and worktree from the committed tip and starts the next stage's agent there; the task id stays the same. Advancing past the final stage closes the task. Approval boundaries reject unresolved failed/needs-human/not-merge-candidate lineage; repeating this ordinary action is never a human override.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/advance-stage",
       "response": "json",
@@ -292,7 +306,7 @@
     },
     {
       "name": "kanna_complete_stage",
-      "description": "Record pipeline stage completion for the current stage run; success can trigger configured auto-advance, while failure stops advancement and surfaces the summary to the user.",
+      "description": "Record pipeline stage completion for the current stage run; success can trigger configured auto-advance, while failure stops advancement and creates a durable approval hold for a main run. A later explicit successful main result in the same stage resolves stale holds; posts never do. Set disposition when the result needs human input or is explicitly not a merge candidate, including a successful diagnostic commit post.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/actions/complete-stage",
       "response": "json",
@@ -300,7 +314,8 @@
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" },
         { "name": "status", "description": "'success' records the stage as complete and can trigger configured auto-advance; 'failure' records what blocked the stage and stops advancement.", "type": "string", "required": true, "location": "body", "enum": ["success", "failure"] },
         { "name": "summary", "description": "Short summary of what was accomplished, or on failure, what is blocking.", "type": "string", "required": true, "location": "body" },
-        { "name": "metadata", "description": "Optional structured result data (e.g. a review verdict) stored on the stage run and readable from the task detail's latestRun.", "type": "object", "required": false, "location": "body" }
+        { "name": "metadata", "description": "Optional structured result data (e.g. a review verdict) stored on the stage run and readable from the task detail's latestRun.", "type": "object", "required": false, "location": "body" },
+        { "name": "disposition", "description": "Structured approval hold for this result. Use needs_human_input when a human decision is required, or not_merge_candidate when diagnostic/partial work may be committed but must not be approved. Omit only when neither applies.", "type": "string", "required": false, "location": "body", "enum": ["needs_human_input", "not_merge_candidate"] }
       ]
     },
     {

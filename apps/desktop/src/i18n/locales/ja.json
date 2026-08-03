@@ -263,6 +263,10 @@
     "requestChanges": "変更を依頼",
     "approve": "承認",
     "approveMerge": "承認してマージ",
+    "approvalHoldTitle": "承認保留",
+    "approvalHoldExplanation": "このタスクには、失敗・人の入力待ち・マージ候補外の未解決結果があります。通常の承認では解除できません。この履歴を意図的に受け入れる場合のみ上書きしてください。理由とこのデスクトップの識別情報が記録され、マージマスターに送られます。",
+    "approvalOverrideReasonPlaceholder": "保留があるにもかかわらずマージしてよい理由",
+    "recordOverrideAndApprove": "上書きを記録して承認",
     "summaryPlaceholder": "任意の概要...",
     "sendRequestChanges": "依頼を送信",
     "shortcutClose": "閉じる"

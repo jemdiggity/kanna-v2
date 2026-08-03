@@ -229,14 +229,12 @@ describe("bundled agent flavor contracts", () => {
     expect(reviewAgentFor("specialized-reviewers")).toBe("qa-dispatcher");
   });
 
-  it("hands the draft-PR composition from approve to merge@github over one MERGE line", () => {
+  it("hands approval to merge@github with the server-built lineage envelope", () => {
     // The GitHub preset composes pr -> approve post -> merge@github across
-    // three separate agent sessions. Nothing type-checks the handoff: approve
-    // emits a MERGE line as free text and merge@github parses it, so the two
-    // spellings must stay identical or the approved flow silently strands at
-    // the merge master. Live coverage is blocked on the harness in
-    // docs/2026-07-08-setup-agent-live-e2e-gap.md.
-    const MERGE_LINE = "MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>";
+    // three separate agent sessions. The dedicated server endpoint builds the
+    // envelope and merge@github parses it, so both sides must retain the same
+    // prefix and approval-state contract.
+    const HANDOFF_PREFIX = "KANNA_MERGE_HANDOFF";
 
     const approveAgent = read(join(agentsRoot, "approve", "AGENT.md"));
     const approveContract = read(join(agentsRoot, "approve", "CONTRACT.md"));
@@ -247,13 +245,12 @@ describe("bundled agent flavor contracts", () => {
       ["approve CONTRACT.md", approveContract],
       ["merge@github AGENT.md", mergeGithub],
     ] as const) {
-      expect(content, label).toContain(MERGE_LINE);
+      expect(content, label).toContain(HANDOFF_PREFIX);
     }
 
-    // approve addresses the merge master by role name, and merge@github is
-    // the flavor that role resolves to under the preset's config.
-    expect(approveAgent).toContain('`agent = "merge"`');
-    expect(approveContract).toContain('`agent = "merge"`');
+    expect(approveAgent).toContain("kanna_signal_merge_handoff");
+    expect(approveContract).toContain("kanna_signal_merge_handoff");
+    expect(mergeGithub).toContain('"approval"');
 
     // The stock preset opens an ordinary PR, so nothing needs readying. A
     // repo that opts into pr@draft-pr still reaches this agent, and

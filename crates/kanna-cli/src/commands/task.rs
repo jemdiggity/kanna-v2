@@ -7,15 +7,16 @@ use crate::api::{
     dependent_tasks_exist_via_api, get_task_via_api, list_repo_tasks_via_api, list_tasks_via_api,
     notify_mobile_via_api, parse_wait_until, rename_task_via_api, request_revision_via_api,
     rerun_stage_via_api, resume_task_via_api, search_tasks_via_api, send_task_input_via_api,
-    set_task_notify_via_api, set_task_parent_via_api, set_task_pipeline_via_api, task_logs_via_api,
-    unblock_task_via_api, wait_task_events_via_api, wait_task_via_api, WaitTaskOutcome,
+    set_task_notify_via_api, set_task_parent_via_api, set_task_pipeline_via_api,
+    signal_merge_handoff_via_api, task_logs_via_api, unblock_task_via_api,
+    wait_task_events_via_api, wait_task_via_api, WaitTaskOutcome,
 };
 use crate::commands::{parse_metadata_json, print_json};
 use crate::config::resolve_server_base_url_from_env;
 use crate::models::{
-    BlockTaskRequest, CreateTaskRequest, MobileNotificationRequest, RequestRevisionRequest,
-    SetTaskNotifyRequest, SetTaskParentRequest, SetTaskPipelineRequest, TaskCreateOptions,
-    TaskDetail, TaskInputRequest, TaskRenameRequest, TaskStatusRow, TaskSummary,
+    BlockTaskRequest, CreateTaskRequest, MergeHandoffRequest, MobileNotificationRequest,
+    RequestRevisionRequest, SetTaskNotifyRequest, SetTaskParentRequest, SetTaskPipelineRequest,
+    TaskCreateOptions, TaskDetail, TaskInputRequest, TaskRenameRequest, TaskStatusRow, TaskSummary,
 };
 use crate::TaskCommands;
 use kanna_tool_catalog::{wait_resolved_result, wait_timeout_result};
@@ -64,6 +65,20 @@ pub(crate) fn build_send_task_input_request(message: String) -> TaskInputRequest
 
 pub(crate) fn build_block_task_request(blocker_task_ids: Vec<String>) -> BlockTaskRequest {
     BlockTaskRequest { blocker_task_ids }
+}
+
+pub(crate) fn build_merge_handoff_request(
+    branch: String,
+    target: String,
+    pr_url: Option<String>,
+    summary: String,
+) -> MergeHandoffRequest {
+    MergeHandoffRequest {
+        branch,
+        target,
+        pr_url,
+        summary,
+    }
 }
 
 /// Render a wait the same way the MCP tool does — the task detail plus the
@@ -376,6 +391,27 @@ pub(crate) async fn run(command: TaskCommands) {
                 });
             if let Err(e) = print_json(&advanced) {
                 eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+        TaskCommands::SignalMerge {
+            task_id,
+            branch,
+            target,
+            pr_url,
+            summary,
+            server_url,
+        } => {
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let request = build_merge_handoff_request(branch, target, pr_url, summary);
+            let response = signal_merge_handoff_via_api(&base_url, &task_id, &request)
+                .await
+                .unwrap_or_else(|error| {
+                    eprintln!("Error: {error}");
+                    process::exit(1);
+                });
+            if let Err(error) = print_json(&response) {
+                eprintln!("Error: {error}");
                 process::exit(1);
             }
         }

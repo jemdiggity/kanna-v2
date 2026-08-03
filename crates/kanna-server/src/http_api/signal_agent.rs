@@ -1,3 +1,4 @@
+use super::lan_trust::PrivilegedTaskAccess;
 use super::state::{db_write_error, AppState};
 use super::task_input::submit_task_input;
 use crate::config::Config;
@@ -34,6 +35,23 @@ pub(super) async fn signal_agent(
     axum::extract::Path((repo_id, agent)): axum::extract::Path<(String, String)>,
     Json(payload): Json<SignalAgentRequest>,
 ) -> Result<Json<SignalAgentResponse>, (axum::http::StatusCode, String)> {
+    // Pipeline approval used to send this exact free-text shape through the
+    // generic singleton endpoint. It carries a task id but no server-owned
+    // lineage projection, so accepting it would preserve the laundering path
+    // that the gated handoff endpoint closes. Direct operator conversation in
+    // the merge terminal remains valid; only automation-shaped HTTP handoffs
+    // are rejected here.
+    let message = payload.message.trim();
+    if agent == "merge"
+        && (message.starts_with("KANNA_MERGE_HANDOFF ")
+            || (message.starts_with("MERGE ") && message.contains("[TASK ")))
+    {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            "pipeline merge handoffs must use /v1/tasks/{task_id}/actions/signal-merge-handoff so the server can attach approval lineage"
+                .into(),
+        ));
+    }
     signal_agent_request(
         state,
         repo_id,
@@ -43,6 +61,93 @@ pub(super) async fn signal_agent(
             agent_provider: payload.agent_provider,
             effort: payload.effort,
         },
+    )
+    .await
+    .map(Json)
+}
+
+/// Deliver an approval handoff whose lineage state is built by the server,
+/// never supplied by the approve agent. The merge singleton can therefore
+/// distinguish a clean approval from a deliberate recorded override and an
+/// unresolved hold can never reach it through this path.
+pub(super) async fn signal_merge_handoff(
+    _access: PrivilegedTaskAccess,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(payload): Json<crate::mobile_api::MergeHandoffRequest>,
+) -> Result<Json<SignalAgentResponse>, (axum::http::StatusCode, String)> {
+    let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id).await?;
+    // Serialize the gate read and the daemon delivery with every transition,
+    // completion, and override mutation for this task. Otherwise a new hold
+    // could be committed after the read but before the handoff was delivered.
+    let _task_mutation = state.begin_requested_task_mutation(&task_id).await;
+    for (name, value) in [
+        ("branch", payload.branch.trim()),
+        ("target", payload.target.trim()),
+        ("summary", payload.summary.trim()),
+    ] {
+        if value.is_empty() {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("merge handoff {name} must be non-empty"),
+            ));
+        }
+    }
+
+    let (repo_id, gate) = {
+        let db = Db::open(&state.config.db_path).map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {error}"),
+            )
+        })?;
+        let task = db
+            .get_pipeline_item(&task_id)
+            .map_err(|error| db_write_error("db error", error))?
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("task not found: {task_id}"),
+                )
+            })?;
+        let gate = db
+            .task_approval_gate(&task_id)
+            .map_err(|error| db_write_error("db error", error))?;
+        if !gate.permits_approval() {
+            return Err((
+                axum::http::StatusCode::CONFLICT,
+                format!(
+                    "approval held: task {task_id} has unresolved lineage disposition(s); a recorded human override is required"
+                ),
+            ));
+        }
+        (task.repo_id, gate)
+    };
+
+    let handoff = serde_json::json!({
+        "version": 1,
+        "taskId": task_id,
+        "branch": payload.branch.trim(),
+        "target": payload.target.trim(),
+        "prUrl": payload.pr_url.as_deref().map(str::trim).filter(|value| !value.is_empty()),
+        "summary": payload.summary.trim(),
+        "approval": gate,
+    });
+    let message = format!(
+        "KANNA_MERGE_HANDOFF {}",
+        serde_json::to_string(&handoff).map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to serialize merge handoff: {error}"),
+            )
+        })?
+    );
+    signal_agent_request(
+        state,
+        repo_id,
+        "merge".into(),
+        message,
+        SingletonAgentOverrides::default(),
     )
     .await
     .map(Json)

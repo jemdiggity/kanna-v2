@@ -17,6 +17,28 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
 }
 
 describe("remote transport", () => {
+  it("propagates an approval hold from the owning desktop without retrying", async () => {
+    const held = new RemoteTransportError(
+      "remote_invocation_failed",
+      "Remote desktop request failed (409): approval held"
+    );
+    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockRejectedValue(held);
+    const transport = createRemoteTransport({
+      listDesktopRecords: async () => [],
+      getSelectedDesktopId: () => "desktop-1",
+      invokeDesktop
+    });
+
+    await expect(transport.advanceTaskStage("task-1")).rejects.toBe(held);
+    expect(invokeDesktop).toHaveBeenCalledTimes(1);
+    expect(invokeDesktop).toHaveBeenCalledWith({
+      desktopId: "desktop-1",
+      method: "POST",
+      path: "/v1/tasks/task-1/actions/advance-stage",
+      body: null
+    });
+  });
+
   it("routes repository command catalog and runs through the owning desktop", async () => {
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>()
       .mockResolvedValueOnce({

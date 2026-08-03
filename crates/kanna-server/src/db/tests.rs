@@ -1,7 +1,8 @@
 use super::NewStageRun;
 use super::{
-    add_column, database_open_flags, run_migration, Db, NewPipelineItem, NewRepo, NewTaskTransfer,
-    NewTaskTransferProvenance, ReplaceTaskBlockersError, CURRENT_SCHEMA_MIGRATIONS,
+    add_column, database_open_flags, run_migration, ApprovalGateState, Db,
+    ExplicitStageDisposition, NewPipelineItem, NewRepo, NewTaskTransfer, NewTaskTransferProvenance,
+    ReplaceTaskBlockersError, CURRENT_SCHEMA_MIGRATIONS,
 };
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
@@ -174,7 +175,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "041_pipeline_item_parentage_index");
+    assert_eq!(latest_migration, "043_task_approval_atomic_projection");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -2272,6 +2273,440 @@ fn ui_snapshot_treats_null_pinned_as_unpinned() {
     let snapshot = db.ui_snapshot().expect("snapshot with nullable pinned");
     assert_eq!(snapshot.entries[0].items[0].pinned, 0);
 
+    let _ = std::fs::remove_file(path);
+}
+
+fn insert_approval_test_run(
+    db: &Db,
+    id: &str,
+    stage: &str,
+    kind: &str,
+    status: &str,
+    summary: &str,
+) {
+    db.insert_stage_run(NewStageRun {
+        id,
+        task_id: "task-approval",
+        stage,
+        kind,
+        agent: None,
+        agent_provider: None,
+        model: None,
+        effort: None,
+        status,
+        result: Some(summary),
+        feedback: Some(summary),
+        session_id: None,
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+}
+
+#[test]
+fn approval_lineage_is_not_laundered_by_posts_or_later_unrelated_stages() {
+    let db = Db::open_for_tests(&Db::test_db_path("approval-lineage-projection")).unwrap();
+    db.insert_test_repo("repo-1", "Repo").unwrap();
+    db.insert_test_pipeline_item(
+        "task-approval",
+        "repo-1",
+        "prompt",
+        Some("Approval task"),
+        "in progress",
+        "2026-08-03 00:00:00",
+    )
+    .unwrap();
+    insert_approval_test_run(
+        &db,
+        "run-main-failed",
+        "in progress",
+        "main",
+        "failed",
+        "Needs human input; not a merge candidate",
+    );
+    let gate = db.task_approval_gate("task-approval").unwrap();
+    assert_eq!(gate.state, ApprovalGateState::Held);
+    assert_eq!(gate.holds[0].run_id, "run-main-failed");
+
+    insert_approval_test_run(
+        &db,
+        "run-commit-success",
+        "commit",
+        "post",
+        "succeeded",
+        "Diagnostic work committed",
+    );
+    db.apply_explicit_stage_disposition(ExplicitStageDisposition {
+        task_id: "task-approval",
+        run_id: "run-commit-success",
+        run_stage: "commit",
+        run_kind: "post",
+        run_status: "succeeded",
+        logical_stage: "in progress",
+        disposition: None,
+        summary: "Diagnostic work committed",
+    })
+    .unwrap();
+    assert_eq!(
+        db.task_approval_gate("task-approval").unwrap().state,
+        ApprovalGateState::Held,
+        "a successful commit post must not clear the failed main result"
+    );
+
+    insert_approval_test_run(
+        &db,
+        "run-pr-success",
+        "pr",
+        "main",
+        "succeeded",
+        "PR created",
+    );
+    db.apply_explicit_stage_disposition(ExplicitStageDisposition {
+        task_id: "task-approval",
+        run_id: "run-pr-success",
+        run_stage: "pr",
+        run_kind: "main",
+        run_status: "succeeded",
+        logical_stage: "pr",
+        disposition: None,
+        summary: "PR created",
+    })
+    .unwrap();
+    assert_eq!(
+        db.task_approval_gate("task-approval").unwrap().state,
+        ApprovalGateState::Held,
+        "a later main result in another stage is not a superseding revision"
+    );
+
+    db.apply_explicit_stage_disposition(ExplicitStageDisposition {
+        task_id: "task-approval",
+        run_id: "run-main-failed",
+        run_stage: "in progress",
+        run_kind: "main",
+        run_status: "succeeded",
+        logical_stage: "in progress",
+        disposition: None,
+        summary: "same run was rewritten",
+    })
+    .unwrap();
+    assert_eq!(
+        db.task_approval_gate("task-approval").unwrap().state,
+        ApprovalGateState::Held,
+        "rewriting the failed run itself must not masquerade as a later revision"
+    );
+
+    insert_approval_test_run(
+        &db,
+        "run-revision-success",
+        "in progress",
+        "main",
+        "succeeded",
+        "Revision met the original criteria",
+    );
+    db.apply_explicit_stage_disposition(ExplicitStageDisposition {
+        task_id: "task-approval",
+        run_id: "run-revision-success",
+        run_stage: "in progress",
+        run_kind: "main",
+        run_status: "succeeded",
+        logical_stage: "in progress",
+        disposition: None,
+        summary: "Revision met the original criteria",
+    })
+    .unwrap();
+    assert_eq!(
+        db.task_approval_gate("task-approval").unwrap().state,
+        ApprovalGateState::Eligible
+    );
+}
+
+#[test]
+fn approval_override_records_actor_channel_reason_and_does_not_cover_new_holds() {
+    let db = Db::open_for_tests(&Db::test_db_path("approval-lineage-override")).unwrap();
+    db.insert_test_repo("repo-1", "Repo").unwrap();
+    db.insert_test_pipeline_item(
+        "task-approval",
+        "repo-1",
+        "prompt",
+        Some("Approval task"),
+        "in progress",
+        "2026-08-03 00:00:00",
+    )
+    .unwrap();
+    insert_approval_test_run(
+        &db,
+        "run-main-failed",
+        "in progress",
+        "main",
+        "failed",
+        "Needs human input",
+    );
+
+    assert!(db
+        .record_approval_override(
+            "task-approval",
+            "override-1",
+            "desktop-1",
+            "desktop_loopback",
+            "Ship the diagnostic fixes independently of the failed experiment",
+        )
+        .unwrap());
+    let gate = db.task_approval_gate("task-approval").unwrap();
+    assert_eq!(gate.state, ApprovalGateState::Overridden);
+    assert_eq!(
+        gate.holds[0].override_record.as_ref().unwrap().id,
+        "override-1"
+    );
+    let record = gate.override_record.unwrap();
+    assert_eq!(record.actor, "desktop-1");
+    assert_eq!(record.channel, "desktop_loopback");
+    assert_eq!(
+        record.reason,
+        "Ship the diagnostic fixes independently of the failed experiment"
+    );
+
+    insert_approval_test_run(
+        &db,
+        "run-review-failed",
+        "review",
+        "main",
+        "failed",
+        "Security review failed",
+    );
+    let gate = db.task_approval_gate("task-approval").unwrap();
+    assert_eq!(gate.state, ApprovalGateState::Held);
+    assert_eq!(gate.holds[0].run_id, "run-review-failed");
+
+    assert!(db
+        .record_approval_override(
+            "task-approval",
+            "override-2",
+            "paired-device-2",
+            "paired_lan_device",
+            "Accept the review exception after inspecting the failure",
+        )
+        .unwrap());
+    let gate = db.task_approval_gate("task-approval").unwrap();
+    assert_eq!(gate.state, ApprovalGateState::Overridden);
+    assert_eq!(gate.holds.len(), 2);
+    assert_eq!(
+        gate.holds[0].override_record.as_ref().unwrap().id,
+        "override-1"
+    );
+    assert_eq!(
+        gate.holds[1].override_record.as_ref().unwrap().id,
+        "override-2"
+    );
+    assert_eq!(gate.override_record.unwrap().id, "override-2");
+}
+
+#[test]
+fn stage_run_write_atomically_projects_disposition_and_revision_resolution() {
+    let db = Db::open_for_tests(&Db::test_db_path("approval-lineage-atomic-projection")).unwrap();
+    db.insert_test_repo("repo-1", "Repo").unwrap();
+    db.insert_test_pipeline_item(
+        "task-approval",
+        "repo-1",
+        "prompt",
+        Some("Approval task"),
+        "in progress",
+        "2026-08-03 00:00:00",
+    )
+    .unwrap();
+    insert_approval_test_run(
+        &db,
+        "run-main-failed",
+        "in progress",
+        "main",
+        "failed",
+        "Original criteria failed",
+    );
+
+    db.insert_stage_run(NewStageRun {
+        id: "run-commit-running",
+        task_id: "task-approval",
+        stage: "commit",
+        kind: "post",
+        agent: Some("commit"),
+        agent_provider: None,
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: None,
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let commit_result = serde_json::json!({
+        "status": "success",
+        "summary": "diagnostics committed",
+        "disposition": "not_merge_candidate",
+    })
+    .to_string();
+    db.finish_stage_run(
+        "run-commit-running",
+        "succeeded",
+        Some(&commit_result),
+        Some("diagnostics committed"),
+    )
+    .unwrap();
+    let gate = db.task_approval_gate("task-approval").unwrap();
+    assert_eq!(gate.state, ApprovalGateState::Held);
+    assert!(gate
+        .holds
+        .iter()
+        .any(|hold| { hold.run_id == "run-commit-running" && hold.kind == "not_merge_candidate" }));
+
+    db.insert_stage_run(NewStageRun {
+        id: "run-revision-running",
+        task_id: "task-approval",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: None,
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: None,
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let revision_result = serde_json::json!({
+        "status": "success",
+        "summary": "original criteria now met",
+    })
+    .to_string();
+    db.finish_stage_run(
+        "run-revision-running",
+        "succeeded",
+        Some(&revision_result),
+        Some("original criteria now met"),
+    )
+    .unwrap();
+    assert_eq!(
+        db.task_approval_gate("task-approval").unwrap().state,
+        ApprovalGateState::Eligible
+    );
+}
+
+#[test]
+fn migration_backfills_failed_main_and_legacy_not_merge_candidate_post() {
+    let path = Db::test_db_path("approval-lineage-migration");
+    let db = Db::open_for_tests(&path).unwrap();
+    db.insert_test_repo("repo-1", "Repo").unwrap();
+    db.insert_test_pipeline_item(
+        "task-approval",
+        "repo-1",
+        "prompt",
+        Some("Approval task"),
+        "pr",
+        "2026-08-03 00:00:00",
+    )
+    .unwrap();
+    db.insert_test_pipeline_item(
+        "task-resolved",
+        "repo-1",
+        "prompt",
+        Some("Resolved approval task"),
+        "pr",
+        "2026-08-03 00:00:01",
+    )
+    .unwrap();
+    db.conn
+        .execute_batch(
+            "DROP TRIGGER stage_run_failed_main_approval_hold_insert;
+             DROP TRIGGER stage_run_failed_main_approval_hold_update;
+             DROP TRIGGER stage_run_structured_approval_hold_insert;
+             DROP TRIGGER stage_run_structured_approval_hold_update;
+             DROP TRIGGER stage_run_success_main_resolve_approval_hold_insert;
+             DROP TRIGGER stage_run_success_main_resolve_approval_hold_update;
+             DROP TABLE task_approval_hold;
+             DROP TABLE task_approval_override;
+             DELETE FROM schema_migrations
+             WHERE id IN ('042_task_approval_lineage', '043_task_approval_atomic_projection');",
+        )
+        .unwrap();
+    insert_approval_test_run(
+        &db,
+        "run-main-failed",
+        "in progress",
+        "main",
+        "failed",
+        "Needs human input; not a merge candidate",
+    );
+    insert_approval_test_run(
+        &db,
+        "run-commit-success",
+        "commit",
+        "post",
+        "succeeded",
+        "Diagnostic work committed successfully, but this is not a merge candidate",
+    );
+    let insert_resolved_run = |id, stage, kind, status, summary| {
+        db.insert_stage_run(NewStageRun {
+            id,
+            task_id: "task-resolved",
+            stage,
+            kind,
+            agent: None,
+            agent_provider: None,
+            model: None,
+            effort: None,
+            status,
+            result: Some(summary),
+            feedback: Some(summary),
+            session_id: None,
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    };
+    insert_resolved_run(
+        "run-resolved-main-failed",
+        "in progress",
+        "main",
+        "failed",
+        "Needs human input",
+    );
+    insert_resolved_run(
+        "run-resolved-commit-success",
+        "commit",
+        "post",
+        "succeeded",
+        "Diagnostic work committed successfully, but this is not a merge candidate",
+    );
+    insert_resolved_run(
+        "run-resolved-revision-success",
+        "in progress",
+        "main",
+        "succeeded",
+        "Revision met the original criteria",
+    );
+    drop(db);
+
+    let db = Db::open_migrated(&path).unwrap();
+    let gate = db.task_approval_gate("task-approval").unwrap();
+    assert_eq!(gate.state, ApprovalGateState::Held);
+    assert_eq!(gate.holds.len(), 2);
+    assert!(gate.holds.iter().all(|hold| hold.stage == "in progress"));
+    assert!(gate
+        .holds
+        .iter()
+        .any(|hold| hold.kind == "not_merge_candidate"));
+    assert_eq!(
+        db.task_approval_gate("task-resolved").unwrap().state,
+        ApprovalGateState::Eligible,
+        "a legacy disposition superseded by a later same-stage main success stays resolved"
+    );
     let _ = std::fs::remove_file(path);
 }
 

@@ -1,4 +1,4 @@
-use super::lan_trust::PrivilegedTaskAccess;
+use super::lan_trust::{HumanApprovalOverrideAccess, PrivilegedTaskAccess};
 use super::state::{db_write_error, AppState};
 use super::task_blockers::{
     resolve_existing_task_id, start_dependents_unblocked_by_close_with_daemon,
@@ -11,8 +11,86 @@ use kanna_agent_protocol::StateChangeScope;
 use serde::Deserialize;
 use std::sync::Arc;
 
+pub(super) async fn override_approval_hold(
+    access: HumanApprovalOverrideAccess,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(payload): Json<crate::mobile_api::ApprovalOverrideRequest>,
+) -> Result<Json<crate::db::ApprovalGate>, (axum::http::StatusCode, String)> {
+    let reason = payload.reason.trim().to_string();
+    if reason.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "approval override reason must be non-empty".into(),
+        ));
+    }
+    if reason.chars().count() > 2_000 {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "approval override reason must be at most 2000 characters".into(),
+        ));
+    }
+    let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
+    let _task_mutation = state.begin_requested_task_mutation(&task_id).await;
+    let gate = {
+        let state = Arc::clone(&state);
+        let task_id = task_id.clone();
+        super::blocking::run_handler_blocking("approval override record", move || {
+            let db = Db::open(&state.config.db_path).map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {error}"),
+                )
+            })?;
+            let task = db
+                .get_pipeline_item(&task_id)
+                .map_err(|error| db_write_error("db error", error))?
+                .ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::NOT_FOUND,
+                        format!("task not found: {task_id}"),
+                    )
+                })?;
+            if task.closed_at.is_some() {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!("task is closed: {task_id}"),
+                ));
+            }
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            let override_id = format!("approval-override-{task_id}-{nanos}");
+            let recorded = db
+                .record_approval_override(
+                    &task_id,
+                    &override_id,
+                    &access.actor,
+                    &access.channel,
+                    &reason,
+                )
+                .map_err(|error| db_write_error("db error", error))?;
+            if !recorded {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!("task has no unresolved approval hold: {task_id}"),
+                ));
+            }
+            db.task_approval_gate(&task_id)
+                .map_err(|error| db_write_error("db error", error))
+        })
+        .await?
+    };
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(Json(gate))
+}
+
 fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
-    if error.starts_with("task is blocked:") {
+    if error.starts_with("task is blocked:")
+        || error.starts_with("approval held:")
+        || error.starts_with("post is still running")
+    {
         axum::http::StatusCode::CONFLICT
     } else {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
@@ -1252,12 +1330,15 @@ pub(super) async fn complete_stage(
     }
     let should_auto_advance = payload.status == "success";
 
-    let stage_result = serde_json::to_string(&serde_json::json!({
+    let mut stage_result_value = serde_json::json!({
         "status": payload.status,
         "summary": payload.summary,
         "metadata": payload.metadata,
-    }))
-    .map_err(|e| {
+    });
+    if let Some(disposition) = payload.disposition {
+        stage_result_value["disposition"] = serde_json::json!(disposition.as_str());
+    }
+    let stage_result = serde_json::to_string(&stage_result_value).map_err(|e| {
         (
             axum::http::StatusCode::BAD_REQUEST,
             format!("invalid stage result: {}", e),
@@ -1269,6 +1350,7 @@ pub(super) async fn complete_stage(
         let payload_status = payload.status;
         let payload_summary = payload.summary;
         let payload_metadata = payload.metadata;
+        let payload_disposition = payload.disposition;
         super::blocking::run_handler_blocking("stage completion record", move || {
             let db = Db::open(&state.config.db_path).map_err(|e| {
                 (
@@ -1314,6 +1396,24 @@ pub(super) async fn complete_stage(
                     )
                     .map_err(|e| db_write_error("db error", e))?,
             };
+            if let Some(run) = finished_run.as_ref() {
+                let logical_stage = db
+                    .get_pipeline_item(&task_id)
+                    .map_err(|e| db_write_error("db error", e))?
+                    .and_then(|item| item.stage)
+                    .unwrap_or_else(|| run.stage.clone());
+                db.apply_explicit_stage_disposition(crate::db::ExplicitStageDisposition {
+                    task_id: &task_id,
+                    run_id: &run.id,
+                    run_stage: &run.stage,
+                    run_kind: &run.kind,
+                    run_status,
+                    logical_stage: &logical_stage,
+                    disposition: payload_disposition.map(|value| value.as_str()),
+                    summary: &payload_summary,
+                })
+                .map_err(|e| db_write_error("db error", e))?;
+            }
             if payload_status == "success" {
                 if let Some(pr_url) =
                     pr_url_from_verdict(payload_metadata.as_ref(), &payload_summary)
@@ -1355,7 +1455,7 @@ pub(super) async fn complete_stage(
                     .as_ref()
                     .and_then(|run| run.completion_transition.as_deref()),
             )
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
+            .map_err(|e| (stage_action_error_status(&e), e))
         })
         .await?
     };

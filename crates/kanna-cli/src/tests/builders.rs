@@ -6,6 +6,7 @@ fn builds_complete_stage_payload() {
         "success".to_string(),
         "review passed".to_string(),
         Some(json!({ "coverage": "sufficient" })),
+        None,
     );
 
     assert_eq!(
@@ -14,6 +15,45 @@ fn builds_complete_stage_payload() {
             "status": "success",
             "summary": "review passed",
             "metadata": { "coverage": "sufficient" },
+        })
+    );
+}
+
+#[test]
+fn builds_structured_non_merge_candidate_stage_payload() {
+    let request = build_complete_stage_request(
+        "success".to_string(),
+        "diagnostic work committed".to_string(),
+        None,
+        Some("not_merge_candidate".to_string()),
+    );
+
+    assert_eq!(
+        serde_json::to_value(request).unwrap(),
+        json!({
+            "status": "success",
+            "summary": "diagnostic work committed",
+            "disposition": "not_merge_candidate",
+        })
+    );
+}
+
+#[test]
+fn builds_merge_handoff_without_approval_state() {
+    let request = build_merge_handoff_request(
+        "task-task-1-4".to_string(),
+        "main".to_string(),
+        Some("https://example.invalid/pull/1".to_string()),
+        "approved".to_string(),
+    );
+
+    assert_eq!(
+        serde_json::to_value(request).unwrap(),
+        json!({
+            "branch": "task-task-1-4",
+            "target": "main",
+            "prUrl": "https://example.invalid/pull/1",
+            "summary": "approved",
         })
     );
 }

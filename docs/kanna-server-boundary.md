@@ -30,6 +30,8 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - `POST /v1/tasks/{task_id}/actions/request-revision`
 - `POST /v1/tasks/{task_id}/actions/close`
 - `POST /v1/tasks/{task_id}/actions/advance-stage`
+- `POST /v1/tasks/{task_id}/actions/override-approval` (authenticated human action; not in the agent tool catalog)
+- `POST /v1/tasks/{task_id}/actions/signal-merge-handoff`
 - `POST /v1/tasks/{task_id}/actions/rerun-stage`
 - `POST /v1/tasks/{task_id}/actions/run-merge-agent`
 - `POST /v1/tasks/{task_id}/actions/set-notify`
@@ -259,6 +261,56 @@ Delivery is claimed once via `pipeline_item.notified_at` and goes through the
 same two-step input helper as `POST /v1/tasks/{task_id}/input`. All of it is
 server/daemon-side; it must not depend on the desktop event bridge being open.
 
+## Approval Lineage Gate
+
+Approval is a server-owned projection of durable stage results, not an agent
+interpretation of `$PREV_RESULT`. A failed main `stage_run`, a structured
+`needs_human_input` disposition, or a structured `not_merge_candidate`
+disposition creates a hold. Successful post runs never resolve a hold, so a
+commit agent can preserve diagnostic work without laundering the main agent's
+failure. The migration also recognizes legacy successful post results that
+explicitly contain “not a merge candidate”; this prose check is compatibility
+for existing histories, not the steady-state contract.
+
+The task detail response exposes `approvalGate` with one of three states:
+
+- `eligible`: there are no unresolved holds.
+- `held`: `holds` identifies the originating run, stage, kind, summary, and
+  creation time. An approval-boundary advance returns `409 Conflict`.
+- `overridden`: the active holds are covered by a durable override whose
+  record includes the available actor identity, authenticated channel, time,
+  and mandatory reason.
+
+Resolution is stage-scoped. Only a later explicit, successful **main** result
+in the same stage resolves that stage's older holds. This is how a genuine
+revision or rerun supersedes stale failure. An inferred success, a main result
+from another stage, or any commit/PR/approve post cannot resolve it. A later
+hold is newer than an existing override and requires a new decision.
+
+The generic repo-agent signal endpoint rejects both the former automated
+`MERGE ... [TASK ...]` shape and caller-built `KANNA_MERGE_HANDOFF` messages
+for the `merge` singleton. This compatibility guard makes pre-gate approve
+agents fail closed instead of bypassing the projection. Human conversation is
+still typed directly into the merge task; task-bound pipeline handoffs use the
+dedicated route.
+
+`POST /v1/tasks/{task_id}/actions/override-approval` is deliberately absent
+from the MCP/tool catalog and agent CLI. It requires a non-empty reason and the
+`x-kanna-human-action: approval-override` header. The server records identity
+honestly from the authenticated surface: the desktop instance id for loopback,
+the paired device id for LAN, or the authenticated relay channel when no
+person-level identity exists. Repeating the ordinary advance action is never
+an override.
+
+Approval posts must call the catalog-backed
+`POST /v1/tasks/{task_id}/actions/signal-merge-handoff`, not generic singleton
+signaling. The server checks the gate again and constructs the canonical
+`KANNA_MERGE_HANDOFF` JSON delivered to the merge singleton. Its `approval`
+member is machine-readable `eligible` or `overridden`; the latter carries the
+durable override record. A caller cannot supply or forge that member. The
+bundled merge agent holds legacy agent-sent merge lines and malformed override
+handoffs as defense in depth.
+
 ## Local Consumer Model
 
 The desktop app starts `kanna-server` and supplies its config.
@@ -270,6 +322,8 @@ The CLI remains the shell/script interface; MCP is the structured agent-tool int
 
 - `kanna-cli task send-input --task-id <TASK_ID> --message <MESSAGE> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/input` and prints `{ "ok": true }` as JSON.
 - `kanna-cli task advance-stage --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/advance-stage` and prints the action response as JSON.
+- `kanna-cli task signal-merge --task-id <TASK_ID> --branch <HEAD> --target <BASE> --summary <SUMMARY> [--pr-url <URL>] [--server-url <URL>]` calls the gated merge-handoff route. The server, not the CLI, attaches approval state.
+- `kanna-cli stage-complete ... --disposition needs_human_input|not_merge_candidate` records a structured hold when the result cannot be approved normally.
 - `kanna-cli task resume --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/resume`. It resumes a dead latest run's provider conversation when its durable transcript and original worktree pass the shared revision-resume checks; otherwise the replacement run records `resumeFallbackReason`.
 - `kanna-cli task rerun-stage --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/rerun-stage`. This is always an explicit fresh provider conversation, not recovery.
 

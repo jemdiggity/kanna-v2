@@ -3,9 +3,10 @@ use crate::api::{
     dependent_tasks_exist_path, dependent_tasks_exist_via_api, get_task_via_api, parse_wait_until,
     rename_task_via_api, repo_agent_list_path, repo_task_list_path, request_revision_via_api,
     rerun_stage_via_api, resume_task_via_api, send_task_input_via_api, set_task_parent_via_api,
-    set_task_pipeline_via_api, signal_agent_path, signal_agent_via_api, task_get_path,
-    task_list_path, task_logs_path, task_matches_wait_until, task_search_path,
-    unblock_task_via_api, wait_task_via_api, WaitTaskOutcome,
+    set_task_pipeline_via_api, signal_agent_path, signal_agent_via_api,
+    signal_merge_handoff_via_api, task_get_path, task_list_path, task_logs_path,
+    task_matches_wait_until, task_search_path, unblock_task_via_api, wait_task_via_api,
+    WaitTaskOutcome,
 };
 use crate::commands::guide::{
     build_guide_context, render_guide_json, render_guide_markdown, run_guide_command, GuideContext,
@@ -16,9 +17,9 @@ use crate::commands::stage_complete::{
     build_complete_stage_request, render_stage_complete_confirmation,
 };
 use crate::commands::task::{
-    build_block_task_request, build_create_task_request, build_request_revision_request,
-    build_send_task_input_request, find_task_status_row, format_task_list, format_task_status,
-    render_wait_outcome, task_not_found_error,
+    build_block_task_request, build_create_task_request, build_merge_handoff_request,
+    build_request_revision_request, build_send_task_input_request, find_task_status_row,
+    format_task_list, format_task_status, render_wait_outcome, task_not_found_error,
 };
 use crate::commands::tool::build_tool_call_args;
 use crate::config::resolve_server_base_url;
@@ -238,6 +239,19 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
+            "kanna_signal_merge_handoff",
+            TypedToolSurface {
+                command_path: &["task", "signal-merge"],
+                param_args: &[
+                    ("task_id", "task_id"),
+                    ("branch", "branch"),
+                    ("target", "target"),
+                    ("pr_url", "pr_url"),
+                    ("summary", "summary"),
+                ],
+            },
+        ),
+        (
             "kanna_rerun_stage",
             TypedToolSurface {
                 command_path: &["task", "rerun-stage"],
@@ -270,6 +284,7 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("status", "status"),
                     ("summary", "summary"),
                     ("metadata", "metadata"),
+                    ("disposition", "disposition"),
                 ],
             },
         ),

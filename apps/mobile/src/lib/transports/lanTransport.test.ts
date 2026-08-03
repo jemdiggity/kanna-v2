@@ -132,6 +132,24 @@ describe("createLanTransport", () => {
     );
   });
 
+  it("surfaces an approval hold from advance-stage without retrying another route", async () => {
+    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: "approval held" })
+    });
+    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
+
+    await expect(transport.advanceTaskStage("task-1")).rejects.toThrow(
+      "LAN request failed (409)"
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://127.0.0.1:48120/v1/tasks/task-1/actions/advance-stage",
+      { method: "POST" }
+    );
+  });
+
   it("fails closed instead of requesting task file contents over unauthenticated LAN", async () => {
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
       ok: true,

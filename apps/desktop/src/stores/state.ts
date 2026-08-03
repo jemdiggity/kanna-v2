@@ -25,7 +25,7 @@ import {
   DEFAULT_MARKDOWN_PREVIEW_MODE,
   type MarkdownPreviewMode,
 } from "./markdownPreviewMode";
-import type { RequestRevisionOptions } from "./pipeline";
+import type { AdvanceStageResult, RequestRevisionOptions } from "./pipeline";
 import type { TaskUiSlot } from "../types/taskUi";
 
 export type AgentMessageAppearance = "chat" | "log" | "terminal";
@@ -195,7 +195,8 @@ export interface StoreServices {
   goForward?: () => void;
   loadPipeline?: (repoId: string, pipelineName: string) => Promise<PipelineDefinition>;
   loadAgent?: (repoId: string, agentName: string) => Promise<AgentDefinition>;
-  advanceStage?: (taskId: string, options?: AdvanceStageOptions) => Promise<void>;
+  advanceStage?: (taskId: string, options?: AdvanceStageOptions) => Promise<AdvanceStageResult>;
+  overrideApprovalHold?: (taskId: string, reason: string) => Promise<boolean>;
   requestRevision?: (taskId: string, options: RequestRevisionOptions) => Promise<boolean>;
   rerunStage?: (taskId: string) => Promise<void>;
   spawnShellSession?: (

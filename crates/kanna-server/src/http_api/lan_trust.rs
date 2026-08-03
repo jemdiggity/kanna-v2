@@ -10,11 +10,26 @@ use std::sync::Arc;
 
 pub(super) const DEVICE_ID_HEADER: &str = "x-kanna-device-id";
 pub(super) const DEVICE_SECRET_HEADER: &str = "x-kanna-device-secret";
+pub(super) const HUMAN_ACTION_HEADER: &str = "x-kanna-human-action";
+pub(super) const APPROVAL_OVERRIDE_ACTION: &str = "approval-override";
 
 /// Marker inserted when a genuine LAN request presented a paired device's
 /// id + secret and the secret verified against the pairing store.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TrustedLanDeviceAccess;
+
+#[derive(Debug, Clone)]
+struct TrustedLanDeviceIdentity(String);
+
+/// Deliberate human authority for approval overrides. This extractor is not
+/// used by ordinary advance routes and the required header is absent from the
+/// generated agent/MCP/SDK surface, so an agent cannot turn a repeated advance
+/// into consent accidentally.
+#[derive(Debug, Clone)]
+pub(super) struct HumanApprovalOverrideAccess {
+    pub(super) actor: String,
+    pub(super) channel: String,
+}
 
 /// Authorization extractor for privileged task controls.
 ///
@@ -64,6 +79,45 @@ impl FromRequestParts<Arc<AppState>> for DesktopLocalAccess {
     }
 }
 
+impl FromRequestParts<Arc<AppState>> for HumanApprovalOverrideAccess {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let deliberate = parts
+            .headers
+            .get(HUMAN_ACTION_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == APPROVAL_OVERRIDE_ACTION);
+        if !deliberate {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "approval override requires an explicit human action".into(),
+            ));
+        }
+        privileged_task_access(&parts.extensions)?;
+
+        if parts.extensions.get::<TunneledHttpInvoke>().is_some() {
+            return Ok(Self {
+                actor: "authenticated-relay-client".into(),
+                channel: "authenticated_relay".into(),
+            });
+        }
+        if let Some(identity) = parts.extensions.get::<TrustedLanDeviceIdentity>() {
+            return Ok(Self {
+                actor: identity.0.clone(),
+                channel: "paired_lan_device".into(),
+            });
+        }
+        Ok(Self {
+            actor: state.config.desktop_id.clone(),
+            channel: "desktop_loopback".into(),
+        })
+    }
+}
+
 fn unauthorized_privileged_task() -> (StatusCode, String) {
     (
         StatusCode::UNAUTHORIZED,
@@ -86,6 +140,9 @@ pub(super) async fn attach_trusted_lan_device(
             if let Ok(store) = PairingStore::load(Path::new(&config.pairing_store_path)) {
                 if store.verify_device_secret(&config.desktop_id, &device_id, &device_secret) {
                     request.extensions_mut().insert(TrustedLanDeviceAccess);
+                    request
+                        .extensions_mut()
+                        .insert(TrustedLanDeviceIdentity(device_id));
                 }
             }
         }

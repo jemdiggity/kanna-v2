@@ -13,7 +13,7 @@
       "post": {
         "name": "commit",
         "agent": "commit",
-        "prompt": "Commit the relevant work for this task before review. Original task: $TASK_PROMPT"
+        "prompt": "Commit the relevant work for this task before review. Original task: $TASK_PROMPT. Previous implementation result: $PREV_MAIN_RESULT"
       }
     },
     {

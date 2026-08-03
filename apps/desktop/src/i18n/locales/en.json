@@ -266,6 +266,10 @@
     "requestChanges": "Request Changes",
     "approve": "Approve",
     "approveMerge": "Approve & Merge",
+    "approvalHoldTitle": "Approval hold",
+    "approvalHoldExplanation": "This task has an unresolved failed, human-input, or not-merge-candidate result. An ordinary approval cannot clear it. Override only if you deliberately accept that lineage; your reason and this desktop's identity will be recorded and sent to the merge master.",
+    "approvalOverrideReasonPlaceholder": "Why is merging despite this hold acceptable?",
+    "recordOverrideAndApprove": "Record Override & Approve",
     "summaryPlaceholder": "Optional summary...",
     "sendRequestChanges": "Send Request",
     "shortcutClose": "Close"

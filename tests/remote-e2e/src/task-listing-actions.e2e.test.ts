@@ -33,6 +33,21 @@ const LINEAR_AUTO_PIPELINE = JSON.stringify({
   ]
 });
 
+const APPROVAL_POST_PIPELINE = JSON.stringify({
+  name: "remote-approval-post",
+  stages: [{
+    name: "pr",
+    agent: "pr",
+    prompt: "Create PR for $TASK_PROMPT",
+    policy: { transition: "manual" },
+    post: {
+      name: "approve",
+      agent: "approve",
+      prompt: "Approve $TASK_PROMPT"
+    }
+  }]
+});
+
 type SqlParam = string | number | boolean | null;
 type JsonRecord = Record<string, unknown>;
 
@@ -257,6 +272,108 @@ describe("remote task listing, creation, and actions E2E", () => {
     expect(getString(asRecord(catalogNext), "cursor").length).toBeLessThan(128);
   }, 120_000);
 
+  it("persists an explicit human override and propagates it through the typed CLI merge handoff", async () => {
+    const source = await createScriptedTask(harness, {
+      displayName: "Approval lineage override source"
+    });
+    await invokeDesktop(
+      harness,
+      "POST",
+      `/v1/tasks/${source.taskId}/actions/complete-stage`,
+      {
+        status: "failure",
+        summary: "Needs human input; original criteria are not mergeable",
+        disposition: "needs_human_input"
+      }
+    );
+    await waitForLatestRunStatus(harness, source.taskId, "failed");
+    expect(await executeSql(
+      harness,
+      "UPDATE pipeline_item SET stage = 'pr', pipeline = ?1, pipeline_def = ?2 WHERE id = ?3",
+      ["remote-approval-post", APPROVAL_POST_PIPELINE, source.taskId]
+    )).toBe(1);
+
+    const held = asRecord(await runKannaCliJson(harness, [
+      "task",
+      "get",
+      "--task-id",
+      source.taskId
+    ]));
+    expect(asRecord(held.approvalGate).state).toBe("held");
+
+    await expect(invokeDesktop(
+      harness,
+      "POST",
+      `/v1/tasks/${source.taskId}/actions/advance-stage`,
+      null
+    )).rejects.toThrow(/approval held/i);
+
+    const mergeResponse = asActionResponse(await invokeDesktop(
+      harness,
+      "POST",
+      `/v1/repos/${source.repoId}/agents/merge/signal`,
+      {
+        message: "Start the deterministic merge queue",
+        agentProvider: "codex"
+      }
+    ));
+    const mergeOutput = collectTerminalEvents(harness, mergeResponse.taskId);
+    try {
+      await waitForTerminalOutput(mergeOutput, "SCRIPT_READY");
+
+      const override = asRecord(await invokeLanJson(
+        harness,
+        "POST",
+        `/v1/tasks/${source.taskId}/actions/override-approval`,
+        { reason: "Ship the independently reviewed diagnostic fix" },
+        { "x-kanna-human-action": "approval-override" }
+      ));
+      expect(override.state).toBe("overridden");
+      expect(asRecord(override.overrideRecord)).toMatchObject({
+        actor: harness.desktopId,
+        channel: "desktop_loopback",
+        reason: "Ship the independently reviewed diagnostic fix"
+      });
+
+      const persisted = asRecord(await runKannaCliJson(harness, [
+        "task",
+        "get",
+        "--task-id",
+        source.taskId
+      ]));
+      expect(asRecord(persisted.approvalGate)).toMatchObject({
+        state: "overridden",
+        overrideRecord: {
+          actor: harness.desktopId,
+          channel: "desktop_loopback",
+          reason: "Ship the independently reviewed diagnostic fix"
+        }
+      });
+
+      await runKannaCliJson(harness, [
+        "task",
+        "signal-merge",
+        "--task-id",
+        source.taskId,
+        "--branch",
+        `task-${source.taskId}`,
+        "--target",
+        "main",
+        "--summary",
+        "Reviewed diagnostic fix"
+      ]);
+      const output = await mergeOutput.waitForOutput(
+        "SCRIPT_INPUT:KANNA_MERGE_HANDOFF",
+        15_000
+      );
+      expect(output).toContain('"state":"overridden"');
+      expect(output).toContain('"channel":"desktop_loopback"');
+      expect(output).toContain("Ship the independently reviewed diagnostic fix");
+    } finally {
+      mergeOutput.close();
+    }
+  }, 120_000);
+
   it("advances stages, completes stages, requests revision, runs merge agent, and closes with current durable-task semantics", async () => {
     const advanceTask = await createScriptedTask(harness, {
       displayName: "Remote advance task"
@@ -459,6 +576,28 @@ async function invokeDesktop(
     path,
     body
   });
+}
+
+async function invokeLanJson(
+  harness: RemoteHarness,
+  method: "GET" | "POST",
+  path: string,
+  body: unknown,
+  headers: Record<string, string> = {}
+): Promise<unknown> {
+  const response = await fetch(`${harness.lanBaseUrl}${path}`, {
+    method,
+    headers: {
+      "content-type": "application/json",
+      ...headers
+    },
+    body: method === "GET" ? undefined : JSON.stringify(body)
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`LAN ${method} ${path} failed (${response.status}): ${text}`);
+  }
+  return text.length > 0 ? JSON.parse(text) as unknown : null;
 }
 
 async function createChildTask(

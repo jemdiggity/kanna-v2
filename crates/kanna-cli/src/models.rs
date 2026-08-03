@@ -47,6 +47,16 @@ pub(crate) struct SignalAgentResponse {
     pub(crate) created: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MergeHandoffRequest {
+    pub(crate) branch: String,
+    pub(crate) target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pr_url: Option<String>,
+    pub(crate) summary: String,
+}
+
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ResolvedAgentDefinition {
@@ -103,6 +113,8 @@ pub(crate) struct TaskDetail {
     /// unavailable downward view into a misleading empty child set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) child_task_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) approval_gate: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -185,6 +197,8 @@ pub(crate) struct CompleteStageRequest {
     pub(crate) summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) metadata: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) disposition: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -21,6 +21,14 @@ Report success once every TASK-RELATED change is committed:
 kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "success", "summary": "<what you committed>"}
 ```
 
+Commit success means the repository bookkeeping succeeded; it does not make
+failed diagnostic work mergeable. If the preceding task result says the
+original criteria remain unmet, needs human input, or is not a merge candidate,
+include `"disposition": "needs_human_input"` or
+`"disposition": "not_merge_candidate"` in the successful completion call.
+That structured hold survives this post and later PR work until a genuine
+successful main revision in the same stage or a recorded human override.
+
 Leftover files the task did not create or modify — pre-existing untracked files, editor droppings, workspace scaffolding such as `.cargo/`, `.build/`, `node_modules/` — do not block success. Leave them alone and mention them in the summary if notable.
 
 If task-related changes remain that you cannot safely commit (you cannot tell whether they belong to the task, or committing them risks breaking something), do not guess: leave the worktree untouched where possible and record `"status": "failure"` with why committing is blocked.

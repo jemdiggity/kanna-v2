@@ -4,6 +4,8 @@ use serde_json::json;
 
 /// Identity of a run closed by `finish_latest_running_stage_run`.
 pub struct FinishedStageRun {
+    pub id: String,
+    pub stage: String,
     pub kind: String,
     pub completion_transition: Option<String>,
 }
@@ -278,7 +280,7 @@ impl Db {
         let run_result = self
             .conn
             .query_row(
-                "SELECT id, kind, completion_transition
+                "SELECT id, stage, kind, completion_transition
                  FROM stage_run
                  WHERE task_id = ? AND status = 'running'
                  ORDER BY datetime(started_at) DESC, id DESC
@@ -288,7 +290,8 @@ impl Db {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 },
             )
@@ -298,11 +301,13 @@ impl Db {
             Err(err) if is_missing_stage_run_table(&err) => return Ok(None),
             Err(err) => return Err(err),
         };
-        let Some((run_id, kind, completion_transition)) = run else {
+        let Some((run_id, stage, kind, completion_transition)) = run else {
             return Ok(None);
         };
         self.finish_stage_run(&run_id, status, result, feedback)?;
         Ok(Some(FinishedStageRun {
+            id: run_id,
+            stage,
             kind,
             completion_transition,
         }))
@@ -323,7 +328,7 @@ impl Db {
         let run_result = self
             .conn
             .query_row(
-                "SELECT id, kind, completion_transition
+                "SELECT id, stage, kind, completion_transition
                  FROM stage_run
                  WHERE task_id = ? AND status IN ('succeeded', 'failed')
                  ORDER BY datetime(started_at) DESC, id DESC
@@ -333,7 +338,8 @@ impl Db {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 },
             )
@@ -343,11 +349,13 @@ impl Db {
             Err(err) if is_missing_stage_run_table(&err) => return Ok(None),
             Err(err) => return Err(err),
         };
-        let Some((run_id, kind, completion_transition)) = run else {
+        let Some((run_id, stage, kind, completion_transition)) = run else {
             return Ok(None);
         };
         self.finish_stage_run(&run_id, status, result, feedback)?;
         Ok(Some(FinishedStageRun {
+            id: run_id,
+            stage,
             kind,
             completion_transition,
         }))
