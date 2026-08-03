@@ -1,13 +1,14 @@
 import { execFile } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { renameSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { promisify } from "node:util";
+import { parseEnv, promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const releaseEnvFsHooks = vi.hoisted(() => ({
-  afterRead: vi.fn<(path: unknown, result: unknown) => void>()
+  afterRead: vi.fn<(path: unknown, result: unknown) => void>(),
+  beforeRename: vi.fn<(oldPath: unknown, newPath: unknown) => void>()
 }));
 
 vi.mock("node:fs", async () => {
@@ -19,6 +20,11 @@ vi.mock("node:fs", async () => {
       const result = readFileSync(...args);
       releaseEnvFsHooks.afterRead(args[0], result);
       return result;
+    },
+    renameSync: (...args: unknown[]) => {
+      const renameSync = actual.renameSync as (...parameters: unknown[]) => unknown;
+      releaseEnvFsHooks.beforeRename(args[0], args[1]);
+      return renameSync(...args);
     }
   };
 });
@@ -55,6 +61,7 @@ function gitWorktreeListRunner(primaryRoot: string, exitCode = 0): CommandRunner
 describe("release environment", () => {
   afterEach(() => {
     releaseEnvFsHooks.afterRead.mockReset();
+    releaseEnvFsHooks.beforeRename.mockReset();
   });
 
   it("loads the global file when the local file is absent", async () => {
@@ -388,6 +395,46 @@ describe("release environment", () => {
     );
   });
 
+  it("uses parseEnv quote boundaries when removing selectors", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
+    const envPath = join(root, ".env.release.local");
+    const source = [
+      'RELEASE_DOUBLE="backslash before boundary\\"',
+      "APPLE_KEYCHAIN_PROFILE=legacy-profile",
+      "RELEASE_SINGLE='another boundary\\'",
+      "export APPLE_KEYCHAIN_PATH=/legacy.keychain-db",
+      "RELEASE_NOTES=`line one",
+      "APPLE_KEYCHAIN_PROFILE=part-of-the-notes",
+      "line three`",
+      "RELEASE_DEFAULT=preserved",
+      ""
+    ].join("\n");
+    await writeFile(envPath, source);
+    expect(parseEnv(source)).toMatchObject({
+      APPLE_KEYCHAIN_PROFILE: "legacy-profile",
+      APPLE_KEYCHAIN_PATH: "/legacy.keychain-db"
+    });
+    const expected = Object.fromEntries(
+      Object.entries(parseEnv(source)).filter(([key]) =>
+        key !== "APPLE_KEYCHAIN_PROFILE" && key !== "APPLE_KEYCHAIN_PATH"
+      )
+    );
+
+    await expect(migrateLegacyRepositoryNotarizationSelectors({
+      repoRoot: root,
+      env: {},
+      runner: gitWorktreeListRunner(root)
+    })).resolves.toBe(envPath);
+
+    const migrated = await readFile(envPath, "utf8");
+    expect(parseEnv(migrated)).toEqual(expected);
+    expect(parseEnv(migrated)).not.toHaveProperty("APPLE_KEYCHAIN_PROFILE");
+    expect(parseEnv(migrated)).not.toHaveProperty("APPLE_KEYCHAIN_PATH");
+    expect(migrated).toContain("APPLE_KEYCHAIN_PROFILE=part-of-the-notes");
+    expect(migrated).not.toContain("APPLE_KEYCHAIN_PROFILE=legacy-profile");
+    expect(migrated).not.toContain("APPLE_KEYCHAIN_PATH=/legacy.keychain-db");
+  });
+
   it("retries migration without losing an unrelated competing edit", async () => {
     const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
     const envPath = join(root, ".env.release.local");
@@ -411,6 +458,44 @@ describe("release environment", () => {
     })).resolves.toBe(envPath);
 
     expect(wroteCompetingEdit).toBe(true);
+    expect(await readFile(envPath, "utf8")).toBe(
+      "RELEASE_DEFAULT=keep\nCONCURRENT_EDIT=preserved\n"
+    );
+  });
+
+  it("preserves an atomic replacement in the final check-to-rename window", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
+    const envPath = join(root, ".env.release.local");
+    const replacementPath = join(root, ".env.release.local.competing");
+    await writeFile(
+      envPath,
+      "RELEASE_DEFAULT=keep\nAPPLE_KEYCHAIN_PROFILE=legacy-profile\n"
+    );
+    let replacedInFinalWindow = false;
+    releaseEnvFsHooks.beforeRename.mockImplementation((oldPath, newPath) => {
+      if (
+        oldPath !== envPath ||
+        !String(newPath).includes(".migrating-") ||
+        replacedInFinalWindow
+      ) {
+        return;
+      }
+      replacedInFinalWindow = true;
+      writeFileSync(
+        replacementPath,
+        "RELEASE_DEFAULT=keep\nCONCURRENT_EDIT=preserved\nAPPLE_KEYCHAIN_PROFILE=legacy-profile\n",
+        "utf8"
+      );
+      renameSync(replacementPath, envPath);
+    });
+
+    await expect(migrateLegacyRepositoryNotarizationSelectors({
+      repoRoot: root,
+      env: {},
+      runner: gitWorktreeListRunner(root)
+    })).resolves.toBe(envPath);
+
+    expect(replacedInFinalWindow).toBe(true);
     expect(await readFile(envPath, "utf8")).toBe(
       "RELEASE_DEFAULT=keep\nCONCURRENT_EDIT=preserved\n"
     );

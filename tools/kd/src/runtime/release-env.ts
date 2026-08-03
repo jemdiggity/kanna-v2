@@ -1,6 +1,7 @@
 import {
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -9,6 +10,7 @@ import {
   writeFileSync
 } from "node:fs";
 import type { BigIntStats } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { parseEnv } from "node:util";
 import type { CommandRunner } from "./process";
@@ -48,8 +50,10 @@ interface ResolvePrimaryRepoRootInput {
   runner: CommandRunner;
 }
 
+type DotenvQuote = "'" | '"' | "`";
+
 function validateDotenv(source: string, envPath: string): void {
-  let pendingQuote: "'" | '"' | undefined;
+  let pendingQuote: DotenvQuote | undefined;
   let pendingLine = 0;
 
   for (const [index, line] of source.split(/\r?\n/).entries()) {
@@ -73,7 +77,7 @@ function validateDotenv(source: string, envPath: string): void {
     }
     const value = (assignment[1] ?? "").trimStart();
     const quote = value[0];
-    if (quote !== '"' && quote !== "'") {
+    if (quote !== '"' && quote !== "'" && quote !== "`") {
       continue;
     }
     const closingIndex = findClosingQuote(value, quote, 1);
@@ -90,20 +94,10 @@ function validateDotenv(source: string, envPath: string): void {
   }
 }
 
-function findClosingQuote(value: string, quote: "'" | '"', start: number): number {
-  for (let index = start; index < value.length; index += 1) {
-    if (value[index] !== quote) {
-      continue;
-    }
-    let precedingBackslashes = 0;
-    for (let cursor = index - 1; cursor >= 0 && value[cursor] === "\\"; cursor -= 1) {
-      precedingBackslashes += 1;
-    }
-    if (precedingBackslashes % 2 === 0) {
-      return index;
-    }
-  }
-  return -1;
+function findClosingQuote(value: string, quote: DotenvQuote, start: number): number {
+  // Node's parseEnv treats the first matching delimiter as the boundary even
+  // when it is preceded by a backslash; dotenv quoting does not use JS escapes.
+  return value.indexOf(quote, start);
 }
 
 function assertOnlyCommentFollows(value: string, envPath: string, line: number): void {
@@ -280,6 +274,7 @@ export async function migrateLegacyRepositoryNotarizationSelectors(input: {
       const updated = removeDotenvAssignments(source, NOTARIZATION_SELECTOR_KEYS);
       const permissions = Number(initialStat.mode & 0o777n);
       const tempPath = `${envPath}.tmp-${process.pid}-${attempt}`;
+      const claimedPath = `${envPath}.migrating-${process.pid}-${attempt}-${randomUUID()}`;
       try {
         writeFileSync(tempPath, updated, { encoding: "utf8", mode: permissions, flag: "wx" });
         chmodSync(tempPath, permissions);
@@ -294,8 +289,55 @@ export async function migrateLegacyRepositoryNotarizationSelectors(input: {
           continue;
         }
 
-        renameSync(tempPath, envPath);
-        return envPath;
+        // Claim the path before publishing the replacement. This closes the
+        // check-to-rename window: a replacement that races the claim is moved
+        // aside and checked, while a writer that recreates envPath prevents the
+        // hard-link publish from overwriting it.
+        renameSync(envPath, claimedPath);
+        let claimedFilePresent = true;
+        try {
+          const claimedStat = statSync(claimedPath, { bigint: true });
+          const claimedSource = readFileSync(claimedPath, "utf8");
+          if (
+            claimedSource !== source ||
+            !sameFileIdentityAfterRename(initialStat, claimedStat) ||
+            !sameFileIdentity(claimedStat, statSync(claimedPath, { bigint: true }))
+          ) {
+            if (!restoreClaimedFile(claimedPath, envPath)) {
+              throw migrationConflictError(envPath, claimedPath);
+            }
+            claimedFilePresent = false;
+            continue;
+          }
+
+          try {
+            linkSync(tempPath, envPath);
+          } catch (error) {
+            if (!isFileSystemError(error, "EEXIST")) {
+              throw error;
+            }
+            // A writer recreated the path after it was claimed. Its version is
+            // authoritative for the retry and must not be overwritten.
+            rmSync(claimedPath);
+            claimedFilePresent = false;
+            continue;
+          }
+          rmSync(claimedPath);
+          claimedFilePresent = false;
+          return envPath;
+        } catch (error) {
+          if (claimedFilePresent) {
+            try {
+              if (!restoreClaimedFile(claimedPath, envPath)) {
+                throw migrationConflictError(envPath, claimedPath);
+              }
+              claimedFilePresent = false;
+            } catch {
+              throw migrationConflictError(envPath, claimedPath);
+            }
+          }
+          throw error;
+        }
       } finally {
         rmSync(tempPath, { force: true });
       }
@@ -314,7 +356,7 @@ export async function migrateLegacyRepositoryNotarizationSelectors(input: {
 
 function removeDotenvAssignments(source: string, keys: ReadonlySet<string>): string {
   const retainedLines: string[] = [];
-  let multilineQuote: "'" | '"' | undefined;
+  let multilineQuote: DotenvQuote | undefined;
   let retainMultiline = false;
 
   for (const line of source.split(/\r?\n/)) {
@@ -337,13 +379,35 @@ function removeDotenvAssignments(source: string, keys: ReadonlySet<string>): str
 
     const value = assignment?.[2]?.trimStart() ?? "";
     const quote = value[0];
-    if ((quote === '"' || quote === "'") && findClosingQuote(value, quote, 1) < 0) {
+    if (
+      (quote === '"' || quote === "'" || quote === "`") &&
+      findClosingQuote(value, quote, 1) < 0
+    ) {
       multilineQuote = quote;
       retainMultiline = !removeAssignment;
     }
   }
 
   return retainedLines.join("\n");
+}
+
+function restoreClaimedFile(claimedPath: string, envPath: string): boolean {
+  try {
+    linkSync(claimedPath, envPath);
+  } catch (error) {
+    if (isFileSystemError(error, "EEXIST")) {
+      return false;
+    }
+    throw error;
+  }
+  rmSync(claimedPath);
+  return true;
+}
+
+function migrationConflictError(envPath: string, claimedPath: string): Error {
+  return new Error(
+    `Release environment ${envPath} changed repeatedly while notarization selectors were being migrated. The competing version was preserved at ${claimedPath}; reconcile it before retrying ./kd release setup-notarization.`
+  );
 }
 
 function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
@@ -355,8 +419,22 @@ function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
     left.ctimeNs === right.ctimeNs;
 }
 
+function sameFileIdentityAfterRename(left: BigIntStats, right: BigIntStats): boolean {
+  // rename(2) may update ctime. The subsequent sameFileIdentity check includes
+  // ctime once the file is at its claimed path and must remain stable there.
+  return left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs;
+}
+
 function isMissingFileError(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "ENOENT";
+  return isFileSystemError(error, "ENOENT");
+}
+
+function isFileSystemError(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
 }
 
 function definedEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
