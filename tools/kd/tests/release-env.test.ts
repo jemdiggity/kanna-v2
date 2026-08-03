@@ -1,11 +1,31 @@
 import { execFile } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const releaseEnvFsHooks = vi.hoisted(() => ({
+  afterRead: vi.fn<(path: unknown, result: unknown) => void>()
+}));
+
+vi.mock("node:fs", async () => {
+  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+  return {
+    ...actual,
+    readFileSync: (...args: unknown[]) => {
+      const readFileSync = actual.readFileSync as (...parameters: unknown[]) => unknown;
+      const result = readFileSync(...args);
+      releaseEnvFsHooks.afterRead(args[0], result);
+      return result;
+    }
+  };
+});
+
 import {
   loadReleaseEnvironment,
+  migrateLegacyRepositoryNotarizationSelectors,
   writeMachineNotarizationSelectors
 } from "../src/runtime/release-env";
 import { nodeCommandRunner, type CommandRunner } from "../src/runtime/process";
@@ -33,6 +53,10 @@ function gitWorktreeListRunner(primaryRoot: string, exitCode = 0): CommandRunner
 }
 
 describe("release environment", () => {
+  afterEach(() => {
+    releaseEnvFsHooks.afterRead.mockReset();
+  });
+
   it("loads the global file when the local file is absent", async () => {
     const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
     const home = join(root, "home");
@@ -330,6 +354,66 @@ describe("release environment", () => {
 
     expect(env.RELEASE_DEFAULT).toBe("value");
     expect(env.RELEASE_NOTES).toBe("line one\nline two");
+  });
+
+  it("preserves selector-looking lines inside retained multiline values during migration", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
+    const envPath = join(root, ".env.release.local");
+    await writeFile(
+      envPath,
+      [
+        'RELEASE_NOTES="line one',
+        "APPLE_KEYCHAIN_PROFILE=part-of-the-notes",
+        "APPLE_KEYCHAIN_PATH=/also-part-of-the-notes",
+        'line four"',
+        "APPLE_KEYCHAIN_PROFILE=legacy-profile",
+        "export APPLE_KEYCHAIN_PATH=/legacy.keychain-db",
+        "RELEASE_DEFAULT=preserved",
+        ""
+      ].join("\n")
+    );
+
+    await expect(migrateLegacyRepositoryNotarizationSelectors({
+      repoRoot: root,
+      env: {},
+      runner: gitWorktreeListRunner(root)
+    })).resolves.toBe(envPath);
+
+    expect(await readFile(envPath, "utf8")).toBe(
+      'RELEASE_NOTES="line one\n' +
+      "APPLE_KEYCHAIN_PROFILE=part-of-the-notes\n" +
+      "APPLE_KEYCHAIN_PATH=/also-part-of-the-notes\n" +
+      'line four"\n' +
+      "RELEASE_DEFAULT=preserved\n"
+    );
+  });
+
+  it("retries migration without losing an unrelated competing edit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
+    const envPath = join(root, ".env.release.local");
+    await writeFile(
+      envPath,
+      "RELEASE_DEFAULT=keep\nAPPLE_KEYCHAIN_PROFILE=legacy-profile\n"
+    );
+    let wroteCompetingEdit = false;
+    releaseEnvFsHooks.afterRead.mockImplementation((path, result) => {
+      if (path !== envPath || wroteCompetingEdit) {
+        return;
+      }
+      wroteCompetingEdit = true;
+      writeFileSync(envPath, `${String(result)}CONCURRENT_EDIT=preserved\n`, "utf8");
+    });
+
+    await expect(migrateLegacyRepositoryNotarizationSelectors({
+      repoRoot: root,
+      env: {},
+      runner: gitWorktreeListRunner(root)
+    })).resolves.toBe(envPath);
+
+    expect(wroteCompetingEdit).toBe(true);
+    expect(await readFile(envPath, "utf8")).toBe(
+      "RELEASE_DEFAULT=keep\nCONCURRENT_EDIT=preserved\n"
+    );
   });
 
   it("resolves the primary checkout from a real linked worktree", async () => {

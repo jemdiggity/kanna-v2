@@ -8,6 +8,7 @@ import {
   statSync,
   writeFileSync
 } from "node:fs";
+import type { BigIntStats } from "node:fs";
 import { join } from "node:path";
 import { parseEnv } from "node:util";
 import type { CommandRunner } from "./process";
@@ -32,6 +33,7 @@ const UNSAFE_PLAINTEXT_RELEASE_KEYS = new Set([
   "GH_TOKEN",
   "GITHUB_TOKEN"
 ]);
+const MIGRATION_REPLACE_ATTEMPTS = 3;
 
 export interface LoadReleaseEnvironmentInput {
   repoRoot: string;
@@ -256,56 +258,105 @@ export async function migrateLegacyRepositoryNotarizationSelectors(input: {
 }): Promise<string | undefined> {
   const primaryRoot = await resolvePrimaryRepoRoot(input);
   const envPath = join(primaryRoot, RELEASE_ENV_FILE);
-  if (!existsSync(envPath)) {
-    return undefined;
+
+  for (let attempt = 0; attempt < MIGRATION_REPLACE_ATTEMPTS; attempt += 1) {
+    if (!existsSync(envPath)) {
+      return undefined;
+    }
+
+    try {
+      const initialStat = statSync(envPath, { bigint: true });
+      const source = readFileSync(envPath, "utf8");
+      if (!sameFileIdentity(initialStat, statSync(envPath, { bigint: true }))) {
+        continue;
+      }
+
+      validateDotenv(source, envPath);
+      const parsed = definedEnvironment(parseEnv(source));
+      if (![...NOTARIZATION_SELECTOR_KEYS].some((key) => parsed[key] !== undefined)) {
+        return undefined;
+      }
+
+      const updated = removeDotenvAssignments(source, NOTARIZATION_SELECTOR_KEYS);
+      const permissions = Number(initialStat.mode & 0o777n);
+      const tempPath = `${envPath}.tmp-${process.pid}-${attempt}`;
+      try {
+        writeFileSync(tempPath, updated, { encoding: "utf8", mode: permissions, flag: "wx" });
+        chmodSync(tempPath, permissions);
+
+        const currentStat = statSync(envPath, { bigint: true });
+        const currentSource = readFileSync(envPath, "utf8");
+        if (
+          currentSource !== source ||
+          !sameFileIdentity(initialStat, currentStat) ||
+          !sameFileIdentity(currentStat, statSync(envPath, { bigint: true }))
+        ) {
+          continue;
+        }
+
+        renameSync(tempPath, envPath);
+        return envPath;
+      } finally {
+        rmSync(tempPath, { force: true });
+      }
+    } catch (error) {
+      if (isMissingFileError(error)) {
+        continue;
+      }
+      throw error;
+    }
   }
 
-  const source = readFileSync(envPath, "utf8");
-  validateDotenv(source, envPath);
-  const parsed = definedEnvironment(parseEnv(source));
-  if (![...NOTARIZATION_SELECTOR_KEYS].some((key) => parsed[key] !== undefined)) {
-    return undefined;
-  }
-
-  const updated = removeDotenvAssignments(source, NOTARIZATION_SELECTOR_KEYS);
-  const permissions = statSync(envPath).mode & 0o777;
-  const tempPath = `${envPath}.tmp-${process.pid}`;
-  try {
-    writeFileSync(tempPath, updated, { encoding: "utf8", mode: permissions, flag: "wx" });
-    chmodSync(tempPath, permissions);
-    renameSync(tempPath, envPath);
-  } finally {
-    rmSync(tempPath, { force: true });
-  }
-  return envPath;
+  throw new Error(
+    `Release environment ${envPath} changed while notarization selectors were being migrated; no migration changes were written. Retry ./kd release setup-notarization.`
+  );
 }
 
 function removeDotenvAssignments(source: string, keys: ReadonlySet<string>): string {
   const retainedLines: string[] = [];
-  let skippedQuote: "'" | '"' | undefined;
+  let multilineQuote: "'" | '"' | undefined;
+  let retainMultiline = false;
 
   for (const line of source.split(/\r?\n/)) {
-    if (skippedQuote) {
-      if (findClosingQuote(line, skippedQuote, 0) >= 0) {
-        skippedQuote = undefined;
+    if (multilineQuote) {
+      if (retainMultiline) {
+        retainedLines.push(line);
+      }
+      if (findClosingQuote(line, multilineQuote, 0) >= 0) {
+        multilineQuote = undefined;
+        retainMultiline = false;
       }
       continue;
     }
 
     const assignment = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
-    if (!assignment?.[1] || !keys.has(assignment[1])) {
+    const removeAssignment = assignment?.[1] !== undefined && keys.has(assignment[1]);
+    if (!removeAssignment) {
       retainedLines.push(line);
-      continue;
     }
 
-    const value = (assignment[2] ?? "").trimStart();
+    const value = assignment?.[2]?.trimStart() ?? "";
     const quote = value[0];
     if ((quote === '"' || quote === "'") && findClosingQuote(value, quote, 1) < 0) {
-      skippedQuote = quote;
+      multilineQuote = quote;
+      retainMultiline = !removeAssignment;
     }
   }
 
   return retainedLines.join("\n");
+}
+
+function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs;
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 function definedEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
