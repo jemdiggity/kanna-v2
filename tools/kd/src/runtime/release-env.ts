@@ -1,17 +1,6 @@
-import {
-  chmodSync,
-  closeSync,
-  constants,
-  fstatSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync
-} from "node:fs";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { lstatSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import { parseEnv } from "node:util";
 import { stripRustCacheEnvironment } from "./rust-cache-policy";
 
@@ -37,6 +26,23 @@ const UNSAFE_PLAINTEXT_RELEASE_KEYS = new Set([
 export interface LoadReleaseEnvironmentInput {
   homeDir: string;
   env: NodeJS.ProcessEnv;
+}
+
+interface DirectoryIdentity {
+  dev: string;
+  ino: string;
+}
+
+interface DirectoryAncestryEntry extends DirectoryIdentity {
+  name: string;
+}
+
+interface PinnedWorkerResponse {
+  ok: boolean;
+  error?: string;
+  missing?: boolean;
+  source?: string;
+  directory?: DirectoryIdentity;
 }
 
 type DotenvQuote = "'" | '"' | "`";
@@ -100,92 +106,38 @@ export function loadReleaseEnvironment(
   input: LoadReleaseEnvironmentInput
 ): NodeJS.ProcessEnv {
   const globalEnvPath = join(input.homeDir, ".kanna", RELEASE_ENV_FILE);
-  const globalEnv = loadDotenvFile(globalEnvPath);
+  const globalEnv = loadDotenvFile(input.homeDir, globalEnvPath);
   const inherited = definedEnvironment(input.env);
   // Release, signing, and packaging must be reproducible with no compiler cache
   // present, so no Kanna-managed or ambient wrapper reaches Bazel or Cargo here.
   return stripRustCacheEnvironment({ ...globalEnv, ...inherited });
 }
 
-function loadDotenvFile(envPath: string): Record<string, string> {
+function loadDotenvFile(homeDir: string, envPath: string): Record<string, string> {
   try {
-    const source = readMachineReleaseFile(envPath, true);
-    if (source === undefined) {
+    const ancestry = machineConfigAncestry(homeDir, false);
+    if (ancestry === undefined) {
       return {};
     }
-    validateDotenv(source, envPath);
-    const parsed = definedEnvironment(parseEnv(source));
+    const response = runPinnedDirectoryWorker(join(homeDir, ".kanna"), {
+      operation: "read",
+      ancestry,
+      fileName: RELEASE_ENV_FILE,
+      requireOwnerOnly: true
+    });
+    if (response.missing) {
+      return {};
+    }
+    if (response.source === undefined) {
+      throw new Error("Pinned release-environment read returned no content.");
+    }
+    validateDotenv(response.source, envPath);
+    const parsed = definedEnvironment(parseEnv(response.source));
     validateReleaseEnvironmentFile(parsed, envPath);
     return parsed;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to load release environment ${envPath}: ${message}`);
-  }
-}
-
-function readMachineReleaseFile(
-  envPath: string,
-  requireOwnerOnly: boolean
-): string | undefined {
-  let descriptor: number;
-  try {
-    descriptor = openSync(
-      envPath,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-    );
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      return undefined;
-    }
-    if (code === "ELOOP") {
-      throw new Error(
-        `Machine-local release environment must be a regular file, not a symbolic link: ${envPath}`
-      );
-    }
-    throw error;
-  }
-
-  try {
-    const openedFile = fstatSync(descriptor);
-    if (!openedFile.isFile()) {
-      throw new Error(
-        `Machine-local release environment must be a regular file: ${envPath}`
-      );
-    }
-
-    const permissions = openedFile.mode & 0o777;
-    if (requireOwnerOnly && (permissions & 0o077) !== 0) {
-      throw new Error(
-        `Machine-local release environment must be owner-only (0600), but ${envPath} is mode ${permissions.toString(8).padStart(4, "0")}. Run chmod 600 ${envPath} before retrying.`
-      );
-    }
-    const source = readFileSync(descriptor, "utf8");
-
-    let configuredPath;
-    try {
-      configuredPath = lstatSync(envPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        throw new Error(
-          `Machine-local release environment changed while it was being opened: ${envPath}`
-        );
-      }
-      throw error;
-    }
-    if (
-      configuredPath.isSymbolicLink()
-      || !configuredPath.isFile()
-      || configuredPath.dev !== openedFile.dev
-      || configuredPath.ino !== openedFile.ino
-    ) {
-      throw new Error(
-        `Machine-local release environment must remain the same regular, non-symlinked file while it is read: ${envPath}`
-      );
-    }
-    return source;
-  } finally {
-    closeSync(descriptor);
   }
 }
 
@@ -201,7 +153,6 @@ function validateReleaseEnvironmentFile(
       `Plaintext release credentials are not allowed in ${envPath}: ${unsafeKeys.join(", ")}. Store notarization credentials with ./kd release setup-notarization and keep other secrets in their supported secure stores.`
     );
   }
-
 }
 
 export function writeMachineNotarizationSelectors(input: {
@@ -211,10 +162,19 @@ export function writeMachineNotarizationSelectors(input: {
 }): string {
   const kannaDir = join(input.homeDir, ".kanna");
   const envPath = join(kannaDir, RELEASE_ENV_FILE);
-  mkdirSync(kannaDir, { recursive: true, mode: 0o700 });
-  chmodSync(kannaDir, 0o700);
+  const ancestry = machineConfigAncestry(input.homeDir, true);
+  if (ancestry === undefined) {
+    throw new Error(`Unable to create machine-local release directory ${kannaDir}.`);
+  }
 
-  const source = readMachineReleaseFile(envPath, false) ?? "";
+  const readResponse = runPinnedDirectoryWorker(kannaDir, {
+    operation: "read",
+    ancestry,
+    fileName: RELEASE_ENV_FILE,
+    requireOwnerOnly: false,
+    repairDirectoryMode: true
+  });
+  const source = readResponse.source ?? "";
   validateDotenv(source, envPath);
   const parsed = definedEnvironment(parseEnv(source));
   validateReleaseEnvironmentFile(parsed, envPath);
@@ -237,16 +197,283 @@ export function writeMachineNotarizationSelectors(input: {
     `${NOTARIZATION_KEYCHAIN_ENV}=${JSON.stringify(input.keychainPath)}`,
     ""
   ].join("\n");
-  const tempPath = `${envPath}.tmp-${process.pid}`;
-  try {
-    writeFileSync(tempPath, updated, { encoding: "utf8", mode: 0o600, flag: "wx" });
-    chmodSync(tempPath, 0o600);
-    renameSync(tempPath, envPath);
-  } finally {
-    rmSync(tempPath, { force: true });
-  }
-  chmodSync(envPath, 0o600);
+
+  runPinnedDirectoryWorker(kannaDir, {
+    operation: "write",
+    ancestry,
+    fileName: RELEASE_ENV_FILE,
+    expectedSource: readResponse.missing ? undefined : source,
+    source: updated,
+    repairDirectoryMode: true
+  });
   return envPath;
+}
+
+function machineConfigAncestry(
+  homeDir: string,
+  createKannaDirectory: boolean
+): DirectoryAncestryEntry[] | undefined {
+  if (!isAbsolute(homeDir)) {
+    throw new Error(`Machine-local home directory must be absolute: ${homeDir}`);
+  }
+  const normalizedHome = resolve(homeDir);
+  // Pin the resolved home inode instead of rejecting every path component:
+  // macOS intentionally exposes /var as a symlink to /private/var. The worker
+  // verifies this inode as its cwd, so replacing any earlier component cannot
+  // redirect the relative .kanna operation.
+  const homeStats = lstatSync(normalizedHome, { bigint: true });
+  if (homeStats.isSymbolicLink()) {
+    throw new Error(
+      `Machine-local home directory must not be a symbolic link: ${normalizedHome}`
+    );
+  }
+  if (!homeStats.isDirectory()) {
+    throw new Error(`Machine-local home path must be a directory: ${normalizedHome}`);
+  }
+  const homeAncestry: DirectoryAncestryEntry[] = [
+    {
+      name: "",
+      dev: homeStats.dev.toString(),
+      ino: homeStats.ino.toString()
+    }
+  ];
+  const response = runPinnedDirectoryWorker(normalizedHome, {
+    operation: createKannaDirectory ? "ensure-directory" : "inspect-directory",
+    ancestry: homeAncestry,
+    childName: ".kanna"
+  });
+  if (response.missing) {
+    return undefined;
+  }
+  if (response.directory === undefined) {
+    throw new Error(`Unable to pin machine-local release directory ${join(homeDir, ".kanna")}.`);
+  }
+  return [...homeAncestry, { name: ".kanna", ...response.directory }];
+}
+
+function runPinnedDirectoryWorker(
+  cwd: string,
+  request: Record<string, unknown>
+): PinnedWorkerResponse {
+  const result = spawnSync(
+    process.execPath,
+    // tsup rewrites require() inside Function#toString to __require(); define
+    // the same local in the standalone process so source and bundled kd share
+    // exactly one worker implementation.
+    ["-e", `const __require = require;\n(${pinnedDirectoryWorker.toString()})()`],
+    {
+      cwd,
+      encoding: "utf8",
+      input: JSON.stringify(request),
+      maxBuffer: 2 * 1024 * 1024
+    }
+  );
+  if (result.error) {
+    throw new Error(`Unable to pin machine-local release directory ${cwd}: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `Unable to access pinned machine-local release directory ${cwd}: ${result.stderr.trim() || `worker exited ${result.status}`}`
+    );
+  }
+  let response: unknown;
+  try {
+    response = JSON.parse(result.stdout);
+  } catch {
+    throw new Error(`Pinned machine-local release directory worker returned invalid output for ${cwd}.`);
+  }
+  if (!isRecord(response) || typeof response.ok !== "boolean") {
+    throw new Error(`Pinned machine-local release directory worker returned invalid output for ${cwd}.`);
+  }
+  const typedResponse = response as unknown as PinnedWorkerResponse;
+  if (!typedResponse.ok) {
+    throw new Error(typedResponse.error ?? `Unable to access pinned directory ${cwd}.`);
+  }
+  return typedResponse;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+// This function is serialized into a fresh Node process whose cwd is selected
+// by the kernel. All sensitive path operations are relative to that pinned cwd;
+// ancestry checks before and after each operation detect pathname replacement
+// without ever following a replacement into repository-controlled storage.
+function pinnedDirectoryWorker(): void {
+  const fs: typeof import("node:fs") = require("node:fs");
+  const crypto: typeof import("node:crypto") = require("node:crypto");
+  const request = JSON.parse(fs.readFileSync(0, "utf8")) as Record<string, unknown>;
+
+  const respond = (response: Record<string, unknown>): void => {
+    process.stdout.write(JSON.stringify(response));
+  };
+  const identity = (path: string): DirectoryIdentity => {
+    const stats = fs.lstatSync(path, { bigint: true });
+    if (stats.isSymbolicLink() || !stats.isDirectory()) {
+      throw new Error(`Machine-local release configuration directory is not a regular directory: ${path}`);
+    }
+    return { dev: stats.dev.toString(), ino: stats.ino.toString() };
+  };
+  const sameIdentity = (left: DirectoryIdentity, right: DirectoryIdentity): boolean =>
+    left.dev === right.dev && left.ino === right.ino;
+  const ancestry = request.ancestry as DirectoryAncestryEntry[];
+  const assertPinnedAncestry = (): void => {
+    if (!Array.isArray(ancestry) || ancestry.length === 0) {
+      throw new Error("Machine-local release configuration ancestry is missing.");
+    }
+    const last = ancestry.length - 1;
+    for (let index = last; index >= 0; index -= 1) {
+      const upward = "../".repeat(last - index);
+      const currentPath = upward || ".";
+      if (!sameIdentity(identity(currentPath), ancestry[index])) {
+        throw new Error("Machine-local release configuration ancestry changed during access.");
+      }
+      if (index > 0) {
+        const entryPath = `${upward}../${ancestry[index].name}`;
+        if (!sameIdentity(identity(entryPath), ancestry[index])) {
+          throw new Error("Machine-local release configuration ancestry changed during access.");
+        }
+      }
+    }
+  };
+  const readReleaseFile = (
+    fileName: string,
+    requireOwnerOnly: boolean
+  ): { missing: boolean; source?: string } => {
+    let descriptor: number;
+    try {
+      descriptor = fs.openSync(
+        fileName,
+        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+      );
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return { missing: true };
+      if (code === "ELOOP") {
+        throw new Error("Machine-local release environment must be a regular file, not a symbolic link.");
+      }
+      throw error;
+    }
+    try {
+      const opened = fs.fstatSync(descriptor);
+      if (!opened.isFile()) {
+        throw new Error("Machine-local release environment must be a regular file.");
+      }
+      const permissions = opened.mode & 0o777;
+      if (requireOwnerOnly && (permissions & 0o077) !== 0) {
+        throw new Error(
+          `Machine-local release environment must be owner-only (0600), but is mode ${permissions.toString(8).padStart(4, "0")}. Run chmod 600 before retrying.`
+        );
+      }
+      const source = fs.readFileSync(descriptor, "utf8");
+      const configured = fs.lstatSync(fileName);
+      if (
+        configured.isSymbolicLink() ||
+        !configured.isFile() ||
+        configured.dev !== opened.dev ||
+        configured.ino !== opened.ino
+      ) {
+        throw new Error(
+          "Machine-local release environment must remain the same regular, non-symlinked file while it is read."
+        );
+      }
+      return { missing: false, source };
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  };
+
+  try {
+    assertPinnedAncestry();
+    const operation = request.operation;
+    if (operation === "inspect-directory" || operation === "ensure-directory") {
+      const childName = String(request.childName);
+      let child;
+      try {
+        child = fs.lstatSync(childName, { bigint: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if (operation === "inspect-directory") {
+          assertPinnedAncestry();
+          respond({ ok: true, missing: true });
+          return;
+        }
+        try {
+          fs.mkdirSync(childName, { mode: 0o700 });
+        } catch (mkdirError) {
+          if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirError;
+        }
+        child = fs.lstatSync(childName, { bigint: true });
+      }
+      if (child.isSymbolicLink()) {
+        throw new Error("Machine-local release configuration directory must not be a symbolic link.");
+      }
+      if (!child.isDirectory()) {
+        throw new Error("Machine-local release configuration path must be a directory.");
+      }
+      assertPinnedAncestry();
+      respond({
+        ok: true,
+        missing: false,
+        directory: { dev: child.dev.toString(), ino: child.ino.toString() }
+      });
+      return;
+    }
+
+    if (request.repairDirectoryMode === true) {
+      fs.chmodSync(".", 0o700);
+    }
+    const fileName = String(request.fileName);
+    if (operation === "read") {
+      const result = readReleaseFile(fileName, request.requireOwnerOnly === true);
+      assertPinnedAncestry();
+      respond({ ok: true, ...result });
+      return;
+    }
+    if (operation === "write") {
+      const current = readReleaseFile(fileName, false);
+      const expectedSource = request.expectedSource;
+      if (
+        (current.missing && expectedSource !== undefined) ||
+        (!current.missing && current.source !== expectedSource)
+      ) {
+        throw new Error("Machine-local release environment changed while selectors were being written; retry setup.");
+      }
+      const source = request.source;
+      if (typeof source !== "string") {
+        throw new Error("Machine-local release environment replacement content is missing.");
+      }
+      const tempName = `${fileName}.tmp-${process.pid}-${crypto.randomUUID()}`;
+      let descriptor: number | undefined;
+      try {
+        descriptor = fs.openSync(
+          tempName,
+          fs.constants.O_WRONLY |
+            fs.constants.O_CREAT |
+            fs.constants.O_EXCL |
+            fs.constants.O_NOFOLLOW,
+          0o600
+        );
+        fs.writeFileSync(descriptor, source, "utf8");
+        fs.fchmodSync(descriptor, 0o600);
+        fs.fsyncSync(descriptor);
+        fs.closeSync(descriptor);
+        descriptor = undefined;
+        assertPinnedAncestry();
+        fs.renameSync(tempName, fileName);
+        assertPinnedAncestry();
+      } finally {
+        if (descriptor !== undefined) fs.closeSync(descriptor);
+        fs.rmSync(tempName, { force: true });
+      }
+      respond({ ok: true });
+      return;
+    }
+    throw new Error("Unknown pinned machine-local release operation.");
+  } catch (error) {
+    respond({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
 }
 
 function definedEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {

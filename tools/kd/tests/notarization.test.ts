@@ -128,6 +128,7 @@ describe("notarization setup", () => {
     const root = await mkdtemp(join(tmpdir(), "kanna-notary-setup-"));
     const homeDir = join(root, "home");
     const keychainPath = join(root, "login.keychain-db");
+    await mkdir(homeDir);
     await writeFile(keychainPath, "keychain fixture\n");
     const calls: Array<{
       command: string;

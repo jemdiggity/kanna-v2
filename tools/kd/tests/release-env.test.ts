@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rm,
   stat,
   symlink,
   writeFile
@@ -58,6 +59,21 @@ describe("release environment", () => {
 
     expect(() => loadReleaseEnvironment({ homeDir: home, env: {} }))
       .toThrow(/regular file, not a symbolic link/);
+  });
+
+  it("rejects loading through a symlinked ~/.kanna directory", async () => {
+    const { root, home } = await createFixture();
+    const repositoryConfigDir = join(root, "repo", "machine-config");
+    await mkdir(repositoryConfigDir, { recursive: true });
+    await writePrivateFile(
+      join(repositoryConfigDir, ".env.release.local"),
+      "APPLE_KEYCHAIN_PROFILE=repository-profile\n"
+    );
+    await rm(join(home, ".kanna"), { recursive: true });
+    await symlink(repositoryConfigDir, join(home, ".kanna"));
+
+    expect(() => loadReleaseEnvironment({ homeDir: home, env: {} }))
+      .toThrow(/configuration directory must not be a symbolic link/);
   });
 
   it("never reads a primary-checkout or worktree release file", async () => {
@@ -137,6 +153,26 @@ describe("release environment", () => {
       'RELEASE_DEFAULT=keep\nAPPLE_KEYCHAIN_PROFILE="new-profile"\nAPPLE_KEYCHAIN_PATH="/Users/test/Library/Keychains/login.keychain-db"\n'
     );
     expect((await stat(globalEnvPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it("rejects setup through a symlinked ~/.kanna directory without modifying its target", async () => {
+    const { root, home } = await createFixture();
+    const repositoryConfigDir = join(root, "repo", "machine-config");
+    const repositoryEnvPath = join(repositoryConfigDir, ".env.release.local");
+    await mkdir(repositoryConfigDir, { recursive: true });
+    await writePrivateFile(repositoryEnvPath, "RELEASE_DEFAULT=repository-owned\n");
+    await rm(join(home, ".kanna"), { recursive: true });
+    await symlink(repositoryConfigDir, join(home, ".kanna"));
+
+    expect(() => writeMachineNotarizationSelectors({
+      homeDir: home,
+      profile: "must-not-write",
+      keychainPath: "/Users/test/Library/Keychains/login.keychain-db"
+    })).toThrow(/configuration directory must not be a symbolic link/);
+
+    expect(await readFile(repositoryEnvPath, "utf8")).toBe(
+      "RELEASE_DEFAULT=repository-owned\n"
+    );
   });
 
   it("strips every compiler-wrapper and cache control from file and process values", async () => {
