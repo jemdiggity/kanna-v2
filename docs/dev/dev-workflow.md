@@ -132,9 +132,11 @@ directory — then deploys that artifact with `actions/upload-pages-artifact` an
 That deploy path requires the repository's Pages source to be **"GitHub
 Actions"**, which is how this repo is configured, along with the
 `schemas.kanna.build` custom domain. Both are human-applied repository settings.
-Branch-based publishing (a `gh-pages` push) is mutually exclusive with it and
-would serve nothing; the `kd pages publish-schema` command that did that was
-removed for exactly that reason.
+Branch-based publishing (pushing a built artifact to a `gh-pages` branch) is
+mutually exclusive with it: a repository serves Pages from one source or the
+other, never both. So do not add one — against this configuration it would push
+a branch nothing serves, and switching the source to serve it would break the
+workflow that publishes today.
 
 Consequences worth knowing:
 

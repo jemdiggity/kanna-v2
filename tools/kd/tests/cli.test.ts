@@ -558,8 +558,11 @@ describe("kd CLI", () => {
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd rust-cache <command>"));
 
     await expect(runCli(["pages", "--help"])).resolves.toBe(0);
-    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("pages build-schema"));
-    expect(log).not.toHaveBeenLastCalledWith(expect.stringContaining("pages publish-schema"));
+    // Matched exactly, so this pins `build-schema` as the only `pages` command rather
+    // than merely asserting it is present.
+    expect(log).toHaveBeenLastCalledWith(
+      ["Usage: kd pages <command>", "", "Commands:", "  pages build-schema --out-dir <dir>"].join("\n")
+    );
 
     await expect(runCli(["pages", "build-schema", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd pages build-schema"));
@@ -1107,9 +1110,6 @@ describe("kd CLI", () => {
       taskId: "pages.build-schema",
       input: { outDir: ".build/pages-schema" }
     });
-    // `pages publish-schema` was removed: the repository's Pages source is "GitHub
-    // Actions", so a gh-pages branch push would serve nothing.
-    expect(() => parseCliArgs(["pages", "publish-schema"])).toThrow(/Unknown command/);
     expect(parseCliArgs(["release", "ship", "--dry-run", "--minor", "--arm64", "--staging"])).toEqual({
       taskId: "release.ship",
       input: { dryRun: true, minor: true, arm64: true, staging: true }
