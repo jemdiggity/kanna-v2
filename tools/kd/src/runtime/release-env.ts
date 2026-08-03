@@ -26,6 +26,8 @@ const UNSAFE_PLAINTEXT_RELEASE_KEYS = new Set([
 export interface LoadReleaseEnvironmentInput {
   homeDir: string;
   env: NodeJS.ProcessEnv;
+  /** @internal Test-only synchronization for deterministic filesystem races. */
+  testSynchronization?: ReleaseEnvironmentTestSynchronization;
 }
 
 interface DirectoryIdentity {
@@ -35,6 +37,13 @@ interface DirectoryIdentity {
 
 interface DirectoryAncestryEntry extends DirectoryIdentity {
   name: string;
+  canonicalPath: string;
+}
+
+interface ReleaseEnvironmentTestSynchronization {
+  event: "after-release-file-read" | "after-temp-created";
+  readyPath: string;
+  continuePath: string;
 }
 
 interface PinnedWorkerResponse {
@@ -106,16 +115,28 @@ export function loadReleaseEnvironment(
   input: LoadReleaseEnvironmentInput
 ): NodeJS.ProcessEnv {
   const globalEnvPath = join(input.homeDir, ".kanna", RELEASE_ENV_FILE);
-  const globalEnv = loadDotenvFile(input.homeDir, globalEnvPath);
+  const globalEnv = loadDotenvFile(
+    input.homeDir,
+    globalEnvPath,
+    input.testSynchronization
+  );
   const inherited = definedEnvironment(input.env);
   // Release, signing, and packaging must be reproducible with no compiler cache
   // present, so no Kanna-managed or ambient wrapper reaches Bazel or Cargo here.
   return stripRustCacheEnvironment({ ...globalEnv, ...inherited });
 }
 
-function loadDotenvFile(homeDir: string, envPath: string): Record<string, string> {
+function loadDotenvFile(
+  homeDir: string,
+  envPath: string,
+  testSynchronization?: ReleaseEnvironmentTestSynchronization
+): Record<string, string> {
   try {
-    const ancestry = machineConfigAncestry(homeDir, false);
+    const ancestry = machineConfigAncestry(
+      homeDir,
+      false,
+      testSynchronization
+    );
     if (ancestry === undefined) {
       return {};
     }
@@ -123,7 +144,8 @@ function loadDotenvFile(homeDir: string, envPath: string): Record<string, string
       operation: "read",
       ancestry,
       fileName: RELEASE_ENV_FILE,
-      requireOwnerOnly: true
+      requireOwnerOnly: true,
+      testSynchronization
     });
     if (response.missing) {
       return {};
@@ -159,10 +181,16 @@ export function writeMachineNotarizationSelectors(input: {
   homeDir: string;
   profile: string;
   keychainPath: string;
+  /** @internal Test-only synchronization for deterministic filesystem races. */
+  testSynchronization?: ReleaseEnvironmentTestSynchronization;
 }): string {
   const kannaDir = join(input.homeDir, ".kanna");
   const envPath = join(kannaDir, RELEASE_ENV_FILE);
-  const ancestry = machineConfigAncestry(input.homeDir, true);
+  const ancestry = machineConfigAncestry(
+    input.homeDir,
+    true,
+    input.testSynchronization
+  );
   if (ancestry === undefined) {
     throw new Error(`Unable to create machine-local release directory ${kannaDir}.`);
   }
@@ -172,7 +200,8 @@ export function writeMachineNotarizationSelectors(input: {
     ancestry,
     fileName: RELEASE_ENV_FILE,
     requireOwnerOnly: false,
-    repairDirectoryMode: true
+    repairDirectoryMode: true,
+    testSynchronization: input.testSynchronization
   });
   const source = readResponse.source ?? "";
   validateDotenv(source, envPath);
@@ -204,14 +233,16 @@ export function writeMachineNotarizationSelectors(input: {
     fileName: RELEASE_ENV_FILE,
     expectedSource: readResponse.missing ? undefined : source,
     source: updated,
-    repairDirectoryMode: true
+    repairDirectoryMode: true,
+    testSynchronization: input.testSynchronization
   });
   return envPath;
 }
 
 function machineConfigAncestry(
   homeDir: string,
-  createKannaDirectory: boolean
+  createKannaDirectory: boolean,
+  testSynchronization?: ReleaseEnvironmentTestSynchronization
 ): DirectoryAncestryEntry[] | undefined {
   if (!isAbsolute(homeDir)) {
     throw new Error(`Machine-local home directory must be absolute: ${homeDir}`);
@@ -233,6 +264,7 @@ function machineConfigAncestry(
   const homeAncestry: DirectoryAncestryEntry[] = [
     {
       name: "",
+      canonicalPath: normalizedHome,
       dev: homeStats.dev.toString(),
       ino: homeStats.ino.toString()
     }
@@ -240,7 +272,8 @@ function machineConfigAncestry(
   const response = runPinnedDirectoryWorker(normalizedHome, {
     operation: createKannaDirectory ? "ensure-directory" : "inspect-directory",
     ancestry: homeAncestry,
-    childName: ".kanna"
+    childName: ".kanna",
+    testSynchronization
   });
   if (response.missing) {
     return undefined;
@@ -248,7 +281,14 @@ function machineConfigAncestry(
   if (response.directory === undefined) {
     throw new Error(`Unable to pin machine-local release directory ${join(homeDir, ".kanna")}.`);
   }
-  return [...homeAncestry, { name: ".kanna", ...response.directory }];
+  return [
+    ...homeAncestry,
+    {
+      name: ".kanna",
+      canonicalPath: join(normalizedHome, ".kanna"),
+      ...response.directory
+    }
+  ];
 }
 
 function runPinnedDirectoryWorker(
@@ -318,6 +358,26 @@ function pinnedDirectoryWorker(): void {
   const sameIdentity = (left: DirectoryIdentity, right: DirectoryIdentity): boolean =>
     left.dev === right.dev && left.ino === right.ino;
   const ancestry = request.ancestry as DirectoryAncestryEntry[];
+  const synchronizeTest = (event: ReleaseEnvironmentTestSynchronization["event"]): void => {
+    const synchronization = request.testSynchronization;
+    if (
+      typeof synchronization !== "object" ||
+      synchronization === null ||
+      (synchronization as ReleaseEnvironmentTestSynchronization).event !== event
+    ) {
+      return;
+    }
+    const { readyPath, continuePath } = synchronization as ReleaseEnvironmentTestSynchronization;
+    fs.writeFileSync(readyPath, event, { encoding: "utf8", flag: "wx" });
+    const waitArray = new Int32Array(new SharedArrayBuffer(4));
+    const deadline = Date.now() + 10_000;
+    while (!fs.existsSync(continuePath)) {
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for release-environment test synchronization at ${event}.`);
+      }
+      Atomics.wait(waitArray, 0, 0, 10);
+    }
+  };
   const assertPinnedAncestry = (): void => {
     if (!Array.isArray(ancestry) || ancestry.length === 0) {
       throw new Error("Machine-local release configuration ancestry is missing.");
@@ -328,6 +388,9 @@ function pinnedDirectoryWorker(): void {
       const currentPath = upward || ".";
       if (!sameIdentity(identity(currentPath), ancestry[index])) {
         throw new Error("Machine-local release configuration ancestry changed during access.");
+      }
+      if (!sameIdentity(identity(ancestry[index].canonicalPath), ancestry[index])) {
+        throw new Error("Machine-local release configuration canonical path changed during access.");
       }
       if (index > 0) {
         const entryPath = `${upward}../${ancestry[index].name}`;
@@ -427,6 +490,7 @@ function pinnedDirectoryWorker(): void {
     const fileName = String(request.fileName);
     if (operation === "read") {
       const result = readReleaseFile(fileName, request.requireOwnerOnly === true);
+      synchronizeTest("after-release-file-read");
       assertPinnedAncestry();
       respond({ ok: true, ...result });
       return;
@@ -455,12 +519,20 @@ function pinnedDirectoryWorker(): void {
             fs.constants.O_NOFOLLOW,
           0o600
         );
+        synchronizeTest("after-temp-created");
         fs.writeFileSync(descriptor, source, "utf8");
         fs.fchmodSync(descriptor, 0o600);
         fs.fsyncSync(descriptor);
         fs.closeSync(descriptor);
         descriptor = undefined;
         assertPinnedAncestry();
+        const publishSource = readReleaseFile(fileName, false);
+        if (
+          (publishSource.missing && expectedSource !== undefined) ||
+          (!publishSource.missing && publishSource.source !== expectedSource)
+        ) {
+          throw new Error("Machine-local release environment changed while selectors were being written; retry setup.");
+        }
         fs.renameSync(tempName, fileName);
         assertPinnedAncestry();
       } finally {

@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   chmod,
   mkdir,
@@ -31,6 +33,89 @@ async function createFixture(): Promise<{
 async function writePrivateFile(path: string, contents: string): Promise<void> {
   await writeFile(path, contents, { mode: 0o600 });
   await chmod(path, 0o600);
+}
+
+interface SynchronizedMutation {
+  done: Promise<void>;
+  synchronization: {
+    event: "after-release-file-read" | "after-temp-created";
+    readyPath: string;
+    continuePath: string;
+  };
+}
+
+function startSynchronizedMutation(input: {
+  root: string;
+  event: "after-release-file-read" | "after-temp-created";
+  mutation:
+    | {
+        kind: "replace-home";
+        home: string;
+        detachedHome: string;
+        replacementSource: string;
+      }
+    | {
+        kind: "replace-file";
+        envPath: string;
+        replacementSource: string;
+      };
+}): SynchronizedMutation {
+  const readyPath = join(input.root, `worker-ready-${randomUUID()}`);
+  const continuePath = join(input.root, `worker-continue-${randomUUID()}`);
+  const child = spawn(
+    process.execPath,
+    [
+      "-e",
+      `const fs = require("node:fs");
+const path = require("node:path");
+const input = JSON.parse(process.argv[1]);
+const waitArray = new Int32Array(new SharedArrayBuffer(4));
+const deadline = Date.now() + 10000;
+while (!fs.existsSync(input.readyPath)) {
+  if (Date.now() >= deadline) throw new Error("Timed out waiting for worker synchronization");
+  Atomics.wait(waitArray, 0, 0, 10);
+}
+if (input.mutation.kind === "replace-home") {
+  fs.renameSync(input.mutation.home, input.mutation.detachedHome);
+  fs.mkdirSync(path.join(input.mutation.home, ".kanna"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    path.join(input.mutation.home, ".kanna", ".env.release.local"),
+    input.mutation.replacementSource,
+    { mode: 0o600 }
+  );
+} else {
+  const competingPath = input.mutation.envPath + ".competing";
+  fs.writeFileSync(competingPath, input.mutation.replacementSource, { mode: 0o600 });
+  fs.renameSync(competingPath, input.mutation.envPath);
+}
+fs.writeFileSync(input.continuePath, "continue", { flag: "wx" });`,
+      JSON.stringify({
+        readyPath,
+        continuePath,
+        mutation: input.mutation
+      })
+    ],
+    { stdio: ["ignore", "ignore", "pipe"] }
+  );
+  const done = new Promise<void>((resolve, reject) => {
+    let stderr = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`Synchronized mutation failed (${code ?? "signal"}): ${stderr.trim()}`));
+      }
+    });
+  });
+  return {
+    done,
+    synchronization: { event: input.event, readyPath, continuePath }
+  };
 }
 
 describe("release environment", () => {
@@ -74,6 +159,37 @@ describe("release environment", () => {
 
     expect(() => loadReleaseEnvironment({ homeDir: home, env: {} }))
       .toThrow(/configuration directory must not be a symbolic link/);
+  });
+
+  it("fails a load when the canonical home path is replaced after the file is read", async () => {
+    const { root, home, globalEnvPath } = await createFixture();
+    const detachedHome = join(root, "detached-home");
+    const originalSource = "RELEASE_DEFAULT=original\n";
+    const replacementSource = "RELEASE_DEFAULT=replacement\n";
+    await writePrivateFile(globalEnvPath, originalSource);
+    const mutation = startSynchronizedMutation({
+      root,
+      event: "after-release-file-read",
+      mutation: {
+        kind: "replace-home",
+        home,
+        detachedHome,
+        replacementSource
+      }
+    });
+
+    expect(() => loadReleaseEnvironment({
+      homeDir: home,
+      env: {},
+      testSynchronization: mutation.synchronization
+    })).toThrow(/canonical path changed during access/);
+    await mutation.done;
+
+    expect(await readFile(globalEnvPath, "utf8")).toBe(replacementSource);
+    expect(await readFile(
+      join(detachedHome, ".kanna", ".env.release.local"),
+      "utf8"
+    )).toBe(originalSource);
   });
 
   it("never reads a primary-checkout or worktree release file", async () => {
@@ -173,6 +289,64 @@ describe("release environment", () => {
     expect(await readFile(repositoryEnvPath, "utf8")).toBe(
       "RELEASE_DEFAULT=repository-owned\n"
     );
+  });
+
+  it("fails setup when the canonical home path is replaced after temp creation", async () => {
+    const { root, home, globalEnvPath } = await createFixture();
+    const detachedHome = join(root, "detached-home");
+    const originalSource = "RELEASE_DEFAULT=original\n";
+    const replacementSource = "RELEASE_DEFAULT=replacement\n";
+    await writePrivateFile(globalEnvPath, originalSource);
+    const mutation = startSynchronizedMutation({
+      root,
+      event: "after-temp-created",
+      mutation: {
+        kind: "replace-home",
+        home,
+        detachedHome,
+        replacementSource
+      }
+    });
+
+    expect(() => writeMachineNotarizationSelectors({
+      homeDir: home,
+      profile: "must-not-write",
+      keychainPath: "/Users/test/Library/Keychains/login.keychain-db",
+      testSynchronization: mutation.synchronization
+    })).toThrow(/canonical path changed during access/);
+    await mutation.done;
+
+    expect(await readFile(globalEnvPath, "utf8")).toBe(replacementSource);
+    expect(await readFile(
+      join(detachedHome, ".kanna", ".env.release.local"),
+      "utf8"
+    )).toBe(originalSource);
+  });
+
+  it("does not overwrite a competing edit made after temp creation", async () => {
+    const { root, home, globalEnvPath } = await createFixture();
+    const originalSource = "RELEASE_DEFAULT=original\n";
+    const competingSource = "RELEASE_DEFAULT=original\nCONCURRENT_EDIT=preserved\n";
+    await writePrivateFile(globalEnvPath, originalSource);
+    const mutation = startSynchronizedMutation({
+      root,
+      event: "after-temp-created",
+      mutation: {
+        kind: "replace-file",
+        envPath: globalEnvPath,
+        replacementSource: competingSource
+      }
+    });
+
+    expect(() => writeMachineNotarizationSelectors({
+      homeDir: home,
+      profile: "must-not-write",
+      keychainPath: "/Users/test/Library/Keychains/login.keychain-db",
+      testSynchronization: mutation.synchronization
+    })).toThrow(/changed while selectors were being written/);
+    await mutation.done;
+
+    expect(await readFile(globalEnvPath, "utf8")).toBe(competingSource);
   });
 
   it("strips every compiler-wrapper and cache control from file and process values", async () => {
