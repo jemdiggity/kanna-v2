@@ -6,6 +6,24 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::json;
 
 impl Db {
+    pub fn list_task_completion_runs(
+        &self,
+    ) -> Result<Vec<(String, bool, Option<String>)>, rusqlite::Error> {
+        let mut statement = self.conn.prepare(
+            "SELECT p.id, p.closed_at IS NULL,
+                        (SELECT s.id
+                         FROM stage_run s
+                         WHERE s.task_id = p.id
+                         ORDER BY s.rowid DESC
+                         LIMIT 1)
+                 FROM pipeline_item p",
+        )?;
+        let runs = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(runs)
+    }
+
     fn pipeline_item_stage(&self, id: &str) -> Result<Option<String>, rusqlite::Error> {
         self.conn
             .query_row(
@@ -402,7 +420,7 @@ impl Db {
                  WHERE p.repo_id = ?
                    AND p.closed_at IS NULL
                    AND sr.agent = ?
-                 ORDER BY sr.rowid DESC
+                 ORDER BY p.rowid DESC
                  LIMIT 1",
                 (repo_id, agent),
                 |row| {
@@ -425,16 +443,26 @@ impl Db {
         self.conn
             .query_row(
                 "SELECT p.id,
-                        COALESCE(NULLIF(sr.session_id, ''), p.id),
-                        COALESCE(protocol.merge_handoff_version, 0)
+                        COALESCE(NULLIF(sr.session_id, ''), NULLIF(protocol.session_id, ''), p.id),
+                        CASE
+                          WHEN sr.rowid IS NULL
+                            OR protocol.session_id IS NULL
+                            OR protocol.session_id = COALESCE(NULLIF(sr.session_id, ''), p.id)
+                          THEN COALESCE(protocol.merge_handoff_version, 0)
+                          ELSE 0
+                        END
                  FROM pipeline_item p
-                 JOIN stage_run sr ON sr.task_id = p.id
+                 LEFT JOIN stage_run sr
+                   ON sr.rowid = (SELECT candidate.rowid
+                                  FROM stage_run candidate
+                                  WHERE candidate.task_id = p.id
+                                  ORDER BY candidate.rowid DESC
+                                  LIMIT 1)
                  LEFT JOIN agent_signal_protocol protocol
                    ON protocol.task_id = p.id
-                  AND protocol.session_id = COALESCE(NULLIF(sr.session_id, ''), p.id)
                  WHERE p.repo_id = ?
                    AND p.closed_at IS NULL
-                   AND sr.agent = 'merge'
+                   AND (sr.agent = 'merge' OR protocol.task_id IS NOT NULL)
                  ORDER BY sr.rowid DESC
                  LIMIT 1",
                 [repo_id],
@@ -452,10 +480,16 @@ impl Db {
     pub fn is_open_agent_task(&self, task_id: &str, agent: &str) -> Result<bool, rusqlite::Error> {
         self.conn.query_row(
             "SELECT EXISTS(
-               SELECT 1
-               FROM pipeline_item p
-               JOIN stage_run sr ON sr.task_id = p.id
-               WHERE p.id = ? AND p.closed_at IS NULL AND sr.agent = ?
+               SELECT 1 FROM pipeline_item p
+               WHERE p.id = ?1 AND p.closed_at IS NULL
+                 AND (EXISTS (
+                        SELECT 1 FROM stage_run sr
+                        WHERE sr.task_id = p.id AND sr.agent = ?2
+                      )
+                      OR (?2 = 'merge' AND EXISTS (
+                        SELECT 1 FROM agent_signal_protocol protocol
+                        WHERE protocol.task_id = p.id
+                      )))
              )",
             (task_id, agent),
             |row| row.get(0),

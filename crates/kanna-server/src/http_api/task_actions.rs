@@ -707,6 +707,7 @@ pub(super) async fn close_task(
         )
         .await;
     }
+    crate::task_creator::remove_completion_contexts(&state.config.daemon_dir, &pipeline_item_id);
     // A direct close reaches no verdict, so it is reported as `closed` — never
     // as a failure the receiving agent would try to diagnose.
     notify_task_completion(
@@ -863,6 +864,7 @@ async fn close_task_after_final_stage(
             format!("db error: {}", e),
         )
     })?;
+    crate::task_creator::remove_completion_contexts(&state.config.daemon_dir, &task_id);
     if has_workspace_teardown {
         crate::task_creator::spawn_prepared_workspace_teardown_best_effort(
             daemon,
@@ -1513,7 +1515,7 @@ pub(super) async fn complete_stage(
         completion_run_id.as_deref(),
         completion_attempt_key.as_deref(),
     ) {
-        mark_completion_context_succeeded(&state.config.daemon_dir, run_id, attempt_key);
+        mark_completion_context_succeeded(&state.config.daemon_dir, &task_id, run_id, attempt_key);
     }
 
     if already_closed || replayed {
@@ -1589,21 +1591,40 @@ pub(super) async fn complete_stage(
     Ok(Json(response))
 }
 
-fn mark_completion_context_succeeded(daemon_dir: &str, run_id: &str, attempt_key: &str) {
-    let path = std::path::Path::new(daemon_dir)
+fn mark_completion_context_succeeded(
+    daemon_dir: &str,
+    task_id: &str,
+    run_id: &str,
+    attempt_key: &str,
+) {
+    let directory = std::path::Path::new(daemon_dir)
         .join("runtime")
-        .join("completion")
-        .join(format!("{run_id}.json"));
+        .join("completion");
+    let task_path = directory.join(format!("task-{task_id}.json"));
+    let legacy_path = directory.join(format!("{run_id}.json"));
+    let legacy_shared_path =
+        kanna_runtime_defaults::socket_path(&std::path::Path::new(daemon_dir).join("pipeline"))
+            .parent()
+            .unwrap_or(std::path::Path::new(daemon_dir))
+            .join("runtime")
+            .join("completion")
+            .join(format!("{run_id}.json"));
+    let path = if task_path.exists() {
+        task_path
+    } else if legacy_path.exists() {
+        legacy_path
+    } else {
+        legacy_shared_path
+    };
     if !path.exists() {
         return;
     }
-    if let Err(error) = kanna_tool_catalog::write_completion_context(
-        &path,
-        &kanna_tool_catalog::CompletionContext {
-            run_id: run_id.to_string(),
-            completed_attempt_key: Some(attempt_key.to_string()),
-        },
-    ) {
+    if let Err(error) = kanna_tool_catalog::mutate_completion_context(&path, |current| {
+        let mut context =
+            current.ok_or_else(|| format!("completion context {} disappeared", path.display()))?;
+        context.record_completed_attempt(run_id, attempt_key);
+        Ok(context)
+    }) {
         log::warn!("failed to persist completion retry binding for {run_id}: {error}");
     }
 }

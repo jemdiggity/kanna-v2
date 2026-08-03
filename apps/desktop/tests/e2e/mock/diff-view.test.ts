@@ -1840,7 +1840,7 @@ describe("diff view", () => {
       [task.id],
     ) as Array<{ actor: string; channel: string; reason: string }>;
     expect(overrides[0]).toMatchObject({
-      channel: "authenticated_desktop",
+      channel: "native_desktop_process",
       reason,
     });
 

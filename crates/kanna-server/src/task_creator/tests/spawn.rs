@@ -143,6 +143,94 @@ async fn spawn_prepared_task_records_running_stage_run_after_session_created() {
 }
 
 #[tokio::test]
+async fn lost_spawn_response_is_classified_after_ack_and_never_rolled_back_as_retryable() {
+    let config = test_config("spawn-response-loss");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Agent task",
+        Some("Agent task"),
+        "in progress",
+        "2026-08-04 00:00:00",
+    )
+    .unwrap();
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let spawn_socket_path = socket_path.clone();
+    let daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::SpawnAgent { .. }
+        ));
+        // Consume the command, then lose the response exactly as a daemon or
+        // transport crash after Spawn took effect would.
+    });
+    let prepared = PreparedTaskSpawn {
+        created_task: CreatedTask {
+            task_id: "task-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            title: "Agent task".to_string(),
+            prompt: "Do work".to_string(),
+            stage: "in progress".to_string(),
+            agent_type: "agent".to_string(),
+            worktree_path: "/tmp/worktree".to_string(),
+        },
+        branch: "task-1".to_string(),
+        session_id: "task-1".to_string(),
+        cwd: "/tmp/repo/.kanna-worktrees/task-1".to_string(),
+        env: HashMap::from([(
+            "KANNA_SOCKET_PATH".to_string(),
+            spawn_socket_path.to_string_lossy().to_string(),
+        )]),
+        stage_agent: Some("merge".to_string()),
+        agent_provider: "claude".to_string(),
+        model: None,
+        effort: None,
+        completion_transition: PipelineStageTransition::Manual,
+        provider_session_id: None,
+        recovery_snapshot: None,
+        session: PreparedSessionSpawn::Agent {
+            agent_provider: DaemonAgentProvider::Claude,
+            prompt: "Do work".to_string(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+            max_turns: None,
+            max_budget_usd: None,
+            system_prompt: "Kanna context".to_string(),
+            mcp_config_path: None,
+            executable: None,
+        },
+    };
+    let mut client = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error = spawn_prepared_task_for_api_recording_stage_run_detailed(
+        &config.db_path,
+        &mut client,
+        prepared,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        PreparedTaskDeliveryError::AfterAcknowledgement(_)
+    ));
+    daemon.await.unwrap();
+    assert!(db.list_stage_runs_for_task("task-1").unwrap().is_empty());
+    assert!(std::path::Path::new(&config.daemon_dir)
+        .join("runtime/completion/task-task-1.json")
+        .exists());
+}
+
+#[tokio::test]
 async fn prepared_agent_task_spawn_includes_task_specific_kanna_context() {
     let repo_root =
         init_git_repo_with_pipeline("agent-kanna-context", "qa", "verify", "auto", "claude");

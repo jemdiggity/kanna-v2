@@ -95,29 +95,9 @@ pub(crate) async fn run(
             eprintln!("Error: {e}");
             process::exit(1);
         });
-    mark_completion_succeeded(&request);
-
     println!(
         "{}",
         render_stage_complete_confirmation(&task_id, &status, &response.task_id)
-    );
-}
-
-fn mark_completion_succeeded(request: &CompleteStageRequest) {
-    let (Some(path), Some(attempt_key), Some(run_id)) = (
-        env::var_os(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV),
-        request.completion_attempt_key.as_ref(),
-        request.run_id.as_ref(),
-    ) else {
-        return;
-    };
-    let path = std::path::PathBuf::from(path);
-    let _ = kanna_tool_catalog::write_completion_context(
-        &path,
-        &kanna_tool_catalog::CompletionContext {
-            run_id: run_id.clone(),
-            completed_attempt_key: Some(attempt_key.clone()),
-        },
     );
 }
 
@@ -132,7 +112,12 @@ async fn bind_completion_request(
     if let Some(path) = env::var_os(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV) {
         let path = std::path::PathBuf::from(path);
         let context = kanna_tool_catalog::read_completion_context(&path)?;
-        request.run_id = Some(context.run_id);
+        request.run_id = Some(
+            context
+                .run_for_attempt(&attempt_key)
+                .unwrap_or(&context.run_id)
+                .to_string(),
+        );
         request.completion_attempt_key = Some(attempt_key);
     } else if let Ok(run_id) = env::var(kanna_tool_catalog::KANNA_STAGE_RUN_ID_ENV) {
         if !run_id.trim().is_empty() {

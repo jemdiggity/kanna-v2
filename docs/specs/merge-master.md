@@ -59,9 +59,12 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   `POST /v1/tasks/{task_id}/actions/override-approval` requires an authenticated
   native desktop process channel, paired device, or authenticated relay user
   and a reason, and records the available actor, channel, and time. The native
-  channel pins and rechecks process identity over a private Unix socket;
-  loopback/KSP traffic and reusable desktop secrets are not authority. Ordinary
-  advance requests and agent tools cannot claim it.
+  channel pins and rechecks process identity over a private Unix socket. A
+  replacement desktop can adopt a surviving server only after the old pinned
+  process is dead and the new peer has the same kernel-resolved executable;
+  loopback/KSP traffic and reusable desktop secrets are not authority. Native
+  terminal bytes use this channel, while merge-session KSP input is rejected.
+  Ordinary advance requests and agent tools cannot claim it.
 - **Gated merge handoff**:
   `POST /v1/tasks/{task_id}/actions/signal-merge-handoff` rechecks the gate and
   requires an active authorized approve post, binds the handoff to that task's
@@ -70,8 +73,10 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   one exists. Surviving pre-upgrade approve and merge sessions use a
   server-validated eligible-only legacy envelope; overrides require a
   protocol-v1 merge session. Capability, reservation, acknowledgement, and
-  durable delivery all bind to the same task/session; pre-acknowledgement
-  failures remain retryable and post-acknowledgement uncertainty is held.
+  durable delivery all bind to the same task/session under a repo-scoped lease.
+  Explicit daemon errors before submission acknowledgement remain retryable;
+  transport response loss after Input or Spawn begins is quarantined as
+  uncertain and never automatically duplicated.
 - Later: a verdict UI on tasks parked at `pr` (request-changes composer →
   request-revision; approve button → advance). Forge-blind — it fires
   stage actions. Line-anchored diff feedback is a follow-up (needs an

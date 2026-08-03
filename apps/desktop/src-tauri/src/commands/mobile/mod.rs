@@ -181,6 +181,7 @@ impl MobileServerManager {
                 server_environment(cloud_env),
             ) && server_config_matches_runtime(&config_path, &expected_desktop_id, cloud_env)
             {
+                adopt_native_desktop(&native_control_daemon_dir()).await?;
                 let mut state = self.inner.lock().await;
                 state.started = true;
                 state.status = status.state;
@@ -243,6 +244,15 @@ impl MobileServerManager {
                 return Err(err);
             }
         };
+        if let Err(error) = adopt_native_desktop(&native_control_daemon_dir()).await {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let mut state = self.inner.lock().await;
+            state.started = false;
+            state.status = "error".to_string();
+            *self.server_lock.lock().await = None;
+            return Err(error);
+        }
 
         {
             let mut state = self.inner.lock().await;
@@ -422,39 +432,107 @@ pub async fn override_approval_hold(
             .map(PathBuf::from)
             .unwrap_or_else(|_| crate::daemon_data_dir())
     };
-    let socket_path = kanna_runtime_defaults::human_control_socket_path(&daemon_dir);
-    let mut stream = UnixStream::connect(&socket_path)
-        .await
-        .map_err(|error| format!("failed to connect to native approval control: {error}"))?;
-    let mut request = serde_json::to_vec(&serde_json::json!({
+    let request = serde_json::json!({
         "action": "override_approval",
         "task_id": task_id,
         "reason": reason,
-    }))
-    .map_err(|error| format!("failed to encode approval override: {error}"))?;
-    request.push(b'\n');
-    stream
-        .write_all(&request)
-        .await
-        .map_err(|error| format!("failed to send approval override: {error}"))?;
-    let mut response = String::new();
-    BufReader::new(stream)
-        .read_line(&mut response)
-        .await
-        .map_err(|error| format!("failed to read approval override response: {error}"))?;
-    let response: serde_json::Value = serde_json::from_str(&response)
-        .map_err(|error| format!("failed to decode approval override response: {error}"))?;
-    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
-        return Err(response
-            .get("error")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("native approval override failed")
-            .to_string());
-    }
+    });
+    let response = send_native_control_request_with_adoption(&daemon_dir, &request).await?;
     response
         .get("body")
         .cloned()
         .ok_or_else(|| "native approval override returned no body".to_string())
+}
+
+/// Route genuine renderer terminal input through the process-authenticated
+/// native channel. KSP remains the output/resize transport, but an agent that
+/// can open a loopback websocket cannot impersonate operator input to merge.
+#[tauri::command]
+pub async fn native_terminal_input(
+    app: tauri::AppHandle,
+    task_id: String,
+    data_b64: String,
+) -> Result<(), String> {
+    let manager = app.state::<MobileServerManager>();
+    let daemon_dir = {
+        let state = manager.inner.lock().await;
+        if !state.started {
+            return Err("kanna-server is not running".to_string());
+        }
+        native_control_daemon_dir()
+    };
+    let request = serde_json::json!({
+        "action": "terminal_input",
+        "task_id": task_id,
+        "data_b64": data_b64,
+    });
+    send_native_control_request_with_adoption(&daemon_dir, &request)
+        .await
+        .map(|_| ())
+}
+
+fn native_control_daemon_dir() -> PathBuf {
+    std::env::var("KANNA_DAEMON_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| crate::daemon_data_dir())
+}
+
+async fn adopt_native_desktop(daemon_dir: &Path) -> Result<(), String> {
+    send_native_control_request(
+        daemon_dir,
+        &serde_json::json!({ "action": "adopt_desktop" }),
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn send_native_control_request_with_adoption(
+    daemon_dir: &Path,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    match send_native_control_request(daemon_dir, request).await {
+        Ok(response) => Ok(response),
+        Err(first_error) => {
+            adopt_native_desktop(daemon_dir)
+                .await
+                .map_err(|adopt_error| {
+                    format!("{first_error}; native desktop re-adoption failed: {adopt_error}")
+                })?;
+            send_native_control_request(daemon_dir, request).await
+        }
+    }
+}
+
+async fn send_native_control_request(
+    daemon_dir: &Path,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let socket_path = kanna_runtime_defaults::human_control_socket_path(daemon_dir);
+    let mut stream = UnixStream::connect(&socket_path)
+        .await
+        .map_err(|error| format!("failed to connect to native desktop control: {error}"))?;
+    let mut encoded = serde_json::to_vec(request)
+        .map_err(|error| format!("failed to encode native desktop request: {error}"))?;
+    encoded.push(b'\n');
+    stream
+        .write_all(&encoded)
+        .await
+        .map_err(|error| format!("failed to send native desktop request: {error}"))?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
+        .await
+        .map_err(|error| format!("failed to read native desktop response: {error}"))?;
+    let response: serde_json::Value = serde_json::from_str(&response)
+        .map_err(|error| format!("failed to decode native desktop response: {error}"))?;
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(response
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("native desktop request failed")
+            .to_string());
+    }
+    Ok(response)
 }
 
 fn resolved_db_path(state: &MobileServerState) -> Result<PathBuf, String> {
@@ -927,11 +1005,12 @@ mod tests {
     use super::cloud_env::relay_url;
     use super::config::{build_server_config, sidecar_sha256_config_line};
     use super::{
-        app_data_dir_for_server_config, current_server_version, default_desktop_name_from_sources,
-        desktop_id, escape_toml_string, generate_uuid_v4_from_reader, is_current_server_status,
-        resolved_db_path, server_base_url, server_stderr_log, stop_server_on_port,
-        stopped_snapshot, MobilePairingSession, MobileServerManager, MobileServerState,
-        MobileServerStatus, WritePathHealth,
+        adopt_native_desktop, app_data_dir_for_server_config, current_server_version,
+        default_desktop_name_from_sources, desktop_id, escape_toml_string,
+        generate_uuid_v4_from_reader, is_current_server_status, resolved_db_path,
+        send_native_control_request_with_adoption, server_base_url, server_stderr_log,
+        stop_server_on_port, stopped_snapshot, MobilePairingSession, MobileServerManager,
+        MobileServerState, MobileServerStatus, WritePathHealth,
     };
     use std::ffi::CString;
     use std::os::unix::fs::PermissionsExt;
@@ -1176,9 +1255,7 @@ mod tests {
             &db_path,
             &daemon_dir,
             &expected_desktop_id,
-            None,
             "__stale__",
-            "development",
             port,
         );
         let mut stale_server = start_test_kanna_server(&stale_config_path, port).await;
@@ -1307,9 +1384,7 @@ mod tests {
             &db_path,
             &daemon_dir,
             stale_desktop_id,
-            None,
             "__stale__",
-            "development",
             port,
         );
         let mut stale_server = start_test_kanna_server(&stale_config_path, port).await;
@@ -1410,6 +1485,130 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Subprocess fixture for `manager_adopts_server_after_original_desktop_exits`.
+    /// It makes the server's pinned parent a short-lived process with the same
+    /// executable path as the replacement test process.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore]
+    async fn desktop_restart_parent_fixture() {
+        let config_path = std::env::var_os("KANNA_RESTART_FIXTURE_CONFIG")
+            .map(PathBuf::from)
+            .expect("fixture config path");
+        let port = std::env::var("KANNA_RESTART_FIXTURE_PORT")
+            .expect("fixture port")
+            .parse::<u16>()
+            .expect("numeric fixture port");
+        let child = start_test_kanna_server(&config_path, port).await;
+        std::mem::forget(child);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn manager_adopts_server_after_original_desktop_exits() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let root = unique_test_root("adopt-after-desktop-restart");
+        let port = free_loopback_port();
+        let app_data_dir = root.join("app-data");
+        let db_path = root.join("kanna-test.db");
+        let daemon_dir = root.join("daemon");
+        configure_process_test_env(port, &db_path, &daemon_dir);
+        create_test_database(&db_path);
+        let manager = MobileServerManager::new(app_data_dir);
+        let config_path = {
+            let state = manager.inner.lock().await;
+            let config = build_server_config(&state).expect("current server config should build");
+            std::fs::create_dir_all(state.config_path.parent().unwrap()).unwrap();
+            std::fs::write(&state.config_path, config).unwrap();
+            state.config_path.clone()
+        };
+
+        let fixture_status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "commands::mobile::tests::desktop_restart_parent_fixture",
+            ])
+            .env("KANNA_RESTART_FIXTURE_CONFIG", &config_path)
+            .env("KANNA_RESTART_FIXTURE_PORT", port.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .expect("restart fixture should launch the surviving server");
+        assert!(fixture_status.success());
+
+        manager
+            .start()
+            .await
+            .expect("replacement desktop should adopt the surviving server");
+        let status = manager.snapshot().await.expect("adopted server status");
+        assert_eq!(status.version, current_server_version());
+        // A second authenticated control request proves the transfer was
+        // durable, rather than merely allowing the one adoption request.
+        adopt_native_desktop(&daemon_dir)
+            .await
+            .expect("adopted desktop should retain native authority");
+
+        stop_server_on_port(port)
+            .await
+            .expect("cleanup should stop server");
+        cleanup_process_test_env();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn visible_native_action_recovers_by_adopting_then_retrying() {
+        let daemon_dir = unique_test_root("native-action-readoption");
+        let socket_path = kanna_runtime_defaults::human_control_socket_path(&daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(async move {
+            let mut actions = Vec::new();
+            for attempt in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read_half, mut write_half) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(read_half)
+                    .read_line(&mut line)
+                    .await
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                actions.push(request["action"].as_str().unwrap().to_string());
+                if attempt == 0 {
+                    // A surviving server rejects the replacement desktop's
+                    // first action and closes without an authenticated reply.
+                    continue;
+                }
+                let body = if attempt == 2 {
+                    serde_json::json!({ "state": "overridden" })
+                } else {
+                    serde_json::Value::Null
+                };
+                let response = serde_json::json!({ "ok": true, "status": 200, "body": body });
+                write_half
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            actions
+        });
+        let request = serde_json::json!({
+            "action": "override_approval",
+            "task_id": "task-held",
+            "reason": "reviewed"
+        });
+        let response = send_native_control_request_with_adoption(&daemon_dir, &request)
+            .await
+            .unwrap();
+        assert_eq!(response["body"]["state"], "overridden");
+        assert_eq!(
+            server.await.unwrap(),
+            vec!["override_approval", "adopt_desktop", "override_approval"]
+        );
+        let _ = std::fs::remove_file(socket_path);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     #[allow(clippy::await_holding_lock)]
     async fn manager_replaces_current_server_with_stale_runtime_config_before_task_create() {
@@ -1440,9 +1639,7 @@ mod tests {
             &stale_db_path,
             &stale_daemon_dir,
             &expected_desktop_id,
-            None,
             current_server_version(),
-            "development",
             port,
         );
         let mut stale_server = start_test_kanna_server(&stale_config_path, port).await;
@@ -2290,21 +2487,15 @@ mod tests {
         db_path: &std::path::Path,
         daemon_dir: &std::path::Path,
         desktop_id: &str,
-        desktop_secret: Option<&str>,
         version: &str,
-        environment: &str,
         port: u16,
     ) {
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent).expect("server config directory should be created");
         }
-        let secret_line = desktop_secret
-            .map(|secret| format!("desktop_secret = \"{}\"\n", escape_toml_string(secret)))
-            .unwrap_or_default();
         let build_metadata = format!(
-            "version = \"{}\"\nenvironment = \"{}\"\n",
+            "version = \"{}\"\nenvironment = \"development\"\n",
             escape_toml_string(version),
-            escape_toml_string(environment),
         );
         let server_binary_sha256_line = sidecar_sha256_config_line("kanna-server")
             .map(|line| format!("{line}\n"))
@@ -2312,13 +2503,12 @@ mod tests {
         let pairing_store_path = config_path.with_file_name("pairings.json");
         let relay_url = relay_url();
         let config = format!(
-            "relay_url = \"{}\"\ndevice_token = \"test-token\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}desktop_id = \"{}\"\n{}desktop_name = \"Kanna Test\"\n{}lan_host = \"127.0.0.1\"\nlan_port = {}\ntransfer_port = {}\npairing_store_path = \"{}\"\n",
+            "relay_url = \"{}\"\ndevice_token = \"test-token\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}desktop_id = \"{}\"\ndesktop_name = \"Kanna Test\"\n{}lan_host = \"127.0.0.1\"\nlan_port = {}\ntransfer_port = {}\npairing_store_path = \"{}\"\n",
             escape_toml_string(&relay_url),
             escape_toml_string(&daemon_dir.to_string_lossy()),
             escape_toml_string(&db_path.to_string_lossy()),
             server_binary_sha256_line,
             escape_toml_string(desktop_id),
-            secret_line,
             build_metadata,
             port,
             port,

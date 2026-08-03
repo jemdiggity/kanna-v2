@@ -15,6 +15,7 @@ import { createTerminalRuntimeState } from "./terminalRuntimeState"
 import { createTerminalSessionLifecycle } from "./terminalSessionLifecycle"
 import type { SpawnOptions, TerminalOptions } from "./terminalTypes"
 import { debugLog } from "../utils/debugLog"
+import { invoke } from "../invoke"
 
 export type { SpawnOptions, TerminalOptions } from "./terminalTypes"
 
@@ -60,7 +61,9 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
 
   const inputQueue = createTerminalInputQueue({
     sessionId,
-    getTerminalStreamClient,
+    sendTerminalInput: async (taskId, dataB64) => {
+      await invoke("native_terminal_input", { taskId, dataB64 })
+    },
   })
   const clipboardBridge = createTerminalClipboardBridge({
     sessionId,

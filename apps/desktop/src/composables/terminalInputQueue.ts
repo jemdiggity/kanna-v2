@@ -27,7 +27,8 @@ export function base64ToBytes(dataB64: string): Uint8Array {
 
 export function createTerminalInputQueue(params: {
   sessionId: string
-  getTerminalStreamClient: () => Promise<StreamClient>
+  getTerminalStreamClient?: () => Promise<StreamClient>
+  sendTerminalInput?: (taskId: string, dataB64: string) => Promise<void>
 }): TerminalInputQueue {
   let pendingInputFlushTimer: ReturnType<typeof setTimeout> | null = null
   let pendingInputBytes: number[] = []
@@ -35,8 +36,16 @@ export function createTerminalInputQueue(params: {
   let inputWriteInFlight = false
 
   async function sendInputBytesNow(bytes: Uint8Array) {
+    const dataB64 = bytesToBase64(bytes)
+    if (params.sendTerminalInput) {
+      await params.sendTerminalInput(params.sessionId, dataB64)
+      return
+    }
+    if (!params.getTerminalStreamClient) {
+      throw new Error("terminal input has no configured transport")
+    }
     const client = await params.getTerminalStreamClient()
-    client.sendTermInput(params.sessionId, bytesToBase64(bytes))
+    client.sendTermInput(params.sessionId, dataB64)
   }
 
   function queueInputWrite(bytes: Uint8Array): Promise<void> {

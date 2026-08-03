@@ -22,4 +22,4 @@ kanna_complete_stage {"task_id": "$KANNA_TASK_ID", "status": "success", "summary
 
 or `"status": "failure"` with why approval is blocked.
 
-CLI fallback for signaling: `kanna-cli task signal-merge --task-id "$KANNA_TASK_ID" --branch "<head>" --target "<base>" --pr-url "<url>" --summary "<summary>"`. Complete with `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Approved PR and signaled merge master: <url>"`, or failure with why approval is blocked.
+CLI fallback for signaling: `kanna-cli task signal-merge --task-id "$KANNA_TASK_ID" --branch "<head>" --target "<base>" --pr-url "<url>" --summary "<summary>"`. Complete with `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status success --summary "Approved PR and signaled merge master: <url>"`, or `kanna-cli stage-complete --task-id "$KANNA_TASK_ID" --status failure --summary "Approval blocked: <reason>"` when approval is blocked.

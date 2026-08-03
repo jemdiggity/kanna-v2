@@ -236,7 +236,8 @@ impl Db {
                    SELECT protocol.merge_handoff_version
                    FROM agent_signal_protocol protocol
                    WHERE protocol.task_id = p.id
-                     AND protocol.session_id = COALESCE(NULLIF(sr.session_id, ''), p.id)
+                     AND (protocol.session_id IS NULL
+                          OR protocol.session_id = COALESCE(NULLIF(sr.session_id, ''), p.id))
                  ), 0) = (
                    SELECT authorization.delivery_protocol
                    FROM task_approval_authorization authorization

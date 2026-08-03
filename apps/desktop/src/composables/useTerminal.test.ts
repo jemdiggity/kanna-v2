@@ -3,6 +3,7 @@ import { mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "../appError";
 import { resetDaemonReadyObservationForTests } from "./daemonReadyState";
+import { bytesToBase64 } from "./terminalInputQueue";
 
 const markTaskSwitchFirstOutputMock = vi.hoisted(() => vi.fn());
 const forwardTerminalRuntimeStatusMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -428,7 +429,11 @@ describe("useTerminal", () => {
     expect(onData).toBeDefined();
     onData("x");
     await waitForQueuedInputFlush();
-    expect(sendTermInput).toHaveBeenCalledWith("session-1", btoa("x"));
+    expect(sendTermInput).not.toHaveBeenCalled();
+    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
+      taskId: "session-1",
+      dataB64: btoa("x"),
+    });
 
     const onResize = terminal.onResize.mock.calls[0]?.[0];
     expect(onResize).toBeDefined();
@@ -2142,9 +2147,9 @@ describe("useTerminal", () => {
 
     expect(dropEvent.preventDefault).toHaveBeenCalled();
     expect(dropEvent.stopPropagation).toHaveBeenCalled();
-    expect(invokeMock).toHaveBeenCalledWith("send_input", {
-      sessionId: "session-1",
-      data: Array.from(new TextEncoder().encode("'/tmp/task/screenshot one.png'")),
+    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
+      taskId: "session-1",
+      dataB64: bytesToBase64(new TextEncoder().encode("'/tmp/task/screenshot one.png'")),
     });
   });
 
@@ -2226,9 +2231,9 @@ describe("useTerminal", () => {
     terminalElement.dispatchEvent(dropEvent);
     await waitForQueuedInputFlush();
 
-    expect(invokeMock).toHaveBeenCalledWith("send_input", {
-      sessionId: "session-1",
-      data: Array.from(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
+    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
+      taskId: "session-1",
+      dataB64: bytesToBase64(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
     });
   });
 
@@ -2324,9 +2329,9 @@ describe("useTerminal", () => {
     });
     await waitForQueuedInputFlush();
 
-    expect(invokeMock).toHaveBeenCalledWith("send_input", {
-      sessionId: "session-1",
-      data: Array.from(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
+    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
+      taskId: "session-1",
+      dataB64: bytesToBase64(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
     });
   });
 
@@ -2423,9 +2428,9 @@ describe("useTerminal", () => {
     });
     await waitForQueuedInputFlush();
 
-    expect(invokeMock).toHaveBeenCalledWith("send_input", {
-      sessionId: "session-1",
-      data: Array.from(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
+    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
+      taskId: "session-1",
+      dataB64: bytesToBase64(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
     });
   });
 
@@ -2524,9 +2529,9 @@ describe("useTerminal", () => {
     await waitForQueuedInputFlush();
 
     expect(invokeMock).toHaveBeenCalledTimes(1);
-    expect(invokeMock).toHaveBeenCalledWith("send_input", {
-      sessionId: "session-1",
-      data: Array.from(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
+    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
+      taskId: "session-1",
+      dataB64: bytesToBase64(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
     });
   });
 
@@ -2612,9 +2617,9 @@ describe("useTerminal", () => {
     });
     await waitForQueuedInputFlush();
 
-    expect(invokeMock).toHaveBeenCalledWith("send_input", {
-      sessionId: "session-1",
-      data: Array.from(new TextEncoder().encode("\u001b[200~'/tmp/task/ChatGPT Image Feb 21, 2026, 12_59_00 AM.png'\u001b[201~")),
+    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
+      taskId: "session-1",
+      dataB64: bytesToBase64(new TextEncoder().encode("\u001b[200~'/tmp/task/ChatGPT Image Feb 21, 2026, 12_59_00 AM.png'\u001b[201~")),
     });
   });
 
@@ -2789,9 +2794,9 @@ describe("useTerminal", () => {
 
     expect(allowed).toBe(false);
     expect(keyboardEvent.preventDefault).toHaveBeenCalled();
-    expect(invokeMock).toHaveBeenCalledWith("send_input", {
-      sessionId: "session-1",
-      data: Array.from(new TextEncoder().encode("\x1b[13;2u")),
+    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
+      taskId: "session-1",
+      dataB64: bytesToBase64(new TextEncoder().encode("\x1b[13;2u")),
     });
   });
 
@@ -2831,17 +2836,17 @@ describe("useTerminal", () => {
     onData("b");
     onData("c");
 
-    expect(invokeMock).not.toHaveBeenCalledWith("send_input", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("native_terminal_input", expect.anything());
 
     await waitForQueuedInputFlush();
 
-    const sendInputCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "send_input");
+    const sendInputCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "native_terminal_input");
     expect(sendInputCalls).toHaveLength(1);
     expect(sendInputCalls[0]).toEqual([
-      "send_input",
+      "native_terminal_input",
       {
-        sessionId: "session-1",
-        data: Array.from(new TextEncoder().encode("abc")),
+        taskId: "session-1",
+        dataB64: bytesToBase64(new TextEncoder().encode("abc")),
       },
     ]);
   });
@@ -2909,14 +2914,14 @@ describe("useTerminal", () => {
     const kittyRequest = new TextEncoder().encode("\u001b]5522;type=read;aW1hZ2UvcG5n\u0007");
     terminalStreamHandlers.get("session-1")?.onOutput(btoa(String.fromCharCode(...kittyRequest)));
 
-    for (let attempt = 0; attempt < 10 && !invokeMock.mock.calls.some(([cmd]) => cmd === "send_input"); attempt += 1) {
+    for (let attempt = 0; attempt < 10 && !invokeMock.mock.calls.some(([cmd]) => cmd === "native_terminal_input"); attempt += 1) {
       await Promise.resolve();
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
 
-    expect(invokeMock).toHaveBeenCalledWith("send_input", expect.objectContaining({
-      sessionId: "session-1",
-      data: expect.any(Array),
+    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", expect.objectContaining({
+      taskId: "session-1",
+      dataB64: expect.any(String),
     }));
   });
 

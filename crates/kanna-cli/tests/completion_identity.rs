@@ -33,10 +33,24 @@ fn read_json_request(stream: &mut TcpStream) -> serde_json::Value {
 }
 
 #[test]
-fn stage_complete_retry_reuses_the_fixed_spawned_run_after_a_lost_response() {
+fn lost_response_retry_cannot_complete_or_restore_a_server_rebound_post_context() {
+    assert_lost_response_retry(false);
+}
+
+#[test]
+fn direct_stage_complete_retry_cannot_complete_or_restore_a_server_rebound_post_context() {
+    assert_lost_response_retry(true);
+}
+
+fn assert_lost_response_retry(direct_stage_complete: bool) {
     let root = std::env::temp_dir().join(format!(
-        "kanna-cli-completion-{}-{}",
+        "kanna-cli-completion-{}-{}-{}",
         std::process::id(),
+        if direct_stage_complete {
+            "direct"
+        } else {
+            "tool"
+        },
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -46,18 +60,24 @@ fn stage_complete_retry_reuses_the_fixed_spawned_run_after_a_lost_response() {
     let context_path = root.join("completion.json");
     kanna_tool_catalog::write_completion_context(
         &context_path,
-        &kanna_tool_catalog::CompletionContext {
-            run_id: "run-original".to_string(),
-            completed_attempt_key: None,
-        },
+        &kanna_tool_catalog::CompletionContext::new("run-original"),
     )
     .unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
+    let server_context_path = context_path.clone();
     let server = std::thread::spawn(move || {
         let (mut first, _) = listener.accept().unwrap();
         let first_body = read_json_request(&mut first);
+        let attempt_key = first_body["completionAttemptKey"].as_str().unwrap();
+        kanna_tool_catalog::mutate_completion_context(&server_context_path, |current| {
+            let mut context = current.unwrap();
+            context.record_completed_attempt("run-original", attempt_key);
+            context.run_id = "run-post".to_string();
+            Ok(context)
+        })
+        .unwrap();
         drop(first);
         let (mut second, _) = listener.accept().unwrap();
         let second_body = read_json_request(&mut second);
@@ -76,8 +96,21 @@ fn stage_complete_retry_reuses_the_fixed_spawned_run_after_a_lost_response() {
     });
 
     let run = || {
-        Command::new(env!("CARGO_BIN_EXE_kanna-cli"))
-            .args([
+        let mut command = Command::new(env!("CARGO_BIN_EXE_kanna-cli"));
+        if direct_stage_complete {
+            command.args([
+                "stage-complete",
+                "--task-id",
+                "task-1",
+                "--status",
+                "success",
+                "--summary",
+                "completed once",
+                "--server-url",
+                &format!("http://{address}"),
+            ]);
+        } else {
+            command.args([
                 "tool",
                 "call",
                 "kanna_complete_stage",
@@ -85,7 +118,9 @@ fn stage_complete_retry_reuses_the_fixed_spawned_run_after_a_lost_response() {
                 r#"{"task_id":"task-1","status":"success","summary":"completed once"}"#,
                 "--server-url",
                 &format!("http://{address}"),
-            ])
+            ]);
+        }
+        command
             .env(
                 kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV,
                 &context_path,
@@ -110,7 +145,10 @@ fn stage_complete_retry_reuses_the_fixed_spawned_run_after_a_lost_response() {
         second_body["completionAttemptKey"]
     );
     let context = kanna_tool_catalog::read_completion_context(&context_path).unwrap();
-    assert_eq!(context.run_id, "run-original");
-    assert!(context.completed_attempt_key.is_some());
+    assert_eq!(context.run_id, "run-post");
+    assert_eq!(
+        context.run_for_attempt(first_body["completionAttemptKey"].as_str().unwrap()),
+        Some("run-original")
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

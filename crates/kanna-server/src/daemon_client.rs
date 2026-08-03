@@ -34,6 +34,10 @@ pub struct DaemonClientWriter {
 }
 
 impl DaemonClient {
+    pub(crate) fn daemon_dir(&self) -> &str {
+        &self.daemon_dir
+    }
+
     pub async fn connect(daemon_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let socket_path = kanna_runtime_defaults::socket_path(Path::new(daemon_dir));
         let stream = UnixStream::connect(&socket_path).await.map_err(|e| {

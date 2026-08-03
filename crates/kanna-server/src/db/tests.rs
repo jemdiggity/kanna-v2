@@ -214,6 +214,146 @@ fn open_creates_and_migrates_fresh_profile_database() {
 }
 
 #[test]
+fn migration_046_upgrades_real_schema_045_atomically_and_reopens_idempotently() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("create fixture");
+    db.insert_test_repo("repo-045", "Schema 045").expect("repo");
+    for (task_id, agent) in [("approval-045", "approve"), ("merge-045", "merge")] {
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-045",
+            task_id,
+            Some(task_id),
+            "approve",
+            "2026-08-04 00:00:00",
+        )
+        .expect("task");
+        db.conn
+            .execute(
+                "INSERT INTO stage_run
+                   (id, task_id, stage, kind, agent, status, session_id, completion_bound)
+                 VALUES (?, ?, 'approve', 'post', ?, 'running', ?, 1)",
+                (
+                    format!("run-{task_id}"),
+                    task_id,
+                    agent,
+                    format!("session-{task_id}"),
+                ),
+            )
+            .expect("legacy run");
+    }
+    let approval_json = serde_json::json!({
+        "state": "eligible",
+        "holds": [],
+    })
+    .to_string();
+    db.conn
+        .execute(
+            "INSERT INTO task_approval_authorization
+               (run_id, task_id, repo_id, branch, target, approval_json)
+             VALUES ('run-approval-045', 'approval-045', 'repo-045',
+                     'task-approval-045', 'main', ?)",
+            [approval_json],
+        )
+        .expect("legacy authorization");
+    db.conn
+        .execute(
+            "INSERT INTO agent_signal_protocol
+               (task_id, session_id, merge_handoff_version)
+             VALUES ('merge-045', 'session-merge-045', 1)",
+            [],
+        )
+        .expect("legacy protocol");
+
+    // Rebuild the exact schema-045 column surface. Fresh-schema parity already
+    // contains 046 columns, so a migration test must remove them explicitly.
+    db.conn
+        .execute_batch(
+            "ALTER TABLE stage_run DROP COLUMN completion_bound;
+             ALTER TABLE task_approval_authorization DROP COLUMN delivery_task_id;
+             ALTER TABLE task_approval_authorization DROP COLUMN delivery_session_id;
+             ALTER TABLE task_approval_authorization DROP COLUMN delivery_protocol;
+             ALTER TABLE task_approval_authorization DROP COLUMN delivery_reserved_at;
+             ALTER TABLE agent_signal_protocol DROP COLUMN session_id;
+             DELETE FROM schema_migrations
+             WHERE id = '046_completion_and_merge_delivery_binding';
+             ALTER TABLE agent_signal_protocol RENAME TO agent_signal_protocol_missing;",
+        )
+        .expect("construct schema-045 fixture with a forced terminal migration failure");
+    drop(db);
+
+    let failed = Db::open_migrated(path.to_str().expect("utf8 path"));
+    assert!(
+        failed.is_err(),
+        "missing final table must fail migration 046"
+    );
+    let db = Db::open(path.to_str().expect("utf8 path")).expect("inspect rollback");
+    let columns = |table: &str| {
+        let mut statement = db
+            .conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .expect("prepare columns");
+        statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect columns")
+    };
+    assert!(!columns("stage_run").contains(&"completion_bound".to_string()));
+    assert!(!columns("task_approval_authorization").contains(&"delivery_task_id".to_string()));
+    let migration_count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations
+             WHERE id = '046_completion_and_merge_delivery_binding'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("migration rollback record");
+    assert_eq!(migration_count, 0, "failed migration must be atomic");
+    db.conn
+        .execute_batch("ALTER TABLE agent_signal_protocol_missing RENAME TO agent_signal_protocol;")
+        .expect("restore schema-045 protocol table");
+    drop(db);
+
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("migrate schema 045");
+    assert!(!db
+        .stage_run_completion_bound("run-approval-045")
+        .expect("completion binding backfill"));
+    let authorization = db
+        .approval_authorization("approval-045", "run-approval-045")
+        .expect("authorization query")
+        .expect("authorization preserved");
+    assert_eq!(authorization.delivered_at, None);
+    assert_eq!(
+        db.find_open_merge_recipient("repo-045")
+            .expect("legacy merge recipient")
+            .expect("merge recipient exists"),
+        super::MergeSignalRecipient {
+            task_id: "merge-045".into(),
+            session_id: "session-merge-045".into(),
+            protocol: 1,
+        },
+        "nullable migrated protocol session must fall back to the run session"
+    );
+    drop(db);
+
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("idempotent reopen");
+    let migration_count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations
+             WHERE id = '046_completion_and_merge_delivery_binding'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("migration count");
+    assert_eq!(migration_count, 1);
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn test_schema_keeps_parentage_index_in_parity_with_migrations() {
     let path = Db::test_db_path("parentage-index-parity");
     let db = Db::open_for_tests(&path).expect("open test db");
@@ -2771,6 +2911,34 @@ fn merge_delivery_is_bound_to_one_recipient_and_failure_before_ack_is_retryable(
             "task-merge",
             "merge-session-new",
         )
+        .unwrap());
+}
+
+#[test]
+fn prepared_merge_singleton_is_unique_before_spawn_acknowledgement() {
+    let db = Db::open_for_tests(&Db::test_db_path("prepared-merge-singleton")).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-merge-prepared",
+        "repo-1",
+        "Merge queue",
+        Some("Merge"),
+        "in progress",
+        "2026-08-04 00:00:00",
+    )
+    .unwrap();
+    // Protocol negotiation is persisted during preparation, before Spawn is
+    // submitted. A lost Spawn response must not make this task invisible and
+    // allow a concurrent approval to prepare a second merge singleton.
+    db.set_merge_handoff_protocol("task-merge-prepared", "merge-session-prepared", 1)
+        .unwrap();
+
+    let recipient = db.find_open_merge_recipient("repo-1").unwrap().unwrap();
+    assert_eq!(recipient.task_id, "task-merge-prepared");
+    assert_eq!(recipient.session_id, "merge-session-prepared");
+    assert_eq!(recipient.protocol, 1);
+    assert!(db
+        .is_open_agent_task("task-merge-prepared", "merge")
         .unwrap());
 }
 

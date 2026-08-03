@@ -80,7 +80,7 @@ pub async fn serve(state: std::sync::Arc<AppState>) -> Result<(), String> {
 }
 pub(crate) use task_input::{
     handle_task_terminal_state, mark_task_session_interrupted, restore_task_run_for_live_session,
-    try_submit_task_input, TaskInputError,
+    send_raw_session_input, try_submit_task_input, TaskInputError,
 };
 
 pub(crate) async fn record_approval_override(

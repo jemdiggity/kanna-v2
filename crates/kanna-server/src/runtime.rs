@@ -16,6 +16,7 @@ pub(crate) async fn run_server_services(
     db: db::Db,
     http_state: Arc<http_api::AppState>,
 ) {
+    crate::task_creator::prune_completion_contexts_on_startup(&config.daemon_dir, &db);
     if config.relay_url.trim().is_empty() {
         tokio::select! {
             result = http_api::serve(Arc::clone(&http_state)) => match result {

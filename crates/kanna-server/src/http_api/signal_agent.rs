@@ -1,6 +1,6 @@
 use super::lan_trust::PrivilegedTaskAccess;
 use super::state::{db_write_error, AppState};
-use super::task_input::submit_task_input;
+use super::task_input::{submit_task_input, try_submit_task_input, TaskInputError};
 use crate::config::Config;
 use crate::db::Db;
 use crate::task_creator::{PrepareTaskError, SingletonAgentOverrides};
@@ -202,6 +202,14 @@ async fn signal_merge_handoff_impl(
             "merge candidate does not match the task's authorized branch, target, and PR".into(),
         ));
     }
+    // One repo-scoped lease owns singleton selection/creation, the complete
+    // text+Enter envelope, and durable delivery acknowledgement. Per-source
+    // task leases cannot prevent two approvals from interleaving one merge PTY
+    // or preparing two merge singletons for the same repository.
+    let merge_delivery_key = format!("merge-delivery:{}", authorization.repo_id);
+    let _merge_delivery = state
+        .begin_requested_task_mutation(&merge_delivery_key)
+        .await;
     if authorization.delivered_at.is_some() {
         return Err((
             axum::http::StatusCode::CONFLICT,
@@ -412,11 +420,27 @@ async fn deliver_to_merge_recipient(
                     ),
                     acknowledged: false,
                 })?;
-            submit_task_input(&mut daemon, &identity.session_id, &message)
+            try_submit_task_input(&mut daemon, &identity.session_id, &message)
                 .await
-                .map_err(|response| MergeDeliveryFailure {
-                    response,
-                    acknowledged: false,
+                .map_err(|error| match error {
+                    TaskInputError::SessionNotFound => MergeDeliveryFailure {
+                        response: (
+                            axum::http::StatusCode::NOT_FOUND,
+                            format!("session not found: {}", identity.session_id),
+                        ),
+                        acknowledged: false,
+                    },
+                    TaskInputError::Other(message) => MergeDeliveryFailure {
+                        response: (axum::http::StatusCode::INTERNAL_SERVER_ERROR, message),
+                        acknowledged: false,
+                    },
+                    TaskInputError::Uncertain(message) => MergeDeliveryFailure {
+                        response: (
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            format!("merge handoff delivery is uncertain: {message}"),
+                        ),
+                        acknowledged: true,
+                    },
                 })?;
             Ok(SignalAgentResponse {
                 task_id: identity.task_id,

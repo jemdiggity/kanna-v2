@@ -249,6 +249,438 @@ async fn task_input_cannot_impersonate_operator_authority_for_merge_singleton() 
     assert!(String::from_utf8_lossy(&body).contains("not operator authority"));
 }
 
+fn seed_approvable_source(db: &Db, task_id: &str, run_id: &str, pr_number: i64) {
+    db.insert_test_pipeline_item(
+        task_id,
+        "repo-1",
+        task_id,
+        Some(task_id),
+        "pr",
+        "2026-08-04T00:00:00Z",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(task_id, task_id, "default", Some("main"), "claude")
+        .unwrap();
+    db.update_pipeline_item_pr(
+        task_id,
+        Some(pr_number),
+        &format!("https://github.com/acme/repo/pull/{pr_number}"),
+    )
+    .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: run_id,
+        task_id,
+        stage: "approve",
+        kind: "post",
+        agent: Some("approve"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some(task_id),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    db.record_approval_authorization(task_id, run_id).unwrap();
+}
+
+fn merge_test_config(unique: &str, daemon_dir: &Path) -> Config {
+    Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(unique),
+        kanna_cli_path: None,
+        desktop_id: "desktop-concurrency".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+    }
+}
+
+#[tokio::test]
+async fn concurrent_approvals_serialize_complete_envelopes_into_one_merge_singleton() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!("merge-concurrency-{}", unique_test_suffix());
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let daemon_server = tokio::spawn(async move {
+        let mut handlers = Vec::new();
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await.unwrap();
+            let observed_tx = observed_tx.clone();
+            handlers.push(tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                for _ in 0..2 {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).await.unwrap();
+                    let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                    match command {
+                        DaemonCommand::Input { session_id, data } => {
+                            assert_eq!(session_id, "merge-session");
+                            observed_tx.send(data).unwrap();
+                        }
+                        other => panic!("expected merge Input, got {other:?}"),
+                    }
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
+                                .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
+            }));
+        }
+        for handler in handlers {
+            handler.await.unwrap();
+        }
+    });
+
+    let config = merge_test_config(&unique, &daemon_dir);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    seed_approvable_source(&db, "task-a", "approve-a", 41);
+    seed_approvable_source(&db, "task-b", "approve-b", 42);
+    db.insert_test_pipeline_item(
+        "task-merge",
+        "repo-1",
+        "Merge master",
+        Some("Merge Master"),
+        "in progress",
+        "2026-08-04T00:00:01Z",
+    )
+    .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-merge",
+        task_id: "task-merge",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("merge"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("merge-session"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    db.set_merge_handoff_protocol("task-merge", "merge-session", 1)
+        .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let request = |task_id: &'static str, pr_number: i64| {
+        app.clone().oneshot(
+            Request::post(format!("/v1/tasks/{task_id}/actions/signal-merge-handoff"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "branch": task_id,
+                        "target": "main",
+                        "prUrl": format!("https://github.com/acme/repo/pull/{pr_number}"),
+                        "summary": format!("Approve {task_id}")
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+    };
+    let (response_a, response_b) = tokio::join!(request("task-a", 41), request("task-b", 42));
+    assert_eq!(response_a.unwrap().status(), StatusCode::OK);
+    assert_eq!(response_b.unwrap().status(), StatusCode::OK);
+    daemon_server.await.unwrap();
+    let mut writes = Vec::new();
+    while let Ok(write) = observed_rx.try_recv() {
+        writes.push(write);
+    }
+    assert_eq!(writes.len(), 4);
+    assert_ne!(writes[0], vec![b'\r']);
+    assert_eq!(writes[1], vec![b'\r']);
+    assert_ne!(writes[2], vec![b'\r']);
+    assert_eq!(writes[3], vec![b'\r']);
+    let first = String::from_utf8(writes[0].clone()).unwrap();
+    let second = String::from_utf8(writes[2].clone()).unwrap();
+    assert!(first.contains("task-a") || first.contains("task-b"));
+    assert!(second.contains("task-a") || second.contains("task-b"));
+    assert_ne!(first.contains("task-a"), second.contains("task-a"));
+
+    let db = Db::open(&config.db_path).unwrap();
+    assert_eq!(
+        db.find_open_merge_recipient("repo-1")
+            .unwrap()
+            .unwrap()
+            .task_id,
+        "task-merge"
+    );
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+#[tokio::test]
+async fn concurrent_approvals_prepare_exactly_one_merge_singleton_when_absent() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!("merge-create-concurrency-{}", unique_test_suffix());
+    let repo_root = std::env::temp_dir().join(format!("{unique}-repo"));
+    init_test_git_repo(&repo_root);
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (spawn_stream, _) = listener.accept().await.unwrap();
+        let (spawn_read, mut spawn_write) = spawn_stream.into_split();
+        let mut spawn_reader = BufReader::new(spawn_read);
+        let mut line = String::new();
+        spawn_reader.read_line(&mut line).await.unwrap();
+        let spawn: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let session_id = match spawn {
+            DaemonCommand::Spawn {
+                session_id, args, ..
+            } => {
+                assert!(args.iter().any(|arg| arg.contains("KANNA_MERGE_HANDOFF")));
+                session_id
+            }
+            DaemonCommand::SpawnAgent { session_id, params } => {
+                assert!(params.prompt.contains("KANNA_MERGE_HANDOFF"));
+                session_id
+            }
+            other => panic!("expected one merge Spawn, got {other:?}"),
+        };
+        spawn_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionCreated {
+                        session_id: session_id.clone(),
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let (input_stream, _) = listener.accept().await.unwrap();
+        let (input_read, mut input_write) = input_stream.into_split();
+        let mut input_reader = BufReader::new(input_read);
+        for expected_enter in [false, true] {
+            let mut line = String::new();
+            input_reader.read_line(&mut line).await.unwrap();
+            match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
+                DaemonCommand::Input {
+                    session_id: input_session,
+                    data,
+                } => {
+                    assert_eq!(input_session, session_id);
+                    assert_eq!(data == vec![b'\r'], expected_enter);
+                }
+                other => panic!("expected second approval Input, got {other:?}"),
+            }
+            input_write
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+
+    let config = merge_test_config(&unique, &daemon_dir);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    seed_approvable_source(&db, "task-a", "approve-a", 61);
+    seed_approvable_source(&db, "task-b", "approve-b", 62);
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let request = |task_id: &'static str, pr_number: i64| {
+        app.clone().oneshot(
+            Request::post(format!("/v1/tasks/{task_id}/actions/signal-merge-handoff"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "branch": task_id,
+                        "target": "main",
+                        "prUrl": format!("https://github.com/acme/repo/pull/{pr_number}"),
+                        "summary": format!("Approve {task_id}")
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+    };
+    let (response_a, response_b) = tokio::join!(request("task-a", 61), request("task-b", 62));
+    let response_a = response_a.unwrap();
+    let response_b = response_b.unwrap();
+    assert_eq!(response_a.status(), StatusCode::OK);
+    assert_eq!(response_b.status(), StatusCode::OK);
+    let body_a: serde_json::Value = from_slice(
+        &axum::body::to_bytes(response_a.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let body_b: serde_json::Value = from_slice(
+        &axum::body::to_bytes(response_b.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_ne!(body_a["created"], body_b["created"]);
+    daemon_server.await.unwrap();
+
+    let db = Db::open(&config.db_path).unwrap();
+    let merge_tasks: i64 = db
+        .connection_for_e2e_tests()
+        .query_row(
+            "SELECT COUNT(DISTINCT p.id)
+             FROM pipeline_item p
+             JOIN stage_run sr ON sr.task_id = p.id
+             WHERE p.repo_id = 'repo-1' AND p.closed_at IS NULL AND sr.agent = 'merge'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(merge_tasks, 1);
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_dir_all(repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+#[tokio::test]
+async fn lost_merge_input_response_is_quarantined_and_never_retried() {
+    use kanna_daemon::protocol::Command as DaemonCommand;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!("merge-response-loss-{}", unique_test_suffix());
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+            DaemonCommand::Input { .. }
+        ));
+        // Drop the transport after consuming the command but before its Ok.
+    });
+
+    let config = merge_test_config(&unique, &daemon_dir);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    seed_approvable_source(&db, "task-source", "approve-source", 51);
+    db.insert_test_pipeline_item(
+        "task-merge",
+        "repo-1",
+        "Merge master",
+        Some("Merge Master"),
+        "in progress",
+        "2026-08-04T00:00:01Z",
+    )
+    .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-merge",
+        task_id: "task-merge",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("merge"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("merge-session"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    db.set_merge_handoff_protocol("task-merge", "merge-session", 1)
+        .unwrap();
+    drop(db);
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let body = serde_json::json!({
+        "branch": "task-source",
+        "target": "main",
+        "prUrl": "https://github.com/acme/repo/pull/51",
+        "summary": "Approve source"
+    });
+    let signal = || {
+        app.clone().oneshot(
+            Request::post("/v1/tasks/task-source/actions/signal-merge-handoff")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+    };
+    let first = signal().await.unwrap();
+    assert_eq!(first.status(), StatusCode::SERVICE_UNAVAILABLE);
+    daemon_server.await.unwrap();
+    let second = signal().await.unwrap();
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+    let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&second_body).contains("uncertain"));
+    let db = Db::open(&config.db_path).unwrap();
+    let reserved_task: Option<String> = db
+        .connection_for_e2e_tests()
+        .query_row(
+            "SELECT delivery_task_id FROM task_approval_authorization WHERE run_id = ?",
+            ["approve-source"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reserved_task.as_deref(), Some("task-merge"));
+    let authorization = db
+        .approval_authorization("task-source", "approve-source")
+        .unwrap()
+        .unwrap();
+    assert!(authorization.delivered_at.is_none());
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
 #[tokio::test]
 async fn surviving_legacy_approve_and_merge_sessions_use_the_server_gate() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};

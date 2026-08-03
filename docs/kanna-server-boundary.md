@@ -289,19 +289,27 @@ hold is newer than an existing override and requires a new decision.
 
 The generic repo-agent signal endpoint and the task-input API reject
 natural-language agent requests and caller-built `KANNA_MERGE_HANDOFF`
-messages for the `merge` singleton. They
-accepts only the exact former automated `MERGE ... [TASK ...]` shape from a
+messages for the `merge` singleton. The signal endpoint accepts only the exact
+former automated `MERGE ... [TASK ...]` shape from a
 surviving pre-upgrade approve session, parses its task id and candidate, and
 routes it through the same server-owned gate as the dedicated endpoint. Human
 conversation is trusted only when it arrives from the native operator terminal
-channel, whose provenance is separate from task-input/MCP/KSP traffic; new
-task-bound pipeline handoffs use the dedicated route.
+channel, whose provenance is separate from task-input/MCP/KSP traffic. KSP
+terminal input is rejected for merge sessions even on loopback; the desktop
+routes terminal bytes through the native control socket instead. New task-bound
+pipeline handoffs use the dedicated route.
 
 `POST /v1/tasks/{task_id}/actions/override-approval` is deliberately absent
 from the MCP/tool catalog and agent CLI. It requires a non-empty reason. The
 native desktop uses a private Unix control socket whose peer PID, process start
 time, and executable path are pinned and rechecked by the server; the reusable
 desktop bearer secret and loopback/KSP tunnel are never override authority.
+When the desktop adopts a healthy surviving server, it must first send an
+explicit `adopt_desktop` request on that socket. The server transfers authority
+only after the old pinned PID/start identity is no longer live and the new peer
+has the same kernel-resolved executable path; there is no reusable handoff
+secret. Override and native terminal requests re-attempt that adoption once so
+a same-version desktop restart has an in-product recovery path.
 Paired LAN devices require their device credential and the explicit
 human-action marker. An authenticated relay invocation carries the verified
 Firebase user id. The server records that actual identity and channel rather
@@ -332,16 +340,25 @@ Natural-language agent calls to the generic merge signal or task-input routes
 are rejected. Delivery is reserved to that exact task/session/protocol,
 recorded only after the daemon acknowledges it, and quarantined rather than
 duplicated if the recipient changes after acknowledgement. Failures before
-acknowledgement release the reservation for retry.
+acknowledgement release the reservation for retry. A repo-scoped delivery lease
+serializes singleton selection, the complete text-plus-Enter envelope, and the
+durable acknowledgement across approvals. Once daemon submission begins, a
+lost Input or Spawn response is uncertain acknowledgement: the reservation and
+prepared singleton remain quarantined and are never treated as safely
+retryable.
 
 Stage completion is bound to the run id fixed in the spawned agent's protected
-environment and completion-context file. MCP and CLI adapters reuse that id
-across a timed-out retry; they never rediscover the latest run for the same
-verdict. The server rejects a mismatched current run but treats an identical
-retry of an already-finished run as idempotent even after a post or replacement
-starts. For rolling upgrades, `runId` may be omitted only for a pre-upgrade run
-whose durable `completion_bound` bit is false, and new clients tolerate old
-task-detail responses that lack `latestRun.id`.
+environment and a task-scoped completion-context file. The server is the sole
+writer after spawn: under a cross-process file lock it records a bounded mapping
+from verdict attempt keys to their original runs and rebinds the current run
+when a continued post starts. MCP and CLI adapters consult that mapping, so a
+timed-out original verdict retries its original run and can neither complete
+the post nor restore stale context. Replacement, close, and startup prune stale
+or orphaned context artifacts. The server rejects a mismatched current run but
+treats an identical retry of an already-finished run as idempotent even after a
+post or replacement starts. For rolling upgrades, `runId` may be omitted only
+for a pre-upgrade run whose durable `completion_bound` bit is false, and new
+clients tolerate old task-detail responses that lack `latestRun.id`.
 
 ## Local Consumer Model
 

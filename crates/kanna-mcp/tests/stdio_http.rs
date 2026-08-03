@@ -572,14 +572,12 @@ fn completion_retry_after_a_lost_response_keeps_the_spawned_run_identity() {
     let context_path = root.join("completion.json");
     kanna_tool_catalog::write_completion_context(
         &context_path,
-        &kanna_tool_catalog::CompletionContext {
-            run_id: "run-original".to_string(),
-            completed_attempt_key: None,
-        },
+        &kanna_tool_catalog::CompletionContext::new("run-original"),
     )
     .expect("write completion context");
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
     let base_url = format!("http://{}", listener.local_addr().expect("fixture address"));
+    let server_context_path = context_path.clone();
     let server = thread::spawn(move || {
         let mut observed = Vec::new();
         for attempt in 0..2 {
@@ -589,6 +587,16 @@ fn completion_retry_after_a_lost_response_keeps_the_spawned_run_identity() {
                 // The server may already have committed this request and started
                 // a replacement run; losing the response must not make the
                 // adapter rediscover and complete that replacement.
+                let attempt_key = observed[0].body.as_ref().unwrap()["completionAttemptKey"]
+                    .as_str()
+                    .unwrap();
+                kanna_tool_catalog::mutate_completion_context(&server_context_path, |current| {
+                    let mut context = current.unwrap();
+                    context.record_completed_attempt("run-original", attempt_key);
+                    context.run_id = "run-post".to_string();
+                    Ok(context)
+                })
+                .expect("server should atomically advance completion context");
                 continue;
             }
             let body = json!({ "taskId": "task-1" }).to_string();
@@ -644,8 +652,15 @@ fn completion_retry_after_a_lost_response_keeps_the_spawned_run_identity() {
     assert_eq!(tool_text(&responses[2]), json!({ "taskId": "task-1" }));
     let context =
         kanna_tool_catalog::read_completion_context(&context_path).expect("read completed context");
-    assert_eq!(context.run_id, "run-original");
-    assert!(context.completed_attempt_key.is_some());
+    assert_eq!(context.run_id, "run-post");
+    assert_eq!(
+        context.run_for_attempt(
+            observed[0].body.as_ref().unwrap()["completionAttemptKey"]
+                .as_str()
+                .unwrap()
+        ),
+        Some("run-original")
+    );
     std::fs::remove_dir_all(root).expect("remove completion context directory");
 }
 

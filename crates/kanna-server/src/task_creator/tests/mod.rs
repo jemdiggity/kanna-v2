@@ -14,7 +14,8 @@ use super::{
     read_default_agent_provider_setting, reopen_task_for_api, reopen_task_for_api_with_test_hook,
     rerun_prepared_stage_for_api, resolve_agent_type, resolve_initial_terminal_geometry,
     spawn_prepared_stage_run_for_api, spawn_prepared_task_for_api_recording_stage_run,
-    PrepareTaskError, ReopenTaskError,
+    spawn_prepared_task_for_api_recording_stage_run_detailed, PrepareTaskError,
+    PreparedTaskDeliveryError, ReopenTaskError,
 };
 use crate::config::Config;
 use crate::daemon_client::DaemonClient;

@@ -41,10 +41,13 @@ pub(super) fn task_input_message(input: &str) -> &str {
 pub(crate) enum TaskInputError {
     SessionNotFound,
     Other(String),
+    /// Submission may have reached the PTY even though its response was lost.
+    /// Retrying this result could duplicate terminal bytes.
+    Uncertain(String),
 }
 
 /// Send one raw Input command to a daemon session.
-async fn send_session_input(
+pub(crate) async fn send_raw_session_input(
     daemon: &mut crate::daemon_client::DaemonClient,
     session_id: &str,
     data: Vec<u8>,
@@ -55,7 +58,7 @@ async fn send_session_input(
             data,
         })
         .await
-        .map_err(|e| TaskInputError::Other(format!("daemon error: {}", e)))?;
+        .map_err(|e| TaskInputError::Uncertain(format!("daemon response lost: {e}")))?;
     match event {
         DaemonEvent::Ok => Ok(()),
         DaemonEvent::Error {
@@ -87,10 +90,21 @@ pub(crate) async fn try_submit_task_input(
     // server-side notifications — submits consistently.
     let message = task_input_message(input);
     if !message.is_empty() {
-        send_session_input(daemon, session_id, message.as_bytes().to_vec()).await?;
+        send_raw_session_input(daemon, session_id, message.as_bytes().to_vec()).await?;
         tokio::time::sleep(std::time::Duration::from_millis(SUBMIT_ENTER_DELAY_MS)).await;
     }
-    send_session_input(daemon, session_id, vec![b'\r']).await?;
+    if let Err(error) = send_raw_session_input(daemon, session_id, vec![b'\r']).await {
+        return Err(if message.is_empty() {
+            error
+        } else {
+            TaskInputError::Uncertain(match error {
+                TaskInputError::SessionNotFound => {
+                    format!("session disappeared after message bytes were accepted: {session_id}")
+                }
+                TaskInputError::Other(message) | TaskInputError::Uncertain(message) => message,
+            })
+        });
+    }
     Ok(())
 }
 
@@ -109,6 +123,10 @@ pub(crate) async fn submit_task_input(
             TaskInputError::Other(message) => {
                 (axum::http::StatusCode::INTERNAL_SERVER_ERROR, message)
             }
+            TaskInputError::Uncertain(message) => (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                format!("terminal input delivery is uncertain: {message}"),
+            ),
         })
 }
 
