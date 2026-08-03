@@ -83,6 +83,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "038_pipeline_item_initial_pipeline",
     "039_stage_run_resume_fallback_reason",
     "040_stage_run_effort",
+    "041_pipeline_item_parentage_index",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1441,6 +1442,13 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     run_migration(conn, "040_stage_run_effort", |conn| {
         add_column(conn, "stage_run", "effort", "TEXT")
+    })?;
+
+    run_migration(conn, "041_pipeline_item_parentage_index", |conn| {
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_pipeline_item_parent_created_id
+             ON pipeline_item(parent_task_id, created_at, id);",
+        )
     })?;
 
     Ok(())

@@ -19,6 +19,16 @@ fn temp_db_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("kanna-server-db-{suffix}-{counter}.sqlite"))
 }
 
+fn index_columns(conn: &Connection, index_name: &str) -> Vec<String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA index_info('{index_name}')"))
+        .expect("prepare index metadata query");
+    stmt.query_map([], |row| row.get(2))
+        .expect("read index metadata")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect index columns")
+}
+
 #[test]
 fn database_open_flags_use_sqlite_mutexes_for_shared_desktop_db() {
     let flags = database_open_flags();
@@ -164,7 +174,12 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "040_stage_run_effort");
+    assert_eq!(latest_migration, "041_pipeline_item_parentage_index");
+    assert_eq!(
+        index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
+        vec!["parent_task_id", "created_at", "id"],
+        "the migrated schema must cover direct-child filtering and ordering"
+    );
 
     let stage_run_sql: String = db
         .conn
@@ -190,6 +205,21 @@ fn open_creates_and_migrates_fresh_profile_database() {
     assert!(transfer_columns.contains(&"target_desktop_id".to_string()));
     assert!(transfer_columns.contains(&"sidecar_cleanup_completed_at".to_string()));
 
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_schema_keeps_parentage_index_in_parity_with_migrations() {
+    let path = Db::test_db_path("parentage-index-parity");
+    let db = Db::open_for_tests(&path).expect("open test db");
+
+    assert_eq!(
+        index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
+        vec!["parent_task_id", "created_at", "id"],
+        "router and DB tests must exercise the indexed production query shape"
+    );
+
+    drop(db);
     let _ = std::fs::remove_file(path);
 }
 

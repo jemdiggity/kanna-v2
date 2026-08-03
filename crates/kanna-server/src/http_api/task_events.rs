@@ -12,9 +12,10 @@
 //!   as the next cursor. `hasMore` says another batch is already waiting, so
 //!   the caller loops without waiting.
 //! - Nothing available → block until an event arrives or the window elapses,
-//!   then return an empty list and a cursor advanced to the head that was read
-//!   *before* the query. Advancing on an empty result is safe (nothing in
-//!   scope existed at or below that head) and keeps the next scan short.
+//!   then return an empty list. Fixed task/repo scopes advance to the head read
+//!   *before* the query. A parent scope keeps the caller's cursor because its
+//!   membership is mutable: a task adopted after the timeout may already have
+//!   retained events below the global head, and advancing would lose them.
 
 use super::state::AppState;
 use super::task_blockers::resolve_existing_task_id;
@@ -159,7 +160,13 @@ fn read_batch(
         })?;
     let has_more = events.len() as i64 > limit;
     events.truncate(limit as usize);
-    let cursor = events.last().map(|event| event.seq).unwrap_or(head_seq);
+    let cursor = events.last().map(|event| event.seq).unwrap_or_else(|| {
+        if matches!(scope, TaskEventScope::Children(_)) {
+            after_seq
+        } else {
+            head_seq
+        }
+    });
     Ok(EventBatch {
         events: events.iter().map(|event| event.to_json()).collect(),
         cursor,

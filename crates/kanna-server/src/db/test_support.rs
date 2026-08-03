@@ -110,6 +110,8 @@ impl Db {
             CREATE UNIQUE INDEX idx_pipeline_item_open_cloud_task_id
             ON pipeline_item(cloud_task_id)
             WHERE closed_at IS NULL;
+            CREATE INDEX idx_pipeline_item_parent_created_id
+            ON pipeline_item(parent_task_id, created_at, id);
 
             CREATE TABLE worktree (
                 id TEXT PRIMARY KEY,

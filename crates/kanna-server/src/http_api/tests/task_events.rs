@@ -386,20 +386,47 @@ async fn watching_by_parent_delivers_child_events_without_naming_ids() {
     );
     cursor = cursor_of(&blocked);
 
-    // Adopted after the watch began. The scope is a query, not a snapshot, so
-    // the new child's events arrive without the caller re-scoping.
+    // The stranger emits an event while outside the subtree, then the parent
+    // gets an empty batch. That timeout must not advance the parent-scoped
+    // cursor to the global head: membership is mutable, so the event becomes
+    // relevant if the task is adopted before the next call.
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("stranger", "pr")
+            .expect("advance stranger outside subtree");
+    }
+    let timed_out = get_json_body(&router, &format!("{watch}&cursor={cursor}&timeoutSecs=0")).await;
+    assert_eq!(timed_out["waitOutcome"], serde_json::json!("timeout"));
+    assert_eq!(
+        cursor_of(&timed_out),
+        cursor,
+        "an empty parent-scoped batch must preserve the cursor for later adoption"
+    );
+
     {
         let db = Db::open(&db_path).expect("open db");
         db.update_pipeline_item_parent("stranger", Some("parent-1"))
             .expect("adopt");
-        start_run(&db, "run-s1", "stranger", "in progress");
     }
     let after_adoption =
         get_json_body(&router, &format!("{watch}&cursor={cursor}&timeoutSecs=1")).await;
     assert_eq!(
         event_pairs(&after_adoption),
-        vec![("stranger".to_string(), "run.started".to_string())],
-        "a task adopted mid-watch must be in scope on the next call"
+        vec![("stranger".to_string(), "stage.changed".to_string())],
+        "a task adopted after a timeout must surface retained pre-adoption events"
+    );
+    cursor = cursor_of(&after_adoption);
+
+    // Future events use the same cursor normally after adoption.
+    {
+        let db = Db::open(&db_path).expect("open db");
+        start_run(&db, "run-s1", "stranger", "in progress");
+    }
+    let after_adoption_event =
+        get_json_body(&router, &format!("{watch}&cursor={cursor}&timeoutSecs=1")).await;
+    assert_eq!(
+        event_pairs(&after_adoption_event),
+        vec![("stranger".to_string(), "run.started".to_string())]
     );
 
     // Replayed from the beginning: the parent's own stage change is still
@@ -413,6 +440,7 @@ async fn watching_by_parent_delivers_child_events_without_naming_ids() {
             ("stranger".to_string(), "stage.changed".to_string()),
             ("child-a".to_string(), "run.finished".to_string()),
             ("child-b".to_string(), "run.started".to_string()),
+            ("stranger".to_string(), "stage.changed".to_string()),
             ("stranger".to_string(), "run.started".to_string()),
         ]
     );

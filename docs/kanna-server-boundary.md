@@ -84,6 +84,13 @@ snapshotted, so a task adopted mid-watch is in scope on the very next call. It
 covers direct children only and excludes the parent's own events, which makes it
 exactly the set `GET /v1/tasks/{task_id}` reports as `childTaskIds`.
 
+Because that membership can change, an empty parent-scoped batch preserves the
+caller's prior cursor instead of advancing to the global event head. Otherwise
+a task could emit an event outside the subtree, the parent could time out past
+it, and a later adoption would make the event relevant only after it had been
+permanently skipped. Fixed task-id and repo scopes still advance empty batches
+to the head they inspected.
+
 ## Task Parentage
 
 `pipeline_item.parent_task_id` is read from both ends: `GET /v1/tasks/{task_id}`
