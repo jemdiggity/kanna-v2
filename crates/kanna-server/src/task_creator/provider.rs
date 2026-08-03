@@ -1,6 +1,32 @@
 use super::definitions::AgentDefinition;
 pub(super) use kanna_agent_protocol::{AgentProvider, AgentSessionType};
+use std::fmt;
 use std::str::FromStr;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ResolveProviderCandidatesError {
+    NotConfigured,
+    Unsupported(String),
+}
+
+impl fmt::Display for ResolveProviderCandidatesError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotConfigured => {
+                formatter.write_str("No agent provider configured for this request.")
+            }
+            Self::Unsupported(candidate) => write!(
+                formatter,
+                "unsupported agent provider '{candidate}' (supported: {})",
+                AgentProvider::ALL
+                    .iter()
+                    .map(|provider| provider.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
 
 pub(super) fn resolve_agent_type(
     explicit_agent_type: Option<&str>,
@@ -110,7 +136,8 @@ pub(super) fn resolve_agent_provider(
         repo_provider,
         agent,
         fallback_provider,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     candidates
         .iter()
         .copied()
@@ -127,7 +154,7 @@ pub(super) fn resolve_agent_provider_candidates(
     repo_provider: Option<&[String]>,
     agent: Option<&AgentDefinition>,
     fallback_provider: Option<&str>,
-) -> Result<Vec<AgentProvider>, String> {
+) -> Result<Vec<AgentProvider>, ResolveProviderCandidatesError> {
     let raw_candidates =
         if let Some(source) = explicit_provider.filter(|value| !value.trim().is_empty()) {
             source
@@ -154,12 +181,15 @@ pub(super) fn resolve_agent_provider_candidates(
         };
 
     if raw_candidates.is_empty() {
-        return Err("No agent provider configured for this request.".to_string());
+        return Err(ResolveProviderCandidatesError::NotConfigured);
     }
 
     raw_candidates
         .iter()
-        .map(|candidate| AgentProvider::from_str(candidate))
+        .map(|candidate| {
+            AgentProvider::from_str(candidate)
+                .map_err(|_| ResolveProviderCandidatesError::Unsupported(candidate.clone()))
+        })
         .collect::<Result<Vec<_>, _>>()
 }
 
@@ -189,7 +219,8 @@ pub(super) fn resolve_agent_provider_with(
         repo_provider,
         agent,
         fallback_provider,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     candidates
         .iter()
         .copied()

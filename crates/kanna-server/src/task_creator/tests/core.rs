@@ -471,7 +471,7 @@ fn provider_resolution_rejects_unknown_values() {
     assert_eq!(
         resolve_agent_provider_with(Some("future-agent"), None, None, None, None, |_| true)
             .unwrap_err(),
-        "unsupported agent provider: future-agent",
+        "unsupported agent provider 'future-agent' (supported: claude, copilot, codex, opencode, antigravity)",
     );
 }
 
@@ -611,6 +611,61 @@ fn create_task_rejects_unsupported_effort_before_persisting_state() {
         error,
         PrepareTaskError::InvalidRequest(
             "effort 'xhigh' is not supported for agent provider 'antigravity' (supported: low, medium, high)"
+                .to_string()
+        )
+    );
+    assert!(db.list_pipeline_items("repo-1").unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn create_task_rejects_unsupported_provider_before_persisting_state() {
+    let repo_root = init_git_repo("reject-unsupported-provider");
+    let config = test_config("reject-unsupported-provider");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let error = match prepare_task_for_api_with_error(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Use an unsupported provider".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("future-agent".to_string()),
+            agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: None,
+            recovery_snapshot: None,
+            blocker_task_ids: None,
+            notify_task_id: None,
+            parent_task_id: None,
+        },
+        None,
+    ) {
+        Ok(_) => panic!("unsupported provider should be rejected"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error,
+        PrepareTaskError::InvalidRequest(
+            "unsupported agent provider 'future-agent' (supported: claude, copilot, codex, opencode, antigravity)"
                 .to_string()
         )
     );

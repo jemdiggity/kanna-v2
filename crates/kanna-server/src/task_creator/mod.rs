@@ -35,7 +35,7 @@ use prompt::{build_stage_prompt, PromptContext};
 use provider::{
     normalize_agent_type, resolve_agent_provider, resolve_agent_provider_candidates,
     resolve_agent_type, validate_effort_shape, validate_model_shape, validate_provider_effort,
-    validate_provider_model, AgentProvider, AgentSessionType,
+    validate_provider_model, AgentProvider, AgentSessionType, ResolveProviderCandidatesError,
 };
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -726,7 +726,8 @@ pub(crate) fn prepare_create_task_repair_for_api(
             parent_task_id: request.parent_task_id,
         },
         &definitions,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
 
     let provider_name = source_task
         .agent_provider
@@ -847,7 +848,8 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         repo_preference.map(|preference| preference.providers.as_slice()),
         agent.as_ref(),
         fallback_provider,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     if provider_candidates.len() == 1 {
         // Session-type compatibility is configuration validation, not an
         // availability probe. Keep this early rejection for a fixed provider
@@ -2417,16 +2419,17 @@ fn prepare_task_spawn_with_error(
     let requested_task_id = request.requested_task_id.clone();
     let create_intent_json = request.create_intent_json.clone();
     let has_requested_task_id = requested_task_id.is_some();
-    let resolved = resolve_task_spawn(repo, request, &definitions).map_err(|error| {
-        if error.starts_with("model override")
-            || error.starts_with("effort override")
-            || error.starts_with("effort '")
-        {
-            PrepareTaskError::InvalidRequest(error)
-        } else {
+    let resolved =
+        resolve_task_spawn(repo, request, &definitions).map_err(|error| match error {
             PrepareTaskError::Other(error)
-        }
-    })?;
+                if error.starts_with("model override")
+                    || error.starts_with("effort override")
+                    || error.starts_with("effort '") =>
+            {
+                PrepareTaskError::InvalidRequest(error)
+            }
+            other => other,
+        })?;
     let stage_run_model = resolved.model.clone();
     let stage_run_effort = resolved.effort.clone();
     let provisional_provider = *resolved
@@ -2633,7 +2636,7 @@ fn resolve_task_spawn(
     _repo: &Repo,
     request: TaskCreationRequest,
     definitions: &RepoDefinitions,
-) -> Result<ResolvedTaskSpawn, String> {
+) -> Result<ResolvedTaskSpawn, PrepareTaskError> {
     let repo_config = definitions.config();
     let original_prompt = request.task_prompt.clone();
     let display_name = request.display_name.clone();
@@ -2702,7 +2705,13 @@ fn resolve_task_spawn(
             .map(|preference| preference.providers.as_slice()),
         agent.as_ref(),
         request.default_provider.as_deref(),
-    )?;
+    )
+    .map_err(|error| match error {
+        ResolveProviderCandidatesError::Unsupported(_) => {
+            PrepareTaskError::InvalidRequest(error.to_string())
+        }
+        ResolveProviderCandidatesError::NotConfigured => PrepareTaskError::Other(error.to_string()),
+    })?;
     if provider_candidates.len() == 1 {
         resolve_agent_type(request.agent_type.as_deref(), provider_candidates[0])?;
     }
@@ -2729,7 +2738,8 @@ fn resolve_task_spawn(
         return Err(format!(
             "model overrides are not supported for agent provider '{}'",
             provider_candidates[0]
-        ));
+        )
+        .into());
     }
     let permission_mode = request.permission_mode.or_else(|| {
         agent
