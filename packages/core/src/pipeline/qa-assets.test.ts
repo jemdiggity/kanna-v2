@@ -55,15 +55,18 @@ describe("built-in agent completion protocol", () => {
 });
 
 describe("QA pipeline assets", () => {
-  it("prefers Codex for Kanna review roles without changing other repos' built-in order", () => {
+  it("prefers Codex for every Kanna role without changing other repos' built-in order", () => {
     const config = JSON.parse(readRepoFile(".kanna/config.json")) as {
       agentProviders?: Record<string, { provider?: unknown } | string>;
     };
     const codexFirst = ["codex", "claude", "copilot", "opencode", "antigravity"];
 
-    expect(config.agentProviders?.review).toEqual({ provider: codexFirst });
-    expect(config.agentProviders?.["review-*"]).toEqual({ provider: codexFirst });
-    expect(config.agentProviders?.["qa-dispatcher"]).toEqual({ provider: codexFirst });
+    expect(config.agentProviders?.["*"]).toEqual({ provider: codexFirst });
+    for (const [pattern, preference] of Object.entries(config.agentProviders ?? {})) {
+      const provider = typeof preference === "string" ? preference : preference.provider;
+      const firstProvider = Array.isArray(provider) ? provider[0] : provider;
+      expect(firstProvider, pattern).toBe("codex");
+    }
 
     for (const name of [
       "implement",
@@ -80,7 +83,7 @@ describe("QA pipeline assets", () => {
       expect(agent.agent_provider?.[0], name).toBe("claude");
     }
 
-    // The repo config is the flip. Keeping the shipped definitions unchanged
+    // The repo wildcard is the flip. Keeping the shipped definitions unchanged
     // is what preserves current behavior for repositories without the key.
     for (const name of [
       "review",
