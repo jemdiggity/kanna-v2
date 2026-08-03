@@ -38,7 +38,14 @@ def main() -> None:
     shutil.copy2(dmg_path, output_path)
     output_path.chmod(output_path.stat().st_mode | stat.S_IWUSR)
 
-    keychain_profile = os.environ.get("APPLE_KEYCHAIN_PROFILE")
+    keychain_profile = required_env("APPLE_KEYCHAIN_PROFILE")
+    keychain_path = Path(required_env("APPLE_KEYCHAIN_PATH"))
+    if not keychain_path.is_absolute():
+        raise SystemExit(
+            "APPLE_KEYCHAIN_PATH must be absolute so kd and the Bazel action select the same Keychain."
+        )
+    if not keychain_path.is_file():
+        raise SystemExit(f"configured notarization keychain does not exist: {keychain_path}")
 
     submit_command = [
         "xcrun",
@@ -46,24 +53,11 @@ def main() -> None:
         "submit",
         str(output_path),
         "--wait",
+        "--keychain-profile",
+        keychain_profile,
+        "--keychain",
+        str(keychain_path),
     ]
-    if keychain_profile:
-        submit_command.extend([
-            "--keychain-profile",
-            keychain_profile,
-        ])
-    else:
-        apple_id = required_env("APPLE_ID")
-        apple_password = required_env("APPLE_PASSWORD")
-        apple_team_id = required_env("APPLE_TEAM_ID")
-        submit_command.extend([
-            "--apple-id",
-            apple_id,
-            "--password",
-            apple_password,
-            "--team-id",
-            apple_team_id,
-        ])
 
     subprocess.run(submit_command, check=True)
 

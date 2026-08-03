@@ -73,6 +73,10 @@ import {
 } from "../runtime/release";
 import { loadReleaseEnvironment } from "../runtime/release-env";
 import {
+  preflightNotarizationCredentials,
+  setupNotarizationCredentials
+} from "../runtime/notarization";
+import {
   applyRustCacheEnvironment,
   getRustCacheStatus,
   installRustCache
@@ -294,6 +298,11 @@ const releaseCutInputSchema = z.object({
 
 const releaseStatusInputSchema = z.object({});
 
+const releaseSetupNotarizationInputSchema = z.object({
+  profile: z.string().optional(),
+  keychain: z.string().optional()
+});
+
 const cloudDeployInputSchema = z.object({
   staging: z.boolean().default(false),
   production: z.boolean().default(false),
@@ -372,14 +381,11 @@ async function resolveDefaultContext(env: NodeJS.ProcessEnv, options: ResolveDef
 }
 
 export async function loadReleaseTaskEnvironment(
-  context: Pick<KdContext, "repoRoot" | "homeDir" | "env">,
-  runner: CommandRunner
+  context: Pick<KdContext, "homeDir" | "env">
 ): Promise<NodeJS.ProcessEnv> {
   return loadReleaseEnvironment({
-    repoRoot: context.repoRoot,
     homeDir: context.homeDir,
-    env: context.env,
-    runner
+    env: context.env
   });
 }
 
@@ -2107,7 +2113,14 @@ export const taskDefinitions = [
       ];
       const environment = parsed.staging ? "staging" : "production";
       const context = await resolveDefaultContext(process.env);
-      const releaseEnv = await loadReleaseTaskEnvironment(context, nodeCommandRunner);
+      const releaseEnv = await loadReleaseTaskEnvironment(context);
+      if (!parsed.dryRun && !parsed.rollbackTo) {
+        await preflightNotarizationCredentials({
+          cwd: context.repoRoot,
+          env: releaseEnv,
+          runner: nodeCommandRunner
+        });
+      }
       const result = await shipRelease({
         repoRoot: context.repoRoot,
         bump,
@@ -2134,7 +2147,14 @@ export const taskDefinitions = [
         ...(parsed.x86_64 ? ["x86_64" as const] : [])
       ];
       const context = await resolveDefaultContext(process.env);
-      const releaseEnv = await loadReleaseTaskEnvironment(context, nodeCommandRunner);
+      const releaseEnv = await loadReleaseTaskEnvironment(context);
+      if (!parsed.dryRun) {
+        await preflightNotarizationCredentials({
+          cwd: context.repoRoot,
+          env: releaseEnv,
+          runner: nodeCommandRunner
+        });
+      }
       const result = await shipRelease({
         repoRoot: context.repoRoot,
         bump: "patch",
@@ -2147,6 +2167,28 @@ export const taskDefinitions = [
         runner: nodeCommandRunner
       });
       return { ok: true, message: formatJsonResult(result), data: result };
+    }
+  },
+  {
+    id: "release.setup-notarization",
+    description: "Store and validate a notarization profile in an explicit file-based Keychain.",
+    inputSchema: releaseSetupNotarizationInputSchema,
+    execute: async (_context, input) => {
+      const parsed = releaseSetupNotarizationInputSchema.parse(input);
+      const context = await resolveDefaultContext(process.env);
+      const result = await setupNotarizationCredentials({
+        cwd: context.repoRoot,
+        homeDir: context.homeDir,
+        env: context.env,
+        runner: nodeCommandRunner,
+        profile: parsed.profile,
+        keychainPath: parsed.keychain
+      });
+      return {
+        ok: true,
+        message: `Stored notarization profile ${result.profile} in ${result.keychainPath}; selectors written to ${result.configPath} with mode 0600.`,
+        data: result
+      };
     }
   },
   {

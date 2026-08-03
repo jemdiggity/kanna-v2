@@ -207,10 +207,8 @@ describeMac("kache Cargo wiring", () => {
     expect(cache.state.active).toBe(true);
 
     const releaseEnv = await loadReleaseEnvironment({
-      repoRoot,
       homeDir,
-      env: cache.env,
-      runner: nodeCommandRunner
+      env: cache.env
     });
     expect(releaseEnv.RUSTC_WRAPPER).toBeUndefined();
     expect(releaseEnv.RUSTC_WORKSPACE_WRAPPER).toBeUndefined();
