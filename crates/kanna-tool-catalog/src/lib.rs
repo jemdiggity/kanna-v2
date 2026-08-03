@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
+use url::Url;
 
 const BUNDLED_CATALOG: &str = include_str!("catalog.json");
 
@@ -88,6 +89,46 @@ pub enum ResponseKind {
     Json,
     Text,
     Wait,
+    RuntimeInfo,
+}
+
+/// Identity owned by the client-side adapter executing a catalog tool. The
+/// connected HTTP server is intentionally represented separately in the
+/// runtime-info result because the two binaries can have different versions
+/// and lifecycles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeAdapterIdentity<'a> {
+    pub name: &'a str,
+    pub version: &'a str,
+    pub mcp_protocol_version: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SafeServerStatus {
+    state: String,
+    desktop_id: String,
+    desktop_name: String,
+    version: String,
+    environment: String,
+    lan_host: String,
+    lan_port: u16,
+    #[serde(default)]
+    ksp_stream_version: Option<u8>,
+    #[serde(default)]
+    write_path_health: Option<SafeWritePathHealth>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SafeWritePathHealth {
+    healthy: bool,
+    status: String,
+    active_workspace_commands: usize,
+    max_workspace_commands: usize,
+    long_running_workspace_commands: usize,
+    oldest_workspace_command_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -139,8 +180,102 @@ pub struct CatalogLoad {
 }
 
 pub fn bundled_catalog() -> Catalog {
+    ensure_required_runtime_tools(parsed_bundled_catalog())
+}
+
+fn parsed_bundled_catalog() -> Catalog {
     serde_json::from_str(BUNDLED_CATALOG)
-        .unwrap_or_else(|e| panic!("bundled kanna tool catalog is invalid: {e}"))
+        .unwrap_or_else(|error| panic!("bundled kanna tool catalog is invalid: {error}"))
+}
+
+/// Runtime identity is a security boundary, not a repo-customizable transport
+/// shortcut. Catalog overrides may add or replace ordinary tools, but the
+/// bundled parameterless status declaration always owns `kanna_info` so an
+/// override cannot turn it into a raw `/v1/status` passthrough.
+fn ensure_required_runtime_tools(mut catalog: Catalog) -> Catalog {
+    let info = parsed_bundled_catalog()
+        .tools
+        .into_iter()
+        .find(|tool| tool.name == "kanna_info")
+        .unwrap_or_else(|| panic!("bundled catalog must declare kanna_info"));
+    catalog.tools.retain(|tool| tool.name != "kanna_info");
+    catalog.tools.insert(0, info);
+    catalog
+}
+
+/// Build the shared `kanna_info` result from client-owned connection metadata
+/// and the server's raw status response. Deserializing into an explicit type is
+/// the security boundary: fields such as `pairingCode`, compatibility aliases,
+/// and any future status additions are ignored unless deliberately allow-listed
+/// here.
+pub fn runtime_info_snapshot(
+    effective_base_url: &str,
+    adapter: RuntimeAdapterIdentity<'_>,
+    status_result: Result<Value, String>,
+) -> Value {
+    let task_context = adapter
+        .task_id
+        .filter(|task_id| !task_id.trim().is_empty())
+        .map(|task_id| serde_json::json!({ "taskId": task_id }));
+    let parsed_url = Url::parse(effective_base_url).ok();
+    let connection = serde_json::json!({
+        "effectiveBaseUrl": effective_base_url,
+        "host": parsed_url.as_ref().and_then(Url::host_str),
+        "port": parsed_url.as_ref().and_then(Url::port_or_known_default),
+    });
+    let client_adapter = serde_json::json!({
+        "name": adapter.name,
+        "version": adapter.version,
+        "mcpProtocolVersion": adapter.mcp_protocol_version,
+    });
+
+    let (server_status, lan_advertised_endpoint) = match status_result {
+        Ok(raw_status) => match serde_json::from_value::<SafeServerStatus>(raw_status) {
+            Ok(status) => {
+                let lan_endpoint = serde_json::json!({
+                    "host": status.lan_host,
+                    "port": status.lan_port,
+                });
+                let server_status = serde_json::json!({
+                    "available": true,
+                    "state": status.state,
+                    "environment": status.environment,
+                    "version": status.version,
+                    "desktop": {
+                        "id": status.desktop_id,
+                        "name": status.desktop_name,
+                    },
+                    "capabilityVersions": {
+                        "kspStream": status.ksp_stream_version,
+                    },
+                    "writePathHealth": status.write_path_health,
+                });
+                (server_status, lan_endpoint)
+            }
+            Err(error) => (
+                serde_json::json!({
+                    "available": false,
+                    "error": format!("GET /v1/status returned an invalid identity payload: {error}"),
+                }),
+                Value::Null,
+            ),
+        },
+        Err(error) => (
+            serde_json::json!({
+                "available": false,
+                "error": error,
+            }),
+            Value::Null,
+        ),
+    };
+
+    serde_json::json!({
+        "clientAdapter": client_adapter,
+        "connection": connection,
+        "serverStatus": server_status,
+        "lanAdvertisedEndpoint": lan_advertised_endpoint,
+        "taskContext": task_context,
+    })
 }
 
 pub fn load_catalog(cwd: &Path) -> CatalogLoad {
@@ -161,7 +296,7 @@ pub fn load_catalog(cwd: &Path) -> CatalogLoad {
     match std::fs::read_to_string(&path) {
         Ok(contents) => match serde_json::from_str::<Catalog>(&contents) {
             Ok(catalog) => CatalogLoad {
-                catalog,
+                catalog: ensure_required_runtime_tools(catalog),
                 watch_source: Some(path),
                 warning: None,
             },

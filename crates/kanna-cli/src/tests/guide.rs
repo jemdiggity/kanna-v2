@@ -38,6 +38,9 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
             "Prefer `kanna-mcp` tools for Kanna task operations; fall back to the instance-local `kanna-cli` from the shell only when MCP tools are unavailable."
         ));
     assert!(guide.contains("Prefer `kanna_complete_stage` to record completion"));
+    assert!(guide.contains("Before environment-sensitive operations"));
+    assert!(guide.contains("call `kanna_info`"));
+    assert!(guide.contains("run `kanna-cli info`"));
     assert!(guide.contains("Fallback: `kanna-cli stage-complete --task-id \"$KANNA_TASK_ID\""));
     assert!(guide.contains("Advancing follows the next stage policy"));
     for tool in kanna_tool_catalog::bundled_catalog().tools {
@@ -140,6 +143,12 @@ async fn guide_json_fetches_env_task_id_and_includes_workflow_context_and_tools(
         .iter()
         .any(|operation| operation.as_str()
             == Some("prefer kanna-mcp tools for Kanna task operations")));
+    assert!(guide["workflow"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|operation| operation.as_str()
+            == Some("call kanna_info before environment-sensitive operations and use its authoritative connected-server identity")));
     assert!(guide["workflow"]["completeStage"]
         .as_str()
         .unwrap()

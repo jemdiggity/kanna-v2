@@ -208,6 +208,173 @@ fn tool_error_text(response: &Value) -> &str {
         .expect("tool error text")
 }
 
+fn info_call(id: i64) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": { "name": "kanna_info", "arguments": {} }
+    })
+}
+
+fn status_fixture(environment: &str, version: &str, lan_port: u16) -> Value {
+    json!({
+        "state": "running",
+        "desktopId": format!("desktop-{environment}"),
+        "desktopName": format!("Kanna {environment}"),
+        "version": version,
+        "environment": environment,
+        "serverVersion": version,
+        "lanHost": "192.168.10.8",
+        "lanPort": lan_port,
+        "pairingCode": "PAIR-SECRET",
+        "kspStreamVersion": 2,
+        "writePathHealth": {
+            "healthy": true,
+            "status": "healthy",
+            "activeWorkspaceCommands": 1,
+            "maxWorkspaceCommands": 4,
+            "longRunningWorkspaceCommands": 0,
+            "oldestWorkspaceCommandSeconds": null
+        },
+        "authToken": "AUTH-SECRET",
+        "appleCredential": "APPLE-SECRET",
+        "githubToken": "GITHUB-SECRET",
+        "databasePath": "/secret/kanna.sqlite3"
+    })
+}
+
+#[test]
+fn kanna_info_reports_configured_connection_and_allow_listed_server_identity() {
+    for (environment, version, lan_port) in [
+        ("staging", "0.0.69-staging.3", 48121),
+        ("production", "0.0.69", 48120),
+    ] {
+        let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
+            method: "GET",
+            path: "/v1/status",
+            body: None,
+            response_status: "200 OK",
+            response_body: status_fixture(environment, version, lan_port),
+        }]);
+        let configured_port = base_url
+            .rsplit_once(':')
+            .expect("fixture URL port")
+            .1
+            .parse::<u16>()
+            .expect("configured port");
+
+        let responses = run_kanna_mcp_with_env(
+            &base_url,
+            &[info_call(41)],
+            &[("KANNA_TASK_ID", "task-runtime-info")],
+        );
+        let observed = server.join().expect("fixture server");
+        assert_eq!(observed.len(), 1);
+        let info = tool_text(&responses[0]);
+
+        assert_eq!(info["clientAdapter"]["name"], "kanna-mcp");
+        assert_eq!(info["clientAdapter"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(info["clientAdapter"]["mcpProtocolVersion"], "2025-11-25");
+        assert_eq!(info["connection"]["effectiveBaseUrl"], base_url);
+        assert_eq!(info["connection"]["host"], "127.0.0.1");
+        assert_eq!(info["connection"]["port"], configured_port);
+        assert_eq!(info["serverStatus"]["available"], true);
+        assert_eq!(info["serverStatus"]["environment"], environment);
+        assert_eq!(info["serverStatus"]["version"], version);
+        assert_eq!(info["serverStatus"]["state"], "running");
+        assert_eq!(
+            info["serverStatus"]["desktop"],
+            json!({
+                "id": format!("desktop-{environment}"),
+                "name": format!("Kanna {environment}")
+            })
+        );
+        assert_eq!(
+            info["lanAdvertisedEndpoint"],
+            json!({ "host": "192.168.10.8", "port": lan_port })
+        );
+        assert_ne!(
+            info["connection"]["host"], info["lanAdvertisedEndpoint"]["host"],
+            "the configured transport endpoint must stay distinct from LAN advertisement"
+        );
+        assert_eq!(info["serverStatus"]["capabilityVersions"]["kspStream"], 2);
+        assert_eq!(info["serverStatus"]["writePathHealth"]["healthy"], true);
+        assert_eq!(info["taskContext"]["taskId"], "task-runtime-info");
+
+        let rendered = info.to_string();
+        for forbidden in [
+            "pairingCode",
+            "PAIR-SECRET",
+            "authToken",
+            "AUTH-SECRET",
+            "APPLE-SECRET",
+            "GITHUB-SECRET",
+            "databasePath",
+            "/secret/kanna.sqlite3",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "kanna_info leaked forbidden status data: {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
+fn kanna_info_retains_adapter_and_endpoint_when_status_is_unreachable() {
+    let reservation = TcpListener::bind("127.0.0.1:0").expect("reserve unreachable port");
+    let port = reservation.local_addr().expect("local address").port();
+    drop(reservation);
+    let base_url = format!("http://127.0.0.1:{port}");
+
+    let responses = run_kanna_mcp(&base_url, &[info_call(42)]);
+    let response = &responses[0];
+    assert!(
+        response["result"].get("isError").is_none(),
+        "status failure is runtime data, not an MCP tool invocation failure"
+    );
+    let info = tool_text(response);
+
+    assert_eq!(info["clientAdapter"]["name"], "kanna-mcp");
+    assert_eq!(info["connection"]["effectiveBaseUrl"], base_url);
+    assert_eq!(info["connection"]["port"], port);
+    assert_eq!(info["serverStatus"]["available"], false);
+    assert!(info["serverStatus"]["error"]
+        .as_str()
+        .expect("server status error")
+        .contains("failed to reach the configured server"));
+    assert!(info["serverStatus"]["environment"].is_null());
+    assert!(info["lanAdvertisedEndpoint"].is_null());
+}
+
+#[test]
+fn kanna_info_does_not_echo_status_error_bodies() {
+    let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
+        method: "GET",
+        path: "/v1/status",
+        body: None,
+        response_status: "503 Service Unavailable",
+        response_body: json!({
+            "error": "PAIR-SECRET AUTH-SECRET /private/kanna.sqlite3"
+        }),
+    }]);
+
+    let responses = run_kanna_mcp(&base_url, &[info_call(43)]);
+    server.join().expect("fixture server");
+    let info = tool_text(&responses[0]);
+
+    assert_eq!(info["serverStatus"]["available"], false);
+    assert_eq!(
+        info["serverStatus"]["error"],
+        "GET /v1/status failed with status 503 Service Unavailable"
+    );
+    let rendered = info.to_string();
+    for forbidden in ["PAIR-SECRET", "AUTH-SECRET", "/private/kanna.sqlite3"] {
+        assert!(!rendered.contains(forbidden), "leaked {forbidden}");
+    }
+}
+
 #[test]
 fn serve_hot_reloads_catalog_override_and_notifies_tools_changed() {
     let root = std::env::temp_dir().join(format!("kanna-mcp-stdio-reload-{}", std::process::id()));
