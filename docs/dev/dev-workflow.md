@@ -245,29 +245,28 @@ Kanna can use [`kache`](https://github.com/kunobi-ninja/kache) as a
 content-addressed compiler cache, pinned by exact version and per-architecture
 SHA-256 in `tools/kd/src/runtime/rust-cache-policy.ts`.
 
-**It is off by default and must be opted into.** Its key selection is not
-demonstrated by canonical automation — exercising the real pinned binary needs a
-network download that `pnpm test` and `./kd test all` deliberately avoid — so
-turning it on is a deliberate choice rather than a default. (An `E0432` failure
-originally blamed on kache turned out to be two of Kanna's own test fixtures —
-the kd real-Cargo integration tests and the daemon's previous-release
-cross-version fixture — compiling into the repository's Cargo build directory.
-Both are fixed and neither was a cache defect.) Details in
-[`docs/2026-08-02-kache-cache-key-e2e-gap.md`](../2026-08-02-kache-cache-key-e2e-gap.md).
+**It is on by default.** It applies to every CI-less macOS Cargo command `kd`
+spawns — sidecars, `./kd test rust`, and the Tauri dev window. It is on because
+the measured trade below was accepted, not because it is free: you are buying
+cross-worktree reuse and a much smaller build tree with a slower single-file
+edit loop.
 
-To opt in for a shell:
+The escape hatch is one variable:
 
 ```sh
-export KANNA_RUST_CACHE=on
+export KANNA_RUST_CACHE=off   # Cargo incremental compilation, for this shell
+```
+
+Setup installs the tool (`./kd rust-cache install`, which this repository's
+`setup` list runs). If it is missing, `kd` says so once and builds without the
+cache rather than downloading a compiler wrapper mid-build.
+
+```sh
 ./kd rust-cache install     # downloads and checksum-verifies the pinned release
 ./kd rust-cache status      # pin, store path, hit/miss stats
 ```
 
-`KANNA_RUST_CACHE=on` also enables it for CI-less macOS builds `kd` spawns —
-sidecars, `./kd test rust`, and the Tauri dev window. Anything else leaves Cargo
-running against rustc directly.
-
-When enabled, each Cargo invocation keeps its own private `.build` and
+Under the cache, each Cargo invocation keeps its own private `.build` and
 `.build/cargo-build`; hits are materialized into that private tree, so worktrees
 share compilation results without sharing Cargo's mutable fingerprint state. The
 store is per repository at `~/Library/Caches/kanna/rust-kache/<repository-id>/`,
@@ -275,12 +274,25 @@ capped at 10 GiB with LRU eviction, local-only, and configured not to cache
 user-facing executables so sidecars and Tauri `externalBin` inputs are always
 produced in and staged from the current checkout.
 
-Enabling it is hermetic, not incremental: kache strips `-C incremental` from
-every invocation it handles, so `kd` sets `CARGO_INCREMENTAL=0` to match.
-Measured on this repo, a cold private tree against a warm store restores 96.5%
-of cacheable invocations and cuts sidecar build CPU by 56%, and
-`.build/cargo-build` shrinks from 3.2 GiB to 1.9 GiB — in exchange, a one-line
-workspace edit rebuilds about 3.5x slower (2.80 s to 9.87 s).
+The cache is hermetic, not incremental: kache strips `-C incremental` from every
+invocation it handles, so `kd` sets `CARGO_INCREMENTAL=0` to match. Measured on
+this repo, a cold private tree against a warm store restores 96.5% of cacheable
+invocations and cuts sidecar build CPU by 56%, and `.build/cargo-build` shrinks
+from 3.2 GiB to 1.9 GiB — in exchange, a one-line workspace edit rebuilds about
+3x slower (re-measured at the new default: 5.47 s to 15.87 s, and 7.4x the CPU).
+That last number is the one you will feel; `KANNA_RUST_CACHE=off` is there for
+exactly that reason. Current measurements and the reasoning behind
+the default are in
+[`docs/specs/safe-rust-build-caching.md`](../specs/safe-rust-build-caching.md).
+
+Its cross-revision key selection is exercised against the real pinned binary by
+`tools/kd/tests/rust-cache.integration.test.ts`, which runs whenever that binary
+is installed — the same condition under which the cache can affect a build. See
+[`docs/2026-08-02-kache-cache-key-e2e-gap.md`](../2026-08-02-kache-cache-key-e2e-gap.md).
+(An `E0432` failure originally blamed on kache turned out to be two of Kanna's
+own test fixtures — the kd real-Cargo integration tests and the daemon's
+previous-release cross-version fixture — compiling into the repository's Cargo
+build directory. Both are fixed and neither was a cache defect.)
 
 Environment resolution is authoritative: `kd` scrubs every compiler-wrapper and
 `KACHE_*` control it owns before deciding, on both the enabled and disabled

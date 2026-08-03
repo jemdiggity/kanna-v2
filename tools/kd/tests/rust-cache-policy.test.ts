@@ -50,21 +50,20 @@ describe("kache tool manifest", () => {
 });
 
 describe("rust cache mode", () => {
-  it("is opt-in: unset and blank stay disabled", () => {
-    // kache 0.12.0 can serve a logically stale entry, so the cache must never
-    // be reached without a developer explicitly asking for it.
-    expect(parseRustCacheMode(undefined)).toEqual({ enabled: false });
-    expect(parseRustCacheMode("")).toEqual({ enabled: false });
-    expect(parseRustCacheMode("   ")).toEqual({ enabled: false });
+  it("is on by default: unset and blank enable the cache", () => {
+    expect(parseRustCacheMode(undefined)).toEqual({ enabled: true });
+    expect(parseRustCacheMode("")).toEqual({ enabled: true });
+    expect(parseRustCacheMode("   ")).toEqual({ enabled: true });
   });
 
-  it("enables only on an explicit opt-in", () => {
+  it("still accepts an explicit opt-in", () => {
     expect(parseRustCacheMode("on")).toEqual({ enabled: true });
     expect(parseRustCacheMode(" Kache ")).toEqual({ enabled: true });
   });
 
-  it("disables on opt-out", () => {
+  it("disables on the opt-out, which is the only escape hatch", () => {
     expect(parseRustCacheMode("off")).toEqual({ enabled: false });
+    expect(parseRustCacheMode(" OFF ")).toEqual({ enabled: false });
   });
 
   it("disables with a warning on an unknown value", () => {
@@ -83,11 +82,12 @@ describe("rust cache eligibility", () => {
     expect(resolveRustCacheEligibility(base)).toEqual({ enabled: true });
   });
 
-  it("stays off by default, distinguishing the default from an explicit opt-out", () => {
-    expect(resolveRustCacheEligibility({ ...base, mode: undefined })).toEqual({
-      enabled: false,
-      category: "disabled-by-default"
-    });
+  it("is on by default, and off only on an explicit opt-out", () => {
+    // The former `disabled-by-default` category is deliberately gone: with the
+    // default on, an unset variable resolves to enabled, so the only configured
+    // way to be off is `off` itself.
+    expect(resolveRustCacheEligibility({ ...base, mode: undefined })).toEqual({ enabled: true });
+    expect(resolveRustCacheEligibility({ ...base, mode: "" })).toEqual({ enabled: true });
     expect(resolveRustCacheEligibility({ ...base, mode: "off" })).toEqual({
       enabled: false,
       category: "disabled"
@@ -129,6 +129,16 @@ describe("rust cache environment", () => {
       KACHE_CACHE_EXECUTABLES: "0",
       KACHE_VERIFY_RESTORES: "always",
       KACHE_MAX_SIZE: KACHE_MAX_SIZE
+    });
+  });
+
+  it("verifies every restore, which must not be relaxed for speed", () => {
+    // Restore verification is the only check between a corrupt or truncated
+    // store entry and the compiler's input, and it costs a digest per hit. Now
+    // that every developer build is cached by default it gets cheaper to argue
+    // away; this test exists so that argument has to be made out loud.
+    expect(buildRustCacheEnvironment({ binary: "/tools/kache", store: "/store" })).toMatchObject({
+      KACHE_VERIFY_RESTORES: "always"
     });
   });
 

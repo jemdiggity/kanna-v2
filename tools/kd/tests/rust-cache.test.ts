@@ -249,11 +249,24 @@ describe("rust cache environment application", () => {
     expect(result.env.PATH).toBe("/usr/bin");
   });
 
-  it("stays inert by default, when opted out, in CI, or off a supported host", () => {
+  it("is active by default once the pinned tool is installed", () => {
+    const { repoRoot, homeDir } = fixture();
+    const binary = install(homeDir);
+    const result = applyRustCacheEnvironment({
+      repoRoot,
+      homeDir,
+      env: { PATH: "/usr/bin" },
+      platform: "darwin",
+      arch: "arm64"
+    });
+    expect(result.state.active).toBe(true);
+    expect(result.env.RUSTC_WRAPPER).toBe(binary);
+  });
+
+  it("stays inert when opted out, in CI, or off a supported host", () => {
     const { repoRoot, homeDir } = fixture();
     install(homeDir);
     for (const [env, category] of [
-      [{}, "disabled-by-default"],
       [{ KANNA_RUST_CACHE: "off" }, "disabled"],
       [{ KANNA_RUST_CACHE: "kanache" }, "invalid-mode"],
       [{ KANNA_RUST_CACHE: "on", CI: "true" }, "disabled-in-ci"]
