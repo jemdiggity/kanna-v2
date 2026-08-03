@@ -224,6 +224,75 @@ impl Db {
         rows.collect()
     }
 
+    /// Read one parent-scoped page against a single membership snapshot.
+    ///
+    /// A parent cursor has one watermark per child rather than one global
+    /// watermark. That distinction is what lets an adopted task replay older
+    /// retained events without replaying events already delivered for existing
+    /// children. Membership and events must be read in the same transaction:
+    /// otherwise an adoption between those reads could be recorded in the
+    /// cursor without its retained events having been considered.
+    pub fn list_child_task_events(
+        &self,
+        parent_task_id: &str,
+        after_seq_by_task: &std::collections::BTreeMap<String, i64>,
+        limit: i64,
+    ) -> Result<(i64, Vec<String>, Vec<TaskEvent>), rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let head_seq =
+            transaction.query_row("SELECT COALESCE(MAX(seq), 0) FROM task_event", [], |row| {
+                row.get(0)
+            })?;
+        let child_task_ids = {
+            let mut stmt = transaction.prepare(
+                "SELECT id FROM pipeline_item
+                 WHERE parent_task_id = ?
+                 ORDER BY created_at ASC, id ASC",
+            )?;
+            let rows = stmt.query_map([parent_task_id], |row| row.get(0))?;
+            rows.collect::<Result<Vec<String>, _>>()?
+        };
+
+        let events = if child_task_ids.is_empty() {
+            Vec::new()
+        } else {
+            let child_predicates =
+                vec!["(task_id = ? AND seq > ?)"; child_task_ids.len()].join(" OR ");
+            let sql = format!(
+                "SELECT seq, task_id, type, payload, created_at
+                 FROM task_event
+                 WHERE seq <= ? AND ({child_predicates})
+                 ORDER BY seq ASC
+                 LIMIT ?"
+            );
+            let mut params = vec![SqlValue::Integer(head_seq)];
+            for task_id in &child_task_ids {
+                params.push(SqlValue::Text(task_id.clone()));
+                params.push(SqlValue::Integer(
+                    after_seq_by_task.get(task_id).copied().unwrap_or(0),
+                ));
+            }
+            params.push(SqlValue::Integer(limit));
+
+            let mut stmt = transaction.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+                let payload: Option<String> = row.get(3)?;
+                Ok(TaskEvent {
+                    seq: row.get(0)?,
+                    task_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    payload: payload
+                        .and_then(|payload| serde_json::from_str(&payload).ok())
+                        .unwrap_or_else(|| json!({})),
+                    created_at: row.get(4)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        transaction.commit()?;
+        Ok((head_seq, child_task_ids, events))
+    }
+
     /// Attach (or clear) the task that receives this task's completion
     /// notification. `notify_task_id` was creation-time only; an orchestrator
     /// that adopts an already-running task needs to set it afterwards.

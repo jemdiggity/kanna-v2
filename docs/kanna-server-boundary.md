@@ -58,10 +58,12 @@ does not reject them as first-stage bindings.
 `GET /v1/task-events` is the surface an orchestrating agent watches instead of
 polling each child. It is cursor-based, not snapshot-diffed:
 
-- The cursor is `task_event.seq` (`INTEGER PRIMARY KEY AUTOINCREMENT`). SQLite
-  allows one writer at a time, so a `seq` cannot be committed out of order and
-  `seq > cursor` can never skip an event. Callers pass back the cursor they were
-  given; events that fire between two calls arrive on the next one.
+- Event order is `task_event.seq` (`INTEGER PRIMARY KEY AUTOINCREMENT`). SQLite
+  allows one writer at a time, so a `seq` cannot be committed out of order.
+  Fixed task/repo cursors are a single sequence watermark; parent cursors are
+  opaque and hold one sequence watermark per current child. Callers pass back
+  the cursor they were given unchanged; events that fire between two calls
+  arrive on the next one.
 - Omitting the cursor returns the scope's retained history (14 days), so a
   watcher that starts after its children does not lose their early events.
 - Events are appended by the same DB writes that change the state they describe
@@ -84,12 +86,14 @@ snapshotted, so a task adopted mid-watch is in scope on the very next call. It
 covers direct children only and excludes the parent's own events, which makes it
 exactly the set `GET /v1/tasks/{task_id}` reports as `childTaskIds`.
 
-Because that membership can change, an empty parent-scoped batch preserves the
-caller's prior cursor instead of advancing to the global event head. Otherwise
-a task could emit an event outside the subtree, the parent could time out past
-it, and a later adoption would make the event relevant only after it had been
-permanently skipped. Fixed task-id and repo scopes still advance empty batches
-to the head they inspected.
+Because that membership can change, a parent-scoped cursor tracks current
+children independently. A response advances each current child's watermark as
+far as that response inspected it; a task adopted after the response has no
+watermark and starts from retained history. Thus if an outside task emits at
+sequence N, an existing child emits and is returned at N+1, and the outside
+task is then adopted, its event at N is still returned. Children removed from
+the parent are removed when the next response snapshots membership. Fixed
+task-id and repo scopes continue to use one sequence watermark.
 
 ## Task Parentage
 

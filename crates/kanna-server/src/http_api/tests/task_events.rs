@@ -387,8 +387,8 @@ async fn watching_by_parent_delivers_child_events_without_naming_ids() {
     cursor = cursor_of(&blocked);
 
     // The stranger emits an event while outside the subtree, then the parent
-    // gets an empty batch. That timeout must not advance the parent-scoped
-    // cursor to the global head: membership is mutable, so the event becomes
+    // gets an empty batch. The cursor may advance the current children, but it
+    // has no watermark for the stranger, so that retained event becomes
     // relevant if the task is adopted before the next call.
     {
         let db = Db::open(&db_path).expect("open db");
@@ -397,11 +397,7 @@ async fn watching_by_parent_delivers_child_events_without_naming_ids() {
     }
     let timed_out = get_json_body(&router, &format!("{watch}&cursor={cursor}&timeoutSecs=0")).await;
     assert_eq!(timed_out["waitOutcome"], serde_json::json!("timeout"));
-    assert_eq!(
-        cursor_of(&timed_out),
-        cursor,
-        "an empty parent-scoped batch must preserve the cursor for later adoption"
-    );
+    cursor = cursor_of(&timed_out);
 
     {
         let db = Db::open(&db_path).expect("open db");
@@ -412,8 +408,11 @@ async fn watching_by_parent_delivers_child_events_without_naming_ids() {
         get_json_body(&router, &format!("{watch}&cursor={cursor}&timeoutSecs=1")).await;
     assert_eq!(
         event_pairs(&after_adoption),
-        vec![("stranger".to_string(), "stage.changed".to_string())],
-        "a task adopted after a timeout must surface retained pre-adoption events"
+        vec![
+            ("stranger".to_string(), "stage.changed".to_string()),
+            ("stranger".to_string(), "stage.changed".to_string()),
+        ],
+        "a task adopted after a timeout must surface all retained pre-adoption events"
     );
     cursor = cursor_of(&after_adoption);
 
@@ -443,6 +442,67 @@ async fn watching_by_parent_delivers_child_events_without_naming_ids() {
             ("stranger".to_string(), "stage.changed".to_string()),
             ("stranger".to_string(), "run.started".to_string()),
         ]
+    );
+}
+
+/// A parent cursor cannot be one global sequence: an outside task can emit at
+/// N, an existing child can emit at N+1 and advance that watermark, and the
+/// outside task can then be adopted. Its retained event at N must still be
+/// delivered without replaying the existing child's event at N+1.
+#[tokio::test]
+async fn parent_cursor_keeps_older_retained_events_for_a_later_adoptee() {
+    let (router, db_path) = parentage_router();
+    let watch = "/v1/task-events?parentTaskId=parent-1";
+
+    let initial = get_json_body(&router, &format!("{watch}&timeoutSecs=0")).await;
+    assert!(event_pairs(&initial).is_empty());
+    let initial_cursor = cursor_of(&initial);
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("stranger", "review")
+            .expect("outside task emits at N");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("existing child emits at N+1");
+    }
+
+    let before_adoption = get_json_body(
+        &router,
+        &format!("{watch}&cursor={initial_cursor}&timeoutSecs=1"),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&before_adoption),
+        vec![("child-a".to_string(), "stage.changed".to_string())]
+    );
+    let child_seq = before_adoption["events"][0]["seq"]
+        .as_i64()
+        .expect("child event seq");
+    let cursor_after_child = cursor_of(&before_adoption);
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_parent("stranger", Some("parent-1"))
+            .expect("adopt outside task");
+    }
+
+    let after_adoption = get_json_body(
+        &router,
+        &format!("{watch}&cursor={cursor_after_child}&timeoutSecs=1"),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&after_adoption),
+        vec![("stranger".to_string(), "stage.changed".to_string())],
+        "adoption must make the retained event at N eligible after N+1 was delivered"
+    );
+    let adopted_seq = after_adoption["events"][0]["seq"]
+        .as_i64()
+        .expect("adopted event seq");
+    assert_eq!(
+        adopted_seq + 1,
+        child_seq,
+        "the regression requires the outside event at N immediately before the child at N+1"
     );
 }
 

@@ -596,6 +596,18 @@ fn wait_events_is_scoped_cursored_and_bounded_by_the_client_budget() {
         parent_scoped,
         format!("/v1/task-events?parentTaskId=parent%201&timeoutSecs={DEFAULT_WAIT_TIMEOUT_SECS}")
     );
+    let description = &catalog
+        .tools
+        .iter()
+        .find(|tool| tool.name == "kanna_wait_events")
+        .expect("wait events tool")
+        .description;
+    assert!(
+        description.contains("opaque cursor")
+            && description.contains("one watermark per current child")
+            && description.contains("older than events already returned"),
+        "the parent scope must document why later adoption cannot lose retained events: {description}"
+    );
 }
 
 /// `parentTaskId` upward and `childTaskIds` downward are the same relation read
