@@ -240,6 +240,47 @@ impl Db {
         rows.collect()
     }
 
+    /// Parent-scoped events using the relationship index first and then the
+    /// per-task event index. This is the legacy p1 upgrade path, where an
+    /// adopted child has a zero watermark: starting at the global sequence
+    /// index would otherwise walk unrelated retained history before applying
+    /// the parent filter.
+    pub fn list_parent_task_events_indexed(
+        &self,
+        parent_task_id: &str,
+        after_seq: i64,
+        head_seq: i64,
+        limit: i64,
+    ) -> Result<Vec<TaskEvent>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event.seq, event.task_id, event.type, event.payload, event.created_at
+             FROM pipeline_item AS item INDEXED BY idx_pipeline_item_parent_created_id
+             JOIN task_event AS event INDEXED BY idx_task_event_task_seq
+               ON event.task_id = item.id
+             WHERE item.parent_task_id = ?1
+               AND event.seq > ?2
+               AND event.seq <= ?3
+             ORDER BY event.seq ASC
+             LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![parent_task_id, after_seq, head_seq, limit],
+            |row| {
+                let payload: Option<String> = row.get(3)?;
+                Ok(TaskEvent {
+                    seq: row.get(0)?,
+                    task_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    payload: payload
+                        .and_then(|payload| serde_json::from_str(&payload).ok())
+                        .unwrap_or_else(|| json!({})),
+                    created_at: row.get(4)?,
+                })
+            },
+        )?;
+        rows.collect()
+    }
+
     /// Attach (or clear) the task that receives this task's completion
     /// notification. `notify_task_id` was creation-time only; an orchestrator
     /// that adopts an already-running task needs to set it afterwards.

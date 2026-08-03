@@ -2531,6 +2531,46 @@ fn parent_event_query_plan_starts_from_the_global_sequence_range() {
     let _ = std::fs::remove_file(path);
 }
 
+#[test]
+fn legacy_sparse_parent_event_query_plan_never_scans_unrelated_events() {
+    let path = Db::test_db_path("legacy-sparse-parent-event-query-plan");
+    let db = Db::open_for_tests(&path).expect("open db");
+    let sql = "EXPLAIN QUERY PLAN
+         SELECT event.seq, event.task_id, event.type, event.payload, event.created_at
+         FROM pipeline_item AS item INDEXED BY idx_pipeline_item_parent_created_id
+         JOIN task_event AS event INDEXED BY idx_task_event_task_seq
+           ON event.task_id = item.id
+         WHERE item.parent_task_id = ?1
+           AND event.seq > ?2
+           AND event.seq <= ?3
+         ORDER BY event.seq ASC
+         LIMIT ?4";
+    let mut stmt = db.conn.prepare(sql).expect("prepare query plan");
+    let details = stmt
+        .query_map(
+            rusqlite::params!["parent-plan", 0_i64, 20_000_i64, 501_i64],
+            |row| row.get::<_, String>(3),
+        )
+        .expect("read query plan")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect query plan");
+    let plan = details.join("\n");
+    assert!(
+        plan.contains("idx_pipeline_item_parent_created_id")
+            && plan.contains("idx_task_event_task_seq"),
+        "zero-watermark legacy reads must probe only the parent's task ids, then their events; \
+         unrelated retained rows must not be a scan input:\n{plan}"
+    );
+    assert!(
+        !plan.contains("SCAN event"),
+        "legacy parent query unexpectedly scans the retained event log:\n{plan}"
+    );
+
+    drop(stmt);
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
 fn seed_sticky_pipeline_db(path: &std::path::Path) -> Db {
     let db = Db::open_for_tests(path.to_str().expect("utf8 path")).expect("open db");
     for (id, name) in [("repo-1", "first"), ("repo-2", "second")] {

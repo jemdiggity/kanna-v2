@@ -37,9 +37,11 @@ use std::time::Duration;
 const DEFAULT_EVENT_LIMIT: i64 = 100;
 const MAX_EVENT_LIMIT: i64 = 500;
 /// Keeps invalid public GET requests and legacy cursor decoding bounded. New
-/// parent cursors are normally under 100 bytes; this larger allowance exists
-/// only so deployed p1 cursors can make one bounded forward-upgrade pass.
-const MAX_CURSOR_LEN: usize = 32 * 1024;
+/// parent cursors are normally under 100 bytes. A deployed p1 cursor may be up
+/// to 32 KiB; its bounded upgrade continuation adds one checkpoint field, so
+/// leave explicit headroom without allowing an unbounded public request.
+const MAX_CURSOR_LEN: usize = 64 * 1024;
+const MAX_DEPLOYED_PARENT_CURSOR_LEN: usize = 32 * 1024;
 const MAX_LEGACY_PARENT_WATERMARKS: usize = 500;
 const LEGACY_CURSOR_SCAN_LIMIT: i64 = 500;
 
@@ -75,6 +77,11 @@ enum TaskEventsCursor {
 struct ParentTaskEventsCursorV1 {
     parent_task_id: String,
     watermarks: BTreeMap<String, i64>,
+    /// Global progress made while draining this legacy map. Deployed p1
+    /// cursors omit it. Once present, entries at or below this boundary can be
+    /// discarded safely, including stale children that later reattach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    event_seq: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -120,7 +127,9 @@ fn parse_cursor(
             .map_err(|_| invalid_cursor())?;
         let parsed: ParentTaskEventsCursorV1 =
             serde_json::from_slice(&bytes).map_err(|_| invalid_cursor())?;
-        if parsed.watermarks.len() > MAX_LEGACY_PARENT_WATERMARKS
+        if (parsed.event_seq.is_none() && cursor.len() > MAX_DEPLOYED_PARENT_CURSOR_LEN)
+            || parsed.watermarks.len() > MAX_LEGACY_PARENT_WATERMARKS
+            || parsed.event_seq.is_some_and(|seq| seq < 0)
             || parsed.watermarks.values().any(|seq| *seq < 0)
         {
             return Err(invalid_cursor());
@@ -144,10 +153,17 @@ fn encode_parent_cursor<T: Serialize>(
             format!("failed to encode task event cursor: {e}"),
         )
     })?;
-    Ok(format!(
+    let encoded = format!(
         "{prefix}{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-    ))
+    );
+    if encoded.len() > MAX_CURSOR_LEN {
+        return Err((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to encode a bounded task event cursor".to_string(),
+        ));
+    }
+    Ok(encoded)
 }
 
 fn resolve_scope(
@@ -235,15 +251,15 @@ fn encode_v3_cursor(
 
 /// Drain one bounded slice of a deployed p1 cursor. This path exists only for
 /// forward compatibility: stale map entries cannot widen the current-parent
-/// SQL scope, scans use the global `seq > ?` hot path, and the cursor upgrades
-/// to constant-size p3 as soon as the current members' uneven legacy
-/// watermarks converge.
-fn read_legacy_parent_batch(
+/// SQL scope, scans use the parent and per-task indexes, and the cursor
+/// upgrades to constant-size p3 as soon as every legacy acknowledgement is
+/// behind its global checkpoint.
+fn read_legacy_parent_batch_with_hook(
     db: &Db,
-    scope: &TaskEventScope,
     parent_task_id: &str,
     legacy: &ParentTaskEventsCursorV1,
     limit: i64,
+    after_membership_read: impl FnOnce(),
 ) -> Result<EventBatch, (axum::http::StatusCode, String)> {
     if legacy.parent_task_id != parent_task_id {
         return Err((
@@ -252,46 +268,75 @@ fn read_legacy_parent_batch(
         ));
     }
 
-    let head_seq = db.latest_task_event_seq().map_err(db_error)?;
+    let (head_seq, members, mut candidates) = db
+        .with_read_transaction(|db| {
+            // The head read establishes the WAL snapshot before membership is
+            // observed. The candidate query below therefore cannot see an
+            // adoption or reparent that the membership calculation did not.
+            let head_seq = db.latest_task_event_seq()?;
+            let members = db.list_child_task_ids(parent_task_id)?;
+            after_membership_read();
+            let after_seq = legacy.event_seq.unwrap_or_else(|| {
+                members
+                    .iter()
+                    .map(|task_id| legacy.watermarks.get(task_id).copied().unwrap_or(0))
+                    .min()
+                    .unwrap_or(0)
+            });
+            let candidates = db.list_parent_task_events_indexed(
+                parent_task_id,
+                after_seq,
+                head_seq,
+                LEGACY_CURSOR_SCAN_LIMIT + 1,
+            )?;
+            Ok((head_seq, members, candidates))
+        })
+        .map_err(db_error)?;
     if legacy
         .watermarks
         .values()
         .any(|watermark| *watermark > head_seq)
+        || legacy.event_seq.is_some_and(|seq| seq > head_seq)
     {
         return Err(invalid_cursor());
-    }
-
-    let members = db.list_child_task_ids(parent_task_id).map_err(db_error)?;
-    if members.is_empty() {
-        return read_sequence_batch(db, scope, 0, limit, Some(parent_task_id));
     }
 
     // A p1 map captured membership at issuance. Entries for children since
     // reparented away are legitimate but irrelevant to the current scope;
     // conversely, a current child absent from the map was adopted later and
-    // retains p1's zero-watermark delivery semantics during this upgrade.
-    let current_watermarks = members
-        .iter()
-        .map(|task_id| {
-            (
-                task_id.as_str(),
-                legacy.watermarks.get(task_id).copied().unwrap_or(0),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let floor = current_watermarks.values().copied().min().unwrap_or(0);
-    let ceiling = current_watermarks.values().copied().max().unwrap_or(0);
-    let mut candidates = db
-        .list_task_events(scope, floor, head_seq, LEGACY_CURSOR_SCAN_LIMIT + 1)
-        .map_err(db_error)?;
+    // retains p1's zero-watermark delivery semantics for the first upgrade
+    // snapshot. Continuations carry a global checkpoint and never grow the
+    // deployed map, so a valid 500-entry p1 always returns a valid cursor.
+    let after_seq = legacy.event_seq.unwrap_or_else(|| {
+        members
+            .iter()
+            .map(|task_id| legacy.watermarks.get(task_id).copied().unwrap_or(0))
+            .min()
+            .unwrap_or(0)
+    });
+    // Include stale entries in the safe compaction ceiling. Dropping a higher
+    // acknowledgement merely because that child is currently away would make
+    // p3 rewind and replay it if the child later reattaches.
+    let ceiling = legacy
+        .watermarks
+        .values()
+        .copied()
+        .max()
+        .unwrap_or(after_seq)
+        .max(after_seq);
     let scan_has_more = candidates.len() as i64 > LEGACY_CURSOR_SCAN_LIMIT;
     candidates.truncate(LEGACY_CURSOR_SCAN_LIMIT as usize);
 
     let mut delivered = Vec::new();
-    let mut processed_seq = floor;
+    let mut processed_seq = after_seq;
     let mut stopped_at_page_limit = false;
     for event in candidates {
-        let watermark = legacy.watermarks.get(&event.task_id).copied().unwrap_or(0);
+        let watermark = legacy
+            .watermarks
+            .get(&event.task_id)
+            .copied()
+            .unwrap_or(0)
+            .max(after_seq);
         if event.seq > watermark {
             if delivered.len() as i64 == limit {
                 stopped_at_page_limit = true;
@@ -312,15 +357,17 @@ fn read_legacy_parent_batch(
         encode_v3_cursor(parent_task_id, processed_seq)?
     } else {
         let mut watermarks = legacy.watermarks.clone();
-        for task_id in members {
-            let watermark = watermarks.entry(task_id).or_insert(0);
-            *watermark = (*watermark).max(processed_seq);
-        }
+        // `event_seq` now protects every acknowledgement through this global
+        // boundary. Removing covered entries keeps the legacy state no larger
+        // than the accepted input, while entries above it preserve the safe
+        // boundary for temporarily reparented-away children.
+        watermarks.retain(|_, watermark| *watermark > processed_seq);
         encode_parent_cursor(
             PARENT_CURSOR_V1_PREFIX,
             &ParentTaskEventsCursorV1 {
                 parent_task_id: parent_task_id.to_string(),
                 watermarks,
+                event_seq: Some(processed_seq),
             },
         )?
     };
@@ -332,6 +379,43 @@ fn read_legacy_parent_batch(
     })
 }
 
+fn read_legacy_parent_batch(
+    db: &Db,
+    parent_task_id: &str,
+    legacy: &ParentTaskEventsCursorV1,
+    limit: i64,
+) -> Result<EventBatch, (axum::http::StatusCode, String)> {
+    read_legacy_parent_batch_with_hook(db, parent_task_id, legacy, limit, || {})
+}
+
+#[cfg(test)]
+pub(super) fn read_legacy_parent_batch_for_test(
+    db: &Db,
+    parent_task_id: &str,
+    cursor: &str,
+    limit: i64,
+    after_membership_read: impl FnOnce(),
+) -> Result<Value, String> {
+    let parsed = parse_cursor(Some(cursor)).map_err(|(_, error)| error)?;
+    let TaskEventsCursor::ParentV1(legacy) = parsed.ok_or_else(|| "missing cursor".to_string())?
+    else {
+        return Err("expected p1 cursor".to_string());
+    };
+    let batch = read_legacy_parent_batch_with_hook(
+        db,
+        parent_task_id,
+        &legacy,
+        limit,
+        after_membership_read,
+    )
+    .map_err(|(_, error)| error)?;
+    Ok(json!({
+        "cursor": batch.cursor,
+        "events": batch.events,
+        "hasMore": batch.has_more,
+    }))
+}
+
 fn read_sequence_batch(
     db: &Db,
     scope: &TaskEventScope,
@@ -341,16 +425,19 @@ fn read_sequence_batch(
 ) -> Result<EventBatch, (axum::http::StatusCode, String)> {
     // Read the head first: the returned cursor must never be ahead of the rows
     // the same call looked at.
-    let head_seq = db.latest_task_event_seq().map_err(db_error)?;
+    let (head_seq, mut events) = db
+        .with_read_transaction(|db| {
+            let head_seq = db.latest_task_event_seq()?;
+            let events = db.list_task_events(scope, after_seq, head_seq, limit + 1)?;
+            Ok((head_seq, events))
+        })
+        .map_err(db_error)?;
     if after_seq > head_seq {
         return Err(invalid_cursor());
     }
     // The lower bound stays a plain range constraint on task_event's INTEGER
     // PRIMARY KEY. Scope filtering happens after that indexable cut, so a
     // drained long poll performs work proportional to new rows, not history.
-    let mut events = db
-        .list_task_events(scope, after_seq, head_seq, limit + 1)
-        .map_err(db_error)?;
     let has_more = events.len() as i64 > limit;
     events.truncate(limit as usize);
     let cursor_seq = if has_more {
@@ -382,7 +469,7 @@ fn read_batch(
     if let TaskEventScope::Children(parent_task_id) = scope {
         return match cursor {
             Some(TaskEventsCursor::ParentV1(legacy)) => {
-                read_legacy_parent_batch(&db, scope, parent_task_id, legacy, limit)
+                read_legacy_parent_batch(&db, parent_task_id, legacy, limit)
             }
             Some(TaskEventsCursor::ParentV3(parent_cursor)) => {
                 if parent_cursor.parent_task_id != *parent_task_id {

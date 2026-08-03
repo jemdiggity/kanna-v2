@@ -83,6 +83,20 @@ fn event_pairs(body: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
+fn legacy_parent_cursor(
+    parent_task_id: &str,
+    watermarks: serde_json::Map<String, Value>,
+) -> String {
+    let payload = serde_json::json!({
+        "parent_task_id": parent_task_id,
+        "watermarks": watermarks,
+    });
+    format!(
+        "p1.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
+    )
+}
+
 fn start_run(db: &Db, run_id: &str, task_id: &str, stage: &str) {
     db.insert_stage_run(NewStageRun {
         id: run_id,
@@ -708,6 +722,261 @@ async fn legacy_p1_parent_cursor_paginates_an_adopted_child_then_compacts_once()
     let drained = get_json_body(&router, &format!("{watch}&cursor={}", cursor_of(&second))).await;
     assert!(event_pairs(&drained).is_empty());
     assert_eq!(cursor_of(&drained), cursor_of(&second));
+}
+
+#[tokio::test]
+async fn legacy_p1_full_map_returns_a_consumable_adoptee_continuation() {
+    let (router, db_path) = parentage_router();
+    let head_seq = {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("stranger", "review")
+            .expect("first retained adoptee event");
+        db.update_pipeline_item_stage("stranger", "pr")
+            .expect("second retained adoptee event");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("established child checkpoint");
+        db.latest_task_event_seq().expect("event head")
+    };
+    let mut watermarks = (0..498)
+        .map(|index| (format!("stale-{index:03}"), serde_json::json!(head_seq)))
+        .collect::<serde_json::Map<_, _>>();
+    watermarks.insert("child-a".to_string(), serde_json::json!(head_seq));
+    watermarks.insert("child-b".to_string(), serde_json::json!(head_seq));
+    assert_eq!(watermarks.len(), 500);
+    let legacy_cursor = legacy_parent_cursor("parent-1", watermarks);
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_parent("stranger", Some("parent-1"))
+            .expect("adopt child after full p1 issuance");
+    }
+    let watch = "/v1/task-events?parentTaskId=parent-1&limit=1&timeoutSecs=0";
+
+    let first = get_json_body(&router, &format!("{watch}&cursor={legacy_cursor}")).await;
+    assert_eq!(
+        event_pairs(&first),
+        vec![("stranger".to_string(), "stage.changed".to_string())]
+    );
+    assert_eq!(first["hasMore"], serde_json::json!(true));
+    let first_cursor = cursor_of(&first);
+    assert!(first_cursor.starts_with("p1."));
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(first_cursor.strip_prefix("p1.").expect("p1 cursor"))
+        .expect("decode continuation");
+    let continuation: Value = serde_json::from_slice(&decoded).expect("parse continuation");
+    assert_eq!(
+        continuation["watermarks"]
+            .as_object()
+            .expect("watermarks")
+            .len(),
+        500,
+        "the adopted child must not make the accepted legacy map grow"
+    );
+
+    let second = get_json_body(&router, &format!("{watch}&cursor={first_cursor}")).await;
+    assert_eq!(
+        event_pairs(&second),
+        vec![("stranger".to_string(), "stage.changed".to_string())]
+    );
+    assert!(cursor_of(&second).starts_with("p3."));
+    assert_ne!(first["events"][0]["seq"], second["events"][0]["seq"]);
+
+    let drained = get_json_body(&router, &format!("{watch}&cursor={}", cursor_of(&second))).await;
+    assert!(event_pairs(&drained).is_empty());
+}
+
+#[tokio::test]
+async fn legacy_p1_reads_membership_and_events_from_one_snapshot() {
+    let (router, db_path) = parentage_router();
+    let head_seq = {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("stranger", "review")
+            .expect("retained adoptee event");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("legacy acknowledgement ceiling");
+        db.update_pipeline_item_parent("stranger", Some("parent-1"))
+            .expect("adopt before snapshot");
+        db.latest_task_event_seq().expect("event head")
+    };
+    let legacy_cursor = legacy_parent_cursor(
+        "parent-1",
+        [
+            ("child-a".to_string(), serde_json::json!(head_seq)),
+            ("child-b".to_string(), serde_json::json!(head_seq)),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    let reader = Db::open(&db_path).expect("open snapshot reader");
+    let writer_path = db_path.clone();
+    let batch = crate::http_api::task_events::read_legacy_parent_batch_for_test(
+        &reader,
+        "parent-1",
+        &legacy_cursor,
+        1,
+        move || {
+            let writer = Db::open(&writer_path).expect("open interleaving writer");
+            writer
+                .update_pipeline_item_parent("stranger", None)
+                .expect("reparent between membership and candidate reads");
+        },
+    )
+    .expect("snapshot batch");
+    assert_eq!(
+        event_pairs(&batch),
+        vec![("stranger".to_string(), "stage.changed".to_string())],
+        "the candidate read must use the membership snapshot, not the writer's newer state"
+    );
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_parent("stranger", Some("parent-1"))
+            .expect("reattach after snapshot");
+    }
+    let replay = get_json_body(
+        &router,
+        &format!(
+            "/v1/task-events?parentTaskId=parent-1&cursor={}&timeoutSecs=0",
+            cursor_of(&batch)
+        ),
+    )
+    .await;
+    assert!(
+        event_pairs(&replay).is_empty(),
+        "delivered adoptee replayed"
+    );
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("stranger", "pr")
+            .expect("future adoptee event");
+    }
+    let future = get_json_body(
+        &router,
+        &format!(
+            "/v1/task-events?parentTaskId=parent-1&cursor={}&timeoutSecs=1",
+            cursor_of(&replay)
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&future),
+        vec![("stranger".to_string(), "stage.changed".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn legacy_p1_compaction_preserves_an_away_child_acknowledgement() {
+    let (router, db_path) = parentage_router();
+    let acknowledged_seq = {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("stranger", "review")
+            .expect("first retained adoptee event");
+        db.update_pipeline_item_stage("stranger", "pr")
+            .expect("second retained adoptee event");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("acknowledged established child event");
+        db.latest_task_event_seq().expect("event head")
+    };
+    let legacy_cursor = legacy_parent_cursor(
+        "parent-1",
+        [
+            ("child-a".to_string(), serde_json::json!(acknowledged_seq)),
+            ("child-b".to_string(), serde_json::json!(0)),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_parent("child-a", None)
+            .expect("reparent acknowledged child away");
+        db.update_pipeline_item_parent("stranger", Some("parent-1"))
+            .expect("adopt child with retained events");
+    }
+    let watch = "/v1/task-events?parentTaskId=parent-1&limit=1&timeoutSecs=0";
+    let first = get_json_body(&router, &format!("{watch}&cursor={legacy_cursor}")).await;
+    assert!(cursor_of(&first).starts_with("p1."));
+    let second = get_json_body(&router, &format!("{watch}&cursor={}", cursor_of(&first))).await;
+    assert!(cursor_of(&second).starts_with("p3."));
+    assert_eq!(event_pairs(&first).len() + event_pairs(&second).len(), 2);
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_parent("child-a", Some("parent-1"))
+            .expect("reattach acknowledged child");
+    }
+    let reattached =
+        get_json_body(&router, &format!("{watch}&cursor={}", cursor_of(&second))).await;
+    assert!(
+        event_pairs(&reattached).is_empty(),
+        "p3 compaction rewound the away child's acknowledgement"
+    );
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_stage("child-a", "pr")
+            .expect("new event after reattach");
+    }
+    let future = get_json_body(
+        &router,
+        &format!("{watch}&cursor={}", cursor_of(&reattached)),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&future),
+        vec![("child-a".to_string(), "stage.changed".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn legacy_p1_sparse_parent_ignores_large_unrelated_retained_history() {
+    let (router, db_path) = parentage_router();
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_parent("child-a", None)
+            .expect("remove first established child");
+        db.update_pipeline_item_parent("child-b", None)
+            .expect("remove second established child");
+    }
+    let conn = rusqlite::Connection::open(&db_path).expect("open bulk writer");
+    conn.execute_batch(
+        "WITH RECURSIVE generated(value) AS (
+             SELECT 1 UNION ALL SELECT value + 1 FROM generated WHERE value < 20000
+         )
+         INSERT INTO task_event (task_id, type, payload)
+         SELECT 'unrelated-retained', 'stage.changed', NULL FROM generated;",
+    )
+    .expect("insert unrelated retained history");
+    drop(conn);
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_parent("stranger", Some("parent-1"))
+            .expect("adopt sparse child");
+        db.update_pipeline_item_stage("stranger", "review")
+            .expect("append sparse parent event");
+    }
+    let cursor = legacy_parent_cursor("parent-1", serde_json::Map::new());
+    let sparse = get_json_body(
+        &router,
+        &format!("/v1/task-events?parentTaskId=parent-1&cursor={cursor}&timeoutSecs=1"),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&sparse),
+        vec![("stranger".to_string(), "stage.changed".to_string())]
+    );
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.update_pipeline_item_parent("stranger", None)
+            .expect("empty the parent scope");
+    }
+    let empty_cursor = legacy_parent_cursor("parent-1", serde_json::Map::new());
+    let empty = get_json_body(
+        &router,
+        &format!("/v1/task-events?parentTaskId=parent-1&cursor={empty_cursor}&timeoutSecs=0"),
+    )
+    .await;
+    assert!(event_pairs(&empty).is_empty());
+    assert!(cursor_of(&empty).starts_with("p3."));
 }
 
 #[tokio::test]
