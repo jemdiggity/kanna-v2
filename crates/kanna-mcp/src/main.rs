@@ -713,6 +713,7 @@ mod tests {
                 "kanna_list_agents",
                 "kanna_create_task",
                 "kanna_signal_agent",
+                "kanna_signal_merge_handoff",
                 "kanna_send_task_input",
                 "kanna_close_task",
                 "kanna_rename_task",
