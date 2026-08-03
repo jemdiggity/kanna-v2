@@ -35,9 +35,11 @@ function makeApi(options: {
   items?: PipelineItem[];
   reloadSnapshot?: () => Promise<void>;
   toastError?: (message: string) => void;
+  toastWarning?: (message: string) => void;
 } = {}) {
   const reloadSnapshot = vi.fn(options.reloadSnapshot ?? (async () => {}));
   const toastError = vi.fn(options.toastError ?? (() => {}));
+  const toastWarning = vi.fn(options.toastWarning ?? (() => {}));
   const context = {
     state: {
       items: ref(options.items ?? [makeItem()]),
@@ -47,6 +49,7 @@ function makeApi(options: {
     },
     toast: {
       error: toastError,
+      warning: toastWarning,
     },
     tt: (key: string) => key,
   } as unknown as StoreContext;
@@ -54,6 +57,7 @@ function makeApi(options: {
     api: createPipelineApi(context),
     reloadSnapshot,
     toastError,
+    toastWarning,
   };
 }
 
@@ -132,5 +136,29 @@ describe("requestRevision", () => {
       prompt: "Please revise.",
     })).resolves.toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("allows only one revision request per task while the mutation is in flight", async () => {
+    let resolveResponse: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
+      resolveResponse = resolve;
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { api, toastWarning } = makeApi();
+    const options = {
+      targetStage: "in progress",
+      summary: "needs changes",
+      prompt: "Please revise.",
+    };
+
+    const first = api.requestRevision("task-1", options);
+    await Promise.resolve();
+    await expect(api.requestRevision("task-1", options)).resolves.toBe(false);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(toastWarning).toHaveBeenCalledWith("toasts.revisionAlreadyStarting");
+
+    resolveResponse?.(new Response(JSON.stringify({ taskId: "task-1" }), { status: 200 }));
+    await expect(first).resolves.toBe(true);
   });
 });

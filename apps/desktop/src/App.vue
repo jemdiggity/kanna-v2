@@ -510,6 +510,7 @@ const modalLayerController = {
         :has-repos="sidebarRepos.length > 0"
         :cloud-task="mainPanelIsCloudTask"
         :cloud-terminal-ref="mainPanelCloudTerminalRef"
+        :request-revision="store.requestRevision"
         @close-task="closeSelectedWorkspaceTask"
         @back="store.selectedItemId = null"
       />
