@@ -381,14 +381,11 @@ async function resolveDefaultContext(env: NodeJS.ProcessEnv, options: ResolveDef
 }
 
 export async function loadReleaseTaskEnvironment(
-  context: Pick<KdContext, "repoRoot" | "homeDir" | "env">,
-  runner: CommandRunner
+  context: Pick<KdContext, "homeDir" | "env">
 ): Promise<NodeJS.ProcessEnv> {
   return loadReleaseEnvironment({
-    repoRoot: context.repoRoot,
     homeDir: context.homeDir,
-    env: context.env,
-    runner
+    env: context.env
   });
 }
 
@@ -2116,7 +2113,7 @@ export const taskDefinitions = [
       ];
       const environment = parsed.staging ? "staging" : "production";
       const context = await resolveDefaultContext(process.env);
-      const releaseEnv = await loadReleaseTaskEnvironment(context, nodeCommandRunner);
+      const releaseEnv = await loadReleaseTaskEnvironment(context);
       if (!parsed.dryRun && !parsed.rollbackTo) {
         await preflightNotarizationCredentials({
           cwd: context.repoRoot,
@@ -2150,7 +2147,7 @@ export const taskDefinitions = [
         ...(parsed.x86_64 ? ["x86_64" as const] : [])
       ];
       const context = await resolveDefaultContext(process.env);
-      const releaseEnv = await loadReleaseTaskEnvironment(context, nodeCommandRunner);
+      const releaseEnv = await loadReleaseTaskEnvironment(context);
       if (!parsed.dryRun) {
         await preflightNotarizationCredentials({
           cwd: context.repoRoot,

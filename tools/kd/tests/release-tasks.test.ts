@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -46,10 +46,9 @@ async function createFixture(): Promise<Fixture> {
   await mkdir(primary, { recursive: true });
   const keychain = join(root, "login.keychain-db");
   await writeFile(keychain, "keychain fixture\n");
-  await writeFile(
-    join(primary, ".env.release.local"),
-    "RELEASE_DEFAULT=file\n"
-  );
+  const releaseEnvPath = join(home, ".kanna", ".env.release.local");
+  await writeFile(releaseEnvPath, "RELEASE_DEFAULT=file\n", { mode: 0o600 });
+  await chmod(releaseEnvPath, 0o600);
   return { primary, worktree, keychain, home };
 }
 
@@ -73,13 +72,6 @@ function mockGitContext(
     }
     if (key === "rev-parse --short HEAD") {
       return { exitCode: 0, stdout: "abc123\n", stderr: "" };
-    }
-    if (key === "worktree list --porcelain") {
-      return {
-        exitCode: 0,
-        stdout: `worktree ${fixture.primary}\nHEAD abc123\nbranch refs/heads/main\n\n`,
-        stderr: ""
-      };
     }
     throw new Error(`unexpected command: ${command} ${key}`);
   });
@@ -198,42 +190,34 @@ describe("release task environment integration", () => {
     );
   });
 
-  it("migrates legacy repository selectors before ship and promote preflight", async () => {
+  it("uses setup selectors from the global file without reading or changing repository files", async () => {
     const fixture = await createFixture();
     vi.stubEnv("APPLE_KEYCHAIN_PROFILE", undefined);
-    await writeFile(
-      join(fixture.primary, ".env.release.local"),
-      [
-        "# Keep repository release defaults here.",
-        "RELEASE_DEFAULT=keep",
-        "APPLE_KEYCHAIN_PROFILE=legacy-profile",
-        `export APPLE_KEYCHAIN_PATH=${fixture.keychain}`,
-        "LOCAL_ONLY=preserved",
-        ""
-      ].join("\n")
-    );
+    const repositoryEnvPath = join(fixture.primary, ".env.release.local");
+    const repositoryEnv = [
+      "# This legacy file is deliberately ignored.",
+      "RELEASE_DEFAULT=repository-must-not-load",
+      "APPLE_KEYCHAIN_PROFILE=legacy-profile",
+      `export APPLE_KEYCHAIN_PATH=${fixture.keychain}`,
+      "LOCAL_ONLY=must-not-load",
+      ""
+    ].join("\n");
+    await writeFile(repositoryEnvPath, repositoryEnv);
     mockGitContext(fixture, { exitCode: 0, stdout: '{"history":[]}', stderr: "" });
 
     await getTaskDefinition("release.setup-notarization").execute(
       { cwd: fixture.worktree, env: {} },
-      { profile: "migrated-profile", keychain: fixture.keychain }
+      { profile: "machine-profile", keychain: fixture.keychain }
     );
 
-    expect(await readFile(join(fixture.primary, ".env.release.local"), "utf8")).toBe(
-      "# Keep repository release defaults here.\nRELEASE_DEFAULT=keep\nLOCAL_ONLY=preserved\n"
-    );
-    const loaded = await loadReleaseEnvironment({
-      repoRoot: fixture.worktree,
-      homeDir: fixture.home,
-      env: {},
-      runner: nodeCommandRunner
-    });
+    expect(await readFile(repositoryEnvPath, "utf8")).toBe(repositoryEnv);
+    const loaded = loadReleaseEnvironment({ homeDir: fixture.home, env: {} });
     expect(loaded).toEqual(expect.objectContaining({
-      APPLE_KEYCHAIN_PROFILE: "migrated-profile",
+      APPLE_KEYCHAIN_PROFILE: "machine-profile",
       APPLE_KEYCHAIN_PATH: fixture.keychain,
-      RELEASE_DEFAULT: "keep",
-      LOCAL_ONLY: "preserved"
+      RELEASE_DEFAULT: "file"
     }));
+    expect(loaded.LOCAL_ONLY).toBeUndefined();
 
     await getTaskDefinition("release.ship").execute(
       { cwd: fixture.worktree, env: {} },
@@ -248,10 +232,9 @@ describe("release task environment integration", () => {
     for (const call of releaseMocks.shipRelease.mock.calls) {
       expect(call[0]).toEqual(expect.objectContaining({
         env: expect.objectContaining({
-          APPLE_KEYCHAIN_PROFILE: "migrated-profile",
+          APPLE_KEYCHAIN_PROFILE: "machine-profile",
           APPLE_KEYCHAIN_PATH: fixture.keychain,
-          RELEASE_DEFAULT: "keep",
-          LOCAL_ONLY: "preserved"
+          RELEASE_DEFAULT: "file"
         })
       }));
     }
@@ -261,7 +244,7 @@ describe("release task environment integration", () => {
         "notarytool",
         "history",
         "--keychain-profile",
-        "migrated-profile",
+        "machine-profile",
         "--keychain",
         fixture.keychain,
         "--output-format",

@@ -2,7 +2,6 @@ import { existsSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { CommandRunner } from "./process";
 import {
-  migrateLegacyRepositoryNotarizationSelectors,
   NOTARIZATION_KEYCHAIN_ENV,
   NOTARIZATION_PROFILE_ENV,
   writeMachineNotarizationSelectors
@@ -165,11 +164,6 @@ export async function setupNotarizationCredentials(
     homeDir: input.homeDir,
     profile: selection.profile,
     keychainPath: selection.keychainPath
-  });
-  await migrateLegacyRepositoryNotarizationSelectors({
-    repoRoot: input.cwd,
-    env: input.env,
-    runner: input.runner
   });
   return { ...selection, configPath };
 }

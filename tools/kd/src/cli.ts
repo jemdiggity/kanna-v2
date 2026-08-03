@@ -1040,7 +1040,8 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd release setup-notarization [--profile <name>] [--keychain <absolute-path>]",
     "",
     "Securely prompt for Apple notarization credentials, validate them, and store the named profile in an explicit file-based Keychain.",
-    "Defaults to profile kanna-notarization and the current user's default login Keychain. Writes only the profile name and Keychain path to ~/.kanna/.env.release.local."
+    "Defaults to profile kanna-notarization and the current user's default login Keychain. Writes only the profile name and Keychain path to ~/.kanna/.env.release.local.",
+    "That owner-only machine-global file is the sole release-environment file kd reads; repository and worktree .env.release.local files are ignored."
   ],
   "release cut": [
     "Usage: kd release cut [--major|--minor|--patch]",

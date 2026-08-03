@@ -11,8 +11,8 @@ Narrower coverage proves the local wiring without publishing anything:
 
 - `tools/kd/tests/notarization.test.ts` exercises safe selector validation,
   credential error classification, the online-validation command boundary, and
-  the interactive setup/config write flow with a disposable Keychain file and
-  faithful command runner.
+  the interactive setup/write flow for the sole machine-global config with a
+  disposable Keychain file and faithful command runner.
 - `tools/kd/tests/release-tasks.test.ts` proves an inaccessible profile stops
   before the ship/build/publish boundary, so no Bazel build, tag, or GitHub
   release operation begins.

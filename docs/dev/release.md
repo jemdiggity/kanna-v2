@@ -55,7 +55,7 @@ on the `desktop-staging` pointer release. Roll back by repointing:
 ### Local release environment
 
 Notarization uses a named credential stored in an explicitly selected,
-file-based macOS Keychain. Run the one-time setup or migration command:
+file-based macOS Keychain. Run the one-time machine setup command:
 
 ```sh
 ./kd release setup-notarization
@@ -74,10 +74,9 @@ APPLE_KEYCHAIN_PATH="/Users/example/Library/Keychains/login.keychain-db"
 Use `--profile <name>` or `--keychain <absolute-path>` when a different named
 profile or file-based Keychain is required. Existing credentials saved with
 `notarytool --sync` live in the data-protection Keychain and cannot be copied or
-extracted; rerun the setup command and enter the credential once so it is saved
-in the selected file-based Keychain. After validation succeeds, setup also
-removes legacy notarization selector assignments from the primary checkout's
-`.env.release.local` while preserving its comments and other release defaults.
+extracted; run the setup command and enter the credential once so it is saved
+in the selected file-based Keychain. Setup writes only
+`~/.kanna/.env.release.local`; it does not inspect or modify repository files.
 
 `kd release ship` and non-dry-run promotions validate that exact profile and
 Keychain using `notarytool history` before starting the release build. Missing
@@ -86,13 +85,16 @@ credentials rejected by Apple produce distinct safe diagnostics. If the login
 Keychain is locked, unlock it normally and retry; never put its password in an
 environment file.
 
-Optional non-sensitive release defaults may remain in the ignored
-`.env.release.local` in the primary repository checkout and are shared by its
-linked worktrees. The notarization profile and Keychain path are machine-local
-and are rejected in that repository file. Explicitly exported selector values
-override `~/.kanna` values. Apple IDs, app-specific passwords, API private keys,
-and other secrets must never be stored in either plaintext file; the release
-path does not forward direct Apple credential variables into Bazel.
+`~/.kanna/.env.release.local` is kd's sole release-environment file for every
+repository and worktree, and kd requires it to be owner-only (`0600`). A primary
+checkout or worktree `.env.release.local` is never read; move any non-secret
+release defaults needed by kd into the machine-global file, then remove the
+obsolete repository file. Explicitly exported process values, including the two
+selectors, override values from `~/.kanna`; use this only for deliberate
+per-invocation non-secret overrides. Apple IDs, app-specific passwords, API
+private keys, and other secrets must never be stored in plaintext release
+config. The release path does not forward direct Apple credential variables
+into Bazel.
 
 ## Cloud services
 
