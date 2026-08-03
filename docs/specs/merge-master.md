@@ -57,10 +57,11 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   the projection as `approvalGate`.
 - **Explicit human override**:
   `POST /v1/tasks/{task_id}/actions/override-approval` requires an authenticated
-  native desktop, paired device, or relay channel and a reason, and records the
-  available actor, channel, and time. Direct desktop and paired-device calls
-  also carry an explicit human-action marker. Ordinary advance requests and
-  agent tools cannot claim it.
+  native desktop process channel, paired device, or authenticated relay user
+  and a reason, and records the available actor, channel, and time. The native
+  channel pins and rechecks process identity over a private Unix socket;
+  loopback/KSP traffic and reusable desktop secrets are not authority. Ordinary
+  advance requests and agent tools cannot claim it.
 - **Gated merge handoff**:
   `POST /v1/tasks/{task_id}/actions/signal-merge-handoff` rechecks the gate and
   requires an active authorized approve post, binds the handoff to that task's
@@ -68,7 +69,9 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   It refuses unresolved holds and includes the complete override record when
   one exists. Surviving pre-upgrade approve and merge sessions use a
   server-validated eligible-only legacy envelope; overrides require a
-  protocol-v1 merge session.
+  protocol-v1 merge session. Capability, reservation, acknowledgement, and
+  durable delivery all bind to the same task/session; pre-acknowledgement
+  failures remain retryable and post-acknowledgement uncertainty is held.
 - Later: a verdict UI on tasks parked at `pr` (request-changes composer →
   request-revision; approve button → advance). Forge-blind — it fires
   stage actions. Line-anchored diff feedback is a follow-up (needs an
@@ -92,6 +95,9 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   input boundary: `KANNA_MERGE_HANDOFF {json}`. The JSON is canonical and
   contains server-owned approval state, while delivery retains the mature
   singleton/session lifecycle.
+- Generic task input, MCP input, and KSP stream steering are never canonical
+  merge authority. Only the server handoff above or an independently
+  provenance-authenticated native operator terminal action may release a hold.
 - ~~Whether the default pipeline ships the approve post or it stays an
   opt-in example. Default-off until the singleton endpoint exists.~~
   Resolved: the singleton signal endpoint

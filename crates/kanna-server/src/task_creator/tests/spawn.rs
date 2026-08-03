@@ -18,7 +18,12 @@ async fn spawn_prepared_task_sends_spawn_agent_for_agent_sessions() {
         branch: "task-1".to_string(),
         session_id: "task-1".to_string(),
         cwd: "/tmp/repo/.kanna-worktrees/task-1".to_string(),
-        env: HashMap::new(),
+        env: HashMap::from([(
+            "KANNA_SOCKET_PATH".to_string(),
+            kanna_runtime_defaults::socket_path(std::path::Path::new(&config.daemon_dir))
+                .to_string_lossy()
+                .to_string(),
+        )]),
         stage_agent: Some("implement".to_string()),
         agent_provider: "claude".to_string(),
         model: Some("sonnet".to_string()),
@@ -91,7 +96,12 @@ async fn spawn_prepared_task_records_running_stage_run_after_session_created() {
         branch: "task-1".to_string(),
         session_id: "task-1".to_string(),
         cwd: "/tmp/repo/.kanna-worktrees/task-1".to_string(),
-        env: HashMap::new(),
+        env: HashMap::from([(
+            "KANNA_SOCKET_PATH".to_string(),
+            kanna_runtime_defaults::socket_path(std::path::Path::new(&config.daemon_dir))
+                .to_string_lossy()
+                .to_string(),
+        )]),
         stage_agent: Some("reviewer".to_string()),
         agent_provider: "claude".to_string(),
         model: Some("sonnet".to_string()),

@@ -28,7 +28,8 @@ mod worktrees;
 pub use analytics::RepoAnalytics;
 #[allow(unused_imports)]
 pub use approval::{
-    ApprovalGate, ApprovalGateState, ApprovalHold, ApprovalOverrideRecord, ExplicitStageDisposition,
+    ApprovalDeliveryReservation, ApprovalGate, ApprovalGateState, ApprovalHold,
+    ApprovalOverrideRecord, ExplicitStageDisposition,
 };
 pub use blockers::ReplaceTaskBlockersError;
 #[allow(unused_imports)]
@@ -93,6 +94,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "043_task_approval_atomic_projection",
     "044_task_approval_authorization",
     "045_agent_signal_protocol",
+    "046_completion_and_merge_delivery_binding",
 ];
 
 #[derive(Debug, Serialize)]
@@ -380,6 +382,13 @@ pub struct ClaimedTaskNotification {
 pub struct OpenAgentTask {
     pub task_id: String,
     pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeSignalRecipient {
+    pub task_id: String,
+    pub session_id: String,
+    pub protocol: i64,
 }
 
 #[derive(Debug)]
@@ -708,6 +717,7 @@ fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           resumed_from_run_id TEXT,
           resume_fallback_reason TEXT,
           completion_transition TEXT CHECK (completion_transition IN ('manual', 'auto')),
+          completion_bound INTEGER NOT NULL DEFAULT 0,
           started_at TEXT NOT NULL DEFAULT (datetime('now')),
           finished_at TEXT
         );
@@ -1559,6 +1569,40 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         create_agent_signal_protocol_schema(conn)
     })?;
 
+    run_migration(conn, "046_completion_and_merge_delivery_binding", |conn| {
+        add_column(
+            conn,
+            "stage_run",
+            "completion_bound",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        add_column(
+            conn,
+            "task_approval_authorization",
+            "delivery_task_id",
+            "TEXT",
+        )?;
+        add_column(
+            conn,
+            "task_approval_authorization",
+            "delivery_session_id",
+            "TEXT",
+        )?;
+        add_column(
+            conn,
+            "task_approval_authorization",
+            "delivery_protocol",
+            "INTEGER",
+        )?;
+        add_column(
+            conn,
+            "task_approval_authorization",
+            "delivery_reserved_at",
+            "TEXT",
+        )?;
+        add_column(conn, "agent_signal_protocol", "session_id", "TEXT")
+    })?;
+
     Ok(())
 }
 
@@ -1574,7 +1618,11 @@ fn create_task_approval_authorization_schema(conn: &Connection) -> Result<(), ru
           pr_url TEXT,
           approval_json TEXT NOT NULL,
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
-          delivered_at TEXT
+          delivered_at TEXT,
+          delivery_task_id TEXT,
+          delivery_session_id TEXT,
+          delivery_protocol INTEGER,
+          delivery_reserved_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_task_approval_authorization_task
           ON task_approval_authorization(task_id, created_at);
@@ -1587,6 +1635,7 @@ fn create_agent_signal_protocol_schema(conn: &Connection) -> Result<(), rusqlite
         r#"
         CREATE TABLE IF NOT EXISTS agent_signal_protocol (
           task_id TEXT PRIMARY KEY REFERENCES pipeline_item(id) ON DELETE CASCADE,
+          session_id TEXT,
           merge_handoff_version INTEGER NOT NULL,
           created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );

@@ -17,7 +17,19 @@ pub(super) async fn override_approval_hold(
     axum::extract::Path(task_id): axum::extract::Path<String>,
     Json(payload): Json<crate::mobile_api::ApprovalOverrideRequest>,
 ) -> Result<Json<crate::db::ApprovalGate>, (axum::http::StatusCode, String)> {
-    let reason = payload.reason.trim().to_string();
+    record_approval_override(state, task_id, payload.reason, access.actor, access.channel)
+        .await
+        .map(Json)
+}
+
+pub(crate) async fn record_approval_override(
+    state: Arc<AppState>,
+    task_id: String,
+    reason: String,
+    actor: String,
+    channel: String,
+) -> Result<crate::db::ApprovalGate, (axum::http::StatusCode, String)> {
+    let reason = reason.trim().to_string();
     if reason.is_empty() {
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
@@ -63,13 +75,7 @@ pub(super) async fn override_approval_hold(
                 .unwrap_or_default();
             let override_id = format!("approval-override-{task_id}-{nanos}");
             let recorded = db
-                .record_approval_override(
-                    &task_id,
-                    &override_id,
-                    &access.actor,
-                    &access.channel,
-                    &reason,
-                )
+                .record_approval_override(&task_id, &override_id, &actor, &channel, &reason)
                 .map_err(|error| db_write_error("db error", error))?;
             if !recorded {
                 return Err((
@@ -83,7 +89,7 @@ pub(super) async fn override_approval_hold(
         .await?
     };
     state.publish_state_changed(StateChangeScope::Tasks);
-    Ok(Json(gate))
+    Ok(gate)
 }
 
 fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
@@ -162,9 +168,10 @@ pub(super) async fn run_merge_agent(
     {
         let state = Arc::clone(&state);
         let merge_task_id = prepared.task_id().to_string();
+        let merge_session_id = prepared.session_id().to_string();
         super::blocking::run_handler_blocking("merge protocol record", move || {
             let db = Db::open(&state.config.db_path).map_err(|e| db_write_error("db error", e))?;
-            db.set_merge_handoff_protocol(&merge_task_id, 1)
+            db.set_merge_handoff_protocol(&merge_task_id, &merge_session_id, 1)
                 .map_err(|e| db_write_error("db error", e))
         })
         .await?;
@@ -1355,7 +1362,9 @@ pub(super) async fn complete_stage(
         )
     })?;
 
-    let (task_id, finished_run, already_closed) = {
+    let completion_attempt_key = payload.completion_attempt_key.clone();
+    let completion_run_id = payload.run_id.clone();
+    let (task_id, finished_run, already_closed, replayed) = {
         let state = Arc::clone(&state);
         let payload_status = payload.status;
         let payload_summary = payload.summary;
@@ -1383,7 +1392,7 @@ pub(super) async fn complete_stage(
                 .map_err(|e| db_write_error("db error", e))?
                 .is_some_and(|item| item.closed_at.is_some())
             {
-                return Ok((task_id, None, true));
+                return Ok((task_id, None, true, false));
             }
             let run_status = if payload_status == "success" {
                 "succeeded"
@@ -1399,7 +1408,38 @@ pub(super) async fn complete_stage(
                         format!("task has no stage run to complete: {task_id}"),
                     )
                 })?;
+            let payload_run_id = match payload_run_id {
+                Some(run_id) if !run_id.trim().is_empty() => run_id,
+                Some(_) => {
+                    return Err((
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "runId must be non-empty when provided".into(),
+                    ))
+                }
+                None => {
+                    if db
+                        .stage_run_completion_bound(&current_run.id)
+                        .map_err(|e| db_write_error("db error", e))?
+                    {
+                        return Err((
+                            axum::http::StatusCode::CONFLICT,
+                            "runId is required for this spawned run; restart the completion adapter if it predates the run".into(),
+                        ));
+                    }
+                    current_run.id.clone()
+                }
+            };
             if current_run.id != payload_run_id {
+                let prior = db
+                    .stage_run(&payload_run_id)
+                    .map_err(|e| db_write_error("db error", e))?;
+                if prior.as_ref().is_some_and(|run| {
+                    run.task_id == task_id
+                        && run.status == run_status
+                        && run.result.as_deref() == Some(stage_result.as_str())
+                }) {
+                    return Ok((task_id, None, false, true));
+                }
                 return Err((
                     axum::http::StatusCode::CONFLICT,
                     format!(
@@ -1407,6 +1447,11 @@ pub(super) async fn complete_stage(
                         current_run.id
                     ),
                 ));
+            }
+            if current_run.status == run_status
+                && current_run.result.as_deref() == Some(stage_result.as_str())
+            {
+                return Ok((task_id, None, false, true));
             }
             if !matches!(
                 current_run.status.as_str(),
@@ -1459,12 +1504,19 @@ pub(super) async fn complete_stage(
                         .map_err(|e| db_write_error("db error", e))?;
                 }
             }
-            Ok((task_id, finished_run, false))
+            Ok((task_id, finished_run, false, false))
         })
         .await?
     };
 
-    if already_closed {
+    if let (Some(run_id), Some(attempt_key)) = (
+        completion_run_id.as_deref(),
+        completion_attempt_key.as_deref(),
+    ) {
+        mark_completion_context_succeeded(&state.config.daemon_dir, run_id, attempt_key);
+    }
+
+    if already_closed || replayed {
         return Ok(Json(crate::mobile_api::TaskActionResponse {
             task_id,
             follow_task: None,
@@ -1535,6 +1587,25 @@ pub(super) async fn complete_stage(
     );
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(response))
+}
+
+fn mark_completion_context_succeeded(daemon_dir: &str, run_id: &str, attempt_key: &str) {
+    let path = std::path::Path::new(daemon_dir)
+        .join("runtime")
+        .join("completion")
+        .join(format!("{run_id}.json"));
+    if !path.exists() {
+        return;
+    }
+    if let Err(error) = kanna_tool_catalog::write_completion_context(
+        &path,
+        &kanna_tool_catalog::CompletionContext {
+            run_id: run_id.to_string(),
+            completed_attempt_key: Some(attempt_key.to_string()),
+        },
+    ) {
+        log::warn!("failed to persist completion retry binding for {run_id}: {error}");
+    }
 }
 
 /// Optimistic blocker resolution: a task parked at the `pr` stage with a

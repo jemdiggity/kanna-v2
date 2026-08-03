@@ -63,6 +63,13 @@ pub struct ApprovalAuthorization {
     pub delivered_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDeliveryReservation {
+    Reserved,
+    AlreadyReserved,
+    AlreadyDelivered,
+}
+
 impl ApprovalGate {
     pub fn permits_approval(&self) -> bool {
         matches!(self.state, ApprovalGateState::Eligible)
@@ -149,44 +156,132 @@ impl Db {
             .optional()
     }
 
+    pub fn reserve_approval_authorization_delivery(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        session_id: &str,
+        protocol: i64,
+    ) -> Result<ApprovalDeliveryReservation, rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let current = transaction.query_row(
+            "SELECT delivered_at, delivery_task_id, delivery_session_id, delivery_protocol
+             FROM task_approval_authorization WHERE run_id = ?",
+            [run_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            },
+        )?;
+        let result = if current.0.is_some() {
+            ApprovalDeliveryReservation::AlreadyDelivered
+        } else if current.1.is_some() || current.2.is_some() || current.3.is_some() {
+            ApprovalDeliveryReservation::AlreadyReserved
+        } else {
+            transaction.execute(
+                "UPDATE task_approval_authorization
+                 SET delivery_task_id = ?, delivery_session_id = ?, delivery_protocol = ?,
+                     delivery_reserved_at = datetime('now')
+                 WHERE run_id = ? AND delivered_at IS NULL
+                   AND delivery_task_id IS NULL AND delivery_session_id IS NULL",
+                (task_id, session_id, protocol, run_id),
+            )?;
+            ApprovalDeliveryReservation::Reserved
+        };
+        transaction.commit()?;
+        Ok(result)
+    }
+
+    pub fn release_approval_authorization_delivery(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        session_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        Ok(self.conn.execute(
+            "UPDATE task_approval_authorization
+             SET delivery_task_id = NULL, delivery_session_id = NULL,
+                 delivery_protocol = NULL, delivery_reserved_at = NULL
+             WHERE run_id = ? AND delivered_at IS NULL
+               AND delivery_task_id = ? AND delivery_session_id = ?",
+            (run_id, task_id, session_id),
+        )? > 0)
+    }
+
+    /// Finalize only after the daemon acknowledged the exact recipient. The
+    /// singleton identity is rechecked in the same transaction; if it was
+    /// replaced after acknowledgement, the reservation remains quarantined
+    /// and a retry cannot duplicate a possibly accepted merge action.
     pub fn mark_approval_authorization_delivered(
         &self,
         run_id: &str,
-    ) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "UPDATE task_approval_authorization
-             SET delivered_at = COALESCE(delivered_at, datetime('now'))
-             WHERE run_id = ?",
-            [run_id],
+        repo_id: &str,
+        task_id: &str,
+        session_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let recipient_matches: bool = transaction.query_row(
+            "SELECT EXISTS(
+               SELECT 1
+               FROM pipeline_item p
+               JOIN stage_run sr ON sr.task_id = p.id
+               WHERE p.id = ? AND p.repo_id = ? AND p.closed_at IS NULL
+                 AND sr.agent = 'merge'
+                 AND COALESCE(NULLIF(sr.session_id, ''), p.id) = ?
+                 AND COALESCE((
+                   SELECT protocol.merge_handoff_version
+                   FROM agent_signal_protocol protocol
+                   WHERE protocol.task_id = p.id
+                     AND protocol.session_id = COALESCE(NULLIF(sr.session_id, ''), p.id)
+                 ), 0) = (
+                   SELECT authorization.delivery_protocol
+                   FROM task_approval_authorization authorization
+                   WHERE authorization.run_id = ?
+                     AND authorization.delivery_task_id = p.id
+                     AND authorization.delivery_session_id = ?
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM stage_run newer
+                   WHERE newer.task_id = p.id AND newer.rowid > sr.rowid
+                     AND newer.agent = 'merge'
+                 )
+             )",
+            (task_id, repo_id, session_id, run_id, session_id),
+            |row| row.get(0),
         )?;
-        Ok(())
+        let changed = if recipient_matches {
+            transaction.execute(
+                "UPDATE task_approval_authorization
+                 SET delivered_at = COALESCE(delivered_at, datetime('now'))
+                 WHERE run_id = ? AND delivery_task_id = ? AND delivery_session_id = ?",
+                (run_id, task_id, session_id),
+            )? > 0
+        } else {
+            false
+        };
+        transaction.commit()?;
+        Ok(changed)
     }
 
     pub fn set_merge_handoff_protocol(
         &self,
         task_id: &str,
+        session_id: &str,
         version: i64,
     ) -> Result<(), rusqlite::Error> {
         self.conn.execute(
-            "INSERT INTO agent_signal_protocol (task_id, merge_handoff_version)
-             VALUES (?, ?)
-             ON CONFLICT(task_id) DO UPDATE SET merge_handoff_version = excluded.merge_handoff_version",
-            (task_id, version),
+            "INSERT INTO agent_signal_protocol (task_id, session_id, merge_handoff_version)
+             VALUES (?, ?, ?)
+             ON CONFLICT(task_id) DO UPDATE SET
+               session_id = excluded.session_id,
+               merge_handoff_version = excluded.merge_handoff_version",
+            (task_id, session_id, version),
         )?;
         Ok(())
-    }
-
-    pub fn merge_handoff_protocol(&self, task_id: &str) -> Result<i64, rusqlite::Error> {
-        use rusqlite::OptionalExtension;
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT merge_handoff_version FROM agent_signal_protocol WHERE task_id = ?",
-                [task_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or(0))
     }
 
     pub fn task_approval_gate(&self, task_id: &str) -> Result<ApprovalGate, rusqlite::Error> {

@@ -5,6 +5,7 @@ mod config;
 mod daemon_client;
 mod db;
 mod http_api;
+mod human_control;
 mod ksp;
 mod mobile_api;
 mod pairing;

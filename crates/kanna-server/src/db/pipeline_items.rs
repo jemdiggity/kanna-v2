@@ -415,6 +415,53 @@ impl Db {
             .optional()
     }
 
+    /// Resolve the merge singleton and its protocol from the same exact task
+    /// row. Callers must keep this identity through delivery; a second
+    /// singleton lookup would let replacement race capability negotiation.
+    pub fn find_open_merge_recipient(
+        &self,
+        repo_id: &str,
+    ) -> Result<Option<super::MergeSignalRecipient>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT p.id,
+                        COALESCE(NULLIF(sr.session_id, ''), p.id),
+                        COALESCE(protocol.merge_handoff_version, 0)
+                 FROM pipeline_item p
+                 JOIN stage_run sr ON sr.task_id = p.id
+                 LEFT JOIN agent_signal_protocol protocol
+                   ON protocol.task_id = p.id
+                  AND protocol.session_id = COALESCE(NULLIF(sr.session_id, ''), p.id)
+                 WHERE p.repo_id = ?
+                   AND p.closed_at IS NULL
+                   AND sr.agent = 'merge'
+                 ORDER BY sr.rowid DESC
+                 LIMIT 1",
+                [repo_id],
+                |row| {
+                    Ok(super::MergeSignalRecipient {
+                        task_id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        protocol: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn is_open_agent_task(&self, task_id: &str, agent: &str) -> Result<bool, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1
+               FROM pipeline_item p
+               JOIN stage_run sr ON sr.task_id = p.id
+               WHERE p.id = ? AND p.closed_at IS NULL AND sr.agent = ?
+             )",
+            (task_id, agent),
+            |row| row.get(0),
+        )
+    }
+
     pub fn get_task_stage_source(
         &self,
         id: &str,

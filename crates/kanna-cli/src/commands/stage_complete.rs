@@ -9,7 +9,8 @@ use crate::config::resolve_server_base_url;
 use crate::models::CompleteStageRequest;
 
 pub(crate) fn build_complete_stage_request(
-    run_id: String,
+    run_id: Option<String>,
+    completion_attempt_key: Option<String>,
     status: String,
     summary: String,
     metadata: Option<Value>,
@@ -17,6 +18,7 @@ pub(crate) fn build_complete_stage_request(
 ) -> CompleteStageRequest {
     CompleteStageRequest {
         run_id,
+        completion_attempt_key,
         status,
         summary,
         metadata,
@@ -73,34 +75,70 @@ pub(crate) async fn run(
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect::<Vec<_>>();
     let base_url = resolve_server_base_url(&borrowed_pairs, server_url);
-    let run_id = crate::api::get_task_via_api(&base_url, &task_id)
-        .await
-        .unwrap_or_else(|error| {
-            eprintln!("Error: failed to bind stage completion to the active run: {error}");
-            process::exit(1);
-        })
-        .latest_run
-        .map(|run| run.id)
-        .unwrap_or_else(|| {
-            eprintln!("Error: task has no stage run to complete: {task_id}");
-            process::exit(1);
-        });
-    let request = build_complete_stage_request(
-        run_id,
+    let mut request = build_complete_stage_request(
+        None,
+        None,
         status.clone(),
         summary.clone(),
         metadata_value,
         disposition,
     );
+    bind_completion_request(&base_url, &task_id, &mut request)
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("Error: {error}");
+            process::exit(1);
+        });
     let response = complete_stage_via_api(&base_url, &task_id, &request)
         .await
         .unwrap_or_else(|e| {
             eprintln!("Error: {e}");
             process::exit(1);
         });
+    mark_completion_succeeded(&request);
 
     println!(
         "{}",
         render_stage_complete_confirmation(&task_id, &status, &response.task_id)
     );
+}
+
+fn mark_completion_succeeded(request: &CompleteStageRequest) {
+    let (Some(path), Some(attempt_key), Some(run_id)) = (
+        env::var_os(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV),
+        request.completion_attempt_key.as_ref(),
+        request.run_id.as_ref(),
+    ) else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    let _ = kanna_tool_catalog::write_completion_context(
+        &path,
+        &kanna_tool_catalog::CompletionContext {
+            run_id: run_id.clone(),
+            completed_attempt_key: Some(attempt_key.clone()),
+        },
+    );
+}
+
+async fn bind_completion_request(
+    _base_url: &str,
+    _task_id: &str,
+    request: &mut CompleteStageRequest,
+) -> Result<(), String> {
+    let body = serde_json::to_value(&*request)
+        .map_err(|error| format!("failed to encode completion request: {error}"))?;
+    let attempt_key = kanna_tool_catalog::completion_attempt_key(&body)?;
+    if let Some(path) = env::var_os(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV) {
+        let path = std::path::PathBuf::from(path);
+        let context = kanna_tool_catalog::read_completion_context(&path)?;
+        request.run_id = Some(context.run_id);
+        request.completion_attempt_key = Some(attempt_key);
+    } else if let Ok(run_id) = env::var(kanna_tool_catalog::KANNA_STAGE_RUN_ID_ENV) {
+        if !run_id.trim().is_empty() {
+            request.run_id = Some(run_id);
+            request.completion_attempt_key = Some(attempt_key);
+        }
+    }
+    Ok(())
 }

@@ -122,7 +122,8 @@ fn parses_task_detail_response_shape() {
         "worktreePath": "/tmp/worktree",
         "commitsAhead": 2,
         "commitsBehind": 1,
-        "dirty": true
+        "dirty": true,
+        "latestRun": {}
     }))
     .unwrap();
 
@@ -136,4 +137,5 @@ fn parses_task_detail_response_shape() {
     assert_eq!(task.commits_ahead, 2);
     assert_eq!(task.commits_behind, 1);
     assert!(task.dirty);
+    assert_eq!(task.latest_run.and_then(|run| run.id), None);
 }

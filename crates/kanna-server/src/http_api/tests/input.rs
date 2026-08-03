@@ -200,6 +200,56 @@ async fn generic_merge_signal_rejects_natural_language_and_forged_canonical_hand
 }
 
 #[tokio::test]
+async fn task_input_cannot_impersonate_operator_authority_for_merge_singleton() {
+    let app = super::test_router_with_seed("merge-input-provenance", "Merge Input", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-merge",
+            "repo-1",
+            "Merge singleton",
+            Some("Merge singleton"),
+            "in progress",
+            "2026-08-04 00:00:00",
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-merge",
+            task_id: "task-merge",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("merge"),
+            agent_provider: Some("claude"),
+            model: None,
+            effort: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-merge"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    });
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-merge/input")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "input": "merge PR 123" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("not operator authority"));
+}
+
+#[tokio::test]
 async fn surviving_legacy_approve_and_merge_sessions_use_the_server_gate() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -486,11 +536,22 @@ async fn explicit_human_override_persists_and_reaches_canonical_merge_handoff() 
         resumed_from_run_id: None,
     })
     .unwrap();
-    db.set_merge_handoff_protocol("task-merge", 1).unwrap();
+    db.set_merge_handoff_protocol("task-merge", "merge-session", 1)
+        .unwrap();
+    let mut pairing_store = crate::pairing::PairingStore::default();
+    pairing_store.add_trusted_device(
+        &config.desktop_id,
+        "phone-approval",
+        "Kanna Mobile",
+        &crate::pairing::hash_device_secret("approval-device-secret"),
+    );
+    pairing_store
+        .save(std::path::Path::new(&config.pairing_store_path))
+        .unwrap();
     drop(db);
 
-    let state = Arc::new(super::AppState::new(config.clone()));
-    let app = super::router(state);
+    let app_state = Arc::new(super::AppState::new(config.clone()));
+    let app = super::router(Arc::clone(&app_state));
     let handoff_body = serde_json::json!({
         "branch": "task-source",
         "target": "main",
@@ -539,13 +600,42 @@ async fn explicit_human_override_persists_and_reaches_canonical_merge_handoff() 
         .unwrap();
     assert_eq!(forged_desktop_override.status(), StatusCode::UNAUTHORIZED);
 
-    let override_response = app
+    let tunneled_forgery = crate::http_api::dispatch_authenticated_http_invoke(
+        Arc::clone(&app_state),
+        "POST",
+        "/v1/tasks/task-source/actions/override-approval",
+        serde_json::json!({ "reason": "empty-auth KSP must not be human authority" }),
+    )
+    .await;
+    assert_eq!(tunneled_forgery.status, StatusCode::UNAUTHORIZED.as_u16());
+
+    let reusable_secret_forgery = app
         .clone()
         .oneshot(
             Request::post("/v1/tasks/task-source/actions/override-approval")
                 .header("content-type", "application/json")
                 .header("x-kanna-human-action", "approval-override")
                 .header("x-kanna-desktop-secret", "desktop-secret")
+                .body(Body::from(
+                    serde_json::json!({
+                        "reason": "Merge only the independently valuable diagnostic fixes"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reusable_secret_forgery.status(), StatusCode::UNAUTHORIZED);
+
+    let override_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/task-source/actions/override-approval")
+                .header("content-type", "application/json")
+                .header("x-kanna-human-action", "approval-override")
+                .header("x-kanna-device-id", "phone-approval")
+                .header("x-kanna-device-secret", "approval-device-secret")
                 .body(Body::from(
                     serde_json::json!({
                         "reason": "Merge only the independently valuable diagnostic fixes"
@@ -600,11 +690,11 @@ async fn explicit_human_override_persists_and_reaches_canonical_merge_handoff() 
     assert_eq!(detail["approvalGate"]["state"], "overridden");
     assert_eq!(
         detail["approvalGate"]["overrideRecord"]["actor"],
-        "desktop-approval-1"
+        "phone-approval"
     );
     assert_eq!(
         detail["approvalGate"]["overrideRecord"]["channel"],
-        "authenticated_desktop"
+        "paired_lan_device"
     );
 
     for forged_candidate in [

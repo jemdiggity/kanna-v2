@@ -407,13 +407,15 @@ async fn handle_mcp_tool_call(
             .map_err(|_| "catalog lock poisoned".to_string())?;
         resolve_request(&catalog, name, &args)?
     };
-    if name == "kanna_complete_stage" {
-        bind_request_to_latest_run(base_url, &mut request).await?;
-    }
+    let completion = if name == "kanna_complete_stage" {
+        bind_request_to_spawned_run(base_url, &mut request).await?
+    } else {
+        None
+    };
     let task_id = env::var("KANNA_TASK_ID")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    execute_resolved_request(
+    let result = execute_resolved_request(
         base_url,
         request,
         RuntimeAdapterIdentity {
@@ -423,30 +425,59 @@ async fn handle_mcp_tool_call(
             task_id: task_id.as_deref(),
         },
     )
-    .await
+    .await;
+    if result.is_ok() {
+        mark_completion_succeeded(completion);
+    }
+    result
 }
 
-async fn bind_request_to_latest_run(
-    base_url: &str,
+struct CompletionBinding {
+    path: std::path::PathBuf,
+    context: kanna_tool_catalog::CompletionContext,
+    attempt_key: String,
+}
+
+async fn bind_request_to_spawned_run(
+    _base_url: &str,
     request: &mut ResolvedRequest,
-) -> Result<(), String> {
-    let task_path = request
-        .path
-        .strip_suffix("/actions/complete-stage")
-        .ok_or_else(|| "complete-stage request path is not canonical".to_string())?;
-    let task: Value = get_json(base_url, task_path).await?;
-    let run_id = task
-        .get("latestRun")
-        .and_then(|run| run.get("id"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "task has no stage run to complete".to_string())?;
+) -> Result<Option<CompletionBinding>, String> {
+    let attempt_key = kanna_tool_catalog::completion_attempt_key(&request.body)?;
+    let context_path =
+        env::var_os(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV).map(std::path::PathBuf::from);
+    let context = match context_path.as_ref() {
+        Some(path) => Some(kanna_tool_catalog::read_completion_context(path)?),
+        None => None,
+    };
+    let run_id = context
+        .as_ref()
+        .map(|context| context.run_id.clone())
+        .or_else(|| env::var(kanna_tool_catalog::KANNA_STAGE_RUN_ID_ENV).ok());
+    let Some(run_id) = run_id.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
     let body = request
         .body
         .as_object_mut()
         .ok_or_else(|| "complete-stage request body must be an object".to_string())?;
     body.insert("runId".to_string(), Value::String(run_id.to_string()));
-    Ok(())
+    body.insert(
+        "completionAttemptKey".to_string(),
+        Value::String(attempt_key.clone()),
+    );
+    Ok(context_path
+        .zip(context)
+        .map(|(path, context)| CompletionBinding {
+            path,
+            context,
+            attempt_key,
+        }))
+}
+
+fn mark_completion_succeeded(binding: Option<CompletionBinding>) {
+    let Some(mut binding) = binding else { return };
+    binding.context.completed_attempt_key = Some(binding.attempt_key);
+    let _ = kanna_tool_catalog::write_completion_context(&binding.path, &binding.context);
 }
 
 async fn maybe_augment_create_task_args(

@@ -125,6 +125,28 @@ pub(super) async fn send_task_input(
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
     }
 
+    let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id).await?;
+    let merge_input_forbidden = {
+        let state = Arc::clone(&state);
+        let task_id = task_id.clone();
+        super::blocking::run_handler_blocking("merge input provenance check", move || {
+            let db = Db::open(&state.config.db_path).map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {error}"),
+                )
+            })?;
+            db.is_open_agent_task(&task_id, "merge")
+                .map_err(|error| super::state::db_write_error("db error", error))
+        })
+        .await?
+    };
+    if merge_input_forbidden {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            "merge singleton input requires a canonical server handoff or the native operator terminal; task-input APIs are not operator authority".into(),
+        ));
+    }
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
         .map_err(|e| {

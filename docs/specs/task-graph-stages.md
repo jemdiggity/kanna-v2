@@ -249,7 +249,9 @@ agent-created child are not different kinds of things.
   place (kill/finish the current agent session, spawn the next stage's agent
   in the task's worktree, update `stage`, insert a `stage_run`).
 - `POST /v1/tasks/{id}/actions/complete-stage` — record the run result for the
-  required `runId` (stale/replaced run ids are rejected); on
+  spawn-bound `runId` (stale/replaced run ids are rejected, while an exact
+  already-committed retry is idempotent; omission is accepted only for a
+  durable pre-upgrade unbound run); on
   `success` with `transition: auto`, advance. On `failure`, mark the run
   failed and park the task.
 - `POST /v1/tasks/{id}/actions/request-revision` — insert a run for the

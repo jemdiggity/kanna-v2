@@ -84,10 +84,13 @@ async fn relay_http_invoke_dispatch_is_concurrent_and_off_the_runtime() {
         Arc::clone(&state),
         Arc::clone(&sink),
         Arc::clone(&permits),
-        crate::relay_client::RelayId::String("slow-invoke".to_string()),
-        "GET".to_string(),
-        "/v1/repos/repo-1/kanna-definitions".to_string(),
-        serde_json::Value::Null,
+        crate::relay::RelayHttpInvokeRequest {
+            id: crate::relay_client::RelayId::String("slow-invoke".to_string()),
+            method: "GET".to_string(),
+            path: "/v1/repos/repo-1/kanna-definitions".to_string(),
+            body: serde_json::Value::Null,
+            authenticated_user_id: None,
+        },
     )
     .await
     .expect("dispatch slow invoke");
@@ -104,10 +107,13 @@ async fn relay_http_invoke_dispatch_is_concurrent_and_off_the_runtime() {
         Arc::clone(&state),
         Arc::clone(&sink),
         Arc::clone(&permits),
-        crate::relay_client::RelayId::String("fast-invoke".to_string()),
-        "GET".to_string(),
-        "/v1/status".to_string(),
-        serde_json::Value::Null,
+        crate::relay::RelayHttpInvokeRequest {
+            id: crate::relay_client::RelayId::String("fast-invoke".to_string()),
+            method: "GET".to_string(),
+            path: "/v1/status".to_string(),
+            body: serde_json::Value::Null,
+            authenticated_user_id: None,
+        },
     )
     .await
     .expect("dispatch fast invoke");
@@ -180,10 +186,13 @@ async fn relay_http_invoke_dispatch_rejects_when_saturated() {
         Arc::clone(&state),
         Arc::clone(&sink),
         Arc::clone(&permits),
-        crate::relay_client::RelayId::String("rejected-invoke".to_string()),
-        "GET".to_string(),
-        "/v1/status".to_string(),
-        serde_json::Value::Null,
+        crate::relay::RelayHttpInvokeRequest {
+            id: crate::relay_client::RelayId::String("rejected-invoke".to_string()),
+            method: "GET".to_string(),
+            path: "/v1/status".to_string(),
+            body: serde_json::Value::Null,
+            authenticated_user_id: None,
+        },
     )
     .await
     .expect("saturation response should still send");

@@ -122,7 +122,8 @@ pub(crate) struct TaskDetail {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TaskLatestRun {
-    pub(crate) id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -201,7 +202,10 @@ pub(crate) struct CreateTaskResponse {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CompleteStageRequest {
-    pub(crate) run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) completion_attempt_key: Option<String>,
     pub(crate) status: String,
     pub(crate) summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]

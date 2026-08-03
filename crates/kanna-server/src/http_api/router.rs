@@ -21,7 +21,10 @@ use super::repos::{
 use super::settings::{delete_setting, get_setting, put_cloud_transfer_identity, put_setting};
 use super::signal_agent::{signal_agent, signal_merge_handoff};
 use super::snapshot::get_snapshot;
-use super::state::{AppState, AuthenticatedHttpInvoke, HttpInvokeResponse, TunneledHttpInvoke};
+use super::state::{
+    AppState, AuthenticatedHttpInvoke, AuthenticatedHumanHttpInvoke, HttpInvokeResponse,
+    TunneledHttpInvoke,
+};
 use super::status::status;
 use super::task_actions::{
     abort_task_creation, advance_stage, close_task, complete_stage, override_approval_hold,
@@ -340,7 +343,7 @@ pub async fn dispatch_http_invoke(
     path: &str,
     body: serde_json::Value,
 ) -> HttpInvokeResponse {
-    dispatch_http_invoke_with_access(state, method, path, body, false).await
+    dispatch_http_invoke_with_access(state, method, path, body, false, None).await
 }
 
 pub async fn dispatch_authenticated_http_invoke(
@@ -349,7 +352,17 @@ pub async fn dispatch_authenticated_http_invoke(
     path: &str,
     body: serde_json::Value,
 ) -> HttpInvokeResponse {
-    dispatch_http_invoke_with_access(state, method, path, body, true).await
+    dispatch_http_invoke_with_access(state, method, path, body, true, None).await
+}
+
+pub async fn dispatch_authenticated_relay_http_invoke(
+    state: Arc<AppState>,
+    actor: String,
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> HttpInvokeResponse {
+    dispatch_http_invoke_with_access(state, method, path, body, true, Some(actor)).await
 }
 
 async fn dispatch_http_invoke_with_access(
@@ -358,6 +371,7 @@ async fn dispatch_http_invoke_with_access(
     path: &str,
     body: serde_json::Value,
     authenticated_file_access: bool,
+    authenticated_human_actor: Option<String>,
 ) -> HttpInvokeResponse {
     let method = match method.parse::<axum::http::Method>() {
         Ok(method) => method,
@@ -422,6 +436,14 @@ async fn dispatch_http_invoke_with_access(
         request
             .extensions_mut()
             .insert(super::task_files::AuthenticatedTaskFileAccess);
+    }
+    if let Some(actor) = authenticated_human_actor {
+        request
+            .extensions_mut()
+            .insert(AuthenticatedHumanHttpInvoke {
+                actor,
+                channel: "authenticated_relay".into(),
+            });
     }
 
     match router(state).oneshot(request).await {

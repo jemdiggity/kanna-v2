@@ -99,6 +99,7 @@ pub(crate) async fn run_relay_loop(
         let mut publication_interval = tokio::time::interval(TASK_SNAPSHOT_POLL_INTERVAL);
         publication_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let publication_enabled = cloud_task_publication_enabled(config.desktop_secret.as_deref());
+        let mut authenticated_user_id: Option<String> = None;
 
         // Message processing loop
         loop {
@@ -412,10 +413,13 @@ pub(crate) async fn run_relay_loop(
                                     Arc::clone(&http_state),
                                     Arc::clone(&sink),
                                     Arc::clone(&invoke_permits),
-                                    id,
-                                    method,
-                                    path,
-                                    body,
+                                    RelayHttpInvokeRequest {
+                                        id,
+                                        method,
+                                        path,
+                                        body,
+                                        authenticated_user_id: authenticated_user_id.clone(),
+                                    },
                                 )
                                 .await
                                 {
@@ -429,6 +433,7 @@ pub(crate) async fn run_relay_loop(
                             capabilities,
                         } => {
                             log::info!("Relay authenticated as user {}", user_id);
+                            authenticated_user_id = Some(user_id.clone());
                             publisher.on_authenticated(
                                 capabilities
                                     .task_snapshot_publication
@@ -616,15 +621,27 @@ async fn send_response(
 /// message processing. Responses are id-addressed, so completion order does
 /// not matter. Returns `Err` only when the saturation response could not be
 /// written to the relay sink (the caller reconnects).
+pub(crate) struct RelayHttpInvokeRequest {
+    pub(crate) id: relay_client::RelayId,
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) body: serde_json::Value,
+    pub(crate) authenticated_user_id: Option<String>,
+}
+
 pub(crate) async fn dispatch_relay_http_invoke(
     http_state: Arc<http_api::AppState>,
     sink: Arc<Mutex<relay_client::WsSink>>,
     invoke_permits: Arc<tokio::sync::Semaphore>,
-    id: relay_client::RelayId,
-    method: String,
-    path: String,
-    body: serde_json::Value,
+    request: RelayHttpInvokeRequest,
 ) -> Result<(), String> {
+    let RelayHttpInvokeRequest {
+        id,
+        method,
+        path,
+        body,
+        authenticated_user_id,
+    } = request;
     let permit = match Arc::clone(&invoke_permits).try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
@@ -642,9 +659,22 @@ pub(crate) async fn dispatch_relay_http_invoke(
         let _permit = permit;
         let handle = tokio::runtime::Handle::current();
         let dispatched = tokio::task::spawn_blocking(move || {
-            handle.block_on(http_api::dispatch_authenticated_http_invoke(
-                http_state, &method, &path, body,
-            ))
+            handle.block_on(async move {
+                match authenticated_user_id {
+                    Some(actor) => {
+                        http_api::dispatch_authenticated_relay_http_invoke(
+                            http_state, actor, &method, &path, body,
+                        )
+                        .await
+                    }
+                    None => {
+                        http_api::dispatch_authenticated_http_invoke(
+                            http_state, &method, &path, body,
+                        )
+                        .await
+                    }
+                }
+            })
         })
         .await;
         let response = match dispatched {

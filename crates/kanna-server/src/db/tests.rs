@@ -1,8 +1,8 @@
 use super::NewStageRun;
 use super::{
-    add_column, database_open_flags, run_migration, ApprovalGateState, Db,
-    ExplicitStageDisposition, NewPipelineItem, NewRepo, NewTaskTransfer, NewTaskTransferProvenance,
-    ReplaceTaskBlockersError, CURRENT_SCHEMA_MIGRATIONS,
+    add_column, database_open_flags, run_migration, ApprovalDeliveryReservation, ApprovalGateState,
+    Db, ExplicitStageDisposition, NewPipelineItem, NewRepo, NewTaskTransfer,
+    NewTaskTransferProvenance, ReplaceTaskBlockersError, CURRENT_SCHEMA_MIGRATIONS,
 };
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
@@ -175,7 +175,10 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "045_agent_signal_protocol");
+    assert_eq!(
+        latest_migration,
+        "046_completion_and_merge_delivery_binding"
+    );
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -193,6 +196,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
     assert!(stage_run_sql.contains("provider_session_id"));
     assert!(stage_run_sql.contains("resumed_from_run_id"));
     assert!(stage_run_sql.contains("completion_transition"));
+    assert!(stage_run_sql.contains("completion_bound"));
     let mut transfer_columns_stmt = db
         .conn
         .prepare("PRAGMA table_info(task_transfer)")
@@ -2544,6 +2548,230 @@ fn restoring_a_live_interrupted_run_removes_its_mechanical_failure_hold() {
             .status,
         "running"
     );
+    assert!(!db
+        .restore_latest_interrupted_stage_run("task-approval", marker)
+        .unwrap());
+}
+
+#[test]
+fn interrupted_restoration_is_atomic_and_never_deletes_an_interleaved_run_hold() {
+    let db = Db::open_for_tests(&Db::test_db_path("approval-restoration-atomicity")).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-approval",
+        "repo-1",
+        "Recover the live session",
+        Some("Recover the live session"),
+        "in progress",
+        "2026-08-04 00:00:00",
+    )
+    .unwrap();
+    insert_approval_test_run(
+        &db,
+        "run-interrupted",
+        "in progress",
+        "main",
+        "running",
+        "interrupted run",
+    );
+    let marker = "agent session disappeared before a verdict was recorded";
+    db.finish_stage_run("run-interrupted", "failed", None, Some(marker))
+        .unwrap();
+
+    db.connection_for_e2e_tests()
+        .execute_batch(
+            "CREATE TRIGGER fail_interrupted_hold_delete
+             BEFORE DELETE ON task_approval_hold
+             WHEN OLD.run_id = 'run-interrupted'
+             BEGIN
+               SELECT RAISE(ABORT, 'simulated crash before hold cleanup');
+             END;",
+        )
+        .unwrap();
+    assert!(db
+        .restore_latest_interrupted_stage_run("task-approval", marker)
+        .is_err());
+    assert_eq!(
+        db.stage_run("run-interrupted").unwrap().unwrap().status,
+        "failed"
+    );
+
+    db.connection_for_e2e_tests()
+        .execute_batch(
+            "DROP TRIGGER fail_interrupted_hold_delete;
+             CREATE TRIGGER interleave_new_failure_during_restore
+             AFTER UPDATE OF status ON stage_run
+             WHEN NEW.id = 'run-interrupted' AND NEW.status = 'running'
+             BEGIN
+               INSERT INTO stage_run
+                 (id, task_id, stage, kind, status, result, feedback)
+               VALUES
+                 ('run-newer-failure', NEW.task_id, NEW.stage, 'main', 'failed',
+                  'genuine later failure', 'genuine later failure');
+             END;",
+        )
+        .unwrap();
+    assert!(db
+        .restore_latest_interrupted_stage_run("task-approval", marker)
+        .unwrap());
+    let gate = db.task_approval_gate("task-approval").unwrap();
+    assert!(gate
+        .holds
+        .iter()
+        .any(|hold| hold.run_id == "run-newer-failure"));
+    assert!(!gate
+        .holds
+        .iter()
+        .any(|hold| hold.run_id == "run-interrupted"));
+    assert!(!db
+        .restore_latest_interrupted_stage_run("task-approval", marker)
+        .unwrap());
+}
+
+#[test]
+fn merge_delivery_is_bound_to_one_recipient_and_failure_before_ack_is_retryable() {
+    let db = Db::open_for_tests(&Db::test_db_path("merge-delivery-binding")).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-source",
+        "repo-1",
+        "Ship the source task",
+        Some("Ship source"),
+        "pr",
+        "2026-08-04 00:00:00",
+    )
+    .unwrap();
+    for run_id in ["approve-run-1", "approve-run-2"] {
+        db.insert_stage_run(NewStageRun {
+            id: run_id,
+            task_id: "task-source",
+            stage: "pr",
+            kind: "post",
+            agent: Some("approve"),
+            agent_provider: Some("claude"),
+            model: None,
+            effort: None,
+            status: "succeeded",
+            result: Some("approved"),
+            feedback: None,
+            session_id: Some("source-session"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+        db.record_approval_authorization("task-source", run_id)
+            .unwrap();
+    }
+    db.insert_test_pipeline_item(
+        "task-merge",
+        "repo-1",
+        "Merge queue",
+        Some("Merge"),
+        "in progress",
+        "2026-08-04 00:00:01",
+    )
+    .unwrap();
+    let insert_merge_run = |id: &'static str, session_id: &'static str| {
+        db.insert_stage_run(NewStageRun {
+            id,
+            task_id: "task-merge",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("merge"),
+            agent_provider: Some("claude"),
+            model: None,
+            effort: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some(session_id),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    };
+    insert_merge_run("merge-run-old", "merge-session-old");
+    db.set_merge_handoff_protocol("task-merge", "merge-session-old", 1)
+        .unwrap();
+
+    assert_eq!(
+        db.reserve_approval_authorization_delivery(
+            "approve-run-1",
+            "task-merge",
+            "merge-session-old",
+            1,
+        )
+        .unwrap(),
+        ApprovalDeliveryReservation::Reserved
+    );
+    insert_merge_run("merge-run-new", "merge-session-new");
+    let replacement = db.find_open_merge_recipient("repo-1").unwrap().unwrap();
+    assert_eq!(replacement.session_id, "merge-session-new");
+    assert_eq!(
+        replacement.protocol, 0,
+        "a replacement session must not inherit the old session's capability"
+    );
+    assert!(!db
+        .mark_approval_authorization_delivered(
+            "approve-run-1",
+            "repo-1",
+            "task-merge",
+            "merge-session-old",
+        )
+        .unwrap());
+    assert_eq!(
+        db.reserve_approval_authorization_delivery(
+            "approve-run-1",
+            "task-merge",
+            "merge-session-new",
+            0,
+        )
+        .unwrap(),
+        ApprovalDeliveryReservation::AlreadyReserved,
+        "an acknowledgement/replacement uncertainty must quarantine duplicates"
+    );
+
+    db.set_merge_handoff_protocol("task-merge", "merge-session-new", 1)
+        .unwrap();
+    assert_eq!(
+        db.reserve_approval_authorization_delivery(
+            "approve-run-2",
+            "task-merge",
+            "merge-session-new",
+            1,
+        )
+        .unwrap(),
+        ApprovalDeliveryReservation::Reserved
+    );
+    assert!(
+        db.release_approval_authorization_delivery(
+            "approve-run-2",
+            "task-merge",
+            "merge-session-new",
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        db.reserve_approval_authorization_delivery(
+            "approve-run-2",
+            "task-merge",
+            "merge-session-new",
+            1,
+        )
+        .unwrap(),
+        ApprovalDeliveryReservation::Reserved,
+        "a delivery failure before acknowledgement must remain retryable"
+    );
+    assert!(db
+        .mark_approval_authorization_delivered(
+            "approve-run-2",
+            "repo-1",
+            "task-merge",
+            "merge-session-new",
+        )
+        .unwrap());
 }
 
 #[test]

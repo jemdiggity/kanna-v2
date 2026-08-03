@@ -13,6 +13,7 @@ import {
   waitForCondition,
   waitForTerminalOutput
 } from "./terminalFlowTestUtils";
+import { BUFFY_UID } from "./firebaseAuth";
 
 const execFileAsync = promisify(execFile);
 
@@ -276,6 +277,7 @@ describe("remote task listing, creation, and actions E2E", () => {
     const source = await createScriptedTask(harness, {
       displayName: "Approval lineage override source"
     });
+    const sourceRun = await latestRunRow(harness, source.taskId);
     await runKannaCliJson(harness, [
       "tool",
       "call",
@@ -287,7 +289,7 @@ describe("remote task listing, creation, and actions E2E", () => {
         summary: "Needs human input; original criteria are not mergeable",
         disposition: "needs_human_input"
       })
-    ]);
+    ], { KANNA_STAGE_RUN_ID: getString(sourceRun, "id") });
     await waitForLatestRunStatus(harness, source.taskId, "failed");
     expect(await executeSql(
       harness,
@@ -330,7 +332,9 @@ describe("remote task listing, creation, and actions E2E", () => {
     )).toBe(1);
     expect(await executeSql(
       harness,
-      "INSERT INTO agent_signal_protocol (task_id, merge_handoff_version) VALUES (?1, 1)",
+      `INSERT INTO agent_signal_protocol (task_id, session_id, merge_handoff_version)
+       SELECT ?1, COALESCE(NULLIF(session_id, ''), task_id), 1
+       FROM stage_run WHERE task_id = ?1 ORDER BY rowid DESC LIMIT 1`,
       [mergeTaskId]
     )).toBe(1);
     const mergeOutput = collectTerminalEvents(harness, mergeTaskId);
@@ -343,7 +347,7 @@ describe("remote task listing, creation, and actions E2E", () => {
         `/v1/tasks/${source.taskId}/actions/override-approval`,
         { reason: "Ship the independently reviewed diagnostic fix" },
         { "x-kanna-human-action": "approval-override" }
-      )).rejects.toThrow(/401.*native desktop authentication/i);
+      )).rejects.toThrow(/401.*native.*control channel/i);
 
       const override = asRecord(await invokeDesktop(
         harness,
@@ -353,7 +357,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       ));
       expect(override.state).toBe("overridden");
       expect(asRecord(override.overrideRecord)).toMatchObject({
-        actor: "authenticated-relay-client",
+        actor: BUFFY_UID,
         channel: "authenticated_relay",
         reason: "Ship the independently reviewed diagnostic fix"
       });
@@ -367,7 +371,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       expect(asRecord(persisted.approvalGate)).toMatchObject({
         state: "overridden",
         overrideRecord: {
-          actor: "authenticated-relay-client",
+          actor: BUFFY_UID,
           channel: "authenticated_relay",
           reason: "Ship the independently reviewed diagnostic fix"
         }
@@ -655,13 +659,17 @@ async function createChildTask(
   return getString(response, "taskId");
 }
 
-async function runKannaCliJson(harness: RemoteHarness, args: string[]): Promise<unknown> {
+async function runKannaCliJson(
+  harness: RemoteHarness,
+  args: string[],
+  extraEnv: Record<string, string> = {}
+): Promise<unknown> {
   const { stdout } = await execFileAsync(
     remoteHarnessKannaCliPath(harness.repoRoot),
     [...args, "--server-url", harness.lanBaseUrl],
     {
       cwd: harness.repoRoot,
-      env: process.env,
+      env: { ...process.env, ...extraEnv },
       timeout: 30_000
     }
   );

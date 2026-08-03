@@ -1,4 +1,6 @@
-use super::state::{AppState, AuthenticatedHttpInvoke, TunneledHttpInvoke};
+use super::state::{
+    AppState, AuthenticatedHttpInvoke, AuthenticatedHumanHttpInvoke, TunneledHttpInvoke,
+};
 use crate::pairing::PairingStore;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, FromRequestParts, State};
@@ -11,7 +13,6 @@ use std::sync::Arc;
 pub(super) const DEVICE_ID_HEADER: &str = "x-kanna-device-id";
 pub(super) const DEVICE_SECRET_HEADER: &str = "x-kanna-device-secret";
 pub(super) const HUMAN_ACTION_HEADER: &str = "x-kanna-human-action";
-pub(super) const DESKTOP_SECRET_HEADER: &str = "x-kanna-desktop-secret";
 pub(super) const APPROVAL_OVERRIDE_ACTION: &str = "approval-override";
 
 /// Marker inserted when a genuine LAN request presented a paired device's
@@ -23,9 +24,9 @@ pub(super) struct TrustedLanDeviceAccess;
 struct TrustedLanDeviceIdentity(String);
 
 /// Deliberate human authority for approval overrides. This extractor is not
-/// used by ordinary advance routes. Direct desktop loopback requests must
-/// additionally prove the secret retained by the native Tauri process; paired
-/// devices and authenticated relay clients already have transport identity.
+/// used by ordinary advance routes. Native desktop overrides use the
+/// peer-authenticated Unix control channel; HTTP accepts only a paired LAN
+/// device or a relay-authenticated human account.
 #[derive(Debug, Clone)]
 pub(super) struct HumanApprovalOverrideAccess {
     pub(super) actor: String,
@@ -85,15 +86,21 @@ impl FromRequestParts<Arc<AppState>> for HumanApprovalOverrideAccess {
 
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &Arc<AppState>,
+        _state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         privileged_task_access(&parts.extensions)?;
 
-        if parts.extensions.get::<TunneledHttpInvoke>().is_some() {
+        if let Some(identity) = parts.extensions.get::<AuthenticatedHumanHttpInvoke>() {
             return Ok(Self {
-                actor: "authenticated-relay-client".into(),
-                channel: "authenticated_relay".into(),
+                actor: identity.actor.clone(),
+                channel: identity.channel.clone(),
             });
+        }
+        if parts.extensions.get::<TunneledHttpInvoke>().is_some() {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "approval override requires an authenticated human channel".into(),
+            ));
         }
         let deliberate = parts
             .headers
@@ -112,36 +119,11 @@ impl FromRequestParts<Arc<AppState>> for HumanApprovalOverrideAccess {
                 channel: "paired_lan_device".into(),
             });
         }
-        let presented_secret = parts
-            .headers
-            .get(DESKTOP_SECRET_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default();
-        let expected_secret = state.config.desktop_secret.as_deref().unwrap_or_default();
-        if expected_secret.is_empty() || !secrets_match(presented_secret, expected_secret) {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                "desktop approval override requires native desktop authentication".into(),
-            ));
-        }
-        Ok(Self {
-            actor: state.config.desktop_id.clone(),
-            channel: "authenticated_desktop".into(),
-        })
+        Err((
+            StatusCode::UNAUTHORIZED,
+            "desktop approval override requires the native control channel".into(),
+        ))
     }
-}
-
-fn secrets_match(presented: &str, expected: &str) -> bool {
-    use sha2::{Digest, Sha256};
-    let presented = Sha256::digest(presented.as_bytes());
-    let expected = Sha256::digest(expected.as_bytes());
-    presented
-        .iter()
-        .zip(expected.iter())
-        .fold(0_u8, |difference, (left, right)| {
-            difference | (left ^ right)
-        })
-        == 0
 }
 
 fn unauthorized_privileged_task() -> (StatusCode, String) {

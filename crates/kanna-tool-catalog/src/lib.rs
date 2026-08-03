@@ -5,6 +5,53 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use url::Url;
 
+pub const KANNA_STAGE_RUN_ID_ENV: &str = "KANNA_STAGE_RUN_ID";
+pub const KANNA_COMPLETION_CONTEXT_ENV: &str = "KANNA_COMPLETION_CONTEXT";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionContext {
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_attempt_key: Option<String>,
+}
+
+pub fn completion_attempt_key(body: &Value) -> Result<String, String> {
+    let mut canonical = body.clone();
+    let object = canonical
+        .as_object_mut()
+        .ok_or_else(|| "complete-stage request body must be an object".to_string())?;
+    object.remove("runId");
+    object.remove("completionAttemptKey");
+    serde_json::to_string(&canonical)
+        .map_err(|error| format!("failed to encode completion attempt: {error}"))
+}
+
+pub fn read_completion_context(path: &Path) -> Result<CompletionContext, String> {
+    let body = std::fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read completion context {}: {error}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&body)
+        .map_err(|error| format!("invalid completion context {}: {error}", path.display()))
+}
+
+pub fn write_completion_context(path: &Path, context: &CompletionContext) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create completion context directory: {error}"))?;
+    }
+    let body = serde_json::to_vec(context)
+        .map_err(|error| format!("failed to encode completion context: {error}"))?;
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temp, body)
+        .map_err(|error| format!("failed to write completion context: {error}"))?;
+    std::fs::rename(&temp, path)
+        .map_err(|error| format!("failed to publish completion context: {error}"))
+}
+
 const BUNDLED_CATALOG: &str = include_str!("catalog.json");
 
 /// MCP clients abort a `tools/call` on their own timer — Codex and Claude Code

@@ -19,6 +19,12 @@ pub(super) struct TunneledHttpInvoke;
 pub(super) struct AuthenticatedHttpInvoke;
 
 #[derive(Clone)]
+pub(super) struct AuthenticatedHumanHttpInvoke {
+    pub actor: String,
+    pub channel: String,
+}
+
+#[derive(Clone)]
 pub struct AppState {
     pub(super) config: Config,
     pub(super) pairing_session: Arc<Mutex<Option<ActivePairingSession>>>,

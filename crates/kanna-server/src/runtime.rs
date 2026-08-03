@@ -1,19 +1,33 @@
 use crate::{config::Config, db, http_api, relay};
 use std::sync::Arc;
 
+async fn run_human_control_service(state: Arc<http_api::AppState>) {
+    match crate::human_control::serve(state).await {
+        Ok(()) => log::warn!("native human control exited unexpectedly"),
+        Err(err) => log::error!("native human control failed: {err}"),
+    }
+    // The LAN/relay API remains useful if this optional privileged channel
+    // cannot bind. Overrides fail closed because HTTP has no native fallback.
+    std::future::pending::<()>().await;
+}
+
 pub(crate) async fn run_server_services(
     config: Config,
     db: db::Db,
     http_state: Arc<http_api::AppState>,
 ) {
     if config.relay_url.trim().is_empty() {
-        match http_api::serve(http_state).await {
-            Ok(()) => log::warn!("LAN API exited unexpectedly"),
-            Err(err) => log::error!("LAN API failed: {}", err),
+        tokio::select! {
+            result = http_api::serve(Arc::clone(&http_state)) => match result {
+                Ok(()) => log::warn!("LAN API exited unexpectedly"),
+                Err(err) => log::error!("LAN API failed: {}", err),
+            },
+            _ = run_human_control_service(http_state) => {},
         }
         return;
     }
 
+    let human_control_state = Arc::clone(&http_state);
     tokio::select! {
         result = http_api::serve(Arc::clone(&http_state)) => match result {
             Ok(()) => log::warn!("LAN API exited unexpectedly"),
@@ -23,6 +37,7 @@ pub(crate) async fn run_server_services(
             Ok(()) => log::warn!("relay loop exited unexpectedly"),
             Err(err) => log::error!("relay loop failed: {}", err),
         },
+        _ = run_human_control_service(human_control_state) => {},
     }
 }
 

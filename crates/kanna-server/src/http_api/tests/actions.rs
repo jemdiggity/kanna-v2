@@ -5018,6 +5018,152 @@ async fn delayed_completion_cannot_finish_a_replacement_run() {
 }
 
 #[tokio::test]
+async fn timed_out_completion_retry_is_idempotent_after_a_replacement_run_starts() {
+    let summary = "post completed before the response arrived";
+    let stage_result = serde_json::json!({
+        "status": "success",
+        "summary": summary,
+        "metadata": null,
+    })
+    .to_string();
+    let state = super::test_state_with_seed("desktop-completion-retry", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Complete exactly one run",
+            Some("Completion retry"),
+            "in progress",
+            "2026-08-04 00:00:00",
+        )
+        .unwrap();
+        let run = |id: &'static str, status: &'static str| crate::db::NewStageRun {
+            id,
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "post",
+            agent: Some("commit"),
+            agent_provider: Some("codex"),
+            model: None,
+            effort: None,
+            status,
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        };
+        db.insert_stage_run_with_completion_binding(run("run-original", "running"), None, true)
+            .unwrap();
+        db.finish_stage_run(
+            "run-original",
+            "succeeded",
+            Some(&stage_result),
+            Some(summary),
+        )
+        .unwrap();
+        db.insert_stage_run_with_completion_binding(run("run-replacement", "running"), None, true)
+            .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let response = super::router(state)
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "runId": "run-original",
+                        "completionAttemptKey": "same-verdict",
+                        "status": "success",
+                        "summary": summary
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    assert_eq!(
+        db.stage_run("run-replacement").unwrap().unwrap().status,
+        "running"
+    );
+}
+
+#[tokio::test]
+async fn missing_run_id_is_legacy_only_and_cannot_complete_a_new_bound_run() {
+    let seed = |db: &Db, task_id: &'static str, run_id: &'static str, bound: bool| {
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-1",
+            "Compatibility completion",
+            Some("Compatibility completion"),
+            "in progress",
+            "2026-08-04 00:00:00",
+        )
+        .unwrap();
+        db.insert_stage_run_with_completion_binding(
+            crate::db::NewStageRun {
+                id: run_id,
+                task_id,
+                stage: "in progress",
+                kind: "main",
+                agent: Some("implement"),
+                agent_provider: Some("codex"),
+                model: None,
+                effort: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some(task_id),
+                provider_session_id: None,
+                cwd: None,
+                resumed_from_run_id: None,
+            },
+            None,
+            bound,
+        )
+        .unwrap();
+    };
+    let state = super::test_state_with_seed("desktop-completion-compat", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        seed(db, "task-legacy", "run-legacy", false);
+        seed(db, "task-bound", "run-bound", true);
+    });
+    let app = super::router(state);
+    let request = |task_id: &'static str| {
+        Request::post(format!("/v1/tasks/{task_id}/actions/complete-stage"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "status": "failure",
+                    "summary": "legacy client verdict"
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    assert_eq!(
+        app.clone()
+            .oneshot(request("task-legacy"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK,
+        "an upgraded server must accept a surviving old client for a pre-upgrade run"
+    );
+    assert_eq!(
+        app.oneshot(request("task-bound")).await.unwrap().status(),
+        StatusCode::CONFLICT,
+        "newly spawned runs must require their fixed identity"
+    );
+}
+
+#[tokio::test]
 async fn complete_stage_route_parses_pr_url_from_summary_fallback() {
     let repo_temp = tempfile::Builder::new()
         .prefix("kanna-http-complete-stage-summary-")

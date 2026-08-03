@@ -131,6 +131,8 @@ pub(super) fn build_spawn_env(
         "KANNA_CLI_PATH",
         "KANNA_MCP_PATH",
         "KANNA_MCP_CONFIG",
+        kanna_tool_catalog::KANNA_STAGE_RUN_ID_ENV,
+        kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV,
     ] {
         env.remove(key);
     }

@@ -239,7 +239,9 @@ async fn signal_merge_handoff_impl(
             .unwrap_or_default(),
         payload.summary.trim(),
     );
-    let protocol = merge_protocol_for_repo(&state, &authorization.repo_id).await?;
+    let recipient =
+        prepare_merge_recipient(&state, &authorization.repo_id, &canonical_message).await?;
+    let protocol = recipient.identity().protocol;
     if protocol == 0
         && !matches!(
             authorization.approval.state,
@@ -251,51 +253,261 @@ async fn signal_merge_handoff_impl(
             "the surviving merge session predates override-aware handoffs; restart it before delivering an overridden approval".into(),
         ));
     }
-    let response = signal_agent_request(
-        Arc::clone(&state),
-        authorization.repo_id.clone(),
-        "merge".into(),
-        if protocol == 0 {
-            legacy_message
-        } else {
-            canonical_message
-        },
-        SingletonAgentOverrides::default(),
-    )
-    .await?;
-    {
+    let delivery_message = if protocol == 0 {
+        legacy_message
+    } else {
+        canonical_message
+    };
+    let recipient_identity = recipient.identity().clone();
+    let reservation = {
         let state = Arc::clone(&state);
-        let run_id = authorization.run_id;
-        super::blocking::run_handler_blocking("merge handoff delivery record", move || {
+        let run_id = authorization.run_id.clone();
+        let recipient = recipient_identity.clone();
+        super::blocking::run_handler_blocking("merge handoff delivery reservation", move || {
             let db = Db::open(&state.config.db_path)
                 .map_err(|error| db_write_error("db error", error))?;
-            db.mark_approval_authorization_delivered(&run_id)
-                .map_err(|error| db_write_error("db error", error))
+            db.reserve_approval_authorization_delivery(
+                &run_id,
+                &recipient.task_id,
+                &recipient.session_id,
+                recipient.protocol,
+            )
+            .map_err(|error| db_write_error("db error", error))
         })
-        .await?;
+        .await?
+    };
+    match reservation {
+        crate::db::ApprovalDeliveryReservation::Reserved => {}
+        crate::db::ApprovalDeliveryReservation::AlreadyDelivered => {
+            return Err((
+                axum::http::StatusCode::CONFLICT,
+                "approval handoff was already delivered".into(),
+            ));
+        }
+        crate::db::ApprovalDeliveryReservation::AlreadyReserved => {
+            return Err((
+                axum::http::StatusCode::CONFLICT,
+                "approval handoff has an uncertain acknowledged delivery; refusing a duplicate"
+                    .into(),
+            ));
+        }
+    }
+
+    let delivery =
+        deliver_to_merge_recipient(Arc::clone(&state), recipient, delivery_message).await;
+    let response = match delivery {
+        Ok(response) => response,
+        Err(error) => {
+            if !error.acknowledged {
+                release_merge_delivery_reservation(
+                    &state,
+                    &authorization.run_id,
+                    &recipient_identity,
+                )
+                .await;
+            }
+            return Err(error.response);
+        }
+    };
+    let delivered = {
+        let state = Arc::clone(&state);
+        let run_id = authorization.run_id;
+        let repo_id = authorization.repo_id;
+        let recipient = recipient_identity;
+        super::blocking::run_handler_blocking("merge handoff delivery acknowledgement", move || {
+            let db = Db::open(&state.config.db_path)
+                .map_err(|error| db_write_error("db error", error))?;
+            db.mark_approval_authorization_delivered(
+                &run_id,
+                &repo_id,
+                &recipient.task_id,
+                &recipient.session_id,
+            )
+            .map_err(|error| db_write_error("db error", error))
+        })
+        .await?
+    };
+    if !delivered {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            "merge recipient was replaced after acknowledging the handoff; delivery is quarantined"
+                .into(),
+        ));
     }
     Ok(response)
 }
 
-async fn merge_protocol_for_repo(
+enum PreparedMergeRecipient {
+    Existing(crate::db::MergeSignalRecipient),
+    New {
+        identity: crate::db::MergeSignalRecipient,
+        prepared: Box<crate::task_creator::PreparedTaskSpawn>,
+    },
+}
+
+impl PreparedMergeRecipient {
+    fn identity(&self) -> &crate::db::MergeSignalRecipient {
+        match self {
+            Self::Existing(identity) | Self::New { identity, .. } => identity,
+        }
+    }
+}
+
+async fn prepare_merge_recipient(
     state: &Arc<AppState>,
     repo_id: &str,
-) -> Result<i64, (axum::http::StatusCode, String)> {
+    canonical_message: &str,
+) -> Result<PreparedMergeRecipient, (axum::http::StatusCode, String)> {
     let state = Arc::clone(state);
     let repo_id = repo_id.to_string();
-    super::blocking::run_handler_blocking("merge signal protocol read", move || {
+    let canonical_message = canonical_message.to_string();
+    super::blocking::run_handler_blocking("merge signal recipient selection", move || {
         let db =
             Db::open(&state.config.db_path).map_err(|error| db_write_error("db error", error))?;
-        let Some(running) = db
-            .find_open_agent_task(&repo_id, "merge")
+        if let Some(running) = db
+            .find_open_merge_recipient(&repo_id)
             .map_err(|error| db_write_error("db error", error))?
-        else {
-            return Ok(1);
+        {
+            return Ok(PreparedMergeRecipient::Existing(running));
+        }
+        let prepared = crate::task_creator::prepare_singleton_agent_task_for_api(
+            &db,
+            &state.config,
+            &repo_id,
+            "merge",
+            &canonical_message,
+            SingletonAgentOverrides::default(),
+        )
+        .map_err(prepare_singleton_error)?;
+        db.pin_pipeline_item_at_top(&repo_id, prepared.task_id())
+            .map_err(|error| db_write_error("db error", error))?;
+        db.set_merge_handoff_protocol(prepared.task_id(), prepared.session_id(), 1)
+            .map_err(|error| db_write_error("db error", error))?;
+        let identity = crate::db::MergeSignalRecipient {
+            task_id: prepared.task_id().to_string(),
+            session_id: prepared.session_id().to_string(),
+            protocol: 1,
         };
-        db.merge_handoff_protocol(&running.task_id)
-            .map_err(|error| db_write_error("db error", error))
+        Ok(PreparedMergeRecipient::New {
+            identity,
+            prepared: Box::new(prepared),
+        })
     })
     .await
+}
+
+async fn deliver_to_merge_recipient(
+    state: Arc<AppState>,
+    recipient: PreparedMergeRecipient,
+    message: String,
+) -> Result<SignalAgentResponse, MergeDeliveryFailure> {
+    match recipient {
+        PreparedMergeRecipient::Existing(identity) => {
+            let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
+                .await
+                .map_err(|error| MergeDeliveryFailure {
+                    response: (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("daemon error: {error}"),
+                    ),
+                    acknowledged: false,
+                })?;
+            submit_task_input(&mut daemon, &identity.session_id, &message)
+                .await
+                .map_err(|response| MergeDeliveryFailure {
+                    response,
+                    acknowledged: false,
+                })?;
+            Ok(SignalAgentResponse {
+                task_id: identity.task_id,
+                created: false,
+            })
+        }
+        PreparedMergeRecipient::New { identity, prepared } => {
+            let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
+                .await
+                .map_err(|error| MergeDeliveryFailure {
+                    response: (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("daemon error: {error}"),
+                    ),
+                    acknowledged: false,
+                })?;
+            let spawn =
+                crate::task_creator::spawn_prepared_task_for_api_recording_stage_run_detailed(
+                    &state.config.db_path,
+                    &mut daemon,
+                    prepared.as_ref().clone(),
+                )
+                .await;
+            if let Err(error) = spawn {
+                let (error, acknowledged) = match error {
+                    crate::task_creator::PreparedTaskDeliveryError::BeforeAcknowledgement(
+                        error,
+                    ) => {
+                        let db = Db::open(&state.config.db_path).map_err(|db_error| {
+                            MergeDeliveryFailure {
+                                response: db_write_error("db error", db_error),
+                                acknowledged: false,
+                            }
+                        })?;
+                        let rollback =
+                            crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                        let error = match rollback {
+                            Ok(()) => error,
+                            Err(rollback_error) => {
+                                format!("{error}; rollback failed: {rollback_error}")
+                            }
+                        };
+                        (error, false)
+                    }
+                    crate::task_creator::PreparedTaskDeliveryError::AfterAcknowledgement(error) => {
+                        (error, true)
+                    }
+                };
+                return Err(MergeDeliveryFailure {
+                    response: (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error),
+                    acknowledged,
+                });
+            }
+            state.publish_state_changed(StateChangeScope::Tasks);
+            Ok(SignalAgentResponse {
+                task_id: identity.task_id,
+                created: true,
+            })
+        }
+    }
+}
+
+struct MergeDeliveryFailure {
+    response: (axum::http::StatusCode, String),
+    /// Once the recipient daemon has acknowledged the canonical prompt, any
+    /// persistence failure is uncertain delivery and must remain quarantined.
+    acknowledged: bool,
+}
+
+async fn release_merge_delivery_reservation(
+    state: &Arc<AppState>,
+    run_id: &str,
+    recipient: &crate::db::MergeSignalRecipient,
+) {
+    let state = Arc::clone(state);
+    let run_id = run_id.to_string();
+    let recipient = recipient.clone();
+    let released = super::blocking::run_handler_blocking("merge delivery release", move || {
+        let db =
+            Db::open(&state.config.db_path).map_err(|error| db_write_error("db error", error))?;
+        db.release_approval_authorization_delivery(
+            &run_id,
+            &recipient.task_id,
+            &recipient.session_id,
+        )
+        .map_err(|error| db_write_error("db error", error))
+    })
+    .await;
+    if let Err((_, error)) = released {
+        log::error!("failed to release undelivered merge reservation: {error}");
+    }
 }
 
 fn parse_legacy_merge_handoff(
@@ -391,7 +603,7 @@ pub(super) async fn signal_agent_request(
             db.pin_pipeline_item_at_top(&repo_id, prepared.task_id())
                 .map_err(|e| db_write_error("db error", e))?;
             if agent == "merge" {
-                db.set_merge_handoff_protocol(prepared.task_id(), 1)
+                db.set_merge_handoff_protocol(prepared.task_id(), prepared.session_id(), 1)
                     .map_err(|e| db_write_error("db error", e))?;
             }
             Ok(prepared)

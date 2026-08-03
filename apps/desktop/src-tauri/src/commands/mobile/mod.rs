@@ -4,6 +4,8 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::Manager;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -209,8 +211,11 @@ impl MobileServerManager {
             }
         };
 
+        let desktop_executable = std::env::current_exe()
+            .map_err(|error| format!("failed to resolve desktop executable: {error}"))?;
         let mut child = match Command::new(server_bin)
             .env("KANNA_SERVER_CONFIG", &config_path)
+            .env("KANNA_DESKTOP_EXECUTABLE", desktop_executable)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(server_stderr_log(&config_path))
@@ -398,8 +403,9 @@ pub async fn desktop_cloud_credential(
     })
 }
 
-/// Record a deliberate desktop approval override without exposing the
-/// desktop credential to webview JavaScript or to task-agent HTTP clients.
+/// Record a deliberate desktop approval override over the server's
+/// kernel-peer-authenticated Unix channel. No reusable bearer credential is
+/// accepted by the HTTP API.
 #[tauri::command]
 pub async fn override_approval_hold(
     app: tauri::AppHandle,
@@ -407,48 +413,48 @@ pub async fn override_approval_hold(
     reason: String,
 ) -> Result<serde_json::Value, String> {
     let manager = app.state::<MobileServerManager>();
-    let (api_base_url, config_path) = {
+    let daemon_dir = {
         let state = manager.inner.lock().await;
         if !state.started {
             return Err("kanna-server is not running".to_string());
         }
-        (state.api_base_url.clone(), state.config_path.clone())
+        std::env::var("KANNA_DAEMON_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| crate::daemon_data_dir())
     };
-    let credential = desktop_credential(&config_path)?;
-    let mut url = reqwest::Url::parse(&api_base_url)
-        .map_err(|error| format!("invalid kanna-server URL: {error}"))?;
-    url.path_segments_mut()
-        .map_err(|_| "kanna-server URL cannot be a base URL".to_string())?
-        .extend([
-            "v1",
-            "tasks",
-            task_id.as_str(),
-            "actions",
-            "override-approval",
-        ]);
-    let response = manager
-        .client
-        .post(url)
-        .header("x-kanna-human-action", "approval-override")
-        .header("x-kanna-desktop-secret", credential.desktop_secret)
-        .json(&serde_json::json!({ "reason": reason }))
-        .send()
+    let socket_path = kanna_runtime_defaults::human_control_socket_path(&daemon_dir);
+    let mut stream = UnixStream::connect(&socket_path)
         .await
-        .map_err(|error| format!("approval override request failed: {error}"))?;
-    let status = response.status();
-    let body = response
-        .text()
+        .map_err(|error| format!("failed to connect to native approval control: {error}"))?;
+    let mut request = serde_json::to_vec(&serde_json::json!({
+        "action": "override_approval",
+        "task_id": task_id,
+        "reason": reason,
+    }))
+    .map_err(|error| format!("failed to encode approval override: {error}"))?;
+    request.push(b'\n');
+    stream
+        .write_all(&request)
+        .await
+        .map_err(|error| format!("failed to send approval override: {error}"))?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_line(&mut response)
         .await
         .map_err(|error| format!("failed to read approval override response: {error}"))?;
-    if !status.is_success() {
-        return Err(if body.trim().is_empty() {
-            format!("approval override request failed with {status}")
-        } else {
-            body
-        });
+    let response: serde_json::Value = serde_json::from_str(&response)
+        .map_err(|error| format!("failed to decode approval override response: {error}"))?;
+    if response.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(response
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("native approval override failed")
+            .to_string());
     }
-    serde_json::from_str(&body)
-        .map_err(|error| format!("failed to decode approval override response: {error}"))
+    response
+        .get("body")
+        .cloned()
+        .ok_or_else(|| "native approval override returned no body".to_string())
 }
 
 fn resolved_db_path(state: &MobileServerState) -> Result<PathBuf, String> {

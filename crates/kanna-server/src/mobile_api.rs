@@ -249,7 +249,12 @@ pub struct CreateTaskResponse {
 pub struct CompleteStageRequest {
     /// Exact run whose verdict is being recorded. Completion is never applied
     /// to whichever run happens to be latest after a rerun/revision race.
-    pub run_id: String,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// Adapter-generated stable key for an exact verdict retry. It is not a
+    /// catalog argument; old clients omit it and old servers ignore it.
+    #[serde(default)]
+    pub completion_attempt_key: Option<String>,
     pub status: String,
     pub summary: String,
     pub metadata: Option<serde_json::Value>,
