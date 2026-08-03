@@ -88,20 +88,32 @@ decide whether a child stopped can therefore read a stop that never happened.
 
 `kanna-mcp` smooths that at the point of consumption, asymmetrically:
 
-- A `working` sample is returned as-is. Reporting busy promptly is never the
-  misread being guarded against.
-- A stopped-looking sample (`idle` or `unread`) is re-read once after
-  `ACTIVITY_CONFIRM_DELAY` (1s, two daemon detection windows), and the fresher
-  sample is what the caller sees. So `kanna_get_task` costs one extra `GET` plus
-  1s **only** when the first read already looked stopped; `kanna_wait_task`
-  confirms the same way before resolving `until: finished`. A task that is
-  closed is exempt: closure is a database fact, not a frame classification.
+- A response with nothing stopped-looking in it is returned as-is. Reporting
+  busy promptly is never the misread being guarded against.
+- A stopped-looking response is re-read once after `ACTIVITY_CONFIRM_DELAY`
+  (1s, two daemon detection windows), and the fresher response is what the
+  caller sees.
 - The confirmation reports whatever it finds and never rewrites one activity
   value into another, so the three-way vocabulary is unchanged and `unread`
   keeps meaning "output nobody has read yet" rather than "stopped" — a busy
   agent can carry `unread`.
+- A closed task is exempt: closure is a database fact, not a frame
+  classification.
+- **A failed confirmation is not a confirmation.** If the re-read fails, the
+  tool call fails with a message saying the stop went unconfirmed. Returning the
+  unconfirmed first sample instead would surface the exact false stop this
+  exists to suppress, and `kanna_wait_task` would resolve on it.
 - It smooths Busy/Idle only. `waiting` stays a positive match on prompt chrome
   in the daemon; nothing here turns quiet into blocked.
+
+Which tools pay, and how much — the cost is always one extra `GET` of the same
+route plus 1s, never one request per task:
+
+| Tool | When the confirmation fires |
+|---|---|
+| `kanna_get_task` | Only when that task already looked stopped. |
+| `kanna_wait_task` | Once per candidate stop, before resolving `until: finished`. Its deadline can overshoot by up to 1s, inside the 60s of headroom between `MAX_WAIT_TIMEOUT_SECS` and `CLIENT_TOOL_CALL_BUDGET_SECS`. |
+| `kanna_list_recent_tasks`, `kanna_search_tasks`, `kanna_list_repo_tasks` | Whenever **any** task in the response looks stopped. For a repo listing that is the common case, so budget these at roughly +1s per call regardless of how many tasks come back. |
 
 The event feed is not debounced: events are appended by the writes that change
 the state they describe, and suppressing one would drop it rather than delay it.

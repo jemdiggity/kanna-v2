@@ -7,6 +7,10 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+/// Mirrors `ACTIVITY_CONFIRM_DELAY` in `crates/kanna-mcp/src/main.rs`. A read
+/// that engaged the confirmation cannot come back faster than this.
+const ACTIVITY_CONFIRM_DELAY: Duration = Duration::from_millis(1_000);
+
 #[derive(Debug)]
 struct ExpectedRequest {
     method: &'static str,
@@ -662,5 +666,248 @@ fn serve_reports_tool_argument_errors_as_tool_error_results() {
     assert_eq!(
         tool_error_text(&responses[0]),
         "missing required argument: query"
+    );
+}
+
+/// A task summary as the three list routes return it. `activity` is written
+/// from the daemon's per-frame verdict, so a listing can carry the same
+/// mid-redraw misread a detail read can.
+fn summary_with_activity(id: &str, activity: &str) -> Value {
+    json!({
+        "id": id,
+        "repoId": "repo-1",
+        "repoName": "kanna",
+        "title": "Specialty review",
+        "stage": "review",
+        "activity": activity,
+        "agentType": "pty",
+        "blockedByTaskIds": []
+    })
+}
+
+/// Two reads of the same list route, disagreeing the way a flapping classifier
+/// makes them disagree.
+fn flapping_list_route(path: &'static str) -> Vec<ExpectedRequest> {
+    vec![
+        ExpectedRequest {
+            method: "GET",
+            path,
+            body: None,
+            response_status: "200 OK",
+            response_body: json!([
+                summary_with_activity("child-1", "working"),
+                summary_with_activity("child-2", "unread")
+            ]),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path,
+            body: None,
+            response_status: "200 OK",
+            response_body: json!([
+                summary_with_activity("child-1", "working"),
+                summary_with_activity("child-2", "working")
+            ]),
+        },
+    ]
+}
+
+/// `kanna_list_recent_tasks`, `kanna_search_tasks`, and `kanna_list_repo_tasks`
+/// all return `TaskSummary` arrays, and each builds its route differently — a
+/// bare path, a query parameter, and a path parameter. All three must confirm a
+/// stopped-looking item against a re-read of that same route.
+#[test]
+fn serve_confirms_a_transient_stop_on_every_task_list_route() {
+    let routes: [(&'static str, &str, Value); 3] = [
+        ("/v1/tasks/recent", "kanna_list_recent_tasks", json!({})),
+        (
+            "/v1/tasks/search?query=review",
+            "kanna_search_tasks",
+            json!({ "query": "review" }),
+        ),
+        (
+            "/v1/repos/repo-1/tasks",
+            "kanna_list_repo_tasks",
+            json!({ "repo_id": "repo-1" }),
+        ),
+    ];
+
+    for (path, tool, arguments) in routes {
+        let (base_url, server) = start_http_fixture(flapping_list_route(path));
+
+        let responses = run_kanna_mcp(
+            &base_url,
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 20,
+                "method": "tools/call",
+                "params": { "name": tool, "arguments": arguments }
+            })],
+        );
+
+        let observed = server.join().expect("fixture server");
+        assert_eq!(
+            observed.len(),
+            2,
+            "{tool} should confirm the listing with one re-read of {path}"
+        );
+        let tasks = tool_text(&responses[0]);
+        assert_eq!(
+            tasks[1]["activity"],
+            json!("working"),
+            "{tool} leaked a transient stop: {tasks}"
+        );
+    }
+}
+
+#[test]
+fn serve_reports_a_held_stop_on_a_task_list_route_within_the_confirmation_delay() {
+    let held = json!([
+        summary_with_activity("child-1", "working"),
+        summary_with_activity("child-2", "unread")
+    ]);
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/recent",
+            body: None,
+            response_status: "200 OK",
+            response_body: held.clone(),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/recent",
+            body: None,
+            response_status: "200 OK",
+            response_body: held,
+        },
+    ]);
+
+    let started = std::time::Instant::now();
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": { "name": "kanna_list_recent_tasks", "arguments": {} }
+        })],
+    );
+    let elapsed = started.elapsed();
+
+    server.join().expect("fixture server");
+    let tasks = tool_text(&responses[0]);
+    assert_eq!(
+        tasks[1]["activity"],
+        json!("unread"),
+        "a held stop must still surface, with its own activity value: {tasks}"
+    );
+    assert!(
+        elapsed >= ACTIVITY_CONFIRM_DELAY,
+        "the answer must have come from a confirmation read (took {elapsed:?})"
+    );
+    assert!(
+        elapsed < ACTIVITY_CONFIRM_DELAY * 10,
+        "the confirmation must stay a small bounded cost (took {elapsed:?})"
+    );
+}
+
+/// An unavailable second sample is not a confirmation. Reporting the first one
+/// anyway would surface exactly the false stop this exists to suppress, so the
+/// call fails instead.
+#[test]
+fn serve_fails_get_task_when_the_confirmation_read_fails() {
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/task-1",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({
+                "id": "task-1",
+                "repoId": "repo-1",
+                "title": "Review MCP",
+                "stage": "in progress",
+                "activity": "unread",
+                "closedAt": null
+            }),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/task-1",
+            body: None,
+            response_status: "503 Service Unavailable",
+            response_body: json!({ "error": "server restarting" }),
+        },
+    ]);
+
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "tools/call",
+            "params": { "name": "kanna_get_task", "arguments": { "task_id": "task-1" } }
+        })],
+    );
+
+    let observed = server.join().expect("fixture server");
+    assert_eq!(observed.len(), 2);
+    let message = tool_error_text(&responses[0]);
+    assert!(
+        !message.contains("\"activity\""),
+        "the unconfirmed stopped sample must not be reported: {message}"
+    );
+    assert!(
+        message.contains("confirming re-read"),
+        "the failure should say the stop went unconfirmed: {message}"
+    );
+}
+
+#[test]
+fn serve_does_not_resolve_a_wait_when_the_confirmation_read_fails() {
+    let finished = json!({
+        "id": "task-1",
+        "repoId": "repo-1",
+        "title": "Review MCP",
+        "stage": "in progress",
+        "activity": "unread",
+        "closedAt": null
+    });
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/task-1",
+            body: None,
+            response_status: "200 OK",
+            response_body: finished,
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/task-1",
+            body: None,
+            response_status: "503 Service Unavailable",
+            response_body: json!({ "error": "server restarting" }),
+        },
+    ]);
+
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 23,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_wait_task",
+                "arguments": { "task_id": "task-1", "timeout_secs": 30, "poll_secs": 1 }
+            }
+        })],
+    );
+
+    server.join().expect("fixture server");
+    let message = tool_error_text(&responses[0]);
+    assert!(
+        !message.contains("resolved"),
+        "an unconfirmed stop must not resolve the wait: {message}"
     );
 }
