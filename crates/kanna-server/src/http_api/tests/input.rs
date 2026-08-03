@@ -442,10 +442,13 @@ async fn signal_agent_route_creates_agent_task_with_requested_provider_and_effor
     let _ = std::fs::remove_dir_all(repo_root);
 }
 
-#[tokio::test]
-async fn signal_agent_route_rejects_effort_the_requested_provider_rejects() {
+async fn assert_signal_agent_route_rejects_override(
+    label: &str,
+    overrides: serde_json::Value,
+    expected_message: &str,
+) {
     let unique = format!(
-        "kanna-signal-agent-bad-effort-{}-{}",
+        "kanna-signal-agent-{label}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -482,18 +485,22 @@ async fn signal_agent_route_rejects_effort_the_requested_provider_rejects() {
     drop(db);
 
     let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let mut body = serde_json::json!({
+        "message": "MERGE task-ready -> main: ready"
+    });
+    body.as_object_mut()
+        .expect("signal request body should be an object")
+        .extend(
+            overrides
+                .as_object()
+                .expect("signal overrides should be an object")
+                .clone(),
+        );
     let response = app
         .oneshot(
             Request::post("/v1/repos/repo-1/agents/merge/signal")
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "message": "MERGE task-ready -> main: ready",
-                        "agentProvider": "claude",
-                        "effort": "turbo"
-                    })
-                    .to_string(),
-                ))
+                .body(Body::from(body.to_string()))
                 .unwrap(),
         )
         .await
@@ -505,8 +512,8 @@ async fn signal_agent_route_rejects_effort_the_requested_provider_rejects() {
         .unwrap();
     let message = String::from_utf8(body.to_vec()).unwrap();
     assert!(
-        message.contains("effort 'turbo'"),
-        "rejection should name the unsupported effort: {message}"
+        message.contains(expected_message),
+        "rejection should explain the invalid override: {message}"
     );
 
     // A rejected override must not leave a half-created singleton behind.
@@ -515,9 +522,35 @@ async fn signal_agent_route_rejects_effort_the_requested_provider_rejects() {
         .find_open_agent_task("repo-1", "merge")
         .unwrap()
         .is_none());
+    assert!(db.list_pipeline_items("repo-1").unwrap().is_empty());
 
     let _ = std::fs::remove_dir_all(daemon_dir);
     let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[tokio::test]
+async fn signal_agent_route_rejects_effort_the_requested_provider_rejects() {
+    assert_signal_agent_route_rejects_override(
+        "bad-effort",
+        serde_json::json!({
+            "agentProvider": "claude",
+            "effort": "turbo"
+        }),
+        "effort 'turbo'",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn signal_agent_route_rejects_unsupported_provider() {
+    assert_signal_agent_route_rejects_override(
+        "bad-provider",
+        serde_json::json!({
+            "agentProvider": "future-agent"
+        }),
+        "unsupported agent provider 'future-agent'",
+    )
+    .await;
 }
 
 #[tokio::test]
