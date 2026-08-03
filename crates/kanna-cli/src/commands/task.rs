@@ -548,6 +548,7 @@ pub(crate) async fn run(command: TaskCommands) {
         }
         TaskCommands::WaitEvents {
             task_id,
+            parent_task_id,
             repo_id,
             cursor,
             timeout_secs,
@@ -558,6 +559,7 @@ pub(crate) async fn run(command: TaskCommands) {
             let events = wait_task_events_via_api(
                 &base_url,
                 &task_id,
+                parent_task_id.as_deref(),
                 repo_id.as_deref(),
                 cursor.as_deref(),
                 timeout_secs,

@@ -666,6 +666,7 @@ fn parses_wait_events_and_set_notify_commands() {
             command:
                 crate::TaskCommands::WaitEvents {
                     task_id,
+                    parent_task_id,
                     repo_id,
                     cursor,
                     timeout_secs,
@@ -674,6 +675,7 @@ fn parses_wait_events_and_set_notify_commands() {
                 },
         } => {
             assert_eq!(task_id, vec!["child-a", "child-b", "child-c"]);
+            assert_eq!(parent_task_id, None);
             assert_eq!(repo_id, None);
             assert_eq!(cursor.as_deref(), Some("42"));
             assert_eq!(timeout_secs, 30);
@@ -724,6 +726,7 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
     let typed = crate::api::task_events_path(
         &["child-a".to_string(), "child-b".to_string()],
         None,
+        None,
         Some("42"),
         30,
         Some(10),
@@ -744,6 +747,20 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
         typed.split_once('?').unwrap().0
     );
     assert_eq!(query_pairs(&resolved.path), query_pairs(&typed));
+
+    // Same for the parent scope: an agent on the CLI fallback must land on the
+    // same children the MCP tool would watch, not on a repo-wide feed.
+    let resolved_parent = kanna_tool_catalog::resolve_request(
+        &catalog,
+        "kanna_wait_events",
+        &json!({ "parent_task_id": "parent-1", "timeout_secs": 30 }),
+    )
+    .unwrap();
+    let typed_parent = crate::api::task_events_path(&[], Some("parent-1"), None, None, 30, None);
+    assert_eq!(
+        query_pairs(&resolved_parent.path),
+        query_pairs(&typed_parent)
+    );
 }
 
 #[test]

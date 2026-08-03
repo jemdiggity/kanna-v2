@@ -23,7 +23,7 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - `POST /v1/tasks/{task_id}/actions/set-pipeline` (re-pin an open task to a compatible pipeline definition)
 - `GET /v1/tasks/recent`
 - `GET /v1/tasks/search?query=...`
-- `GET /v1/task-events?taskIds=...|repoId=...&cursor=...&timeoutSecs=...&limit=...` (multi-task event feed; blocks server-side until an event arrives or the window elapses)
+- `GET /v1/task-events?taskIds=...|parentTaskId=...|repoId=...&cursor=...&timeoutSecs=...&limit=...` (multi-task event feed; blocks server-side until an event arrives or the window elapses)
 - `POST /v1/tasks`
 - `POST /v1/tasks/{task_id}/input`
 - `POST /v1/tasks/{task_id}/actions/complete-stage`
@@ -58,10 +58,13 @@ does not reject them as first-stage bindings.
 `GET /v1/task-events` is the surface an orchestrating agent watches instead of
 polling each child. It is cursor-based, not snapshot-diffed:
 
-- The cursor is `task_event.seq` (`INTEGER PRIMARY KEY AUTOINCREMENT`). SQLite
-  allows one writer at a time, so a `seq` cannot be committed out of order and
-  `seq > cursor` can never skip an event. Callers pass back the cursor they were
-  given; events that fire between two calls arrive on the next one.
+- Event order is `task_event.seq` (`INTEGER PRIMARY KEY AUTOINCREMENT`). SQLite
+  allows one writer at a time, so a `seq` cannot be committed out of order.
+  Fixed task/repo cursors are a single sequence watermark. Parent cursors bind
+  that same global watermark to the parent id; they are constant-size and do
+  not contain child ids or membership history. Callers pass back the cursor
+  they were given unchanged; events that fire between two calls arrive on the
+  next one.
 - Omitting the cursor returns the scope's retained history (14 days), so a
   watcher that starts after its children does not lose their early events.
 - Events are appended by the same DB writes that change the state they describe
@@ -74,6 +77,37 @@ polling each child. It is cursor-based, not snapshot-diffed:
   is a positive match on a prompt the agent CLI rendered. It is deliberately
   never inferred from a session going quiet; see
   [2026-07-29-awaiting-input-detection-e2e-gap.md](2026-07-29-awaiting-input-detection-e2e-gap.md).
+
+Three scopes, in precedence order: `taskIds`, then `parentTaskId`, then
+`repoId`. `parentTaskId` exists because the other two do not cover a fan-out
+that lost the ids it created — an id list dies with the context that held it,
+and a repo scope hands the caller every other task's events to filter.
+It is evaluated per read against `pipeline_item.parent_task_id`, so a task
+created or adopted mid-watch is in scope at the next checkpoint. It covers
+direct children only and excludes the parent's own events, which makes it
+exactly the set `GET /v1/tasks/{task_id}` reports as `childTaskIds`.
+
+Reparenting uses read-checkpoint semantics. Every response advances one global
+sequence after evaluating the membership that exists for that read. Moving a
+child away and back never rewinds the sequence or replays acknowledged events;
+an event after the checkpoint is eligible if the child is back under the parent
+at the next read. An event that was outside the scope when an intervening empty
+read advanced past it stays ineligible after the child returns. Omitting the
+cursor is the explicit way to request retained history for current membership.
+The hot query always starts with the indexable `task_event.seq > ?` range and
+uses `idx_pipeline_item_parent_created_id` for membership, so an empty long poll
+advances past unrelated rows instead of rescanning retained history on every
+recheck.
+
+## Task Parentage
+
+`pipeline_item.parent_task_id` is read from both ends: `GET /v1/tasks/{task_id}`
+returns `parentTaskId` upward and `childTaskIds` downward. `childTaskIds` lists
+direct children oldest first and **includes closed ones** — parentage is
+durable, and a finished child is exactly what a fan-out orchestrator reconciles,
+so an empty list means "nothing was dispatched" rather than "everything already
+finished". This is deliberately unlike `GET /v1/tasks/search` and
+`GET /v1/repos/{repo_id}/tasks`, which list open tasks only.
 
 ## Activity Confirmation in `kanna-mcp`
 

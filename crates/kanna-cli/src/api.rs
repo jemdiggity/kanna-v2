@@ -66,6 +66,7 @@ pub(crate) fn dependent_tasks_exist_path(task_id: &str) -> String {
 /// deserializes them with the same casing the MCP catalog sends.
 pub(crate) fn task_events_path(
     task_ids: &[String],
+    parent_task_id: Option<&str>,
     repo_id: Option<&str>,
     cursor: Option<&str>,
     timeout_secs: u64,
@@ -79,6 +80,12 @@ pub(crate) fn task_events_path(
         query.push(format!(
             "taskIds={}",
             encode_path_segment(&task_ids.join(","))
+        ));
+    }
+    if let Some(parent_task_id) = parent_task_id {
+        query.push(format!(
+            "parentTaskId={}",
+            encode_path_segment(parent_task_id)
         ));
     }
     if let Some(repo_id) = repo_id {
@@ -437,6 +444,7 @@ pub(crate) async fn rename_task_via_api(
 pub(crate) async fn wait_task_events_via_api(
     base_url: &str,
     task_ids: &[String],
+    parent_task_id: Option<&str>,
     repo_id: Option<&str>,
     cursor: Option<&str>,
     timeout_secs: u64,
@@ -444,7 +452,14 @@ pub(crate) async fn wait_task_events_via_api(
 ) -> Result<Value, String> {
     get_json(
         base_url,
-        &task_events_path(task_ids, repo_id, cursor, timeout_secs, limit),
+        &task_events_path(
+            task_ids,
+            parent_task_id,
+            repo_id,
+            cursor,
+            timeout_secs,
+            limit,
+        ),
     )
     .await
 }

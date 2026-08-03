@@ -22,6 +22,8 @@
 use super::Db;
 use rusqlite::{types::Value as SqlValue, OptionalExtension};
 use serde_json::{json, Value};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::sync::LazyLock;
 use tokio::sync::Notify;
 
@@ -106,11 +108,45 @@ impl TaskEvent {
     }
 }
 
-/// Which tasks a reader cares about. An orchestrator names its children; a
-/// human-facing tool may watch a whole repo.
+/// Reverse sequence ordering turns `BinaryHeap` into a min-heap. Task-event
+/// sequences are unique, so no secondary ordering key is needed.
+struct PendingTaskEvent(TaskEvent);
+
+impl PartialEq for PendingTaskEvent {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.seq == other.0.seq
+    }
+}
+
+impl Eq for PendingTaskEvent {}
+
+impl PartialOrd for PendingTaskEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PendingTaskEvent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other.0.seq.cmp(&self.0.seq)
+    }
+}
+
+/// Which tasks a reader cares about. An orchestrator names its children, or
+/// names *itself* and gets whatever it fanned out; a human-facing tool may
+/// watch a whole repo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskEventScope {
     Tasks(Vec<String>),
+    /// Every task whose `parent_task_id` is this task — the scope an
+    /// orchestrator that lost its id list can still name. Resolved per query
+    /// rather than snapshotted, so a child created while the caller is blocked
+    /// is in scope for the same call.
+    ///
+    /// Direct children only, and the parent's own events are excluded: this is
+    /// exactly the set `TaskDetail::child_task_ids` reports, so ids and events
+    /// reconcile against each other without a second rule.
+    Children(String),
     Repo(String),
 }
 
@@ -124,6 +160,9 @@ impl TaskEventScope {
                 let placeholders = vec!["?"; task_ids.len()].join(", ");
                 format!("task_id IN ({placeholders})")
             }
+            Self::Children(_) => {
+                "task_id IN (SELECT id FROM pipeline_item WHERE parent_task_id = ?)".to_string()
+            }
             Self::Repo(_) => {
                 "task_id IN (SELECT id FROM pipeline_item WHERE repo_id = ?)".to_string()
             }
@@ -136,6 +175,7 @@ impl TaskEventScope {
                 .iter()
                 .map(|task_id| SqlValue::Text(task_id.clone()))
                 .collect(),
+            Self::Children(parent_task_id) => vec![SqlValue::Text(parent_task_id.clone())],
             Self::Repo(repo_id) => vec![SqlValue::Text(repo_id.clone())],
         }
     }
@@ -167,10 +207,17 @@ impl Db {
     /// *before* querying events so the cursor handed back never outruns the
     /// rows actually returned.
     pub fn latest_task_event_seq(&self) -> Result<i64, rusqlite::Error> {
-        self.conn
-            .query_row("SELECT COALESCE(MAX(seq), 0) FROM task_event", [], |row| {
-                row.get(0)
-            })
+        // `sqlite_sequence` preserves the highest AUTOINCREMENT allocation even
+        // when retention deletes every event. `MAX(task_event.seq)` would fall
+        // backwards to zero and make a drained response rewind a valid cursor.
+        self.conn.query_row(
+            "SELECT COALESCE(
+                 (SELECT seq FROM sqlite_sequence WHERE name = 'task_event'),
+                 0
+             )",
+            [],
+            |row| row.get(0),
+        )
     }
 
     /// Events in `scope` with `after_seq < seq <= head_seq`, oldest first.
@@ -181,9 +228,18 @@ impl Db {
         head_seq: i64,
         limit: i64,
     ) -> Result<Vec<TaskEvent>, rusqlite::Error> {
+        // For a dynamic parent scope, SQLite otherwise prefers one
+        // `idx_task_event_task_seq` probe per child. `NOT INDEXED` still permits
+        // the INTEGER PRIMARY KEY range seek, and forces work to start at the
+        // global cursor instead of scaling with total fan-out on a drained poll.
+        let event_source = if matches!(scope, TaskEventScope::Children(_)) {
+            "task_event NOT INDEXED"
+        } else {
+            "task_event"
+        };
         let sql = format!(
             "SELECT seq, task_id, type, payload, created_at
-             FROM task_event
+             FROM {event_source}
              WHERE seq > ? AND seq <= ? AND {}
              ORDER BY seq ASC
              LIMIT ?",
@@ -208,6 +264,71 @@ impl Db {
             })
         })?;
         rows.collect()
+    }
+
+    /// Globally ordered events for a known parent-membership snapshot, with
+    /// candidate work bounded by `task_ids.len() + limit` index hits.
+    ///
+    /// This is the legacy p1 upgrade path. Starting from the global sequence
+    /// index can walk unrelated retained history for a sparse parent, while a
+    /// relationship-first join makes SQLite sort the parent's entire retained
+    /// history before applying its global limit. Instead, seed a merge heap
+    /// with one indexed row per child and replenish only the child whose row
+    /// was consumed. The compatibility path is therefore bounded even when a
+    /// child has dense retained history, without sacrificing sparse parents.
+    pub fn list_task_event_candidates_bounded(
+        &self,
+        task_ids: &[String],
+        after_seq: i64,
+        head_seq: i64,
+        limit: i64,
+    ) -> Result<Vec<TaskEvent>, rusqlite::Error> {
+        if task_ids.is_empty() || limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, task_id, type, payload, created_at
+             FROM task_event INDEXED BY idx_task_event_task_seq
+             WHERE task_id = ?1 AND seq > ?2 AND seq <= ?3
+             ORDER BY seq ASC
+             LIMIT 1",
+        )?;
+        let read_next = |stmt: &mut rusqlite::Statement<'_>, task_id: &str, after_seq: i64| {
+            stmt.query_row(rusqlite::params![task_id, after_seq, head_seq], |row| {
+                let payload: Option<String> = row.get(3)?;
+                Ok(TaskEvent {
+                    seq: row.get(0)?,
+                    task_id: row.get(1)?,
+                    event_type: row.get(2)?,
+                    payload: payload
+                        .and_then(|payload| serde_json::from_str(&payload).ok())
+                        .unwrap_or_else(|| json!({})),
+                    created_at: row.get(4)?,
+                })
+            })
+            .optional()
+        };
+
+        let mut pending = BinaryHeap::with_capacity(task_ids.len());
+        for task_id in task_ids {
+            if let Some(event) = read_next(&mut stmt, task_id, after_seq)? {
+                pending.push(PendingTaskEvent(event));
+            }
+        }
+
+        let mut events = Vec::with_capacity(limit as usize);
+        while events.len() < limit as usize {
+            let Some(PendingTaskEvent(event)) = pending.pop() else {
+                break;
+            };
+            let task_id = event.task_id.clone();
+            let event_seq = event.seq;
+            events.push(event);
+            if let Some(next) = read_next(&mut stmt, &task_id, event_seq)? {
+                pending.push(PendingTaskEvent(next));
+            }
+        }
+        Ok(events)
     }
 
     /// Attach (or clear) the task that receives this task's completion

@@ -582,6 +582,59 @@ fn wait_events_is_scoped_cursored_and_bounded_by_the_client_budget() {
         format!("/v1/task-events?repoId=repo%201&timeoutSecs={MAX_WAIT_TIMEOUT_SECS}&limit=5"),
         "an over-long window must be clamped before the client can kill the call"
     );
+
+    // The scope a fan-out can name after losing the ids it created. Without it
+    // the only alternative is the whole repo, and the caller filters the noise.
+    let parent_scoped = resolve_request(
+        &catalog,
+        "kanna_wait_events",
+        &json!({ "parent_task_id": "parent 1" }),
+    )
+    .expect("wait events")
+    .path;
+    assert_eq!(
+        parent_scoped,
+        format!("/v1/task-events?parentTaskId=parent%201&timeoutSecs={DEFAULT_WAIT_TIMEOUT_SECS}")
+    );
+    let description = &catalog
+        .tools
+        .iter()
+        .find(|tool| tool.name == "kanna_wait_events")
+        .expect("wait events tool")
+        .description;
+    assert!(
+        description.contains("opaque cursor")
+            && description.contains("constant-size cursor")
+            && description.contains("read checkpoint")
+            && description.contains("never rewinds acknowledged events")
+            && description.contains("without cursor growth"),
+        "the parent scope must document its bounded reparenting semantics: {description}"
+    );
+}
+
+/// `parentTaskId` upward and `childTaskIds` downward are the same relation read
+/// from both ends. An agent that only ever hears about the upward half has no
+/// way back to a child it forgot, so the tool description has to name the
+/// downward half and say that closed children are in it.
+#[test]
+fn get_task_documents_the_downward_view_of_parentage() {
+    let catalog = bundled_catalog();
+    let description = &catalog
+        .tools
+        .iter()
+        .find(|tool| tool.name == "kanna_get_task")
+        .expect("get task tool")
+        .description;
+
+    assert!(
+        description.contains("childTaskIds"),
+        "kanna_get_task must document childTaskIds: {description}"
+    );
+    assert!(
+        description.contains("closed"),
+        "kanna_get_task must say closed children are included, or an empty list \
+         reads as 'nothing was dispatched': {description}"
+    );
 }
 
 /// The tool description is the only documentation an agent reads before

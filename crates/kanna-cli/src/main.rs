@@ -479,6 +479,11 @@ pub(crate) enum TaskCommands {
         #[arg(long = "task-id", value_delimiter = ',')]
         task_id: Vec<String>,
 
+        /// Watch this task's direct children instead of naming their ids; pass
+        /// your own task id to watch everything you fanned out
+        #[arg(long)]
+        parent_task_id: Option<String>,
+
         /// Watch every task in this repo instead of naming ids
         #[arg(long)]
         repo_id: Option<String>,

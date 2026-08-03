@@ -83,6 +83,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "038_pipeline_item_initial_pipeline",
     "039_stage_run_resume_fallback_reason",
     "040_stage_run_effort",
+    "041_pipeline_item_parentage_index",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1443,6 +1444,13 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         add_column(conn, "stage_run", "effort", "TEXT")
     })?;
 
+    run_migration(conn, "041_pipeline_item_parentage_index", |conn| {
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_pipeline_item_parent_created_id
+             ON pipeline_item(parent_task_id, created_at, id);",
+        )
+    })?;
+
     Ok(())
 }
 
@@ -1486,6 +1494,32 @@ impl Db {
             Err(error) => {
                 if let Err(rollback_error) = self.conn.execute_batch("ROLLBACK") {
                     log::error!("failed to roll back immediate transaction: {rollback_error}");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Run related reads against one SQLite snapshot without taking the write
+    /// reservation used by mutation transactions. In WAL mode writers may
+    /// continue while this snapshot is held, but every read in `operation`
+    /// observes the same committed state.
+    pub(crate) fn with_read_transaction<T>(
+        &self,
+        operation: impl FnOnce(&Self) -> Result<T, rusqlite::Error>,
+    ) -> Result<T, rusqlite::Error> {
+        self.conn.execute_batch("BEGIN")?;
+        match operation(self) {
+            Ok(value) => {
+                if let Err(error) = self.conn.execute_batch("COMMIT") {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = self.conn.execute_batch("ROLLBACK") {
+                    log::error!("failed to roll back read transaction: {rollback_error}");
                 }
                 Err(error)
             }

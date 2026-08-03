@@ -19,6 +19,16 @@ fn temp_db_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("kanna-server-db-{suffix}-{counter}.sqlite"))
 }
 
+fn index_columns(conn: &Connection, index_name: &str) -> Vec<String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA index_info('{index_name}')"))
+        .expect("prepare index metadata query");
+    stmt.query_map([], |row| row.get(2))
+        .expect("read index metadata")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect index columns")
+}
+
 #[test]
 fn database_open_flags_use_sqlite_mutexes_for_shared_desktop_db() {
     let flags = database_open_flags();
@@ -164,7 +174,12 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "040_stage_run_effort");
+    assert_eq!(latest_migration, "041_pipeline_item_parentage_index");
+    assert_eq!(
+        index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
+        vec!["parent_task_id", "created_at", "id"],
+        "the migrated schema must cover direct-child filtering and ordering"
+    );
 
     let stage_run_sql: String = db
         .conn
@@ -190,6 +205,104 @@ fn open_creates_and_migrates_fresh_profile_database() {
     assert!(transfer_columns.contains(&"target_desktop_id".to_string()));
     assert!(transfer_columns.contains(&"sidecar_cleanup_completed_at".to_string()));
 
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn test_schema_keeps_parentage_index_in_parity_with_migrations() {
+    let path = Db::test_db_path("parentage-index-parity");
+    let db = Db::open_for_tests(&path).expect("open test db");
+
+    assert_eq!(
+        index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
+        vec!["parent_task_id", "created_at", "id"],
+        "router and DB tests must exercise the indexed production query shape"
+    );
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn parentage_index_migrates_existing_rows_and_reopens_idempotently() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("create fixture db");
+    db.insert_test_repo("repo-parent-migration", "Parent Migration")
+        .expect("insert repo");
+    for (id, created_at) in [
+        ("parent-existing", "2026-08-01 00:00:00"),
+        ("child-existing-open", "2026-08-01 00:01:00"),
+        ("child-existing-closed", "2026-08-01 00:02:00"),
+    ] {
+        db.insert_test_pipeline_item(
+            id,
+            "repo-parent-migration",
+            id,
+            Some(id),
+            "in progress",
+            created_at,
+        )
+        .expect("insert task");
+    }
+    db.update_pipeline_item_parent("child-existing-open", Some("parent-existing"))
+        .expect("parent open child");
+    db.update_pipeline_item_parent("child-existing-closed", Some("parent-existing"))
+        .expect("parent closed child");
+    db.close_pipeline_item("child-existing-closed")
+        .expect("close child before migration");
+
+    // Reconstruct the exact pre-041 state: 041 only adds this index, so the
+    // production schema and existing parented rows otherwise remain unchanged.
+    db.conn
+        .execute_batch(
+            "DROP INDEX idx_pipeline_item_parent_created_id;
+             DELETE FROM schema_migrations
+             WHERE id = '041_pipeline_item_parentage_index';",
+        )
+        .expect("prepare pre-041 fixture");
+    drop(db);
+
+    let db = Db::open_migrated(path.to_str().expect("utf8 path"))
+        .expect("migrate existing parented rows through production path");
+    assert_eq!(
+        db.list_child_task_ids("parent-existing")
+            .expect("list migrated children"),
+        vec![
+            "child-existing-open".to_string(),
+            "child-existing-closed".to_string()
+        ],
+        "index migration must preserve ordering and closed children"
+    );
+    assert_eq!(
+        index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
+        vec!["parent_task_id", "created_at", "id"]
+    );
+    let obsolete_parent_cursor_objects: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE name = 'task_parent_revision'
+                OR name LIKE 'trg_pipeline_item_parent_revision_%'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("check obsolete cursor schema");
+    assert_eq!(obsolete_parent_cursor_objects, 0);
+    drop(db);
+
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("reopen migrated fixture");
+    let migration_count: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations
+             WHERE id = '041_pipeline_item_parentage_index'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count migration records");
+    assert_eq!(migration_count, 1, "reopen must not repeat migration 041");
+
+    drop(db);
     let _ = std::fs::remove_file(path);
 }
 
@@ -2350,6 +2463,11 @@ fn task_event_log_cursor_increases_and_survives_deletes() {
     db.conn
         .execute("DELETE FROM task_event", [])
         .expect("prune");
+    assert_eq!(
+        db.latest_task_event_seq().expect("head after prune"),
+        head,
+        "retention must not rewind the allocated cursor before another append"
+    );
     db.append_task_event(
         "task-1",
         super::TaskEventKind::TaskClosed,
@@ -2370,6 +2488,78 @@ fn task_event_log_cursor_increases_and_survives_deletes() {
         "AUTOINCREMENT must not reuse a cursor"
     );
 
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn parent_event_query_plan_starts_from_the_global_sequence_range() {
+    let path = Db::test_db_path("parent-event-query-plan");
+    let db = Db::open_for_tests(&path).expect("open db");
+    let sql = "EXPLAIN QUERY PLAN
+         SELECT seq, task_id, type, payload, created_at
+         FROM task_event NOT INDEXED
+         WHERE seq > ? AND seq <= ?
+           AND task_id IN (
+               SELECT id FROM pipeline_item WHERE parent_task_id = ?
+           )
+         ORDER BY seq ASC
+         LIMIT ?";
+    let mut stmt = db.conn.prepare(sql).expect("prepare query plan");
+    let details = stmt
+        .query_map(
+            rusqlite::params![10_i64, 20_i64, "parent-plan", 100_i64],
+            |row| row.get::<_, String>(3),
+        )
+        .expect("read query plan")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect query plan");
+    let plan = details.join("\n");
+    assert!(
+        plan.contains("SEARCH task_event USING INTEGER PRIMARY KEY")
+            && plan.contains("rowid>?")
+            && plan.contains("rowid<?"),
+        "parent feed must seek from the cursor instead of rescanning retained history:\n{plan}"
+    );
+    assert!(
+        plan.contains("idx_pipeline_item_parent_created_id"),
+        "parent membership must use the covering relationship index:\n{plan}"
+    );
+
+    drop(stmt);
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn legacy_parent_candidate_probe_is_indexed_and_never_sorts_history() {
+    let path = Db::test_db_path("legacy-parent-candidate-query-plan");
+    let db = Db::open_for_tests(&path).expect("open db");
+    let sql = "EXPLAIN QUERY PLAN
+         SELECT seq, task_id, type, payload, created_at
+         FROM task_event INDEXED BY idx_task_event_task_seq
+         WHERE task_id = ?1 AND seq > ?2 AND seq <= ?3
+         ORDER BY seq ASC
+         LIMIT 1";
+    let mut stmt = db.conn.prepare(sql).expect("prepare query plan");
+    let details = stmt
+        .query_map(rusqlite::params!["child-plan", 0_i64, 20_000_i64], |row| {
+            row.get::<_, String>(3)
+        })
+        .expect("read query plan")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect query plan");
+    let plan = details.join("\n");
+    assert!(
+        plan.contains("idx_task_event_task_seq") && plan.contains("task_id=? AND seq>? AND seq<?"),
+        "legacy candidates must use a bounded per-child sequence probe:\n{plan}"
+    );
+    assert!(
+        !plan.contains("SCAN task_event") && !plan.contains("USE TEMP B-TREE"),
+        "a candidate probe must neither scan nor sort retained history:\n{plan}"
+    );
+
+    drop(stmt);
     drop(db);
     let _ = std::fs::remove_file(path);
 }

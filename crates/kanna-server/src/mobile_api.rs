@@ -119,6 +119,13 @@ pub struct TaskDetail {
     /// its human instead of revising again; `0` means unlimited.
     pub revision_limit: i64,
     pub parent_task_id: Option<String>,
+    /// Direct children of this task, oldest first — the downward view of
+    /// `parent_task_id`. **Closed children are included**: parentage is
+    /// durable, and a fan-out orchestrator that lost its id list (compaction,
+    /// session resume) reconciles finished children from here, so omitting
+    /// them would make an empty list mean two different things.
+    #[serde(default)]
+    pub child_task_ids: Vec<String>,
     #[serde(default)]
     pub blocked_by_task_ids: Vec<String>,
 }
@@ -494,14 +501,21 @@ impl MobileApi {
             ._db
             .list_open_task_blocker_ids(&item.id)
             .map_err(|e| format!("db error: {}", e))?;
+        let child_task_ids = self
+            ._db
+            .list_child_task_ids(&item.id)
+            .map_err(|e| format!("db error: {}", e))?;
         Ok(Some(map_task_detail(
             item,
             repo.as_ref(),
-            worktree_path,
-            latest_run,
-            resolved_model,
-            resolved_effort,
-            blocked_by_task_ids,
+            TaskDetailRelations {
+                worktree_path,
+                latest_run,
+                resolved_model,
+                resolved_effort,
+                child_task_ids,
+                blocked_by_task_ids,
+            },
         )))
     }
 }
@@ -622,15 +636,30 @@ fn map_task_summary(
     }
 }
 
-fn map_task_detail(
-    item: crate::db::PipelineItem,
-    repo: Option<&crate::db::Repo>,
+/// The rows a task detail needs that the `pipeline_item` row cannot supply on
+/// its own — each one a separate query the caller has already run.
+struct TaskDetailRelations {
     worktree_path: Option<String>,
     latest_run: Option<crate::db::StageRun>,
     resolved_model: Option<String>,
     resolved_effort: Option<String>,
+    child_task_ids: Vec<String>,
     blocked_by_task_ids: Vec<String>,
+}
+
+fn map_task_detail(
+    item: crate::db::PipelineItem,
+    repo: Option<&crate::db::Repo>,
+    relations: TaskDetailRelations,
 ) -> TaskDetail {
+    let TaskDetailRelations {
+        worktree_path,
+        latest_run,
+        resolved_model,
+        resolved_effort,
+        child_task_ids,
+        blocked_by_task_ids,
+    } = relations;
     let prompt = item.prompt.clone();
     let title = item
         .display_name
@@ -699,6 +728,7 @@ fn map_task_detail(
         revision_rounds: item.revision_rounds,
         revision_limit,
         parent_task_id: item.parent_task_id,
+        child_task_ids,
         blocked_by_task_ids,
     }
 }
