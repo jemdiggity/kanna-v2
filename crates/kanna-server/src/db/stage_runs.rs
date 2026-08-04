@@ -1,9 +1,11 @@
 use super::{Db, NewStageRun, StageRun, TaskEventKind};
-use rusqlite::OptionalExtension;
+use rusqlite::{params, OptionalExtension};
 use serde_json::json;
 
 /// Identity of a run closed by `finish_latest_running_stage_run`.
 pub struct FinishedStageRun {
+    pub id: String,
+    pub stage: String,
     pub kind: String,
     pub completion_transition: Option<String>,
 }
@@ -36,12 +38,26 @@ impl Db {
         run: NewStageRun<'_>,
         completion_transition: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
+        self.insert_stage_run_with_completion_binding(run, completion_transition, false)
+    }
+
+    /// Insert a run whose agent process was spawned with this exact run id in
+    /// its completion context. Legacy/pre-upgrade runs deliberately leave the
+    /// bit clear so surviving old clients may omit `runId`; a newly spawned
+    /// run never takes that compatibility path.
+    pub fn insert_stage_run_with_completion_binding(
+        &self,
+        run: NewStageRun<'_>,
+        completion_transition: Option<&str>,
+        completion_bound: bool,
+    ) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO stage_run
              (id, task_id, stage, kind, agent, agent_provider, model, effort, status, result, feedback,
-              session_id, provider_session_id, cwd, resumed_from_run_id, completion_transition)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
+              session_id, provider_session_id, cwd, resumed_from_run_id, completion_transition,
+              completion_bound)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
                 run.id,
                 run.task_id,
                 run.stage,
@@ -58,7 +74,8 @@ impl Db {
                 run.cwd,
                 run.resumed_from_run_id,
                 completion_transition,
-            ),
+                completion_bound,
+            ],
         )?;
         // A pending run has not started anything yet; the watcher wants the
         // moment an agent is actually working.
@@ -89,7 +106,7 @@ impl Db {
                     resume_fallback_reason, completion_transition, started_at, finished_at
              FROM stage_run
              WHERE task_id = ?
-             ORDER BY datetime(started_at) ASC, id ASC",
+             ORDER BY rowid ASC",
         )?;
         let rows = stmt.query_map([task_id], stage_run_from_row)?;
         rows.collect()
@@ -105,7 +122,7 @@ impl Db {
                         resume_fallback_reason, completion_transition, started_at, finished_at
                  FROM stage_run
                  WHERE task_id = ?
-                 ORDER BY datetime(started_at) DESC, id DESC
+                 ORDER BY rowid DESC
                  LIMIT 1",
                 [task_id],
                 stage_run_from_row,
@@ -116,6 +133,19 @@ impl Db {
             Err(err) if is_missing_stage_run_table(&err) => Ok(None),
             Err(err) => Err(err),
         }
+    }
+
+    pub fn stage_run(&self, run_id: &str) -> Result<Option<StageRun>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
+                        feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
+                        resume_fallback_reason, completion_transition, started_at, finished_at
+                 FROM stage_run WHERE id = ?",
+                [run_id],
+                stage_run_from_row,
+            )
+            .optional()
     }
 
     /// The most recent main run of `stage` whose provider session could be
@@ -136,7 +166,7 @@ impl Db {
                  FROM stage_run
                  WHERE task_id = ? AND stage = ? AND kind = 'main'
                    AND provider_session_id IS NOT NULL AND cwd IS NOT NULL
-                 ORDER BY datetime(started_at) DESC, id DESC
+                 ORDER BY rowid DESC
                  LIMIT 1",
                 [task_id, stage],
                 stage_run_from_row,
@@ -225,7 +255,7 @@ impl Db {
              WHERE id = (
                SELECT id FROM stage_run
                WHERE task_id = ?
-               ORDER BY datetime(started_at) DESC, id DESC
+               ORDER BY rowid DESC
                LIMIT 1
              )",
             (provider_session_id, task_id),
@@ -242,27 +272,65 @@ impl Db {
         task_id: &str,
         interruption_feedback: &str,
     ) -> Result<bool, rusqlite::Error> {
-        let rows_affected = self.conn.execute(
+        let transaction = self.conn.unchecked_transaction()?;
+        let run_id = transaction
+            .query_row(
+                "SELECT sr.id
+                 FROM stage_run sr
+                 JOIN pipeline_item p ON p.id = sr.task_id
+                 WHERE sr.task_id = ?
+                   AND p.closed_at IS NULL
+                   AND sr.id = (
+                     SELECT latest.id
+                     FROM stage_run latest
+                     WHERE latest.task_id = sr.task_id
+                     ORDER BY latest.rowid DESC
+                     LIMIT 1
+                   )
+                   AND sr.status IN ('cancelled', 'failed')
+                   AND (
+                     sr.feedback = ?
+                     OR (sr.status = 'cancelled' AND sr.result IS NULL AND sr.feedback IS NULL)
+                   )
+                 ORDER BY sr.rowid DESC
+                 LIMIT 1",
+                (task_id, interruption_feedback),
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(run_id) = run_id else {
+            transaction.commit()?;
+            return Ok(false);
+        };
+        let rows_affected = transaction.execute(
             "UPDATE stage_run
              SET status = 'running', result = NULL, feedback = NULL, finished_at = NULL
-             WHERE id = (
-               SELECT id FROM stage_run
-               WHERE task_id = ?
-               ORDER BY datetime(started_at) DESC, id DESC
-               LIMIT 1
-               )
+             WHERE id = ?
                AND status IN ('cancelled', 'failed')
                AND (
                  feedback = ?
                  OR (status = 'cancelled' AND result IS NULL AND feedback IS NULL)
-               )
-               AND EXISTS (
-                 SELECT 1 FROM pipeline_item
-                 WHERE id = ? AND closed_at IS NULL
                )",
-            (task_id, interruption_feedback, task_id),
+            (&run_id, interruption_feedback),
         )?;
+        if rows_affected > 0 {
+            transaction.execute(
+                "DELETE FROM task_approval_hold
+                 WHERE run_id = ?
+                   AND kind = 'failed_result'",
+                [&run_id],
+            )?;
+        }
+        transaction.commit()?;
         Ok(rows_affected > 0)
+    }
+
+    pub fn stage_run_completion_bound(&self, run_id: &str) -> Result<bool, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT completion_bound != 0 FROM stage_run WHERE id = ?",
+            [run_id],
+            |row| row.get(0),
+        )
     }
 
     /// Finish the task's most recent `running` run, returning its kind so
@@ -278,17 +346,18 @@ impl Db {
         let run_result = self
             .conn
             .query_row(
-                "SELECT id, kind, completion_transition
+                "SELECT id, stage, kind, completion_transition
                  FROM stage_run
                  WHERE task_id = ? AND status = 'running'
-                 ORDER BY datetime(started_at) DESC, id DESC
+                 ORDER BY rowid DESC
                  LIMIT 1",
                 [task_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 },
             )
@@ -298,56 +367,13 @@ impl Db {
             Err(err) if is_missing_stage_run_table(&err) => return Ok(None),
             Err(err) => return Err(err),
         };
-        let Some((run_id, kind, completion_transition)) = run else {
+        let Some((run_id, stage, kind, completion_transition)) = run else {
             return Ok(None);
         };
         self.finish_stage_run(&run_id, status, result, feedback)?;
         Ok(Some(FinishedStageRun {
-            kind,
-            completion_transition,
-        }))
-    }
-
-    /// Re-finish the task's most recent already-finished run with a late
-    /// verdict. A parked task has no running run: an agent that reported
-    /// failure, fixed the problem, and reported success would otherwise lose
-    /// the verdict (and, for posts, the deferred transition). The latest
-    /// verdict wins.
-    pub fn refinish_latest_stage_run(
-        &self,
-        task_id: &str,
-        status: &str,
-        result: Option<&str>,
-        feedback: Option<&str>,
-    ) -> Result<Option<FinishedStageRun>, rusqlite::Error> {
-        let run_result = self
-            .conn
-            .query_row(
-                "SELECT id, kind, completion_transition
-                 FROM stage_run
-                 WHERE task_id = ? AND status IN ('succeeded', 'failed')
-                 ORDER BY datetime(started_at) DESC, id DESC
-                 LIMIT 1",
-                [task_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .optional();
-        let run = match run_result {
-            Ok(run) => run,
-            Err(err) if is_missing_stage_run_table(&err) => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        let Some((run_id, kind, completion_transition)) = run else {
-            return Ok(None);
-        };
-        self.finish_stage_run(&run_id, status, result, feedback)?;
-        Ok(Some(FinishedStageRun {
+            id: run_id,
+            stage,
             kind,
             completion_transition,
         }))
@@ -405,7 +431,7 @@ impl Db {
                 "SELECT status
                  FROM stage_run
                  WHERE task_id = ? AND status IN ('succeeded', 'failed')
-                 ORDER BY datetime(finished_at) DESC, datetime(started_at) DESC, id DESC
+                 ORDER BY rowid DESC
                  LIMIT 1",
                 [task_id],
                 |row| row.get(0),
@@ -432,7 +458,7 @@ impl Db {
                    AND status IN ('succeeded', 'failed')
                    AND result IS NOT NULL
                    AND (?2 IS NULL OR kind = ?2)
-                 ORDER BY datetime(finished_at) DESC, datetime(started_at) DESC, id DESC
+                 ORDER BY rowid DESC
                  LIMIT 1",
                 rusqlite::params![task_id, kind],
                 |row| row.get(0),

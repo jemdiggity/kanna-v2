@@ -19,6 +19,9 @@ const summaryComposerOpen = ref(false);
 const summaryDraft = ref("");
 const sendingRevision = ref(false);
 const approving = ref(false);
+const approvalOverrideOpen = ref(false);
+const approvalOverrideReason = ref("");
+const recordingApprovalOverride = ref(false);
 
 const props = defineProps<{
   repoPath: string;
@@ -106,15 +109,41 @@ async function approveReview() {
   if (!props.taskId || approveDisabled.value) return;
   approving.value = true;
   try {
-    await store.advanceStage(props.taskId);
+    const result = await store.advanceStage(props.taskId);
+    if (result === "held") {
+      approvalOverrideOpen.value = true;
+      nextTick(() => {
+        modalRef.value?.querySelector<HTMLTextAreaElement>(".approval-override-composer textarea")?.focus();
+      });
+    }
   } finally {
     approving.value = false;
+  }
+}
+
+async function submitApprovalOverride() {
+  if (!props.taskId || recordingApprovalOverride.value) return;
+  const reason = approvalOverrideReason.value.trim();
+  if (!reason) return;
+  recordingApprovalOverride.value = true;
+  try {
+    const recorded = await store.overrideApprovalHold(props.taskId, reason);
+    if (!recorded) return;
+    approvalOverrideOpen.value = false;
+    approvalOverrideReason.value = "";
+    await approveReview();
+  } finally {
+    recordingApprovalOverride.value = false;
   }
 }
 
 function dismiss(): boolean {
   if (summaryComposerOpen.value) {
     summaryComposerOpen.value = false;
+    return false;
+  }
+  if (approvalOverrideOpen.value) {
+    approvalOverrideOpen.value = false;
     return false;
   }
   return diffViewRef.value?.dismissReviewLayer() ?? true;
@@ -124,7 +153,7 @@ function requestChanges() {
   openRequestChangesComposer();
 }
 
-defineExpose({ zIndex, bringToFront, dismiss, requestChanges });
+defineExpose({ zIndex, bringToFront, dismiss, requestChanges, approveReview });
 
 // Escape is handled by the centralized dismiss handler in useKeyboardShortcuts
 // (capture phase), which respects modal priority (e.g. closes shortcuts menu first).
@@ -183,6 +212,28 @@ onMounted(() => {
             <button type="button" @click="summaryComposerOpen = false">{{ $t('actions.cancel') }}</button>
             <button type="button" class="primary" :disabled="sendingRevision || comments.length === 0" @click="submitRequestChanges">
               {{ $t('diffView.sendRequestChanges') }}
+            </button>
+          </div>
+        </div>
+      </div>
+      <div v-if="approvalOverrideOpen" class="summary-composer approval-override-composer">
+        <div class="summary-panel">
+          <h2>{{ $t('diffView.approvalHoldTitle') }}</h2>
+          <p>{{ $t('diffView.approvalHoldExplanation') }}</p>
+          <textarea
+            v-model="approvalOverrideReason"
+            :placeholder="$t('diffView.approvalOverrideReasonPlaceholder')"
+            @keydown.meta.enter.prevent="submitApprovalOverride"
+          />
+          <div class="summary-actions">
+            <button type="button" @click="approvalOverrideOpen = false">{{ $t('actions.cancel') }}</button>
+            <button
+              type="button"
+              class="primary"
+              :disabled="recordingApprovalOverride || approvalOverrideReason.trim().length === 0"
+              @click="submitApprovalOverride"
+            >
+              {{ $t('diffView.recordOverrideAndApprove') }}
             </button>
           </div>
         </div>

@@ -16,10 +16,13 @@ const STAGE_ADVANCE_RECONCILE_RETRY_MS = 100;
 export interface PipelineApi {
   loadPipeline: (repoId: string, pipelineName: string) => Promise<PipelineDefinition>;
   loadAgent: (repoId: string, agentName: string) => Promise<AgentDefinition>;
-  advanceStage: (taskId: string, options?: AdvanceStageOptions) => Promise<void>;
+  advanceStage: (taskId: string, options?: AdvanceStageOptions) => Promise<AdvanceStageResult>;
+  overrideApprovalHold: (taskId: string, reason: string) => Promise<boolean>;
   requestRevision: (taskId: string, options: RequestRevisionOptions) => Promise<boolean>;
   rerunStage: (taskId: string) => Promise<void>;
 }
+
+export type AdvanceStageResult = "advanced" | "held" | "ignored" | "failed";
 
 export interface RequestRevisionOptions {
   targetStage: string;
@@ -264,17 +267,20 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     return response.definition;
   }
 
-  async function advanceStage(taskId: string, options: AdvanceStageOptions = {}): Promise<void> {
+  async function advanceStage(
+    taskId: string,
+    options: AdvanceStageOptions = {},
+  ): Promise<AdvanceStageResult> {
     const item = context.state.items.value.find((candidate) => candidate.id === taskId);
-    if (!item) return;
-    if (item.closed_at != null) return;
+    if (!item) return "ignored";
+    if (item.closed_at != null) return "ignored";
     // Single-flight: while a post (e.g. approve) runs, an ordinary repeated
     // advance would hit the backend's running-post override and transition
     // the stage before the post finishes its work. Only the post's own
     // completion may move the task.
     if (item.has_running_post) {
       context.toast.warning(context.tt("toasts.stagePostRunning"));
-      return;
+      return "ignored";
     }
     const sourceTaskIsSelected = requireService(context.services.selectedTaskId, "selectedTaskId").value === item.id;
     const fallbackSelectionId = computeNextVisibleItemId(item.id);
@@ -292,13 +298,17 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     });
 
     try {
-      await withOptimisticStageAdvance(taskId, nextStageName, pendingPostName, async () => {
+      return await withOptimisticStageAdvance(taskId, nextStageName, pendingPostName, async () => {
         const response = await postTaskAction(taskId, "advance-stage");
         if (!response.ok) {
           const message = await response.text();
           if (response.status === 409) {
+            if (message.startsWith("approval held:")) {
+              context.toast.warning(message);
+              return "held" as const;
+            }
             context.toast.warning(context.tt("mainPanel.taskBlocked"));
-            return;
+            return "ignored" as const;
           }
           throw new Error(message);
         }
@@ -314,10 +324,26 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
         if (taskClosed && sourceTaskIsSelected) {
           await restoreStageAdvanceSelection(fallbackSelectionId);
         }
+        return "advanced" as const;
       });
     } catch (error) {
       console.error("[store] advanceStage: server action failed:", error);
       context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
+      return "failed";
+    }
+  }
+
+  async function overrideApprovalHold(taskId: string, reason: string): Promise<boolean> {
+    const normalizedReason = reason.trim();
+    if (!normalizedReason) return false;
+    try {
+      await invoke("override_approval_hold", { taskId, reason: normalizedReason });
+      await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
+      return true;
+    } catch (error) {
+      console.error("[store] overrideApprovalHold: server action failed:", error);
+      context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
+      return false;
     }
   }
 
@@ -376,6 +402,7 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     loadPipeline,
     loadAgent,
     advanceStage,
+    overrideApprovalHold,
     requestRevision,
     rerunStage,
   };

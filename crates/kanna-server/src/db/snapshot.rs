@@ -81,7 +81,7 @@ impl Db {
                       SELECT stage_run.id
                       FROM stage_run
                       WHERE stage_run.task_id = pipeline_item.id
-                      ORDER BY datetime(stage_run.started_at) DESC, stage_run.id DESC
+                      ORDER BY stage_run.rowid DESC
                       LIMIT 1
                     ) AS transition_revision,
                     COALESCE(pipeline_item.cloud_task_id, pipeline_item.id) AS cloud_task_id,

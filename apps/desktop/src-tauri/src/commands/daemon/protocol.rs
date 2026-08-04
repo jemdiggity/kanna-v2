@@ -91,6 +91,23 @@ pub(super) fn parse_ack(response: &str) -> Result<(), DaemonCommandError> {
     }
 }
 
+pub(super) fn parse_protected_input_ready(response: &str) -> Result<(), DaemonCommandError> {
+    let event: serde_json::Value = serde_json::from_str(response).unwrap_or_default();
+    match event.get("type").and_then(|value| value.as_str()) {
+        Some("ProtectedInputReady")
+            if event.get("version").and_then(|value| value.as_u64())
+                == Some(kanna_runtime_defaults::PROTECTED_INPUT_PROTOCOL_VERSION.into()) =>
+        {
+            Ok(())
+        }
+        Some("Error") => Err(parse_error_event(&event)),
+        _ => Err(DaemonCommandError {
+            message: format!("unexpected protected-input negotiation response: {response}"),
+            code: Some(UNEXPECTED_ACK_EVENT_CODE.to_string()),
+        }),
+    }
+}
+
 pub(super) fn parse_session_created(response: &str) -> Result<(), DaemonCommandError> {
     let event: serde_json::Value =
         serde_json::from_str(response).map_err(|error| DaemonCommandError {

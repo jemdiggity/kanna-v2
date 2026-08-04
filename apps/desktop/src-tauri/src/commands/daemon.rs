@@ -17,8 +17,8 @@ use attachment::{
     spawn_attached_stream_task, unregister_attached_owner, update_window_session_size,
 };
 use connection::{
-    daemon_socket_path, ensure_connected, require_option_mut, send_command_expect_ack,
-    send_command_expect_session_created,
+    daemon_socket_path, ensure_connected, negotiate_protected_input, require_option_mut,
+    send_command_expect_ack, send_command_expect_ack_bounded, send_command_expect_session_created,
 };
 #[allow(unused_imports)]
 pub use protocol::TerminalSnapshotPayload;
@@ -42,8 +42,13 @@ pub async fn spawn_session(
     cols: u16,
     rows: u16,
     agent_provider: Option<String>,
+    operator_input_only: Option<bool>,
 ) -> Result<(), DaemonCommandError> {
     let agent_provider = parse_agent_provider(agent_provider)?;
+    let operator_input_only = operator_input_only.unwrap_or(false);
+    if operator_input_only {
+        negotiate_protected_input(&state).await?;
+    }
     let cmd = serde_json::json!({
         "type": "Spawn",
         "session_id": session_id,
@@ -54,6 +59,7 @@ pub async fn spawn_session(
         "cols": cols,
         "rows": rows,
         "agent_provider": agent_provider,
+        "operator_input_only": operator_input_only,
     });
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
     send_command_expect_session_created(&state, &json).await
@@ -199,6 +205,60 @@ pub async fn send_input(
     });
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
     send_command_expect_ack(&state, &json).await
+}
+
+/// Write to a protected merge terminal through the daemon's
+/// kernel-authenticated native desktop channel.
+#[tauri::command]
+pub async fn send_operator_input(
+    state: tauri::State<'_, DaemonState>,
+    session_id: String,
+    data: Vec<u8>,
+) -> Result<(), DaemonCommandError> {
+    submit_operator_input(&state, session_id, data, std::time::Duration::from_secs(2)).await
+}
+
+async fn submit_operator_input(
+    state: &DaemonState,
+    session_id: String,
+    data: Vec<u8>,
+    timeout: std::time::Duration,
+) -> Result<(), DaemonCommandError> {
+    let input = serde_json::json!({
+        "type": "OperatorInput",
+        "session_id": session_id,
+        "data": data,
+    })
+    .to_string();
+    let first_error = match send_command_expect_ack_bounded(state, &input, timeout).await {
+        Ok(()) => return Ok(()),
+        Err(error) if error.code.as_deref() == Some("input_unauthorized") => error,
+        Err(error) => return Err(error),
+    };
+
+    let adopt = serde_json::json!({ "type": "AdoptOperator" }).to_string();
+    send_command_expect_ack_bounded(state, &adopt, timeout)
+        .await
+        .map_err(|adopt_error| {
+            DaemonCommandError::from(format!(
+                "{first_error:?}; native operator re-adoption failed: {adopt_error:?}"
+            ))
+        })?;
+    send_command_expect_ack_bounded(state, &input, timeout).await
+}
+
+pub(crate) async fn authorize_server_process(
+    client: &mut DaemonClient,
+    pid: u32,
+) -> Result<(), DaemonCommandError> {
+    let command = serde_json::json!({
+        "type": "AuthorizeServer",
+        "pid": pid,
+    })
+    .to_string();
+    client.send_command(&command).await?;
+    let response = client.read_event().await?;
+    parse_ack(&response)
 }
 
 #[tauri::command]
@@ -411,4 +471,135 @@ pub async fn detach_session(
         parse_ack(&response)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod operator_input_tests {
+    use super::{authorize_server_process, submit_operator_input, DaemonState};
+    use crate::daemon_client::DaemonClient;
+    use std::sync::Arc;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+    use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn lost_ack_after_operator_bytes_never_replays_them() {
+        let dir = std::path::PathBuf::from("/tmp").join(format!(
+            "kd-operator-lost-ack-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut lines = BufReader::new(stream).lines();
+            let first = lines.next_line().await.unwrap().unwrap();
+            // The daemon applied the command, but its acknowledgement was lost.
+            drop(lines);
+            first
+        });
+
+        let client = DaemonClient::connect(&socket).await.unwrap();
+        let state: DaemonState = Arc::new(Mutex::new(Some(client)));
+        let error = submit_operator_input(
+            &state,
+            "merge-session".to_string(),
+            b"merge PR 123\r".to_vec(),
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .expect_err("lost acknowledgement is uncertain and must not be replayed");
+        assert_ne!(error.code.as_deref(), Some("input_unauthorized"));
+
+        let submitted = server.await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&submitted).unwrap();
+        assert_eq!(value["type"], "OperatorInput");
+        assert_eq!(value["session_id"], "merge-session");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn explicit_pre_write_unauthorized_allows_one_adoption_and_replay() {
+        let dir = std::path::PathBuf::from("/tmp").join(format!(
+            "kd-operator-adopt-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let mut command_types = Vec::new();
+            for response in [
+                r#"{"type":"Error","code":"input_unauthorized","message":"old desktop"}"#,
+                r#"{"type":"Ok"}"#,
+                r#"{"type":"Ok"}"#,
+            ] {
+                let line = lines.next_line().await.unwrap().unwrap();
+                let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+                command_types.push(value["type"].as_str().unwrap().to_string());
+                write.write_all(response.as_bytes()).await.unwrap();
+                write.write_all(b"\n").await.unwrap();
+            }
+            command_types
+        });
+
+        let client = DaemonClient::connect(&socket).await.unwrap();
+        let state: DaemonState = Arc::new(Mutex::new(Some(client)));
+        submit_operator_input(
+            &state,
+            "merge-session".to_string(),
+            b"approved\r".to_vec(),
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            server.await.unwrap(),
+            ["OperatorInput", "AdoptOperator", "OperatorInput"]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn native_desktop_hands_exact_server_pid_to_daemon() {
+        let dir = std::path::PathBuf::from("/tmp").join(format!(
+            "kd-authorize-server-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(read).read_line(&mut line).await.unwrap();
+            write.write_all(b"{\"type\":\"Ok\"}\n").await.unwrap();
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()
+        });
+
+        let mut client = DaemonClient::connect(&socket).await.unwrap();
+        authorize_server_process(&mut client, 42).await.unwrap();
+
+        let command = server.await.unwrap();
+        assert_eq!(command["type"], "AuthorizeServer");
+        assert_eq!(command["pid"], 42);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

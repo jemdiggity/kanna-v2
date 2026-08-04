@@ -428,6 +428,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       env: {
         ...process.env,
         KANNA_DAEMON_DIR: daemonDir,
+        KANNA_SERVER_EXECUTABLE: join(repoRoot, ".build/debug/kanna-server"),
         HOME: zshStartupDir,
         PATH: prependPath(fakeAgentBinDir, process.env.PATH),
         ZDOTDIR: zshStartupDir

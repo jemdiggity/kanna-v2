@@ -475,7 +475,8 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
                 "agentProvider": "claude",
                 "branch": "task-task-1",
                 "prUrl": null,
-                "closedAt": null
+                "closedAt": null,
+                "latestRun": { "id": "run-review-1" }
             }),
         },
         ExpectedRequest {
@@ -547,13 +548,120 @@ fn serve_forwards_get_and_post_tool_calls_to_configured_http_server() {
             "agentProvider": "claude",
             "branch": "task-task-1",
             "prUrl": null,
-            "closedAt": null
+            "closedAt": null,
+            "latestRun": { "id": "run-review-1" }
         })
     );
     assert_eq!(
         tool_text(&responses[3]),
         json!({ "taskId": "task-1", "stage": "pr" })
     );
+}
+
+#[test]
+fn completion_retry_after_a_lost_response_keeps_the_spawned_run_identity() {
+    let root = std::env::temp_dir().join(format!(
+        "kanna-mcp-completion-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).expect("completion context directory");
+    let context_path = root.join("completion.json");
+    kanna_tool_catalog::write_completion_context(
+        &context_path,
+        &kanna_tool_catalog::CompletionContext::new("run-original"),
+    )
+    .expect("write completion context");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+    let base_url = format!("http://{}", listener.local_addr().expect("fixture address"));
+    let server_context_path = context_path.clone();
+    let server = thread::spawn(move || {
+        let mut observed = Vec::new();
+        for attempt in 0..2 {
+            let (mut stream, _) = listener.accept().expect("accept completion request");
+            observed.push(read_http_request(&mut stream));
+            if attempt == 0 {
+                // The server may already have committed this request and started
+                // a replacement run; losing the response must not make the
+                // adapter rediscover and complete that replacement.
+                let attempt_key = observed[0].body.as_ref().unwrap()["completionAttemptKey"]
+                    .as_str()
+                    .unwrap();
+                kanna_tool_catalog::mutate_completion_context(&server_context_path, |current| {
+                    let mut context = current.unwrap();
+                    context.record_completed_attempt("run-original", attempt_key);
+                    context.run_id = "run-post".to_string();
+                    Ok(context)
+                })
+                .expect("server should atomically advance completion context");
+                continue;
+            }
+            let body = json!({ "taskId": "task-1" }).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write retry response");
+        }
+        observed
+    });
+    let context_path_string = context_path.to_string_lossy().to_string();
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "kanna_complete_stage",
+            "arguments": {
+                "task_id": "task-1",
+                "status": "success",
+                "summary": "completed once"
+            }
+        }
+    });
+    let responses = run_kanna_mcp_with_env(
+        &base_url,
+        &[
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
+            call.clone(),
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": call["params"].clone() }),
+        ],
+        &[(
+            kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV,
+            &context_path_string,
+        )],
+    );
+
+    let observed = server.join().expect("fixture server");
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0].method, "POST");
+    assert_eq!(observed[1].method, "POST");
+    assert_eq!(observed[0].body, observed[1].body);
+    assert_eq!(
+        observed[0].body.as_ref().and_then(|body| body.get("runId")),
+        Some(&json!("run-original"))
+    );
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[1]["result"]["isError"], json!(true));
+    assert_eq!(tool_text(&responses[2]), json!({ "taskId": "task-1" }));
+    let context =
+        kanna_tool_catalog::read_completion_context(&context_path).expect("read completed context");
+    assert_eq!(context.run_id, "run-post");
+    assert_eq!(
+        context.run_for_attempt(
+            observed[0].body.as_ref().unwrap()["completionAttemptKey"]
+                .as_str()
+                .unwrap()
+        ),
+        Some("run-original")
+    );
+    std::fs::remove_dir_all(root).expect("remove completion context directory");
 }
 
 #[test]

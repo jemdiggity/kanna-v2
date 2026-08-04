@@ -166,6 +166,14 @@ pub(crate) async fn run_daemon() {
             std::process::exit(1);
         }
     };
+    let operator_authorizer = match crate::operator_auth::OperatorAuthorizer::capture() {
+        Ok(authorizer) => Arc::new(authorizer),
+        Err(error) => {
+            log::error!("refusing to start without operator trust root: {error}");
+            eprintln!("kanna-daemon: could not capture operator trust root: {error}");
+            std::process::exit(1);
+        }
+    };
 
     let pid_path = dir.join("daemon.pid");
     let socket_path = kanna_runtime_defaults::socket_path(&dir);
@@ -308,6 +316,9 @@ pub(crate) async fn run_daemon() {
                 status: handoff.status,
                 status_observed,
                 last_status_check_at: None,
+                operator_input_only: handoff.operator_input_only
+                    || !handoff.input_policy_classified,
+                input_policy_classified: handoff.input_policy_classified,
             }));
             let reader = match handle.try_clone_io_fd().await {
                 Ok(io_fd) => match handle.take_input_rx().await {
@@ -505,6 +516,7 @@ pub(crate) async fn run_daemon() {
                 let agent_sessions_clone = agent_sessions.clone();
                 let daemon_lifecycle_clone = daemon_lifecycle.clone();
                 let successor_authorizer_clone = successor_authorizer.clone();
+                let operator_authorizer_clone = operator_authorizer.clone();
                 tokio::spawn(async move {
                     handle_connection(
                         stream,
@@ -518,6 +530,7 @@ pub(crate) async fn run_daemon() {
                         agent_sessions_clone,
                         daemon_lifecycle_clone,
                         successor_authorizer_clone,
+                        operator_authorizer_clone,
                     )
                     .await;
                 });

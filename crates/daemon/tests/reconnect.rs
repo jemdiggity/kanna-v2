@@ -61,6 +61,21 @@ enum Cmd {
         session_id: String,
         data: Vec<u8>,
     },
+    OperatorInput {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    SystemInput {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    AuthorizeServer {
+        pid: u32,
+    },
+    ClassifyInput {
+        session_id: String,
+        operator_input_only: bool,
+    },
     ResizeNoReply {
         session_id: String,
         cols: u16,
@@ -126,6 +141,8 @@ enum Evt {
 #[serde(rename_all = "snake_case")]
 enum ErrorCode {
     PtySpawnFailed,
+    InputUnauthorized,
+    ProtectedInputProtocolRequired,
     #[serde(other)]
     Other,
 }
@@ -462,6 +479,13 @@ impl ClientConn {
         self.writer.flush().unwrap();
     }
 
+    fn send_json(&mut self, cmd: &serde_json::Value) {
+        let mut json = serde_json::to_string(cmd).unwrap();
+        json.push('\n');
+        self.writer.write_all(json.as_bytes()).unwrap();
+        self.writer.flush().unwrap();
+    }
+
     fn recv(&mut self) -> Evt {
         let mut line = String::new();
         self.reader.read_line(&mut line).expect("read timed out");
@@ -741,6 +765,248 @@ fn spawn_shell_session(conn: &mut ClientConn, session_id: &str, script: &str) {
         Evt::SessionCreated { session_id: sid } => assert_eq!(sid, session_id),
         other => panic!("expected SessionCreated, got: {:?}", other),
     }
+}
+
+#[test]
+fn protected_session_rejects_generic_daemon_input_and_accepts_authenticated_operator() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "protected-merge-input";
+    conn.send_json(&serde_json::json!({
+        "type": "Spawn",
+        "session_id": session_id,
+        "executable": "/bin/cat",
+        "args": [],
+        "cwd": "/tmp",
+        "env": {},
+        "cols": 80,
+        "rows": 24,
+        "operator_input_only": true
+    }));
+    expect_session_created(&mut conn, session_id);
+
+    conn.send(&Cmd::ClassifyInput {
+        session_id: session_id.to_string(),
+        operator_input_only: false,
+    });
+    assert!(matches!(
+        conn.recv(),
+        Evt::Error {
+            code: Some(ErrorCode::InputUnauthorized),
+            ..
+        }
+    ));
+
+    conn.send(&Cmd::Input {
+        session_id: session_id.to_string(),
+        data: b"forged merge\r".to_vec(),
+    });
+    match conn.recv() {
+        Evt::Error {
+            code: Some(ErrorCode::InputUnauthorized),
+            ..
+        } => {}
+        other => panic!("generic daemon input was not fenced: {other:?}"),
+    }
+
+    conn.send(&Cmd::InputNoReply {
+        session_id: session_id.to_string(),
+        data: b"forged no-reply merge\r".to_vec(),
+    });
+    assert!(matches!(
+        conn.recv(),
+        Evt::Error {
+            code: Some(ErrorCode::InputUnauthorized),
+            ..
+        }
+    ));
+
+    conn.send(&Cmd::OperatorInput {
+        session_id: session_id.to_string(),
+        data: b"operator merge\r".to_vec(),
+    });
+    assert!(matches!(conn.recv(), Evt::Ok));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        conn.send(&Cmd::Snapshot {
+            session_id: session_id.to_string(),
+        });
+        match conn.recv() {
+            Evt::Snapshot { snapshot, .. } if snapshot.vt.contains("operator merge") => break,
+            Evt::Snapshot { .. } if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Evt::Snapshot { snapshot, .. } => {
+                panic!(
+                    "operator input never reached protected PTY: {:?}",
+                    snapshot.vt
+                )
+            }
+            other => panic!("expected protected session snapshot, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+#[ignore = "fixture invoked by old_server_cannot_spawn_on_a_new_daemon_without_negotiation"]
+fn unnegotiated_server_spawn_child() {
+    let Some(socket_path) = std::env::var_os("KANNA_UNNEGOTIATED_SPAWN_SOCKET") else {
+        return;
+    };
+    let stream = UnixStream::connect(socket_path).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut connection = ClientConn {
+        reader: BufReader::new(stream.try_clone().unwrap()),
+        writer: stream,
+    };
+    connection.send_json(&serde_json::json!({
+        "type": "Spawn",
+        "session_id": "old-server-merge",
+        "executable": "/bin/cat",
+        "args": [],
+        "cwd": "/tmp",
+        "env": {},
+        "cols": 80,
+        "rows": 24
+    }));
+    assert!(matches!(
+        connection.recv(),
+        Evt::Error {
+            code: Some(ErrorCode::ProtectedInputProtocolRequired),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn old_server_cannot_spawn_on_a_new_daemon_without_negotiation() {
+    let current_executable = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    let daemon = DaemonHandle::start_with_env([(
+        "KANNA_SERVER_EXECUTABLE",
+        current_executable.to_str().unwrap(),
+    )]);
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "unnegotiated_server_spawn_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("KANNA_UNNEGOTIATED_SPAWN_SOCKET", &daemon.socket_path)
+        .status()
+        .expect("spawn old-server fixture");
+    assert!(status.success());
+}
+
+#[test]
+#[ignore = "fixture invoked by privileged_input_rejects_a_separate_process_impersonator"]
+fn privileged_input_impersonation_child() {
+    let Some(socket_path) = std::env::var_os("KANNA_IMPERSONATION_SOCKET") else {
+        return;
+    };
+    let session_id = std::env::var("KANNA_IMPERSONATION_SESSION").unwrap();
+    let stream = UnixStream::connect(socket_path).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut conn = ClientConn {
+        reader: BufReader::new(stream.try_clone().unwrap()),
+        writer: stream,
+    };
+    let commands = [
+        Cmd::AuthorizeServer {
+            pid: std::process::id(),
+        },
+        Cmd::OperatorInput {
+            session_id: session_id.clone(),
+            data: b"forged operator\r".to_vec(),
+        },
+        Cmd::SystemInput {
+            session_id: session_id.clone(),
+            data: b"forged system\r".to_vec(),
+        },
+        Cmd::ClassifyInput {
+            session_id,
+            operator_input_only: false,
+        },
+    ];
+    for command in commands {
+        conn.send(&command);
+        assert!(matches!(
+            conn.recv(),
+            Evt::Error {
+                code: Some(ErrorCode::InputUnauthorized),
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn privileged_input_rejects_a_separate_process_impersonator() {
+    let current_executable = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    let daemon = DaemonHandle::start_with_env([(
+        "KANNA_SERVER_EXECUTABLE",
+        current_executable.to_str().unwrap(),
+    )]);
+    let mut conn = daemon.connect();
+    let session_id = "protected-cross-process";
+    conn.send_json(&serde_json::json!({
+        "type": "Spawn",
+        "session_id": session_id,
+        "executable": "/bin/cat",
+        "args": [],
+        "cwd": "/tmp",
+        "env": {},
+        "cols": 80,
+        "rows": 24,
+        "operator_input_only": true
+    }));
+    expect_session_created(&mut conn, session_id);
+
+    conn.send(&Cmd::AuthorizeServer {
+        pid: std::process::id(),
+    });
+    assert!(matches!(conn.recv(), Evt::Ok));
+    let audit = std::fs::read_to_string(daemon._dir.join("kanna-daemon-lifecycle.log"))
+        .expect("server authorization should be durably audited");
+    assert!(
+        audit.contains(&format!(
+            "pid={} event=server_authorized server_pid={} scope=protected_system_input",
+            daemon.child.id(),
+            std::process::id()
+        )),
+        "authorization audit must identify both exact processes: {audit}"
+    );
+
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "privileged_input_impersonation_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("KANNA_IMPERSONATION_SOCKET", &daemon.socket_path)
+        .env("KANNA_IMPERSONATION_SESSION", session_id)
+        .status()
+        .expect("spawn separate impersonator process");
+    assert!(status.success(), "impersonator fixture assertions failed");
+
+    conn.send(&Cmd::Snapshot {
+        session_id: session_id.to_string(),
+    });
+    let snapshot = loop {
+        match conn.recv() {
+            Evt::Snapshot { snapshot, .. } => break snapshot,
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("expected protected session snapshot, got {other:?}"),
+        }
+    };
+    assert!(!snapshot.vt.contains("forged operator"));
+    assert!(!snapshot.vt.contains("forged system"));
 }
 
 #[test]

@@ -35,6 +35,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_list_agents",
             "kanna_create_task",
             "kanna_signal_agent",
+            "kanna_signal_merge_handoff",
             "kanna_send_task_input",
             "kanna_close_task",
             "kanna_rename_task",
@@ -247,6 +248,23 @@ fn generated_tools_mark_get_tools_read_only() {
 }
 
 #[test]
+fn human_approval_override_is_not_an_agent_tool() {
+    let catalog = bundled_catalog();
+
+    assert!(catalog
+        .tools
+        .iter()
+        .all(|tool| tool.name != "kanna_override_approval"));
+    let advance = catalog
+        .tools
+        .iter()
+        .find(|tool| tool.name == "kanna_advance_stage")
+        .expect("advance tool");
+    assert_eq!(advance.params.len(), 1);
+    assert_eq!(advance.params[0].name, "task_id");
+}
+
+#[test]
 fn resolves_expected_requests_for_every_bundled_tool() {
     let catalog = bundled_catalog();
     let cases = [
@@ -410,6 +428,25 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             }),
         ),
         (
+            "kanna_signal_merge_handoff",
+            json!({
+                "task_id": "task-1",
+                "branch": "task-task-1-4",
+                "target": "main",
+                "pr_url": "https://example.invalid/pull/1",
+                "summary": "approved"
+            }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/tasks/task-1/actions/signal-merge-handoff",
+            json!({
+                "branch": "task-task-1-4",
+                "target": "main",
+                "prUrl": "https://example.invalid/pull/1",
+                "summary": "approved"
+            }),
+        ),
+        (
             "kanna_signal_agent",
             json!({
                 "repo_id": "repo-1",
@@ -561,7 +598,8 @@ fn resolves_expected_requests_for_every_bundled_tool() {
                 "task_id": "task-1",
                 "status": "success",
                 "summary": "done",
-                "metadata": { "review": "passed" }
+                "metadata": { "review": "passed" },
+                "disposition": "not_merge_candidate"
             }),
             Method::Post,
             ResponseKind::Json,
@@ -569,7 +607,8 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({
                 "status": "success",
                 "summary": "done",
-                "metadata": { "review": "passed" }
+                "metadata": { "review": "passed" },
+                "disposition": "not_merge_candidate"
             }),
         ),
         (

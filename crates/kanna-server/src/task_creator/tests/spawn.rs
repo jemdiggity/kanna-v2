@@ -1,6 +1,180 @@
 use super::*;
 
 #[tokio::test]
+async fn protected_merge_pty_negotiates_before_spawn() {
+    let config = test_config("protected-merge-negotiation");
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let fake_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut reader = BufReader::new(read);
+        let mut commands = Vec::new();
+        for response in [
+            kanna_daemon::protocol::Event::ProtectedInputReady {
+                version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+            },
+            kanna_daemon::protocol::Event::SessionCreated {
+                session_id: "merge-task".to_string(),
+            },
+        ] {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            commands.push(
+                serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            );
+            write
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+        commands
+    });
+    let prepared = PreparedTaskSpawn {
+        created_task: CreatedTask {
+            task_id: "merge-task".to_string(),
+            repo_id: "repo-1".to_string(),
+            title: "Merge".to_string(),
+            prompt: "Merge approved work".to_string(),
+            stage: "in progress".to_string(),
+            agent_type: "pty".to_string(),
+            worktree_path: "/tmp/worktree".to_string(),
+        },
+        branch: "merge-task".to_string(),
+        session_id: "merge-task".to_string(),
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        stage_agent: Some("merge".to_string()),
+        agent_provider: "codex".to_string(),
+        model: None,
+        effort: None,
+        completion_transition: PipelineStageTransition::Manual,
+        provider_session_id: None,
+        recovery_snapshot: None,
+        session: PreparedSessionSpawn::Pty {
+            executable: "/bin/cat".to_string(),
+            args: Vec::new(),
+            cols: 80,
+            rows: 24,
+            agent_provider: DaemonAgentProvider::Codex,
+        },
+    };
+    let mut client = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    spawn_prepared_task(&mut client, prepared).await.unwrap();
+    let commands = fake_daemon.await.unwrap();
+    assert!(matches!(
+        commands.first(),
+        Some(kanna_daemon::protocol::Command::NegotiateProtectedInput {
+            version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+        })
+    ));
+    assert!(matches!(
+        commands.get(1),
+        Some(kanna_daemon::protocol::Command::Spawn {
+            operator_input_only: true,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn protected_pty_negotiation_disconnect_is_recorded_before_acknowledgement() {
+    let config = test_config("protected-merge-negotiation-disconnect");
+    let _ = std::fs::remove_dir_all(
+        std::path::Path::new(&config.daemon_dir).join("runtime/completion"),
+    );
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "merge-task",
+        "repo-1",
+        "Merge task",
+        Some("Merge task"),
+        "in progress",
+        "2026-08-04 00:00:00",
+    )
+    .unwrap();
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, _write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap()
+    });
+    let prepared = PreparedTaskSpawn {
+        created_task: CreatedTask {
+            task_id: "merge-task".to_string(),
+            repo_id: "repo-1".to_string(),
+            title: "Merge task".to_string(),
+            prompt: "Merge approved work".to_string(),
+            stage: "in progress".to_string(),
+            agent_type: "pty".to_string(),
+            worktree_path: "/tmp/worktree".to_string(),
+        },
+        branch: "merge-task".to_string(),
+        session_id: "merge-task".to_string(),
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        stage_agent: Some("merge".to_string()),
+        agent_provider: "codex".to_string(),
+        model: None,
+        effort: None,
+        completion_transition: PipelineStageTransition::Manual,
+        provider_session_id: None,
+        recovery_snapshot: None,
+        session: PreparedSessionSpawn::Pty {
+            executable: "/bin/cat".to_string(),
+            args: Vec::new(),
+            cols: 80,
+            rows: 24,
+            agent_provider: DaemonAgentProvider::Codex,
+        },
+    };
+    let mut client = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+
+    let error = spawn_prepared_task_for_api_recording_stage_run_detailed(
+        &config.db_path,
+        &mut client,
+        prepared,
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        PreparedTaskDeliveryError::BeforeAcknowledgement(_)
+    ));
+    assert!(matches!(
+        daemon.await.unwrap(),
+        kanna_daemon::protocol::Command::NegotiateProtectedInput { .. }
+    ));
+    let runs = db.list_stage_runs_for_task("merge-task").unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "failed");
+    assert!(runs[0]
+        .result
+        .as_deref()
+        .is_some_and(|result| result.contains("before submission")));
+    let completion_dir = std::path::Path::new(&config.daemon_dir).join("runtime/completion");
+    assert!(
+        !completion_dir.exists()
+            || std::fs::read_dir(completion_dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(
+                    |entry| entry.path().extension().and_then(|value| value.to_str())
+                        != Some("json")
+                ),
+        "pre-submission failure must not preserve an uncertain child completion context"
+    );
+}
+
+#[tokio::test]
 async fn spawn_prepared_task_sends_spawn_agent_for_agent_sessions() {
     let config = test_config("spawn-prepared-agent-command");
     let daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;
@@ -18,7 +192,12 @@ async fn spawn_prepared_task_sends_spawn_agent_for_agent_sessions() {
         branch: "task-1".to_string(),
         session_id: "task-1".to_string(),
         cwd: "/tmp/repo/.kanna-worktrees/task-1".to_string(),
-        env: HashMap::new(),
+        env: HashMap::from([(
+            "KANNA_SOCKET_PATH".to_string(),
+            kanna_runtime_defaults::socket_path(std::path::Path::new(&config.daemon_dir))
+                .to_string_lossy()
+                .to_string(),
+        )]),
         stage_agent: Some("implement".to_string()),
         agent_provider: "claude".to_string(),
         model: Some("sonnet".to_string()),
@@ -91,7 +270,12 @@ async fn spawn_prepared_task_records_running_stage_run_after_session_created() {
         branch: "task-1".to_string(),
         session_id: "task-1".to_string(),
         cwd: "/tmp/repo/.kanna-worktrees/task-1".to_string(),
-        env: HashMap::new(),
+        env: HashMap::from([(
+            "KANNA_SOCKET_PATH".to_string(),
+            kanna_runtime_defaults::socket_path(std::path::Path::new(&config.daemon_dir))
+                .to_string_lossy()
+                .to_string(),
+        )]),
         stage_agent: Some("reviewer".to_string()),
         agent_provider: "claude".to_string(),
         model: Some("sonnet".to_string()),
@@ -130,6 +314,213 @@ async fn spawn_prepared_task_records_running_stage_run_after_session_created() {
     assert_eq!(runs[0].model.as_deref(), Some("sonnet"));
     assert_eq!(runs[0].status, "running");
     assert_eq!(runs[0].session_id.as_deref(), Some("task-1"));
+}
+
+#[tokio::test]
+async fn lost_spawn_response_is_classified_after_ack_and_never_rolled_back_as_retryable() {
+    let config = test_config("spawn-response-loss");
+    let _ = std::fs::remove_dir_all(
+        std::path::Path::new(&config.daemon_dir).join("runtime/completion"),
+    );
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Agent task",
+        Some("Agent task"),
+        "in progress",
+        "2026-08-04 00:00:00",
+    )
+    .unwrap();
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let spawn_socket_path = socket_path.clone();
+    let daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::SpawnAgent { .. }
+        ));
+        // Consume the command, then lose the response exactly as a daemon or
+        // transport crash after Spawn took effect would.
+    });
+    let prepared = PreparedTaskSpawn {
+        created_task: CreatedTask {
+            task_id: "task-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            title: "Agent task".to_string(),
+            prompt: "Do work".to_string(),
+            stage: "in progress".to_string(),
+            agent_type: "agent".to_string(),
+            worktree_path: "/tmp/worktree".to_string(),
+        },
+        branch: "task-1".to_string(),
+        session_id: "task-1".to_string(),
+        cwd: "/tmp/repo/.kanna-worktrees/task-1".to_string(),
+        env: HashMap::from([(
+            "KANNA_SOCKET_PATH".to_string(),
+            spawn_socket_path.to_string_lossy().to_string(),
+        )]),
+        stage_agent: Some("merge".to_string()),
+        agent_provider: "claude".to_string(),
+        model: None,
+        effort: None,
+        completion_transition: PipelineStageTransition::Manual,
+        provider_session_id: None,
+        recovery_snapshot: None,
+        session: PreparedSessionSpawn::Agent {
+            agent_provider: DaemonAgentProvider::Claude,
+            prompt: "Do work".to_string(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+            max_turns: None,
+            max_budget_usd: None,
+            system_prompt: "Kanna context".to_string(),
+            mcp_config_path: None,
+            executable: None,
+        },
+    };
+    let mut client = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error = spawn_prepared_task_for_api_recording_stage_run_detailed(
+        &config.db_path,
+        &mut client,
+        prepared,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        PreparedTaskDeliveryError::AfterAcknowledgement(_)
+    ));
+    daemon.await.unwrap();
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "running");
+    assert!(db.stage_run_completion_bound(&runs[0].id).unwrap());
+    let completion_dir = std::path::Path::new(&config.daemon_dir).join("runtime/completion");
+    assert_eq!(
+        std::fs::read_dir(completion_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(
+                |entry| entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+            )
+            .count(),
+        1,
+        "uncertain delivery keeps the exact context owned by the possibly-live agent"
+    );
+}
+
+#[tokio::test]
+async fn rejected_spawn_rolls_back_run_scoped_completion_artifacts_immediately() {
+    let config = test_config("spawn-before-ack-context-rollback");
+    let _ = std::fs::remove_dir_all(
+        std::path::Path::new(&config.daemon_dir).join("runtime/completion"),
+    );
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Merge task",
+        Some("Merge task"),
+        "in progress",
+        "2026-08-04 00:00:00",
+    )
+    .unwrap();
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let spawn_socket_path = socket_path.clone();
+    let daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            kanna_daemon::protocol::Command::SpawnAgent { .. }
+        ));
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&kanna_daemon::protocol::Event::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::AgentSpawnFailed),
+                        message: "rejected before acknowledgement".to_string(),
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let prepared = PreparedTaskSpawn {
+        created_task: CreatedTask {
+            task_id: "task-1".to_string(),
+            repo_id: "repo-1".to_string(),
+            title: "Merge task".to_string(),
+            prompt: "Merge work".to_string(),
+            stage: "in progress".to_string(),
+            agent_type: "agent".to_string(),
+            worktree_path: "/tmp/worktree".to_string(),
+        },
+        branch: "task-1".to_string(),
+        session_id: "task-1".to_string(),
+        cwd: "/tmp/repo/.kanna-worktrees/task-1".to_string(),
+        env: HashMap::from([(
+            "KANNA_SOCKET_PATH".to_string(),
+            spawn_socket_path.to_string_lossy().to_string(),
+        )]),
+        stage_agent: Some("merge".to_string()),
+        agent_provider: "claude".to_string(),
+        model: None,
+        effort: None,
+        completion_transition: PipelineStageTransition::Manual,
+        provider_session_id: None,
+        recovery_snapshot: None,
+        session: PreparedSessionSpawn::Agent {
+            agent_provider: DaemonAgentProvider::Claude,
+            prompt: "Merge work".to_string(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+            allowed_tools: Vec::new(),
+            disallowed_tools: Vec::new(),
+            max_turns: None,
+            max_budget_usd: None,
+            system_prompt: "Kanna context".to_string(),
+            mcp_config_path: None,
+            executable: None,
+        },
+    };
+    let mut client = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error =
+        spawn_prepared_task_for_api_recording_stage_run(&config.db_path, &mut client, prepared)
+            .await
+            .unwrap_err();
+    assert!(error.contains("rejected before acknowledgement"));
+    daemon.await.unwrap();
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "failed");
+    assert_eq!(runs[0].feedback.as_deref(), Some("task spawn failed"));
+    assert!(db.stage_run_completion_bound(&runs[0].id).unwrap());
+    let completion_dir = std::path::Path::new(&config.daemon_dir).join("runtime/completion");
+    assert!(
+        std::fs::read_dir(completion_dir).unwrap().next().is_none(),
+        "before-ack rollback must remove both JSON and lock artifacts"
+    );
 }
 
 #[tokio::test]

@@ -41,6 +41,8 @@ enum Cmd {
         rows: u16,
         #[serde(skip_serializing_if = "Option::is_none")]
         agent_provider: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        operator_input_only: bool,
     },
     AttachSnapshot {
         session_id: String,
@@ -48,6 +50,13 @@ enum Cmd {
     Input {
         session_id: String,
         data: Vec<u8>,
+    },
+    ClassifyInput {
+        session_id: String,
+        operator_input_only: bool,
+    },
+    AuthorizeServer {
+        pid: u32,
     },
     Snapshot {
         session_id: String,
@@ -98,6 +107,7 @@ enum ErrorCode {
     NotAgentSession,
     UnknownPermissionRequest,
     RetryOnSuccessor,
+    InputUnauthorized,
 }
 
 #[allow(dead_code)]
@@ -431,6 +441,7 @@ fn spawn_echo(conn: &mut ClientConn, id: &str) {
         cols: 80,
         rows: 24,
         agent_provider: None,
+        operator_input_only: false,
     });
     loop {
         match conn.recv() {
@@ -889,6 +900,7 @@ fn run_successful_lifecycle_churn(conn: &mut ClientConn, script: &Path) -> usize
                     cols: 80,
                     rows: 24,
                     agent_provider: None,
+                    operator_input_only: false,
                 },
                 |event| matches!(event, Evt::SessionCreated { session_id } if session_id == &pty_id),
             )
@@ -1004,11 +1016,94 @@ fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
     // that pre-commit transfer window.
     let mut old_churn = old.connect();
     drop(old_pty);
+    let old_pid = old.child.id();
+    let classifier_dir = dir.clone();
+    let (v2_rejected_tx, v2_rejected_rx) = std::sync::mpsc::sync_channel(1);
+    let classifier = std::thread::spawn(move || {
+        let connect = || {
+            let stream = UnixStream::connect(compute_socket_path(&classifier_dir))
+                .expect("classifier connects to daemon");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            ClientConn {
+                reader: BufReader::new(stream.try_clone().unwrap()),
+                writer: stream,
+            }
+        };
+        let mut incumbent = connect();
+        incumbent
+            .try_round_trip_until(&Cmd::List, |event| matches!(event, Evt::SessionList { .. }))
+            .expect("v2 List remains compatible");
+        let rejected = incumbent.try_round_trip_until(
+            &Cmd::ClassifyInput {
+                session_id: "stable-pty".to_string(),
+                operator_input_only: false,
+            },
+            |event| matches!(event, Evt::Ok),
+        );
+        assert!(
+            rejected.is_err(),
+            "shipped v2 must reject the unknown classification command"
+        );
+        v2_rejected_tx.send(()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let published = std::fs::read_to_string(classifier_dir.join("daemon.pid"))
+                .ok()
+                .and_then(|value| value.trim().parse::<u32>().ok());
+            if published.is_some_and(|pid| pid != old_pid) {
+                if let Ok(stream) = UnixStream::connect(compute_socket_path(&classifier_dir)) {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut successor = ClientConn {
+                        reader: BufReader::new(stream.try_clone().unwrap()),
+                        writer: stream,
+                    };
+                    successor
+                        .try_round_trip_until(
+                            &Cmd::AuthorizeServer {
+                                pid: std::process::id(),
+                            },
+                            |event| matches!(event, Evt::Ok),
+                        )
+                        .expect("native desktop pins the server process on the successor");
+                    successor
+                        .try_round_trip_until(
+                            &Cmd::ClassifyInput {
+                                session_id: "stable-pty".to_string(),
+                                operator_input_only: false,
+                            },
+                            |event| matches!(event, Evt::Ok),
+                        )
+                        .expect("published v3 successor accepts classification");
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "classifier never reached the published v3 successor"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    });
+    v2_rejected_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("classification must race the shipped v2 incumbent");
     let current_dir = dir.clone();
+    let server_executable = std::fs::canonicalize(std::env::current_exe().unwrap())
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
     let current_start = std::thread::spawn(move || {
         DaemonHandle::start_in_with_env(
             &current_dir,
-            &[("KANNA_TEST_HANDOFF_ACK_DELAY_MS", "1500")],
+            &[
+                ("KANNA_TEST_HANDOFF_ACK_DELAY_MS", "1500"),
+                ("KANNA_SERVER_EXECUTABLE", server_executable.as_str()),
+            ],
         )
     });
     wait_for_daemon_log_contains(
@@ -1024,6 +1119,7 @@ fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
     );
     drop(old_churn);
     let current = current_start.join().expect("current daemon start thread");
+    classifier.join().expect("classification retry thread");
 
     assert!(
         wait_for_child_exit(&mut old.child, Duration::from_secs(10)).is_some(),
@@ -1031,6 +1127,8 @@ fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
     );
     let mut current_pty = current.connect();
     attach(&mut current_pty, "stable-pty");
+    // Server-style classification began against shipped v2, retried only
+    // after v3 was published, and unfenced this ordinary inherited PTY.
     send_input_and_wait_for_echo(&mut current_pty, "stable-pty", b"after\n", "after");
     assert_agent_steers_after_handoff(&current, "stable-agent");
     assert_daemon_log_contains(&dir, "selected legacy-v2 mode");
@@ -1083,6 +1181,168 @@ fn current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter() {
     drop(adopted_pty);
     drop(old_adopter);
     drop(current);
+    cleanup(&dir);
+}
+
+#[test]
+fn protected_v3_session_refuses_transfer_to_a_shipped_v2_adopter() {
+    let dir = test_dir("protected-v3-v2-refusal");
+    cleanup(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let stable_daemon = dir.join("stable-kanna-daemon");
+    install_test_daemon_at(
+        Path::new(env!("CARGO_BIN_EXE_kanna-daemon")),
+        &stable_daemon,
+    );
+    let mut current = DaemonHandle::start_binary_in(&stable_daemon, &dir);
+    let mut connection = current.connect();
+    connection.send(&Cmd::Spawn {
+        session_id: "protected-merge".to_string(),
+        executable: "/bin/cat".to_string(),
+        args: Vec::new(),
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        agent_provider: None,
+        operator_input_only: true,
+    });
+    assert!(matches!(connection.recv(), Evt::SessionCreated { .. }));
+
+    let previous = support::previous_daemon::binary();
+    install_test_daemon_at(&previous, &stable_daemon);
+    let mut legacy = Command::new(&stable_daemon)
+        .env("KANNA_DAEMON_DIR", dir.to_str().unwrap())
+        .spawn()
+        .expect("start shipped v2 adopter");
+    let status = wait_for_child_exit(&mut legacy, Duration::from_secs(10))
+        .expect("legacy adopter should fail instead of taking protected PTYs");
+    assert!(!status.success());
+    assert!(current.child.try_wait().unwrap().is_none());
+    let published = std::fs::read_to_string(dir.join("daemon.pid")).unwrap();
+    assert_eq!(published.trim(), current.child.id().to_string());
+    let audit = std::fs::read_to_string(dir.join("kanna-daemon-lifecycle.log")).unwrap();
+    assert!(
+        audit.contains(
+            "event=handoff_refused reason=protected_input_requires_v3 session=protected-merge"
+        ),
+        "protected legacy refusal should be audited: {audit}"
+    );
+
+    drop(connection);
+    drop(current);
+    cleanup(&dir);
+}
+
+#[test]
+fn classification_waits_out_the_snapshot_and_must_be_replayed_on_the_successor() {
+    let dir = test_dir("classification-snapshot-fence");
+    cleanup(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("snapshot-complete");
+    let release = dir.join("release-snapshot");
+    let server_executable = std::fs::canonicalize(std::env::current_exe().unwrap())
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let marker_string = marker.to_string_lossy().to_string();
+    let release_string = release.to_string_lossy().to_string();
+    let mut old = DaemonHandle::start_in_with_env(
+        &dir,
+        &[
+            ("KANNA_SERVER_EXECUTABLE", server_executable.as_str()),
+            (
+                "KANNA_DAEMON_TEST_HANDOFF_SNAPSHOT_MARKER",
+                marker_string.as_str(),
+            ),
+            (
+                "KANNA_DAEMON_TEST_HANDOFF_SNAPSHOT_RELEASE",
+                release_string.as_str(),
+            ),
+        ],
+    );
+    let mut connection = old.connect();
+    spawn_echo(&mut connection, "snapshot-race");
+    connection.send(&Cmd::AuthorizeServer {
+        pid: std::process::id(),
+    });
+    assert!(matches!(connection.recv(), Evt::Ok));
+
+    let mut successor = spawn_replacement_without_wait(
+        &dir,
+        &[("KANNA_SERVER_EXECUTABLE", server_executable.as_str())],
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        marker.exists(),
+        "handoff never reached its snapshot boundary"
+    );
+
+    connection.send(&Cmd::ClassifyInput {
+        session_id: "snapshot-race".to_string(),
+        operator_input_only: true,
+    });
+    assert!(
+        connection
+            .recv_with_timeout(Duration::from_millis(200))
+            .is_err(),
+        "classification must not acknowledge after the handoff snapshot was captured"
+    );
+    std::fs::write(&release, b"release").unwrap();
+    let post_snapshot = connection.recv_with_timeout(Duration::from_secs(5));
+    assert!(
+        !matches!(post_snapshot, Ok(Evt::Ok)),
+        "the snapshotted predecessor must not acknowledge classification: {post_snapshot:?}"
+    );
+
+    assert!(
+        wait_for_child_exit(&mut old.child, Duration::from_secs(10)).is_some(),
+        "predecessor should commit handoff"
+    );
+    let successor_pid = successor.id();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::fs::read_to_string(dir.join("daemon.pid"))
+        .ok()
+        .is_none_or(|pid| pid.trim() != successor_pid.to_string())
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let stream = UnixStream::connect(compute_socket_path(&dir)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut adopted = ClientConn {
+        reader: BufReader::new(stream.try_clone().unwrap()),
+        writer: stream,
+    };
+    adopted.send(&Cmd::AuthorizeServer {
+        pid: std::process::id(),
+    });
+    assert!(matches!(adopted.recv(), Evt::Ok));
+    adopted.send(&Cmd::ClassifyInput {
+        session_id: "snapshot-race".to_string(),
+        operator_input_only: true,
+    });
+    assert!(matches!(adopted.recv(), Evt::Ok));
+    adopted.send(&Cmd::Input {
+        session_id: "snapshot-race".to_string(),
+        data: b"forged\n".to_vec(),
+    });
+    assert!(matches!(
+        adopted.recv(),
+        Evt::Error {
+            code: Some(ErrorCode::InputUnauthorized),
+            ..
+        }
+    ));
+
+    let _ = successor.kill();
+    let _ = successor.wait();
+    drop(old);
     cleanup(&dir);
 }
 
@@ -1318,6 +1578,7 @@ fn test_handoff_capture_serializes_spawn_and_kill_until_abort() {
         cols: 80,
         rows: 24,
         agent_provider: None,
+        operator_input_only: false,
     });
     let mut killer = daemon.connect();
     killer.send(&Cmd::Kill {
@@ -1392,6 +1653,7 @@ fn test_handoff_commit_refuses_mutations_with_retry_on_successor() {
         cols: 80,
         rows: 24,
         agent_provider: None,
+        operator_input_only: false,
     });
 
     let mut agent_spawner = daemon.connect();
@@ -1469,6 +1731,7 @@ fn retry_on_successor_creates_one_session_and_publishes_one_killed_exit() {
         cols: 80,
         rows: 24,
         agent_provider: None,
+        operator_input_only: false,
     };
     let kill = Cmd::Kill {
         session_id: "adopted-then-killed".to_string(),
@@ -1769,6 +2032,7 @@ fn test_handoff_preserves_output_emitted_after_final_snapshot_before_ack() {
         cols: 80,
         rows: 24,
         agent_provider: None,
+        operator_input_only: false,
     });
     match conn_a.recv() {
         Evt::SessionCreated { .. } => {}
@@ -1824,6 +2088,7 @@ fn test_adopted_pty_tracks_status_before_first_attach() {
         cols: 80,
         rows: 24,
         agent_provider: Some("codex".to_string()),
+        operator_input_only: false,
     });
     match conn_a.recv() {
         Evt::SessionCreated { .. } => {}
@@ -1875,6 +2140,7 @@ fn test_handoff_keeps_live_session_when_snapshot_fails() {
         cols: 80,
         rows: 24,
         agent_provider: None,
+        operator_input_only: false,
     });
     match conn_a.recv() {
         Evt::SessionCreated { .. } => {}

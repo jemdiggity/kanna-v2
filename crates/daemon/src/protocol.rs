@@ -11,6 +11,11 @@ pub const HANDOFF_PROTOCOL_VERSION: u32 = 3;
 /// Deployed pre-transaction handoff retained to preserve stable live sessions.
 pub const LEGACY_HANDOFF_PROTOCOL_VERSION: u32 = 2;
 
+/// Server/daemon contract required before protected terminal sessions may be
+/// created or inherited input policy may be classified.
+pub const PROTECTED_INPUT_PROTOCOL_VERSION: u32 =
+    kanna_runtime_defaults::PROTECTED_INPUT_PROTOCOL_VERSION;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -28,6 +33,8 @@ pub enum ErrorCode {
     NotAgentSession,
     UnknownPermissionRequest,
     RetryOnSuccessor,
+    InputUnauthorized,
+    ProtectedInputProtocolRequired,
 }
 
 /// Whether a session is a PTY terminal or a headless agent (NDJSON pipes).
@@ -108,6 +115,15 @@ pub struct HandoffSession {
     /// resume-respawn after a crash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_spawn: Option<AgentSpawnParams>,
+    /// When set, generic daemon input is fenced. Only a kernel-authenticated
+    /// native desktop connection may write terminal bytes.
+    #[serde(default)]
+    pub operator_input_only: bool,
+    /// New daemons set this for every handoff entry. When absent on an old
+    /// daemon's payload, the successor fences input until kanna-server
+    /// classifies the adopted session from durable task state.
+    #[serde(default)]
+    pub input_policy_classified: bool,
 }
 
 /// Everything needed to (re)build a provider adapter spawn for an agent
@@ -154,6 +170,11 @@ pub enum SessionStatus {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Command {
+    /// Negotiate the generic-input fence with the exact kanna-server process.
+    /// The daemon pins the caller's kernel identity for this generation.
+    NegotiateProtectedInput {
+        version: u32,
+    },
     Spawn {
         session_id: String,
         executable: String,
@@ -166,6 +187,8 @@ pub enum Command {
         agent_provider: Option<AgentProvider>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminal_prelude: Option<Vec<u8>>,
+        #[serde(default)]
+        operator_input_only: bool,
     },
     AttachSnapshot {
         session_id: String,
@@ -188,6 +211,34 @@ pub enum Command {
     InputNoReply {
         session_id: String,
         data: Vec<u8>,
+    },
+    /// Process-authenticated native operator input for protected sessions.
+    OperatorInput {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    /// Server-originated, machine-protocol input for a protected session.
+    /// The daemon authenticates the peer's exact process identity; this is not
+    /// exposed by agent-facing HTTP, KSP, MCP, or CLI surfaces.
+    SystemInput {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    /// Transfer native operator authority after the previously pinned desktop
+    /// has exited. Carries no reusable credential; the daemon authenticates
+    /// the socket peer from kernel process metadata.
+    AdoptOperator,
+    /// Pin the exact kanna-server process authorized to submit protected
+    /// system input. Only the kernel-authenticated native desktop may perform
+    /// this handoff; the pid is revalidated with start time and executable.
+    AuthorizeServer {
+        pid: u32,
+    },
+    /// Server-authenticated classification for an adopted legacy session.
+    /// A classified protected session can never be relaxed.
+    ClassifyInput {
+        session_id: String,
+        operator_input_only: bool,
     },
     Resize {
         session_id: String,
@@ -268,6 +319,9 @@ pub enum Command {
 #[serde(tag = "type")]
 #[allow(clippy::enum_variant_names)]
 pub enum Event {
+    ProtectedInputReady {
+        version: u32,
+    },
     Output {
         session_id: String,
         data: Vec<u8>,
@@ -362,6 +416,7 @@ mod tests {
             rows: 24,
             agent_provider: Some(AgentProvider::Codex),
             terminal_prelude: Some(b"stage marker\r\n".to_vec()),
+            operator_input_only: false,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         let decoded: Command = serde_json::from_str(&json).unwrap();
@@ -405,6 +460,7 @@ mod tests {
             decoded,
             Command::Spawn {
                 terminal_prelude: None,
+                operator_input_only: false,
                 ..
             }
         ));
@@ -738,6 +794,8 @@ mod tests {
                 provider_session_id: None,
                 agent_fd_count: 0,
                 agent_spawn: None,
+                operator_input_only: false,
+                input_policy_classified: true,
             }],
         };
 

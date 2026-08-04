@@ -7,7 +7,7 @@ import { useThemeRuntime } from "../theme/runtime"
 import { getSharedStreamClient } from "./desktopStreamClient"
 import type { StreamClient } from "@kanna/stream-client"
 import { useToast } from "./useToast"
-import { createTerminalInputQueue } from "./terminalInputQueue"
+import { base64ToBytes, createTerminalInputQueue } from "./terminalInputQueue"
 import { createTerminalClipboardBridge } from "./terminalClipboardBridge"
 import { initializeTerminalView } from "./terminalView"
 import { createTerminalLayoutController } from "./terminalLayout"
@@ -15,6 +15,7 @@ import { createTerminalRuntimeState } from "./terminalRuntimeState"
 import { createTerminalSessionLifecycle } from "./terminalSessionLifecycle"
 import type { SpawnOptions, TerminalOptions } from "./terminalTypes"
 import { debugLog } from "../utils/debugLog"
+import { invoke } from "../invoke"
 
 export type { SpawnOptions, TerminalOptions } from "./terminalTypes"
 
@@ -37,6 +38,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   const instanceId = Math.random().toString(36).slice(2, 10)
   const outputDecoder = new TextDecoder()
   const state = createTerminalRuntimeState()
+  const operatorTerminalInput = ref(options?.operatorTerminalInput === true)
 
   function handleLinkActivate(_event: MouseEvent, uri: string) {
     if (isImageLinkUri(uri)) {
@@ -58,9 +60,21 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     return state.streamClient
   }
 
+  const sendOperatorTerminalInput = async (nativeSessionId: string, dataB64: string) => {
+    await invoke("send_operator_input", {
+      sessionId: nativeSessionId,
+      data: Array.from(base64ToBytes(dataB64)),
+    })
+  }
+  const sendGenericTerminalInput = async (nativeSessionId: string, dataB64: string) => {
+    const client = await getTerminalStreamClient()
+    client.sendTermInput(nativeSessionId, dataB64)
+  }
   const inputQueue = createTerminalInputQueue({
     sessionId,
-    getTerminalStreamClient,
+    getSendTerminalInput: () => operatorTerminalInput.value
+      ? sendOperatorTerminalInput
+      : sendGenericTerminalInput,
   })
   const clipboardBridge = createTerminalClipboardBridge({
     sessionId,
@@ -145,5 +159,8 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     ensureConnected: lifecycle.ensureConnected,
     pause: lifecycle.pause,
     dispose: lifecycle.dispose,
+    setOperatorTerminalInput: (enabled: boolean) => {
+      operatorTerminalInput.value = enabled
+    },
   }
 }

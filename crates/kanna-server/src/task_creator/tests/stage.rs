@@ -417,6 +417,176 @@ async fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
+#[tokio::test]
+async fn acknowledged_stage_survives_db_failure_restart_and_can_complete() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+    use tower::ServiceExt;
+
+    let config = test_config("stage-after-ack-reconcile");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Transition",
+        Some("Transition"),
+        "in progress",
+        "2026-08-04 00:00:00",
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-original",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    drop(db);
+
+    let prepared = super::super::types::PreparedStageRunSpawn {
+        task_id: "task-1".to_string(),
+        session_id: "task-1".to_string(),
+        next_stage: "review".to_string(),
+        run_stage: "review".to_string(),
+        run_kind: "main",
+        workspace: super::super::types::PreparedRunWorkspace::Current,
+        workspace_teardown: None,
+        stage_agent: Some("implement".to_string()),
+        agent_provider: "codex".to_string(),
+        model: None,
+        effort: None,
+        completion_transition: PipelineStageTransition::Manual,
+        feedback: None,
+        provider_session_id: None,
+        resumed_from_run_id: None,
+        resume_fallback_reason: None,
+        cwd: "/tmp".to_string(),
+        env: std::collections::HashMap::new(),
+        terminal_prelude: None,
+        session: PreparedSessionSpawn::Pty {
+            executable: "/bin/cat".to_string(),
+            args: Vec::new(),
+            cols: 80,
+            rows: 24,
+            agent_provider: kanna_daemon::protocol::AgentProvider::Codex,
+        },
+        deferred_setup: None,
+        setup_hard_timeout: None,
+    };
+
+    let raw = Connection::open(&config.db_path).unwrap();
+    raw.execute_batch(
+        r#"
+        CREATE TRIGGER fail_stage_landing_after_spawn
+        BEFORE UPDATE OF stage ON pipeline_item
+        WHEN NEW.id = 'task-1' AND NEW.stage = 'review'
+        BEGIN
+          SELECT RAISE(ABORT, 'injected surviving stage landing failure');
+        END;
+        "#,
+    )
+    .unwrap();
+    drop(raw);
+
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let fake_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        for expected in ["Kill", "Spawn"] {
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+            let response = match command {
+                kanna_daemon::protocol::Command::Kill { .. } if expected == "Kill" => {
+                    kanna_daemon::protocol::Event::Ok
+                }
+                kanna_daemon::protocol::Command::Spawn { session_id, .. }
+                    if expected == "Spawn" =>
+                {
+                    kanna_daemon::protocol::Event::SessionCreated { session_id }
+                }
+                other => panic!("expected {expected}, got {other:?}"),
+            };
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error = spawn_prepared_stage_run_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        prepared,
+    )
+    .await
+    .expect_err("post-ack stage landing failure must be surfaced");
+    assert!(error.contains("injected surviving stage landing failure"));
+    fake_daemon.await.unwrap();
+
+    // Reopen as startup would, then prune. The pre-spawn bound row is the
+    // latest durable identity, so the acknowledged child's artifact remains.
+    let db = Db::open(&config.db_path).unwrap();
+    let live_run = db.latest_stage_run("task-1").unwrap().unwrap();
+    assert_eq!(live_run.stage, "review");
+    assert_eq!(live_run.status, "running");
+    assert!(db.stage_run_completion_bound(&live_run.id).unwrap());
+    crate::task_creator::prune_completion_contexts_on_startup(&config.daemon_dir, &db);
+    let completion_dir = std::path::Path::new(&config.daemon_dir).join("runtime/completion");
+    let context_path = completion_dir.join(format!("{}.json", live_run.id));
+    assert!(context_path.exists());
+    drop(db);
+
+    let response = crate::http_api::router(std::sync::Arc::new(crate::http_api::AppState::new(
+        config.clone(),
+    )))
+    .oneshot(
+        Request::post("/v1/tasks/task-1/actions/complete-stage")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "runId": live_run.id,
+                    "status": "failure",
+                    "summary": "surviving child reported after restart"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        Db::open(&config.db_path)
+            .unwrap()
+            .latest_stage_run("task-1")
+            .unwrap()
+            .unwrap()
+            .status,
+        "failed"
+    );
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(config.daemon_dir);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
 #[test]
 fn prepare_rerun_stage_recreates_missing_initial_worktree() {
     let repo_root = init_git_repo("rerun-missing-worktree");
@@ -1642,10 +1812,7 @@ async fn headless_rerun_runs_environment_setup_after_killing_previous_session() 
         let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
         for _ in 0..2 {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: kanna_daemon::protocol::Command =
-                serde_json::from_str(line.trim()).unwrap();
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
             let response = match &command {
                 kanna_daemon::protocol::Command::Kill { .. } => {
                     assert!(!daemon_worktree.join("headless-rerun-setup.marker").exists());
@@ -1770,9 +1937,7 @@ async fn headless_rerun_setup_failure_records_durable_diagnostics_after_kill() {
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: kanna_daemon::protocol::Command = serde_json::from_str(line.trim()).unwrap();
+        let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
         assert!(matches!(
             command,
             kanna_daemon::protocol::Command::Kill { .. }
@@ -2065,6 +2230,25 @@ fn write_post_pipeline_fixtures(repo_root: &std::path::Path) {
     publish_origin_main(repo_root, "publish post pipeline definitions");
 }
 
+fn add_approval_post_to_fixture(repo_root: &std::path::Path) {
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/approve")).unwrap();
+    let pipeline_path = repo_root.join(".kanna/pipelines/default.json");
+    let mut pipeline: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&pipeline_path).unwrap()).unwrap();
+    pipeline["stages"][1]["post"] = serde_json::json!({
+        "name": "approve",
+        "agent": "approve",
+        "prompt": "Approve $PREV_RESULT"
+    });
+    std::fs::write(&pipeline_path, pipeline.to_string()).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/approve/AGENT.md"),
+        "---\nname: approve\ndescription: Signal merge\nagent_provider: claude\n---\nApprove agent.",
+    )
+    .unwrap();
+    publish_origin_main(repo_root, "add approval post fixture");
+}
+
 fn seed_post_pipeline_task(config: &Config, db: &Db, repo_root: &std::path::Path) {
     assert!(Command::new("git")
         .args(["branch", "task-source"])
@@ -2099,6 +2283,134 @@ fn seed_post_pipeline_task(config: &Config, db: &Db, repo_root: &std::path::Path
     db.update_test_pipeline_item_stage_context("task-1", "task-source", "default", None, "claude")
         .unwrap();
     let _ = config;
+}
+
+#[test]
+fn failed_main_commit_pr_approve_lineage_stops_at_approval_without_override() {
+    let repo_root = init_git_repo("approval-lineage-regression");
+    write_post_pipeline_fixtures(&repo_root);
+    add_approval_post_to_fixture(&repo_root);
+    let config = test_config("approval-lineage-regression");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    seed_post_pipeline_task(&config, &db, &repo_root);
+
+    db.insert_stage_run(NewStageRun {
+        id: "run-main-failed",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "failed",
+        result: Some("Needs human input. Not a merge candidate."),
+        feedback: Some("Needs human input. Not a merge candidate."),
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Post(post) => assert_eq!(post.run_stage, "commit"),
+        _ => panic!("failed implementation may still dispatch its diagnostic commit post"),
+    }
+    db.insert_stage_run(NewStageRun {
+        id: "run-commit-success",
+        task_id: "task-1",
+        stage: "commit",
+        kind: "post",
+        agent: Some("commit"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "succeeded",
+        result: Some("Diagnostic work committed; original criteria not met"),
+        feedback: Some("Diagnostic work committed; original criteria not met"),
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    db.apply_explicit_stage_disposition(crate::db::ExplicitStageDisposition {
+        task_id: "task-1",
+        run_id: "run-commit-success",
+        run_stage: "commit",
+        run_kind: "post",
+        run_status: "succeeded",
+        logical_stage: "in progress",
+        disposition: Some("not_merge_candidate"),
+        summary: "Diagnostic work committed; original criteria not met",
+    })
+    .unwrap();
+
+    let pr_run = match prepare_stage_completion_for_api(&db, &config, "task-1", Some("post"), None)
+        .unwrap()
+        .expect("commit completion should advance to pr")
+    {
+        PreparedStageTransition::Run(run) => run,
+        _ => panic!("commit completion should prepare the pr main run"),
+    };
+    let pr_branch = pr_run
+        .forked_workspace()
+        .expect("pr transition should fork a workspace")
+        .branch
+        .clone();
+    db.update_pipeline_item_stage_and_branch("task-1", "pr", &pr_branch)
+        .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-pr-success",
+        task_id: "task-1",
+        stage: "pr",
+        kind: "main",
+        agent: Some("pr"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "succeeded",
+        result: Some("PR created"),
+        feedback: Some("PR created"),
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    db.apply_explicit_stage_disposition(crate::db::ExplicitStageDisposition {
+        task_id: "task-1",
+        run_id: "run-pr-success",
+        run_stage: "pr",
+        run_kind: "main",
+        run_status: "succeeded",
+        logical_stage: "pr",
+        disposition: None,
+        summary: "PR created",
+    })
+    .unwrap();
+
+    let error = match prepare_advance_stage_for_api(&db, &config, "task-1") {
+        Ok(_) => panic!("approve post must not dispatch while lineage is held"),
+        Err(error) => error,
+    };
+    assert!(error.starts_with("approval held:"), "error: {error}");
+
+    assert!(db
+        .record_approval_override(
+            "task-1",
+            "override-1",
+            "desktop-1",
+            "desktop_loopback",
+            "Merge only the independently useful diagnostic fixes",
+        )
+        .unwrap());
+    match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
+        PreparedStageTransition::Post(post) => assert_eq!(post.run_stage, "approve"),
+        _ => panic!("recorded override should permit approve post dispatch"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[test]
@@ -2299,11 +2611,11 @@ fn prepare_advance_stage_swaps_after_succeeded_post() {
 }
 
 #[test]
-fn prepare_advance_stage_overrides_running_post_with_swap() {
-    let repo_root = init_git_repo("advance-overrides-running-post");
+fn prepare_advance_stage_does_not_treat_repeated_advance_as_post_override() {
+    let repo_root = init_git_repo("advance-does-not-override-running-post");
     write_post_pipeline_fixtures(&repo_root);
 
-    let config = test_config("advance-overrides-running-post");
+    let config = test_config("advance-does-not-override-running-post");
     let db = Db::open_for_tests(&config.db_path).unwrap();
     seed_post_pipeline_task(&config, &db, &repo_root);
     db.insert_stage_run(NewStageRun {
@@ -2325,13 +2637,11 @@ fn prepare_advance_stage_overrides_running_post_with_swap() {
     })
     .unwrap();
 
-    // A second ⌘S while the post is still running is a human override.
-    let run = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
-        PreparedStageTransition::Run(run) => run,
-        PreparedStageTransition::Post(_) => panic!("expected human override swap"),
-        PreparedStageTransition::Close { .. } => panic!("expected swap, got close"),
+    let error = match prepare_advance_stage_for_api(&db, &config, "task-1") {
+        Ok(_) => panic!("repeated advance must not bypass a running post"),
+        Err(error) => error,
     };
-    assert_eq!(run.next_stage, "pr");
+    assert!(error.contains("post is still running"), "error: {error}");
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -2519,6 +2829,13 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
         resumed_from_run_id: None,
     })
     .unwrap();
+    let completion_path =
+        std::path::Path::new(&config.daemon_dir).join("runtime/completion/run-main.json");
+    kanna_tool_catalog::write_completion_context(
+        &completion_path,
+        &kanna_tool_catalog::CompletionContext::new("run-main"),
+    )
+    .unwrap();
 
     let post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
         PreparedStageTransition::Post(post) => post,
@@ -2570,6 +2887,13 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
     assert_eq!(runs[1].agent.as_deref(), Some("implement"));
     assert_eq!(runs[1].model.as_deref(), Some("sonnet"));
     assert_eq!(runs[1].session_id.as_deref(), Some("task-1"));
+    assert_eq!(
+        kanna_tool_catalog::read_completion_context(&completion_path)
+            .unwrap()
+            .run_id,
+        runs[1].id,
+        "live post dispatch must rebind through the inherited process context, not the fallback env"
+    );
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -2600,10 +2924,7 @@ async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
         let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: kanna_daemon::protocol::Command =
-                serde_json::from_str(line.trim()).unwrap();
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
             let response = match &command {
                 kanna_daemon::protocol::Command::Input { .. }
                 | kanna_daemon::protocol::Command::Kill { .. } => {
@@ -2715,10 +3036,7 @@ async fn prompt_only_post_provider_overrides_source_task_provider_in_fallback_da
         let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: kanna_daemon::protocol::Command =
-                serde_json::from_str(line.trim()).unwrap();
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
             let response = match &command {
                 kanna_daemon::protocol::Command::Input { .. }
                 | kanna_daemon::protocol::Command::Kill { .. } => {

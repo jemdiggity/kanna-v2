@@ -58,7 +58,7 @@ async fn assert_created_task_overrides_reach_daemon_spawn(
     effort: Option<(&str, &str)>,
 ) {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = unique_test_suffix();
@@ -84,9 +84,7 @@ async fn assert_created_task_overrides_reach_daemon_spawn(
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         let session_id = match command {
             DaemonCommand::Spawn {
                 session_id,
@@ -533,7 +531,7 @@ async fn abort_waits_for_requested_creation_and_owns_the_id_until_release() {
 #[tokio::test]
 async fn create_task_route_replays_requested_task_id_without_preparing_or_spawning_twice() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -557,9 +555,7 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         match command {
             DaemonCommand::SeedSnapshot {
                 session_id,
@@ -581,9 +577,7 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
             .await
             .unwrap();
 
-        line.clear();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         let session_id = match command {
             DaemonCommand::Spawn {
                 session_id, cwd, ..
@@ -705,7 +699,7 @@ async fn create_task_route_replays_requested_task_id_without_preparing_or_spawni
 #[tokio::test]
 async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
     use kanna_daemon::protocol::{Command as DaemonCommand, ErrorCode, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -881,9 +875,7 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
         let mut reader = BufReader::new(read_half);
         let mut command_count = 0usize;
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             command_count += 1;
             match command {
                 DaemonCommand::Kill { .. } => {
@@ -1128,7 +1120,7 @@ fn create_task_prepare_error_replays_only_requested_id_collision() {
 #[tokio::test]
 async fn create_task_route_uses_saved_default_agent_provider_when_payload_omits_provider() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -1154,9 +1146,7 @@ async fn create_task_route_uses_saved_default_agent_provider_when_payload_omits_
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         let session_id = match command {
             DaemonCommand::Spawn {
                 session_id,
@@ -1249,7 +1239,7 @@ async fn create_task_route_uses_saved_default_agent_provider_when_payload_omits_
 #[tokio::test]
 async fn create_task_route_runs_a_non_review_builtin_agent_in_the_first_stage() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = unique_test_suffix();
@@ -1266,9 +1256,7 @@ async fn create_task_route_runs_a_non_review_builtin_agent_in_the_first_stage() 
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         let session_id = match command {
             DaemonCommand::Spawn {
                 session_id,
@@ -1368,7 +1356,7 @@ async fn create_task_route_runs_a_non_review_builtin_agent_in_the_first_stage() 
 #[tokio::test]
 async fn create_task_route_persists_display_name_alias_and_returns_it_as_title() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -1391,9 +1379,7 @@ async fn create_task_route_persists_display_name_alias_and_returns_it_as_title()
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         let session_id = match command {
             DaemonCommand::Spawn {
                 session_id, cwd, ..
@@ -1522,7 +1508,7 @@ async fn create_task_route_persists_display_name_alias_and_returns_it_as_title()
 #[tokio::test]
 async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -1581,9 +1567,7 @@ async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         let session_id = match command {
             DaemonCommand::SpawnAgent { session_id, params } => {
                 assert_eq!(params.prompt, "Ship safely");
@@ -1671,7 +1655,7 @@ async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
 #[tokio::test]
 async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -1714,9 +1698,7 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
             let (stream, _) = daemon_listener.accept().await.unwrap();
             let (read_half, mut write_half) = stream.into_split();
             let mut reader = BufReader::new(read_half);
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             let session_id = match command {
                 DaemonCommand::Spawn {
                     session_id,
@@ -2158,7 +2140,7 @@ async fn create_task_route_with_blocker_creates_dormant_task_without_spawning() 
 #[tokio::test]
 async fn create_task_route_with_only_closed_blockers_spawns_immediately() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -2182,9 +2164,7 @@ async fn create_task_route_with_only_closed_blockers_spawns_immediately() {
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         let session_id = match command {
             DaemonCommand::Spawn {
                 session_id,
@@ -2319,9 +2299,7 @@ async fn create_task_route_preserves_failed_recovery_seed_diagnostics_without_sp
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         let session_id = match command {
             DaemonCommand::SeedSnapshot {
                 session_id,

@@ -632,6 +632,30 @@ async fn resolve_task_session_id(db_path: String, task_id: String) -> Result<Str
     .map_err(|error| format!("session lookup worker failed: {error}"))?
 }
 
+async fn merge_terminal_input_forbidden(
+    state: &Arc<AppState>,
+    task_id: &str,
+) -> Result<bool, String> {
+    if task_id.starts_with("shell-") {
+        return Ok(false);
+    }
+    let db_path = state.config().db_path.clone();
+    let task_id = task_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let db = Db::open(&db_path).map_err(|error| format!("db error: {error}"))?;
+        let Some(resolved) = db
+            .resolve_pipeline_item_id(&task_id)
+            .map_err(|error| format!("db error: {error}"))?
+        else {
+            return Ok(false);
+        };
+        db.is_open_agent_task(&resolved, "merge")
+            .map_err(|error| format!("db error: {error}"))
+    })
+    .await
+    .map_err(|error| format!("merge input provenance worker failed: {error}"))?
+}
+
 fn direct_terminal_session_id(task_id: &str) -> Option<String> {
     task_id.starts_with("shell-").then(|| task_id.to_string())
 }
@@ -1329,6 +1353,27 @@ impl StreamConn {
                 self.enqueue_agent_command(task_id, AgentControlCommand::SetModel(model));
             }
             ClientFrame::TermInput { task_id, data_b64 } => {
+                match if self.auth_mode == AuthMode::AllowEmpty {
+                    merge_terminal_input_forbidden(&self.state, &task_id).await
+                } else {
+                    Ok(false)
+                } {
+                    Ok(true) => {
+                        self.error(
+                            Some(task_id),
+                            "native_operator_required",
+                            "loopback merge terminal input requires the process-authenticated native desktop channel".into(),
+                        )
+                        .await;
+                        return true;
+                    }
+                    Ok(false) => {}
+                    Err(message) => {
+                        self.error(Some(task_id), "merge_input_check_failed", message)
+                            .await;
+                        return true;
+                    }
+                }
                 let data = match base64::engine::general_purpose::STANDARD.decode(&data_b64) {
                     Ok(data) => data,
                     Err(error) => {
@@ -5355,6 +5400,66 @@ mod tests {
         ));
         drop(incoming_tx);
         let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn loopback_ksp_cannot_type_into_merge_singleton() {
+        let unique = format!(
+            "ksp-merge-input-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let config = test_config(&unique, "KSP Merge Input");
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo("repo-merge-ksp", "Merge KSP").unwrap();
+        db.insert_test_pipeline_item(
+            "merge-ksp-task",
+            "repo-merge-ksp",
+            "merge",
+            Some("Merge Master"),
+            "in progress",
+            "2026-08-04 00:00:00",
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-merge-ksp",
+            task_id: "merge-ksp-task",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("merge"),
+            agent_provider: Some("claude"),
+            model: None,
+            effort: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("merge-ksp-session"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+        drop(db);
+
+        let state = Arc::new(crate::http_api::AppState::new(config));
+        let url = serve_router(crate::http_api::router(state)).await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &ClientFrame::Auth { credential: None }).await;
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInput {
+                task_id: "merge-ksp-task".into(),
+                data_b64: b64(b"merge PR 123\r"),
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_frame(&mut socket).await,
+            ServerFrame::Error { code, .. } if code == "native_operator_required"
+        ));
     }
 
     #[tokio::test]

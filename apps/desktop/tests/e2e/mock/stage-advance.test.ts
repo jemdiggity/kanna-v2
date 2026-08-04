@@ -597,7 +597,11 @@ describe("stage advance", () => {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ status: "success", summary: "ready for review" }),
+          body: JSON.stringify({
+            runId: "run-auto-complete-source-seed",
+            status: "success",
+            summary: "ready for review",
+          }),
         },
       );
       if (!response.ok) {

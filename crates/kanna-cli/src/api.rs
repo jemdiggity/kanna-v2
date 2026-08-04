@@ -7,11 +7,11 @@ use serde_json::Value;
 
 use crate::models::{
     AddRepoRequest, BlockTaskRequest, CompleteStageRequest, CreateTaskRequest, CreateTaskResponse,
-    DependentTasksExistResponse, MobileNotificationRequest, MobileNotificationResponse, RepoDetail,
-    RepoSummary, RequestRevisionRequest, ResolvedAgentDefinition, SetTaskNotifyRequest,
-    SetTaskParentRequest, SetTaskPipelineRequest, SetTaskPipelineResponse, SignalAgentRequest,
-    SignalAgentResponse, TaskActionResponse, TaskDetail, TaskInputRequest, TaskInputResponse,
-    TaskRenameRequest, TaskSummary, WaitUntil,
+    DependentTasksExistResponse, MergeHandoffRequest, MobileNotificationRequest,
+    MobileNotificationResponse, RepoDetail, RepoSummary, RequestRevisionRequest,
+    ResolvedAgentDefinition, SetTaskNotifyRequest, SetTaskParentRequest, SetTaskPipelineRequest,
+    SetTaskPipelineResponse, SignalAgentRequest, SignalAgentResponse, TaskActionResponse,
+    TaskDetail, TaskInputRequest, TaskInputResponse, TaskRenameRequest, TaskSummary, WaitUntil,
 };
 
 pub(crate) fn join_server_url(base_url: &str, path: &str) -> String {
@@ -262,6 +262,19 @@ pub(crate) async fn signal_agent_via_api(
     request: &SignalAgentRequest,
 ) -> Result<SignalAgentResponse, String> {
     post_json(base_url, &signal_agent_path(repo_id, agent), request).await
+}
+
+pub(crate) async fn signal_merge_handoff_via_api(
+    base_url: &str,
+    task_id: &str,
+    request: &MergeHandoffRequest,
+) -> Result<SignalAgentResponse, String> {
+    post_json(
+        base_url,
+        &format!("/v1/tasks/{task_id}/actions/signal-merge-handoff"),
+        request,
+    )
+    .await
 }
 
 pub(crate) async fn list_repo_agents_via_api(

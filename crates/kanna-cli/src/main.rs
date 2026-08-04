@@ -50,6 +50,10 @@ pub(crate) enum Commands {
         #[arg(long)]
         metadata: Option<String>,
 
+        /// Structured approval hold: needs_human_input or not_merge_candidate
+        #[arg(long)]
+        disposition: Option<String>,
+
         /// Override the local Kanna server base URL
         #[arg(long)]
         server_url: Option<String>,
@@ -365,6 +369,32 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Signal the merge singleton through the server-owned approval gate
+    SignalMerge {
+        /// Approved task/pipeline_item ID
+        #[arg(long)]
+        task_id: String,
+
+        /// Resolved PR head branch
+        #[arg(long)]
+        branch: String,
+
+        /// Resolved PR base branch
+        #[arg(long)]
+        target: String,
+
+        /// Pull-request URL, when one exists
+        #[arg(long)]
+        pr_url: Option<String>,
+
+        /// Concise task or PR summary
+        #[arg(long)]
+        summary: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Rerun the current pipeline stage for a task
     RerunStage {
         /// The task/pipeline_item ID to rerun
@@ -553,6 +583,7 @@ async fn main() {
             status,
             summary,
             metadata,
+            disposition,
             server_url,
         } => {
             commands::stage_complete::run(
@@ -560,6 +591,7 @@ async fn main() {
                 status,
                 summary,
                 metadata,
+                disposition,
                 server_url.as_deref(),
             )
             .await;

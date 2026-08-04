@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { stat, writeFile } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -13,6 +13,7 @@ import {
   waitForCondition,
   waitForTerminalOutput
 } from "./terminalFlowTestUtils";
+import { BUFFY_UID } from "./firebaseAuth";
 
 const execFileAsync = promisify(execFile);
 
@@ -31,6 +32,31 @@ const LINEAR_AUTO_PIPELINE = JSON.stringify({
     { name: "in progress", transition: "auto", prompt: "$TASK_PROMPT" },
     { name: "review", transition: "manual", prompt: "Review $TASK_PROMPT" }
   ]
+});
+
+const APPROVAL_POST_PIPELINE = JSON.stringify({
+  name: "remote-approval-post",
+  stages: [{
+    name: "pr",
+    agent: "pr",
+    prompt: "Create PR for $TASK_PROMPT",
+    policy: { transition: "manual" },
+    post: {
+      name: "approve",
+      agent: "approve",
+      prompt: "Approve $TASK_PROMPT"
+    }
+  }]
+});
+
+const SINGLETON_MERGE_PIPELINE = JSON.stringify({
+  name: "singleton-merge",
+  stages: [{
+    name: "in progress",
+    agent: "merge",
+    prompt: "$TASK_PROMPT",
+    policy: { transition: "manual" }
+  }]
 });
 
 type SqlParam = string | number | boolean | null;
@@ -257,6 +283,152 @@ describe("remote task listing, creation, and actions E2E", () => {
     expect(getString(asRecord(catalogNext), "cursor").length).toBeLessThan(128);
   }, 120_000);
 
+  it("persists an explicit human override and propagates it through the typed CLI merge handoff", async () => {
+    const source = await createScriptedTask(harness, {
+      displayName: "Approval lineage override source"
+    });
+    const sourceRun = await latestRunRow(harness, source.taskId);
+    await runKannaCliJson(harness, [
+      "tool",
+      "call",
+      "kanna_complete_stage",
+      "--json",
+      JSON.stringify({
+        task_id: source.taskId,
+        status: "failure",
+        summary: "Needs human input; original criteria are not mergeable",
+        disposition: "needs_human_input"
+      })
+    ], { KANNA_STAGE_RUN_ID: getString(sourceRun, "id") });
+    await waitForLatestRunStatus(harness, source.taskId, "failed");
+    expect(await executeSql(
+      harness,
+      "UPDATE pipeline_item SET stage = 'pr', pipeline = ?1, pipeline_def = ?2 WHERE id = ?3",
+      ["remote-approval-post", APPROVAL_POST_PIPELINE, source.taskId]
+    )).toBe(1);
+
+    const held = asRecord(await runKannaCliJson(harness, [
+      "task",
+      "get",
+      "--task-id",
+      source.taskId
+    ]));
+    expect(asRecord(held.approvalGate).state).toBe("held");
+
+    await expect(invokeDesktop(
+      harness,
+      "POST",
+      `/v1/tasks/${source.taskId}/actions/advance-stage`,
+      null
+    )).rejects.toThrow(/approval held/i);
+
+    const repoPath = await repoPathForTask(harness, source.taskId);
+    await mkdir(`${repoPath}/.kanna/pipelines`, { recursive: true });
+    await writeFile(
+      `${repoPath}/.kanna/pipelines/singleton-merge.json`,
+      `${SINGLETON_MERGE_PIPELINE}\n`
+    );
+    await git(repoPath, ["add", ".kanna/pipelines/singleton-merge.json"]);
+    await git(repoPath, ["commit", "-m", "Add deterministic merge pipeline"]);
+    await git(repoPath, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+    const mergeReceiver = asRecord(await invokeDesktop(
+      harness,
+      "POST",
+      "/v1/tasks",
+      {
+        repoId: source.repoId,
+        prompt: "Run deterministic merge receiver",
+        displayName: "Deterministic merge receiver",
+        pipelineName: "singleton-merge",
+        agentProvider: "codex",
+        agentType: "pty"
+      }
+    ));
+    const mergeTaskId = getString(mergeReceiver, "taskId");
+    expect(await executeSql(
+      harness,
+      `INSERT INTO agent_signal_protocol (task_id, session_id, merge_handoff_version)
+       SELECT ?1, COALESCE(NULLIF(session_id, ''), task_id), 1
+       FROM stage_run WHERE task_id = ?1 ORDER BY rowid DESC LIMIT 1`,
+      [mergeTaskId]
+    )).toBe(1);
+    const mergeOutput = collectTerminalEvents(harness, mergeTaskId);
+    try {
+      await waitForTerminalOutput(mergeOutput, "SCRIPT_READY");
+
+      await expect(invokeLanJson(
+        harness,
+        "POST",
+        `/v1/tasks/${source.taskId}/actions/override-approval`,
+        { reason: "Ship the independently reviewed diagnostic fix" },
+        { "x-kanna-human-action": "approval-override" }
+      )).rejects.toThrow(/401.*native.*control channel/i);
+
+      const override = asRecord(await invokeDesktop(
+        harness,
+        "POST",
+        `/v1/tasks/${source.taskId}/actions/override-approval`,
+        { reason: "Ship the independently reviewed diagnostic fix" }
+      ));
+      expect(override.state).toBe("overridden");
+      expect(asRecord(override.overrideRecord)).toMatchObject({
+        actor: BUFFY_UID,
+        channel: "authenticated_relay",
+        reason: "Ship the independently reviewed diagnostic fix"
+      });
+
+      const persisted = asRecord(await runKannaCliJson(harness, [
+        "task",
+        "get",
+        "--task-id",
+        source.taskId
+      ]));
+      expect(asRecord(persisted.approvalGate)).toMatchObject({
+        state: "overridden",
+        overrideRecord: {
+          actor: BUFFY_UID,
+          channel: "authenticated_relay",
+          reason: "Ship the independently reviewed diagnostic fix"
+        }
+      });
+
+      await invokeDesktop(
+        harness,
+        "POST",
+        `/v1/tasks/${source.taskId}/actions/advance-stage`,
+        null
+      );
+      await waitForCondition(async () => {
+        const run = await latestRunRow(harness, source.taskId);
+        return run.stage === "approve" && run.kind === "post" && run.status === "running";
+      }, 15_000, `task ${source.taskId} did not start its approve post`);
+      const sourceTask = await taskRow(harness, source.taskId);
+
+      await runKannaCliJson(harness, [
+        "task",
+        "signal-merge",
+        "--task-id",
+        source.taskId,
+        "--branch",
+        getString(sourceTask, "branch"),
+        "--target",
+        "main",
+        "--summary",
+        "Reviewed diagnostic fix"
+      ]);
+      const output = await mergeOutput.waitForOutput(
+        "SCRIPT_INPUT:KANNA_MERGE_HANDOFF",
+        15_000
+      );
+      expect(output).toContain('"state":"overridden"');
+      expect(output).toContain('"channel":"authenticated_relay"');
+      expect(output).toContain("Ship the independently reviewed diagnostic fix");
+    } finally {
+      mergeOutput.close();
+    }
+  }, 120_000);
+
   it("advances stages, completes stages, requests revision, runs merge agent, and closes with current durable-task semantics", async () => {
     const advanceTask = await createScriptedTask(harness, {
       displayName: "Remote advance task"
@@ -303,6 +475,7 @@ describe("remote task listing, creation, and actions E2E", () => {
     const successTask = await createScriptedTask(harness, {
       displayName: "Remote complete success task"
     });
+    const successRun = await latestRunRow(harness, successTask.taskId);
     await setPipelineDefinition(
       harness,
       successTask.taskId,
@@ -315,6 +488,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       "POST",
       `/v1/tasks/${successTask.taskId}/actions/complete-stage`,
       {
+        runId: successRun.id,
         status: "success",
         summary: "implemented over relay",
         metadata: { coverage: "remote-e2e" }
@@ -331,6 +505,7 @@ describe("remote task listing, creation, and actions E2E", () => {
     const failureTask = await createScriptedTask(harness, {
       displayName: "Remote complete failure task"
     });
+    const failureRun = await latestRunRow(harness, failureTask.taskId);
     await setPipelineDefinition(
       harness,
       failureTask.taskId,
@@ -343,6 +518,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       "POST",
       `/v1/tasks/${failureTask.taskId}/actions/complete-stage`,
       {
+        runId: failureRun.id,
         status: "failure",
         summary: "tests failed over relay",
         metadata: { failing: "remote-e2e" }
@@ -461,6 +637,28 @@ async function invokeDesktop(
   });
 }
 
+async function invokeLanJson(
+  harness: RemoteHarness,
+  method: "GET" | "POST",
+  path: string,
+  body: unknown,
+  headers: Record<string, string> = {}
+): Promise<unknown> {
+  const response = await fetch(`${harness.lanBaseUrl}${path}`, {
+    method,
+    headers: {
+      "content-type": "application/json",
+      ...headers
+    },
+    body: method === "GET" ? undefined : JSON.stringify(body)
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`LAN ${method} ${path} failed (${response.status}): ${text}`);
+  }
+  return text.length > 0 ? JSON.parse(text) as unknown : null;
+}
+
 async function createChildTask(
   harness: RemoteHarness,
   parent: { repoId: string; taskId: string },
@@ -477,13 +675,17 @@ async function createChildTask(
   return getString(response, "taskId");
 }
 
-async function runKannaCliJson(harness: RemoteHarness, args: string[]): Promise<unknown> {
+async function runKannaCliJson(
+  harness: RemoteHarness,
+  args: string[],
+  extraEnv: Record<string, string> = {}
+): Promise<unknown> {
   const { stdout } = await execFileAsync(
     remoteHarnessKannaCliPath(harness.repoRoot),
     [...args, "--server-url", harness.lanBaseUrl],
     {
       cwd: harness.repoRoot,
-      env: process.env,
+      env: { ...process.env, ...extraEnv },
       timeout: 30_000
     }
   );
@@ -597,7 +799,7 @@ async function taskRow(harness: RemoteHarness, taskId: string): Promise<JsonReco
 async function latestRunRow(harness: RemoteHarness, taskId: string): Promise<JsonRecord> {
   const rows = await querySql(
     harness,
-    `SELECT stage, kind, status, feedback
+    `SELECT id, stage, kind, status, feedback
        FROM stage_run
       WHERE task_id = ?1
       ORDER BY started_at DESC, id DESC

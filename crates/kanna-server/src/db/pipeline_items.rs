@@ -6,6 +6,24 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::json;
 
 impl Db {
+    pub fn list_task_completion_runs(
+        &self,
+    ) -> Result<Vec<(String, bool, Option<String>)>, rusqlite::Error> {
+        let mut statement = self.conn.prepare(
+            "SELECT p.id, p.closed_at IS NULL,
+                        (SELECT s.id
+                         FROM stage_run s
+                         WHERE s.task_id = p.id
+                         ORDER BY s.rowid DESC
+                         LIMIT 1)
+                 FROM pipeline_item p",
+        )?;
+        let runs = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(runs)
+    }
+
     fn pipeline_item_stage(&self, id: &str) -> Result<Option<String>, rusqlite::Error> {
         self.conn
             .query_row(
@@ -376,7 +394,7 @@ impl Db {
                    AND status = 'running'
                    AND session_id IS NOT NULL
                    AND session_id != ''
-                 ORDER BY datetime(started_at) DESC, id DESC
+                 ORDER BY rowid DESC
                  LIMIT 1",
                 [&pipeline_item_id],
                 |row| row.get(0),
@@ -402,7 +420,7 @@ impl Db {
                  WHERE p.repo_id = ?
                    AND p.closed_at IS NULL
                    AND sr.agent = ?
-                 ORDER BY datetime(sr.started_at) DESC, sr.id DESC
+                 ORDER BY p.rowid DESC
                  LIMIT 1",
                 (repo_id, agent),
                 |row| {
@@ -413,6 +431,109 @@ impl Db {
                 },
             )
             .optional()
+    }
+
+    /// Resolve the merge singleton and its protocol from the same exact task
+    /// row. Callers must keep this identity through delivery; a second
+    /// singleton lookup would let replacement race capability negotiation.
+    pub fn find_open_merge_recipient(
+        &self,
+        repo_id: &str,
+    ) -> Result<Option<super::MergeSignalRecipient>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT p.id,
+                        COALESCE(NULLIF(sr.session_id, ''), NULLIF(protocol.session_id, ''), p.id),
+                        CASE
+                          WHEN sr.rowid IS NULL
+                            OR protocol.session_id IS NULL
+                            OR protocol.session_id = COALESCE(NULLIF(sr.session_id, ''), p.id)
+                          THEN COALESCE(protocol.merge_handoff_version, 0)
+                          ELSE 0
+                        END
+                 FROM pipeline_item p
+                 LEFT JOIN stage_run sr
+                   ON sr.rowid = (SELECT candidate.rowid
+                                  FROM stage_run candidate
+                                  WHERE candidate.task_id = p.id
+                                  ORDER BY candidate.rowid DESC
+                                  LIMIT 1)
+                 LEFT JOIN agent_signal_protocol protocol
+                   ON protocol.task_id = p.id
+                 WHERE p.repo_id = ?
+                   AND p.closed_at IS NULL
+                   AND (sr.agent = 'merge' OR protocol.task_id IS NOT NULL)
+                 ORDER BY sr.rowid DESC
+                 LIMIT 1",
+                [repo_id],
+                |row| {
+                    Ok(super::MergeSignalRecipient {
+                        task_id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        protocol: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn is_open_agent_task(&self, task_id: &str, agent: &str) -> Result<bool, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pipeline_item p
+               WHERE p.id = ?1 AND p.closed_at IS NULL
+                 AND (EXISTS (
+                        SELECT 1 FROM stage_run sr
+                        WHERE sr.task_id = p.id AND sr.agent = ?2
+                      )
+                      OR (?2 = 'merge' AND EXISTS (
+                        SELECT 1 FROM agent_signal_protocol protocol
+                        WHERE protocol.task_id = p.id
+                      )))
+             )",
+            (task_id, agent),
+            |row| row.get(0),
+        )
+    }
+
+    /// Classify a live daemon session from durable task history. This does not
+    /// require the task to remain open: a PTY surviving a crash after task
+    /// close must not regain generic input authority during daemon handoff.
+    pub fn session_requires_operator_input(
+        &self,
+        session_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pipeline_item p
+               WHERE (p.id = ?1
+                      OR EXISTS (
+                        SELECT 1 FROM terminal_session terminal
+                        WHERE terminal.pipeline_item_id = p.id
+                          AND terminal.daemon_session_id = ?1
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM stage_run session_run
+                        WHERE session_run.task_id = p.id
+                          AND session_run.session_id = ?1
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM agent_signal_protocol session_protocol
+                        WHERE session_protocol.task_id = p.id
+                          AND session_protocol.session_id = ?1
+                      ))
+                 AND (EXISTS (
+                        SELECT 1 FROM stage_run merge_run
+                        WHERE merge_run.task_id = p.id AND merge_run.agent = 'merge'
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM agent_signal_protocol protocol
+                        WHERE protocol.task_id = p.id
+                      ))
+             )",
+            [session_id],
+            |row| row.get(0),
+        )
     }
 
     pub fn get_task_stage_source(

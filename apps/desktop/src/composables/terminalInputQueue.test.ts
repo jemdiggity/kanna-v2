@@ -58,6 +58,21 @@ describe("terminalInputQueue", () => {
     expect(Array.from(frames[0])).toEqual(Array.from(payload))
   })
 
+  it("routes operator input through the process-authenticated native transport", async () => {
+    const sendTerminalInput = vi.fn<(_taskId: string, _dataB64: string) => Promise<void>>()
+      .mockResolvedValue()
+    const queue = createTerminalInputQueue({
+      sessionId: "task-merge",
+      sendTerminalInput,
+    })
+    const payload = new TextEncoder().encode("merge PR 992\r")
+
+    await queue.sendInputBytes(payload, { immediate: true })
+
+    expect(sendTerminalInput).toHaveBeenCalledOnce()
+    expect(sendTerminalInput).toHaveBeenCalledWith("task-merge", bytesToBase64(payload))
+  })
+
   it("flushes queued typing before an immediate terminal response", async () => {
     const sent: string[] = []
     const sendTermInput = vi.fn((_taskId: string, dataB64: string) => {

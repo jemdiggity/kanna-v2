@@ -401,16 +401,19 @@ async fn handle_mcp_tool_call(
     args: Value,
 ) -> Result<Value, String> {
     let args = maybe_augment_create_task_args(base_url, name, args).await?;
-    let request = {
+    let mut request = {
         let catalog = catalog
             .read()
             .map_err(|_| "catalog lock poisoned".to_string())?;
         resolve_request(&catalog, name, &args)?
     };
+    if name == "kanna_complete_stage" {
+        bind_request_to_spawned_run(base_url, &mut request).await?;
+    }
     let task_id = env::var("KANNA_TASK_ID")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    execute_resolved_request(
+    let result = execute_resolved_request(
         base_url,
         request,
         RuntimeAdapterIdentity {
@@ -420,7 +423,43 @@ async fn handle_mcp_tool_call(
             task_id: task_id.as_deref(),
         },
     )
-    .await
+    .await;
+    result
+}
+
+async fn bind_request_to_spawned_run(
+    _base_url: &str,
+    request: &mut ResolvedRequest,
+) -> Result<(), String> {
+    let attempt_key = kanna_tool_catalog::completion_attempt_key(&request.body)?;
+    let context_path =
+        env::var_os(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV).map(std::path::PathBuf::from);
+    let context = match context_path.as_ref() {
+        Some(path) => Some(kanna_tool_catalog::read_completion_context(path)?),
+        None => None,
+    };
+    let run_id = context
+        .as_ref()
+        .map(|context| {
+            context
+                .run_for_attempt(&attempt_key)
+                .unwrap_or(&context.run_id)
+                .to_string()
+        })
+        .or_else(|| env::var(kanna_tool_catalog::KANNA_STAGE_RUN_ID_ENV).ok());
+    let Some(run_id) = run_id.filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+    let body = request
+        .body
+        .as_object_mut()
+        .ok_or_else(|| "complete-stage request body must be an object".to_string())?;
+    body.insert("runId".to_string(), Value::String(run_id.to_string()));
+    body.insert(
+        "completionAttemptKey".to_string(),
+        Value::String(attempt_key.clone()),
+    );
+    Ok(())
 }
 
 async fn maybe_augment_create_task_args(
@@ -713,6 +752,7 @@ mod tests {
                 "kanna_list_agents",
                 "kanna_create_task",
                 "kanna_signal_agent",
+                "kanna_signal_merge_handoff",
                 "kanna_send_task_input",
                 "kanna_close_task",
                 "kanna_rename_task",

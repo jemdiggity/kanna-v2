@@ -15,6 +15,34 @@ async fn advance_stage_posts_to_task_action_path_with_empty_json_body() {
 }
 
 #[tokio::test]
+async fn signal_merge_handoff_posts_only_candidate_details_to_the_gated_route() {
+    let response = http_json_response(
+        "200 OK",
+        r#"{"taskId":"merge-master-task","created":false}"#,
+    );
+    let (base_url, handle) = serve_single_http_response(response).await;
+    let request_body = build_merge_handoff_request(
+        "task-task-123-4".to_string(),
+        "main".to_string(),
+        Some("https://example.invalid/pull/1".to_string()),
+        "approved".to_string(),
+    );
+
+    let response = signal_merge_handoff_via_api(&base_url, "task-123", &request_body)
+        .await
+        .unwrap();
+    let request = handle.await.unwrap();
+
+    assert_eq!(response.task_id, "merge-master-task");
+    assert!(request.starts_with("POST /v1/tasks/task-123/actions/signal-merge-handoff HTTP/1.1"));
+    assert!(request.ends_with(
+        r#"{"branch":"task-task-123-4","target":"main","prUrl":"https://example.invalid/pull/1","summary":"approved"}"#
+    ));
+    assert!(!request.contains("overrideRecord"));
+    assert!(!request.contains("approvalGate"));
+}
+
+#[tokio::test]
 async fn rerun_stage_posts_to_task_action_path_with_empty_json_body() {
     let response = http_json_response("200 OK", "{\"taskId\":\"task-123\"}");
     let (base_url, handle) = serve_single_http_response(response).await;

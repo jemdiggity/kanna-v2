@@ -5,6 +5,182 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use url::Url;
 
+pub const KANNA_STAGE_RUN_ID_ENV: &str = "KANNA_STAGE_RUN_ID";
+pub const KANNA_COMPLETION_CONTEXT_ENV: &str = "KANNA_COMPLETION_CONTEXT";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionContext {
+    /// Immutable identity of the run that received this context at spawn.
+    /// Older files omit it; their run-scoped filename is the authoritative
+    /// fallback during upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_run_id: Option<String>,
+    /// True when the server compiled a context created by an adapter which
+    /// predates coordinated context writes. That live process must be
+    /// replaced rather than continued into a post.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy_writer: bool,
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_attempt_key: Option<String>,
+    /// Run paired with the legacy single-attempt field. Older contexts omit
+    /// this, in which case `completed_attempt_key` belongs to `run_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_run_id: Option<String>,
+    /// Bounded replay history retained when a continued post rebinds this
+    /// context to its successor run. A retry of the original verdict must
+    /// replay against the original run, never complete the successor post.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub completed_attempts: Vec<CompletionAttempt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionAttempt {
+    pub run_id: String,
+    pub attempt_key: String,
+}
+
+const MAX_COMPLETION_ATTEMPTS: usize = 8;
+
+impl CompletionContext {
+    pub fn new(run_id: impl Into<String>) -> Self {
+        let run_id = run_id.into();
+        Self {
+            spawned_run_id: Some(run_id.clone()),
+            legacy_writer: false,
+            run_id,
+            completed_attempt_key: None,
+            completed_run_id: None,
+            completed_attempts: Vec::new(),
+        }
+    }
+
+    pub fn run_for_attempt(&self, attempt_key: &str) -> Option<&str> {
+        self.completed_attempts
+            .iter()
+            .rev()
+            .find(|attempt| attempt.attempt_key == attempt_key)
+            .map(|attempt| attempt.run_id.as_str())
+            .or_else(|| {
+                (self.completed_attempt_key.as_deref() == Some(attempt_key)).then(|| {
+                    self.completed_run_id
+                        .as_deref()
+                        .unwrap_or(self.run_id.as_str())
+                })
+            })
+    }
+
+    pub fn record_completed_attempt(&mut self, run_id: &str, attempt_key: &str) {
+        self.completed_attempts
+            .retain(|attempt| attempt.attempt_key != attempt_key);
+        self.completed_attempts.push(CompletionAttempt {
+            run_id: run_id.to_string(),
+            attempt_key: attempt_key.to_string(),
+        });
+        if self.completed_attempts.len() > MAX_COMPLETION_ATTEMPTS {
+            self.completed_attempts
+                .drain(..self.completed_attempts.len() - MAX_COMPLETION_ATTEMPTS);
+        }
+        self.completed_attempt_key = Some(attempt_key.to_string());
+        self.completed_run_id = Some(run_id.to_string());
+    }
+}
+
+pub fn completion_attempt_key(body: &Value) -> Result<String, String> {
+    let mut canonical = body.clone();
+    let object = canonical
+        .as_object_mut()
+        .ok_or_else(|| "complete-stage request body must be an object".to_string())?;
+    object.remove("runId");
+    object.remove("completionAttemptKey");
+    serde_json::to_string(&canonical)
+        .map_err(|error| format!("failed to encode completion attempt: {error}"))
+}
+
+pub fn read_completion_context(path: &Path) -> Result<CompletionContext, String> {
+    let body = std::fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read completion context {}: {error}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&body)
+        .map_err(|error| format!("invalid completion context {}: {error}", path.display()))
+}
+
+pub fn write_completion_context(path: &Path, context: &CompletionContext) -> Result<(), String> {
+    mutate_completion_context(path, |_| Ok(context.clone())).map(|_| ())
+}
+
+/// Atomically read-modify-write a completion context across the server, CLI,
+/// and MCP processes. The adjacent lock file is stable across the atomic
+/// rename used to publish the JSON payload.
+pub fn mutate_completion_context(
+    path: &Path,
+    mutate: impl FnOnce(Option<CompletionContext>) -> Result<CompletionContext, String>,
+) -> Result<CompletionContext, String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create completion context directory: {error}"))?;
+    }
+    let lock_path = path.with_extension("lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| format!("failed to open completion context lock: {error}"))?;
+    lock_completion_file(&lock)?;
+    let current =
+        match std::fs::read_to_string(path) {
+            Ok(body) => Some(serde_json::from_str(&body).map_err(|error| {
+                format!("invalid completion context {}: {error}", path.display())
+            })?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(format!(
+                    "failed to read completion context {}: {error}",
+                    path.display()
+                ))
+            }
+        };
+    let context = mutate(current)?;
+    let body = serde_json::to_vec(&context)
+        .map_err(|error| format!("failed to encode completion context: {error}"))?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let temp = path.with_extension(format!("tmp-{}-{nonce}", std::process::id()));
+    std::fs::write(&temp, body)
+        .map_err(|error| format!("failed to write completion context: {error}"))?;
+    std::fs::rename(&temp, path)
+        .map_err(|error| format!("failed to publish completion context: {error}"))?;
+    Ok(context)
+}
+
+#[cfg(unix)]
+fn lock_completion_file(file: &std::fs::File) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to lock completion context: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_completion_file(_file: &std::fs::File) -> Result<(), String> {
+    Ok(())
+}
+
 const BUNDLED_CATALOG: &str = include_str!("catalog.json");
 
 /// MCP clients abort a `tools/call` on their own timer — Codex and Claude Code
@@ -744,4 +920,68 @@ pub fn encode_path_segment(value: &str) -> String {
             _ => format!("%{byte:02X}").chars().collect(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod completion_context_tests {
+    use super::{
+        mutate_completion_context, read_completion_context, write_completion_context,
+        CompletionContext,
+    };
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn old_context_without_spawn_identity_remains_readable_for_server_upgrade() {
+        let context: CompletionContext = serde_json::from_str(r#"{"runId":"run-post"}"#).unwrap();
+        assert_eq!(context.run_id, "run-post");
+        assert_eq!(context.spawned_run_id, None);
+        assert!(!context.legacy_writer);
+        assert!(context.completed_attempts.is_empty());
+        assert_eq!(context.completed_run_id, None);
+    }
+
+    #[test]
+    fn concurrent_completion_record_and_post_rebind_cannot_overwrite_each_other() {
+        let root = std::env::temp_dir().join(format!(
+            "kanna-completion-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = root.join("task-1.json");
+        write_completion_context(&path, &super::CompletionContext::new("run-main")).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let record_path = path.clone();
+        let record_barrier = Arc::clone(&barrier);
+        let record = std::thread::spawn(move || {
+            record_barrier.wait();
+            mutate_completion_context(&record_path, |current| {
+                let mut context = current.unwrap();
+                context.record_completed_attempt("run-main", "attempt-main");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                Ok(context)
+            })
+            .unwrap();
+        });
+        let rebind_path = path.clone();
+        let rebind = std::thread::spawn(move || {
+            barrier.wait();
+            mutate_completion_context(&rebind_path, |current| {
+                let mut context = current.unwrap();
+                context.run_id = "run-post".to_string();
+                Ok(context)
+            })
+            .unwrap();
+        });
+        record.join().unwrap();
+        rebind.join().unwrap();
+
+        let context = read_completion_context(&path).unwrap();
+        assert_eq!(context.run_id, "run-post");
+        assert_eq!(context.run_for_attempt("attempt-main"), Some("run-main"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

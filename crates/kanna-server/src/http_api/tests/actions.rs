@@ -40,6 +40,27 @@ async fn wait_for_stage_run(db: &Db, task_id: &str, expected_stage: &str) -> cra
     panic!("task {task_id} never recorded a run for stage {expected_stage}");
 }
 
+fn insert_running_pr_run(db: &Db, task_id: &str, run_id: &str) {
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: run_id,
+        task_id,
+        stage: "pr",
+        kind: "main",
+        agent: Some("pr"),
+        agent_provider: Some("claude"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some(task_id),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+}
+
 async fn recv_state_change_scope(
     rx: &mut tokio::sync::broadcast::Receiver<kanna_agent_protocol::ServerFrame>,
 ) -> kanna_agent_protocol::StateChangeScope {
@@ -193,7 +214,7 @@ async fn abort_task_creation_closes_an_existing_requested_id() {
 #[tokio::test]
 async fn close_task_route_releases_claimed_ports() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -214,9 +235,7 @@ async fn close_task_route_releases_claimed_ports() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         for expected_session_id in ["task-1", "shell-wt-task-1", "td-task-1"] {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
                 DaemonCommand::Kill { session_id } => assert_eq!(session_id, expected_session_id),
                 other => panic!("expected kill command, got {other:?}"),
@@ -723,7 +742,7 @@ async fn agent_session_id_route_persists_provider_session_id() {
 #[tokio::test]
 async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_running_dependents() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -838,9 +857,7 @@ async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_ru
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         for index in 0..5 {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match (index, command) {
                 (0, DaemonCommand::Input { session_id, data }) => {
                     assert_eq!(session_id, "task-b-session");
@@ -1173,7 +1190,7 @@ async fn close_task_route_rejects_parent_with_open_subtasks() {
 #[tokio::test]
 async fn close_task_route_resolves_branch_style_task_id() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -1196,9 +1213,7 @@ async fn close_task_route_resolves_branch_style_task_id() {
         let expected = ["710917fb", "shell-wt-710917fb", "td-710917fb"];
 
         for expected_session_id in expected {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
                 DaemonCommand::Kill { session_id } => {
                     assert_eq!(session_id, expected_session_id)
@@ -1281,7 +1296,7 @@ async fn close_task_route_resolves_branch_style_task_id() {
 #[tokio::test]
 async fn close_task_route_tears_down_current_stage_environment_before_repo_teardown() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -1386,9 +1401,7 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
         let expected_kills = ["task-1", "shell-wt-task-1", "td-task-source"];
 
         for expected_session_id in expected_kills {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
                 DaemonCommand::Kill { session_id } => assert_eq!(session_id, expected_session_id),
                 other => panic!("expected kill command, got {other:?}"),
@@ -1401,8 +1414,7 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
                 .unwrap();
         }
 
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         let item = Db::open(&daemon_db_path)
             .expect("open db before teardown spawn assertion")
             .get_pipeline_item("task-1")
@@ -1412,7 +1424,6 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
             item.closed_at.is_some(),
             "close route must mark the task closed before spawning teardown cleanup"
         );
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
         match command {
             DaemonCommand::Spawn {
                 session_id,
@@ -1747,7 +1758,7 @@ async fn unblock_task_route_removes_blockers() {
 #[tokio::test]
 async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -1802,6 +1813,7 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
     .unwrap();
     db.update_test_pipeline_item_stage_context("task-a", "task-a-stage", "default", None, "claude")
         .unwrap();
+    insert_running_pr_run(&db, "task-a", "task-a-pr-run");
     drop(db);
 
     // The pr-stage agent has already rebased, renamed, and committed on the
@@ -1911,11 +1923,11 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
         let mut spawned = Vec::new();
         let mut recovery_seeded = false;
         loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).await.unwrap() == 0 {
+            let Some(command) =
+                read_test_daemon_command_optional(&mut reader, &mut write_half).await
+            else {
                 break;
-            }
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            };
             match command {
                 DaemonCommand::Kill { .. } => {
                     write_half
@@ -2002,6 +2014,7 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "task-a-pr-run",
                         "status": "success",
                         "summary": "PR is ready",
                         "metadata": { "pr_url": "https://github.com/acme/repo/pull/7" }
@@ -2127,6 +2140,7 @@ async fn complete_pr_stage_without_pr_url_leaves_dormant_dependent_unstarted() {
     .unwrap();
     db.update_test_pipeline_item_stage_context("task-a", "task-a", "default", None, "claude")
         .unwrap();
+    insert_running_pr_run(&db, "task-a", "task-a-pr-run");
     drop(db);
 
     let app = super::router(Arc::new(super::AppState::new(config.clone())));
@@ -2162,6 +2176,7 @@ async fn complete_pr_stage_without_pr_url_leaves_dormant_dependent_unstarted() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "task-a-pr-run",
                         "status": "success",
                         "summary": "PR is ready"
                     })
@@ -2193,7 +2208,7 @@ async fn complete_pr_stage_without_pr_url_leaves_dormant_dependent_unstarted() {
 #[tokio::test]
 async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -2249,6 +2264,7 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
     .unwrap();
     db.update_test_pipeline_item_stage_context("task-a", "task-a-stage", "default", None, "claude")
         .unwrap();
+    insert_running_pr_run(&db, "task-a", "task-a-pr-run");
     drop(db);
 
     let blocker_worktree_path = repo_root.join(".kanna-worktrees").join("task-a-stage");
@@ -2334,11 +2350,11 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
         let mut reader = BufReader::new(read_half);
         let mut spawned = Vec::new();
         loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).await.unwrap() == 0 {
+            let Some(command) =
+                read_test_daemon_command_optional(&mut reader, &mut write_half).await
+            else {
                 break;
-            }
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            };
             match command {
                 DaemonCommand::Kill { .. } => {
                     write_half
@@ -2490,7 +2506,7 @@ fn git_branch_exists(repo_root: &Path, branch: &str) -> bool {
 #[tokio::test]
 async fn conflicting_sibling_blockers_create_integration_task_and_leave_dependent_dormant() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -2602,11 +2618,11 @@ async fn conflicting_sibling_blockers_create_integration_task_and_leave_dependen
             let (read_half, mut write_half) = stream.into_split();
             let mut reader = BufReader::new(read_half);
             loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).await.unwrap() == 0 {
+                let Some(command) =
+                    read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                else {
                     break;
-                }
-                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                };
                 match command {
                     DaemonCommand::Kill { .. } => {
                         write_half
@@ -2735,7 +2751,7 @@ async fn conflicting_sibling_blockers_create_integration_task_and_leave_dependen
 #[tokio::test]
 async fn closing_integration_task_starts_dependent_from_integration_branch() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -2847,11 +2863,11 @@ async fn closing_integration_task_starts_dependent_from_integration_branch() {
             let (read_half, mut write_half) = stream.into_split();
             let mut reader = BufReader::new(read_half);
             loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).await.unwrap() == 0 {
+                let Some(command) =
+                    read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                else {
                     break;
-                }
-                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                };
                 match command {
                     DaemonCommand::Kill { .. } => {
                         write_half
@@ -3013,7 +3029,7 @@ async fn closing_integration_task_starts_dependent_from_integration_branch() {
 #[tokio::test]
 async fn renamed_multi_blocker_pr_branches_survive_earlier_worktree_cleanup() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -3144,11 +3160,11 @@ async fn renamed_multi_blocker_pr_branches_survive_earlier_worktree_cleanup() {
             let (read_half, mut write_half) = stream.into_split();
             let mut reader = BufReader::new(read_half);
             loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).await.unwrap() == 0 {
+                let Some(command) =
+                    read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                else {
                     break;
-                }
-                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                };
                 match command {
                     DaemonCommand::Kill { .. } => {
                         write_half
@@ -3255,7 +3271,7 @@ async fn renamed_multi_blocker_pr_branches_survive_earlier_worktree_cleanup() {
 #[tokio::test]
 async fn close_non_final_blocker_leaves_dormant_dependent_unstarted() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -3341,11 +3357,11 @@ async fn close_non_final_blocker_leaves_dormant_dependent_unstarted() {
         let mut reader = BufReader::new(read_half);
         let mut spawned = 0usize;
         loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).await.unwrap() == 0 {
+            let Some(command) =
+                read_test_daemon_command_optional(&mut reader, &mut write_half).await
+            else {
                 break;
-            }
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            };
             match command {
                 DaemonCommand::Kill { .. } => {
                     write_half
@@ -3638,6 +3654,7 @@ async fn complete_stage_waits_for_competing_advance_stage_mutation() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "test-only-run",
                         "status": "success",
                         "summary": "competing completion",
                     })
@@ -3884,7 +3901,7 @@ async fn rerun_stage_route_uses_stage_rerunner() {
 async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -3962,9 +3979,7 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             let session_id = match command {
                 // Durable stage swap kills the previous session in place
                 // before respawning the same session id.
@@ -4300,7 +4315,7 @@ async fn advance_stage_route_notifies_after_detached_setup_failure_is_persisted(
 async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_write() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
 
@@ -4365,11 +4380,11 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
             let (read_half, mut write_half) = stream.into_split();
             let mut reader = BufReader::new(read_half);
             loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).await.unwrap() == 0 {
+                let Some(command) =
+                    read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                else {
                     continue 'connections;
-                }
-                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                };
                 match command {
                     DaemonCommand::Kill { session_id, .. } if session_id == "source-1" => {
                         let response = DaemonEvent::Error {
@@ -4558,7 +4573,16 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
     assert_eq!(task.branch.as_deref(), Some("task-source"));
     assert!(task.closed_at.is_some());
     let runs = db.list_stage_runs_for_task("source-1").unwrap();
-    assert!(runs.iter().all(|run| run.stage != "review"));
+    let review = runs
+        .iter()
+        .find(|run| run.stage == "review")
+        .expect("the acknowledged child keeps a durable diagnostic identity");
+    assert_eq!(review.status, "failed");
+    assert!(review
+        .result
+        .as_deref()
+        .unwrap_or_default()
+        .contains("closed before stage transition landed"));
 
     if created_sidecar {
         let _ = std::fs::remove_file(&kanna_cli_path);
@@ -4572,7 +4596,7 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
 async fn advance_stage_route_closes_final_stage_and_tears_down_environment_before_repo() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -4656,9 +4680,7 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
         let expected_kills = ["task-1", "shell-wt-task-1", "td-task-source"];
 
         for expected_session_id in expected_kills {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
                 DaemonCommand::Kill { session_id } => assert_eq!(session_id, expected_session_id),
                 other => panic!("expected kill command, got {other:?}"),
@@ -4671,8 +4693,7 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
                 .unwrap();
         }
 
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         let item = Db::open(&daemon_db_path)
             .expect("open db before final-stage teardown spawn assertion")
             .get_pipeline_item("task-1")
@@ -4682,7 +4703,6 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
             item.closed_at.is_some(),
             "final-stage close must mark the task closed before spawning teardown cleanup"
         );
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
         match command {
             DaemonCommand::Spawn {
                 session_id,
@@ -4812,6 +4832,7 @@ async fn complete_stage_route_uses_stage_completer() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "test-stage-completer-run",
                         "status": "success",
                         "summary": "review passed",
                         "metadata": { "coverage": "sufficient" }
@@ -4880,6 +4901,7 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "run-1",
                         "status": "success",
                         "summary": "implemented",
                         "metadata": { "pr_url": "https://github.com/acme/repo/pull/41" }
@@ -4914,6 +4936,445 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
         Some("https://github.com/acme/repo/pull/41")
     );
     assert_eq!(item.pr_number, Some(41));
+}
+
+#[tokio::test]
+async fn delayed_completion_cannot_finish_a_replacement_run() {
+    let state = super::test_state_with_seed("desktop-stale-completion", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Replace the failed run",
+            Some("Replace the failed run"),
+            "in progress",
+            "2026-08-04 00:00:00",
+        )
+        .unwrap();
+        let insert = |id: &str, status: &str| {
+            db.insert_stage_run(crate::db::NewStageRun {
+                id,
+                task_id: "task-1",
+                stage: "in progress",
+                kind: "main",
+                agent: Some("implement"),
+                agent_provider: Some("codex"),
+                model: None,
+                effort: None,
+                status,
+                result: None,
+                feedback: None,
+                session_id: Some("task-1"),
+                provider_session_id: None,
+                cwd: None,
+                resumed_from_run_id: None,
+            })
+            .unwrap();
+        };
+        // Deliberately reverse lexical id order: insertion lineage, not UUID
+        // ordering within SQLite's one-second timestamp precision, is current.
+        insert("zz-run-old", "failed");
+        insert("aa-run-replacement", "running");
+    });
+    let db_path = state.config.db_path.clone();
+    let response = super::router(state)
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "runId": "zz-run-old",
+                        "status": "success",
+                        "summary": "late success from the replaced process"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let db = Db::open(&db_path).unwrap();
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(
+        runs.iter()
+            .find(|run| run.id == "aa-run-replacement")
+            .unwrap()
+            .status,
+        "running"
+    );
+    assert_eq!(
+        db.task_approval_gate("task-1").unwrap().state,
+        crate::db::ApprovalGateState::Held
+    );
+}
+
+#[tokio::test]
+async fn timed_out_completion_retry_is_idempotent_after_a_replacement_run_starts() {
+    let summary = "post completed before the response arrived";
+    let stage_result = serde_json::json!({
+        "status": "success",
+        "summary": summary,
+        "metadata": null,
+    })
+    .to_string();
+    let state = super::test_state_with_seed("desktop-completion-retry", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "Complete exactly one run",
+            Some("Completion retry"),
+            "in progress",
+            "2026-08-04 00:00:00",
+        )
+        .unwrap();
+        let run = |id: &'static str, status: &'static str| crate::db::NewStageRun {
+            id,
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "post",
+            agent: Some("commit"),
+            agent_provider: Some("codex"),
+            model: None,
+            effort: None,
+            status,
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        };
+        db.insert_stage_run_with_completion_binding(run("run-original", "running"), None, true)
+            .unwrap();
+        db.finish_stage_run(
+            "run-original",
+            "succeeded",
+            Some(&stage_result),
+            Some(summary),
+        )
+        .unwrap();
+        db.insert_stage_run_with_completion_binding(run("run-replacement", "running"), None, true)
+            .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let response = super::router(state)
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "runId": "run-original",
+                        "completionAttemptKey": "same-verdict",
+                        "status": "success",
+                        "summary": summary
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    assert_eq!(
+        db.stage_run("run-replacement").unwrap().unwrap().status,
+        "running"
+    );
+}
+
+#[tokio::test]
+async fn pre_upgrade_adapter_cannot_complete_rebound_post_after_lost_main_response() {
+    let summary = "main completed before the response was lost";
+    let stage_result = serde_json::json!({
+        "status": "success",
+        "summary": summary,
+        "metadata": null,
+    })
+    .to_string();
+    let state =
+        super::test_state_with_seed("desktop-legacy-completion-retry", "Studio Mac", |db| {
+            db.insert_test_repo("repo-1", "Repo One").unwrap();
+            db.insert_test_pipeline_item(
+                "task-1",
+                "repo-1",
+                "Complete exactly one run",
+                Some("Legacy completion retry"),
+                "in progress",
+                "2026-08-04 00:00:00",
+            )
+            .unwrap();
+            let run = |id: &'static str, kind: &'static str, status: &'static str| {
+                crate::db::NewStageRun {
+                    id,
+                    task_id: "task-1",
+                    stage: "in progress",
+                    kind,
+                    agent: Some("implement"),
+                    agent_provider: Some("codex"),
+                    model: None,
+                    effort: None,
+                    status,
+                    result: None,
+                    feedback: None,
+                    session_id: Some("task-1"),
+                    provider_session_id: None,
+                    cwd: None,
+                    resumed_from_run_id: None,
+                }
+            };
+            db.insert_stage_run_with_completion_binding(
+                run("run-task-1-original", "main", "running"),
+                None,
+                true,
+            )
+            .unwrap();
+            db.finish_stage_run(
+                "run-task-1-original",
+                "succeeded",
+                Some(&stage_result),
+                Some(summary),
+            )
+            .unwrap();
+            db.insert_stage_run_with_completion_binding(
+                run("run-task-1-post", "post", "running"),
+                None,
+                true,
+            )
+            .unwrap();
+        });
+    let db_path = state.config.db_path.clone();
+    let context_dir = std::path::Path::new(&state.config.daemon_dir).join("runtime/completion");
+    std::fs::create_dir_all(&context_dir).unwrap();
+    // Exact short-lived old format after its unlocked post-200 write raced
+    // with server rebinding: no immutable identity and no retry history.
+    std::fs::write(
+        context_dir.join("run-task-1-original.json"),
+        r#"{"runId":"run-task-1-post"}"#,
+    )
+    .unwrap();
+    let request_without_binding = serde_json::json!({
+        "status": "success",
+        "summary": summary,
+    });
+    let attempt_key = kanna_tool_catalog::completion_attempt_key(&request_without_binding).unwrap();
+
+    let response = super::router(state)
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        // A surviving old adapter reads the rebound successor
+                        // and cannot see the new history fields.
+                        "runId": "run-task-1-post",
+                        "completionAttemptKey": attempt_key,
+                        "status": "success",
+                        "summary": summary,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    assert_eq!(
+        db.stage_run("run-task-1-post").unwrap().unwrap().status,
+        "running"
+    );
+}
+
+#[tokio::test]
+async fn distinct_current_run_with_identical_verdict_is_not_rewritten_to_history() {
+    let summary = "the same deterministic verdict";
+    let stage_result = serde_json::json!({
+        "status": "failure",
+        "summary": summary,
+        "metadata": null,
+    })
+    .to_string();
+    let state = super::test_state_with_seed(
+        "desktop-distinct-identical-completion",
+        "Studio Mac",
+        |db| {
+            db.insert_test_repo("repo-1", "Repo One").unwrap();
+            db.insert_test_pipeline_item(
+                "task-1",
+                "repo-1",
+                "Repeat deterministic work",
+                Some("Repeat deterministic work"),
+                "in progress",
+                "2026-08-04 00:00:00",
+            )
+            .unwrap();
+            let run = |id: &'static str, status: &'static str| crate::db::NewStageRun {
+                id,
+                task_id: "task-1",
+                stage: "in progress",
+                kind: "main",
+                agent: Some("implement"),
+                agent_provider: Some("codex"),
+                model: None,
+                effort: None,
+                status,
+                result: None,
+                feedback: None,
+                session_id: Some("task-1"),
+                provider_session_id: None,
+                cwd: None,
+                resumed_from_run_id: None,
+            };
+            db.insert_stage_run_with_completion_binding(
+                run("run-task-1-old", "running"),
+                Some("manual"),
+                true,
+            )
+            .unwrap();
+            db.finish_stage_run(
+                "run-task-1-old",
+                "failed",
+                Some(&stage_result),
+                Some(summary),
+            )
+            .unwrap();
+            db.insert_stage_run_with_completion_binding(
+                run("run-task-1-new", "running"),
+                Some("manual"),
+                true,
+            )
+            .unwrap();
+        },
+    );
+    let db_path = state.config.db_path.clone();
+    let seeded = Db::open(&db_path)
+        .unwrap()
+        .latest_stage_run("task-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(seeded.id, "run-task-1-new");
+    assert_eq!(seeded.completion_transition.as_deref(), Some("manual"));
+    let context_dir = std::path::Path::new(&state.config.daemon_dir).join("runtime/completion");
+    std::fs::create_dir_all(&context_dir).unwrap();
+    std::fs::write(
+        context_dir.join("run-task-1-old.json"),
+        r#"{"runId":"run-task-1-old"}"#,
+    )
+    .unwrap();
+    let request_without_binding = serde_json::json!({
+        "status": "failure",
+        "summary": summary,
+    });
+    let attempt_key = kanna_tool_catalog::completion_attempt_key(&request_without_binding).unwrap();
+
+    let response = super::router(state)
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "runId": "run-task-1-new",
+                        "completionAttemptKey": attempt_key,
+                        "status": "failure",
+                        "summary": summary,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response_body)
+    );
+    let db = Db::open(&db_path).unwrap();
+    assert_eq!(
+        db.stage_run("run-task-1-new").unwrap().unwrap().status,
+        "failed"
+    );
+}
+
+#[tokio::test]
+async fn missing_run_id_is_legacy_only_and_cannot_complete_a_new_bound_run() {
+    let seed = |db: &Db, task_id: &'static str, run_id: &'static str, bound: bool| {
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-1",
+            "Compatibility completion",
+            Some("Compatibility completion"),
+            "in progress",
+            "2026-08-04 00:00:00",
+        )
+        .unwrap();
+        db.insert_stage_run_with_completion_binding(
+            crate::db::NewStageRun {
+                id: run_id,
+                task_id,
+                stage: "in progress",
+                kind: "main",
+                agent: Some("implement"),
+                agent_provider: Some("codex"),
+                model: None,
+                effort: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some(task_id),
+                provider_session_id: None,
+                cwd: None,
+                resumed_from_run_id: None,
+            },
+            None,
+            bound,
+        )
+        .unwrap();
+    };
+    let state = super::test_state_with_seed("desktop-completion-compat", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        seed(db, "task-legacy", "run-legacy", false);
+        seed(db, "task-bound", "run-bound", true);
+    });
+    let app = super::router(state);
+    let request = |task_id: &'static str| {
+        Request::post(format!("/v1/tasks/{task_id}/actions/complete-stage"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "status": "failure",
+                    "summary": "legacy client verdict"
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    assert_eq!(
+        app.clone()
+            .oneshot(request("task-legacy"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK,
+        "an upgraded server must accept a surviving old client for a pre-upgrade run"
+    );
+    assert_eq!(
+        app.oneshot(request("task-bound")).await.unwrap().status(),
+        StatusCode::CONFLICT,
+        "newly spawned runs must require their fixed identity"
+    );
 }
 
 #[tokio::test]
@@ -4967,6 +5428,7 @@ async fn complete_stage_route_parses_pr_url_from_summary_fallback() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "run-1",
                         "status": "success",
                         "summary": "Created PR https://github.com/acme/repo/pull/7 from add-feature."
                     })
@@ -4991,7 +5453,7 @@ async fn complete_stage_route_parses_pr_url_from_summary_fallback() {
 async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -5053,9 +5515,7 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             let response = match &command {
                 DaemonCommand::Kill { .. } => DaemonEvent::Error {
                     code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
@@ -5172,6 +5632,7 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "run-post",
                         "status": "success",
                         "summary": "cleaned up and committed"
                     })
@@ -5224,6 +5685,7 @@ async fn complete_stage_missing_task_returns_not_found() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "missing-run",
                         "status": "success",
                         "summary": "done"
                     })
@@ -5259,6 +5721,7 @@ async fn complete_stage_for_already_closed_task_is_idempotent() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "closed-run",
                         "status": "success",
                         "summary": "done again"
                     })
@@ -5282,7 +5745,7 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -5326,13 +5789,10 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
                 let (read_half, mut write_half) = stream.into_split();
                 let mut reader = BufReader::new(read_half);
                 loop {
-                    let mut line = String::new();
-                    match reader.read_line(&mut line).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {}
-                    }
-                    let Ok(command) = serde_json::from_str::<DaemonCommand>(line.trim()) else {
-                        continue;
+                    let Some(command) =
+                        read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                    else {
+                        break;
                     };
                     let response = match &command {
                         DaemonCommand::Spawn { session_id, .. } => DaemonEvent::SessionCreated {
@@ -5510,6 +5970,7 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": post_run.id,
                         "status": "success",
                         "summary": "PR approved and merge master signaled"
                     })
@@ -5548,7 +6009,7 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
 async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -5612,9 +6073,7 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             let session_id = match command {
                 DaemonCommand::Kill { .. } => {
                     let response = DaemonEvent::Error {
@@ -5749,7 +6208,7 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
 async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use std::time::Duration;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -5805,6 +6264,7 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
     .unwrap();
     db.update_test_pipeline_item_stage_context("task-a", "task-a-stage", "default", None, "claude")
         .unwrap();
+    insert_running_pr_run(&db, "task-a", "task-a-pr-run");
     drop(db);
 
     let blocker_worktree_path = commit_branch_change(
@@ -5862,11 +6322,11 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
         let mut reader = BufReader::new(read_half);
         let mut spawned = Vec::new();
         loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).await.unwrap() == 0 {
+            let Some(command) =
+                read_test_daemon_command_optional(&mut reader, &mut write_half).await
+            else {
                 break;
-            }
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            };
             match command {
                 DaemonCommand::Kill { .. } => {
                     write_half
@@ -5969,7 +6429,7 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
 async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use std::time::Duration;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -6025,6 +6485,7 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
     .unwrap();
     db.update_test_pipeline_item_stage_context("task-a", "task-a-stage", "default", None, "claude")
         .unwrap();
+    insert_running_pr_run(&db, "task-a", "task-a-pr-run");
     drop(db);
 
     let blocker_worktree_path = commit_branch_change(
@@ -6089,11 +6550,11 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
         let mut reader = BufReader::new(read_half);
         let mut spawned = Vec::new();
         loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).await.unwrap() == 0 {
+            let Some(command) =
+                read_test_daemon_command_optional(&mut reader, &mut write_half).await
+            else {
                 break;
-            }
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            };
             match command {
                 DaemonCommand::Kill { .. } => {
                     write_half
@@ -6149,6 +6610,7 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
+                        "runId": "task-a-pr-run",
                         "status": "success",
                         "summary": "PR is ready",
                         "metadata": { "pr_url": "https://github.com/acme/repo/pull/7" }

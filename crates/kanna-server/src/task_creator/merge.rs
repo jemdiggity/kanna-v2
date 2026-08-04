@@ -32,9 +32,14 @@ async fn spawn_merge_agent_task(
     daemon: &mut DaemonClient,
     prepared: PreparedTaskSpawn,
 ) -> Result<String, String> {
-    spawn_prepared_task_for_api_recording_stage_run(db_path, daemon, prepared)
-        .await
-        .map(|created| created.task_id)
+    let task_id = prepared.task_id().to_string();
+    let session_id = prepared.session_id().to_string();
+    let db = Db::open(db_path).map_err(|error| format!("db error: {error}"))?;
+    db.set_merge_handoff_protocol(&task_id, &session_id, 1)
+        .map_err(|error| format!("db error: {error}"))?;
+    let created =
+        spawn_prepared_task_for_api_recording_stage_run(db_path, daemon, prepared).await?;
+    Ok(created.task_id)
 }
 
 fn load_merge_source_repo(db: &Db, source_task_id: &str) -> Result<Repo, String> {

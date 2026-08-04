@@ -19,6 +19,7 @@ use crate::fanout::{
     existing_session_fanout, session_fanout, SessionFanout, SessionFanouts, SubscriberKind,
 };
 use crate::handoff::{blank_snapshot, handle_handoff};
+use crate::operator_auth::OperatorAuthorizer;
 use crate::output::{handle_output_chunk, stream_output};
 use crate::paths::daemon_data_dir;
 use crate::session::{
@@ -76,6 +77,7 @@ pub(crate) async fn handle_connection(
     agent_sessions: kanna_daemon::agent::AgentSessions,
     daemon_lifecycle: DaemonLifecycle,
     successor_authorizer: Arc<SuccessorAuthorizer>,
+    operator_authorizer: Arc<OperatorAuthorizer>,
 ) {
     // Keep the raw fd for SCM_RIGHTS (used by Handoff)
     let raw_fd = stream.as_raw_fd();
@@ -112,6 +114,37 @@ pub(crate) async fn handle_connection(
             Some(Command::HandoffAdopted { .. }) => {
                 let evt = error_event(None, "unexpected handoff adoption acknowledgement");
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
+            }
+            Some(Command::AdoptOperator) => {
+                let event = match operator_authorizer.authorize(raw_fd, true) {
+                    Ok(()) => Event::Ok,
+                    Err(message) => {
+                        error_event(Some(protocol::ErrorCode::InputUnauthorized), message)
+                    }
+                };
+                let _ = write_event(&mut *writer.lock().await, &event).await;
+            }
+            Some(Command::AuthorizeServer { pid }) => {
+                let event = match operator_authorizer.authorize_server_process(raw_fd, pid) {
+                    Ok(()) => Event::Ok,
+                    Err(message) => {
+                        error_event(Some(protocol::ErrorCode::InputUnauthorized), message)
+                    }
+                };
+                let _ = write_event(&mut *writer.lock().await, &event).await;
+            }
+            Some(Command::NegotiateProtectedInput { version }) => {
+                let event = match operator_authorizer
+                    .negotiate_protected_input(raw_fd, version)
+                    .await
+                {
+                    Ok(()) => Event::ProtectedInputReady { version },
+                    Err(message) => error_event(
+                        Some(protocol::ErrorCode::ProtectedInputProtocolRequired),
+                        message,
+                    ),
+                };
+                let _ = write_event(&mut *writer.lock().await, &event).await;
             }
             Some(Command::Subscribe) => {
                 if subscription_task.is_none() {
@@ -250,6 +283,8 @@ pub(crate) async fn handle_connection(
                     recovery_manager.clone(),
                     agent_sessions.clone(),
                     daemon_lifecycle.clone(),
+                    raw_fd,
+                    operator_authorizer.clone(),
                 )
                 .await;
             }
@@ -296,6 +331,8 @@ pub(crate) async fn handle_command(
     recovery_manager: RecoveryManager,
     agent_sessions: kanna_daemon::agent::AgentSessions,
     daemon_lifecycle: DaemonLifecycle,
+    raw_fd: std::os::fd::RawFd,
+    operator_authorizer: Arc<OperatorAuthorizer>,
 ) {
     match command {
         Command::Spawn {
@@ -308,7 +345,16 @@ pub(crate) async fn handle_command(
             rows,
             agent_provider,
             terminal_prelude,
+            operator_input_only,
         } => {
+            if let Err(message) = operator_authorizer.authorize_spawn(raw_fd) {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::ProtectedInputProtocolRequired),
+                    format!("protected-input negotiation required before PTY spawn: {message}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
             // A PTY id also reaches the recovery snapshot path. Reject before
             // any lock -- an unsafe id is invalid whatever the daemon's
             // lifecycle state, and "retry against the adopting daemon" would be
@@ -432,6 +478,8 @@ pub(crate) async fn handle_command(
                         status: headless_terminal::initial_session_status(agent_provider),
                         status_observed: false,
                         last_status_check_at: None,
+                        operator_input_only,
+                        input_policy_classified: true,
                     }));
                     let io_fd = match handle.try_clone_io_fd().await {
                         Ok(fd) => fd,
@@ -637,6 +685,15 @@ pub(crate) async fn handle_command(
                 return;
             };
 
+            if session.operator_input_only().await {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::InputUnauthorized),
+                    format!("session requires authenticated operator input: {session_id}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+
             let evt = match session.enqueue_acknowledged_input(data) {
                 Ok(written) => match written.await {
                     Ok(()) => Event::Ok,
@@ -663,6 +720,15 @@ pub(crate) async fn handle_command(
                 return;
             };
 
+            if session.operator_input_only().await {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::InputUnauthorized),
+                    format!("session requires authenticated operator input: {session_id}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+
             if session.enqueue_input(data).is_err() {
                 let evt = error_event(
                     Some(protocol::ErrorCode::WriteFailed),
@@ -670,6 +736,121 @@ pub(crate) async fn handle_command(
                 );
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
             }
+        }
+
+        Command::OperatorInput { session_id, data } => {
+            if let Err(message) = operator_authorizer.authorize(raw_fd, false) {
+                let evt = error_event(Some(protocol::ErrorCode::InputUnauthorized), message);
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+            let Some(session) = session_handle(&sessions, &session_id).await else {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::SessionNotFound),
+                    format!("session not found: {session_id}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            };
+            if !session.operator_input_only().await {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::InputUnauthorized),
+                    format!("operator input is not enabled for session: {session_id}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+            let evt = match session.enqueue_acknowledged_input(data) {
+                Ok(written) => match written.await {
+                    Ok(()) => Event::Ok,
+                    Err(_) => error_event(
+                        Some(protocol::ErrorCode::WriteFailed),
+                        format!("input write failed for session: {session_id}"),
+                    ),
+                },
+                Err(_) => error_event(
+                    Some(protocol::ErrorCode::WriteFailed),
+                    format!("input queue closed for session: {session_id}"),
+                ),
+            };
+            let _ = write_event(&mut *writer.lock().await, &evt).await;
+        }
+
+        Command::SystemInput { session_id, data } => {
+            if let Err(message) = operator_authorizer.authorize_system_input(raw_fd) {
+                let evt = error_event(Some(protocol::ErrorCode::InputUnauthorized), message);
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+            let Some(session) = session_handle(&sessions, &session_id).await else {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::SessionNotFound),
+                    format!("session not found: {session_id}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            };
+            if !session.operator_input_only().await {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::InputUnauthorized),
+                    format!("system input is not enabled for session: {session_id}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+            let evt = match session.enqueue_acknowledged_input(data) {
+                Ok(written) => match written.await {
+                    Ok(()) => Event::Ok,
+                    Err(_) => error_event(
+                        Some(protocol::ErrorCode::WriteFailed),
+                        format!("input write failed for session: {session_id}"),
+                    ),
+                },
+                Err(_) => error_event(
+                    Some(protocol::ErrorCode::WriteFailed),
+                    format!("input queue closed for session: {session_id}"),
+                ),
+            };
+            let _ = write_event(&mut *writer.lock().await, &evt).await;
+        }
+
+        Command::ClassifyInput {
+            session_id,
+            operator_input_only,
+        } => {
+            if let Err(message) = operator_authorizer.authorize_system_input(raw_fd) {
+                let evt = error_event(Some(protocol::ErrorCode::InputUnauthorized), message);
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+            let daemon_lifecycle_guard = daemon_lifecycle.read().await;
+            if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::RetryOnSuccessor),
+                    "daemon handoff already committed; reclassify on the adopting daemon",
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+            let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+            let _lifecycle_guard = lifecycle.lock().await;
+            let Some(session) = session_handle(&sessions, &session_id).await else {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::SessionNotFound),
+                    format!("session not found: {session_id}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            };
+            let event = if session.classify_input(operator_input_only).await {
+                Event::Ok
+            } else {
+                error_event(
+                    Some(protocol::ErrorCode::InputUnauthorized),
+                    format!("refusing to relax protected session: {session_id}"),
+                )
+            };
+            let _ = write_event(&mut *writer.lock().await, &event).await;
         }
 
         Command::AttachSnapshot {
@@ -1281,6 +1462,13 @@ pub(crate) async fn handle_command(
 
         Command::AgentSetModel { session_id, model } => {
             agent_runtime::handle_agent_set_model(session_id, model, writer, agent_sessions).await;
+        }
+
+        Command::AdoptOperator
+        | Command::AuthorizeServer { .. }
+        | Command::NegotiateProtectedInput { .. } => {
+            let event = error_event(None, "unexpected nested authority command");
+            let _ = write_event(&mut *writer.lock().await, &event).await;
         }
     }
 }

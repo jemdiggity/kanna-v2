@@ -159,14 +159,12 @@ async fn launch_server(label: &str) -> RunningServer {
         .spawn()
         .expect("launch kanna-server");
 
-    let mut server = RunningServer {
+    RunningServer {
         child,
         _root: root,
         base_url: format!("http://127.0.0.1:{port}"),
         daemon_dir,
-    };
-    wait_for_server(&mut server).await;
-    server
+    }
 }
 
 async fn wait_for_server(server: &mut RunningServer) {
@@ -280,11 +278,13 @@ fn daemon_socket_path(daemon_dir: &Path) -> PathBuf {
     PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
 }
 
-/// A stand-in for the PTY daemon that speaks its wire protocol: it answers the
-/// server's `Subscribe` and control `List` commands, then pushes
-/// `StatusChanged` events on the subscription. It classifies nothing — the
-/// verdicts come from the test, which is what lets a test stage the exact frame
-/// sequence a real misread produces. `crates/daemon` is not involved.
+/// A stand-in for the PTY daemon that speaks its wire protocol: it establishes
+/// the protected-input generation required before the server opens its HTTP
+/// listeners, answers the watcher's `Subscribe` and control `List` commands,
+/// then pushes `StatusChanged` events on the subscription. It classifies
+/// nothing — the verdicts come from the test, which is what lets a test stage
+/// the exact frame sequence a real misread produces. `crates/daemon` is not
+/// involved.
 struct FakeDaemon {
     events: mpsc::Sender<String>,
     subscribed: mpsc::Receiver<()>,
@@ -326,28 +326,48 @@ fn spawn_fake_daemon(daemon_dir: &Path) -> FakeDaemon {
     let (handshake_done, subscribed) = mpsc::channel::<()>();
 
     thread::spawn(move || {
-        // The subscription connection carries unsolicited events; the server
-        // keeps request/response commands on a second, unsubscribed socket so
-        // an event can never be consumed as a command reply.
-        let (mut subscription, _) = listener.accept().expect("accept subscribe connection");
-        let mut reader = BufReader::new(
-            subscription
-                .try_clone()
-                .expect("clone subscribe connection"),
-        );
-        let mut line = String::new();
-        reader.read_line(&mut line).expect("read subscribe command");
-        assert!(line.contains("Subscribe"), "expected Subscribe, got {line}");
-        writeln!(subscription, "{{\"type\":\"Ok\"}}").expect("acknowledge subscribe");
+        // Production starts the terminal watcher before the protected-input
+        // startup gate, so either connection can win the race. Accept both
+        // lifecycles in their natural order while requiring every command.
+        let mut generation_ready = false;
+        let mut watcher_listed = false;
+        let mut subscription = None;
+        while !generation_ready || !watcher_listed || subscription.is_none() {
+            let (mut connection, _) = listener.accept().expect("accept daemon connection");
+            let mut reader =
+                BufReader::new(connection.try_clone().expect("clone daemon connection"));
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read daemon command");
 
-        let (mut control, _) = listener.accept().expect("accept control connection");
-        let mut control_reader = BufReader::new(control.try_clone().expect("clone control"));
-        line.clear();
-        control_reader
-            .read_line(&mut line)
-            .expect("read list command");
-        assert!(line.contains("List"), "expected List, got {line}");
-        writeln!(control, "{{\"type\":\"SessionList\",\"sessions\":[]}}").expect("answer list");
+            if line.contains("NegotiateProtectedInput") {
+                assert!(!generation_ready, "duplicate protected-input negotiation");
+                writeln!(
+                    connection,
+                    "{{\"type\":\"ProtectedInputReady\",\"version\":1}}"
+                )
+                .expect("acknowledge protected-input negotiation");
+                line.clear();
+                reader
+                    .read_line(&mut line)
+                    .expect("read generation list command");
+                assert!(line.contains("List"), "expected List, got {line}");
+                writeln!(connection, "{{\"type\":\"SessionList\",\"sessions\":[]}}")
+                    .expect("answer generation list");
+                generation_ready = true;
+            } else if line.contains("Subscribe") {
+                assert!(subscription.is_none(), "duplicate subscription");
+                writeln!(connection, "{{\"type\":\"Ok\"}}").expect("acknowledge subscribe");
+                subscription = Some(connection);
+            } else {
+                assert!(line.contains("List"), "expected daemon command, got {line}");
+                assert!(!watcher_listed, "duplicate watcher list");
+                writeln!(connection, "{{\"type\":\"SessionList\",\"sessions\":[]}}")
+                    .expect("answer watcher list");
+                watcher_listed = true;
+            }
+        }
+
+        let mut subscription = subscription.expect("subscription established");
         if handshake_done.send(()).is_err() {
             return;
         }
@@ -441,8 +461,9 @@ impl RunningMcp {
 /// kanna-server, real kanna-mcp — with the task already mid-turn, which is the
 /// only state where a dropped busy marker can do damage.
 async fn start_chain(label: &str) -> (RunningServer, FakeDaemon, RunningMcp) {
-    let server = launch_server(label).await;
+    let mut server = launch_server(label).await;
     let daemon = spawn_fake_daemon(&server.daemon_dir);
+    wait_for_server(&mut server).await;
     daemon.await_subscription();
     seed_working_task(&server).await;
     let mcp = launch_mcp(&server);

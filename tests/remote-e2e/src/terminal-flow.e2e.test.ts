@@ -24,6 +24,18 @@ describe("remote task terminal flow E2E", () => {
     await harness?.stop();
   }, 30_000);
 
+  async function currentRunId(taskId: string): Promise<string> {
+    const detail = await harness.client.invokeDesktop({
+      desktopId: harness.desktopId,
+      method: "GET",
+      path: `/v1/tasks/${taskId}`,
+      body: null,
+    }) as { latestRun?: { id?: string } };
+    const runId = detail.latestRun?.id;
+    if (!runId) throw new Error(`task ${taskId} has no latest run id`);
+    return runId;
+  }
+
   it("streams snapshot, live output, and exit through observe_session and stops after unobserve", async () => {
     const task = await createScriptedTask(harness, {
       displayName: "Terminal streaming task"
@@ -265,6 +277,7 @@ describe("remote task terminal flow E2E", () => {
       await waitForTerminalOutput(parentEvents, "SCRIPT_READY");
       await waitForTerminalOutput(childEvents, "SCRIPT_READY");
       await pinSingleStagePipeline(harness, child.taskId);
+      const childRunId = await currentRunId(child.taskId);
       // The agent succeeds on its only stage, then the stage is advanced —
       // which, past the final stage, closes the task. That close used to
       // hardcode [failure] no matter how the run finished.
@@ -272,7 +285,7 @@ describe("remote task terminal flow E2E", () => {
         desktopId: harness.desktopId,
         method: "POST",
         path: `/v1/tasks/${child.taskId}/actions/complete-stage`,
-        body: { status: "success", summary: "Approved PR and signaled merge master" }
+        body: { runId: childRunId, status: "success", summary: "Approved PR and signaled merge master" }
       });
       await harness.client.invokeDesktop({
         desktopId: harness.desktopId,
@@ -332,11 +345,12 @@ describe("remote task terminal flow E2E", () => {
     try {
       await waitForTerminalOutput(parentEvents, "SCRIPT_READY");
       await waitForTerminalOutput(childEvents, "SCRIPT_READY");
+      const childRunId = await currentRunId(child.taskId);
       await harness.client.invokeDesktop({
         desktopId: harness.desktopId,
         method: "POST",
         path: `/v1/tasks/${child.taskId}/actions/complete-stage`,
-        body: { status: "failure", summary: "could not build the feed" }
+        body: { runId: childRunId, status: "failure", summary: "could not build the feed" }
       });
       // The agent then quits cleanly. The exit code says 0; the verdict on
       // record says failed, and the verdict is what the payload must report.

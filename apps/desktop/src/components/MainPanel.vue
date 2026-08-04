@@ -65,6 +65,17 @@ const isBlocked = computed(() => {
 const commandHintDismissed = ref(readCommandHintDismissed());
 const showCommandHint = computed(() => !commandHintDismissed.value);
 const taskDetail = ref<DesktopTaskDetail | null>(null);
+const taskDetailRefreshPending = ref(false);
+const terminalInputPolicyKnown = computed(() =>
+  taskDetail.value?.id === item.value?.id
+    && typeof taskDetail.value?.operatorTerminalInput === "boolean"
+);
+// A same-task refresh can coincide with a same-id respawn into the protected
+// merge session. Keep the retained xterm mounted, but use the stricter native
+// transport until the server supplies the new authoritative policy.
+const operatorTerminalInput = computed(() =>
+  taskDetailRefreshPending.value || taskDetail.value?.operatorTerminalInput === true
+);
 const revisionComposerOpen = ref(false);
 const revisionSummary = ref("");
 const revisionPrompt = ref("");
@@ -85,15 +96,16 @@ const parkedRevisionAvailable = computed(() => {
 let taskDetailRequest = 0;
 async function loadTaskDetail(taskId: string): Promise<void> {
   const request = ++taskDetailRequest;
+  if (taskDetail.value?.id === taskId && item.value?.id === taskId) {
+    taskDetailRefreshPending.value = true;
+  }
   try {
     const detail = await fetchDesktopTaskDetail(taskId);
     if (request === taskDetailRequest && item.value?.id === taskId) {
       taskDetail.value = detail;
+      taskDetailRefreshPending.value = false;
     }
   } catch (error) {
-    if (request === taskDetailRequest && item.value?.id === taskId) {
-      taskDetail.value = null;
-    }
     console.error(`[main-panel] failed to load task detail for ${taskId}:`, error);
   }
 }
@@ -108,6 +120,7 @@ watch(
     if (taskId !== previous?.[0]) {
       taskDetailRequest += 1;
       taskDetail.value = null;
+      taskDetailRefreshPending.value = false;
       revisionComposerOpen.value = false;
       revisionSummary.value = "";
       revisionPrompt.value = "";
@@ -381,6 +394,7 @@ function dismissCommandHint() {
       </template>
       <template v-else>
         <TerminalTabs
+          v-if="terminalInputPolicyKnown"
           :session-id="item.id"
           :agent-type="item.agent_type || 'pty'"
           :agent-provider="item.agent_provider"
@@ -389,7 +403,9 @@ function dismissCommandHint() {
           :prompt="item.prompt || ''"
           :spawn-pty-session="spawnPtySession"
           :recover-task-session="recoverTaskSession"
+          :operator-terminal-input="operatorTerminalInput"
         />
+        <div v-else class="terminal-policy-loading" data-testid="terminal-policy-loading" />
       </template>
     </template>
     <div v-else class="empty-state">
@@ -625,6 +641,11 @@ function dismissCommandHint() {
   align-items: center;
   justify-content: center;
   gap: 6px;
+}
+
+.terminal-policy-loading {
+  flex: 1;
+  min-height: 0;
 }
 
 .setup-placeholder {

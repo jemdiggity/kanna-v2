@@ -361,9 +361,9 @@ describe("QA pipeline assets", () => {
     const approveAgent = readRepoPhrases(".kanna/agents/approve/AGENT.md");
     const approveContract = readRepoPhrases(".kanna/agents/approve/CONTRACT.md");
 
-    // The MERGE line is built from headRefName/baseRefName, which task
-    // metadata never carries — it only has prUrl. Taking the metadata path
-    // and skipping `gh pr view` leaves both refs unresolved.
+    // The server-owned handoff envelope is built from headRefName/baseRefName,
+    // which task metadata never carries — it only has prUrl. Taking the
+    // metadata path and skipping `gh pr view` leaves both refs unresolved.
     expect(approveAgent).toContain("gh pr view <prUrl-or-$BRANCH> --json url,isDraft,baseRefName,headRefName,title");
     expect(approveAgent).toContain("Run it even when task context already gave you `prUrl`");
     expect(approveAgent).toContain("If no PR resolves");
@@ -392,8 +392,10 @@ describe("QA pipeline assets", () => {
     expect(mergeAgent).toContain("PR metadata can explain intent, but topology decides ordering.");
     expect(mergeAgent).toContain("Do not infer stack relationships from PR titles or descriptions");
     expect(mergeAgent).toContain("Do not delete a parent branch while an unmerged child still uses it");
-    expect(approveAgent).toContain("MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>");
-    expect(mergeAgent).toContain("MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>");
+    expect(approveAgent).toContain("canonical `KANNA_MERGE_HANDOFF` line");
+    expect(approveAgent).not.toContain("MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>");
+    expect(mergeAgent).toContain("KANNA_MERGE_HANDOFF");
+    expect(mergeAgent).not.toContain("MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>");
     expect(mergeAgent).toContain("Before deleting any merged remote branch, call `kanna_is_dependent_tasks_exist` with the merged task id");
     expect(mergeAgent).toContain("If it returns `exists: true`, do not delete the remote branch");
     expect(mergeAgent).toContain('If MCP is unavailable, use `kanna-cli task dependent-tasks-exist --task-id "<task_id>"`.');

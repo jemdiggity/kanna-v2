@@ -200,6 +200,7 @@ pub fn run() {
                 bundle_identifier.as_str(),
             );
             app.manage(mobile_manager.clone());
+            let server_pid_receiver = mobile_manager.server_pid_receiver();
             tauri::async_runtime::spawn(async move {
                 if let Err(err) = mobile_manager.start().await {
                     eprintln!("[mobile] failed to start kanna-server: {}", err);
@@ -236,7 +237,7 @@ pub fn run() {
                 ensure_daemon_running().await;
                 // Clear stale connection so commands reconnect to the new daemon
                 *daemon_state.lock().await = None;
-                spawn_event_bridge(handle, daemon_state_bridge);
+                spawn_event_bridge(handle, daemon_state_bridge, server_pid_receiver);
             });
             Ok(())
         })
@@ -247,6 +248,7 @@ pub fn run() {
             commands::daemon::spawn_session,
             commands::daemon::spawn_agent_session,
             commands::daemon::send_input,
+            commands::daemon::send_operator_input,
             commands::daemon::send_agent_input,
             commands::daemon::resize_session,
             commands::daemon::signal_session,
@@ -305,6 +307,8 @@ pub fn run() {
             commands::mobile::mobile_server_status,
             commands::mobile::create_mobile_pairing_session,
             commands::mobile::desktop_cloud_credential,
+            commands::mobile::override_approval_hold,
+            commands::mobile::native_terminal_input,
             // Shell commands
             commands::shell::run_script,
             commands::shell::ensure_term_init,

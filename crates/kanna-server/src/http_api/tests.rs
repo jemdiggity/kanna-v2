@@ -20,6 +20,45 @@ use std::process::Command;
 use std::sync::Arc;
 use tower::ServiceExt;
 
+async fn read_test_daemon_command(
+    reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+) -> kanna_daemon::protocol::Command {
+    read_test_daemon_command_optional(reader, writer)
+        .await
+        .expect("fake daemon connection closed before the expected command")
+}
+
+async fn read_test_daemon_command_optional(
+    reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+) -> Option<kanna_daemon::protocol::Command> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line).await {
+            Ok(0) | Err(_) => return None,
+            Ok(_) => {}
+        }
+        let command = serde_json::from_str(line.trim()).unwrap();
+        if matches!(
+            command,
+            kanna_daemon::protocol::Command::NegotiateProtectedInput { .. }
+        ) {
+            let response = kanna_daemon::protocol::Event::ProtectedInputReady {
+                version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+            };
+            writer
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            continue;
+        }
+        return Some(command);
+    }
+}
+
 fn daemon_socket_path_for_dir(daemon_dir: &str) -> PathBuf {
     kanna_runtime_defaults::socket_path(Path::new(daemon_dir))
 }

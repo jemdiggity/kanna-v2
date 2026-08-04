@@ -305,6 +305,16 @@ async fn request_handoff(
     log::info!("[handoff] received response: {}", line.trim());
     let session_infos = parse_handoff_response(line.trim())?;
 
+    if mode == HandoffMode::LegacyV2
+        && session_infos
+            .iter()
+            .any(|session| session.operator_input_only)
+    {
+        return Err(HandoffRequestError::OldDaemonRefused(
+            "legacy-v2 handoff contains a protected-input session; refusing adoption".to_string(),
+        ));
+    }
+
     if let Err(message) = validate_handoff_fd_counts(&session_infos) {
         // The fd stream is positional: one out-of-protocol count would
         // misassign every subsequent descriptor. Refuse before receiving.
@@ -939,6 +949,23 @@ pub(crate) async fn handle_handoff(
         return false;
     }
 
+    if mode == HandoffMode::LegacyV2 {
+        let handles = sessions.lock().await.handles();
+        for (session_id, handle) in handles {
+            if handle.operator_input_only().await {
+                lifecycle_audit(format_args!(
+                    "event=handoff_refused reason=protected_input_requires_v3 session={session_id}"
+                ));
+                let event = error_event(
+                    Some(protocol::ErrorCode::HandoffVersionMismatch),
+                    format!("legacy-v2 handoff cannot transfer protected session: {session_id}"),
+                );
+                let _ = write_event(&mut *writer.lock().await, &event).await;
+                return false;
+            }
+        }
+    }
+
     // Snapshot and clone fds without removing ownership. The old daemon keeps
     // serving sessions unless the adopting daemon explicitly ACKs success.
     // Fence concurrent PTY Spawn/Kill for the duration of the transfer: a
@@ -1063,6 +1090,8 @@ pub(crate) async fn handle_handoff(
                     provider_session_id: None,
                     agent_fd_count: 0,
                     agent_spawn: None,
+                    operator_input_only: parts.operator_input_only,
+                    input_policy_classified: parts.input_policy_classified,
                 });
                 fds.push(fd);
                 cloned_pty_fds.push(fd);
@@ -1153,6 +1182,8 @@ pub(crate) async fn handle_handoff(
             provider_session_id: record.provider_session_id.clone(),
             agent_fd_count,
             agent_spawn: Some(record.params.clone()),
+            operator_input_only: false,
+            input_policy_classified: true,
         });
         fds.extend(session_fds);
     }

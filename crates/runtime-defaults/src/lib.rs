@@ -2,6 +2,9 @@ pub mod session_id;
 
 use std::path::{Path, PathBuf};
 
+/// Version of the server/daemon contract that fences protected terminal input.
+pub const PROTECTED_INPUT_PROTOCOL_VERSION: u32 = 1;
+
 pub const DESKTOP_BUNDLE_IDENTIFIER: &str = "build.kanna";
 pub const STAGING_DESKTOP_BUNDLE_IDENTIFIER: &str = "build.kanna.staging";
 pub const LEGACY_DESKTOP_BUNDLE_IDENTIFIER: &str = "com.kanna.app";
@@ -313,6 +316,15 @@ pub fn socket_path(dir: &Path) -> PathBuf {
     dir.hash(&mut hasher);
     let hash = hasher.finish() as u32;
     PathBuf::from(format!("/tmp/kanna-{hash:08x}.sock"))
+}
+
+pub fn human_control_socket_path(dir: &Path) -> PathBuf {
+    let daemon_socket = socket_path(dir);
+    let stem = daemon_socket
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("kanna");
+    PathBuf::from(format!("/tmp/{stem}-human.sock"))
 }
 
 pub fn current_target_triple() -> &'static str {
@@ -671,6 +683,18 @@ mod tests {
         ] {
             assert_eq!(socket_path(dir), legacy_socket_path(dir));
         }
+    }
+
+    #[test]
+    fn human_control_socket_path_stays_below_unix_path_limits() {
+        let daemon_dir = Path::new(
+            "/private/var/folders/very/long/worktree/path/that/cannot/fit/in/a/unix/domain/socket/.kanna-daemon",
+        );
+
+        let path = human_control_socket_path(daemon_dir);
+        assert_eq!(path.parent(), Some(Path::new("/tmp")));
+        assert!(path.as_os_str().len() < 104);
+        assert_ne!(path, socket_path(daemon_dir));
     }
 
     #[test]

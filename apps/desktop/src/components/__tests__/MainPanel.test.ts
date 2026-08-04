@@ -103,6 +103,7 @@ describe("MainPanel", () => {
       revisionRounds: 0,
       revisionLimit: 3,
       childTaskIds: [],
+      operatorTerminalInput: false,
     }));
     invokeMock.mockImplementation((command: string) => {
       if (command === "read_env_var") return Promise.resolve("0.0.0");
@@ -110,6 +111,117 @@ describe("MainPanel", () => {
     });
     vi.stubGlobal("__KANNA_MOBILE__", false);
     localStorage.clear();
+  });
+
+  it("waits for the authoritative input policy and never falls back to pipeline metadata", async () => {
+    const { default: MainPanel } = await import("../MainPanel.vue");
+    let resolveDetail: ((detail: object) => void) | undefined;
+    fetchTaskDetailMock.mockImplementation(() => new Promise((resolve) => {
+      resolveDetail = resolve;
+    }));
+    const wrapper = mount(MainPanel, {
+      props: {
+        uiSlot: readySlot(durableTask({ pipeline: "singleton-merge" })),
+        repoPath: "/tmp/repo",
+        hasRepos: true,
+      },
+      global: {
+        mocks: { $t: (key: string) => key },
+        stubs: {
+          TaskHeader: true,
+          TerminalTabs: {
+            name: "TerminalTabs",
+            props: ["operatorTerminalInput"],
+            template: '<div data-testid="terminal-tabs" />',
+          },
+        },
+      },
+    });
+    expect(wrapper.findComponent({ name: "TerminalTabs" }).exists()).toBe(false);
+    expect(wrapper.get('[data-testid="terminal-policy-loading"]').exists()).toBe(true);
+
+    resolveDetail?.({
+      id: "task-pending",
+      stage: "in progress",
+      closedAt: null,
+      latestRun: null,
+      revisionRounds: 0,
+      revisionLimit: 3,
+      childTaskIds: [],
+      operatorTerminalInput: true,
+    });
+    await flushPromises();
+    expect(wrapper.findComponent({ name: "TerminalTabs" }).props("operatorTerminalInput")).toBe(true);
+  });
+
+  it("keeps terminal state but fails closed across refresh failure, then recovers policy", async () => {
+    const { default: MainPanel } = await import("../MainPanel.vue");
+    fetchTaskDetailMock
+      .mockResolvedValueOnce({
+        id: "task-pending",
+        stage: "in progress",
+        closedAt: null,
+        latestRun: null,
+        revisionRounds: 0,
+        revisionLimit: 3,
+        childTaskIds: [],
+        operatorTerminalInput: false,
+      })
+      .mockRejectedValueOnce(new Error("transient detail refresh failure"))
+      .mockResolvedValueOnce({
+        id: "task-pending",
+        stage: "in progress",
+        closedAt: null,
+        latestRun: null,
+        revisionRounds: 0,
+        revisionLimit: 3,
+        childTaskIds: [],
+        operatorTerminalInput: true,
+      });
+    const wrapper = mount(MainPanel, {
+      props: {
+        uiSlot: readySlot(durableTask()),
+        repoPath: "/tmp/repo",
+        hasRepos: true,
+      },
+      attachTo: document.body,
+      global: {
+        mocks: { $t: (key: string) => key },
+        stubs: {
+          TaskHeader: true,
+          TerminalTabs: {
+            name: "TerminalTabs",
+            props: ["operatorTerminalInput"],
+            template: '<textarea data-testid="interactive-terminal">buffer-before-refresh</textarea>',
+          },
+        },
+      },
+    });
+    await flushPromises();
+    const terminal = wrapper.get<HTMLTextAreaElement>('[data-testid="interactive-terminal"]');
+    await terminal.setValue("typed-during-transition");
+    terminal.element.focus();
+
+    await wrapper.setProps({
+      uiSlot: readySlot(durableTask({ activity_revision: 1 })),
+    });
+    await flushPromises();
+    expect(wrapper.get('[data-testid="interactive-terminal"]').element).toBe(terminal.element);
+    expect(terminal.element.value).toBe("typed-during-transition");
+    expect(document.activeElement).toBe(terminal.element);
+    // The stale generic policy must not survive a failed refresh that may
+    // represent a same-id respawn into a protected merge terminal.
+    expect(wrapper.findComponent({ name: "TerminalTabs" }).props("operatorTerminalInput")).toBe(true);
+
+    await wrapper.setProps({
+      uiSlot: readySlot(durableTask({ activity_revision: 2 })),
+    });
+    await flushPromises();
+    expect(wrapper.get('[data-testid="interactive-terminal"]').element).toBe(terminal.element);
+    expect(terminal.element.value).toBe("typed-during-transition");
+    expect(document.activeElement).toBe(terminal.element);
+    expect(wrapper.findComponent({ name: "TerminalTabs" }).props("operatorTerminalInput")).toBe(true);
+    wrapper.unmount();
   });
 
   it("shows a dismissible command hint at the bottom even without repos or tasks and keeps it hidden after dismissal", async () => {
@@ -373,6 +485,7 @@ describe("MainPanel", () => {
       cloudTask: false,
       cloudTerminalRef: null,
     });
+    await flushPromises();
 
     expect(wrapper.find(".setup-placeholder").exists()).toBe(false);
     expect(wrapper.get('[data-testid="terminal-tabs"]').attributes("data-session-id")).toBe("task-pending");

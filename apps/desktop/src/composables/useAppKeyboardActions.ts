@@ -234,6 +234,10 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       await invoke("run_script", { script: `${store.ideCommand} "${worktreePath}"`, cwd: worktreePath, env: {} }).catch((e) => console.error("[openInIDE] failed:", e));
     },
     advanceStage: () => {
+      if (showDiffModal.value) {
+        void diffModalRef.value?.approveReview();
+        return;
+      }
       const workspaceTask = selectedWorkspaceTask.value;
       if (workspaceTask) {
         if (selectedWorkspaceTaskBlocked.value) {

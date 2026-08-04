@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod analytics;
+mod approval;
 mod blockers;
 mod create_intents;
 mod notifications;
@@ -25,6 +26,11 @@ mod worktrees;
 
 #[allow(unused_imports)]
 pub use analytics::RepoAnalytics;
+#[allow(unused_imports)]
+pub use approval::{
+    ApprovalDeliveryReservation, ApprovalGate, ApprovalGateState, ApprovalHold,
+    ApprovalOverrideRecord, ExplicitStageDisposition,
+};
 pub use blockers::ReplaceTaskBlockersError;
 #[allow(unused_imports)]
 pub use operator_events::NewOperatorEvent;
@@ -84,6 +90,11 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "039_stage_run_resume_fallback_reason",
     "040_stage_run_effort",
     "041_pipeline_item_parentage_index",
+    "042_task_approval_lineage",
+    "043_task_approval_atomic_projection",
+    "044_task_approval_authorization",
+    "045_agent_signal_protocol",
+    "046_completion_and_merge_delivery_binding",
 ];
 
 #[derive(Debug, Serialize)]
@@ -371,6 +382,13 @@ pub struct ClaimedTaskNotification {
 pub struct OpenAgentTask {
     pub task_id: String,
     pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeSignalRecipient {
+    pub task_id: String,
+    pub session_id: String,
+    pub protocol: i64,
 }
 
 #[derive(Debug)]
@@ -699,13 +717,15 @@ fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           resumed_from_run_id TEXT,
           resume_fallback_reason TEXT,
           completion_transition TEXT CHECK (completion_transition IN ('manual', 'auto')),
+          completion_bound INTEGER NOT NULL DEFAULT 0,
           started_at TEXT NOT NULL DEFAULT (datetime('now')),
           finished_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_stage_run_task_started ON stage_run(task_id, started_at);
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         "#,
-    )
+    )?;
+    create_task_approval_lineage_schema(conn)
 }
 
 fn has_migration(conn: &Connection, id: &str) -> Result<bool, rusqlite::Error> {
@@ -1451,7 +1471,329 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         )
     })?;
 
+    run_migration(conn, "042_task_approval_lineage", |conn| {
+        create_task_approval_lineage_schema(conn)?;
+        // Existing failed main runs are authoritative even though they predate
+        // the projection. Only a later successful main run in the same stage
+        // supersedes them; successful commit/approve posts deliberately do not.
+        conn.execute_batch(
+            r#"
+            INSERT OR IGNORE INTO task_approval_hold
+              (task_id, run_id, scope_stage, kind, summary, created_at)
+            SELECT
+              failed.task_id,
+              failed.id,
+              failed.stage,
+              'failed_result',
+              COALESCE(NULLIF(failed.feedback, ''), NULLIF(failed.result, ''), 'main stage run failed'),
+              COALESCE(failed.finished_at, failed.started_at, datetime('now'))
+            FROM stage_run AS failed
+            WHERE failed.kind = 'main'
+              AND failed.status = 'failed'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM stage_run AS succeeded
+                WHERE succeeded.task_id = failed.task_id
+                  AND succeeded.kind = 'main'
+                  AND succeeded.stage = failed.stage
+                  AND succeeded.status = 'succeeded'
+                  AND succeeded.rowid > failed.rowid
+              );
+
+            -- One-time compatibility for successful diagnostic posts that
+            -- explicitly carried the old prose disposition. New writes use
+            -- CompleteStageRequest.disposition and never depend on parsing.
+            INSERT OR IGNORE INTO task_approval_hold
+              (task_id, run_id, scope_stage, kind, summary, created_at)
+            SELECT
+              post.task_id,
+              post.id,
+              COALESCE(
+                (
+                  SELECT failed.stage
+                  FROM stage_run AS failed
+                  WHERE failed.task_id = post.task_id
+                    AND failed.kind = 'main'
+                    AND failed.status = 'failed'
+                    AND failed.rowid < post.rowid
+                  ORDER BY failed.rowid DESC
+                  LIMIT 1
+                ),
+                owner.stage
+              ),
+              'not_merge_candidate',
+              COALESCE(NULLIF(post.feedback, ''), NULLIF(post.result, ''), 'not a merge candidate'),
+              COALESCE(post.finished_at, post.started_at, datetime('now'))
+            FROM stage_run AS post
+            JOIN pipeline_item AS owner ON owner.id = post.task_id
+            WHERE post.kind = 'post'
+              AND post.status = 'succeeded'
+              AND (
+                lower(COALESCE(post.feedback, '')) LIKE '%not a merge candidate%'
+                OR lower(COALESCE(post.result, '')) LIKE '%not a merge candidate%'
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM stage_run AS succeeded
+                WHERE succeeded.task_id = post.task_id
+                  AND succeeded.kind = 'main'
+                  AND succeeded.status = 'succeeded'
+                  AND succeeded.rowid > post.rowid
+                  AND succeeded.stage = COALESCE(
+                    (
+                      SELECT failed.stage
+                      FROM stage_run AS failed
+                      WHERE failed.task_id = post.task_id
+                        AND failed.kind = 'main'
+                        AND failed.status = 'failed'
+                        AND failed.rowid < post.rowid
+                      ORDER BY failed.rowid DESC
+                      LIMIT 1
+                    ),
+                    owner.stage
+                  )
+              );
+            "#,
+        )
+    })?;
+
+    run_migration(conn, "043_task_approval_atomic_projection", |conn| {
+        create_task_approval_lineage_schema(conn)
+    })?;
+
+    run_migration(conn, "044_task_approval_authorization", |conn| {
+        create_task_approval_authorization_schema(conn)
+    })?;
+
+    run_migration(conn, "045_agent_signal_protocol", |conn| {
+        create_agent_signal_protocol_schema(conn)
+    })?;
+
+    run_migration(conn, "046_completion_and_merge_delivery_binding", |conn| {
+        add_column(
+            conn,
+            "stage_run",
+            "completion_bound",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        add_column(
+            conn,
+            "task_approval_authorization",
+            "delivery_task_id",
+            "TEXT",
+        )?;
+        add_column(
+            conn,
+            "task_approval_authorization",
+            "delivery_session_id",
+            "TEXT",
+        )?;
+        add_column(
+            conn,
+            "task_approval_authorization",
+            "delivery_protocol",
+            "INTEGER",
+        )?;
+        add_column(
+            conn,
+            "task_approval_authorization",
+            "delivery_reserved_at",
+            "TEXT",
+        )?;
+        add_column(conn, "agent_signal_protocol", "session_id", "TEXT")
+    })?;
+
     Ok(())
+}
+
+fn create_task_approval_authorization_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS task_approval_authorization (
+          run_id TEXT PRIMARY KEY REFERENCES stage_run(id) ON DELETE CASCADE,
+          task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+          repo_id TEXT NOT NULL REFERENCES repo(id) ON DELETE CASCADE,
+          branch TEXT NOT NULL,
+          target TEXT NOT NULL,
+          pr_url TEXT,
+          approval_json TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          delivered_at TEXT,
+          delivery_task_id TEXT,
+          delivery_session_id TEXT,
+          delivery_protocol INTEGER,
+          delivery_reserved_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_approval_authorization_task
+          ON task_approval_authorization(task_id, created_at);
+        "#,
+    )
+}
+
+fn create_agent_signal_protocol_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS agent_signal_protocol (
+          task_id TEXT PRIMARY KEY REFERENCES pipeline_item(id) ON DELETE CASCADE,
+          session_id TEXT,
+          merge_handoff_version INTEGER NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        "#,
+    )
+}
+
+fn create_task_approval_lineage_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS task_approval_override (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+          actor TEXT NOT NULL,
+          channel TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS task_approval_hold (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL UNIQUE REFERENCES stage_run(id) ON DELETE CASCADE,
+          scope_stage TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('failed_result', 'needs_human_input', 'not_merge_candidate')),
+          summary TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          resolved_by_run_id TEXT REFERENCES stage_run(id),
+          resolved_at TEXT,
+          override_id TEXT REFERENCES task_approval_override(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_approval_hold_task
+          ON task_approval_hold(task_id, id);
+        CREATE TRIGGER IF NOT EXISTS stage_run_failed_main_approval_hold_insert
+        AFTER INSERT ON stage_run
+        WHEN NEW.kind = 'main' AND NEW.status = 'failed'
+        BEGIN
+          INSERT INTO task_approval_hold
+            (task_id, run_id, scope_stage, kind, summary)
+          VALUES
+            (NEW.task_id, NEW.id, NEW.stage, 'failed_result',
+             COALESCE(NULLIF(NEW.feedback, ''), NULLIF(NEW.result, ''), 'main stage run failed'))
+          ON CONFLICT(run_id) DO UPDATE SET
+            scope_stage = excluded.scope_stage,
+            kind = 'failed_result',
+            summary = excluded.summary,
+            created_at = datetime('now'),
+            resolved_by_run_id = NULL,
+            resolved_at = NULL,
+            override_id = NULL;
+        END;
+        CREATE TRIGGER IF NOT EXISTS stage_run_failed_main_approval_hold_update
+        AFTER UPDATE OF status, result, feedback ON stage_run
+        WHEN NEW.kind = 'main' AND NEW.status = 'failed'
+        BEGIN
+          INSERT INTO task_approval_hold
+            (task_id, run_id, scope_stage, kind, summary)
+          VALUES
+            (NEW.task_id, NEW.id, NEW.stage, 'failed_result',
+             COALESCE(NULLIF(NEW.feedback, ''), NULLIF(NEW.result, ''), 'main stage run failed'))
+          ON CONFLICT(run_id) DO UPDATE SET
+            scope_stage = excluded.scope_stage,
+            kind = 'failed_result',
+            summary = excluded.summary,
+            created_at = datetime('now'),
+            resolved_by_run_id = NULL,
+            resolved_at = NULL,
+            override_id = NULL;
+        END;
+        CREATE TRIGGER IF NOT EXISTS stage_run_structured_approval_hold_insert
+        AFTER INSERT ON stage_run
+        WHEN CASE
+          WHEN json_valid(NEW.result)
+          THEN json_extract(NEW.result, '$.disposition')
+          ELSE NULL
+        END IN ('needs_human_input', 'not_merge_candidate')
+        BEGIN
+          INSERT INTO task_approval_hold
+            (task_id, run_id, scope_stage, kind, summary)
+          VALUES
+            (NEW.task_id, NEW.id,
+             CASE
+               WHEN NEW.kind = 'post'
+               THEN COALESCE((SELECT stage FROM pipeline_item WHERE id = NEW.task_id), NEW.stage)
+               ELSE NEW.stage
+             END,
+             json_extract(NEW.result, '$.disposition'),
+             COALESCE(NULLIF(NEW.feedback, ''), NULLIF(NEW.result, ''), 'explicit approval hold'))
+          ON CONFLICT(run_id) DO UPDATE SET
+            scope_stage = excluded.scope_stage,
+            kind = excluded.kind,
+            summary = excluded.summary,
+            created_at = datetime('now'),
+            resolved_by_run_id = NULL,
+            resolved_at = NULL,
+            override_id = NULL;
+        END;
+        CREATE TRIGGER IF NOT EXISTS stage_run_structured_approval_hold_update
+        AFTER UPDATE OF status, result, feedback ON stage_run
+        WHEN CASE
+          WHEN json_valid(NEW.result)
+          THEN json_extract(NEW.result, '$.disposition')
+          ELSE NULL
+        END IN ('needs_human_input', 'not_merge_candidate')
+        BEGIN
+          INSERT INTO task_approval_hold
+            (task_id, run_id, scope_stage, kind, summary)
+          VALUES
+            (NEW.task_id, NEW.id,
+             CASE
+               WHEN NEW.kind = 'post'
+               THEN COALESCE((SELECT stage FROM pipeline_item WHERE id = NEW.task_id), NEW.stage)
+               ELSE NEW.stage
+             END,
+             json_extract(NEW.result, '$.disposition'),
+             COALESCE(NULLIF(NEW.feedback, ''), NULLIF(NEW.result, ''), 'explicit approval hold'))
+          ON CONFLICT(run_id) DO UPDATE SET
+            scope_stage = excluded.scope_stage,
+            kind = excluded.kind,
+            summary = excluded.summary,
+            created_at = datetime('now'),
+            resolved_by_run_id = NULL,
+            resolved_at = NULL,
+            override_id = NULL;
+        END;
+        CREATE TRIGGER IF NOT EXISTS stage_run_success_main_resolve_approval_hold_insert
+        AFTER INSERT ON stage_run
+        WHEN NEW.kind = 'main' AND NEW.status = 'succeeded'
+        BEGIN
+          UPDATE task_approval_hold
+          SET resolved_by_run_id = NEW.id, resolved_at = datetime('now')
+          WHERE task_id = NEW.task_id
+            AND scope_stage = NEW.stage
+            AND resolved_at IS NULL
+            AND EXISTS (
+              SELECT 1
+              FROM stage_run AS origin
+              WHERE origin.id = task_approval_hold.run_id
+                AND origin.rowid < NEW.rowid
+            );
+        END;
+        CREATE TRIGGER IF NOT EXISTS stage_run_success_main_resolve_approval_hold_update
+        AFTER UPDATE OF status, result, feedback ON stage_run
+        WHEN NEW.kind = 'main' AND NEW.status = 'succeeded'
+        BEGIN
+          UPDATE task_approval_hold
+          SET resolved_by_run_id = NEW.id, resolved_at = datetime('now')
+          WHERE task_id = NEW.task_id
+            AND scope_stage = NEW.stage
+            AND resolved_at IS NULL
+            AND EXISTS (
+              SELECT 1
+              FROM stage_run AS origin
+              WHERE origin.id = task_approval_hold.run_id
+                AND origin.rowid < NEW.rowid
+            );
+        END;
+        "#,
+    )
 }
 
 /// Events exist to be tailed, not archived: a watcher that has been away for

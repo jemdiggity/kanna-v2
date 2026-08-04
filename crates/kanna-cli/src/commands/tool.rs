@@ -104,7 +104,10 @@ pub(crate) async fn call_catalog_tool(
     name: &str,
     args: &Value,
 ) -> Result<(ResponseKind, Value), String> {
-    let request = resolve_request(catalog, name, args)?;
+    let mut request = resolve_request(catalog, name, args)?;
+    if name == "kanna_complete_stage" {
+        bind_request_to_spawned_run(base_url, &mut request).await?;
+    }
     let kind = request.kind;
     let task_id = env::var("KANNA_TASK_ID")
         .ok()
@@ -121,6 +124,41 @@ pub(crate) async fn call_catalog_tool(
     )
     .await?;
     Ok((kind, value))
+}
+
+async fn bind_request_to_spawned_run(
+    _base_url: &str,
+    request: &mut ResolvedRequest,
+) -> Result<(), String> {
+    let attempt_key = kanna_tool_catalog::completion_attempt_key(&request.body)?;
+    let context_path =
+        env::var_os(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV).map(std::path::PathBuf::from);
+    let context = match context_path.as_ref() {
+        Some(path) => Some(kanna_tool_catalog::read_completion_context(path)?),
+        None => None,
+    };
+    let run_id = context
+        .as_ref()
+        .map(|context| {
+            context
+                .run_for_attempt(&attempt_key)
+                .unwrap_or(&context.run_id)
+                .to_string()
+        })
+        .or_else(|| env::var(kanna_tool_catalog::KANNA_STAGE_RUN_ID_ENV).ok());
+    let Some(run_id) = run_id.filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+    let body = request
+        .body
+        .as_object_mut()
+        .ok_or_else(|| "complete-stage request body must be an object".to_string())?;
+    body.insert("runId".to_string(), Value::String(run_id.to_string()));
+    body.insert(
+        "completionAttemptKey".to_string(),
+        Value::String(attempt_key.clone()),
+    );
+    Ok(())
 }
 
 async fn get_runtime_status(base_url: &str, path: &str) -> Result<Value, String> {

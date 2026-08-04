@@ -201,6 +201,7 @@ export async function fetchDesktopSnapshot(): Promise<DesktopSnapshot> {
 }
 
 export interface DesktopTaskLatestRun {
+  id: string;
   stage: string;
   kind: string;
   status: string;
@@ -218,6 +219,7 @@ export interface DesktopTaskDetail {
   revisionRounds: number;
   revisionLimit: number;
   childTaskIds: string[];
+  operatorTerminalInput?: boolean;
 }
 
 export async function fetchDesktopTaskDetail(taskId: string): Promise<DesktopTaskDetail> {

@@ -266,6 +266,10 @@
     "requestChanges": "변경 요청",
     "approve": "승인",
     "approveMerge": "승인 후 머지",
+    "approvalHoldTitle": "승인 보류",
+    "approvalHoldExplanation": "이 작업에는 해결되지 않은 실패, 사용자 입력 필요 또는 머지 후보 아님 결과가 있습니다. 일반 승인은 이를 해제할 수 없습니다. 이 이력을 의도적으로 수락하는 경우에만 재정의하세요. 이유와 이 데스크톱의 식별 정보가 기록되어 머지 마스터로 전달됩니다.",
+    "approvalOverrideReasonPlaceholder": "보류가 있어도 머지해도 되는 이유",
+    "recordOverrideAndApprove": "재정의 기록 및 승인",
     "summaryPlaceholder": "선택 요약...",
     "sendRequestChanges": "요청 보내기",
     "shortcutClose": "닫기"

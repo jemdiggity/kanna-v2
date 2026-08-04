@@ -44,6 +44,34 @@ struct LoadedStageIdentity {
     repo: Repo,
 }
 
+fn stage_is_approval_boundary(stage: &PipelineStage, is_final: bool) -> bool {
+    stage.name == "approve"
+        || stage.agent.as_deref() == Some("approve")
+        || (stage.name == "pr" && is_final)
+        || stage
+            .post
+            .as_ref()
+            .is_some_and(|post| post.name == "approve" || post.agent.as_deref() == Some("approve"))
+}
+
+fn ensure_approval_gate_allows_transition(db: &Db, task_id: &str) -> Result<(), String> {
+    let gate = db
+        .task_approval_gate(task_id)
+        .map_err(|error| format!("db error: {error}"))?;
+    if gate.permits_approval() {
+        return Ok(());
+    }
+    let reasons = gate
+        .holds
+        .iter()
+        .map(|hold| format!("{} {}: {}", hold.stage, hold.kind, hold.summary))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(format!(
+        "approval held: task {task_id} has unresolved lineage disposition(s): {reasons}. A normal advance is not an override; use the explicit human approval override flow with a reason."
+    ))
+}
+
 fn load_stage_identity(db: &Db, source_task_id: &str) -> Result<LoadedStageIdentity, String> {
     let source_task = db
         .get_task_stage_source(source_task_id)
@@ -112,20 +140,36 @@ pub(crate) fn prepare_advance_stage_for_api(
     match position {
         // Legacy in-flight task parked at a folded post name (e.g. `commit`):
         // the post is the current context, so advancing swaps past its owner.
-        StagePosition::Post { owner } => prepare_swap_to_index(db, config, &context, owner + 1),
+        StagePosition::Post { owner } => {
+            if stage_is_approval_boundary(
+                &loaded.pipeline.stages[owner],
+                owner + 1 == loaded.pipeline.stages.len(),
+            ) {
+                ensure_approval_gate_allows_transition(db, source_task_id)?;
+            }
+            prepare_swap_to_index(db, config, &context, owner + 1)
+        }
         StagePosition::Stage(index) => {
             let stage = &loaded.pipeline.stages[index];
+            if stage_is_approval_boundary(stage, index + 1 == loaded.pipeline.stages.len()) {
+                ensure_approval_gate_allows_transition(db, source_task_id)?;
+            }
             if let Some(post) = &stage.post {
                 let latest = db
                     .latest_stage_run(source_task_id)
                     .map_err(|e| format!("db error: {}", e))?;
                 // Dispatch the post unless it already ran for this stage
-                // visit: a succeeded post means the transition proceeds, and
-                // a still-running post being advanced again is a human
-                // override (swap immediately). Failed or cancelled posts are
-                // re-dispatched.
+                // visit. A repeated advance while it is running is never an
+                // override; only the post's verdict may complete the deferred
+                // transition. Failed or cancelled posts are re-dispatched.
                 let post_pending = match &latest {
                     Some(run) if run.kind == "post" && run.stage == post.name => {
+                        if run.status == "running" {
+                            return Err(format!(
+                                "post is still running for task {source_task_id}: {}",
+                                post.name
+                            ));
+                        }
                         matches!(run.status.as_str(), "failed" | "cancelled")
                     }
                     _ => true,
@@ -173,11 +217,20 @@ pub(crate) fn prepare_stage_completion_for_api(
         // Legacy in-flight task parked at a folded post name: success means
         // the post finished, which always advances past its owner.
         StagePosition::Post { owner } => {
+            if stage_is_approval_boundary(
+                &loaded.pipeline.stages[owner],
+                owner + 1 == loaded.pipeline.stages.len(),
+            ) {
+                ensure_approval_gate_allows_transition(db, source_task_id)?;
+            }
             prepare_swap_to_index(db, config, &context, owner + 1).map(Some)
         }
         StagePosition::Stage(index) => {
             let stage = &loaded.pipeline.stages[index];
             if finished_run_kind == Some("post") {
+                if stage_is_approval_boundary(stage, index + 1 == loaded.pipeline.stages.len()) {
+                    ensure_approval_gate_allows_transition(db, source_task_id)?;
+                }
                 return prepare_swap_to_index(db, config, &context, index + 1).map(Some);
             }
             let transition = match completion_transition {
@@ -235,6 +288,9 @@ fn prepare_swap_to_index(
             workspace_teardown,
         });
     };
+    if next_stage.name == "approve" || next_stage.agent.as_deref() == Some("approve") {
+        ensure_approval_gate_allows_transition(db, context.source_task_id)?;
+    }
     let from_stage = context
         .source_task
         .stage
@@ -264,6 +320,13 @@ fn prepare_post_dispatch(
     owner_index: usize,
 ) -> Result<PreparedStageTransition, String> {
     let owner = &context.pipeline.stages[owner_index];
+    if owner
+        .post
+        .as_ref()
+        .is_some_and(|post| post.name == "approve" || post.agent.as_deref() == Some("approve"))
+    {
+        ensure_approval_gate_allows_transition(db, context.source_task_id)?;
+    }
     let post_stage =
         post_as_stage(owner).ok_or_else(|| format!("stage has no post: {}", owner.name))?;
     let run_stage = post_stage.name.clone();

@@ -65,6 +65,8 @@ fn parse_handoff_response_accepts_v2_payload() {
             provider_session_id: None,
             agent_fd_count: 0,
             agent_spawn: None,
+            operator_input_only: false,
+            input_policy_classified: false,
         }],
     })
     .unwrap();
@@ -654,6 +656,8 @@ fn handoff_session(kind: protocol::SessionKind, agent_fd_count: u8) -> protocol:
         provider_session_id: None,
         agent_fd_count,
         agent_spawn: None,
+        operator_input_only: false,
+        input_policy_classified: true,
     }
 }
 
@@ -1445,6 +1449,8 @@ async fn forged_agent_handoff_cannot_target_unrelated_processes() {
         provider_session_id: Some("prov-forged".to_string()),
         agent_fd_count: 2,
         agent_spawn: Some(sleeper_spawn_params("forged")),
+        operator_input_only: false,
+        input_policy_classified: true,
     };
     crate::agent_runtime::adopt_agent_session(
         info,
@@ -1517,6 +1523,8 @@ async fn legacy_handoff_without_identity_keeps_live_agents_killable() {
         provider_session_id: Some("prov-legacy".to_string()),
         agent_fd_count: 2,
         agent_spawn: Some(sleeper_spawn_params("legacy")),
+        operator_input_only: false,
+        input_policy_classified: false,
     };
     crate::agent_runtime::adopt_agent_session(
         info,

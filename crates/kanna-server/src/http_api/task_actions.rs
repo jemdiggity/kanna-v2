@@ -1,4 +1,4 @@
-use super::lan_trust::PrivilegedTaskAccess;
+use super::lan_trust::{HumanApprovalOverrideAccess, PrivilegedTaskAccess};
 use super::state::{db_write_error, AppState};
 use super::task_blockers::{
     resolve_existing_task_id, start_dependents_unblocked_by_close_with_daemon,
@@ -11,8 +11,92 @@ use kanna_agent_protocol::StateChangeScope;
 use serde::Deserialize;
 use std::sync::Arc;
 
+pub(super) async fn override_approval_hold(
+    access: HumanApprovalOverrideAccess,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(payload): Json<crate::mobile_api::ApprovalOverrideRequest>,
+) -> Result<Json<crate::db::ApprovalGate>, (axum::http::StatusCode, String)> {
+    record_approval_override(state, task_id, payload.reason, access.actor, access.channel)
+        .await
+        .map(Json)
+}
+
+pub(crate) async fn record_approval_override(
+    state: Arc<AppState>,
+    task_id: String,
+    reason: String,
+    actor: String,
+    channel: String,
+) -> Result<crate::db::ApprovalGate, (axum::http::StatusCode, String)> {
+    let reason = reason.trim().to_string();
+    if reason.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "approval override reason must be non-empty".into(),
+        ));
+    }
+    if reason.chars().count() > 2_000 {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "approval override reason must be at most 2000 characters".into(),
+        ));
+    }
+    let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
+    let _task_mutation = state.begin_requested_task_mutation(&task_id).await;
+    let gate = {
+        let state = Arc::clone(&state);
+        let task_id = task_id.clone();
+        super::blocking::run_handler_blocking("approval override record", move || {
+            let db = Db::open(&state.config.db_path).map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {error}"),
+                )
+            })?;
+            let task = db
+                .get_pipeline_item(&task_id)
+                .map_err(|error| db_write_error("db error", error))?
+                .ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::NOT_FOUND,
+                        format!("task not found: {task_id}"),
+                    )
+                })?;
+            if task.closed_at.is_some() {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!("task is closed: {task_id}"),
+                ));
+            }
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            let override_id = format!("approval-override-{task_id}-{nanos}");
+            let recorded = db
+                .record_approval_override(&task_id, &override_id, &actor, &channel, &reason)
+                .map_err(|error| db_write_error("db error", error))?;
+            if !recorded {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!("task has no unresolved approval hold: {task_id}"),
+                ));
+            }
+            db.task_approval_gate(&task_id)
+                .map_err(|error| db_write_error("db error", error))
+        })
+        .await?
+    };
+    state.publish_state_changed(StateChangeScope::Tasks);
+    Ok(gate)
+}
+
 fn stage_action_error_status(error: &str) -> axum::http::StatusCode {
-    if error.starts_with("task is blocked:") {
+    if error.starts_with("task is blocked:")
+        || error.starts_with("approval held:")
+        || error.starts_with("post is still running")
+    {
         axum::http::StatusCode::CONFLICT
     } else {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
@@ -81,6 +165,17 @@ pub(super) async fn run_merge_agent(
         })
         .await?
     };
+    {
+        let state = Arc::clone(&state);
+        let merge_task_id = prepared.task_id().to_string();
+        let merge_session_id = prepared.session_id().to_string();
+        super::blocking::run_handler_blocking("merge protocol record", move || {
+            let db = Db::open(&state.config.db_path).map_err(|e| db_write_error("db error", e))?;
+            db.set_merge_handoff_protocol(&merge_task_id, &merge_session_id, 1)
+                .map_err(|e| db_write_error("db error", e))
+        })
+        .await?;
+    }
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
         .map_err(|e| {
@@ -612,6 +707,7 @@ pub(super) async fn close_task(
         )
         .await;
     }
+    crate::task_creator::remove_completion_contexts(&state.config.daemon_dir, &pipeline_item_id);
     // A direct close reaches no verdict, so it is reported as `closed` — never
     // as a failure the receiving agent would try to diagnose.
     notify_task_completion(
@@ -768,6 +864,7 @@ async fn close_task_after_final_stage(
             format!("db error: {}", e),
         )
     })?;
+    crate::task_creator::remove_completion_contexts(&state.config.daemon_dir, &task_id);
     if has_workspace_teardown {
         crate::task_creator::spawn_prepared_workspace_teardown_best_effort(
             daemon,
@@ -1252,23 +1349,31 @@ pub(super) async fn complete_stage(
     }
     let should_auto_advance = payload.status == "success";
 
-    let stage_result = serde_json::to_string(&serde_json::json!({
+    let mut stage_result_value = serde_json::json!({
         "status": payload.status,
         "summary": payload.summary,
         "metadata": payload.metadata,
-    }))
-    .map_err(|e| {
+    });
+    if let Some(disposition) = payload.disposition {
+        stage_result_value["disposition"] = serde_json::json!(disposition.as_str());
+    }
+    let stage_result = serde_json::to_string(&stage_result_value).map_err(|e| {
         (
             axum::http::StatusCode::BAD_REQUEST,
             format!("invalid stage result: {}", e),
         )
     })?;
 
-    let (task_id, finished_run) = {
+    let completion_attempt_key = payload.completion_attempt_key.clone();
+    let completion_attempt_key_for_record = completion_attempt_key.clone();
+    let completion_run_id = payload.run_id.clone();
+    let (task_id, finished_run, already_closed, replayed) = {
         let state = Arc::clone(&state);
         let payload_status = payload.status;
         let payload_summary = payload.summary;
         let payload_metadata = payload.metadata;
+        let payload_disposition = payload.disposition;
+        let payload_run_id = payload.run_id;
         super::blocking::run_handler_blocking("stage completion record", move || {
             let db = Db::open(&state.config.db_path).map_err(|e| {
                 (
@@ -1285,35 +1390,128 @@ pub(super) async fn complete_stage(
                         format!("task not found: {}", task_id),
                     )
                 })?;
+            if db
+                .get_pipeline_item(&task_id)
+                .map_err(|e| db_write_error("db error", e))?
+                .is_some_and(|item| item.closed_at.is_some())
+            {
+                return Ok((task_id, None, true, false));
+            }
             let run_status = if payload_status == "success" {
                 "succeeded"
             } else {
                 "failed"
             };
-            let finished_run = db
-                .finish_latest_running_stage_run(
-                    &task_id,
-                    run_status,
-                    Some(&stage_result),
-                    Some(&payload_summary),
-                )
-                .map_err(|e| db_write_error("db error", e))?;
-            // A parked task has no running run (its last verdict finished it).
-            // An agent may recover after reporting failure — e.g. the commit
-            // post cleans up and reports success — and that late verdict must
-            // both stick and keep its run identity, or a corrected post would
-            // never perform its deferred transition.
-            let finished_run = match finished_run {
-                Some(run) => Some(run),
-                None => db
-                    .refinish_latest_stage_run(
-                        &task_id,
-                        run_status,
-                        Some(&stage_result),
-                        Some(&payload_summary),
+            let current_run = db
+                .latest_stage_run(&task_id)
+                .map_err(|e| db_write_error("db error", e))?
+                .ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::CONFLICT,
+                        format!("task has no stage run to complete: {task_id}"),
                     )
-                    .map_err(|e| db_write_error("db error", e))?,
+                })?;
+            let mut payload_run_id = match payload_run_id {
+                Some(run_id) if !run_id.trim().is_empty() => run_id,
+                Some(_) => {
+                    return Err((
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "runId must be non-empty when provided".into(),
+                    ))
+                }
+                None => {
+                    if db
+                        .stage_run_completion_bound(&current_run.id)
+                        .map_err(|e| db_write_error("db error", e))?
+                    {
+                        return Err((
+                            axum::http::StatusCode::CONFLICT,
+                            "runId is required for this spawned run; restart the completion adapter if it predates the run".into(),
+                        ));
+                    }
+                    current_run.id.clone()
+                }
             };
+            if let Some(attempt_key) = completion_attempt_key_for_record.as_deref() {
+                if let Some(original_run_id) =
+                    crate::task_creator::resolve_legacy_completion_retry_run(
+                        &state.config.daemon_dir,
+                        &db,
+                        &task_id,
+                        &payload_run_id,
+                        attempt_key,
+                    )
+                {
+                    payload_run_id = original_run_id;
+                }
+            }
+            if current_run.id != payload_run_id {
+                let prior = db
+                    .stage_run(&payload_run_id)
+                    .map_err(|e| db_write_error("db error", e))?;
+                if prior.as_ref().is_some_and(|run| {
+                    run.task_id == task_id
+                        && run.status == run_status
+                        && run.result.as_deref() == Some(stage_result.as_str())
+                }) {
+                    return Ok((task_id, None, false, true));
+                }
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!(
+                        "stale stage completion for run {payload_run_id}; current run is {}",
+                        current_run.id
+                    ),
+                ));
+            }
+            if current_run.status == run_status
+                && current_run.result.as_deref() == Some(stage_result.as_str())
+            {
+                return Ok((task_id, None, false, true));
+            }
+            if !matches!(
+                current_run.status.as_str(),
+                "running" | "succeeded" | "failed"
+            ) {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!(
+                        "stage run {payload_run_id} cannot be completed from status {}",
+                        current_run.status
+                    ),
+                ));
+            }
+            db.finish_stage_run(
+                &payload_run_id,
+                run_status,
+                Some(&stage_result),
+                Some(&payload_summary),
+            )
+            .map_err(|e| db_write_error("db error", e))?;
+            let finished_run = Some(crate::db::FinishedStageRun {
+                id: current_run.id,
+                stage: current_run.stage,
+                kind: current_run.kind,
+                completion_transition: current_run.completion_transition,
+            });
+            if let Some(run) = finished_run.as_ref() {
+                let logical_stage = db
+                    .get_pipeline_item(&task_id)
+                    .map_err(|e| db_write_error("db error", e))?
+                    .and_then(|item| item.stage)
+                    .unwrap_or_else(|| run.stage.clone());
+                db.apply_explicit_stage_disposition(crate::db::ExplicitStageDisposition {
+                    task_id: &task_id,
+                    run_id: &run.id,
+                    run_stage: &run.stage,
+                    run_kind: &run.kind,
+                    run_status,
+                    logical_stage: &logical_stage,
+                    disposition: payload_disposition.map(|value| value.as_str()),
+                    summary: &payload_summary,
+                })
+                .map_err(|e| db_write_error("db error", e))?;
+            }
             if payload_status == "success" {
                 if let Some(pr_url) =
                     pr_url_from_verdict(payload_metadata.as_ref(), &payload_summary)
@@ -1322,10 +1520,25 @@ pub(super) async fn complete_stage(
                         .map_err(|e| db_write_error("db error", e))?;
                 }
             }
-            Ok((task_id, finished_run))
+            Ok((task_id, finished_run, false, false))
         })
         .await?
     };
+
+    if let (Some(run_id), Some(attempt_key)) = (
+        completion_run_id.as_deref(),
+        completion_attempt_key.as_deref(),
+    ) {
+        mark_completion_context_succeeded(&state.config.daemon_dir, &task_id, run_id, attempt_key);
+    }
+
+    if already_closed || replayed {
+        return Ok(Json(crate::mobile_api::TaskActionResponse {
+            task_id,
+            follow_task: None,
+            revision_budget: None,
+        }));
+    }
 
     if !should_auto_advance {
         state.publish_state_changed(StateChangeScope::Tasks);
@@ -1355,7 +1568,7 @@ pub(super) async fn complete_stage(
                     .as_ref()
                     .and_then(|run| run.completion_transition.as_deref()),
             )
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
+            .map_err(|e| (stage_action_error_status(&e), e))
         })
         .await?
     };
@@ -1390,6 +1603,71 @@ pub(super) async fn complete_stage(
     );
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(response))
+}
+
+fn mark_completion_context_succeeded(
+    daemon_dir: &str,
+    task_id: &str,
+    run_id: &str,
+    attempt_key: &str,
+) {
+    let directory = std::path::Path::new(daemon_dir)
+        .join("runtime")
+        .join("completion");
+    let task_path = directory.join(format!("task-{task_id}.json"));
+    let legacy_path = directory.join(format!("{run_id}.json"));
+    let legacy_shared_path =
+        kanna_runtime_defaults::socket_path(&std::path::Path::new(daemon_dir).join("pipeline"))
+            .parent()
+            .unwrap_or(std::path::Path::new(daemon_dir))
+            .join("runtime")
+            .join("completion")
+            .join(format!("{run_id}.json"));
+    let path = if legacy_path.exists() {
+        Some(legacy_path)
+    } else if task_path.exists() {
+        Some(task_path)
+    } else if legacy_shared_path.exists() {
+        Some(legacy_shared_path)
+    } else {
+        find_rebound_completion_context(&directory, task_id, run_id).or_else(|| {
+            legacy_shared_path
+                .parent()
+                .and_then(|directory| find_rebound_completion_context(directory, task_id, run_id))
+        })
+    };
+    let Some(path) = path else {
+        return;
+    };
+    if let Err(error) = kanna_tool_catalog::mutate_completion_context(&path, |current| {
+        let mut context =
+            current.ok_or_else(|| format!("completion context {} disappeared", path.display()))?;
+        context.record_completed_attempt(run_id, attempt_key);
+        Ok(context)
+    }) {
+        log::warn!("failed to persist completion retry binding for {run_id}: {error}");
+    }
+}
+
+fn find_rebound_completion_context(
+    directory: &std::path::Path,
+    task_id: &str,
+    run_id: &str,
+) -> Option<std::path::PathBuf> {
+    let prefix = format!("run-{task_id}-");
+    std::fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension().and_then(|extension| extension.to_str()) == Some("json")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix))
+                && kanna_tool_catalog::read_completion_context(path)
+                    .is_ok_and(|context| context.run_id == run_id)
+        })
 }
 
 /// Optimistic blocker resolution: a task parked at the `pr` stage with a

@@ -8,6 +8,13 @@ export interface TerminalInputQueue {
   clearPendingInputFlushTimer(): void
 }
 
+type SendTerminalInput = (taskId: string, dataB64: string) => Promise<void>
+
+interface PendingInputBatch {
+  bytes: number[]
+  sendTerminalInput: SendTerminalInput
+}
+
 export function bytesToBase64(bytes: Uint8Array): string {
   let binary = ""
   for (const byte of bytes) {
@@ -27,29 +34,49 @@ export function base64ToBytes(dataB64: string): Uint8Array {
 
 export function createTerminalInputQueue(params: {
   sessionId: string
-  getTerminalStreamClient: () => Promise<StreamClient>
+  getTerminalStreamClient?: () => Promise<StreamClient>
+  sendTerminalInput?: SendTerminalInput
+  getSendTerminalInput?: () => SendTerminalInput
 }): TerminalInputQueue {
   let pendingInputFlushTimer: ReturnType<typeof setTimeout> | null = null
-  let pendingInputBytes: number[] = []
+  let pendingInputBatches: PendingInputBatch[] = []
   let inputWriteChain: Promise<void> = Promise.resolve()
   let inputWriteInFlight = false
 
-  async function sendInputBytesNow(bytes: Uint8Array) {
+  const defaultSendTerminalInput: SendTerminalInput = async (taskId, dataB64) => {
+    if (params.sendTerminalInput) {
+      await params.sendTerminalInput(taskId, dataB64)
+      return
+    }
+    if (!params.getTerminalStreamClient) {
+      throw new Error("terminal input has no configured transport")
+    }
     const client = await params.getTerminalStreamClient()
-    client.sendTermInput(params.sessionId, bytesToBase64(bytes))
+    client.sendTermInput(taskId, dataB64)
   }
 
-  function queueInputWrite(bytes: Uint8Array): Promise<void> {
+  async function sendInputBytesNow(
+    bytes: Uint8Array,
+    sendTerminalInput: SendTerminalInput,
+  ) {
+    const dataB64 = bytesToBase64(bytes)
+    await sendTerminalInput(params.sessionId, dataB64)
+  }
+
+  function queueInputWrite(
+    bytes: Uint8Array,
+    sendTerminalInput: SendTerminalInput,
+  ): Promise<void> {
     const runWrite = async () => {
       inputWriteInFlight = true
       try {
-        await sendInputBytesNow(bytes)
+        await sendInputBytesNow(bytes, sendTerminalInput)
       } finally {
         inputWriteInFlight = false
       }
     }
 
-    if (!inputWriteInFlight && pendingInputBytes.length === 0 && !pendingInputFlushTimer) {
+    if (!inputWriteInFlight && pendingInputBatches.length === 0 && !pendingInputFlushTimer) {
       inputWriteChain = runWrite()
       return inputWriteChain
     }
@@ -65,16 +92,27 @@ export function createTerminalInputQueue(params: {
       clearTimeout(pendingInputFlushTimer)
       pendingInputFlushTimer = null
     }
-    if (pendingInputBytes.length === 0) {
+    if (pendingInputBatches.length === 0) {
       return inputWriteChain
     }
-    const bytes = new Uint8Array(pendingInputBytes)
-    pendingInputBytes = []
-    return queueInputWrite(bytes)
+    const batches = pendingInputBatches
+    pendingInputBatches = []
+    for (const batch of batches) {
+      inputWriteChain = queueInputWrite(
+        new Uint8Array(batch.bytes),
+        batch.sendTerminalInput,
+      )
+    }
+    return inputWriteChain
   }
 
-  function queueInputBytes(bytes: Uint8Array): void {
-    pendingInputBytes.push(...bytes)
+  function queueInputBytes(bytes: Uint8Array, sendTerminalInput: SendTerminalInput): void {
+    const lastBatch = pendingInputBatches.at(-1)
+    if (lastBatch?.sendTerminalInput === sendTerminalInput) {
+      lastBatch.bytes.push(...bytes)
+    } else {
+      pendingInputBatches.push({ bytes: Array.from(bytes), sendTerminalInput })
+    }
     if (pendingInputFlushTimer) {
       return
     }
@@ -85,12 +123,16 @@ export function createTerminalInputQueue(params: {
   }
 
   async function sendInputBytes(bytes: Uint8Array, config?: { immediate?: boolean }) {
+    // Resolve the transport before any await. A retained terminal may switch
+    // policy while this write is batched or queued behind an acknowledgement;
+    // those bytes must retain the authority under which xterm captured them.
+    const sendTerminalInput = params.getSendTerminalInput?.() ?? defaultSendTerminalInput
     if (config?.immediate) {
       await flushQueuedInput()
-      await queueInputWrite(bytes)
+      await queueInputWrite(bytes, sendTerminalInput)
       return
     }
-    queueInputBytes(bytes)
+    queueInputBytes(bytes, sendTerminalInput)
   }
 
   function clearPendingInputFlushTimer(): void {

@@ -3,6 +3,7 @@ import { mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppError } from "../appError";
 import { resetDaemonReadyObservationForTests } from "./daemonReadyState";
+import { bytesToBase64 } from "./terminalInputQueue";
 
 const markTaskSwitchFirstOutputMock = vi.hoisted(() => vi.fn());
 const forwardTerminalRuntimeStatusMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -447,6 +448,123 @@ describe("useTerminal", () => {
 
     wrapper.unmount();
     expect(detach).toHaveBeenCalledWith("session-1", "terminal");
+  });
+
+  it("switches both directions between KSP and protected input without remounting", async () => {
+    const sendTermInput = vi.fn();
+    streamClientMock.getSharedStreamClient.mockResolvedValue({
+      attachTerminal: vi.fn(),
+      sendTermInput,
+      sendTermResize: vi.fn(),
+      detach: vi.fn(),
+    });
+    const { useTerminal } = await import("./useTerminal");
+    const TestHarness = defineComponent({
+      setup() {
+        const { init, setOperatorTerminalInput } = useTerminal("merge-session", undefined, {
+          agentTerminal: true,
+          operatorTerminalInput: false,
+        });
+        return { init, setOperatorTerminalInput };
+      },
+      render() {
+        return h("div");
+      },
+    });
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    const onData = terminals[0].onData.mock.calls[0]?.[0];
+    expect(onData).toBeDefined();
+    onData("generic input");
+    await waitForQueuedInputFlush();
+
+    expect(sendTermInput).toHaveBeenCalledWith("merge-session", btoa("generic input"));
+    expect(invokeMock).not.toHaveBeenCalledWith("send_operator_input", expect.anything());
+
+    wrapper.vm.setOperatorTerminalInput(true);
+    onData("merge PR 992");
+    await waitForQueuedInputFlush();
+
+    expect(invokeMock).toHaveBeenCalledWith("send_operator_input", {
+      sessionId: "merge-session",
+      data: Array.from(new TextEncoder().encode("merge PR 992")),
+    });
+
+    wrapper.vm.setOperatorTerminalInput(false);
+    onData("generic again");
+    await waitForQueuedInputFlush();
+
+    expect(sendTermInput).toHaveBeenLastCalledWith("merge-session", btoa("generic again"));
+    expect(sendTermInput).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps batched and acknowledgement-blocked bytes on their captured input transport", async () => {
+    let releaseFirstOperatorInput: (() => void) | undefined;
+    const firstOperatorInputPending = new Promise<void>((resolve) => {
+      releaseFirstOperatorInput = resolve;
+    });
+    let operatorInputCalls = 0;
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "send_operator_input" && operatorInputCalls++ === 0) {
+        await firstOperatorInputPending;
+      }
+      return null;
+    });
+    const sendTermInput = vi.fn();
+    streamClientMock.getSharedStreamClient.mockResolvedValue({
+      attachTerminal: vi.fn(),
+      sendTermInput,
+      sendTermResize: vi.fn(),
+      detach: vi.fn(),
+    });
+    const { useTerminal } = await import("./useTerminal");
+    const TestHarness = defineComponent({
+      setup() {
+        const { init, setOperatorTerminalInput } = useTerminal("same-id-session", undefined, {
+          agentTerminal: true,
+          operatorTerminalInput: true,
+        });
+        return { init, setOperatorTerminalInput };
+      },
+      render() {
+        return h("div");
+      },
+    });
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    const onData = terminals[0].onData.mock.calls[0]?.[0];
+    expect(onData).toBeDefined();
+    onData("old-in-flight");
+    await waitForQueuedInputFlush();
+    onData("old-batched");
+    wrapper.vm.setOperatorTerminalInput(false);
+    onData("new-generic");
+    await waitForQueuedInputFlush();
+
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "send_operator_input")).toHaveLength(1);
+    expect(sendTermInput).not.toHaveBeenCalled();
+
+    releaseFirstOperatorInput?.();
+    await flushAsyncWork();
+
+    const operatorPayloads = invokeMock.mock.calls
+      .filter(([cmd]) => cmd === "send_operator_input")
+      .map(([, args]) => new TextDecoder().decode(new Uint8Array(args.data)));
+    expect(operatorPayloads).toEqual(["old-in-flight", "old-batched"]);
+    expect(sendTermInput).toHaveBeenCalledOnce();
+    expect(sendTermInput).toHaveBeenCalledWith("same-id-session", btoa("new-generic"));
   });
 
   it("re-attaches when the session is respawned even though the terminal still believes it is attached", async () => {
@@ -2523,11 +2641,12 @@ describe("useTerminal", () => {
     nativeWebviewDragDropHandler?.(dropEvent);
     await waitForQueuedInputFlush();
 
-    expect(invokeMock).toHaveBeenCalledTimes(1);
-    expect(invokeMock).toHaveBeenCalledWith("send_input", {
+    const sendInputCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "send_input");
+    expect(sendInputCalls).toHaveLength(1);
+    expect(sendInputCalls[0]).toEqual(["send_input", {
       sessionId: "session-1",
       data: Array.from(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
-    });
+    }]);
   });
 
   it("treats Copilot drops as bracketed paste even when the restored stream does not advertise bracketed mode", async () => {
@@ -2837,13 +2956,10 @@ describe("useTerminal", () => {
 
     const sendInputCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "send_input");
     expect(sendInputCalls).toHaveLength(1);
-    expect(sendInputCalls[0]).toEqual([
-      "send_input",
-      {
-        sessionId: "session-1",
-        data: Array.from(new TextEncoder().encode("abc")),
-      },
-    ]);
+    expect(sendInputCalls[0]).toEqual(["send_input", {
+      sessionId: "session-1",
+      data: Array.from(new TextEncoder().encode("abc")),
+    }]);
   });
 
   it("responds to kitty clipboard image reads after an explicit paste", async () => {

@@ -118,6 +118,8 @@ pub struct SessionRecord {
     pub status: SessionStatus,
     pub status_observed: bool,
     pub last_status_check_at: Option<Instant>,
+    pub operator_input_only: bool,
+    pub input_policy_classified: bool,
 }
 
 pub struct SessionRuntimeState {
@@ -127,6 +129,8 @@ pub struct SessionRuntimeState {
     pub status: SessionStatus,
     pub status_observed: bool,
     pub last_status_check_at: Option<Instant>,
+    pub operator_input_only: bool,
+    pub input_policy_classified: bool,
 }
 
 pub struct PendingInput {
@@ -236,6 +240,8 @@ impl SessionHandle {
                 status: record.status,
                 status_observed: record.status_observed,
                 last_status_check_at: record.last_status_check_at,
+                operator_input_only: record.operator_input_only,
+                input_policy_classified: record.input_policy_classified,
             }),
             input_tx,
             input_rx: Mutex::new(Some(input_rx)),
@@ -278,6 +284,23 @@ impl SessionHandle {
 
     pub async fn set_stream_control(&self, stream_control: StreamControl) {
         self.state.lock().await.stream_control = Some(stream_control);
+    }
+
+    pub async fn operator_input_only(&self) -> bool {
+        self.state.lock().await.operator_input_only
+    }
+
+    pub async fn classify_input(&self, operator_input_only: bool) -> bool {
+        let mut state = self.state.lock().await;
+        if state.input_policy_classified {
+            if operator_input_only {
+                state.operator_input_only = true;
+            }
+            return operator_input_only || !state.operator_input_only;
+        }
+        state.operator_input_only = operator_input_only;
+        state.input_policy_classified = true;
+        true
     }
 
     pub async fn stream_control(&self) -> Option<StreamControl> {
@@ -561,6 +584,8 @@ impl SessionHandle {
             snapshot,
             agent_provider: state.agent_provider,
             status: state.status,
+            operator_input_only: state.operator_input_only,
+            input_policy_classified: state.input_policy_classified,
             fd,
         }))
     }
@@ -577,6 +602,8 @@ pub struct SessionHandoffParts {
     pub snapshot: Option<crate::protocol::TerminalSnapshot>,
     pub agent_provider: Option<AgentProvider>,
     pub status: SessionStatus,
+    pub operator_input_only: bool,
+    pub input_policy_classified: bool,
     pub fd: std::os::fd::OwnedFd,
 }
 
@@ -898,6 +925,8 @@ pub mod test_support {
             status: SessionStatus::Idle,
             status_observed: false,
             last_status_check_at: None,
+            operator_input_only: false,
+            input_policy_classified: true,
         })
     }
 
@@ -920,6 +949,8 @@ pub mod test_support {
             status: SessionStatus::Idle,
             status_observed: false,
             last_status_check_at: None,
+            operator_input_only: false,
+            input_policy_classified: true,
         })
     }
 }
@@ -1053,6 +1084,8 @@ mod tests {
             status,
             status_observed: false,
             last_status_check_at: None,
+            operator_input_only: false,
+            input_policy_classified: true,
         })
     }
 
@@ -1097,6 +1130,23 @@ mod tests {
 
         pending.acknowledge_written();
         written.await.expect("PTY writer acknowledgement");
+        handle.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_handoff_input_stays_fenced_until_one_way_classification() {
+        let mut record = spawn_test_record(AgentProvider::Codex, SessionStatus::Idle).unwrap();
+        record.operator_input_only = true;
+        record.input_policy_classified = false;
+        let handle = SessionHandle::new(record);
+
+        assert!(handle.operator_input_only().await);
+        assert!(handle.classify_input(false).await);
+        assert!(!handle.operator_input_only().await);
+        assert!(handle.classify_input(true).await);
+        assert!(handle.operator_input_only().await);
+        assert!(!handle.classify_input(false).await);
+        assert!(handle.operator_input_only().await);
         handle.kill().await.unwrap();
     }
 

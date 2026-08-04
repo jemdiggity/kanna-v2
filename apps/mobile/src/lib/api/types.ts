@@ -209,6 +209,7 @@ export interface TaskSummary {
 }
 
 export interface TaskLatestRun {
+  id: string;
   stage: string;
   kind: string;
   status: string;
@@ -216,6 +217,30 @@ export interface TaskLatestRun {
   resumedFromRunId?: string | null;
   resumeFallbackReason?: string | null;
   finishedAt?: string | null;
+}
+
+export interface ApprovalHold {
+  runId: string;
+  stage: string;
+  kind: "failed_result" | "needs_human_input" | "not_merge_candidate";
+  summary: string;
+  createdAt: string;
+  /** The exact durable override that covered this hold, when present. */
+  overrideRecord?: ApprovalOverrideRecord;
+}
+
+export interface ApprovalOverrideRecord {
+  id: string;
+  actor: string;
+  channel: string;
+  reason: string;
+  createdAt: string;
+}
+
+export interface ApprovalGate {
+  state: "eligible" | "held" | "overridden";
+  holds: ApprovalHold[];
+  overrideRecord?: ApprovalOverrideRecord;
 }
 
 export interface TaskDetail extends TaskSummary {
@@ -237,4 +262,6 @@ export interface TaskDetail extends TaskSummary {
   revisionRounds?: number;
   /** Rounds the task's pipeline allows before it parks for its human; 0 = unlimited. */
   revisionLimit?: number;
+  /** Server-owned merge eligibility derived from the full stage-run lineage. */
+  approvalGate?: ApprovalGate;
 }
