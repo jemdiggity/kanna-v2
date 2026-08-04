@@ -31,6 +31,11 @@ describe("mobile smoke runner", () => {
     expect(supportedSmokeModes).toContain("search-focus");
   });
 
+  it("registers a targeted active-tab reselection smoke mode", () => {
+    expect(smokeSpecPaths).toContain("specs/smoke/tab-reselection.e2e.ts");
+    expect(supportedSmokeModes).toContain("tab-reselection");
+  });
+
   it("supports both simulator and physical-device targets", () => {
     expect(supportedSmokeTargets).toEqual(["simulator", "device"]);
   });

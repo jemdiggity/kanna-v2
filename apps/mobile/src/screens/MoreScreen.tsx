@@ -21,6 +21,7 @@ interface MoreScreenProps {
   status: RepoCommandStatus;
   errorMessage: string | null;
   runningCommandId: string | null;
+  scrollViewRef?: React.RefObject<ScrollView | null>;
   onSelectRepo(repoId: string): void;
   onRunCommand(commandId: string): void;
   onRetry(): void;
@@ -33,6 +34,7 @@ export function MoreScreen({
   status,
   errorMessage,
   runningCommandId,
+  scrollViewRef,
   onSelectRepo,
   onRunCommand,
   onRetry
@@ -45,13 +47,16 @@ export function MoreScreen({
 
   return (
     <ScrollView
+      ref={scrollViewRef}
       contentContainerStyle={styles.content}
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}
       testID={MOBILE_E2E_IDS.moreScreen}
     >
       <View style={styles.wrap}>
-        <Text style={styles.heading}>More</Text>
+        <Text style={styles.heading} testID={MOBILE_E2E_IDS.moreHeading}>
+          More
+        </Text>
         <Text style={styles.subheading}>Run a command for a repository.</Text>
 
         <ScrollView
@@ -101,6 +106,7 @@ export function MoreScreen({
           placeholder="Search repository commands"
           placeholderTextColor="#6A7E9D"
           style={styles.searchInput}
+          testID={MOBILE_E2E_IDS.moreSearchInput}
           value={query}
         />
 

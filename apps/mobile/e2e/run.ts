@@ -41,6 +41,7 @@ import {
 } from "./specs/smoke/profile-connection.e2e";
 import { runSearchFocusSmoke } from "./specs/smoke/search-focus.e2e";
 import { runShellVisualSmoke } from "./specs/smoke/shell-visual.e2e";
+import { runTabReselectionSmoke } from "./specs/smoke/tab-reselection.e2e";
 import { runCloudTaskFlow } from "./specs/cloud/cloud-task-flow.e2e";
 import { runHybridTaskFlow } from "./specs/hybrid/hybrid-task-flow.e2e";
 import { runRelayTaskFlow } from "./specs/relay/relay-task-flow.e2e";
@@ -53,12 +54,14 @@ export const smokeSpecPaths = [
   "specs/smoke/list-detail-back.e2e.ts",
   "specs/smoke/profile-connection.e2e.ts",
   "specs/smoke/search-focus.e2e.ts",
-  "specs/smoke/shell-visual.e2e.ts"
+  "specs/smoke/shell-visual.e2e.ts",
+  "specs/smoke/tab-reselection.e2e.ts"
 ];
 export const supportedSmokeTargets = ["simulator", "device"] as const;
 export const supportedSmokeModes = [
   "smoke",
   "search-focus",
+  "tab-reselection",
   "shell-visual",
   "profile-disconnected",
   "cloud",
@@ -244,6 +247,7 @@ async function main(): Promise<void> {
     if (
       mode === "smoke" ||
       mode === "search-focus" ||
+      mode === "tab-reselection" ||
       mode === "shell-visual"
     ) {
       await assertDesktopServerReachable(resolvedDesktopServerUrl);
@@ -374,11 +378,14 @@ async function main(): Promise<void> {
       });
       if (mode === "search-focus") {
         await runSearchFocusSmoke(driver);
+      } else if (mode === "tab-reselection") {
+        await runTabReselectionSmoke(driver);
       } else {
         await runListDetailBackSmoke(driver, {
           desktopServerUrl: resolvedDesktopServerUrl
         });
         await runSearchFocusSmoke(driver);
+        await runTabReselectionSmoke(driver);
         if (env.target === "simulator") {
           await runShellVisualSmoke(driver);
         }

@@ -2,6 +2,8 @@ export const MOBILE_E2E_IDS = {
   appShell: "mobile.app-shell",
   appStartupLoading: "mobile.app-startup-loading",
   moreScreen: "mobile.more-screen",
+  moreHeading: "mobile.more-heading",
+  moreSearchInput: "mobile.more-search-input",
   tasksScreen: "mobile.tasks-screen",
   recentScreen: "mobile.recent-screen",
   searchScreen: "mobile.search-screen",
