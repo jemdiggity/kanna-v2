@@ -1,8 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket, { type RawData } from "ws";
+import { createKannaClient } from "../../../apps/mobile/src/lib/api/client";
 import type { TaskSummary } from "../../../apps/mobile/src/lib/api/types";
 import type { TaskTerminalStreamEvent, TaskTerminalSubscription } from "../../../apps/mobile/src/lib/api/client";
 import { createLanTransport, type FetchLike, type WebSocketLike } from "../../../apps/mobile/src/lib/transports/lanTransport";
+import { createMobileController } from "../../../apps/mobile/src/state/mobileController";
+import {
+  createSessionStore,
+  type SessionStore
+} from "../../../apps/mobile/src/state/sessionStore";
 import { startRemoteHarness, type RemoteHarness } from "./harness";
 import {
   collectTerminalEvents,
@@ -131,6 +137,49 @@ describe("LAN task loop E2E", () => {
     }
   }, 45_000);
 
+  it("retains authoritative no-echo input output across a mobile terminal remount", async () => {
+    const task = await createScriptedTask(harness, {
+      displayName: "Mobile retained terminal input task",
+      redactInput: true
+    });
+    const client = createKannaClient(createLanClient(harness));
+    const store = createSessionStore();
+    const controller = createMobileController(client, store);
+    const submittedInput = "first pasted line\n日本語の composed password";
+
+    try {
+      await controller.bootstrap();
+      controller.openTask(task.taskId);
+      await waitForStoreTerminalOutput(store, "SCRIPT_INPUT_READY", 30_000);
+
+      await controller.sendTaskInput(task.taskId, submittedInput);
+      const connectedOutput = await waitForStoreTerminalOutput(
+        store,
+        "SCRIPT_REDACTED_INPUT",
+        30_000
+      );
+      expect(connectedOutput).not.toContain(submittedInput);
+      expect(connectedOutput).not.toContain("composed password");
+
+      const connectedEpoch = store.getState().taskTerminalOutputEpoch;
+      controller.closeTask(task.taskId);
+      expect(store.getState().taskTerminalOutput).toBe("");
+      controller.openTask(task.taskId);
+
+      const remountedOutput = await waitForStoreTerminalOutput(
+        store,
+        "SCRIPT_REDACTED_INPUT",
+        30_000
+      );
+      expect(remountedOutput).not.toContain(submittedInput);
+      expect(store.getState().taskTerminalOutputEpoch).toBeGreaterThan(
+        connectedEpoch
+      );
+    } finally {
+      controller.dispose();
+    }
+  }, 60_000);
+
   it("keeps LAN and relay task state and terminal exit observations in parity", async () => {
     const task = await createScriptedTask(harness, {
       displayName: "LAN relay parity task"
@@ -177,6 +226,47 @@ function createLanClient(harness: RemoteHarness): LanTransport {
     nodeFetch,
     (url) => new NodeWebSocketAdapter(url)
   );
+}
+
+function decodeRetainedTerminalOutput(output: string): string {
+  return output
+    .split("\n")
+    .map((frame) => frame.trim())
+    .filter(Boolean)
+    .map((frame) => Buffer.from(frame, "base64").toString("utf8"))
+    .join("");
+}
+
+async function waitForStoreTerminalOutput(
+  store: SessionStore,
+  marker: string,
+  timeoutMs: number
+): Promise<string> {
+  const currentOutput = decodeRetainedTerminalOutput(
+    store.getState().taskTerminalOutput
+  );
+  if (currentOutput.includes(marker)) {
+    return currentOutput;
+  }
+
+  return await new Promise<string>((resolve, reject) => {
+    let unsubscribe: () => void = () => undefined;
+    const timeout = setTimeout(() => {
+      unsubscribe();
+      reject(new Error(`timed out waiting for retained terminal output ${marker}`));
+    }, timeoutMs);
+    unsubscribe = store.subscribe(() => {
+      const output = decodeRetainedTerminalOutput(
+        store.getState().taskTerminalOutput
+      );
+      if (!output.includes(marker)) {
+        return;
+      }
+      clearTimeout(timeout);
+      unsubscribe();
+      resolve(output);
+    });
+  });
 }
 
 async function fetchJson(url: string): Promise<unknown> {

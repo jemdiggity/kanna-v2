@@ -1347,6 +1347,22 @@ describe("TaskScreen", () => {
     expect(componentMocks.draftSetter).toHaveBeenCalledWith("");
   });
 
+  it("submits the latest composed multiline paste as one authoritative input", () => {
+    const tree = renderTaskScreen({ agentType: "pty", draftInput: "" });
+    const input = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    const changeText = input?.props?.onChangeText as (value: string) => void;
+
+    changeText("に");
+    changeText("first pasted line\n日本語の composed line");
+    pressSend(tree);
+
+    expect(componentMocks.onSendInput).toHaveBeenCalledWith(
+      "first pasted line\n日本語の composed line"
+    );
+    expect(componentMocks.onSendInput).toHaveBeenCalledTimes(1);
+    expect(componentMocks.draftSetter).toHaveBeenLastCalledWith("");
+  });
+
   it("shrinks an expanded composer and dismisses its keyboard after Send", () => {
     let tree = renderTaskScreen({
       agentType: "agent",

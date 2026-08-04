@@ -917,6 +917,40 @@ describe("TerminalWebView", () => {
     ).toHaveLength(1);
   });
 
+  it("does not let load completion skip retained output received before the terminal effect", async () => {
+    const initialOutput = `${Buffer.from("initial snapshot").toString("base64")}\n`;
+    const updatedOutput = `${initialOutput}${Buffer.from(
+      "submitted command authoritative output"
+    ).toString("base64")}\n`;
+    const initialWebView = await renderTerminalWebView({ output: initialOutput });
+    runEffects();
+    (initialWebView.props.onLoadStart as () => void)();
+
+    const updatedWebView = await renderTerminalWebView({ output: updatedOutput });
+    // A local WebView document can finish loading before React flushes the
+    // effect for output delivered by the terminal stream in the same turn.
+    const finishLoading = updatedWebView.props.onLoadEnd;
+    if (typeof finishLoading === "function") {
+      finishLoading();
+    }
+    runEffects();
+    injectedScripts.length = 0;
+
+    (updatedWebView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({ type: "terminal-ready" })
+      }
+    } as WebViewMessageEvent);
+
+    expect(injectedScripts).toContain(
+      buildTerminalReplaceScript({
+        contentRevision: 1,
+        output: updatedOutput,
+        status: "live"
+      })
+    );
+  });
+
   it("keeps accessible loading feedback until the current snapshot epoch is rendered", async () => {
     const webView = await renderTerminalWebView({
       output: `${Buffer.from("scrollback\n".repeat(20_000)).toString("base64")}\n`,

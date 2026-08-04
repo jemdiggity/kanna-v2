@@ -87,6 +87,7 @@ describe("scripted remote E2E agent", () => {
     const source = scriptedAgentSource();
 
     expect(source).toContain("SCRIPT_MENU_CURSOR:2");
+    expect(source).toContain("SCRIPT_INPUT_READY");
     expect(source).toContain("SCRIPT_MENU_OPTION_1_HIGHLIGHTED");
     expect(source).toContain("SCRIPT_MENU_SELECTED:1");
     expect(source).toContain("stty -icanon min 1 time 0 -echo -icrnl");
@@ -100,6 +101,16 @@ describe("scripted remote E2E agent", () => {
     expect(source).toContain("*exit-zero*)");
     expect(source).toContain("*exit-one*)");
     expect(source).toContain("wait \"$heartbeat_pid\"");
+  });
+
+  it("can consume sensitive input without returning its bytes to observers", () => {
+    const source = scriptedAgentSource({ redactInput: true });
+
+    expect(source).toContain("SCRIPT_REDACTED_INPUT");
+    expect(source).not.toContain("SCRIPT_INPUT:%s");
+    expect(source.indexOf("stty -icanon min 1 time 0 -echo -icrnl")).toBeLessThan(
+      source.indexOf("SCRIPT_INPUT_READY")
+    );
   });
 
   it("preserves embedded line feeds while observing one submitted PTY input", async () => {

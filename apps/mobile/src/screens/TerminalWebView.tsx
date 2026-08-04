@@ -552,13 +552,6 @@ export function TerminalWebView({
           });
         }}
         onMessage={handleMessage}
-        onLoadEnd={() => {
-          previousTaskIdRef.current = taskId;
-          previousOutputRef.current = output;
-          previousOutputEpochRef.current = outputEpoch;
-          previousOutputStartRef.current = outputStart;
-          previousStatusRef.current = status;
-        }}
         scrollEnabled
         source={{ html: document }}
         style={fullscreen ? styles.webviewFullscreen : styles.webview}

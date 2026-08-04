@@ -97,6 +97,7 @@ export async function createScriptedTask(
     notifyTaskId?: string;
     prompt?: string;
     repoName?: string;
+    redactInput?: boolean;
     setupCommands?: string[];
     snapshotHistory?: ScriptedAgentOptions["snapshotHistory"];
     waitingPromptSnippet?: string;
@@ -107,6 +108,7 @@ export async function createScriptedTask(
     `scripted-repo-${Date.now()}-${Math.random().toString(16).slice(2)}`
   );
   await writeScriptedRepo(repoPath, {
+    redactInput: options.redactInput,
     setupCommands: options.setupCommands,
     snapshotHistory: options.snapshotHistory,
   });

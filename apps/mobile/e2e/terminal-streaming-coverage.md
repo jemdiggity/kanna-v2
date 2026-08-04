@@ -170,12 +170,20 @@ pnpm --filter @kanna/tui-fidelity test:terminal-safe-region
 
 The simulator-free coverage is:
 
+- `tests/remote-e2e/src/lan-layer.e2e.test.ts` now drives the real mobile
+  controller and LAN transport through `kanna-server` and the daemon PTY. Its
+  scripted terminal enters `stty -echo` before advertising input readiness,
+  accepts one multiline paste containing composed Unicode, emits only a
+  redacted authoritative result, and proves a mobile close/reopen replaces the
+  retained model from a fresh snapshot without fabricating the submitted
+  bytes.
 - `src/screens/terminalSafeArea.test.ts` and `src/screens/TaskScreen.test.tsx`
   for measured normal, multiline, and keyboard-shifted composer geometry.
 - `src/screens/TerminalWebView.test.tsx` for resize/inset/snapshot ordering,
   pre-ready inset coalescing, immediate updates, stable document identity,
-  accessible content-loading feedback, reconnect epochs, and stale render
-  acknowledgement rejection.
+  accessible content-loading feedback, reconnect epochs, stale render
+  acknowledgement rejection, and the load-completion/output-effect ordering
+  that previously skipped retained bytes until remount.
 - `src/screens/buildTerminalDocument.test.ts` for large newline-delimited
   base64 frame preservation, the actual xterm DOM/public-buffer contract,
   manual scrollback following, dynamic safe-region alignment, the resize
