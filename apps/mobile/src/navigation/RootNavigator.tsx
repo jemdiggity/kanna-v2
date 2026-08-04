@@ -565,7 +565,13 @@ function TaskDetailRoute({
       pendingTaskAction={pendingTaskAction}
       taskCreationPhase={resolveTaskCreationPhase(state, routeTaskId)}
       taskCreationErrorMessage={creationAttempt?.errorMessage ?? null}
-      onBack={() => navigation.goBack()}
+      onBack={() => {
+        if (!navigation.canGoBack()) {
+          return false;
+        }
+        navigation.goBack();
+        return true;
+      }}
       onAdvanceTaskStage={() => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         if (durableTaskId) {

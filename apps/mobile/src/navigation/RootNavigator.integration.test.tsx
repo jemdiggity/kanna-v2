@@ -1,5 +1,4 @@
 import React, { useEffect, useState } from "react";
-import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import { showTaskActionMenu, type TaskAction } from "../screens/taskActionMenu";
 import { DEFAULT_TASK_QUICK_REPLIES } from "../screens/taskQuickReplies";
 import {
@@ -34,6 +33,14 @@ const navigationHarness = vi.hoisted(() => ({
     | null
 }));
 
+const keyboardHarness = vi.hoisted(() => ({
+  dismiss: vi.fn(),
+  listeners: new Map<
+    string,
+    (event: { endCoordinates: { height: number } }) => void
+  >()
+}));
+
 vi.mock("@expo/vector-icons", () => ({
   Ionicons: "Ionicons"
 }));
@@ -41,8 +48,22 @@ vi.mock("@expo/vector-icons", () => ({
 vi.mock("react-native", () => ({
   ActivityIndicator: "ActivityIndicator",
   Keyboard: {
-    addListener: vi.fn(() => ({ remove: vi.fn() })),
-    dismiss: vi.fn()
+    addListener: vi.fn(
+      (
+        eventName: string,
+        listener: (event: { endCoordinates: { height: number } }) => void
+      ) => {
+        keyboardHarness.listeners.set(eventName, listener);
+        return {
+          remove: () => {
+            if (keyboardHarness.listeners.get(eventName) === listener) {
+              keyboardHarness.listeners.delete(eventName);
+            }
+          }
+        };
+      }
+    ),
+    dismiss: keyboardHarness.dismiss
   },
   Pressable: "Pressable",
   ScrollView: "ScrollView",
@@ -281,6 +302,8 @@ afterEach(async () => {
   controller?.dispose();
   controller = null;
   navigationHarness.onStateChange = null;
+  keyboardHarness.dismiss.mockReset();
+  keyboardHarness.listeners.clear();
 });
 
 async function flushMicrotasks(iterations = 12): Promise<void> {
@@ -595,6 +618,105 @@ describe("RootNavigator task collection integration", () => {
       await refresh;
     });
   });
+});
+
+describe("RootNavigator task Back integration", () => {
+  const task: TaskSummary = {
+    id: "task-back",
+    repoId: "repo-1",
+    title: "Back boundary fixture",
+    stage: "in progress",
+    agentType: "pty"
+  };
+
+  function findAllByTestId(testID: string) {
+    return rendered?.root.findAll((node) => node.props.testID === testID) ?? [];
+  }
+
+  function pressByTestId(testID: string): void {
+    if (!rendered) throw new Error("navigator is not rendered");
+    const node = rendered.root.find((candidate) => candidate.props.testID === testID);
+    const onPress = node.props.onPress as (() => void) | undefined;
+    if (!onPress) throw new Error(`${testID} does not expose onPress`);
+    onPress();
+  }
+
+  it.each([
+    ["while the terminal is connecting", false],
+    ["with the keyboard open over long scrollback", true]
+  ] as const)(
+    "crosses the real navigation boundary %s",
+    async (_caseName, loadLongScrollback) => {
+      const closeTerminal = vi.fn();
+      const client = createClientMock();
+      vi.mocked(client.listRecentTasks).mockResolvedValue([task]);
+      vi.mocked(client.listRepoTasks).mockResolvedValue([task]);
+      vi.mocked(client.observeTaskTerminal).mockReturnValue({
+        close: closeTerminal
+      });
+      const store = createSessionStore();
+      controller = createMobileController(client, store);
+
+      await act(async () => {
+        rendered = create(
+          <NavigatorHarness activeController={controller!} store={store} />
+        );
+        await controller!.bootstrap();
+      });
+      await act(async () => {
+        pressByTestId(MOBILE_E2E_IDS.taskListItem(task.id));
+        await flushMicrotasks();
+      });
+
+      expect(findAllByTestId(MOBILE_E2E_IDS.taskDetailScreen)).toHaveLength(1);
+      if (loadLongScrollback) {
+        const longScrollback = `${"scrollback line\n".repeat(20_000)}END`;
+        await act(async () => {
+          store.replaceTaskTerminalSnapshot(task.id, longScrollback, 80, 24);
+          keyboardHarness.listeners.get("keyboardWillShow")?.({
+            endCoordinates: { height: 320 }
+          });
+        });
+
+        expect(
+          rendered!.root.findByType("TerminalWebView").props
+        ).toMatchObject({
+          output: `${longScrollback}\n`,
+          status: "live"
+        });
+        expect(
+          findAllByTestId(MOBILE_E2E_IDS.taskComposerChrome)[0]?.props.style
+        ).toContainEqual({ bottom: 328 });
+      } else {
+        expect(
+          findAllByTestId(MOBILE_E2E_IDS.terminalOverlay)[0]?.props.pointerEvents
+        ).toBe("none");
+      }
+
+      const backButton = findAllByTestId(MOBILE_E2E_IDS.taskBackButton)[0];
+      expect(backButton?.props).toMatchObject({
+        accessibilityLabel: "Back",
+        accessibilityState: { busy: false, disabled: false },
+        disabled: false,
+        hitSlop: 4
+      });
+
+      await act(async () => {
+        pressByTestId(MOBILE_E2E_IDS.taskBackButton);
+        await flushMicrotasks();
+      });
+
+      expect(keyboardHarness.dismiss).toHaveBeenCalledOnce();
+      expect(findAllByTestId(MOBILE_E2E_IDS.taskDetailScreen)).toHaveLength(0);
+      expect(findAllByTestId(MOBILE_E2E_IDS.tasksScreen)).toHaveLength(1);
+      expect(closeTerminal).toHaveBeenCalledOnce();
+      expect(store.getState()).toMatchObject({
+        selectedTaskId: null,
+        taskTerminalTaskId: null,
+        taskTerminalOutput: ""
+      });
+    }
+  );
 });
 
 describe("RootNavigator More integration", () => {

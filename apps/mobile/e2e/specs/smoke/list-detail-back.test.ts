@@ -312,7 +312,8 @@ describe("task prompt expansion journey", () => {
     const backEnabled = vi.fn(async () => true);
     Object.assign(backButton, {
       isDisplayed: backDisplayed,
-      isEnabled: backEnabled
+      isEnabled: backEnabled,
+      getSize: vi.fn(async () => ({ height: 48, width: 48 }))
     });
     const ui = {
       getBackButton: vi.fn(async () => backButton),
