@@ -50,6 +50,7 @@ interface MobileSelectionResult {
 }
 
 interface TerminalHookState {
+  contentRevision?: number;
   text?: string;
   chunksB64?: string[];
 }
@@ -1259,6 +1260,7 @@ declare global {
         active: {
           type: "normal" | "alternate";
           baseY: number;
+          length: number;
           viewportY: number;
           getLine: (row: number) =>
             | {

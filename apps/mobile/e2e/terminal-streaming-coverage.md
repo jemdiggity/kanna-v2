@@ -41,6 +41,13 @@ sentinel, and the terminal root received the expected desktop PTY dimensions
 through `data-kanna-cols` and `data-kanna-rows`. The 16 KiB decoded-byte default
 is intentionally above the old 12,000-character base64 cap failure mode, which
 could only decode to about 9 KiB and could leave the rendered terminal blank.
+The terminal's native loading node now keeps the existing
+`mobile.terminal-overlay` selector present after transport connection until the
+WebView acknowledges the current snapshot epoch. Consequently the smoke's
+existing `waitForTaskTerminalLive` boundary no longer treats snapshot receipt as
+render readiness: with the scripted agent's deliberate 10,050-line history, it
+waits for xterm application and a paint opportunity before inspecting the
+sentinel.
 The native journey also taps the selected task's title, verifies the canonical
 prompt through its end sentinel, verifies the complete task ID, long-presses the
 ID for 1.5 seconds, requires the native iOS `Copy` action, and compares the
@@ -151,7 +158,11 @@ and fit addon in Chromium, rather than a DOM stub. It proves clearance for 132,
 212, 446, and 526 px obstructions (normal, multiline, keyboard-shifted, and
 keyboard-plus-multiline composer layouts), uses a real wheel event to enter
 scrollback, verifies append does not move `viewportY` or the top line, and
-verifies following resumes near the bottom. Run it directly with:
+verifies following resumes near the bottom. The same runner also injects 10,050
+history lines plus a sentinel through the production WebView hook and proves
+that the revision-tagged `terminal-content-ready` bridge message is absent in
+the injection task, then arrives only after xterm has drained its writes and
+the sentinel is present in the real terminal buffer. Run it directly with:
 
 ```bash
 pnpm --filter @kanna/tui-fidelity test:terminal-safe-region
@@ -162,14 +173,17 @@ The simulator-free coverage is:
 - `src/screens/terminalSafeArea.test.ts` and `src/screens/TaskScreen.test.tsx`
   for measured normal, multiline, and keyboard-shifted composer geometry.
 - `src/screens/TerminalWebView.test.tsx` for resize/inset/snapshot ordering,
-  pre-ready inset coalescing, immediate updates, and stable document identity.
+  pre-ready inset coalescing, immediate updates, stable document identity,
+  accessible content-loading feedback, reconnect epochs, and stale render
+  acknowledgement rejection.
 - `src/screens/buildTerminalDocument.test.ts` for large newline-delimited
   base64 frame preservation, the actual xterm DOM/public-buffer contract,
   manual scrollback following, dynamic safe-region alignment, the resize
   bridge, executable fallback touch scrolling, pinch scale clamping, and the
   generated terminal script path.
-- `tests/tui-fidelity/src/terminalSafeRegion.ts` for the real-browser bundled-
-  xterm integration described above.
+- `tests/tui-fidelity/src/terminalSafeRegion.ts` and
+  `tests/tui-fidelity/src/terminalInitialContentReadiness.ts` for the
+  real-browser bundled-xterm integrations described above.
 - `src/state/sessionStore.test.ts` for preserving large base64 frames without
   slicing mid-token.
 - `src/state/mobileController.test.ts` for applying ready-event PTY dimensions

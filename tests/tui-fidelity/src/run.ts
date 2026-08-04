@@ -13,6 +13,7 @@ import {
   verifyMobileEasedScrolling,
   verifyMobileTerminalSelection
 } from "./render.ts";
+import { verifyTerminalInitialContentReadiness } from "./terminalInitialContentReadiness.ts";
 import { verifyTerminalSafeRegion } from "./terminalSafeRegion.ts";
 import type { FixtureResult } from "./types.ts";
 
@@ -29,6 +30,8 @@ async function main(): Promise<void> {
   try {
     await verifyTerminalSafeRegion(browser);
     process.stdout.write("PASS terminal-safe-region\n");
+    await verifyTerminalInitialContentReadiness(browser);
+    process.stdout.write("PASS terminal-initial-content-readiness\n");
     await verifyMobileEasedScrolling(browser);
     process.stdout.write("PASS mobile-eased-scrolling\n");
     await verifyMobileAltScreenScrollInput(browser);

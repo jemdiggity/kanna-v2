@@ -1,6 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as Clipboard from "expo-clipboard";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Pressable,
+  StyleSheet,
+  Text,
+  View
+} from "react-native";
 import {
   WebView as NativeWebView,
   type WebViewMessageEvent,
@@ -100,8 +106,14 @@ export function TerminalWebView({
   const previousStatusRef = useRef<TaskTerminalStatus>("idle");
   const activeTaskIdRef = useRef(taskId);
   activeTaskIdRef.current = taskId;
+  const activeOutputEpochRef = useRef(outputEpoch);
+  activeOutputEpochRef.current = outputEpoch;
   const selectionContextRef = useRef({ copyPending: false, version: 0 });
-  const [terminalInspection, setTerminalInspection] = useState<TerminalInspection | null>(null);
+  const [renderedOutputEpoch, setRenderedOutputEpoch] = useState<number | null>(
+    null
+  );
+  const [terminalInspection, setTerminalInspection] =
+    useState<TerminalInspection | null>(null);
   const [terminalSelection, setTerminalSelection] = useState("");
   const [selectionCopyError, setSelectionCopyError] = useState<string | null>(null);
   const [selectionCopyPending, setSelectionCopyPending] = useState(false);
@@ -124,10 +136,11 @@ export function TerminalWebView({
   const replaceScript = useMemo(
     () =>
       buildTerminalReplaceScript({
+        contentRevision: outputEpoch,
         output,
         status
       }),
-    [output, status]
+    [output, outputEpoch, status]
   );
   const bottomInsetScript = useMemo(
     () => buildTerminalBottomInsetScript(resolvedBottomInset),
@@ -143,7 +156,10 @@ export function TerminalWebView({
     cols,
     rows,
     bridgeReady: bridgeReadyRef.current,
-    pendingScriptCount: pendingScriptsRef.current.length
+    pendingScriptCount: pendingScriptsRef.current.length,
+    renderedOutputEpoch,
+    contentReady:
+      status === "live" && renderedOutputEpoch === activeOutputEpochRef.current
   });
 
   const injectOrQueueScript = (
@@ -174,7 +190,19 @@ export function TerminalWebView({
           ...remainingScripts
         ];
       } else {
-        pendingScriptsRef.current.push(script);
+        // Before the bridge is ready, the current replace script already
+        // contains the authoritative snapshot plus every live frame received
+        // so far. Coalesce duplicate initial effects and pre-ready appends to
+        // that latest full state so one epoch cannot acknowledge an earlier
+        // queued copy while another copy is still applying.
+        pendingScriptsRef.current = [
+          ...pendingScriptsRef.current.filter(
+            (pendingScript) =>
+              !pendingScript.includes("__replaceTerminalState") &&
+              !pendingScript.includes("__appendTerminalChunk")
+          ),
+          replaceScript
+        ];
       }
       return;
     }
@@ -224,6 +252,7 @@ export function TerminalWebView({
       case "replace":
         injectOrQueueScript(
           buildTerminalReplaceScript({
+            contentRevision: outputEpoch,
             output: mutation.output,
             status: mutation.status
           })
@@ -263,6 +292,7 @@ export function TerminalWebView({
       line?: unknown;
       text?: unknown;
       dataB64?: unknown;
+      contentRevision?: unknown;
     };
 
     try {
@@ -344,6 +374,17 @@ export function TerminalWebView({
       return;
     }
 
+    if (payload.type === "terminal-content-ready") {
+      if (
+        typeof payload.contentRevision === "number" &&
+        Number.isSafeInteger(payload.contentRevision) &&
+        payload.contentRevision === activeOutputEpochRef.current
+      ) {
+        setRenderedOutputEpoch(payload.contentRevision);
+      }
+      return;
+    }
+
     if (payload.type !== "terminal-ready") {
       return;
     }
@@ -362,6 +403,9 @@ export function TerminalWebView({
       webViewRef.current?.injectJavaScript(script);
     }
   };
+
+  const isTerminalContentReady =
+    status === "live" && renderedOutputEpoch === outputEpoch;
 
   const clearTerminalSelection = () => {
     selectionContextRef.current.version += 1;
@@ -401,6 +445,22 @@ export function TerminalWebView({
 
   return (
     <View style={fullscreen ? styles.wrapFullscreen : styles.wrap}>
+      {!isTerminalContentReady ? (
+        <View
+          accessibilityLabel="Loading terminal content"
+          accessibilityLiveRegion="polite"
+          accessibilityRole="progressbar"
+          accessibilityState={{ busy: true }}
+          pointerEvents="none"
+          style={[styles.contentLoading, { top: resolvedSelectionToolbarTop }]}
+          testID={MOBILE_E2E_IDS.terminalOverlay}
+        >
+          <ActivityIndicator accessible={false} color="#A9D7FF" size="small" />
+          <Text accessible={false} style={styles.contentLoadingText}>
+            Loading terminal content
+          </Text>
+        </View>
+      ) : null}
       {ENABLE_E2E_TERMINAL_INSPECTION && terminalInspection ? (
         <Text
           accessibilityValue={{ text: JSON.stringify(terminalInspection) }}
@@ -443,6 +503,7 @@ export function TerminalWebView({
         originWhitelist={["*"]}
         onLoadStart={() => {
           bridgeReadyRef.current = false;
+          setRenderedOutputEpoch(null);
           selectionContextRef.current.version += 1;
           selectionContextRef.current.copyPending = false;
           setTerminalSelection("");
@@ -508,6 +569,25 @@ export function TerminalWebView({
 }
 
 const styles = StyleSheet.create({
+  contentLoading: {
+    alignItems: "center",
+    alignSelf: "center",
+    backgroundColor: "#10213AEE",
+    borderColor: "#365B83",
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    position: "absolute",
+    zIndex: 9
+  },
+  contentLoadingText: {
+    color: "#D8E7F7",
+    fontSize: 12,
+    fontWeight: "600"
+  },
   selectionButton: {
     borderRadius: 7,
     paddingHorizontal: 10,
