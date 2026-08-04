@@ -421,7 +421,7 @@ async fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
 async fn acknowledged_stage_survives_db_failure_restart_and_can_complete() {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
     use tower::ServiceExt;
 
@@ -510,10 +510,7 @@ async fn acknowledged_stage_survives_db_failure_restart_and_can_complete() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         for expected in ["Kill", "Spawn"] {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: kanna_daemon::protocol::Command =
-                serde_json::from_str(line.trim()).unwrap();
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
             let response = match command {
                 kanna_daemon::protocol::Command::Kill { .. } if expected == "Kill" => {
                     kanna_daemon::protocol::Event::Ok
@@ -1815,10 +1812,7 @@ async fn headless_rerun_runs_environment_setup_after_killing_previous_session() 
         let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
         for _ in 0..2 {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: kanna_daemon::protocol::Command =
-                serde_json::from_str(line.trim()).unwrap();
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
             let response = match &command {
                 kanna_daemon::protocol::Command::Kill { .. } => {
                     assert!(!daemon_worktree.join("headless-rerun-setup.marker").exists());
@@ -1943,9 +1937,7 @@ async fn headless_rerun_setup_failure_records_durable_diagnostics_after_kill() {
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: kanna_daemon::protocol::Command = serde_json::from_str(line.trim()).unwrap();
+        let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
         assert!(matches!(
             command,
             kanna_daemon::protocol::Command::Kill { .. }
@@ -2932,10 +2924,7 @@ async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
         let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: kanna_daemon::protocol::Command =
-                serde_json::from_str(line.trim()).unwrap();
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
             let response = match &command {
                 kanna_daemon::protocol::Command::Input { .. }
                 | kanna_daemon::protocol::Command::Kill { .. } => {
@@ -3047,10 +3036,7 @@ async fn prompt_only_post_provider_overrides_source_task_provider_in_fallback_da
         let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: kanna_daemon::protocol::Command =
-                serde_json::from_str(line.trim()).unwrap();
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
             let response = match &command {
                 kanna_daemon::protocol::Command::Input { .. }
                 | kanna_daemon::protocol::Command::Kill { .. } => {

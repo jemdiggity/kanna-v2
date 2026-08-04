@@ -86,6 +86,9 @@ async fn classify_sessions_on_connected_daemon(
         }
     };
     for session in sessions {
+        if session.kind != kanna_daemon::protocol::SessionKind::Pty {
+            continue;
+        }
         let session_id = session.session_id;
         let operator_input_only = match db.session_requires_operator_input(&session_id) {
             Ok(value) => value,
@@ -102,7 +105,11 @@ async fn classify_sessions_on_connected_daemon(
             })
             .await
         {
-            Ok(kanna_daemon::protocol::Event::Ok) => {}
+            Ok(kanna_daemon::protocol::Event::Ok)
+            | Ok(kanna_daemon::protocol::Event::Error {
+                code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                ..
+            }) => {}
             Ok(event) => {
                 return Err(format!(
                     "daemon refused input classification for session {session_id}: {event:?}"
@@ -177,7 +184,7 @@ mod tests {
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt},
-        net::TcpListener,
+        net::{TcpListener, UnixListener},
         time::Duration,
     };
     use tokio_tungstenite::{accept_async, tungstenite::Message};
@@ -200,6 +207,129 @@ mod tests {
             ))
             .to_string_lossy()
             .to_string()
+    }
+
+    fn listed_session(
+        session_id: &str,
+        kind: kanna_daemon::protocol::SessionKind,
+    ) -> kanna_daemon::protocol::SessionInfo {
+        kanna_daemon::protocol::SessionInfo {
+            session_id: session_id.to_string(),
+            pid: 1,
+            cwd: "/tmp".to_string(),
+            state: kanna_daemon::protocol::SessionState::Active,
+            idle_seconds: 0,
+            status: kanna_daemon::protocol::SessionStatus::Idle,
+            kind,
+        }
+    }
+
+    async fn serve_generation_replay(
+        listener: UnixListener,
+        sessions: Vec<kanna_daemon::protocol::SessionInfo>,
+        classify_response: kanna_daemon::protocol::Event,
+    ) -> Vec<kanna_daemon::protocol::Command> {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut reader = tokio::io::BufReader::new(read);
+        let mut commands = Vec::new();
+        for response in [
+            kanna_daemon::protocol::Event::ProtectedInputReady {
+                version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+            },
+            kanna_daemon::protocol::Event::SessionList { sessions },
+            classify_response,
+        ] {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            commands.push(serde_json::from_str(line.trim()).unwrap());
+            write
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+        commands
+    }
+
+    #[tokio::test]
+    async fn generation_readiness_classifies_only_pty_sessions() {
+        let daemon_dir = unique_path("mixed-generation-replay", "dir");
+        let db_path = unique_path("mixed-generation-replay", "sqlite");
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(std::path::Path::new(&daemon_dir));
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(serve_generation_replay(
+            listener,
+            vec![
+                listed_session("pty-session", kanna_daemon::protocol::SessionKind::Pty),
+                listed_session(
+                    "headless-session",
+                    kanna_daemon::protocol::SessionKind::Agent,
+                ),
+            ],
+            kanna_daemon::protocol::Event::Ok,
+        ));
+        let db = db::Db::open_for_tests(&db_path).unwrap();
+        let mut daemon = crate::daemon_client::DaemonClient::connect(&daemon_dir)
+            .await
+            .unwrap();
+
+        super::prepare_daemon_generation(&mut daemon, &db)
+            .await
+            .unwrap();
+
+        let commands = server.await.unwrap();
+        assert!(matches!(
+            commands.as_slice(),
+            [
+                kanna_daemon::protocol::Command::NegotiateProtectedInput { .. },
+                kanna_daemon::protocol::Command::List,
+                kanna_daemon::protocol::Command::ClassifyInput { session_id, .. },
+            ] if session_id == "pty-session"
+        ));
+        let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn generation_readiness_tolerates_pty_disappearing_during_replay() {
+        let daemon_dir = unique_path("disappearing-generation-replay", "dir");
+        let db_path = unique_path("disappearing-generation-replay", "sqlite");
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(std::path::Path::new(&daemon_dir));
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(serve_generation_replay(
+            listener,
+            vec![listed_session(
+                "short-lived-pty",
+                kanna_daemon::protocol::SessionKind::Pty,
+            )],
+            kanna_daemon::protocol::Event::Error {
+                code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                message: "session exited after inventory".to_string(),
+            },
+        ));
+        let db = db::Db::open_for_tests(&db_path).unwrap();
+        let mut daemon = crate::daemon_client::DaemonClient::connect(&daemon_dir)
+            .await
+            .unwrap();
+        let expected_pid = daemon.connected_pid();
+
+        assert_eq!(
+            super::prepare_daemon_generation(&mut daemon, &db)
+                .await
+                .unwrap(),
+            expected_pid,
+        );
+
+        let commands = server.await.unwrap();
+        assert!(matches!(
+            commands.last(),
+            Some(kanna_daemon::protocol::Command::ClassifyInput { session_id, .. })
+                if session_id == "short-lived-pty"
+        ));
+        let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
     #[tokio::test]

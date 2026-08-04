@@ -81,7 +81,7 @@ async fn request_revision_error_body_survives_error_logging_middleware() {
 #[tokio::test]
 async fn request_revision_route_resolves_branch_style_task_id() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = super::unique_test_suffix();
@@ -138,9 +138,7 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             let session_id = match command {
                 // A durable revision replaces the task's session in place:
                 // the previous session is killed before the respawn.
@@ -297,7 +295,7 @@ async fn request_revision_route_resolves_branch_style_task_id() {
 async fn automatic_revision_completion_dispatches_commit_post_through_http_routes() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use std::time::Duration;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
     use tokio::sync::mpsc;
 
@@ -391,9 +389,7 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let revision_session_id = loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             let (response, spawned_session_id) = match command {
                 DaemonCommand::Kill { .. } => (
                     DaemonEvent::Error {
@@ -450,9 +446,7 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         for input_index in 0..2 {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
                 DaemonCommand::Input { session_id, data } => {
                     assert_eq!(session_id, revision_session_id);
@@ -643,7 +637,7 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
 #[tokio::test]
 async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = super::unique_test_suffix();
@@ -713,9 +707,7 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             let session_id = match command {
                 // A durable revision replaces the task's session in place:
                 // the previous session is killed before the respawn.
@@ -1049,7 +1041,7 @@ fn spawn_fixture_daemon(
     release: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> tokio::task::JoinHandle<()> {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let listener = UnixListener::bind(&socket_path).unwrap();
@@ -1063,12 +1055,9 @@ fn spawn_fixture_daemon(
             let (read_half, mut write_half) = stream.into_split();
             let mut reader = BufReader::new(read_half);
             loop {
-                let mut line = String::new();
-                match reader.read_line(&mut line).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                }
-                let Ok(command) = serde_json::from_str::<DaemonCommand>(line.trim()) else {
+                let Some(command) =
+                    read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                else {
                     break;
                 };
                 if let Some(seen) = first_command_seen.take() {
@@ -1205,7 +1194,7 @@ async fn agent_revision_request_parks_the_task_once_the_round_budget_is_spent() 
 #[tokio::test]
 async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let fixture = setup_revision_budget_fixture("human", 1);
@@ -1218,9 +1207,7 @@ async fn human_revision_request_ignores_the_budget_and_hands_it_back() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             let session_id = match command {
                 DaemonCommand::Kill { .. } => {
                     let response = DaemonEvent::Error {
@@ -1316,7 +1303,7 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use std::sync::Mutex;
     use std::time::Duration;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     const DECLINED_MARKER: &str = "DECLINED: the migration finding is out of scope for this task.";
@@ -1397,12 +1384,9 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
                 let (read_half, mut write_half) = stream.into_split();
                 let mut reader = BufReader::new(read_half);
                 loop {
-                    let mut line = String::new();
-                    match reader.read_line(&mut line).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(_) => {}
-                    }
-                    let Ok(command) = serde_json::from_str::<DaemonCommand>(line.trim()) else {
+                    let Some(command) =
+                        read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                    else {
                         return;
                     };
                     let response = match command {

@@ -214,7 +214,7 @@ async fn abort_task_creation_closes_an_existing_requested_id() {
 #[tokio::test]
 async fn close_task_route_releases_claimed_ports() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -235,9 +235,7 @@ async fn close_task_route_releases_claimed_ports() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         for expected_session_id in ["task-1", "shell-wt-task-1", "td-task-1"] {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
                 DaemonCommand::Kill { session_id } => assert_eq!(session_id, expected_session_id),
                 other => panic!("expected kill command, got {other:?}"),
@@ -744,7 +742,7 @@ async fn agent_session_id_route_persists_provider_session_id() {
 #[tokio::test]
 async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_running_dependents() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -859,9 +857,7 @@ async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_ru
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         for index in 0..5 {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match (index, command) {
                 (0, DaemonCommand::Input { session_id, data }) => {
                     assert_eq!(session_id, "task-b-session");
@@ -1194,7 +1190,7 @@ async fn close_task_route_rejects_parent_with_open_subtasks() {
 #[tokio::test]
 async fn close_task_route_resolves_branch_style_task_id() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -1217,9 +1213,7 @@ async fn close_task_route_resolves_branch_style_task_id() {
         let expected = ["710917fb", "shell-wt-710917fb", "td-710917fb"];
 
         for expected_session_id in expected {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
                 DaemonCommand::Kill { session_id } => {
                     assert_eq!(session_id, expected_session_id)
@@ -1302,7 +1296,7 @@ async fn close_task_route_resolves_branch_style_task_id() {
 #[tokio::test]
 async fn close_task_route_tears_down_current_stage_environment_before_repo_teardown() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -1407,9 +1401,7 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
         let expected_kills = ["task-1", "shell-wt-task-1", "td-task-source"];
 
         for expected_session_id in expected_kills {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
                 DaemonCommand::Kill { session_id } => assert_eq!(session_id, expected_session_id),
                 other => panic!("expected kill command, got {other:?}"),
@@ -1422,8 +1414,7 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
                 .unwrap();
         }
 
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         let item = Db::open(&daemon_db_path)
             .expect("open db before teardown spawn assertion")
             .get_pipeline_item("task-1")
@@ -1433,7 +1424,6 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
             item.closed_at.is_some(),
             "close route must mark the task closed before spawning teardown cleanup"
         );
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
         match command {
             DaemonCommand::Spawn {
                 session_id,
@@ -1768,7 +1758,7 @@ async fn unblock_task_route_removes_blockers() {
 #[tokio::test]
 async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -1933,11 +1923,11 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
         let mut spawned = Vec::new();
         let mut recovery_seeded = false;
         loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).await.unwrap() == 0 {
+            let Some(command) =
+                read_test_daemon_command_optional(&mut reader, &mut write_half).await
+            else {
                 break;
-            }
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            };
             match command {
                 DaemonCommand::Kill { .. } => {
                     write_half
@@ -2218,7 +2208,7 @@ async fn complete_pr_stage_without_pr_url_leaves_dormant_dependent_unstarted() {
 #[tokio::test]
 async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -2360,11 +2350,11 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
         let mut reader = BufReader::new(read_half);
         let mut spawned = Vec::new();
         loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).await.unwrap() == 0 {
+            let Some(command) =
+                read_test_daemon_command_optional(&mut reader, &mut write_half).await
+            else {
                 break;
-            }
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            };
             match command {
                 DaemonCommand::Kill { .. } => {
                     write_half
@@ -2516,7 +2506,7 @@ fn git_branch_exists(repo_root: &Path, branch: &str) -> bool {
 #[tokio::test]
 async fn conflicting_sibling_blockers_create_integration_task_and_leave_dependent_dormant() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -2628,11 +2618,11 @@ async fn conflicting_sibling_blockers_create_integration_task_and_leave_dependen
             let (read_half, mut write_half) = stream.into_split();
             let mut reader = BufReader::new(read_half);
             loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).await.unwrap() == 0 {
+                let Some(command) =
+                    read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                else {
                     break;
-                }
-                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                };
                 match command {
                     DaemonCommand::Kill { .. } => {
                         write_half
@@ -2761,7 +2751,7 @@ async fn conflicting_sibling_blockers_create_integration_task_and_leave_dependen
 #[tokio::test]
 async fn closing_integration_task_starts_dependent_from_integration_branch() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -2873,11 +2863,11 @@ async fn closing_integration_task_starts_dependent_from_integration_branch() {
             let (read_half, mut write_half) = stream.into_split();
             let mut reader = BufReader::new(read_half);
             loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).await.unwrap() == 0 {
+                let Some(command) =
+                    read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                else {
                     break;
-                }
-                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                };
                 match command {
                     DaemonCommand::Kill { .. } => {
                         write_half
@@ -3039,7 +3029,7 @@ async fn closing_integration_task_starts_dependent_from_integration_branch() {
 #[tokio::test]
 async fn renamed_multi_blocker_pr_branches_survive_earlier_worktree_cleanup() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -3170,11 +3160,11 @@ async fn renamed_multi_blocker_pr_branches_survive_earlier_worktree_cleanup() {
             let (read_half, mut write_half) = stream.into_split();
             let mut reader = BufReader::new(read_half);
             loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).await.unwrap() == 0 {
+                let Some(command) =
+                    read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                else {
                     break;
-                }
-                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                };
                 match command {
                     DaemonCommand::Kill { .. } => {
                         write_half
@@ -3281,7 +3271,7 @@ async fn renamed_multi_blocker_pr_branches_survive_earlier_worktree_cleanup() {
 #[tokio::test]
 async fn close_non_final_blocker_leaves_dormant_dependent_unstarted() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -3367,11 +3357,11 @@ async fn close_non_final_blocker_leaves_dormant_dependent_unstarted() {
         let mut reader = BufReader::new(read_half);
         let mut spawned = 0usize;
         loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).await.unwrap() == 0 {
+            let Some(command) =
+                read_test_daemon_command_optional(&mut reader, &mut write_half).await
+            else {
                 break;
-            }
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            };
             match command {
                 DaemonCommand::Kill { .. } => {
                     write_half
@@ -3911,7 +3901,7 @@ async fn rerun_stage_route_uses_stage_rerunner() {
 async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -3989,9 +3979,7 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             let session_id = match command {
                 // Durable stage swap kills the previous session in place
                 // before respawning the same session id.
@@ -4327,7 +4315,7 @@ async fn advance_stage_route_notifies_after_detached_setup_failure_is_persisted(
 async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_write() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
     use tokio::sync::oneshot;
 
@@ -4392,11 +4380,11 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
             let (read_half, mut write_half) = stream.into_split();
             let mut reader = BufReader::new(read_half);
             loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).await.unwrap() == 0 {
+                let Some(command) =
+                    read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                else {
                     continue 'connections;
-                }
-                let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                };
                 match command {
                     DaemonCommand::Kill { session_id, .. } if session_id == "source-1" => {
                         let response = DaemonEvent::Error {
@@ -4608,7 +4596,7 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
 async fn advance_stage_route_closes_final_stage_and_tears_down_environment_before_repo() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -4692,9 +4680,7 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
         let expected_kills = ["task-1", "shell-wt-task-1", "td-task-source"];
 
         for expected_session_id in expected_kills {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
                 DaemonCommand::Kill { session_id } => assert_eq!(session_id, expected_session_id),
                 other => panic!("expected kill command, got {other:?}"),
@@ -4707,8 +4693,7 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
                 .unwrap();
         }
 
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         let item = Db::open(&daemon_db_path)
             .expect("open db before final-stage teardown spawn assertion")
             .get_pipeline_item("task-1")
@@ -4718,7 +4703,6 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
             item.closed_at.is_some(),
             "final-stage close must mark the task closed before spawning teardown cleanup"
         );
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
         match command {
             DaemonCommand::Spawn {
                 session_id,
@@ -5469,7 +5453,7 @@ async fn complete_stage_route_parses_pr_url_from_summary_fallback() {
 async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -5531,9 +5515,7 @@ async fn complete_stage_success_after_failed_post_refinishes_run_and_transitions
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             let response = match &command {
                 DaemonCommand::Kill { .. } => DaemonEvent::Error {
                     code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
@@ -5763,7 +5745,7 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -5807,13 +5789,10 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
                 let (read_half, mut write_half) = stream.into_split();
                 let mut reader = BufReader::new(read_half);
                 loop {
-                    let mut line = String::new();
-                    match reader.read_line(&mut line).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {}
-                    }
-                    let Ok(command) = serde_json::from_str::<DaemonCommand>(line.trim()) else {
-                        continue;
+                    let Some(command) =
+                        read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                    else {
+                        break;
                     };
                     let response = match &command {
                         DaemonCommand::Spawn { session_id, .. } => DaemonEvent::SessionCreated {
@@ -6030,7 +6009,7 @@ async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_unt
 async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -6094,9 +6073,7 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             let session_id = match command {
                 DaemonCommand::Kill { .. } => {
                     let response = DaemonEvent::Error {
@@ -6231,7 +6208,7 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
 async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use std::time::Duration;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -6345,11 +6322,11 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
         let mut reader = BufReader::new(read_half);
         let mut spawned = Vec::new();
         loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).await.unwrap() == 0 {
+            let Some(command) =
+                read_test_daemon_command_optional(&mut reader, &mut write_half).await
+            else {
                 break;
-            }
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            };
             match command {
                 DaemonCommand::Kill { .. } => {
                     write_half
@@ -6452,7 +6429,7 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
 async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use std::time::Duration;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let _sidecar_guard = crate::test_sidecar_guard();
@@ -6573,11 +6550,11 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
         let mut reader = BufReader::new(read_half);
         let mut spawned = Vec::new();
         loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).await.unwrap() == 0 {
+            let Some(command) =
+                read_test_daemon_command_optional(&mut reader, &mut write_half).await
+            else {
                 break;
-            }
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            };
             match command {
                 DaemonCommand::Kill { .. } => {
                     write_half

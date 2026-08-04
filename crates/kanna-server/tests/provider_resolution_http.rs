@@ -326,68 +326,26 @@ async fn fake_daemon_until_spawn(daemon_dir: PathBuf) -> DaemonCommand {
     let socket_path = kanna_runtime_defaults::socket_path(&daemon_dir);
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).expect("fake daemon should bind");
-    let mut subscribers = Vec::new();
+    let (command_tx, mut commands) = mpsc::unbounded_channel();
+    let mut connections = JoinSet::new();
 
     loop {
-        let (stream, _) = listener
-            .accept()
-            .await
-            .expect("daemon client should connect");
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .await
-            .expect("daemon command should be readable");
-        let command: DaemonCommand =
-            serde_json::from_str(line.trim()).expect("daemon command should be JSON");
-        match command {
-            DaemonCommand::Subscribe => {
-                write_half
-                    .write_all(
-                        format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap())
-                            .as_bytes(),
-                    )
-                    .await
-                    .expect("subscribe response should be written");
-                subscribers.push(write_half);
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted.expect("daemon client should connect");
+                connections.spawn(serve_fake_daemon_connection(stream, command_tx.clone()));
             }
-            DaemonCommand::List => {
-                write_half
-                    .write_all(
-                        format!(
-                            "{}\n",
-                            serde_json::to_string(&DaemonEvent::SessionList {
-                                sessions: Vec::new(),
-                            })
-                            .unwrap()
-                        )
-                        .as_bytes(),
-                    )
-                    .await
-                    .expect("list response should be written");
+            command = commands.recv() => {
+                let command = command.expect("fake daemon command channel should remain open");
+                if matches!(command, DaemonCommand::Spawn { .. } | DaemonCommand::SpawnAgent { .. }) {
+                    return command;
+                }
             }
-            command @ (DaemonCommand::Spawn { .. } | DaemonCommand::SpawnAgent { .. }) => {
-                let session_id = match &command {
-                    DaemonCommand::Spawn { session_id, .. }
-                    | DaemonCommand::SpawnAgent { session_id, .. } => session_id.clone(),
-                    _ => unreachable!(),
-                };
-                write_half
-                    .write_all(
-                        format!(
-                            "{}\n",
-                            serde_json::to_string(&DaemonEvent::SessionCreated { session_id })
-                                .unwrap()
-                        )
-                        .as_bytes(),
-                    )
-                    .await
-                    .expect("spawn response should be written");
-                return command;
+            completed = connections.join_next(), if !connections.is_empty() => {
+                completed
+                    .expect("fake daemon connection set should not be empty")
+                    .expect("fake daemon connection handler should complete cleanly");
             }
-            other => panic!("unexpected daemon command: {other:?}"),
         }
     }
 }
@@ -410,6 +368,9 @@ async fn serve_fake_daemon_connection(
         let command: DaemonCommand =
             serde_json::from_str(line.trim()).expect("daemon command should be JSON");
         let response = match &command {
+            DaemonCommand::NegotiateProtectedInput { .. } => DaemonEvent::ProtectedInputReady {
+                version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+            },
             DaemonCommand::Subscribe => DaemonEvent::Ok,
             DaemonCommand::List => DaemonEvent::SessionList {
                 sessions: Vec::new(),
@@ -428,7 +389,12 @@ async fn serve_fake_daemon_connection(
             .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
             .await
             .expect("daemon response should be written");
-        if !matches!(&command, DaemonCommand::Subscribe | DaemonCommand::List) {
+        if !matches!(
+            &command,
+            DaemonCommand::NegotiateProtectedInput { .. }
+                | DaemonCommand::Subscribe
+                | DaemonCommand::List
+        ) {
             let _ = commands.send(command);
         }
     }
@@ -781,8 +747,10 @@ async fn unsupported_headless_provider_is_rejected_before_durable_state_through_
     write_executable(&repo.join(".kanna/provider-bin/copilot"));
     let ports = ServerPortReservations::new();
     let port = ports.lan_port();
-    let (config_path, _, _) = write_server_config(&root, port, ports.transfer_port());
+    let (config_path, daemon_dir, _) = write_server_config(&root, port, ports.transfer_port());
     let ServerPortReservations { lan, transfer } = ports;
+    let (command_tx, _commands) = mpsc::unbounded_channel();
+    let daemon = tokio::spawn(fake_daemon_persistent(daemon_dir, command_tx));
     let mut server = start_server(&config_path, &root, port, lan, transfer).await;
     let client = Client::new();
     let repo_id = register_repo(&client, port, &repo).await;
@@ -825,5 +793,7 @@ async fn unsupported_headless_provider_is_rejected_before_durable_state_through_
     );
 
     stop_server(&mut server).await;
+    daemon.abort();
+    assert!(daemon.await.unwrap_err().is_cancelled());
     std::fs::remove_dir_all(root).expect("test root should be removed");
 }

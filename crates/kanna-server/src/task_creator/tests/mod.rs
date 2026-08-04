@@ -44,6 +44,31 @@ fn test_daemon_socket_path(daemon_dir: &str) -> std::path::PathBuf {
     kanna_runtime_defaults::socket_path(std::path::Path::new(daemon_dir))
 }
 
+async fn read_fake_daemon_command(
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+) -> kanna_daemon::protocol::Command {
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let command = serde_json::from_str(line.trim()).unwrap();
+        if matches!(
+            command,
+            kanna_daemon::protocol::Command::NegotiateProtectedInput { .. }
+        ) {
+            let response = kanna_daemon::protocol::Event::ProtectedInputReady {
+                version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+            };
+            writer
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            continue;
+        }
+        return command;
+    }
+}
+
 async fn spawn_fake_daemon_session_created_once(
     daemon_dir: String,
 ) -> tokio::task::JoinHandle<kanna_daemon::protocol::Command> {
@@ -54,9 +79,7 @@ async fn spawn_fake_daemon_session_created_once(
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: kanna_daemon::protocol::Command = serde_json::from_str(line.trim()).unwrap();
+        let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
         let response = serde_json::to_string(&kanna_daemon::protocol::Event::SessionCreated {
             session_id: "task-1".to_string(),
         })
@@ -76,10 +99,9 @@ async fn spawn_fake_daemon_read_then_stall(daemon_dir: String) -> tokio::task::J
     let listener = UnixListener::bind(&socket_path).unwrap();
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let (read_half, _write_half) = stream.into_split();
+        let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
+        let _ = read_fake_daemon_command(&mut reader, &mut write_half).await;
         std::future::pending::<()>().await;
     })
 }
@@ -255,10 +277,7 @@ async fn spawn_fake_daemon_input_ok(
         let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
         for _ in 0..expected_commands {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: kanna_daemon::protocol::Command =
-                serde_json::from_str(line.trim()).unwrap();
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
             commands.push(command);
             let response = serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap();
             write_half.write_all(response.as_bytes()).await.unwrap();
@@ -287,10 +306,7 @@ async fn spawn_fake_daemon_fork_transition(
         let mut commands = Vec::new();
         let mut spawns = 0;
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: kanna_daemon::protocol::Command =
-                serde_json::from_str(line.trim()).unwrap();
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
             let response = match &command {
                 kanna_daemon::protocol::Command::Kill { .. } => kanna_daemon::protocol::Event::Ok,
                 kanna_daemon::protocol::Command::Spawn { session_id, .. }
@@ -329,10 +345,7 @@ async fn spawn_fake_daemon_fork_transition_with_teardown(
         let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
         for command_index in 0..5 {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: kanna_daemon::protocol::Command =
-                serde_json::from_str(line.trim()).unwrap();
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
             let response = match &command {
                 kanna_daemon::protocol::Command::Kill { .. } => kanna_daemon::protocol::Event::Ok,
                 kanna_daemon::protocol::Command::Spawn { session_id, .. }

@@ -450,7 +450,7 @@ describe("useTerminal", () => {
     expect(detach).toHaveBeenCalledWith("session-1", "terminal");
   });
 
-  it("routes only protected operator terminals through native process authentication", async () => {
+  it("switches both directions between KSP and protected input without remounting", async () => {
     const sendTermInput = vi.fn();
     streamClientMock.getSharedStreamClient.mockResolvedValue({
       attachTerminal: vi.fn(),
@@ -461,11 +461,11 @@ describe("useTerminal", () => {
     const { useTerminal } = await import("./useTerminal");
     const TestHarness = defineComponent({
       setup() {
-        const { init } = useTerminal("merge-session", undefined, {
+        const { init, setOperatorTerminalInput } = useTerminal("merge-session", undefined, {
           agentTerminal: true,
-          operatorTerminalInput: true,
+          operatorTerminalInput: false,
         });
-        return { init };
+        return { init, setOperatorTerminalInput };
       },
       render() {
         return h("div");
@@ -481,14 +481,27 @@ describe("useTerminal", () => {
 
     const onData = terminals[0].onData.mock.calls[0]?.[0];
     expect(onData).toBeDefined();
+    onData("generic input");
+    await waitForQueuedInputFlush();
+
+    expect(sendTermInput).toHaveBeenCalledWith("merge-session", btoa("generic input"));
+    expect(invokeMock).not.toHaveBeenCalledWith("send_operator_input", expect.anything());
+
+    wrapper.vm.setOperatorTerminalInput(true);
     onData("merge PR 992");
     await waitForQueuedInputFlush();
 
-    expect(sendTermInput).not.toHaveBeenCalled();
     expect(invokeMock).toHaveBeenCalledWith("send_operator_input", {
       sessionId: "merge-session",
       data: Array.from(new TextEncoder().encode("merge PR 992")),
     });
+
+    wrapper.vm.setOperatorTerminalInput(false);
+    onData("generic again");
+    await waitForQueuedInputFlush();
+
+    expect(sendTermInput).toHaveBeenLastCalledWith("merge-session", btoa("generic again"));
+    expect(sendTermInput).toHaveBeenCalledTimes(2);
   });
 
   it("re-attaches when the session is respawned even though the terminal still believes it is attached", async () => {

@@ -38,6 +38,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   const instanceId = Math.random().toString(36).slice(2, 10)
   const outputDecoder = new TextDecoder()
   const state = createTerminalRuntimeState()
+  const operatorTerminalInput = ref(options?.operatorTerminalInput === true)
 
   function handleLinkActivate(_event: MouseEvent, uri: string) {
     if (isImageLinkUri(uri)) {
@@ -61,17 +62,17 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
 
   const inputQueue = createTerminalInputQueue({
     sessionId,
-    getTerminalStreamClient: options?.operatorTerminalInput
-      ? undefined
-      : getTerminalStreamClient,
-    sendTerminalInput: options?.operatorTerminalInput
-      ? async (nativeSessionId, dataB64) => {
-          await invoke("send_operator_input", {
-            sessionId: nativeSessionId,
-            data: Array.from(base64ToBytes(dataB64)),
-          })
-        }
-      : undefined,
+    sendTerminalInput: async (nativeSessionId, dataB64) => {
+      if (operatorTerminalInput.value) {
+        await invoke("send_operator_input", {
+          sessionId: nativeSessionId,
+          data: Array.from(base64ToBytes(dataB64)),
+        })
+        return
+      }
+      const client = await getTerminalStreamClient()
+      client.sendTermInput(nativeSessionId, dataB64)
+    },
   })
   const clipboardBridge = createTerminalClipboardBridge({
     sessionId,
@@ -156,5 +157,8 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     ensureConnected: lifecycle.ensureConnected,
     pause: lifecycle.pause,
     dispose: lifecycle.dispose,
+    setOperatorTerminalInput: (enabled: boolean) => {
+      operatorTerminalInput.value = enabled
+    },
   }
 }

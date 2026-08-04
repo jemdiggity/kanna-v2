@@ -154,18 +154,30 @@ describe("MainPanel", () => {
     expect(wrapper.findComponent({ name: "TerminalTabs" }).props("operatorTerminalInput")).toBe(true);
   });
 
-  it("keeps terminal input, focus, and buffer state across authoritative detail refreshes", async () => {
+  it("keeps terminal state and the last policy across refresh failure, then recovers policy", async () => {
     const { default: MainPanel } = await import("../MainPanel.vue");
-    fetchTaskDetailMock.mockResolvedValue({
-      id: "task-pending",
-      stage: "in progress",
-      closedAt: null,
-      latestRun: null,
-      revisionRounds: 0,
-      revisionLimit: 3,
-      childTaskIds: [],
-      operatorTerminalInput: true,
-    });
+    fetchTaskDetailMock
+      .mockResolvedValueOnce({
+        id: "task-pending",
+        stage: "in progress",
+        closedAt: null,
+        latestRun: null,
+        revisionRounds: 0,
+        revisionLimit: 3,
+        childTaskIds: [],
+        operatorTerminalInput: true,
+      })
+      .mockRejectedValueOnce(new Error("transient detail refresh failure"))
+      .mockResolvedValueOnce({
+        id: "task-pending",
+        stage: "in progress",
+        closedAt: null,
+        latestRun: null,
+        revisionRounds: 0,
+        revisionLimit: 3,
+        childTaskIds: [],
+        operatorTerminalInput: false,
+      });
     const wrapper = mount(MainPanel, {
       props: {
         uiSlot: readySlot(durableTask()),
@@ -193,10 +205,20 @@ describe("MainPanel", () => {
     await wrapper.setProps({
       uiSlot: readySlot(durableTask({ activity_revision: 1 })),
     });
+    await flushPromises();
     expect(wrapper.get('[data-testid="interactive-terminal"]').element).toBe(terminal.element);
     expect(terminal.element.value).toBe("typed-during-transition");
     expect(document.activeElement).toBe(terminal.element);
     expect(wrapper.findComponent({ name: "TerminalTabs" }).props("operatorTerminalInput")).toBe(true);
+
+    await wrapper.setProps({
+      uiSlot: readySlot(durableTask({ activity_revision: 2 })),
+    });
+    await flushPromises();
+    expect(wrapper.get('[data-testid="interactive-terminal"]').element).toBe(terminal.element);
+    expect(terminal.element.value).toBe("typed-during-transition");
+    expect(document.activeElement).toBe(terminal.element);
+    expect(wrapper.findComponent({ name: "TerminalTabs" }).props("operatorTerminalInput")).toBe(false);
     wrapper.unmount();
   });
 

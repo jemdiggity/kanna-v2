@@ -76,18 +76,14 @@ async fn spawn_prepared_task_classified(
         operator_input_only,
     );
 
-    let event = if operator_input_only {
-        daemon
-            .send_protected_command_retrying_successor(&command)
-            .await
-    } else {
-        daemon.send_command_retrying_successor(&command).await
-    }
-    .map_err(|e| {
-        SpawnPreparedError::UncertainDelivery(format!(
-            "daemon spawn response lost after submission began: {e}"
-        ))
-    })?;
+    let event = daemon
+        .send_command_retrying_successor(&command)
+        .await
+        .map_err(|e| {
+            SpawnPreparedError::UncertainDelivery(format!(
+                "daemon spawn response lost after submission began: {e}"
+            ))
+        })?;
 
     match event {
         DaemonEvent::SessionCreated { .. } => Ok(prepared.created_task),

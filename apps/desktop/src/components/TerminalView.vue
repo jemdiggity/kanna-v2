@@ -22,7 +22,7 @@ const props = defineProps<{
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
-const { terminal, init, startListening, fit, fitDeferred, redraw, ensureConnected, pause, dispose } = useTerminal(props.sessionId, props.spawnOptions, {
+const { terminal, init, startListening, fit, fitDeferred, redraw, ensureConnected, pause, dispose, setOperatorTerminalInput } = useTerminal(props.sessionId, props.spawnOptions, {
   kittyKeyboard: props.kittyKeyboard,
   agentProvider: props.agentProvider,
   worktreePath: props.worktreePath,
@@ -30,6 +30,12 @@ const { terminal, init, startListening, fit, fitDeferred, redraw, ensureConnecte
   operatorTerminalInput: props.operatorTerminalInput,
   recoverSession: props.recoverSession,
 })
+
+watch(
+  () => props.operatorTerminalInput === true,
+  enabled => setOperatorTerminalInput(enabled),
+  { immediate: true },
+)
 
 defineExpose({
   focus: () => terminal.value?.focus(),

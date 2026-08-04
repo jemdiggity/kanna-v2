@@ -134,10 +134,7 @@ async fn spawn_recovery_fake_daemon(
         let mut reader = BufReader::new(read_half);
         let mut commands = Vec::new();
         loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: kanna_daemon::protocol::Command =
-                serde_json::from_str(line.trim()).unwrap();
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
             let response = match &command {
                 kanna_daemon::protocol::Command::Kill { .. } => {
                     kanna_daemon::protocol::Event::Error {
@@ -190,9 +187,7 @@ async fn spawn_listing_fake_daemon(
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: kanna_daemon::protocol::Command = serde_json::from_str(line.trim()).unwrap();
+        let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
         assert!(matches!(command, kanna_daemon::protocol::Command::List));
         let event = kanna_daemon::protocol::Event::SessionList {
             sessions: vec![kanna_daemon::protocol::SessionInfo {

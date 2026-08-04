@@ -6,9 +6,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tempfile::TempDir;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
+use tokio::task::JoinHandle;
 
 struct RunningServer {
     child: Child,
+    daemon: JoinHandle<()>,
     _root: TempDir,
     port: u16,
     status_url: String,
@@ -20,7 +24,56 @@ impl Drop for RunningServer {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        self.daemon.abort();
     }
+}
+
+fn start_fake_daemon(daemon_dir: &Path) -> JoinHandle<()> {
+    std::fs::create_dir_all(daemon_dir).expect("create fake daemon directory");
+    let socket_path = kanna_runtime_defaults::socket_path(daemon_dir);
+    let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
+    std::fs::write(
+        daemon_dir.join("daemon.pid"),
+        format!("{}\n", std::process::id()),
+    )
+    .expect("publish fake daemon pid");
+
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.expect("accept daemon client");
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let command: kanna_daemon::protocol::Command =
+                        serde_json::from_str(line.trim()).expect("parse daemon command");
+                    let response = match command {
+                        kanna_daemon::protocol::Command::NegotiateProtectedInput { .. } => {
+                            kanna_daemon::protocol::Event::ProtectedInputReady {
+                                version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+                            }
+                        }
+                        kanna_daemon::protocol::Command::List => {
+                            kanna_daemon::protocol::Event::SessionList {
+                                sessions: Vec::new(),
+                            }
+                        }
+                        _ => kanna_daemon::protocol::Event::Ok,
+                    };
+                    write
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .expect("write fake daemon response");
+                }
+            });
+        }
+    })
 }
 
 struct ServerPortReservations {
@@ -111,6 +164,7 @@ fn launch_server(
         ),
     )
     .expect("write server configuration");
+    let daemon = start_fake_daemon(&daemon_dir);
 
     let ServerPortReservations { lan, transfer } = ports;
     drop(lan);
@@ -125,6 +179,7 @@ fn launch_server(
 
     RunningServer {
         child,
+        daemon,
         _root: root,
         port,
         status_url: format!("http://127.0.0.1:{port}/v1/status"),
@@ -256,6 +311,13 @@ async fn register_emits_a_startable_development_config_with_build_identity() {
     let config_path = registered_config_path(root.path());
     let registered_config = std::fs::read_to_string(&config_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", config_path.display()));
+    let registered_values: toml::Value =
+        toml::from_str(&registered_config).expect("parse registered config");
+    let daemon_dir = PathBuf::from(
+        registered_values["daemon_dir"]
+            .as_str()
+            .expect("registered config should include daemon_dir"),
+    );
     let expected_version = include_str!("../../../VERSION").trim();
     assert!(registered_config.contains(&format!("version = \"{expected_version}\"")));
     assert!(registered_config.contains("environment = \"development\""));
@@ -280,6 +342,7 @@ async fn register_emits_a_startable_development_config_with_build_identity() {
         "lan_host = \"127.0.0.1\"\nlan_port = {port}"
     )
     .expect("configure registered server loopback port");
+    let daemon = start_fake_daemon(&daemon_dir);
 
     let ServerPortReservations { lan, transfer } = ports;
     drop(lan);
@@ -295,6 +358,7 @@ async fn register_emits_a_startable_development_config_with_build_identity() {
         .expect("start kanna-server from registered config");
     let mut server = RunningServer {
         child,
+        daemon,
         _root: root,
         port,
         status_url: format!("http://127.0.0.1:{port}/v1/status"),

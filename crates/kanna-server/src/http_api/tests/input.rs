@@ -17,7 +17,7 @@ async fn expect_task_state_changed(
 
 async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str) {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique_prefix = format!(
@@ -56,9 +56,7 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str) 
         let mut reader = BufReader::new(read_half);
         let mut inputs = Vec::new();
         for _ in 0..2 {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
                 DaemonCommand::Input { session_id, data } => {
                     assert_eq!(session_id, "merge-session");
@@ -313,7 +311,7 @@ fn merge_test_config(unique: &str, daemon_dir: &Path) -> Config {
 #[tokio::test]
 async fn concurrent_approvals_serialize_complete_envelopes_into_one_merge_singleton() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!("merge-concurrency-{}", unique_test_suffix());
@@ -331,9 +329,7 @@ async fn concurrent_approvals_serialize_complete_envelopes_into_one_merge_single
                 let (read_half, mut write_half) = stream.into_split();
                 let mut reader = BufReader::new(read_half);
                 for _ in 0..2 {
-                    let mut line = String::new();
-                    reader.read_line(&mut line).await.unwrap();
-                    let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+                    let command = read_test_daemon_command(&mut reader, &mut write_half).await;
                     match command {
                         DaemonCommand::SystemInput { session_id, data } => {
                             assert_eq!(session_id, "merge-session");
@@ -458,9 +454,7 @@ async fn concurrent_approvals_prepare_exactly_one_merge_singleton_when_absent() 
         let (spawn_stream, _) = listener.accept().await.unwrap();
         let (spawn_read, mut spawn_write) = spawn_stream.into_split();
         let mut spawn_reader = BufReader::new(spawn_read);
-        let mut line = String::new();
-        spawn_reader.read_line(&mut line).await.unwrap();
-        let spawn: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let spawn = read_test_daemon_command(&mut spawn_reader, &mut spawn_write).await;
         let session_id = match spawn {
             DaemonCommand::Spawn {
                 session_id, args, ..
@@ -581,7 +575,7 @@ async fn concurrent_approvals_prepare_exactly_one_merge_singleton_when_absent() 
 #[tokio::test]
 async fn rejected_merge_singleton_spawn_rolls_back_completion_context_artifacts() {
     use kanna_daemon::protocol::{Command as DaemonCommand, ErrorCode, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!("merge-before-ack-context-{}", unique_test_suffix());
@@ -595,10 +589,9 @@ async fn rejected_merge_singleton_spawn_rolls_back_completion_context_artifacts(
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         assert!(matches!(
-            serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+            command,
             DaemonCommand::Spawn { .. } | DaemonCommand::SpawnAgent { .. }
         ));
         write_half
@@ -661,7 +654,7 @@ async fn rejected_merge_singleton_spawn_rolls_back_completion_context_artifacts(
 #[tokio::test]
 async fn acknowledged_merge_spawn_keeps_completion_context_when_db_bookkeeping_fails() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!("merge-after-ack-context-{}", unique_test_suffix());
@@ -677,9 +670,7 @@ async fn acknowledged_merge_spawn_keeps_completion_context_when_db_bookkeeping_f
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let spawn = serde_json::from_str::<DaemonCommand>(line.trim()).unwrap();
+        let spawn = read_test_daemon_command(&mut reader, &mut write_half).await;
         let session_id = match spawn {
             DaemonCommand::Spawn { session_id, .. }
             | DaemonCommand::SpawnAgent { session_id, .. } => session_id,
@@ -1360,7 +1351,7 @@ async fn explicit_human_override_persists_and_reaches_canonical_merge_handoff() 
 #[tokio::test]
 async fn signal_agent_route_creates_pinned_agent_task_when_absent() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -1383,9 +1374,7 @@ async fn signal_agent_route_creates_pinned_agent_task_when_absent() {
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         let session_id = match command {
             DaemonCommand::Spawn {
                 session_id, args, ..
@@ -1494,7 +1483,7 @@ async fn signal_agent_route_creates_pinned_agent_task_when_absent() {
 #[tokio::test]
 async fn signal_agent_route_creates_agent_task_with_requested_provider_and_effort() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -1517,9 +1506,7 @@ async fn signal_agent_route_creates_agent_task_with_requested_provider_and_effor
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         let session_id = match command {
             DaemonCommand::Spawn {
                 session_id, args, ..
@@ -1737,7 +1724,7 @@ async fn signal_agent_route_rejects_unsupported_provider() {
 #[tokio::test]
 async fn signal_agent_route_detaches_creation_spawn_from_request_future() {
     use kanna_daemon::protocol::Command as DaemonCommand;
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::io::BufReader;
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -1758,11 +1745,9 @@ async fn signal_agent_route_detaches_creation_spawn_from_request_future() {
 
     let daemon_server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let (read_half, _) = stream.into_split();
+        let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
-        let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         match command {
             DaemonCommand::Spawn { .. } | DaemonCommand::SpawnAgent { .. } => {}
             other => panic!("expected spawn command, got {other:?}"),
@@ -1898,7 +1883,7 @@ async fn send_task_input_route_uses_input_sender() {
 #[tokio::test]
 async fn submit_task_input_sends_text_then_enter_as_discrete_inputs() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -1920,9 +1905,7 @@ async fn submit_task_input_sends_text_then_enter_as_discrete_inputs() {
         let mut reader = BufReader::new(read_half);
         let mut inputs = Vec::new();
         for _ in 0..2 {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
                 DaemonCommand::Input { session_id, data } => {
                     assert_eq!(session_id, "task-target");
@@ -1957,7 +1940,7 @@ async fn submit_task_input_sends_text_then_enter_as_discrete_inputs() {
 #[tokio::test]
 async fn terminal_state_notification_sends_once_to_notify_target() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     let unique = format!(
@@ -1979,9 +1962,7 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
         let mut reader = BufReader::new(read_half);
         let mut inputs = Vec::new();
         for _ in 0..2 {
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
+            let command = read_test_daemon_command(&mut reader, &mut write_half).await;
             match command {
                 DaemonCommand::Input { session_id, data } => {
                     assert_eq!(session_id, "task-parent");
@@ -2145,13 +2126,13 @@ mod completion_notification {
             // own client.
             let drain = tokio::spawn(async move {
                 loop {
-                    let mut line = String::new();
-                    match reader.read_line(&mut line).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(_) => {}
-                    }
-                    let event = match serde_json::from_str::<DaemonCommand>(line.trim()) {
-                        Ok(DaemonCommand::Spawn { session_id, .. }) => {
+                    let Some(command) =
+                        read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                    else {
+                        return;
+                    };
+                    let event = match command {
+                        DaemonCommand::Spawn { session_id, .. } => {
                             DaemonEvent::SessionCreated { session_id }
                         }
                         _ => DaemonEvent::Ok,

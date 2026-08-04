@@ -96,9 +96,6 @@ async function loadTaskDetail(taskId: string): Promise<void> {
       taskDetail.value = detail;
     }
   } catch (error) {
-    if (request === taskDetailRequest && item.value?.id === taskId) {
-      taskDetail.value = null;
-    }
     console.error(`[main-panel] failed to load task detail for ${taskId}:`, error);
   }
 }

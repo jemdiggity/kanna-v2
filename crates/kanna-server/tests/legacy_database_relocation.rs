@@ -8,6 +8,8 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
 
 const CRASH_DB_ENV: &str = "KANNA_TEST_CRASH_LEGACY_DB";
 const CRASH_READY_ENV: &str = "KANNA_TEST_CRASH_LEGACY_READY";
@@ -46,6 +48,16 @@ impl TestRoot {
 
 struct ChildGuard {
     child: Option<Child>,
+}
+
+struct FakeDaemonGuard {
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for FakeDaemonGuard {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 impl ChildGuard {
@@ -321,6 +333,56 @@ fn write_server_config(
     std::fs::write(path, config).expect("server config should be written");
 }
 
+fn start_fake_daemon(daemon_dir: &Path) -> FakeDaemonGuard {
+    std::fs::create_dir_all(daemon_dir).expect("fake daemon directory should be created");
+    let socket_path = kanna_runtime_defaults::socket_path(daemon_dir);
+    let listener = UnixListener::bind(&socket_path).expect("fake daemon socket should bind");
+    std::fs::write(
+        daemon_dir.join("daemon.pid"),
+        format!("{}\n", std::process::id()),
+    )
+    .expect("fake daemon pid should be published");
+
+    let task = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.expect("fake daemon should accept");
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let command: kanna_daemon::protocol::Command =
+                        serde_json::from_str(line.trim())
+                            .expect("fake daemon command should parse");
+                    let response = match command {
+                        kanna_daemon::protocol::Command::NegotiateProtectedInput { .. } => {
+                            kanna_daemon::protocol::Event::ProtectedInputReady {
+                                version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+                            }
+                        }
+                        kanna_daemon::protocol::Command::List => {
+                            kanna_daemon::protocol::Event::SessionList {
+                                sessions: Vec::new(),
+                            }
+                        }
+                        _ => kanna_daemon::protocol::Event::Ok,
+                    };
+                    write
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .expect("fake daemon response should write");
+                }
+            });
+        }
+    });
+    FakeDaemonGuard { task }
+}
+
 async fn start_server(config_path: &Path, home: &Path, data_root: &Path, port: u16) -> ChildGuard {
     let mut command = Command::new(env!("CARGO_BIN_EXE_kanna-server"));
     command
@@ -402,6 +464,7 @@ async fn legacy_only_database_is_relocated_before_serving_and_persists_after_res
     let legacy_shm_path = sqlite_sidecar_path(&legacy_db_path, "-shm");
     let config_path = root.path().join("server.toml");
     let daemon_dir = root.path().join("daemon");
+    let _fake_daemon = start_fake_daemon(&daemon_dir);
     let pairing_store_path = root.path().join("pairings.json");
     let ready_path = root.path().join("crash-writer.ready");
     let main_only_copy_path = root.path().join("legacy-main-only.db");
@@ -493,6 +556,7 @@ async fn canonical_database_wins_and_legacy_state_is_archived_when_both_paths_ex
         kanna_runtime_defaults::canonical_desktop_db_path_for_app_support_root(&data_root);
     let config_path = root.path().join("server.toml");
     let daemon_dir = root.path().join("daemon");
+    let _fake_daemon = start_fake_daemon(&daemon_dir);
     let pairing_store_path = root.path().join("pairings.json");
     let ports = ServerPortReservations::new();
     let port = ports.lan_port();
@@ -556,6 +620,7 @@ async fn canonical_database_wins_while_archiving_legacy_wal_only_writes() {
         kanna_runtime_defaults::canonical_desktop_db_path_for_app_support_root(&data_root);
     let config_path = root.path().join("server.toml");
     let daemon_dir = root.path().join("daemon");
+    let _fake_daemon = start_fake_daemon(&daemon_dir);
     let pairing_store_path = root.path().join("pairings.json");
     let ready_path = root.path().join("crash-writer.ready");
     let ports = ServerPortReservations::new();
