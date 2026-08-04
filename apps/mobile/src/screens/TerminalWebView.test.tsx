@@ -31,6 +31,9 @@ let lastTree: ElementNode | null = null;
 const clipboardMocks = vi.hoisted(() => ({
   setStringAsync: vi.fn<(value: string) => Promise<void>>()
 }));
+const diagnosticMocks = vi.hoisted(() => ({
+  capture: vi.fn()
+}));
 
 vi.mock("react", async (importActual) => {
   const actual = await importActual<typeof import("react")>();
@@ -87,6 +90,9 @@ vi.mock("react-native-webview", () => ({
 }));
 
 vi.mock("expo-clipboard", () => clipboardMocks);
+vi.mock("../lib/diagnostics/mobileCrashDiagnostics", () => ({
+  captureMobileCrashDiagnostic: diagnosticMocks.capture
+}));
 
 function findByAccessibilityLabel(
   node: ElementNode | null,
@@ -222,6 +228,7 @@ describe("TerminalWebView", () => {
     vi.resetModules();
     clipboardMocks.setStringAsync.mockReset();
     clipboardMocks.setStringAsync.mockResolvedValue(undefined);
+    diagnosticMocks.capture.mockReset();
   });
 
   afterEach(() => {
@@ -234,6 +241,63 @@ describe("TerminalWebView", () => {
     const webView = await renderTerminalWebView({});
 
     expect(webView.props.webviewDebuggingEnabled).toBe(true);
+  });
+
+  it("captures terminal WebView load and process failures with bounded state", async () => {
+    const webView = await renderTerminalWebView({
+      taskId: "task-crash",
+      output: "encoded-output",
+      outputEpoch: 7,
+      outputStart: 250_000,
+      status: "live",
+      cols: 132,
+      rows: 48
+    });
+
+    webView.props.onError({
+      nativeEvent: {
+        code: -1,
+        description: "WebView load failed",
+        domain: "WKErrorDomain",
+        url: "about:blank"
+      }
+    });
+    webView.props.onContentProcessDidTerminate({
+      nativeEvent: { url: "about:blank" }
+    });
+    webView.props.onRenderProcessGone({
+      nativeEvent: { didCrash: true }
+    });
+
+    expect(diagnosticMocks.capture).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        kind: "webview-load-error",
+        message: "WebView load failed",
+        details: expect.objectContaining({
+          taskId: "task-crash",
+          outputChars: 14,
+          outputEpoch: 7,
+          outputStart: 250_000,
+          cols: 132,
+          rows: 48
+        })
+      })
+    );
+    expect(diagnosticMocks.capture).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        kind: "webview-process-terminated",
+        message: "The iOS terminal WebView content process terminated."
+      })
+    );
+    expect(diagnosticMocks.capture).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        kind: "webview-process-terminated",
+        message: "The Android terminal WebView render process crashed."
+      })
+    );
   });
 
   it("reports validated mention history without rendering a horizontal strip", async () => {

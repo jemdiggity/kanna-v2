@@ -6,6 +6,11 @@ import type { BuildIdentity } from "../lib/updates/buildIdentity";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
+vi.mock("../lib/diagnostics/mobileCrashDiagnostics", () => ({
+  clearMobileCrashDiagnostics: vi.fn().mockResolvedValue(undefined),
+  formatMobileCrashDiagnostics: (records: unknown) => JSON.stringify(records),
+  readMobileCrashDiagnostics: vi.fn().mockResolvedValue([])
+}));
 vi.mock("react-native", () => ({
   Pressable: "Pressable",
   StyleSheet: {
@@ -161,5 +166,76 @@ describe("BuildInfoPanel", () => {
     expect(
       rendered.root.findAllByProps({ testID: "mobile.build-info.update-id" })
     ).toHaveLength(0);
+  });
+
+  it("loads, copies, and clears retained crash diagnostics", async () => {
+    if (!BuildInfoPanel) throw new Error("BuildInfoPanel was not loaded");
+    const diagnostic = {
+      schemaVersion: 1 as const,
+      id: "diagnostic-123",
+      at: "2026-08-04T03:00:00.000Z",
+      kind: "webview-process-terminated" as const,
+      fatal: false,
+      message: "The iOS terminal WebView content process terminated.",
+      context: {
+        appState: "active",
+        connectionMode: "lan",
+        connectionState: "connected",
+        forceCloudEnabled: false,
+        selectedTaskId: "task-1",
+        terminalCols: 120,
+        terminalOutputChars: 900_000,
+        terminalOutputEpoch: 3,
+        terminalOutputStart: 100_000,
+        terminalRows: 44,
+        terminalStatus: "live"
+      },
+      breadcrumbs: [],
+      build: {
+        channel: "staging",
+        environment: "staging",
+        nativeSummary: "2.4.0 (108)",
+        runtimeVersion: "2.1.4",
+        source: "ota-123"
+      }
+    };
+    const copyDiagnostics = vi.fn().mockResolvedValue(undefined);
+    const loadDiagnostics = vi.fn().mockResolvedValue([diagnostic]);
+    const removeDiagnostics = vi.fn().mockResolvedValue(undefined);
+
+    await act(async () => {
+      rendered = create(
+        React.createElement(BuildInfoPanel!, {
+          identity: otaIdentity,
+          copyDiagnostics,
+          loadDiagnostics,
+          removeDiagnostics
+        })
+      );
+    });
+    await act(async () => {
+      rendered?.root.findByProps({ testID: "mobile.build-info.toggle" }).props.onPress();
+      await Promise.resolve();
+    });
+
+    expect(copy()).toContain("diagnostic-123");
+    expect(copy()).toContain("webview-process-terminated");
+
+    await act(async () => {
+      await rendered?.root.findByProps({
+        testID: "mobile.crash-diagnostics.copy"
+      }).props.onPress();
+    });
+    expect(copyDiagnostics).toHaveBeenCalledWith(
+      expect.stringContaining('"id":"diagnostic-123"')
+    );
+
+    await act(async () => {
+      await rendered?.root.findByProps({
+        testID: "mobile.crash-diagnostics.clear"
+      }).props.onPress();
+    });
+    expect(removeDiagnostics).toHaveBeenCalledTimes(1);
+    expect(copy()).toContain("No retained crash diagnostics.");
   });
 });

@@ -19,6 +19,10 @@ describe("mobile Expo entrypoint", () => {
 
     expect(entrySource).toContain("registerRootComponent");
     expect(entrySource).toContain('./App');
+    expect(entrySource).toContain("installMobileCrashHandler");
+    expect(entrySource.indexOf("installMobileCrashHandler();")).toBeLessThan(
+      entrySource.indexOf('require("./App")')
+    );
   });
 
   it("provides the screen factory required by native-stack", () => {

@@ -6,20 +6,36 @@ import {
   getCurrentBuildIdentity,
   type BuildIdentity
 } from "../lib/updates/buildIdentity";
+import {
+  clearMobileCrashDiagnostics,
+  formatMobileCrashDiagnostics,
+  readMobileCrashDiagnostics,
+  type MobileCrashDiagnostic
+} from "../lib/diagnostics/mobileCrashDiagnostics";
 
 const COPY_FEEDBACK_MS = 2_000;
 
 interface BuildInfoPanelProps {
   identity?: BuildIdentity;
   copyUpdateId?(value: string): Promise<unknown>;
+  copyDiagnostics?(value: string): Promise<unknown>;
+  loadDiagnostics?(): Promise<MobileCrashDiagnostic[]>;
+  removeDiagnostics?(): Promise<void>;
 }
 
 export function BuildInfoPanel({
   identity = getCurrentBuildIdentity(),
-  copyUpdateId = Clipboard.setStringAsync
+  copyUpdateId = Clipboard.setStringAsync,
+  copyDiagnostics = Clipboard.setStringAsync,
+  loadDiagnostics = readMobileCrashDiagnostics,
+  removeDiagnostics = clearMobileCrashDiagnostics
 }: BuildInfoPanelProps) {
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<MobileCrashDiagnostic[] | null>(
+    null
+  );
+  const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!copied) return;
@@ -27,6 +43,32 @@ export function BuildInfoPanel({
     const timeout = setTimeout(() => setCopied(false), COPY_FEEDBACK_MS);
     return () => clearTimeout(timeout);
   }, [copied]);
+
+  useEffect(() => {
+    if (!expanded || diagnostics !== null) return;
+    let cancelled = false;
+    void loadDiagnostics().then(
+      (records) => {
+        if (!cancelled) {
+          setDiagnostics(records);
+          setDiagnosticError(null);
+        }
+      },
+      (error: unknown) => {
+        if (!cancelled) {
+          setDiagnostics([]);
+          setDiagnosticError(
+            error instanceof Error
+              ? error.message
+              : "Could not read crash diagnostics."
+          );
+        }
+      }
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [diagnostics, expanded, loadDiagnostics]);
 
   const handleCopy = async () => {
     if (identity.source.kind !== "ota") return;
@@ -36,6 +78,30 @@ export function BuildInfoPanel({
       setCopied(true);
     } catch {
       // Build diagnostics remain usable even when the clipboard is unavailable.
+    }
+  };
+
+  const handleCopyDiagnostics = async () => {
+    if (!diagnostics?.length) return;
+    try {
+      await copyDiagnostics(formatMobileCrashDiagnostics(diagnostics));
+      setDiagnosticError(null);
+    } catch (error: unknown) {
+      setDiagnosticError(
+        error instanceof Error ? error.message : "Could not copy diagnostics."
+      );
+    }
+  };
+
+  const handleClearDiagnostics = async () => {
+    try {
+      await removeDiagnostics();
+      setDiagnostics([]);
+      setDiagnosticError(null);
+    } catch (error: unknown) {
+      setDiagnosticError(
+        error instanceof Error ? error.message : "Could not clear diagnostics."
+      );
     }
   };
 
@@ -117,6 +183,53 @@ export function BuildInfoPanel({
                 {identity.source.label}
               </Text>
             )}
+          </View>
+          <View
+            style={styles.diagnosticSection}
+            testID={MOBILE_E2E_IDS.crashDiagnostics}
+          >
+            <Text style={styles.detailLabel}>Crash diagnostics</Text>
+            {diagnostics === null ? (
+              <Text style={styles.diagnosticSummary}>Loading…</Text>
+            ) : diagnostics.length === 0 ? (
+              <Text style={styles.diagnosticSummary}>
+                {diagnosticError ?? "No retained crash diagnostics."}
+              </Text>
+            ) : (
+              <>
+                <Text selectable style={styles.diagnosticSummary}>
+                  {`${diagnostics[0].kind} · ${diagnostics[0].at}\n${diagnostics[0].id}\n${diagnostics[0].message}`}
+                </Text>
+                <View style={styles.diagnosticActions}>
+                  <Pressable
+                    accessibilityHint="Copies the retained crash records and runtime context"
+                    accessibilityRole="button"
+                    onPress={() => void handleCopyDiagnostics()}
+                    style={({ pressed }) => [
+                      styles.diagnosticButton,
+                      pressed ? styles.updateIdPressed : null
+                    ]}
+                    testID={MOBILE_E2E_IDS.crashDiagnosticsCopy}
+                  >
+                    <Text style={styles.copyHint}>Copy diagnostics</Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => void handleClearDiagnostics()}
+                    style={({ pressed }) => [
+                      styles.diagnosticButton,
+                      pressed ? styles.updateIdPressed : null
+                    ]}
+                    testID={MOBILE_E2E_IDS.crashDiagnosticsClear}
+                  >
+                    <Text style={styles.copyHint}>Clear</Text>
+                  </Pressable>
+                </View>
+              </>
+            )}
+            {diagnosticError && (diagnostics?.length ?? 0) > 0 ? (
+              <Text style={styles.diagnosticError}>{diagnosticError}</Text>
+            ) : null}
           </View>
         </View>
       ) : null}
@@ -211,5 +324,28 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 17
   },
-  copyHint: { color: "#7FA7D9", fontSize: 11, fontWeight: "700" }
+  copyHint: { color: "#7FA7D9", fontSize: 11, fontWeight: "700" },
+  diagnosticSection: {
+    borderTopColor: "#22304D",
+    borderTopWidth: 1,
+    gap: 8,
+    paddingTop: 10
+  },
+  diagnosticSummary: {
+    color: "#D8E7F7",
+    fontFamily: "monospace",
+    fontSize: 11,
+    lineHeight: 16
+  },
+  diagnosticActions: { flexDirection: "row", gap: 8 },
+  diagnosticButton: {
+    backgroundColor: "#10192A",
+    borderColor: "#22304D",
+    borderRadius: 10,
+    borderWidth: 1,
+    minHeight: 40,
+    justifyContent: "center",
+    paddingHorizontal: 12
+  },
+  diagnosticError: { color: "#FFC7CE", fontSize: 11, lineHeight: 16 }
 });

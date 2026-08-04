@@ -13,6 +13,9 @@ describe("MOBILE_E2E_IDS", () => {
       "mobile.search-keyboard-dismiss-target"
     );
     expect(MOBILE_E2E_IDS.moreScreen).toBe("mobile.more-screen");
+    expect(MOBILE_E2E_IDS.crashDiagnosticsCopy).toBe(
+      "mobile.crash-diagnostics.copy"
+    );
     expect(MOBILE_E2E_IDS.toolbarNavigation).toBe("mobile.toolbar.navigation");
     expect(MOBILE_E2E_IDS.toolbarSearch).toBe("mobile.toolbar.search");
     expect(MOBILE_E2E_IDS.taskDetailScreen).toBe("mobile.task-detail-screen");

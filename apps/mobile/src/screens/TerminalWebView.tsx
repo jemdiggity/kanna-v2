@@ -8,6 +8,9 @@ import {
 } from "react-native-webview";
 import type { TaskTerminalStatus } from "../state/sessionStore";
 import {
+  captureMobileCrashDiagnostic
+} from "../lib/diagnostics/mobileCrashDiagnostics";
+import {
   buildTerminalAppendScript,
   buildTerminalBottomInsetScript,
   buildTerminalDocument,
@@ -130,6 +133,18 @@ export function TerminalWebView({
     () => buildTerminalBottomInsetScript(resolvedBottomInset),
     [resolvedBottomInset]
   );
+
+  const terminalDiagnosticDetails = () => ({
+    taskId,
+    status,
+    outputChars: output.length,
+    outputEpoch,
+    outputStart,
+    cols,
+    rows,
+    bridgeReady: bridgeReadyRef.current,
+    pendingScriptCount: pendingScriptsRef.current.length
+  });
 
   const injectOrQueueScript = (
     script: string,
@@ -438,6 +453,42 @@ export function TerminalWebView({
             bottomInsetScript,
             replaceScript
           ];
+        }}
+        onError={(event) => {
+          captureMobileCrashDiagnostic({
+            kind: "webview-load-error",
+            message: event.nativeEvent.description,
+            details: {
+              ...terminalDiagnosticDetails(),
+              code: event.nativeEvent.code,
+              domain: event.nativeEvent.domain,
+              url: event.nativeEvent.url
+            }
+          });
+        }}
+        onContentProcessDidTerminate={(event) => {
+          captureMobileCrashDiagnostic({
+            kind: "webview-process-terminated",
+            message: "The iOS terminal WebView content process terminated.",
+            details: {
+              ...terminalDiagnosticDetails(),
+              platform: "ios",
+              url: event.nativeEvent.url
+            }
+          });
+        }}
+        onRenderProcessGone={(event) => {
+          captureMobileCrashDiagnostic({
+            kind: "webview-process-terminated",
+            message: event.nativeEvent.didCrash
+              ? "The Android terminal WebView render process crashed."
+              : "The Android terminal WebView render process was terminated.",
+            details: {
+              ...terminalDiagnosticDetails(),
+              didCrash: event.nativeEvent.didCrash,
+              platform: "android"
+            }
+          });
         }}
         onMessage={handleMessage}
         onLoadEnd={() => {

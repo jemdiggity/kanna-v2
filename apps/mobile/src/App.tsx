@@ -22,6 +22,7 @@ import {
 } from "./appLifecycle";
 import { createAppModel, resolveForceCloud, type AppModel } from "./appModel";
 import { AccountSheet } from "./components/AccountSheet";
+import { MobileCrashBoundary } from "./components/MobileCrashBoundary";
 import { QuickReplyEditorModal } from "./components/QuickReplyEditorModal";
 import { UpdateReadyBanner } from "./components/UpdateReadyBanner";
 import { LoadingText } from "./components/LoadingText";
@@ -36,6 +37,10 @@ import {
   type MobileNotificationTaskTarget
 } from "./lib/notifications/mobilePush";
 import { readExpoConfig } from "./lib/expoConfig";
+import {
+  addMobileCrashBreadcrumb,
+  updateMobileCrashContext
+} from "./lib/diagnostics/mobileCrashDiagnostics";
 import { readKannaExpoExtra } from "./mobileEnvironment";
 import RootNavigator from "./navigation/RootNavigator";
 import { buildInitialNavigationState } from "./navigation/navigationState";
@@ -51,7 +56,7 @@ import {
 
 const OTA_FOREGROUND_CHECK_THROTTLE_MS = 5 * 60 * 1000;
 
-export default function App() {
+function AppContent() {
   const modelRef = useRef<AppModel | null>(null);
   if (!modelRef.current) {
     modelRef.current = createAppModel({
@@ -84,6 +89,19 @@ export default function App() {
   );
   const [quickRepliesHydrated, setQuickRepliesHydrated] = useState(false);
   const [forceCloudEnabled, setForceCloudEnabled] = useState(resolveForceCloud());
+  updateMobileCrashContext({
+    appState: AppState.currentState,
+    connectionMode: state.connectionMode ?? "unknown",
+    connectionState: state.connectionState,
+    forceCloudEnabled,
+    selectedTaskId: state.selectedTaskId,
+    terminalCols: state.taskTerminalCols,
+    terminalOutputChars: state.taskTerminalOutput.length,
+    terminalOutputEpoch: state.taskTerminalOutputEpoch,
+    terminalOutputStart: state.taskTerminalOutputStart,
+    terminalRows: state.taskTerminalRows,
+    terminalStatus: state.taskTerminalStatus
+  });
   const [openMachinesRequestKey, setOpenMachinesRequestKey] = useState(0);
   const [initialized, setInitialized] = useState(false);
   const [initializationError, setInitializationError] = useState<string | null>(null);
@@ -208,6 +226,10 @@ export default function App() {
         nextState,
         hasDownloadedUpdate: hasDownloadedUpdateRef.current
       });
+      addMobileCrashBreadcrumb(
+        "app-state",
+        `${previousState}->${nextState} action=${foregroundAction}`
+      );
       if (foregroundAction === "reload") {
         hasDownloadedUpdateRef.current = false;
         void reloadToApplyUpdate();
@@ -360,6 +382,14 @@ export default function App() {
         ) : null}
       </View>
     </SafeAreaView>
+  );
+}
+
+export default function App() {
+  return (
+    <MobileCrashBoundary>
+      <AppContent />
+    </MobileCrashBoundary>
   );
 }
 
