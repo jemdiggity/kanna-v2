@@ -100,3 +100,94 @@ launch, using the same current build, fixed-duration labeled scenarios, and
 Instruments Time Profiler/Energy Log or equivalent device metrics. Terminal
 contents, credentials, and user input must not be captured or retained with
 those measurements.
+
+### Physical-device retry (2026-08-05)
+
+Jerome's iPhone 15 was attached and unlocked for the requested retry. Device
+discovery initially exposed a name-normalization detail: Xcode reports
+`Jerome’s iPhone 15` with a typographic apostrophe, so the ASCII
+`Jerome's iPhone 15` selector did not match. With Xcode's exact visible name,
+the current PR #998 task build completed the canonical staging dev-client
+build, install, and launch:
+
+```text
+KANNA_IOS_PHYSICAL_DEVICE_NAME='Jerome’s iPhone 15' ./kd mobile run --device --staging
+Launched Kanna mobile on Jerome’s iPhone 15.
+Bundle ID: build.kanna.app.staging
+Metro: http://192.168.10.101:8174
+App: installed and launched.
+OK metro-lan: Metro is reachable at http://192.168.10.101:8174/status.
+OK app-installed: build.kanna.app.staging is installed on Jerome’s iPhone 15.
+```
+
+WebDriverAgent also cleared the previous blocker. After pointing the canonical
+device-smoke workflow at the installed staging desktop server on port 48121,
+the WDA session started and the smoke advanced to the existing safe-fixture
+guard:
+
+```text
+KANNA_APP_ENV=staging KANNA_MOBILE_SERVER_PORT=48121 \
+  KANNA_IOS_PHYSICAL_DEVICE_NAME='Jerome’s iPhone 15' \
+  ./kd mobile device-smoke
+KANNA_E2E_PTY_TASK_ID is required. Provide a known live PTY task whose terminal
+snapshot contains KANNA_E2E_PTY_SENTINEL; opening an arbitrary task row does not
+prove mobile PTY rendering.
+```
+
+No arbitrary task was substituted, because doing so could expose real terminal
+contents and would not produce a labeled deterministic output or TUI state.
+
+The phone then displayed a load error. The task-local Metro log established the
+cause without collecting application or terminal contents:
+
+```text
+./kd dev log mobile
+CommandError: Must specify --private-key-path argument to sign development
+manifest for requested code signing key
+```
+
+This prevents the current staging dev-client from loading the task JavaScript;
+it is not terminal CPU or crash evidence. A machine-local OTA signing key exists,
+but the canonical `./kd mobile` development workflow has no path selector for
+it. This retry did not copy the key, add it to the worktree, run Expo directly,
+or widen PR #998 with credential/workflow changes.
+
+The canonical self-contained alternative was attempted twice with:
+
+```text
+KANNA_IOS_PHYSICAL_DEVICE_NAME='Jerome’s iPhone 15' \
+  ./kd mobile run --device --staging --install
+```
+
+Both attempts stopped before compilation with `xcodebuild` exit 65:
+
+```text
+Build Preparation
+Couldn't create workspace arena folder
+'.../.build/mobile/ios-device-staging': You can’t save the file
+“ios-device-staging” because the volume “VHS” is out of space.
+** BUILD FAILED **
+```
+
+The exact build-private target is a worktree symlink to
+`/Volumes/VHS/kanna-builds/kanna-7/task-670d3457-6`. At the retry it reported
+931 GiB used of 931 GiB, 32 MiB available, and 91% inode use. The source/Data
+volume separately had 70 GiB free; bypassing `.build` would violate the
+canonical build-private workflow. No unrelated build artifacts or user data
+were deleted.
+
+Consequently the controlled profiling matrix remains blocked before a valid
+fixed-duration interval can begin. Idle terminal, output burst, and
+alternate-screen TUI were all skipped over LAN and relay. Ordinary output was
+also skipped over both transports, matching the original eight-state matrix.
+No Instruments/Energy Log interval was recorded, so this retry yields no
+after-side CPU percentage, energy value, thermal-pressure value, footprint, or
+crash-rate evidence and makes no on-device performance or crash claim.
+
+Disposition: **needs human input**. Free sufficient space on `/Volumes/VHS` so
+the canonical self-contained staging install can build, or provide a canonical
+`./kd mobile` mechanism that supplies the existing development-manifest signing
+key without copying it into the worktree. A deterministic safe PTY fixture is
+also required before output and alternate-screen states can run; until then,
+only a content-free idle interval would be eligible after the app loads. Do not
+publish OTA, staging, or production as part of that unblock.
