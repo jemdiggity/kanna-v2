@@ -7,6 +7,7 @@ const MAX_DIAGNOSTICS = 5;
 const MAX_BREADCRUMBS = 20;
 const MAX_MESSAGE_LENGTH = 4_000;
 const MAX_STACK_LENGTH = 12_000;
+const GLOBAL_HANDLER_PERSISTENCE_DEADLINE_MS = 500;
 const REDACTED_VALUE = "[REDACTED]";
 const SENSITIVE_FIELD_PATTERN =
   /authorization|proxy-authorization|(?:access|refresh|id)[_-]?token|token|password|passwd|secret|api[_-]?key|credential|cookie|session/i;
@@ -84,6 +85,12 @@ interface DiagnosticEnvironment {
   readBuild(): MobileCrashDiagnostic["build"];
 }
 
+interface PendingDiagnostic {
+  diagnostic: MobileCrashDiagnostic;
+  rejectPersistence?: (reason: unknown) => void;
+  resolvePersistence?: () => void;
+}
+
 const EMPTY_CONTEXT: MobileCrashContext = {
   appState: "unknown",
   connectionMode: "unknown",
@@ -109,7 +116,7 @@ const UNKNOWN_BUILD: MobileCrashDiagnostic["build"] = {
 export class MobileCrashDiagnosticRecorder {
   private context: MobileCrashContext = { ...EMPTY_CONTEXT };
   private breadcrumbs: MobileCrashBreadcrumb[] = [];
-  private pendingDiagnostics: MobileCrashDiagnostic[] = [];
+  private pendingDiagnostics: PendingDiagnostic[] = [];
   private persistenceQueue: Promise<void> | null = null;
 
   constructor(
@@ -148,28 +155,25 @@ export class MobileCrashDiagnosticRecorder {
       {
         at: this.environment.now().toISOString(),
         category,
-        message: truncate(redactSensitiveText(message), MAX_MESSAGE_LENGTH)
+        message: redactAndTruncate(message, MAX_MESSAGE_LENGTH)
       }
     ].slice(-MAX_BREADCRUMBS);
   }
 
   capture(input: MobileCrashDiagnosticInput): MobileCrashDiagnostic {
-    return this.enqueueDiagnostic(input);
+    return this.enqueueDiagnostic(input).diagnostic;
   }
 
   captureWithPersistence(
     input: MobileCrashDiagnosticInput
   ): MobileCrashDiagnosticCapture {
-    const diagnostic = this.enqueueDiagnostic(input);
-    return {
-      diagnostic,
-      persistence: this.waitForPersistence()
-    };
+    return this.enqueueDiagnostic(input, true);
   }
 
   private enqueueDiagnostic(
-    input: MobileCrashDiagnosticInput
-  ): MobileCrashDiagnostic {
+    input: MobileCrashDiagnosticInput,
+    trackPersistence = false
+  ): MobileCrashDiagnosticCapture {
     const at = this.environment.now();
     let build = UNKNOWN_BUILD;
     try {
@@ -186,14 +190,14 @@ export class MobileCrashDiagnosticRecorder {
       at: at.toISOString(),
       kind: input.kind,
       fatal: input.fatal === true,
-      message: truncate(redactSensitiveText(input.message), MAX_MESSAGE_LENGTH),
+      message: redactAndTruncate(input.message, MAX_MESSAGE_LENGTH),
       ...(input.stack
-        ? { stack: truncate(redactSensitiveText(input.stack), MAX_STACK_LENGTH) }
+        ? { stack: redactAndTruncate(input.stack, MAX_STACK_LENGTH) }
         : {}),
       ...(input.componentStack
         ? {
-            componentStack: truncate(
-              redactSensitiveText(input.componentStack),
+            componentStack: redactAndTruncate(
+              input.componentStack,
               MAX_STACK_LENGTH
             )
           }
@@ -204,12 +208,29 @@ export class MobileCrashDiagnosticRecorder {
       build
     };
 
-    this.pendingDiagnostics = [diagnostic, ...this.pendingDiagnostics].slice(
-      0,
-      MAX_DIAGNOSTICS
+    let resolvePersistence: (() => void) | undefined;
+    let rejectPersistence: ((reason: unknown) => void) | undefined;
+    const persistence = trackPersistence
+      ? new Promise<void>((resolve, reject) => {
+          resolvePersistence = resolve;
+          rejectPersistence = reject;
+        })
+      : Promise.resolve();
+    const pending: PendingDiagnostic = {
+      diagnostic,
+      ...(resolvePersistence ? { resolvePersistence } : {}),
+      ...(rejectPersistence ? { rejectPersistence } : {})
+    };
+    let untrackedCount = 0;
+    this.pendingDiagnostics = [pending, ...this.pendingDiagnostics].filter(
+      (entry) => {
+        if (entry.resolvePersistence) return true;
+        untrackedCount += 1;
+        return untrackedCount <= MAX_DIAGNOSTICS;
+      }
     );
     this.startPersistence();
-    return diagnostic;
+    return { diagnostic, persistence };
   }
 
   async read(): Promise<MobileCrashDiagnostic[]> {
@@ -250,12 +271,37 @@ export class MobileCrashDiagnosticRecorder {
 
   private async flushPendingDiagnostics(): Promise<void> {
     while (this.pendingDiagnostics.length > 0) {
-      const batch = this.pendingDiagnostics.splice(0, MAX_DIAGNOSTICS);
-      const previous = await this.readStored();
-      await this.storage.setItem(
-        DIAGNOSTICS_STORAGE_KEY,
-        JSON.stringify([...batch, ...previous].slice(0, MAX_DIAGNOSTICS))
-      );
+      let trackedIndex = -1;
+      for (
+        let index = this.pendingDiagnostics.length - 1;
+        index >= 0;
+        index -= 1
+      ) {
+        if (this.pendingDiagnostics[index].resolvePersistence) {
+          trackedIndex = index;
+          break;
+        }
+      }
+      const batch =
+        trackedIndex >= 0
+          ? this.pendingDiagnostics.splice(trackedIndex, 1)
+          : this.pendingDiagnostics.splice(0, MAX_DIAGNOSTICS);
+      try {
+        const previous = await this.readStored();
+        await this.storage.setItem(
+          DIAGNOSTICS_STORAGE_KEY,
+          JSON.stringify(
+            [...batch.map((entry) => entry.diagnostic), ...previous].slice(
+              0,
+              MAX_DIAGNOSTICS
+            )
+          )
+        );
+        for (const entry of batch) entry.resolvePersistence?.();
+      } catch (error: unknown) {
+        for (const entry of batch) entry.rejectPersistence?.(error);
+        throw error;
+      }
     }
   }
 
@@ -371,7 +417,26 @@ export function installMobileCrashHandler(
         message: normalized.message,
         stack: normalized.stack
       });
-      void Promise.resolve(attempt.persistence).then(delegate, delegate);
+      let pendingDelegate: (() => void) | null = delegate;
+      const finishDelegation = () => {
+        const currentDelegate = pendingDelegate;
+        pendingDelegate = null;
+        currentDelegate?.();
+      };
+      const fallback = setTimeout(
+        finishDelegation,
+        GLOBAL_HANDLER_PERSISTENCE_DEADLINE_MS
+      );
+      void Promise.resolve(attempt.persistence).then(
+        () => {
+          clearTimeout(fallback);
+          finishDelegation();
+        },
+        () => {
+          clearTimeout(fallback);
+          finishDelegation();
+        }
+      );
     } catch {
       console.warn(
         "Mobile crash diagnostic capture failed before persistence completed."
@@ -412,12 +477,9 @@ function normalizeDetails(
       .map(([key, value]) => [
         key,
         typeof value === "string"
-          ? truncate(
-              SENSITIVE_FIELD_PATTERN.test(key)
-                ? REDACTED_VALUE
-                : redactSensitiveText(value),
-              MAX_MESSAGE_LENGTH
-            )
+          ? SENSITIVE_FIELD_PATTERN.test(key)
+            ? REDACTED_VALUE
+            : redactAndTruncate(value, MAX_MESSAGE_LENGTH)
           : value
       ])
   );
@@ -428,21 +490,30 @@ function redactMobileCrashDiagnostic(
 ): MobileCrashDiagnostic {
   return {
     ...diagnostic,
-    message: redactSensitiveText(diagnostic.message),
+    message: redactAndTruncate(diagnostic.message, MAX_MESSAGE_LENGTH),
     ...(diagnostic.stack
-      ? { stack: redactSensitiveText(diagnostic.stack) }
+      ? { stack: redactAndTruncate(diagnostic.stack, MAX_STACK_LENGTH) }
       : {}),
     ...(diagnostic.componentStack
-      ? { componentStack: redactSensitiveText(diagnostic.componentStack) }
+      ? {
+          componentStack: redactAndTruncate(
+            diagnostic.componentStack,
+            MAX_STACK_LENGTH
+          )
+        }
       : {}),
     ...(diagnostic.details
       ? { details: normalizeDetails(diagnostic.details) }
       : {}),
     breadcrumbs: diagnostic.breadcrumbs.map((breadcrumb) => ({
       ...breadcrumb,
-      message: redactSensitiveText(breadcrumb.message)
+      message: redactAndTruncate(breadcrumb.message, MAX_MESSAGE_LENGTH)
     }))
   };
+}
+
+function redactAndTruncate(value: string, length: number): string {
+  return truncate(redactSensitiveText(truncate(value, length)), length);
 }
 
 function redactSensitiveText(value: string): string {

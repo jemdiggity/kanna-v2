@@ -8,6 +8,9 @@ const diagnosticMocks = vi.hoisted(() => ({
   capture: vi.fn(() => ({ id: "diagnostic-123" })),
   format: vi.fn((records: unknown) => JSON.stringify(records))
 }));
+const nativeMocks = vi.hoisted(() => ({
+  announceForAccessibility: vi.fn()
+}));
 
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
 vi.mock("../lib/diagnostics/mobileCrashDiagnostics", () => ({
@@ -15,6 +18,9 @@ vi.mock("../lib/diagnostics/mobileCrashDiagnostics", () => ({
   formatMobileCrashDiagnostics: diagnosticMocks.format
 }));
 vi.mock("react-native", () => ({
+  AccessibilityInfo: {
+    announceForAccessibility: nativeMocks.announceForAccessibility
+  },
   Pressable: "Pressable",
   SafeAreaView: "SafeAreaView",
   StyleSheet: {
@@ -36,6 +42,7 @@ afterEach(async () => {
   diagnosticMocks.capture.mockClear();
   diagnosticMocks.capture.mockReturnValue({ id: "diagnostic-123" });
   diagnosticMocks.format.mockClear();
+  nativeMocks.announceForAccessibility.mockClear();
 });
 
 describe("MobileCrashBoundary", () => {
@@ -124,6 +131,109 @@ describe("MobileCrashBoundary", () => {
     expect(
       rendered.root.findAllByType("Text").flatMap((node) => node.children)
     ).toContain("Diagnostics copied");
+    expect(
+      rendered.root.findByProps({ accessibilityLabel: "Diagnostics copied" })
+        .props.accessibilityRole
+    ).toBe("button");
+    expect(
+      rendered.root.findByProps({ accessibilityLiveRegion: "polite" }).children
+    ).toContain("Diagnostics copied");
+    expect(
+      rendered.root.findByProps({ accessibilityLiveRegion: "polite" }).props
+        .accessibilityRole
+    ).toBe("alert");
+    expect(nativeMocks.announceForAccessibility).toHaveBeenCalledWith(
+      "Diagnostics copied"
+    );
+    consoleError.mockRestore();
+  });
+
+  it("keeps clipboard feedback scoped to the diagnostic and latest request", async () => {
+    let resolveFirstCopy: (() => void) | null = null;
+    const firstCopy = new Promise<void>((resolve) => {
+      resolveFirstCopy = resolve;
+    });
+    let rejectSecondCopy: ((reason: unknown) => void) | null = null;
+    const secondCopy = new Promise<void>((_resolve, reject) => {
+      rejectSecondCopy = reject;
+    });
+    const copyDiagnostic = vi
+      .fn<(value: string) => Promise<void>>()
+      .mockReturnValueOnce(firstCopy)
+      .mockReturnValueOnce(secondCopy);
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const consoleWarn = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    diagnosticMocks.capture
+      .mockReturnValueOnce({ id: "diagnostic-a" })
+      .mockReturnValueOnce({ id: "diagnostic-b" });
+    let failureMessage = "failure A";
+    function Child() {
+      throw new Error(failureMessage);
+    }
+
+    await act(async () => {
+      rendered = create(
+        <MobileCrashBoundary copyDiagnostic={copyDiagnostic}>
+          <Child />
+        </MobileCrashBoundary>
+      );
+    });
+    act(() => {
+      rendered?.root
+        .findByProps({ accessibilityLabel: "Copy crash diagnostics" })
+        .props.onPress();
+    });
+
+    failureMessage = "failure B";
+    await act(async () => {
+      rendered?.root.findByProps({ accessibilityLabel: "Retry" }).props.onPress();
+      await Promise.resolve();
+    });
+    act(() => {
+      rendered?.root
+        .findByProps({ accessibilityLabel: "Copy crash diagnostics" })
+        .props.onPress();
+    });
+    await act(async () => {
+      rejectSecondCopy?.(new Error("clipboard unavailable"));
+      await secondCopy.catch(() => undefined);
+    });
+
+    expect(
+      rendered.root.findByProps({
+        accessibilityLabel: "Copy failed — try again"
+      }).props.accessibilityRole
+    ).toBe("button");
+    expect(
+      rendered.root.findByProps({ accessibilityLiveRegion: "polite" }).children
+    ).toContain("Copy failed — try again");
+    expect(
+      rendered.root.findByProps({ accessibilityLiveRegion: "polite" }).props
+        .accessibilityRole
+    ).toBe("alert");
+    expect(nativeMocks.announceForAccessibility).toHaveBeenCalledWith(
+      "Copy failed — try again"
+    );
+
+    await act(async () => {
+      resolveFirstCopy?.();
+      await firstCopy;
+    });
+
+    expect(
+      rendered.root.findByProps({
+        accessibilityLabel: "Copy failed — try again"
+      }).props.accessibilityRole
+    ).toBe("button");
+    expect(
+      rendered.root.findByProps({ accessibilityLiveRegion: "polite" }).children
+    ).toContain("Copy failed — try again");
+    expect(nativeMocks.announceForAccessibility).toHaveBeenCalledTimes(1);
+    consoleWarn.mockRestore();
     consoleError.mockRestore();
   });
 });

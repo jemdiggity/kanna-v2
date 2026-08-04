@@ -1,6 +1,13 @@
 import * as Clipboard from "expo-clipboard";
 import React from "react";
-import { Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
+import {
+  AccessibilityInfo,
+  Pressable,
+  SafeAreaView,
+  StyleSheet,
+  Text,
+  View
+} from "react-native";
 import {
   captureMobileCrashDiagnostic,
   formatMobileCrashDiagnostics,
@@ -23,6 +30,8 @@ export class MobileCrashBoundary extends React.Component<
   MobileCrashBoundaryProps,
   MobileCrashBoundaryState
 > {
+  private copyRequestId = 0;
+
   state: MobileCrashBoundaryState = {
     copyStatus: "idle",
     diagnostic: null,
@@ -37,6 +46,7 @@ export class MobileCrashBoundary extends React.Component<
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo): void {
+    this.copyRequestId += 1;
     const diagnostic = captureMobileCrashDiagnostic({
       kind: "react-render-error",
       message: `${error.name}: ${error.message}`,
@@ -49,15 +59,44 @@ export class MobileCrashBoundary extends React.Component<
   private copyDiagnostic = async (): Promise<void> => {
     const { diagnostic } = this.state;
     if (!diagnostic) return;
+    const requestId = ++this.copyRequestId;
 
     try {
       await (this.props.copyDiagnostic ?? Clipboard.setStringAsync)(
         formatMobileCrashDiagnostics([diagnostic])
       );
-      this.setState({ copyStatus: "copied" });
+      if (
+        requestId !== this.copyRequestId ||
+        this.state.diagnostic !== diagnostic
+      ) {
+        return;
+      }
+      this.setState({ copyStatus: "copied" }, () => {
+        if (
+          requestId === this.copyRequestId &&
+          this.state.diagnostic === diagnostic
+        ) {
+          AccessibilityInfo.announceForAccessibility("Diagnostics copied");
+        }
+      });
     } catch (error: unknown) {
+      if (
+        requestId !== this.copyRequestId ||
+        this.state.diagnostic !== diagnostic
+      ) {
+        return;
+      }
       console.warn("Mobile crash diagnostic clipboard export failed:", error);
-      this.setState({ copyStatus: "failed" });
+      this.setState({ copyStatus: "failed" }, () => {
+        if (
+          requestId === this.copyRequestId &&
+          this.state.diagnostic === diagnostic
+        ) {
+          AccessibilityInfo.announceForAccessibility(
+            "Copy failed — try again"
+          );
+        }
+      });
     }
   };
 
@@ -84,7 +123,13 @@ export class MobileCrashBoundary extends React.Component<
           </Text>
           {this.state.diagnostic ? (
             <Pressable
-              accessibilityLabel="Copy crash diagnostics"
+              accessibilityLabel={
+                this.state.copyStatus === "copied"
+                  ? "Diagnostics copied"
+                  : this.state.copyStatus === "failed"
+                    ? "Copy failed — try again"
+                    : "Copy crash diagnostics"
+              }
               accessibilityRole="button"
               onPress={() => void this.copyDiagnostic()}
               style={({ pressed }) => [
@@ -93,7 +138,15 @@ export class MobileCrashBoundary extends React.Component<
                 pressed ? styles.actionPressed : null
               ]}
             >
-              <Text style={styles.actionText}>
+              <Text
+                accessibilityLiveRegion={
+                  this.state.copyStatus === "idle" ? "none" : "polite"
+                }
+                accessibilityRole={
+                  this.state.copyStatus === "idle" ? undefined : "alert"
+                }
+                style={styles.actionText}
+              >
                 {this.state.copyStatus === "copied"
                   ? "Diagnostics copied"
                   : this.state.copyStatus === "failed"
@@ -106,6 +159,7 @@ export class MobileCrashBoundary extends React.Component<
             accessibilityLabel="Retry"
             accessibilityRole="button"
             onPress={() => {
+              this.copyRequestId += 1;
               this.setState((state) => ({
                 copyStatus: "idle",
                 error: null,

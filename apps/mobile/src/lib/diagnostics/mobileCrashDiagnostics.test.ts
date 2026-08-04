@@ -32,6 +32,7 @@ const diagnosticGlobal = globalThis as typeof globalThis & TestDiagnosticGlobal;
 afterEach(() => {
   delete diagnosticGlobal.ErrorUtils;
   delete diagnosticGlobal.__kannaMobileCrashHandlerInstalled;
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -329,6 +330,62 @@ describe("installMobileCrashHandler", () => {
     expect(storage.setItem).toHaveBeenCalledTimes(1);
   });
 
+  it("persists the fatal record before delegation during a slow-storage burst", async () => {
+    let releaseInitialRead: (() => void) | null = null;
+    const initialReadGate = new Promise<void>((resolve) => {
+      releaseInitialRead = resolve;
+    });
+    let readCount = 0;
+    let storageAvailable = true;
+    let persistedValue: string | null = null;
+    const storage = {
+      getItem: vi.fn(async () => {
+        readCount += 1;
+        if (readCount === 1) await initialReadGate;
+        if (!storageAvailable) throw new Error("storage unavailable");
+        return persistedValue;
+      }),
+      removeItem: vi.fn(async () => undefined),
+      setItem: vi.fn(async (_key: string, value: string) => {
+        if (!storageAvailable) throw new Error("storage unavailable");
+        persistedValue = value;
+      })
+    };
+    const { recorder } = createRecorder(storage);
+    const previousHandler = vi.fn(() => {
+      storageAvailable = false;
+    });
+    let installedHandler: ((error: unknown, isFatal?: boolean) => void) | null =
+      null;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    diagnosticGlobal.ErrorUtils = {
+      getGlobalHandler: () => previousHandler,
+      setGlobalHandler: (handler) => {
+        installedHandler = handler;
+      }
+    };
+    installMobileCrashHandler(recorder.captureWithPersistence.bind(recorder));
+
+    recorder.capture({ kind: "javascript-error", message: "initial write" });
+    installedHandler?.(new Error("fatal retained through burst"), true);
+    for (let index = 0; index < 100; index += 1) {
+      recorder.capture({
+        kind: "javascript-error",
+        message: `later failure ${index}`
+      });
+    }
+
+    releaseInitialRead?.();
+    await vi.waitFor(() => expect(previousHandler).toHaveBeenCalledTimes(1));
+
+    expect(persistedValue).toContain("fatal retained through burst");
+    expect(storage.setItem.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(warn).toHaveBeenCalledWith(
+      "Mobile crash diagnostic persistence failed:",
+      expect.anything()
+    );
+  });
+
   it("delegates after a fatal persistence failure", async () => {
     const storage = createStorage();
     storage.setItem.mockRejectedValue(new Error("disk unavailable"));
@@ -405,5 +462,64 @@ describe("installMobileCrashHandler", () => {
     expect(previousHandler).toHaveBeenCalledTimes(values.length);
     expect(capture).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledTimes(values.length);
+  });
+
+  it("bounds redaction work for an oversized hostile thrown value", async () => {
+    const previousHandler = vi.fn();
+    let installedHandler: ((error: unknown, isFatal?: boolean) => void) | null =
+      null;
+    diagnosticGlobal.ErrorUtils = {
+      getGlobalHandler: () => previousHandler,
+      setGlobalHandler: (handler) => {
+        installedHandler = handler;
+      }
+    };
+    const { recorder } = createRecorder();
+    installMobileCrashHandler(recorder.captureWithPersistence.bind(recorder));
+
+    installedHandler?.(`${"a".repeat(1_000_000)} password=tail-secret`, true);
+
+    await vi.waitFor(() => expect(previousHandler).toHaveBeenCalledTimes(1));
+    const records = await recorder.read();
+    expect(records[0].message.length).toBeLessThanOrEqual(4_001);
+    expect(records[0].message.endsWith("…")).toBe(true);
+    expect(records[0].message).not.toContain("tail-secret");
+  });
+
+  it("delegates exactly once when persistence never settles", async () => {
+    const { recorder } = createRecorder();
+    const diagnostic = recorder.capture({
+      kind: "javascript-error",
+      message: "stalled persistence diagnostic"
+    });
+    await recorder.read();
+    vi.useFakeTimers();
+    const previousHandler = vi.fn();
+    let installedHandler: ((error: unknown, isFatal?: boolean) => void) | null =
+      null;
+    let resolvePersistence: (() => void) | null = null;
+    const persistence = new Promise<void>((resolve) => {
+      resolvePersistence = resolve;
+    });
+    diagnosticGlobal.ErrorUtils = {
+      getGlobalHandler: () => previousHandler,
+      setGlobalHandler: (handler) => {
+        installedHandler = handler;
+      }
+    };
+    installMobileCrashHandler(() => ({
+      diagnostic,
+      persistence
+    }));
+
+    installedHandler?.(new Error("fatal stalled storage"), true);
+    expect(previousHandler).not.toHaveBeenCalled();
+
+    await vi.runAllTimersAsync();
+    expect(previousHandler).toHaveBeenCalledTimes(1);
+
+    resolvePersistence?.();
+    await Promise.resolve();
+    expect(previousHandler).toHaveBeenCalledTimes(1);
   });
 });
