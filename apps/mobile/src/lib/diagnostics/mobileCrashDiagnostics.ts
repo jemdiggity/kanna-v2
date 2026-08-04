@@ -121,6 +121,8 @@ export class MobileCrashDiagnosticRecorder {
   private breadcrumbs: MobileCrashBreadcrumb[] = [];
   private pendingDiagnostics: PendingDiagnostic[] = [];
   private persistenceQueue: Promise<void> | null = null;
+  private nextCaptureOrder = 0;
+  private readonly captureOrders = new Map<string, number>();
 
   constructor(
     private readonly storage: DiagnosticStorage,
@@ -178,6 +180,8 @@ export class MobileCrashDiagnosticRecorder {
     trackPersistence = false
   ): MobileCrashDiagnosticCapture {
     const at = this.environment.now();
+    const captureOrder = this.nextCaptureOrder;
+    this.nextCaptureOrder += 1;
     let build = UNKNOWN_BUILD;
     try {
       build = this.environment.readBuild();
@@ -187,9 +191,14 @@ export class MobileCrashDiagnosticRecorder {
         `build-identity-unavailable=${formatErrorMessage(error)}`
       );
     }
+    const diagnosticId = [
+      at.getTime().toString(36),
+      captureOrder.toString(36),
+      this.environment.randomId()
+    ].join("-");
     const diagnostic: MobileCrashDiagnostic = {
       schemaVersion: 1,
-      id: `${at.getTime().toString(36)}-${this.environment.randomId()}`,
+      id: diagnosticId,
       at: at.toISOString(),
       kind: input.kind,
       fatal: input.fatal === true,
@@ -210,6 +219,7 @@ export class MobileCrashDiagnosticRecorder {
       breadcrumbs: [...this.breadcrumbs],
       build
     };
+    this.captureOrders.set(diagnostic.id, captureOrder);
 
     let resolvePersistence: (() => void) | undefined;
     let rejectPersistence: ((reason: unknown) => void) | undefined;
@@ -257,10 +267,13 @@ export class MobileCrashDiagnosticRecorder {
           entry,
           new Error("Mobile crash diagnostic persistence backlog exceeded.")
         );
+        this.captureOrders.delete(entry.diagnostic.id);
         return false;
       }
       untrackedCount += 1;
-      return untrackedCount <= MAX_DIAGNOSTICS;
+      if (untrackedCount <= MAX_DIAGNOSTICS) return true;
+      this.captureOrders.delete(entry.diagnostic.id);
+      return false;
     });
   }
 
@@ -297,6 +310,7 @@ export class MobileCrashDiagnosticRecorder {
   async clear(): Promise<void> {
     await this.waitForPersistence();
     await this.storage.removeItem(DIAGNOSTICS_STORAGE_KEY);
+    this.captureOrders.clear();
   }
 
   private async waitForPersistence(): Promise<void> {
@@ -342,17 +356,21 @@ export class MobileCrashDiagnosticRecorder {
           : this.pendingDiagnostics.splice(0, MAX_DIAGNOSTICS);
       try {
         const previous = await this.readStored();
+        const retained = [
+          ...batch.map((entry) => entry.diagnostic),
+          ...previous
+        ]
+          .sort((left, right) => this.compareRetentionOrder(left, right))
+          .slice(0, MAX_DIAGNOSTICS);
         await this.storage.setItem(
           DIAGNOSTICS_STORAGE_KEY,
-          JSON.stringify(
-            [...batch.map((entry) => entry.diagnostic), ...previous]
-              .sort((left, right) => right.at.localeCompare(left.at))
-              .slice(0, MAX_DIAGNOSTICS)
-          )
+          JSON.stringify(retained)
         );
+        this.pruneCaptureOrders(retained);
         for (const entry of batch) this.resolveTrackedPersistence(entry);
       } catch (error: unknown) {
         for (const entry of batch) {
+          this.captureOrders.delete(entry.diagnostic.id);
           this.rejectTrackedPersistence(
             entry,
             error instanceof Error ? error : new Error(String(error))
@@ -360,6 +378,41 @@ export class MobileCrashDiagnosticRecorder {
         }
         throw error;
       }
+    }
+  }
+
+  private compareRetentionOrder(
+    left: MobileCrashDiagnostic,
+    right: MobileCrashDiagnostic
+  ): number {
+    // Persisted timestamps are untrusted. Captures from this recorder use their
+    // actual enqueue order and always outrank records loaded from storage.
+    const leftCaptureOrder = this.captureOrders.get(left.id);
+    const rightCaptureOrder = this.captureOrders.get(right.id);
+    if (leftCaptureOrder !== undefined && rightCaptureOrder !== undefined) {
+      return rightCaptureOrder - leftCaptureOrder;
+    }
+    if (leftCaptureOrder !== undefined) return -1;
+    if (rightCaptureOrder !== undefined) return 1;
+
+    const leftTimestamp = Date.parse(left.at);
+    const rightTimestamp = Date.parse(right.at);
+    const leftHasValidTimestamp = Number.isFinite(leftTimestamp);
+    const rightHasValidTimestamp = Number.isFinite(rightTimestamp);
+    if (leftHasValidTimestamp !== rightHasValidTimestamp) {
+      return leftHasValidTimestamp ? -1 : 1;
+    }
+    if (!leftHasValidTimestamp) return 0;
+    return rightTimestamp - leftTimestamp;
+  }
+
+  private pruneCaptureOrders(retained: MobileCrashDiagnostic[]): void {
+    const activeIds = new Set([
+      ...retained.map((diagnostic) => diagnostic.id),
+      ...this.pendingDiagnostics.map((entry) => entry.diagnostic.id)
+    ]);
+    for (const id of this.captureOrders.keys()) {
+      if (!activeIds.has(id)) this.captureOrders.delete(id);
     }
   }
 

@@ -49,10 +49,10 @@ function createStorage(initial: string | null = null) {
   };
 }
 
-function createRecorder(storage = createStorage()) {
+function createRecorder(storage = createStorage(), fixedNow?: Date) {
   let nowMs = Date.parse("2026-08-04T03:00:00.000Z");
   const recorder = new MobileCrashDiagnosticRecorder(storage, {
-    now: () => new Date(nowMs++),
+    now: () => (fixedNow ? new Date(fixedNow) : new Date(nowMs++)),
     randomId: () => "abc123",
     readBuild: () => ({
       channel: "staging",
@@ -126,6 +126,44 @@ describe("MobileCrashDiagnosticRecorder", () => {
       "failure-3",
       "failure-2"
     ]);
+  });
+
+  it("prioritizes a new capture over malformed and future persisted dates", async () => {
+    const fixture = createRecorder();
+    const template = fixture.recorder.capture({
+      kind: "javascript-error",
+      message: "persisted template"
+    });
+    await fixture.recorder.read();
+    const stored = [
+      {
+        ...template,
+        id: "malformed",
+        at: "zzzz",
+        message: "malformed date"
+      },
+      ...Array.from({ length: 5 }, (_, index) => ({
+        ...template,
+        id: `future-${index}`,
+        at: `9999-12-31T23:59:59.99${index}Z`,
+        message: `future date ${index}`
+      }))
+    ];
+    const storage = createStorage(JSON.stringify(stored));
+    const { recorder } = createRecorder(storage);
+
+    const fatal = recorder.capture({
+      kind: "javascript-error",
+      fatal: true,
+      message: "new fatal"
+    });
+    const records = await recorder.read();
+
+    expect(records).toHaveLength(5);
+    expect(records[0]).toEqual(fatal);
+    expect(records.map((record) => record.message)).not.toContain(
+      "malformed date"
+    );
   });
 
   it("coalesces a burst to five pending records while storage is slow", async () => {
@@ -463,7 +501,7 @@ describe("installMobileCrashHandler", () => {
     ]);
   });
 
-  it("retains a newer fatal error after older released records drain", async () => {
+  it("retains a fatal after equal-timestamp older released records drain", async () => {
     let storedValue: string | null = null;
     let releaseFirstRead: (() => void) | null = null;
     const firstRead = new Promise<void>((resolve) => {
@@ -481,7 +519,10 @@ describe("installMobileCrashHandler", () => {
         storedValue = value;
       })
     };
-    const { recorder } = createRecorder(storage);
+    const { recorder } = createRecorder(
+      storage,
+      new Date("2026-08-04T03:00:00.000Z")
+    );
     const previousHandler = vi.fn();
     let installedHandler: ((error: unknown, isFatal?: boolean) => void) | null =
       null;
