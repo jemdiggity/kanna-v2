@@ -1000,6 +1000,7 @@ describe("buildTerminalDocument", () => {
     expect(html).toContain("window.__appendTerminalChunk");
     expect(html).toContain("window.ReactNativeWebView.postMessage");
     expect(html).toContain('type: "terminal-ready"');
+    expect(html).toContain('type: "terminal-content-ready"');
     expect(html).toContain('type: "terminal-tap"');
     expect(html).toContain('viewport.addEventListener("pointerdown"');
     expect(html).toContain("term.onScroll");
@@ -1008,6 +1009,21 @@ describe("buildTerminalDocument", () => {
     expect(html).not.toContain('terminalViewport.addEventListener("scroll"');
     expect(html).not.toContain("terminalViewport.style.bottom");
     expect(html).not.toContain("<pre id=\"terminal\"></pre>");
+  });
+
+  it("acknowledges the applied terminal content revision through the native bridge", () => {
+    const { messages, terminal, window } = createExecutedTerminalDocument();
+
+    window.__replaceTerminalState({
+      contentRevision: 23,
+      text: "rendered snapshot"
+    });
+
+    expect(terminal.writes).toContain("rendered snapshot");
+    expect(lastMessageOfType(messages, "terminal-content-ready")).toEqual({
+      type: "terminal-content-ready",
+      contentRevision: 23
+    });
   });
 
   it("keeps manual xterm scrollback stable and resumes following near the bottom", () => {
@@ -1730,6 +1746,7 @@ describe("buildTerminalDocument", () => {
 
   it("writes base64 terminal chunks as bytes in replace scripts", () => {
     const script = buildTerminalReplaceScript({
+      contentRevision: 4,
       output: `${b64("╭── Claude Code ──╮")}\n`,
       status: "live"
     });
@@ -1739,6 +1756,7 @@ describe("buildTerminalDocument", () => {
     expect(script).not.toContain("â­");
     expect(script).toContain("window.__replaceTerminalState");
     expect(script).toContain("chunksB64");
+    expect(script).toContain('"contentRevision":4');
   });
 
   it("preserves split multibyte terminal chunks in append scripts", () => {
@@ -1752,10 +1770,12 @@ describe("buildTerminalDocument", () => {
 
   it("renders terminal status copy when no output is available", () => {
     const connectingScript = buildTerminalReplaceScript({
+      contentRevision: 5,
       output: "",
       status: "connecting"
     });
     const idleScript = buildTerminalReplaceScript({
+      contentRevision: 6,
       output: "   ",
       status: "idle"
     });
@@ -1776,6 +1796,7 @@ describe("buildTerminalDocument", () => {
     const firstFrame = "A".repeat(64_000);
     const secondFrame = b64("terminal prompt\n");
     const script = buildTerminalReplaceScript({
+      contentRevision: 7,
       output: `${firstFrame}\n${secondFrame}\n`,
       status: "live"
     });
@@ -1799,6 +1820,7 @@ describe("buildTerminalDocument", () => {
   it("keeps echoed terminal input control stripping in the webview byte path", () => {
     const html = buildTerminalDocument({ bottomInset: 24, enableE2EInspection: false });
     const replaceScript = buildTerminalReplaceScript({
+      contentRevision: 8,
       output: `${b64("\u001b[200~continue\u001b[201~\u001b[13u\nClaude response\n")}\n`,
       status: "live"
     });

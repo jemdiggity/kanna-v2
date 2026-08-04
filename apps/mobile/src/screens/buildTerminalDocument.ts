@@ -11,6 +11,7 @@ interface BuildTerminalDocumentOptions {
 }
 
 interface BuildTerminalUpdateScriptOptions {
+  contentRevision: number;
   output: string;
   status: TaskTerminalStatus;
 }
@@ -191,6 +192,7 @@ export function buildTerminalDocument({
       let pendingAlternateFileMentionScan = false;
       let pendingFileMentionScanTimer = null;
       let lastPostedFileMentionSnapshot = "";
+      let latestContentRevision = null;
 
       term.loadAddon(fitAddon);
       term.open(root);
@@ -1278,6 +1280,31 @@ export function buildTerminalDocument({
         window.ReactNativeWebView.postMessage(JSON.stringify({ type: "terminal-ready" }));
       }
 
+      function scheduleTerminalContentReady(contentRevision) {
+        if (!Number.isSafeInteger(contentRevision)) {
+          return;
+        }
+
+        // xterm's write callback means the bytes reached its model. Waiting
+        // through two animation frames also gives the first render and the
+        // layout/alignment work queued by finalizeRender a paint opportunity.
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (
+              contentRevision !== latestContentRevision ||
+              !window.ReactNativeWebView ||
+              !window.ReactNativeWebView.postMessage
+            ) {
+              return;
+            }
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: "terminal-content-ready",
+              contentRevision
+            }));
+          });
+        });
+      }
+
       ${enableE2EInspection ? `function renderedTerminalText() {
         try {
           const buffer = term.buffer.active;
@@ -1439,6 +1466,10 @@ export function buildTerminalDocument({
       }
 
       window.__replaceTerminalState = function replaceTerminalState(state) {
+        const contentRevision = Number.isSafeInteger(state.contentRevision)
+          ? state.contentRevision
+          : null;
+        latestContentRevision = contentRevision;
         clearTerminalSelection();
         viewportPinnedToBottom = true;
         const shouldStick = shouldFollowTerminalBottom();
@@ -1449,6 +1480,7 @@ export function buildTerminalDocument({
           fitTerminal();
           finalizeRender(shouldStick);
           rebuildTerminalFileMentions();
+          scheduleTerminalContentReady(contentRevision);
         };
         if (state.text) {
           term.write(state.text, complete);
@@ -1495,12 +1527,13 @@ export function buildTerminalDocument({
 }
 
 export function buildTerminalReplaceScript({
+  contentRevision,
   output,
   status
 }: BuildTerminalUpdateScriptOptions): string {
   const state = output.trim()
-    ? { chunksB64: terminalChunksFromOutput(output) }
-    : { text: getStatusCopy(status) };
+    ? { chunksB64: terminalChunksFromOutput(output), contentRevision }
+    : { text: getStatusCopy(status), contentRevision };
   return `window.__replaceTerminalState(${JSON.stringify(state)}); true;`;
 }
 

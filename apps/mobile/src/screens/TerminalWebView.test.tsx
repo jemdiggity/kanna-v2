@@ -76,6 +76,7 @@ vi.mock("react", async (importActual) => {
 });
 
 vi.mock("react-native", () => ({
+  ActivityIndicator: "ActivityIndicator",
   Pressable: "Pressable",
   ScrollView: "ScrollView",
   StyleSheet: {
@@ -904,10 +905,116 @@ describe("TerminalWebView", () => {
     expect(injectedScripts[0]).toBe(buildTerminalResizeScript(132, 43));
     expect(injectedScripts).toContain(
       buildTerminalReplaceScript({
+        contentRevision: 1,
         output,
         status: "live"
       })
     );
+    expect(
+      injectedScripts.filter((script) =>
+        script.includes("__replaceTerminalState")
+      )
+    ).toHaveLength(1);
+  });
+
+  it("keeps accessible loading feedback until the current snapshot epoch is rendered", async () => {
+    const webView = await renderTerminalWebView({
+      output: `${Buffer.from("scrollback\n".repeat(20_000)).toString("base64")}\n`,
+      outputEpoch: 7
+    });
+
+    expect(
+      findByAccessibilityLabel(lastTree, "Loading terminal content")?.props
+    ).toMatchObject({
+      accessibilityLiveRegion: "polite",
+      accessibilityRole: "progressbar",
+      accessibilityState: { busy: true },
+      pointerEvents: "none",
+      testID: "mobile.terminal-overlay"
+    });
+
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: { data: JSON.stringify({ type: "terminal-ready" }) }
+    } as WebViewMessageEvent);
+    await renderTerminalWebView({ outputEpoch: 7 });
+    expect(
+      findByAccessibilityLabel(lastTree, "Loading terminal content")
+    ).not.toBeNull();
+
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-content-ready",
+          contentRevision: 7
+        })
+      }
+    } as WebViewMessageEvent);
+    await renderTerminalWebView({ outputEpoch: 7 });
+    expect(
+      findByAccessibilityLabel(lastTree, "Loading terminal content")
+    ).toBeNull();
+  });
+
+  it("ignores stale render acknowledgements and becomes pending again for reconnect snapshots", async () => {
+    const initialWebView = await renderTerminalWebView({ outputEpoch: 3 });
+    (initialWebView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-content-ready",
+          contentRevision: 3
+        })
+      }
+    } as WebViewMessageEvent);
+    await renderTerminalWebView({ outputEpoch: 3 });
+    expect(
+      findByAccessibilityLabel(lastTree, "Loading terminal content")
+    ).toBeNull();
+
+    const reconnectWebView = await renderTerminalWebView({ outputEpoch: 4 });
+    expect(
+      findByAccessibilityLabel(lastTree, "Loading terminal content")
+    ).not.toBeNull();
+    (reconnectWebView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-content-ready",
+          contentRevision: 3
+        })
+      }
+    } as WebViewMessageEvent);
+    await renderTerminalWebView({ outputEpoch: 4 });
+    expect(
+      findByAccessibilityLabel(lastTree, "Loading terminal content")
+    ).not.toBeNull();
+  });
+
+  it("finishes empty snapshots and does not return to loading for live output in the same epoch", async () => {
+    const webView = await renderTerminalWebView({
+      output: "",
+      outputEpoch: 9
+    });
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-content-ready",
+          contentRevision: 9
+        })
+      }
+    } as WebViewMessageEvent);
+
+    await renderTerminalWebView({ output: "", outputEpoch: 9 });
+    expect(
+      findByAccessibilityLabel(lastTree, "Loading terminal content")
+    ).toBeNull();
+
+    await renderTerminalWebView({
+      output: `${Buffer.from("first live frame").toString("base64")}\n`,
+      outputEpoch: 9
+    });
+    runEffects();
+    expect(
+      findByAccessibilityLabel(lastTree, "Loading terminal content")
+    ).toBeNull();
   });
 
   it("coalesces measured insets after resize and before terminal state", async () => {
@@ -1042,7 +1149,11 @@ describe("TerminalWebView", () => {
     runEffects();
 
     expect(injectedScripts).toContain(
-      buildTerminalReplaceScript({ output: "fresh\n", status: "live" })
+      buildTerminalReplaceScript({
+        contentRevision: 3,
+        output: "fresh\n",
+        status: "live"
+      })
     );
     expect(
       injectedScripts.filter((script) => script.includes("__replaceTerminalState"))

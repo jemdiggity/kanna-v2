@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { verifyTerminalInitialContentReadiness } from "./terminalInitialContentReadiness.ts";
 import { verifyTerminalSafeRegion } from "./terminalSafeRegion.ts";
 
 async function main(): Promise<void> {
@@ -6,6 +7,8 @@ async function main(): Promise<void> {
   try {
     await verifyTerminalSafeRegion(browser);
     process.stdout.write("PASS terminal-safe-region\n");
+    await verifyTerminalInitialContentReadiness(browser);
+    process.stdout.write("PASS terminal-initial-content-readiness\n");
   } finally {
     await browser.close();
   }
