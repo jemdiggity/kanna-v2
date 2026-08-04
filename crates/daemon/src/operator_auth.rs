@@ -1,6 +1,7 @@
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use tokio::sync::Notify;
 
 use crate::proc_info::{ProcessInfo, StartTime};
 
@@ -16,6 +17,7 @@ pub(crate) struct OperatorAuthorizer {
     trusted_server_executable: Option<PathBuf>,
     trusted_server: Mutex<Option<DesktopIdentity>>,
     protected_input_server: Mutex<Option<(DesktopIdentity, u32)>>,
+    server_authorized: Notify,
 }
 
 impl OperatorAuthorizer {
@@ -38,6 +40,7 @@ impl OperatorAuthorizer {
                 .and_then(|path| std::fs::canonicalize(path).ok()),
             trusted_server: Mutex::new(None),
             protected_input_server: Mutex::new(None),
+            server_authorized: Notify::new(),
         })
     }
 
@@ -160,7 +163,7 @@ impl OperatorAuthorizer {
         Ok(())
     }
 
-    pub(crate) fn negotiate_protected_input(
+    pub(crate) async fn negotiate_protected_input(
         &self,
         socket_fd: RawFd,
         version: u32,
@@ -171,11 +174,52 @@ impl OperatorAuthorizer {
                 crate::protocol::PROTECTED_INPUT_PROTOCOL_VERSION
             ));
         }
-        if self.authorize_system_input(socket_fd).is_err() {
+        loop {
+            let authorization_changed = self.server_authorized.notified();
+            tokio::pin!(authorization_changed);
+            authorization_changed.as_mut().enable();
+            let system_error = match self.authorize_system_input(socket_fd) {
+                Ok(()) => break,
+                Err(error) => error,
+            };
             // The native desktop may create an explicitly protected PTY for
             // diagnostics/E2E. It already owns operator authority and does
             // not become the server identity for later SystemInput.
-            return self.authorize(socket_fd, false);
+            if self.authorize(socket_fd, false).is_ok() {
+                return Ok(());
+            }
+
+            let expected = self
+                .trusted_server_executable
+                .as_ref()
+                .ok_or(system_error.clone())?;
+            let peer_pid =
+                crate::proc_info::socket_peer_pid(socket_fd).ok_or(system_error.clone())?;
+            let peer = live_process(peer_pid).ok_or(system_error.clone())?;
+            let peer_executable = executable(peer_pid).ok_or(system_error.clone())?;
+            if &peer_executable != expected {
+                return Err(system_error);
+            }
+            let pinned_server = self
+                .trusted_server
+                .lock()
+                .map_err(|_| "server identity lock was poisoned".to_string())?
+                .clone();
+            if pinned_server.as_ref().is_some_and(|identity| {
+                live_process(identity.pid).is_some_and(|process| {
+                    process.start == identity.start
+                        && executable(identity.pid).as_ref() == Some(&identity.executable)
+                }) && (peer.pid != identity.pid
+                    || peer.start != identity.start
+                    || peer_executable != identity.executable)
+            }) {
+                return Err(system_error);
+            }
+
+            // A surviving kanna-server is no longer the successor daemon's
+            // direct child. Stay fail-closed until the desktop event bridge
+            // pins that exact live process, then revalidate the socket peer.
+            authorization_changed.await;
         }
         let peer_pid = crate::proc_info::socket_peer_pid(socket_fd)
             .ok_or_else(|| "protected-input peer identity is unavailable".to_string())?;
@@ -274,6 +318,7 @@ impl OperatorAuthorizer {
         {
             return Err("kanna-server identity changed during authorization".to_string());
         }
+        self.server_authorized.notify_waiters();
         log::info!(
             "[operator-auth] daemon pid={} authorized kanna-server pid={} for protected system input",
             std::process::id(),

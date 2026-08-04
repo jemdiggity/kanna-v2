@@ -1037,12 +1037,14 @@ mod tests {
     use super::{
         adopt_native_desktop, app_data_dir_for_server_config, current_server_version,
         default_desktop_name_from_sources, desktop_id, escape_toml_string,
-        generate_uuid_v4_from_reader, is_current_server_status, resolved_db_path,
-        send_native_control_request_with_adoption, server_base_url, server_stderr_log,
-        stop_server_on_port, stopped_snapshot, MobilePairingSession, MobileServerManager,
-        MobileServerState, MobileServerStatus, WritePathHealth,
+        generate_uuid_v4_from_reader, is_current_server_status, listening_server_pid,
+        resolved_db_path, send_native_control_request_with_adoption, server_base_url,
+        server_stderr_log, stop_server_on_port, stopped_snapshot, MobilePairingSession,
+        MobileServerManager, MobileServerState, MobileServerStatus, WritePathHealth,
     };
+    use crate::daemon_client::DaemonClient;
     use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::process::{Command as StdCommand, Stdio};
@@ -1051,6 +1053,9 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
     use tokio::process::{Child, Command};
+
+    const RESTART_ORDINARY_SESSION: &str = "shell-restart-ordinary";
+    const RESTART_PROTECTED_SESSION: &str = "shell-restart-protected";
 
     pub(super) fn env_lock() -> &'static Mutex<()> {
         crate::test_env_lock()
@@ -1288,6 +1293,7 @@ mod tests {
             "__stale__",
             port,
         );
+        let mut daemon = start_test_kanna_daemon(&daemon_dir).await;
         let mut stale_server = start_test_kanna_server(&stale_config_path, port).await;
         let stale_pid = stale_server.id().expect("stale server should have pid");
 
@@ -1319,6 +1325,11 @@ mod tests {
         stop_server_on_port(port)
             .await
             .expect("cleanup should stop server");
+        daemon
+            .kill()
+            .await
+            .expect("cleanup should stop test daemon");
+        let _ = daemon.wait().await;
         cleanup_process_test_env();
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1354,6 +1365,7 @@ mod tests {
         let unhealthy_pid = unhealthy_server
             .id()
             .expect("unhealthy server should have pid");
+        let mut daemon = start_test_kanna_daemon(&daemon_dir).await;
 
         manager
             .start()
@@ -1386,6 +1398,11 @@ mod tests {
         stop_server_on_port(port)
             .await
             .expect("cleanup should stop server");
+        daemon
+            .kill()
+            .await
+            .expect("cleanup should stop test daemon");
+        let _ = daemon.wait().await;
         cleanup_process_test_env();
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1417,6 +1434,7 @@ mod tests {
             "__stale__",
             port,
         );
+        let mut daemon = start_test_kanna_daemon(&daemon_dir).await;
         let mut stale_server = start_test_kanna_server(&stale_config_path, port).await;
         let stale_pid = stale_server.id().expect("stale server should have pid");
 
@@ -1448,6 +1466,11 @@ mod tests {
         stop_server_on_port(port)
             .await
             .expect("cleanup should stop server");
+        daemon
+            .kill()
+            .await
+            .expect("cleanup should stop test daemon");
+        let _ = daemon.wait().await;
         cleanup_process_test_env();
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1480,6 +1503,7 @@ mod tests {
         std::fs::create_dir_all(existing_config_path.parent().unwrap()).unwrap();
         std::fs::write(&existing_config_path, current_config)
             .expect("current server config should be written");
+        let mut daemon = start_test_kanna_daemon(&daemon_dir).await;
         let mut existing_server = start_test_kanna_server(&existing_config_path, port).await;
 
         manager
@@ -1511,6 +1535,11 @@ mod tests {
             .await
             .expect("cleanup should stop server");
         let _ = existing_server.wait().await;
+        daemon
+            .kill()
+            .await
+            .expect("cleanup should stop test daemon");
+        let _ = daemon.wait().await;
         cleanup_process_test_env();
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1524,12 +1553,33 @@ mod tests {
         let config_path = std::env::var_os("KANNA_RESTART_FIXTURE_CONFIG")
             .map(PathBuf::from)
             .expect("fixture config path");
+        let daemon_dir = std::env::var_os("KANNA_DAEMON_DIR")
+            .map(PathBuf::from)
+            .expect("fixture daemon directory");
         let port = std::env::var("KANNA_RESTART_FIXTURE_PORT")
             .expect("fixture port")
             .parse::<u16>()
             .expect("numeric fixture port");
-        let child = start_test_kanna_server(&config_path, port).await;
-        std::mem::forget(child);
+        let lifecycle_log_fd = std::env::var("KANNA_RESTART_FIXTURE_LOG_FD")
+            .expect("fixture lifecycle log fd")
+            .parse::<libc::c_int>()
+            .expect("numeric fixture lifecycle log fd");
+        // Production starts kanna-server and a fresh daemon generation from
+        // the same desktop lifetime. Keep both children alive after this
+        // short-lived fixture exits so the parent test can exercise restart
+        // adoption and the next real daemon handoff.
+        let daemon = start_test_kanna_daemon(&daemon_dir).await;
+        let lifecycle_log = unsafe { OwnedFd::from_raw_fd(lifecycle_log_fd) };
+        let server =
+            start_test_kanna_server_with_stderr(&config_path, port, Stdio::from(lifecycle_log))
+                .await;
+        persist_restart_protected_session(&config_path, RESTART_PROTECTED_SESSION);
+        spawn_restart_terminal(&daemon_dir, RESTART_ORDINARY_SESSION, false).await;
+        // The replacement-generation replay must be what makes this session
+        // protected. Handoff alone deliberately carries an ordinary policy.
+        spawn_restart_terminal(&daemon_dir, RESTART_PROTECTED_SESSION, false).await;
+        std::mem::forget(server);
+        std::mem::forget(daemon);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1552,6 +1602,20 @@ mod tests {
             state.config_path.clone()
         };
 
+        let (restart_log_reader, restart_log_writer) =
+            std::os::unix::net::UnixStream::pair().expect("restart lifecycle log socket pair");
+        let log_fd = restart_log_writer.as_raw_fd();
+        let log_fd_flags = unsafe { libc::fcntl(log_fd, libc::F_GETFD) };
+        assert_ne!(
+            log_fd_flags, -1,
+            "restart lifecycle log fd should be readable"
+        );
+        assert_ne!(
+            unsafe { libc::fcntl(log_fd, libc::F_SETFD, log_fd_flags & !libc::FD_CLOEXEC) },
+            -1,
+            "restart lifecycle log fd should be inherited by the fixture"
+        );
+
         let fixture_status = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--ignored",
@@ -1560,13 +1624,23 @@ mod tests {
             ])
             .env("KANNA_RESTART_FIXTURE_CONFIG", &config_path)
             .env("KANNA_RESTART_FIXTURE_PORT", port.to_string())
+            .env("KANNA_RESTART_FIXTURE_LOG_FD", log_fd.to_string())
+            .env("RUST_LOG", "kanna_server::runtime=info")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .await
             .expect("restart fixture should launch the surviving server");
+        drop(restart_log_writer);
         assert!(fixture_status.success());
+        restart_log_reader
+            .set_nonblocking(true)
+            .expect("restart lifecycle log reader should become nonblocking");
+        let mut restart_log = BufReader::new(
+            tokio::net::UnixStream::from_std(restart_log_reader)
+                .expect("restart lifecycle log should become async"),
+        );
 
         manager
             .start()
@@ -1580,9 +1654,69 @@ mod tests {
             .await
             .expect("adopted desktop should retain native authority");
 
+        let server_pid = listening_server_pid(None)
+            .await
+            .expect("surviving kanna-server should have an exact pid");
+        assert_ne!(server_pid, std::process::id());
+        let mut replacement_daemon = start_test_kanna_daemon(&daemon_dir).await;
+        let replacement_daemon_pid = replacement_daemon
+            .id()
+            .expect("replacement daemon should have an exact pid");
+
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir);
+        let mut authorization = DaemonClient::connect(&socket_path)
+            .await
+            .expect("replacement daemon should accept native authorization");
+        let wrong_process = crate::commands::daemon::authorize_server_process(
+            &mut authorization,
+            std::process::id(),
+        )
+        .await
+        .expect_err("desktop pid must not authenticate as kanna-server");
+        assert_eq!(wrong_process.code.as_deref(), Some("input_unauthorized"));
+        crate::commands::daemon::authorize_server_process(&mut authorization, server_pid)
+            .await
+            .expect("replacement daemon should authorize the exact surviving server");
+        await_successor_policy_log(&mut restart_log, replacement_daemon_pid).await;
+
+        assert_daemon_ack(
+            &daemon_dir,
+            serde_json::json!({
+                "type": "Input",
+                "session_id": RESTART_ORDINARY_SESSION,
+                "data": [111, 114, 100, 105, 110, 97, 114, 121, 10]
+            }),
+        )
+        .await;
+        let protected_error = daemon_round_trip(
+            &daemon_dir,
+            serde_json::json!({
+                "type": "Input",
+                "session_id": RESTART_PROTECTED_SESSION,
+                "data": [102, 111, 114, 103, 101, 100, 10]
+            }),
+        )
+        .await;
+        assert_eq!(protected_error["type"], "Error");
+        assert_eq!(protected_error["code"], "input_unauthorized");
+        assert_daemon_ack(
+            &daemon_dir,
+            serde_json::json!({
+                "type": "OperatorInput",
+                "session_id": RESTART_PROTECTED_SESSION,
+                "data": [111, 112, 101, 114, 97, 116, 111, 114, 10]
+            }),
+        )
+        .await;
+
         stop_server_on_port(port)
             .await
             .expect("cleanup should stop server");
+        replacement_daemon
+            .kill()
+            .await
+            .expect("cleanup should stop replacement daemon");
+        let _ = replacement_daemon.wait().await;
         cleanup_process_test_env();
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1655,9 +1789,6 @@ mod tests {
         init_test_git_repo(&repo_root);
         create_task_server_test_database(&stale_db_path, &repo_root, "claude");
         create_task_server_test_database(&intended_db_path, &repo_root, "copilot");
-        let daemon_socket = daemon_socket_path_for_dir(&intended_daemon_dir);
-        let daemon_server = spawn_one_task_create_daemon(&daemon_socket, "copilot").await;
-
         configure_process_test_env(port, &intended_db_path, &intended_daemon_dir);
         let manager = MobileServerManager::new(app_data_dir.clone());
         let expected_desktop_id = {
@@ -1672,8 +1803,10 @@ mod tests {
             current_server_version(),
             port,
         );
+        let mut stale_daemon = start_test_kanna_daemon(&stale_daemon_dir).await;
         let mut stale_server = start_test_kanna_server(&stale_config_path, port).await;
         let stale_pid = stale_server.id().expect("stale server should have pid");
+        let mut intended_daemon = start_test_kanna_daemon(&intended_daemon_dir).await;
 
         manager
             .start()
@@ -1711,15 +1844,20 @@ mod tests {
             stale_provider.is_none(),
             "stale DB should not receive CLI-created task after manager replacement"
         );
-        daemon_server
-            .await
-            .expect("fake daemon should observe copilot spawn");
-
         stop_server_on_port(port)
             .await
             .expect("cleanup should stop server");
+        intended_daemon
+            .kill()
+            .await
+            .expect("cleanup should stop intended daemon");
+        let _ = intended_daemon.wait().await;
+        stale_daemon
+            .kill()
+            .await
+            .expect("cleanup should stop stale daemon");
+        let _ = stale_daemon.wait().await;
         cleanup_process_test_env();
-        let _ = std::fs::remove_file(daemon_socket);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1802,6 +1940,7 @@ mod tests {
             return;
         }
 
+        let mut daemon = start_test_kanna_daemon(&daemon_dir).await;
         let start_result = manager.start().await;
         let status_result = if start_result.is_ok() {
             Some(
@@ -1818,6 +1957,11 @@ mod tests {
                 .await
                 .expect("cleanup should stop staging server");
         }
+        daemon
+            .kill()
+            .await
+            .expect("cleanup should stop staging daemon");
+        let _ = daemon.wait().await;
         assert_production_status_still_available(production_port, &mut owned_production_server)
             .await;
         cleanup_process_test_env();
@@ -2341,97 +2485,6 @@ mod tests {
         kanna_runtime_defaults::socket_path(daemon_dir)
     }
 
-    async fn spawn_one_task_create_daemon(
-        socket_path: &std::path::Path,
-        expected_agent_provider: &str,
-    ) -> tokio::task::JoinHandle<()> {
-        if let Some(parent) = socket_path.parent() {
-            std::fs::create_dir_all(parent).expect("daemon socket parent should exist");
-        }
-        let _ = std::fs::remove_file(socket_path);
-        let listener = UnixListener::bind(socket_path).expect("fake daemon socket should bind");
-        let expected_agent_provider = expected_agent_provider.to_string();
-        tokio::spawn(async move {
-            let mut connections = tokio::task::JoinSet::new();
-            loop {
-                tokio::select! {
-                    accepted = listener.accept() => {
-                        let (stream, _) = accepted.expect("daemon should accept connection");
-                        let expected_agent_provider = expected_agent_provider.clone();
-                        connections.spawn(async move {
-                            let (read_half, mut write_half) = stream.into_split();
-                            let mut reader = BufReader::new(read_half);
-                            let mut line = String::new();
-                            loop {
-                                line.clear();
-                                if reader
-                                    .read_line(&mut line)
-                                    .await
-                                    .expect("daemon command should be readable")
-                                    == 0
-                                {
-                                    return false;
-                                }
-                                let command: serde_json::Value = serde_json::from_str(line.trim())
-                                    .expect("daemon command should be JSON");
-
-                                match command.get("type").and_then(|value| value.as_str()) {
-                                    Some("Subscribe") => {
-                                        write_half
-                                            .write_all(b"{\"type\":\"Ok\"}\n")
-                                            .await
-                                            .expect("daemon subscribe response should be written");
-                                    }
-                                    Some("List") => {
-                                        write_half
-                                            .write_all(b"{\"type\":\"SessionList\",\"sessions\":[]}\n")
-                                            .await
-                                            .expect("daemon list response should be written");
-                                    }
-                                    Some("Spawn") => {
-                                        assert_eq!(
-                                            command
-                                                .get("agent_provider")
-                                                .and_then(|value| value.as_str()),
-                                            Some(expected_agent_provider.as_str())
-                                        );
-                                        let session_id = command
-                                            .get("session_id")
-                                            .and_then(|value| value.as_str())
-                                            .expect("spawn should include session id");
-                                        write_half
-                                            .write_all(
-                                                format!(
-                                                    "{{\"type\":\"SessionCreated\",\"session_id\":{}}}\n",
-                                                    serde_json::to_string(session_id).unwrap()
-                                                )
-                                                .as_bytes(),
-                                            )
-                                            .await
-                                            .expect("daemon response should be written");
-                                        return true;
-                                    }
-                                    other => panic!(
-                                        "expected Subscribe, List, or Spawn command, got {other:?}"
-                                    ),
-                                }
-                            }
-                        });
-                    }
-                    completed = connections.join_next(), if !connections.is_empty() => {
-                        if completed
-                            .expect("daemon connection task should exist")
-                            .expect("daemon connection task should complete")
-                        {
-                            connections.abort_all();
-                            break;
-                        }
-                    }
-                }
-            }
-        })
-    }
-
     const TEST_DEFAULT_PROVIDER_PIPELINE: &str = "test-default-provider";
 
     fn init_test_git_repo(repo_root: &std::path::Path) {
@@ -2547,7 +2600,173 @@ mod tests {
         std::fs::write(config_path, config).expect("server config should be written");
     }
 
+    async fn start_test_kanna_daemon(daemon_dir: &std::path::Path) -> Child {
+        let daemon = test_kanna_daemon_binary().unwrap_or_else(|| {
+            panic!("kanna-daemon sidecar not found; run `./kd build sidecars` before this test")
+        });
+        let server = test_kanna_server_binary().unwrap_or_else(|| {
+            panic!("kanna-server sidecar not found; run `./kd build sidecars` before this test")
+        });
+        std::fs::create_dir_all(daemon_dir).expect("daemon directory should be created");
+        let mut child = Command::new(daemon)
+            .env("KANNA_DAEMON_DIR", daemon_dir)
+            .env("KANNA_SERVER_EXECUTABLE", server)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("kanna-daemon should spawn");
+        let expected_pid = child.id().expect("spawned daemon should have a pid");
+        let pid_path = daemon_dir.join("daemon.pid");
+        let socket_path = daemon_socket_path_for_dir(daemon_dir);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        while tokio::time::Instant::now() < deadline {
+            if let Some(status) = child.try_wait().expect("daemon status should be readable") {
+                panic!("kanna-daemon exited early with {status}");
+            }
+            let published_pid = std::fs::read_to_string(&pid_path)
+                .ok()
+                .and_then(|pid| pid.trim().parse::<u32>().ok());
+            if published_pid == Some(expected_pid) {
+                if let Ok(client) = DaemonClient::connect(&socket_path).await {
+                    if client.connected_pid() == expected_pid {
+                        return child;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let _ = child.kill().await;
+        panic!("timed out waiting for kanna-daemon pid {expected_pid}");
+    }
+
+    async fn await_successor_policy_log(
+        lifecycle_log: &mut BufReader<tokio::net::UnixStream>,
+        daemon_pid: u32,
+    ) {
+        let expected =
+            format!("protected-input policy established on successor daemon pid {daemon_pid}");
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let mut line = String::new();
+                let read = lifecycle_log
+                    .read_line(&mut line)
+                    .await
+                    .expect("surviving server lifecycle log should be readable");
+                assert_ne!(read, 0, "surviving server lifecycle log closed early");
+                if line.contains(&expected) {
+                    return;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for server lifecycle: {expected}"));
+    }
+
+    fn persist_restart_protected_session(config_path: &std::path::Path, session_id: &str) {
+        let db_path = std::env::var_os("KANNA_DB_PATH")
+            .map(PathBuf::from)
+            .expect("fixture database path");
+        let connection = rusqlite::Connection::open(db_path).expect("fixture database should open");
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO repo (id, path, name) VALUES (?1, ?2, ?3)",
+                (
+                    "restart-policy-repo",
+                    config_path.to_string_lossy().as_ref(),
+                    "Restart Policy",
+                ),
+            )
+            .expect("restart fixture repo should be persisted");
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO pipeline_item (id, repo_id, issue_title, prompt, stage) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                (
+                    "restart-protected-task",
+                    "restart-policy-repo",
+                    "Restart protected terminal",
+                    "fixture",
+                    "in progress",
+                ),
+            )
+            .expect("restart fixture task should be persisted");
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO agent_signal_protocol \
+                 (task_id, session_id, merge_handoff_version) VALUES (?1, ?2, ?3)",
+                ("restart-protected-task", session_id, 1_i64),
+            )
+            .expect("restart fixture protected session should be persisted");
+    }
+
+    async fn daemon_round_trip(
+        daemon_dir: &std::path::Path,
+        command: serde_json::Value,
+    ) -> serde_json::Value {
+        let socket_path = daemon_socket_path_for_dir(daemon_dir);
+        let mut client = DaemonClient::connect(&socket_path)
+            .await
+            .expect("test daemon should accept a command connection");
+        client
+            .send_command(&command.to_string())
+            .await
+            .expect("test daemon command should be written");
+        loop {
+            let event = client
+                .read_event()
+                .await
+                .expect("test daemon should answer the command");
+            let event: serde_json::Value =
+                serde_json::from_str(&event).expect("test daemon event should be JSON");
+            if !matches!(
+                event.get("type").and_then(serde_json::Value::as_str),
+                Some("Output" | "StatusChanged")
+            ) {
+                return event;
+            }
+        }
+    }
+
+    async fn assert_daemon_ack(daemon_dir: &std::path::Path, command: serde_json::Value) {
+        let event = daemon_round_trip(daemon_dir, command).await;
+        assert_eq!(event["type"], "Ok", "daemon rejected command: {event}");
+    }
+
+    async fn spawn_restart_terminal(
+        daemon_dir: &std::path::Path,
+        session_id: &str,
+        operator_input_only: bool,
+    ) {
+        let event = daemon_round_trip(
+            daemon_dir,
+            serde_json::json!({
+                "type": "Spawn",
+                "session_id": session_id,
+                "executable": "/bin/cat",
+                "args": [],
+                "cwd": "/tmp",
+                "env": {},
+                "cols": 80,
+                "rows": 24,
+                "agent_provider": null,
+                "operator_input_only": operator_input_only
+            }),
+        )
+        .await;
+        assert_eq!(event["type"], "SessionCreated");
+        assert_eq!(event["session_id"], session_id);
+    }
+
     async fn start_test_kanna_server(config_path: &std::path::Path, port: u16) -> Child {
+        start_test_kanna_server_with_stderr(config_path, port, Stdio::null()).await
+    }
+
+    async fn start_test_kanna_server_with_stderr(
+        config_path: &std::path::Path,
+        port: u16,
+        stderr: Stdio,
+    ) -> Child {
         let sidecar = test_kanna_server_binary().unwrap_or_else(|| {
             panic!("kanna-server sidecar not found; run `./kd build sidecars` before this test")
         });
@@ -2555,7 +2774,7 @@ mod tests {
             .env("KANNA_SERVER_CONFIG", config_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .spawn()
             .expect("kanna-server should spawn");
         let base_url = server_base_url(port);
@@ -2824,6 +3043,22 @@ while True:
             return Some(suffixed);
         }
         let unsuffixed = dir.join("kanna-server");
+        if unsuffixed.is_file() {
+            return Some(unsuffixed);
+        }
+        None
+    }
+
+    fn test_kanna_daemon_binary() -> Option<PathBuf> {
+        let dir = test_sidecar_dir()?;
+        let suffixed = dir.join(format!(
+            "kanna-daemon-{}",
+            kanna_runtime_defaults::current_target_triple()
+        ));
+        if suffixed.is_file() {
+            return Some(suffixed);
+        }
+        let unsuffixed = dir.join("kanna-daemon");
         if unsuffixed.is_file() {
             return Some(unsuffixed);
         }

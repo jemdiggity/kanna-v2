@@ -134,7 +134,10 @@ pub(crate) async fn handle_connection(
                 let _ = write_event(&mut *writer.lock().await, &event).await;
             }
             Some(Command::NegotiateProtectedInput { version }) => {
-                let event = match operator_authorizer.negotiate_protected_input(raw_fd, version) {
+                let event = match operator_authorizer
+                    .negotiate_protected_input(raw_fd, version)
+                    .await
+                {
                     Ok(()) => Event::ProtectedInputReady { version },
                     Err(message) => error_event(
                         Some(protocol::ErrorCode::ProtectedInputProtocolRequired),
