@@ -1,9 +1,11 @@
 import React from "react";
+import { Window } from "happy-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WebViewMessageEvent } from "react-native-webview";
 import type { TaskTerminalStatus } from "../state/sessionStore";
 import {
   buildTerminalAppendScript,
+  buildTerminalDocument,
   buildTerminalReplaceScript,
   buildTerminalResizeScript
 } from "./buildTerminalDocument";
@@ -200,6 +202,207 @@ async function renderTerminalWebView(input: {
 
 function bottomInsetScript(bottomInset: number): string {
   return `window.__setTerminalBottomInset(${JSON.stringify({ bottomInset })}); true;`;
+}
+
+interface BurstTerminalBuffer {
+  type: "normal" | "alternate";
+  baseY: number;
+  viewportY: number;
+  length: number;
+  getLine(): undefined;
+}
+
+class BurstTerminal {
+  cols: number;
+  rows = 42;
+  options: { fontSize: number; smoothScrollDuration?: number; wordSeparator?: string };
+  resets = 0;
+  writes: unknown[] = [];
+  dimensions = {
+    css: { cell: { width: 9, height: 18 } }
+  };
+  private normalBuffer: BurstTerminalBuffer = {
+    type: "normal",
+    baseY: 0,
+    viewportY: 0,
+    length: 0,
+    getLine: () => undefined
+  };
+  private alternateBuffer: BurstTerminalBuffer = {
+    type: "alternate",
+    baseY: 0,
+    viewportY: 0,
+    length: 0,
+    getLine: () => undefined
+  };
+  buffer = {
+    active: this.normalBuffer,
+    normal: this.normalBuffer,
+    alternate: this.alternateBuffer
+  };
+
+  constructor(options: {
+    cols: number;
+    fontSize: number;
+    smoothScrollDuration?: number;
+  }) {
+    this.cols = options.cols;
+    this.options = {
+      fontSize: options.fontSize,
+      smoothScrollDuration: options.smoothScrollDuration
+    };
+  }
+
+  loadAddon(): void {}
+
+  open(root: HTMLElement): void {
+    const xterm = root.ownerDocument.createElement("div");
+    xterm.className = "xterm";
+    const screen = root.ownerDocument.createElement("div");
+    screen.className = "xterm-screen";
+    screen.getBoundingClientRect = () => ({
+      x: 0,
+      y: 0,
+      width: this.cols * 9,
+      height: this.rows * 18,
+      top: 0,
+      right: this.cols * 9,
+      bottom: this.rows * 18,
+      left: 0,
+      toJSON: () => ({})
+    });
+    xterm.append(screen);
+    root.append(xterm);
+  }
+
+  onScroll(): { dispose(): void } {
+    return { dispose() {} };
+  }
+
+  onData(): { dispose(): void } {
+    return { dispose() {} };
+  }
+
+  onBinary(): { dispose(): void } {
+    return { dispose() {} };
+  }
+
+  onSelectionChange(): { dispose(): void } {
+    return { dispose() {} };
+  }
+
+  registerLinkProvider(): { dispose(): void } {
+    return { dispose() {} };
+  }
+
+  getSelection(): string {
+    return "";
+  }
+
+  clearSelection(): void {}
+
+  resize(cols: number, rows: number): void {
+    this.cols = cols;
+    this.rows = rows;
+  }
+
+  scrollToBottom(): void {
+    this.buffer.active.viewportY = this.buffer.active.baseY;
+  }
+
+  scrollToLine(line: number): void {
+    this.buffer.active.viewportY = line;
+  }
+
+  select(): void {}
+
+  write(data: unknown, done?: () => void): void {
+    this.writes.push(data);
+    const bytes =
+      typeof data === "string"
+        ? new TextEncoder().encode(data)
+        : ArrayBuffer.isView(data)
+          ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+          : new Uint8Array(0);
+    let addedLines = 0;
+    for (const byte of bytes) {
+      if (byte === 10) addedLines += 1;
+    }
+    this.normalBuffer.length += Math.max(1, addedLines);
+    this.normalBuffer.baseY = Math.max(0, this.normalBuffer.length - this.rows);
+    this.normalBuffer.viewportY = this.normalBuffer.baseY;
+    done?.();
+  }
+
+  reset(): void {
+    this.resets += 1;
+    for (const buffer of [this.normalBuffer, this.alternateBuffer]) {
+      buffer.baseY = 0;
+      buffer.viewportY = 0;
+      buffer.length = 0;
+    }
+    this.buffer.active = this.normalBuffer;
+  }
+}
+
+function extractTerminalScript(html: string): string {
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
+    (match) => match[1]
+  );
+  return scripts.at(-1) ?? "";
+}
+
+function createBurstTerminalDocument(): {
+  terminal: BurstTerminal;
+  window: Window & typeof globalThis;
+} {
+  const html = buildTerminalDocument({
+    bottomInset: 24,
+    enableE2EInspection: false
+  });
+  const window = new Window() as Window & typeof globalThis;
+  window.document.documentElement.innerHTML =
+    html.match(/<html[^>]*>([\s\S]*)<\/html>/)?.[1] ?? html;
+  window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+    callback(0);
+    return 1;
+  }) as typeof window.requestAnimationFrame;
+  // File-mention debounce work is unrelated to the terminal write bound under
+  // test, so keep it pending just as it would be during one continuous burst.
+  window.setTimeout = (() => 1) as typeof window.setTimeout;
+  window.clearTimeout = (() => undefined) as typeof window.clearTimeout;
+  window.ReactNativeWebView = { postMessage() {} };
+
+  let terminal: BurstTerminal | null = null;
+  window.Terminal = class extends BurstTerminal {
+    constructor(options: {
+      cols: number;
+      fontSize: number;
+      smoothScrollDuration?: number;
+    }) {
+      super(options);
+      terminal = this;
+    }
+  };
+  window.FitAddon = {
+    FitAddon: class {
+      proposeDimensions(): { rows: number } {
+        return { rows: 42 };
+      }
+      fit(): void {}
+    }
+  };
+
+  const viewport = window.document.getElementById("viewport");
+  if (!viewport) throw new Error("generated terminal viewport was not rendered");
+  Object.defineProperties(viewport, {
+    clientWidth: { configurable: true, value: 390 },
+    clientHeight: { configurable: true, value: 844 },
+    scrollHeight: { configurable: true, value: 1000 }
+  });
+  window.eval(extractTerminalScript(html));
+  if (!terminal) throw new Error("generated terminal script did not initialize xterm");
+  return { terminal, window };
 }
 
 function resolvedSelectionToolbarTop(tree: ElementNode | null): number | null {
@@ -1162,40 +1365,105 @@ describe("TerminalWebView", () => {
     );
   });
 
-  it("does not split retained history again for a steady-state append", async () => {
-    const initialOutput = `${Buffer.from("scrollback row\r\n".repeat(20_000)).toString("base64")}\n`;
-    const liveFrame = `${Buffer.from("one live frame\r\n").toString("base64")}\n`;
-    const updatedOutput = `${initialOutput}${liveFrame}`;
+  it("bounds pre-ready coalescing and steady-state xterm work for large bursts", async () => {
+    const frameCount = 2_000;
+    const frames = Array.from({ length: frameCount }, (_, index) =>
+      `${Buffer.from(`BURST_${String(index + 1).padStart(4, "0")}_${"X".repeat(128)}\r\n`).toString("base64")}\n`
+    );
+    let preReadyOutput = frames[0];
     const initialWebView = await renderTerminalWebView({
-      output: initialOutput,
+      output: preReadyOutput,
       outputEpoch: 7
     });
     (initialWebView.props.onLoadStart as () => void)();
     runEffects();
+
+    const splitSpy = vi.spyOn(String.prototype, "split");
+    const stringifySpy = vi.spyOn(JSON, "stringify");
+    for (const frame of frames.slice(1)) {
+      preReadyOutput += frame;
+      await renderTerminalWebView({ output: preReadyOutput, outputEpoch: 7 });
+      runEffects();
+    }
+
+    expect(
+      splitSpy.mock.contexts.filter((value) => value === preReadyOutput)
+    ).toHaveLength(0);
+    expect(
+      stringifySpy.mock.calls.filter(
+        ([value]) =>
+          typeof value === "object" &&
+          value !== null &&
+          "chunksB64" in value &&
+          Array.isArray(value.chunksB64) &&
+          value.chunksB64.length > 1
+      )
+    ).toHaveLength(0);
+    expect(
+      injectedScripts.filter((script) => script.includes("__replaceTerminalState"))
+    ).toHaveLength(0);
+
     (initialWebView.props.onMessage as (event: WebViewMessageEvent) => void)({
       nativeEvent: { data: JSON.stringify({ type: "terminal-ready" }) }
     } as WebViewMessageEvent);
-    injectedScripts.length = 0;
 
-    const splitSpy = vi.spyOn(String.prototype, "split");
-    const trimSpy = vi.spyOn(String.prototype, "trim");
-    await renderTerminalWebView({
-      output: updatedOutput,
-      outputEpoch: 7
-    });
-    runEffects();
-
-    const splitInputs = splitSpy.mock.contexts.map((value) => String(value));
-    const trimInputs = trimSpy.mock.contexts.map((value) => String(value));
-    splitSpy.mockRestore();
-    trimSpy.mockRestore();
-    expect(splitInputs).toContain(liveFrame);
-    expect(splitInputs).not.toContain(updatedOutput);
-    expect(trimInputs).not.toContain(initialOutput);
-    expect(injectedScripts).toContain(buildTerminalAppendScript(liveFrame));
+    const readyScripts = [...injectedScripts];
     expect(
-      injectedScripts.some((script) => script.includes("__replaceTerminalState"))
-    ).toBe(false);
+      splitSpy.mock.contexts.filter((value) => value === preReadyOutput)
+    ).toHaveLength(1);
+    expect(
+      stringifySpy.mock.calls.filter(
+        ([value]) =>
+          typeof value === "object" &&
+          value !== null &&
+          "chunksB64" in value &&
+          Array.isArray(value.chunksB64) &&
+          value.chunksB64.length === frameCount
+      )
+    ).toHaveLength(1);
+    expect(
+      readyScripts.filter((script) => script.includes("__replaceTerminalState"))
+    ).toHaveLength(1);
+
+    const bridge = createBurstTerminalDocument();
+    for (const script of readyScripts) bridge.window.eval(script);
+    expect(bridge.terminal.resets).toBe(1);
+    expect(bridge.terminal.writes).toHaveLength(frameCount);
+
+    injectedScripts.length = 0;
+    const writesAtReady = bridge.terminal.writes.length;
+    const postReadyFrames = frames.map((_frame, index) =>
+      `${Buffer.from(`LIVE_${String(index + 1).padStart(4, "0")}_${"Y".repeat(128)}\r\n`).toString("base64")}\n`
+    );
+    let steadyOutput = preReadyOutput;
+    for (const frame of postReadyFrames) {
+      steadyOutput += frame;
+      await renderTerminalWebView({ output: steadyOutput, outputEpoch: 7 });
+      runEffects();
+    }
+
+    const terminalMutationScripts = injectedScripts.filter((script) =>
+      script.includes("__appendTerminalChunk") ||
+      script.includes("__replaceTerminalState")
+    );
+    expect(terminalMutationScripts).toHaveLength(frameCount);
+    expect(
+      terminalMutationScripts.every(
+        (script) =>
+          script.includes("__appendTerminalChunk") &&
+          !script.includes("__replaceTerminalState") &&
+          script.length < 512
+      )
+    ).toBe(true);
+    expect(
+      splitSpy.mock.contexts.filter((value) => value === steadyOutput)
+    ).toHaveLength(0);
+    for (const script of terminalMutationScripts) bridge.window.eval(script);
+
+    splitSpy.mockRestore();
+    stringifySpy.mockRestore();
+    expect(bridge.terminal.resets).toBe(1);
+    expect(bridge.terminal.writes).toHaveLength(writesAtReady + frameCount);
   });
 
   it("replaces terminal state once when a new snapshot epoch arrives", async () => {

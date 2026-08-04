@@ -64,3 +64,39 @@ This change is diagnostic coverage, not a claimed fix for the reported crash.
 The next incident should yield a copyable signature under **More → About this
 build → Crash diagnostics**, while native process crashes and iOS jetsam still
 require an Apple `.ips` report.
+
+## Terminal CPU incident profiling follow-up
+
+The retained incident reports establish the before-side evidence for the
+2026-08-04 process, without establishing one shared cause:
+
+- PID 43418 consumed 90 seconds of CPU in 132 seconds (68% average versus the
+  OS 50% threshold), 105.315 seconds total CPU, and 60.30 mWh in the sampled
+  interval. ThermalPressure was advisory 20. Footprint grew from 76.61 MB to
+  109.72 MB and peaked at 126.58 MB. The heaviest sampled stack was the React
+  runtime JavaScript thread in Hermes interpreter/string work.
+- The same PID later terminated at 22:33:50 JST with EXC_CRASH/SIGABRT.
+  `lastExceptionBacktrace` reaches `RCTExceptionsManager` fatal exception
+  reporting and the abort occurred on
+  `com.meta.react.turbomodulemanager.queue`. The report contains no JavaScript
+  exception message, so this is evidence of a fatal JavaScript exception, not
+  evidence that the CPU event caused it.
+
+The current branch was built, installed, and launched on Jerome's iPhone 15
+through `./kd mobile run --device --staging`. The canonical device doctor then
+confirmed the staging bundle and task-local Metro were reachable. Controlled
+after-side profiling could not proceed: `./kd mobile device-smoke`, pointed at
+the installed staging desktop server, made four WebDriverAgent launch attempts;
+each `xcodebuild` exited with code 65 and each WDA `/status` request timed out
+after 60 seconds. The WebDriver session retry window then expired.
+
+Therefore there are no defensible after-side CPU percentages, energy values,
+thermal readings, or crash counts for idle, ordinary output, burst output, or
+alternate-screen TUI states over either LAN or relay. Those eight
+transport/state combinations remain explicitly unverified. The successful
+install and launch are not a load profile and must not be used as evidence that
+the hot path is fixed on-device. Profiling should be retried when WDA can
+launch, using the same current build, fixed-duration labeled scenarios, and
+Instruments Time Profiler/Energy Log or equivalent device metrics. Terminal
+contents, credentials, and user input must not be captured or retained with
+those measurements.

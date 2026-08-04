@@ -177,10 +177,13 @@ describe("LAN task loop E2E", () => {
 
       const remountedOutput = await waitForStoreTerminalOutput(
         store,
-        "SCRIPT_REDACTED_INPUT",
+        "SCRIPT_BURST_DONE",
         30_000
       );
       expect(remountedOutput).not.toContain(submittedInput);
+      expect(remountedOutput).not.toContain("composed password");
+      expect(remountedOutput).toContain("SCRIPT_BURST_0001_");
+      expect(remountedOutput).toContain("SCRIPT_BURST_2000_");
       expect(store.getState().taskTerminalOutputEpoch).toBeGreaterThan(
         connectedEpoch
       );
