@@ -211,6 +211,15 @@ impl OperatorAuthorizer {
         {
             return Err("kanna-server identity changed during authorization".to_string());
         }
+        log::info!(
+            "[operator-auth] daemon pid={} authorized kanna-server pid={} for protected system input",
+            std::process::id(),
+            selected.pid
+        );
+        crate::paths::lifecycle_audit(format_args!(
+            "event=server_authorized server_pid={} scope=protected_system_input",
+            selected.pid
+        ));
         Ok(())
     }
 }

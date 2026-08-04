@@ -159,17 +159,8 @@ impl MobileServerManager {
         }
     }
 
-    pub async fn wait_for_server_pid(&self) -> Result<u32, String> {
-        let mut receiver = self.server_pid_tx.subscribe();
-        loop {
-            if let Some(pid) = *receiver.borrow() {
-                return Ok(pid);
-            }
-            receiver
-                .changed()
-                .await
-                .map_err(|_| "kanna-server process identity channel closed".to_string())?;
-        }
+    pub(crate) fn server_pid_receiver(&self) -> watch::Receiver<Option<u32>> {
+        self.server_pid_tx.subscribe()
     }
 
     pub async fn start(&self) -> Result<(), String> {

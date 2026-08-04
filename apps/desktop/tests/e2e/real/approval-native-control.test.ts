@@ -7,6 +7,55 @@ import { WebDriverClient } from "../helpers/webdriver";
 
 const client = new WebDriverClient();
 
+async function waitForSelectedTask(taskId: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const selected = await client.executeSync<string | null>(
+      "return window.__KANNA_E2E__?.setupState?.store?.selectedItemId ?? null;",
+    );
+    if (selected === taskId) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for selected task ${taskId}`);
+}
+
+async function selectProtectedTask(taskId: string): Promise<string> {
+  await callVueMethod(client, "loadItems");
+  await callVueMethod(client, "store.selectRepo", SEED.repos.app.id);
+  await callVueMethod(client, "store.selectItem", taskId);
+  await waitForSelectedTask(taskId);
+  return client.waitForElement(
+    '.terminal-panel[data-operator-terminal-input="true"] .xterm-helper-textarea',
+    20_000,
+  );
+}
+
+async function waitForReplacementDaemonAuthorization(
+  daemonDir: string,
+  successorPid: number,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const pid = await tauriInvoke(client, "read_text_file", {
+      path: `${daemonDir}/daemon.pid`,
+    }).catch(() => null);
+    const log = await tauriInvoke(client, "read_text_file", {
+      path: `${daemonDir}/kanna-daemon-lifecycle.log`,
+    }).catch(() => null);
+    if (
+      typeof pid === "string" &&
+      pid.trim() === String(successorPid) &&
+      typeof log === "string" &&
+      log.includes(`pid=${successorPid} event=server_authorized server_pid=`)
+    ) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("Replacement daemon never recorded authorization for the adopted kanna-server");
+}
+
 describe("native approval control", () => {
   beforeAll(async () => {
     await client.createSession();
@@ -98,12 +147,24 @@ describe("native approval control", () => {
         agentProvider: "codex",
         operatorInputOnly: true,
       });
-      await callVueMethod(client, "loadItems", SEED.repos.app.id);
-      await callVueMethod(client, "store.selectItem", taskId);
-      const textarea = await client.waitForElement(
-        '.terminal-panel[data-operator-terminal-input="true"] .xterm-helper-textarea',
-        15_000,
-      );
+      await selectProtectedTask(taskId);
+      const daemonDir = await tauriInvoke(client, "read_env_var", {
+        name: "KANNA_DAEMON_DIR",
+      });
+      if (typeof daemonDir !== "string" || daemonDir.length === 0) {
+        throw new Error(`Invalid daemon directory: ${String(daemonDir)}`);
+      }
+      const successorPid = await tauriInvoke(client, "spawn_replacement_daemon_for_e2e");
+      if (
+        typeof successorPid !== "number" ||
+        !Number.isSafeInteger(successorPid) ||
+        successorPid <= 0
+      ) {
+        throw new Error(`Invalid replacement daemon pid: ${String(successorPid)}`);
+      }
+
+      await waitForReplacementDaemonAuthorization(daemonDir, successorPid);
+      const textarea = await selectProtectedTask(taskId);
       await client.sendKeys(textarea, `${marker}\n`);
 
       let observed = "";
@@ -121,5 +182,5 @@ describe("native approval control", () => {
       await execDb(client, "DELETE FROM stage_run WHERE task_id = ?", [taskId]);
       await execDb(client, "DELETE FROM pipeline_item WHERE id = ?", [taskId]);
     }
-  }, 30_000);
+  }, 120_000);
 });

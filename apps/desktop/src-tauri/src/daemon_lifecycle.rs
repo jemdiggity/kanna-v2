@@ -178,12 +178,35 @@ async fn connect_with_backoff() -> Option<DaemonClient> {
     None
 }
 
+async fn authorize_server_generation(
+    event_client: &mut DaemonClient,
+    server_pid_receiver: &mut tokio::sync::watch::Receiver<Option<u32>>,
+) -> Result<u32, String> {
+    let server_pid = loop {
+        if let Some(pid) = *server_pid_receiver.borrow_and_update() {
+            break pid;
+        }
+        server_pid_receiver
+            .changed()
+            .await
+            .map_err(|_| "kanna-server process identity channel closed".to_string())?;
+    };
+    crate::commands::daemon::authorize_server_process(event_client, server_pid)
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+    Ok(server_pid)
+}
+
 /// Spawn the lifecycle bridge: a background task that reads non-output events
 /// from a dedicated daemon subscription and emits them as Tauri events.
 /// Terminal bytes now flow through KSP `term_*` frames on kanna-server.
 /// This bridge stays until daemon_ready, hooks, status, and session exits have
 /// KSP equivalents for the desktop app.
-pub(crate) fn spawn_event_bridge(app: tauri::AppHandle, daemon_state: DaemonState) {
+pub(crate) fn spawn_event_bridge(
+    app: tauri::AppHandle,
+    daemon_state: DaemonState,
+    mut server_pid_receiver: tokio::sync::watch::Receiver<Option<u32>>,
+) {
     tauri::async_runtime::spawn(async move {
         loop {
             // Connect (with backoff for reconnection after daemon restart)
@@ -204,6 +227,16 @@ pub(crate) fn spawn_event_bridge(app: tauri::AppHandle, daemon_state: DaemonStat
                     }
                 }
             };
+
+            if let Err(error) =
+                authorize_server_generation(&mut event_client, &mut server_pid_receiver).await
+            {
+                eprintln!(
+                    "[event-bridge] failed to authorize kanna-server on daemon generation: {error}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
 
             // Subscribe to hook event broadcasts
             let _ = event_client
@@ -255,7 +288,9 @@ pub(crate) fn spawn_event_bridge(app: tauri::AppHandle, daemon_state: DaemonStat
 
 #[cfg(test)]
 mod tests {
-    use super::{wait_for_published_daemon_at, PublishedPid};
+    use super::{authorize_server_generation, wait_for_published_daemon_at, PublishedPid};
+    use crate::daemon_client::DaemonClient;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     #[tokio::test]
@@ -284,6 +319,46 @@ mod tests {
 
         assert_eq!(client.connected_pid(), std::process::id());
         let _ = accept.await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn every_daemon_generation_receives_the_current_server_authorization() {
+        let dir = std::path::PathBuf::from("/tmp").join(format!(
+            "kd-generation-auth-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (server_pid_tx, mut server_pid_rx) = tokio::sync::watch::channel(Some(42));
+
+        for generation in ["first", "replacement"] {
+            let socket = dir.join(format!("{generation}.sock"));
+            let listener = UnixListener::bind(&socket).unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(read).read_line(&mut line).await.unwrap();
+                write.write_all(b"{\"type\":\"Ok\"}\n").await.unwrap();
+                serde_json::from_str::<serde_json::Value>(&line).unwrap()
+            });
+            let mut client = DaemonClient::connect(&socket).await.unwrap();
+            assert_eq!(
+                authorize_server_generation(&mut client, &mut server_pid_rx)
+                    .await
+                    .unwrap(),
+                42
+            );
+            let command = server.await.unwrap();
+            assert_eq!(command["type"], "AuthorizeServer");
+            assert_eq!(command["pid"], 42);
+        }
+
+        drop(server_pid_tx);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

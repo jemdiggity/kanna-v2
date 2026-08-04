@@ -244,7 +244,7 @@ async fn submit_operator_input(
 }
 
 pub(crate) async fn authorize_server_process(
-    state: &DaemonState,
+    client: &mut DaemonClient,
     pid: u32,
 ) -> Result<(), DaemonCommandError> {
     let command = serde_json::json!({
@@ -252,7 +252,9 @@ pub(crate) async fn authorize_server_process(
         "pid": pid,
     })
     .to_string();
-    send_command_expect_ack(state, &command).await
+    client.send_command(&command).await?;
+    let response = client.read_event().await?;
+    parse_ack(&response)
 }
 
 #[tauri::command]
@@ -588,9 +590,8 @@ mod operator_input_tests {
             serde_json::from_str::<serde_json::Value>(&line).unwrap()
         });
 
-        let client = DaemonClient::connect(&socket).await.unwrap();
-        let state: DaemonState = Arc::new(Mutex::new(Some(client)));
-        authorize_server_process(&state, 42).await.unwrap();
+        let mut client = DaemonClient::connect(&socket).await.unwrap();
+        authorize_server_process(&mut client, 42).await.unwrap();
 
         let command = server.await.unwrap();
         assert_eq!(command["type"], "AuthorizeServer");

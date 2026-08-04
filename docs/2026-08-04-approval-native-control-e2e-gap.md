@@ -41,6 +41,18 @@ never executed. The corrected real xterm assertion remains mandatory and is
 not waived; this lane is infrastructure-blocked until WebDriver consistently
 attaches to the Tauri main webview.
 
+A subsequent clean run did attach and reached both tests. The override test
+passed, while the protected-terminal test exposed that its authorization wait
+was consulting the replaceable per-process log symlink. The production event
+bridge had already reauthorized and subscribed to the successor daemon. The
+authorization audit now also writes the stable lifecycle log, and the test
+matches the successor daemon PID there. The clean rerun after that correction
+was again allowed to exhaust the full readiness timeout. Its `/status` response
+was healthy, but a fresh WebDriver session still reported `about:blank`, a
+complete document with an empty body, `hookPresent: false`, and
+`hookReady: null`; no worktree webview log was created. Vitest never started,
+so the real xterm assertion remains unexecuted and unwaived for that run.
+
 The cross-boundary coverage is backed by narrower regressions:
 
 - a real daemon integration rejects generic `Input` and `InputNoReply` for a
@@ -53,7 +65,24 @@ The cross-boundary coverage is backed by narrower regressions:
 
 After the exact-process server handoff and atomic timeout-retirement revision,
 a fresh clean run of the same command attached successfully and passed both
-real tests. It exercised protected merge-terminal typing through the actual
-xterm and the desktop restart/adoption flow; the xterm assertion was not
-waived. The earlier readiness failures remain recorded above as runner history,
-but they no longer block this boundary's E2E coverage.
+real tests. A later reviewer run attached but exposed that raw DB insertion did
+not deterministically select the synthetic task, so the test now explicitly
+reloads the store, selects the repo and task, and waits for that selection
+before requiring the protected xterm.
+
+A real desktop-process relaunch remains a specific E2E harness gap. On
+2026-08-04 the test invoked Tauri's production `plugin:process|restart` command:
+the debug app exited cleanly, but `tauri dev` treated that exit as terminal,
+closed its tmux pane with status 0, and never republished the WebDriver endpoint
+during the full 60-second reconnect window. The test therefore could not run
+post-relaunch assertions or cleanup through the webview. Supporting this edge
+requires the E2E runner to relaunch the debug app while preserving its DB,
+server, and daemon directories, then publish a new WebDriver session.
+
+The narrower cross-process coverage is not waived: the desktop process test
+adopts a server after its original desktop exits, and the real xterm test
+forces a daemon handoff, waits for the successor PID plus its exact-server
+authorization audit (which records both daemon and server PIDs), then types
+through the protected terminal. This proves the per-daemon-generation
+authorization and real operator-input wiring while the full desktop-relaunch
+harness work remains outstanding.

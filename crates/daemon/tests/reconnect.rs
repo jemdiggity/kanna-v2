@@ -917,6 +917,16 @@ fn privileged_input_rejects_a_separate_process_impersonator() {
         pid: std::process::id(),
     });
     assert!(matches!(conn.recv(), Evt::Ok));
+    let audit = std::fs::read_to_string(daemon._dir.join("kanna-daemon-lifecycle.log"))
+        .expect("server authorization should be durably audited");
+    assert!(
+        audit.contains(&format!(
+            "pid={} event=server_authorized server_pid={} scope=protected_system_input",
+            daemon.child.id(),
+            std::process::id()
+        )),
+        "authorization audit must identify both exact processes: {audit}"
+    );
 
     let status = Command::new(std::env::current_exe().unwrap())
         .args([
