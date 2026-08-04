@@ -463,6 +463,62 @@ describe("installMobileCrashHandler", () => {
     ]);
   });
 
+  it("retains a newer fatal error after older released records drain", async () => {
+    let storedValue: string | null = null;
+    let releaseFirstRead: (() => void) | null = null;
+    const firstRead = new Promise<void>((resolve) => {
+      releaseFirstRead = resolve;
+    });
+    let readCount = 0;
+    const storage = {
+      getItem: vi.fn(async () => {
+        readCount += 1;
+        if (readCount === 1) await firstRead;
+        return storedValue;
+      }),
+      removeItem: vi.fn(async () => undefined),
+      setItem: vi.fn(async (_key: string, value: string) => {
+        storedValue = value;
+      })
+    };
+    const { recorder } = createRecorder(storage);
+    const previousHandler = vi.fn();
+    let installedHandler: ((error: unknown, isFatal?: boolean) => void) | null =
+      null;
+    diagnosticGlobal.ErrorUtils = {
+      getGlobalHandler: () => previousHandler,
+      setGlobalHandler: (handler) => {
+        installedHandler = handler;
+      }
+    };
+    installMobileCrashHandler(recorder.captureWithPersistence.bind(recorder));
+
+    recorder.capture({
+      kind: "javascript-error",
+      message: "stalled write"
+    });
+    for (let index = 0; index < 5; index += 1) {
+      installedHandler?.(new Error(`queued nonfatal ${index}`), false);
+    }
+    installedHandler?.(new Error("newer fatal"), true);
+
+    expect(storage.getItem).toHaveBeenCalledTimes(1);
+    expect(storage.setItem).not.toHaveBeenCalled();
+    expect(previousHandler).toHaveBeenCalledTimes(5);
+
+    releaseFirstRead?.();
+    await vi.waitFor(() => expect(previousHandler).toHaveBeenCalledTimes(6));
+    const records = await recorder.read();
+
+    expect(records.map((record) => record.message)).toEqual([
+      "Error: newer fatal",
+      "Error: queued nonfatal 4",
+      "Error: queued nonfatal 3",
+      "Error: queued nonfatal 2",
+      "Error: queued nonfatal 1"
+    ]);
+  });
+
   it("delegates after a fatal persistence failure", async () => {
     const storage = createStorage();
     storage.setItem.mockRejectedValue(new Error("disk unavailable"));

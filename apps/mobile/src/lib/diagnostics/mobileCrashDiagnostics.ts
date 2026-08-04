@@ -345,10 +345,9 @@ export class MobileCrashDiagnosticRecorder {
         await this.storage.setItem(
           DIAGNOSTICS_STORAGE_KEY,
           JSON.stringify(
-            [...batch.map((entry) => entry.diagnostic), ...previous].slice(
-              0,
-              MAX_DIAGNOSTICS
-            )
+            [...batch.map((entry) => entry.diagnostic), ...previous]
+              .sort((left, right) => right.at.localeCompare(left.at))
+              .slice(0, MAX_DIAGNOSTICS)
           )
         );
         for (const entry of batch) this.resolveTrackedPersistence(entry);
