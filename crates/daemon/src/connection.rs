@@ -133,6 +133,16 @@ pub(crate) async fn handle_connection(
                 };
                 let _ = write_event(&mut *writer.lock().await, &event).await;
             }
+            Some(Command::NegotiateProtectedInput { version }) => {
+                let event = match operator_authorizer.negotiate_protected_input(raw_fd, version) {
+                    Ok(()) => Event::ProtectedInputReady { version },
+                    Err(message) => error_event(
+                        Some(protocol::ErrorCode::ProtectedInputProtocolRequired),
+                        message,
+                    ),
+                };
+                let _ = write_event(&mut *writer.lock().await, &event).await;
+            }
             Some(Command::Subscribe) => {
                 if subscription_task.is_none() {
                     let mut broadcast_rx = broadcast_tx.subscribe();
@@ -334,13 +344,10 @@ pub(crate) async fn handle_command(
             terminal_prelude,
             operator_input_only,
         } => {
-            if operator_input_only
-                && operator_authorizer.authorize_system_input(raw_fd).is_err()
-                && operator_authorizer.authorize(raw_fd, false).is_err()
-            {
+            if let Err(message) = operator_authorizer.authorize_spawn(raw_fd) {
                 let evt = error_event(
-                    Some(protocol::ErrorCode::InputUnauthorized),
-                    "protected sessions require an authenticated desktop or server".to_string(),
+                    Some(protocol::ErrorCode::ProtectedInputProtocolRequired),
+                    format!("protected-input negotiation required before PTY spawn: {message}"),
                 );
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
                 return;
@@ -813,6 +820,17 @@ pub(crate) async fn handle_command(
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
                 return;
             }
+            let daemon_lifecycle_guard = daemon_lifecycle.read().await;
+            if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
+                let evt = error_event(
+                    Some(protocol::ErrorCode::RetryOnSuccessor),
+                    "daemon handoff already committed; reclassify on the adopting daemon",
+                );
+                let _ = write_event(&mut *writer.lock().await, &evt).await;
+                return;
+            }
+            let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
+            let _lifecycle_guard = lifecycle.lock().await;
             let Some(session) = session_handle(&sessions, &session_id).await else {
                 let evt = error_event(
                     Some(protocol::ErrorCode::SessionNotFound),
@@ -1443,7 +1461,9 @@ pub(crate) async fn handle_command(
             agent_runtime::handle_agent_set_model(session_id, model, writer, agent_sessions).await;
         }
 
-        Command::AdoptOperator | Command::AuthorizeServer { .. } => {
+        Command::AdoptOperator
+        | Command::AuthorizeServer { .. }
+        | Command::NegotiateProtectedInput { .. } => {
             let event = error_event(None, "unexpected nested authority command");
             let _ = write_event(&mut *writer.lock().await, &event).await;
         }

@@ -60,7 +60,8 @@ async fn spawn_prepared_task_classified(
     daemon: &mut DaemonClient,
     prepared: PreparedTaskSpawn,
 ) -> Result<CreatedTask, SpawnPreparedError> {
-    let operator_input_only = prepared.stage_agent.as_deref() == Some("merge");
+    let operator_input_only = prepared.stage_agent.as_deref() == Some("merge")
+        && matches!(&prepared.session, PreparedSessionSpawn::Pty { .. });
     if let Some(snapshot) = prepared.recovery_snapshot.as_ref() {
         seed_recovery_snapshot(daemon, &prepared.session_id, snapshot)
             .await
@@ -75,14 +76,18 @@ async fn spawn_prepared_task_classified(
         operator_input_only,
     );
 
-    let event = daemon
-        .send_command_retrying_successor(&command)
-        .await
-        .map_err(|e| {
-            SpawnPreparedError::UncertainDelivery(format!(
-                "daemon spawn response lost after submission began: {e}"
-            ))
-        })?;
+    let event = if operator_input_only {
+        daemon
+            .send_protected_command_retrying_successor(&command)
+            .await
+    } else {
+        daemon.send_command_retrying_successor(&command).await
+    }
+    .map_err(|e| {
+        SpawnPreparedError::UncertainDelivery(format!(
+            "daemon spawn response lost after submission began: {e}"
+        ))
+    })?;
 
     match event {
         DaemonEvent::SessionCreated { .. } => Ok(prepared.created_task),

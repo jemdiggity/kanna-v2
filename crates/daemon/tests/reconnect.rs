@@ -142,6 +142,7 @@ enum Evt {
 enum ErrorCode {
     PtySpawnFailed,
     InputUnauthorized,
+    ProtectedInputProtocolRequired,
     #[serde(other)]
     Other,
 }
@@ -845,6 +846,59 @@ fn protected_session_rejects_generic_daemon_input_and_accepts_authenticated_oper
             other => panic!("expected protected session snapshot, got {other:?}"),
         }
     }
+}
+
+#[test]
+#[ignore = "fixture invoked by old_server_cannot_spawn_on_a_new_daemon_without_negotiation"]
+fn unnegotiated_server_spawn_child() {
+    let Some(socket_path) = std::env::var_os("KANNA_UNNEGOTIATED_SPAWN_SOCKET") else {
+        return;
+    };
+    let stream = UnixStream::connect(socket_path).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut connection = ClientConn {
+        reader: BufReader::new(stream.try_clone().unwrap()),
+        writer: stream,
+    };
+    connection.send_json(&serde_json::json!({
+        "type": "Spawn",
+        "session_id": "old-server-merge",
+        "executable": "/bin/cat",
+        "args": [],
+        "cwd": "/tmp",
+        "env": {},
+        "cols": 80,
+        "rows": 24
+    }));
+    assert!(matches!(
+        connection.recv(),
+        Evt::Error {
+            code: Some(ErrorCode::ProtectedInputProtocolRequired),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn old_server_cannot_spawn_on_a_new_daemon_without_negotiation() {
+    let current_executable = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    let daemon = DaemonHandle::start_with_env([(
+        "KANNA_SERVER_EXECUTABLE",
+        current_executable.to_str().unwrap(),
+    )]);
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "unnegotiated_server_spawn_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("KANNA_UNNEGOTIATED_SPAWN_SOCKET", &daemon.socket_path)
+        .status()
+        .expect("spawn old-server fixture");
+    assert!(status.success());
 }
 
 #[test]

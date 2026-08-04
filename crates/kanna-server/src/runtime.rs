@@ -1,37 +1,67 @@
 use crate::{config::Config, db, http_api, relay};
 use std::sync::Arc;
 
-async fn classify_existing_session_input(config: &Config, db: &db::Db) {
-    let mut daemon = match crate::daemon_client::DaemonClient::connect(&config.daemon_dir).await {
-        Ok(daemon) => daemon,
-        Err(error) => {
-            log::warn!("failed to connect while protecting existing merge sessions: {error}");
-            return;
+async fn prepare_daemon_generation(
+    daemon: &mut crate::daemon_client::DaemonClient,
+    db: &db::Db,
+) -> Result<u32, String> {
+    let connected_pid = daemon.connected_pid();
+    daemon.negotiate_protected_input().await?;
+    classify_sessions_on_connected_daemon(daemon, db).await?;
+    Ok(connected_pid)
+}
+
+async fn wait_for_protected_input_generation(
+    config: &Config,
+    db: &db::Db,
+    mut previous_pid: Option<u32>,
+) -> u32 {
+    let mut retry_delay = std::time::Duration::from_millis(50);
+    loop {
+        let connection = match previous_pid {
+            Some(pid) => crate::daemon_client::wait_for_successor(&config.daemon_dir, pid).await,
+            None => crate::daemon_client::DaemonClient::connect(&config.daemon_dir).await,
+        };
+        let mut daemon = match connection {
+            Ok(daemon) => daemon,
+            Err(error) => {
+                log::warn!(
+                    "protected-input daemon generation is not ready; LAN/relay remain unavailable: {error}"
+                );
+                previous_pid = None;
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = std::cmp::min(retry_delay * 2, std::time::Duration::from_secs(2));
+                continue;
+            }
+        };
+        let connected_pid = daemon.connected_pid();
+        match prepare_daemon_generation(&mut daemon, db).await {
+            Ok(pid) => return pid,
+            Err(error) => {
+                log::warn!(
+                    "daemon pid {connected_pid} lacks the protected-input contract; waiting for a successor: {error}"
+                );
+                previous_pid = Some(connected_pid);
+            }
+        }
+    }
+}
+
+async fn maintain_protected_input_generations(config: Config, mut pid: u32) {
+    let db = loop {
+        match db::Db::open(&config.db_path) {
+            Ok(db) => break db,
+            Err(error) => {
+                log::error!(
+                    "failed to open the classification database for daemon generation monitoring: {error}"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
         }
     };
-    let connected_pid = daemon.connected_pid();
-    if let Err(error) = classify_sessions_on_connected_daemon(&mut daemon, db).await {
-        // Desktop replacement and server startup intentionally overlap. A
-        // shipped v2 daemon understands List but closes when it sees the new
-        // ClassifyInput command; wait for the published handoff successor and
-        // repeat the complete classification pass there.
-        log::warn!(
-            "daemon input classification failed on pid {connected_pid}; waiting for handoff successor: {error}"
-        );
-        match crate::daemon_client::wait_for_successor(&config.daemon_dir, connected_pid).await {
-            Ok(mut successor) => {
-                if let Err(retry_error) =
-                    classify_sessions_on_connected_daemon(&mut successor, db).await
-                {
-                    log::warn!(
-                        "failed to classify inherited sessions on successor daemon: {retry_error}"
-                    );
-                }
-            }
-            Err(wait_error) => log::warn!(
-                "failed to classify inherited sessions and no successor became available: {wait_error}"
-            ),
-        }
+    loop {
+        pid = wait_for_protected_input_generation(&config, &db, Some(pid)).await;
+        log::info!("protected-input policy established on successor daemon pid {pid}");
     }
 }
 
@@ -60,8 +90,9 @@ async fn classify_sessions_on_connected_daemon(
         let operator_input_only = match db.session_requires_operator_input(&session_id) {
             Ok(value) => value,
             Err(error) => {
-                log::warn!("failed to classify existing session {session_id}: {error}");
-                continue;
+                return Err(format!(
+                    "failed to resolve input policy for existing session {session_id}: {error}"
+                ));
             }
         };
         match daemon
@@ -73,7 +104,9 @@ async fn classify_sessions_on_connected_daemon(
         {
             Ok(kanna_daemon::protocol::Event::Ok) => {}
             Ok(event) => {
-                log::warn!("failed to classify existing session {session_id}: {event:?}")
+                return Err(format!(
+                    "daemon refused input classification for session {session_id}: {event:?}"
+                ))
             }
             Err(error) => {
                 return Err(format!(
@@ -101,7 +134,9 @@ pub(crate) async fn run_server_services(
     http_state: Arc<http_api::AppState>,
 ) {
     crate::task_creator::prune_completion_contexts_on_startup(&config.daemon_dir, &db);
-    classify_existing_session_input(&config, &db).await;
+    let protected_input_pid = wait_for_protected_input_generation(&config, &db, None).await;
+    let protected_input_maintenance =
+        maintain_protected_input_generations(config.clone(), protected_input_pid);
     if config.relay_url.trim().is_empty() {
         tokio::select! {
             result = http_api::serve(Arc::clone(&http_state)) => match result {
@@ -109,6 +144,7 @@ pub(crate) async fn run_server_services(
                 Err(err) => log::error!("LAN API failed: {}", err),
             },
             _ = run_human_control_service(http_state) => {},
+            _ = protected_input_maintenance => {},
         }
         return;
     }
@@ -124,6 +160,7 @@ pub(crate) async fn run_server_services(
             Err(err) => log::error!("relay loop failed: {}", err),
         },
         _ = run_human_control_service(human_control_state) => {},
+        _ = protected_input_maintenance => {},
     }
 }
 
@@ -138,7 +175,11 @@ mod tests {
         },
         time::{SystemTime, UNIX_EPOCH},
     };
-    use tokio::{net::TcpListener, time::Duration};
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt},
+        net::TcpListener,
+        time::Duration,
+    };
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     async fn free_port() -> u16 {
@@ -213,6 +254,60 @@ mod tests {
 
         let db_path = unique_path("singleton-publisher", "sqlite");
         let pairing_store_path = unique_path("singleton-publisher-pairings", "json");
+        let daemon_dir = unique_path("singleton-publisher-daemon", "dir");
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let daemon_socket = kanna_runtime_defaults::socket_path(std::path::Path::new(&daemon_dir));
+        let daemon_listener = tokio::net::UnixListener::bind(&daemon_socket).unwrap();
+        std::fs::write(
+            std::path::Path::new(&daemon_dir).join("daemon.pid"),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+        let fake_daemon = tokio::spawn(async move {
+            let (stream, _) = daemon_listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+                kanna_daemon::protocol::Command::NegotiateProtectedInput { .. }
+            ));
+            write
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(
+                            &kanna_daemon::protocol::Event::ProtectedInputReady {
+                                version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+                            }
+                        )
+                        .unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(matches!(
+                serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+                kanna_daemon::protocol::Command::List
+            ));
+            write
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&kanna_daemon::protocol::Event::SessionList {
+                            sessions: Vec::new(),
+                        })
+                        .unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
         let lan_port = free_port().await;
         let config = Config {
             relay_url: format!("ws://{relay_addr}"),
@@ -220,7 +315,7 @@ mod tests {
             firebase_project_id: "kanna-local".into(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: unique_path("singleton-publisher-daemon", "dir"),
+            daemon_dir: daemon_dir.clone(),
             db_path: db_path.clone(),
             kanna_cli_path: None,
             desktop_id: "desktop-1".into(),
@@ -286,7 +381,9 @@ mod tests {
         }
 
         fake_relay.abort();
+        fake_daemon.abort();
         let _ = std::fs::remove_file(db_path);
         let _ = std::fs::remove_file(pairing_store_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
     }
 }

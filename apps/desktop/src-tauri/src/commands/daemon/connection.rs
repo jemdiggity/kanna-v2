@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::daemon_client::DaemonClient;
 
 use super::protocol::{
-    is_retryable_command_error, parse_ack, parse_session_created,
+    is_retryable_command_error, parse_ack, parse_protected_input_ready, parse_session_created,
     should_clear_daemon_client_after_error, DaemonCommandError,
 };
 use super::DaemonState;
@@ -97,6 +97,20 @@ pub(super) async fn send_command_expect_ack(
     json: &str,
 ) -> Result<(), DaemonCommandError> {
     send_command_with_successor_retry(state, json, parse_ack, |previous_pid| async move {
+        crate::daemon_lifecycle::wait_for_successor(previous_pid).await
+    })
+    .await
+}
+
+pub(super) async fn negotiate_protected_input(
+    state: &DaemonState,
+) -> Result<(), DaemonCommandError> {
+    let command = serde_json::json!({
+        "type": "NegotiateProtectedInput",
+        "version": kanna_runtime_defaults::PROTECTED_INPUT_PROTOCOL_VERSION,
+    })
+    .to_string();
+    send_command_with_successor_retry(state, &command, parse_protected_input_ready, |previous_pid| async move {
         crate::daemon_lifecycle::wait_for_successor(previous_pid).await
     })
     .await

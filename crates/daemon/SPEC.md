@@ -117,7 +117,9 @@ Handoff versions identify guarantee epochs:
 - **v2 (`LEGACY_HANDOFF_PROTOCOL_VERSION`)** — the deployed pre-transaction
   protocol, retained only so existing live sessions survive the upgrade to
   v3. Stable PTYs and agent state transfer, but Spawn/Kill operations racing
-  the old v2 snapshot have unspecified ordering.
+  the old v2 snapshot have unspecified ordering. A v2 transfer is refused if
+  either side can see an explicitly protected-input session; protected PTYs
+  may move only through v3.
 
 A current adopter requests v3 first. It makes exactly one v2 attempt only when
 the incumbent returns an explicit handoff-version-mismatch error before any
@@ -125,8 +127,9 @@ transfer. Timeouts, disconnects, malformed responses, partial descriptor
 transfers, and all other ambiguous failures are fail-closed. Version 1 is not
 supported.
 
-A current sender accepts both versions. It still applies its hardened seal and
-descriptor ownership when a deployed v2 adopter requests v2.
+A current sender accepts both versions for lineages without protected PTYs. It
+still applies its hardened seal and descriptor ownership when a deployed v2
+adopter requests v2.
 
 ### Sequence
 
@@ -315,6 +318,14 @@ An old daemon's handoff has no input-policy field, so the successor initially
 fences every such PTY. Before serving HTTP, the authenticated server classifies
 the adopted sessions from durable merge-agent history; classification may
 tighten a session later but can never relax one already marked protected.
+`NegotiateProtectedInput` version 1 must be acknowledged by the active daemon
+before the server exposes HTTP/relay or creates a merge PTY. The daemon records
+the exact negotiating server process and refuses server-originated PTY spawns
+from an unnegotiated process, making an old-server/new-daemon pairing fail
+closed. `ClassifyInput` shares the daemon lifecycle fence with the handoff
+snapshot; a command that loses that race receives `RetryOnSuccessor`, and the
+server repeats negotiation plus the complete classification pass on every
+published daemon generation.
 
 | Env Var | Description | Default |
 |---------|-------------|---------|

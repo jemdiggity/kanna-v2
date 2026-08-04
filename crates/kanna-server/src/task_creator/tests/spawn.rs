@@ -1,6 +1,84 @@
 use super::*;
 
 #[tokio::test]
+async fn protected_merge_pty_negotiates_before_spawn() {
+    let config = test_config("protected-merge-negotiation");
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let fake_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut reader = BufReader::new(read);
+        let mut commands = Vec::new();
+        for response in [
+            kanna_daemon::protocol::Event::ProtectedInputReady {
+                version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+            },
+            kanna_daemon::protocol::Event::SessionCreated {
+                session_id: "merge-task".to_string(),
+            },
+        ] {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            commands.push(
+                serde_json::from_str::<kanna_daemon::protocol::Command>(line.trim()).unwrap(),
+            );
+            write
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+        commands
+    });
+    let prepared = PreparedTaskSpawn {
+        created_task: CreatedTask {
+            task_id: "merge-task".to_string(),
+            repo_id: "repo-1".to_string(),
+            title: "Merge".to_string(),
+            prompt: "Merge approved work".to_string(),
+            stage: "in progress".to_string(),
+            agent_type: "pty".to_string(),
+            worktree_path: "/tmp/worktree".to_string(),
+        },
+        branch: "merge-task".to_string(),
+        session_id: "merge-task".to_string(),
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        stage_agent: Some("merge".to_string()),
+        agent_provider: "codex".to_string(),
+        model: None,
+        effort: None,
+        completion_transition: PipelineStageTransition::Manual,
+        provider_session_id: None,
+        recovery_snapshot: None,
+        session: PreparedSessionSpawn::Pty {
+            executable: "/bin/cat".to_string(),
+            args: Vec::new(),
+            cols: 80,
+            rows: 24,
+            agent_provider: DaemonAgentProvider::Codex,
+        },
+    };
+    let mut client = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    spawn_prepared_task(&mut client, prepared).await.unwrap();
+    let commands = fake_daemon.await.unwrap();
+    assert!(matches!(
+        commands.first(),
+        Some(kanna_daemon::protocol::Command::NegotiateProtectedInput {
+            version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+        })
+    ));
+    assert!(matches!(
+        commands.get(1),
+        Some(kanna_daemon::protocol::Command::Spawn {
+            operator_input_only: true,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn spawn_prepared_task_sends_spawn_agent_for_agent_sessions() {
     let config = test_config("spawn-prepared-agent-command");
     let daemon = spawn_fake_daemon_session_created_once(config.daemon_dir.clone()).await;

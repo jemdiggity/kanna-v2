@@ -15,6 +15,7 @@ pub(crate) struct OperatorAuthorizer {
     trusted: Mutex<DesktopIdentity>,
     trusted_server_executable: Option<PathBuf>,
     trusted_server: Mutex<Option<DesktopIdentity>>,
+    protected_input_server: Mutex<Option<(DesktopIdentity, u32)>>,
 }
 
 impl OperatorAuthorizer {
@@ -36,6 +37,7 @@ impl OperatorAuthorizer {
                 .map(PathBuf::from)
                 .and_then(|path| std::fs::canonicalize(path).ok()),
             trusted_server: Mutex::new(None),
+            protected_input_server: Mutex::new(None),
         })
     }
 
@@ -154,6 +156,67 @@ impl OperatorAuthorizer {
             || executable(peer_pid).as_ref() != Some(&selected.executable)
         {
             return Err("system-input peer identity changed during authorization".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn negotiate_protected_input(
+        &self,
+        socket_fd: RawFd,
+        version: u32,
+    ) -> Result<(), String> {
+        if version != crate::protocol::PROTECTED_INPUT_PROTOCOL_VERSION {
+            return Err(format!(
+                "protected-input protocol mismatch: expected {}, got {version}",
+                crate::protocol::PROTECTED_INPUT_PROTOCOL_VERSION
+            ));
+        }
+        if self.authorize_system_input(socket_fd).is_err() {
+            // The native desktop may create an explicitly protected PTY for
+            // diagnostics/E2E. It already owns operator authority and does
+            // not become the server identity for later SystemInput.
+            return self.authorize(socket_fd, false);
+        }
+        let peer_pid = crate::proc_info::socket_peer_pid(socket_fd)
+            .ok_or_else(|| "protected-input peer identity is unavailable".to_string())?;
+        let peer =
+            live_process(peer_pid).ok_or_else(|| "protected-input peer is not live".to_string())?;
+        let peer_executable = executable(peer_pid)
+            .ok_or_else(|| "protected-input peer executable is unavailable".to_string())?;
+        let selected = DesktopIdentity {
+            pid: peer.pid,
+            start: peer.start,
+            executable: peer_executable,
+        };
+        *self
+            .protected_input_server
+            .lock()
+            .map_err(|_| "protected-input protocol lock was poisoned".to_string())? =
+            Some((selected, version));
+        Ok(())
+    }
+
+    pub(crate) fn authorize_spawn(&self, socket_fd: RawFd) -> Result<(), String> {
+        if self.authorize(socket_fd, false).is_ok() {
+            return Ok(());
+        }
+        let peer_pid = crate::proc_info::socket_peer_pid(socket_fd)
+            .ok_or_else(|| "spawn peer identity is unavailable".to_string())?;
+        let peer = live_process(peer_pid).ok_or_else(|| "spawn peer is not live".to_string())?;
+        let peer_executable = executable(peer_pid)
+            .ok_or_else(|| "spawn peer executable is unavailable".to_string())?;
+        let negotiated = self
+            .protected_input_server
+            .lock()
+            .map_err(|_| "protected-input protocol lock was poisoned".to_string())?
+            .clone()
+            .ok_or_else(|| "kanna-server has not negotiated protected-input support".to_string())?;
+        if negotiated.1 != crate::protocol::PROTECTED_INPUT_PROTOCOL_VERSION
+            || peer.pid != negotiated.0.pid
+            || peer.start != negotiated.0.start
+            || peer_executable != negotiated.0.executable
+        {
+            return Err("spawn peer is not the negotiated kanna-server process".to_string());
         }
         Ok(())
     }

@@ -6,6 +6,8 @@ import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 
 const client = new WebDriverClient();
+const protectedTerminalSelector =
+  '.terminal-panel[data-operator-terminal-input="true"] .xterm-helper-textarea';
 
 async function waitForSelectedTask(taskId: string, timeoutMs = 15_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -24,10 +26,7 @@ async function selectProtectedTask(taskId: string): Promise<string> {
   await callVueMethod(client, "store.selectRepo", SEED.repos.app.id);
   await callVueMethod(client, "store.selectItem", taskId);
   await waitForSelectedTask(taskId);
-  return client.waitForElement(
-    '.terminal-panel[data-operator-terminal-input="true"] .xterm-helper-textarea',
-    20_000,
-  );
+  return client.waitForElement(protectedTerminalSelector, 20_000);
 }
 
 async function waitForReplacementDaemonAuthorization(
@@ -165,7 +164,26 @@ describe("native approval control", () => {
 
       await waitForReplacementDaemonAuthorization(daemonDir, successorPid);
       const textarea = await selectProtectedTask(taskId);
+      await client.executeSync<void>(`
+        window.__KANNA_E2E__?.invokes?.clear();
+        const terminal = document.querySelector(${JSON.stringify(protectedTerminalSelector)});
+        if (terminal) {
+          terminal.dataset.continuityMarker = ${JSON.stringify(marker)};
+          terminal.focus();
+        }
+      `);
       await client.sendKeys(textarea, `${marker}\n`);
+
+      await callVueMethod(client, "loadItems");
+      await waitForSelectedTask(taskId);
+      const continuity = await client.executeSync<{ marker: string | null; focused: boolean }>(`
+        const terminal = document.querySelector(${JSON.stringify(protectedTerminalSelector)});
+        return {
+          marker: terminal?.dataset?.continuityMarker ?? null,
+          focused: document.activeElement === terminal,
+        };
+      `);
+      expect(continuity).toEqual({ marker, focused: true });
 
       let observed = "";
       for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -176,6 +194,11 @@ describe("native approval control", () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
       expect(observed).toContain(`merge-native-input:${marker}`);
+      const invokes = await client.executeSync<Array<{ cmd: string; args?: unknown }>>(
+        "return window.__KANNA_E2E__?.invokes?.getAll() ?? [];",
+      );
+      expect(invokes.some((record) => record.cmd === "send_operator_input")).toBe(true);
+      expect(invokes.some((record) => record.cmd === "send_input")).toBe(false);
     } finally {
       await tauriInvoke(client, "kill_session", { sessionId: taskId }).catch(() => undefined);
       await execDb(client, "DELETE FROM terminal_session WHERE pipeline_item_id = ?", [taskId]);

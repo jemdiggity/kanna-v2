@@ -2,6 +2,9 @@ pub mod session_id;
 
 use std::path::{Path, PathBuf};
 
+/// Version of the server/daemon contract that fences protected terminal input.
+pub const PROTECTED_INPUT_PROTOCOL_VERSION: u32 = 1;
+
 pub const DESKTOP_BUNDLE_IDENTIFIER: &str = "build.kanna";
 pub const STAGING_DESKTOP_BUNDLE_IDENTIFIER: &str = "build.kanna.staging";
 pub const LEGACY_DESKTOP_BUNDLE_IDENTIFIER: &str = "com.kanna.app";

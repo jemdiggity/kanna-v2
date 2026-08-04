@@ -11,6 +11,11 @@ pub const HANDOFF_PROTOCOL_VERSION: u32 = 3;
 /// Deployed pre-transaction handoff retained to preserve stable live sessions.
 pub const LEGACY_HANDOFF_PROTOCOL_VERSION: u32 = 2;
 
+/// Server/daemon contract required before protected terminal sessions may be
+/// created or inherited input policy may be classified.
+pub const PROTECTED_INPUT_PROTOCOL_VERSION: u32 =
+    kanna_runtime_defaults::PROTECTED_INPUT_PROTOCOL_VERSION;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -29,6 +34,7 @@ pub enum ErrorCode {
     UnknownPermissionRequest,
     RetryOnSuccessor,
     InputUnauthorized,
+    ProtectedInputProtocolRequired,
 }
 
 /// Whether a session is a PTY terminal or a headless agent (NDJSON pipes).
@@ -164,6 +170,11 @@ pub enum SessionStatus {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Command {
+    /// Negotiate the generic-input fence with the exact kanna-server process.
+    /// The daemon pins the caller's kernel identity for this generation.
+    NegotiateProtectedInput {
+        version: u32,
+    },
     Spawn {
         session_id: String,
         executable: String,
@@ -308,6 +319,9 @@ pub enum Command {
 #[serde(tag = "type")]
 #[allow(clippy::enum_variant_names)]
 pub enum Event {
+    ProtectedInputReady {
+        version: u32,
+    },
     Output {
         session_id: String,
         data: Vec<u8>,

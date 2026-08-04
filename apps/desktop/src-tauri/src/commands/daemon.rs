@@ -17,8 +17,8 @@ use attachment::{
     spawn_attached_stream_task, unregister_attached_owner, update_window_session_size,
 };
 use connection::{
-    daemon_socket_path, ensure_connected, require_option_mut, send_command_expect_ack,
-    send_command_expect_ack_bounded, send_command_expect_session_created,
+    daemon_socket_path, ensure_connected, negotiate_protected_input, require_option_mut,
+    send_command_expect_ack, send_command_expect_ack_bounded, send_command_expect_session_created,
 };
 #[allow(unused_imports)]
 pub use protocol::TerminalSnapshotPayload;
@@ -45,6 +45,10 @@ pub async fn spawn_session(
     operator_input_only: Option<bool>,
 ) -> Result<(), DaemonCommandError> {
     let agent_provider = parse_agent_provider(agent_provider)?;
+    let operator_input_only = operator_input_only.unwrap_or(false);
+    if operator_input_only {
+        negotiate_protected_input(&state).await?;
+    }
     let cmd = serde_json::json!({
         "type": "Spawn",
         "session_id": session_id,
@@ -55,7 +59,7 @@ pub async fn spawn_session(
         "cols": cols,
         "rows": rows,
         "agent_provider": agent_provider,
-        "operator_input_only": operator_input_only.unwrap_or(false),
+        "operator_input_only": operator_input_only,
     });
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
     send_command_expect_session_created(&state, &json).await

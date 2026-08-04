@@ -305,7 +305,13 @@ server-built merge envelopes use `SystemInput` pinned to the exact server PID,
 start time, and executable. The authenticated desktop hands that identity to a
 replacement daemon when adopting a surviving server; an initial server may
 bootstrap only as the desktop's direct child. A same-executable agent process
-is not server authority.
+is not server authority. Before binding the LAN API or relay, kanna-server must
+receive the active daemon generation's versioned protected-input
+acknowledgement and classify every inherited PTY from durable task state. It
+repeats that full pass after every daemon replacement. Classification is
+lifecycle-fenced against the handoff snapshot, and merge PTYs cannot cross a
+legacy-v2 handoff; an old server therefore cannot silently create or inherit an
+unfenced merge terminal on a new daemon.
 New task-bound
 pipeline handoffs use the dedicated route.
 
@@ -314,6 +320,9 @@ from the MCP/tool catalog and agent CLI. It requires a non-empty reason. The
 native desktop uses a private Unix control socket whose peer PID, process start
 time, and executable path are pinned and rechecked by the server; the reusable
 desktop bearer secret and loopback/KSP tunnel are never override authority.
+Peer eligibility is checked before reading a request, and the initial request
+frame has a fixed deadline so idle or unauthorized local connections cannot
+retain server tasks and descriptors indefinitely.
 When the desktop adopts a healthy surviving server, it must first send an
 explicit `adopt_desktop` request on that socket. The server transfers authority
 only after the old pinned PID/start identity is no longer live and the new peer

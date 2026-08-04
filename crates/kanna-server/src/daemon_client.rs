@@ -83,6 +83,47 @@ impl DaemonClient {
         self.send_serialized_command(&json).await
     }
 
+    pub(crate) async fn negotiate_protected_input(&mut self) -> Result<(), String> {
+        let version = kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION;
+        match self
+            .send_command(&Command::NegotiateProtectedInput { version })
+            .await
+            .map_err(|error| format!("protected-input negotiation failed: {error}"))?
+        {
+            Event::ProtectedInputReady {
+                version: acknowledged,
+            } if acknowledged == version => Ok(()),
+            Event::Error { message, .. } => Err(format!(
+                "daemon refused protected-input protocol {version}: {message}"
+            )),
+            event => Err(format!(
+                "daemon did not acknowledge protected-input protocol {version}: {event:?}"
+            )),
+        }
+    }
+
+    pub(crate) async fn send_protected_command_retrying_successor(
+        &mut self,
+        cmd: &Command,
+    ) -> Result<Event, Box<dyn std::error::Error>> {
+        self.negotiate_protected_input().await?;
+        let first = self.send_command(cmd).await?;
+        if !matches!(
+            first,
+            Event::Error {
+                code: Some(kanna_daemon::protocol::ErrorCode::RetryOnSuccessor),
+                ..
+            }
+        ) {
+            return Ok(first);
+        }
+        let previous_pid = self.connected_pid;
+        let mut successor = wait_for_successor(&self.daemon_dir, previous_pid).await?;
+        successor.negotiate_protected_input().await?;
+        *self = successor;
+        self.send_command(cmd).await
+    }
+
     /// Retry one daemon lifecycle command only when the daemon explicitly
     /// proves it refused before side effects. The command is serialized once,
     /// then replayed byte-for-byte against a different published daemon PID.

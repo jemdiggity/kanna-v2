@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
 const MAX_REQUEST_BYTES: u64 = 16 * 1024;
+const INITIAL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Clone)]
 struct TrustedDesktopIdentity {
@@ -83,18 +84,10 @@ async fn handle_connection(
     mut stream: UnixStream,
     trusted_desktop: Arc<Mutex<Option<TrustedDesktopIdentity>>>,
 ) -> Result<(), String> {
-    let peer_pid = kanna_daemon::proc_info::socket_peer_pid(stream.as_raw_fd())
-        .ok_or_else(|| "native control peer has no kernel identity".to_string())?;
-    let initial = kanna_daemon::proc_info::process_info(peer_pid)
-        .ok_or_else(|| "native control peer is not live".to_string())?;
-    let peer_executable = kanna_daemon::proc_info::process_executable_path(peer_pid)
-        .ok_or_else(|| "native control peer executable is unavailable".to_string())?;
+    let peer = authenticate_peer_before_frame(&stream, &trusted_desktop)?;
+    let peer_pid = peer.pid;
     let mut line = String::new();
-    BufReader::new(&mut stream)
-        .take(MAX_REQUEST_BYTES)
-        .read_line(&mut line)
-        .await
-        .map_err(|error| format!("failed to read native control request: {error}"))?;
+    read_initial_request(&mut stream, &mut line, INITIAL_REQUEST_TIMEOUT).await?;
     let request: HumanControlRequest = serde_json::from_str(line.trim())
         .map_err(|error| format!("invalid native control request: {error}"))?;
 
@@ -105,20 +98,14 @@ async fn handle_connection(
         let current = trusted
             .as_ref()
             .ok_or_else(|| "native desktop parent was not pinned at server launch".to_string())?;
-        let peer = TrustedDesktopIdentity {
-            pid: peer_pid,
-            start: initial.start,
-            executable: peer_executable.clone(),
-        };
         let prior_is_live = if peer_matches(current, &peer) {
             true
         } else {
-            let prior_is_live = kanna_daemon::proc_info::process_info(current.pid)
+            kanna_daemon::proc_info::process_info(current.pid)
                 .is_some_and(|process| process.start == current.start)
                 && kanna_daemon::proc_info::process_executable_path(current.pid)
                     .and_then(|path| std::fs::canonicalize(path).ok())
-                    .is_some_and(|path| path == current.executable);
-            prior_is_live
+                    .is_some_and(|path| path == current.executable)
         };
         let selected = authorize_or_adopt_desktop(
             current,
@@ -201,8 +188,79 @@ async fn handle_connection(
         .map_err(|error| format!("failed to write native control response: {error}"))
 }
 
+fn authenticate_peer_before_frame(
+    stream: &UnixStream,
+    trusted_desktop: &Mutex<Option<TrustedDesktopIdentity>>,
+) -> Result<TrustedDesktopIdentity, String> {
+    let peer_pid = kanna_daemon::proc_info::socket_peer_pid(stream.as_raw_fd())
+        .ok_or_else(|| "native control peer has no kernel identity".to_string())?;
+    let initial = kanna_daemon::proc_info::process_info(peer_pid)
+        .ok_or_else(|| "native control peer is not live".to_string())?;
+    let peer_executable = kanna_daemon::proc_info::process_executable_path(peer_pid)
+        .ok_or_else(|| "native control peer executable is unavailable".to_string())?;
+    let peer = TrustedDesktopIdentity {
+        pid: peer_pid,
+        start: initial.start,
+        executable: peer_executable.clone(),
+    };
+    {
+        let trusted = trusted_desktop
+            .lock()
+            .map_err(|_| "native desktop identity lock was poisoned".to_string())?;
+        let current = trusted
+            .as_ref()
+            .ok_or_else(|| "native desktop parent was not pinned at server launch".to_string())?;
+        preauthorize_desktop_peer(current, &peer)?;
+    }
+    Ok(peer)
+}
+
+async fn read_initial_request(
+    stream: &mut UnixStream,
+    line: &mut String,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    tokio::time::timeout(
+        timeout,
+        BufReader::new(stream)
+            .take(MAX_REQUEST_BYTES)
+            .read_line(line),
+    )
+    .await
+    .map_err(|_| "native control request timed out before the initial frame".to_string())?
+    .map_err(|error| format!("failed to read native control request: {error}"))?;
+    if line.is_empty() {
+        return Err("native control peer closed before sending a request".to_string());
+    }
+    Ok(())
+}
+
 fn peer_matches(left: &TrustedDesktopIdentity, right: &TrustedDesktopIdentity) -> bool {
     left.pid == right.pid && left.start == right.start && left.executable == right.executable
+}
+
+fn preauthorize_desktop_peer(
+    current: &TrustedDesktopIdentity,
+    peer: &TrustedDesktopIdentity,
+) -> Result<(), String> {
+    if peer_matches(current, peer) {
+        return Ok(());
+    }
+    let prior_is_live = kanna_daemon::proc_info::process_info(current.pid)
+        .is_some_and(|process| process.start == current.start)
+        && kanna_daemon::proc_info::process_executable_path(current.pid)
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .is_some_and(|path| path == current.executable);
+    if !prior_is_live && peer.executable == current.executable {
+        // Eligible replacement only. Authority is not transferred until its
+        // bounded first frame explicitly requests AdoptDesktop.
+        return Ok(());
+    }
+    Err(format!(
+        "native control peer is not eligible for desktop authority: pid={}, executable={}",
+        peer.pid,
+        peer.executable.display()
+    ))
 }
 
 fn authorize_or_adopt_desktop(
@@ -292,7 +350,11 @@ fn trusted_desktop_identity() -> Option<TrustedDesktopIdentity> {
 
 #[cfg(test)]
 mod tests {
-    use super::{authorize_or_adopt_desktop, peer_matches, TrustedDesktopIdentity};
+    use super::{
+        authenticate_peer_before_frame, authorize_or_adopt_desktop, peer_matches,
+        read_initial_request, TrustedDesktopIdentity,
+    };
+    use std::sync::Mutex;
 
     fn identity(pid: libc::pid_t, start: (u64, u64), executable: &str) -> TrustedDesktopIdentity {
         TrustedDesktopIdentity {
@@ -318,5 +380,34 @@ mod tests {
             false,
         )
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn idle_unauthorized_connection_is_rejected_before_the_request_read() {
+        let (server, _idle_peer) = tokio::net::UnixStream::pair().unwrap();
+        let current_pid = std::process::id() as libc::pid_t;
+        let trusted = Mutex::new(Some(identity(
+            current_pid,
+            kanna_daemon::proc_info::process_info(current_pid)
+                .unwrap()
+                .start,
+            "/tmp/not-the-live-peer-executable",
+        )));
+        let started = std::time::Instant::now();
+        assert!(authenticate_peer_before_frame(&server, &trusted).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn idle_authorized_peer_has_a_bounded_initial_frame_lifetime() {
+        let (mut server, _idle_peer) = tokio::net::UnixStream::pair().unwrap();
+        let mut line = String::new();
+        let started = std::time::Instant::now();
+        let error =
+            read_initial_request(&mut server, &mut line, std::time::Duration::from_millis(25))
+                .await
+                .unwrap_err();
+        assert!(error.contains("timed out"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 }

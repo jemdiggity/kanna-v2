@@ -65,9 +65,11 @@ const isBlocked = computed(() => {
 const commandHintDismissed = ref(readCommandHintDismissed());
 const showCommandHint = computed(() => !commandHintDismissed.value);
 const taskDetail = ref<DesktopTaskDetail | null>(null);
-const operatorTerminalInput = computed(() =>
-  taskDetail.value?.operatorTerminalInput ?? item.value?.pipeline === "singleton-merge"
+const terminalInputPolicyKnown = computed(() =>
+  taskDetail.value?.id === item.value?.id
+    && typeof taskDetail.value?.operatorTerminalInput === "boolean"
 );
+const operatorTerminalInput = computed(() => taskDetail.value?.operatorTerminalInput === true);
 const revisionComposerOpen = ref(false);
 const revisionSummary = ref("");
 const revisionPrompt = ref("");
@@ -384,7 +386,7 @@ function dismissCommandHint() {
       </template>
       <template v-else>
         <TerminalTabs
-          :key="`${item.id}:${operatorTerminalInput}`"
+          v-if="terminalInputPolicyKnown"
           :session-id="item.id"
           :agent-type="item.agent_type || 'pty'"
           :agent-provider="item.agent_provider"
@@ -395,6 +397,7 @@ function dismissCommandHint() {
           :recover-task-session="recoverTaskSession"
           :operator-terminal-input="operatorTerminalInput"
         />
+        <div v-else class="terminal-policy-loading" data-testid="terminal-policy-loading" />
       </template>
     </template>
     <div v-else class="empty-state">
@@ -630,6 +633,11 @@ function dismissCommandHint() {
   align-items: center;
   justify-content: center;
   gap: 6px;
+}
+
+.terminal-policy-loading {
+  flex: 1;
+  min-height: 0;
 }
 
 .setup-placeholder {
