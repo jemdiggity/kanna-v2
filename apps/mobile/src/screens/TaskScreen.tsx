@@ -100,7 +100,7 @@ interface TaskScreenProps {
   quickReplies: readonly TaskQuickReply[];
   quickRepliesHydrated: boolean;
   pendingTaskAction?: TaskStageAction | TaskCreationAction | null;
-  onBack(): void;
+  onBack(): boolean;
   onAdvanceTaskStage(): void;
   onCloseTask(): void;
   onResolveTaskFileMentions(
@@ -174,6 +174,7 @@ export function TaskScreen({
     TASK_COMPOSER_MIN_HEIGHT
   );
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [isBackPending, setIsBackPending] = useState(false);
   const [screenHeight, setScreenHeight] = useState(0);
   const [composerTop, setComposerTop] = useState<number | null>(null);
   const [topChromeBottom, setTopChromeBottom] = useState<number | null>(null);
@@ -322,6 +323,22 @@ export function TaskScreen({
     Keyboard.dismiss();
   };
   const sendDraftInput = () => submitInput(composerSnapshotRef.current.draftInput);
+  const navigateBack = () => {
+    if (isBackPending) {
+      return;
+    }
+
+    setIsBackPending(true);
+    if (!onBack()) {
+      setIsBackPending(false);
+      return;
+    }
+
+    // Dispatch navigation before dismissing the software keyboard. On some
+    // devices the keyboard animation can otherwise make a recognized first tap
+    // look ignored while the task screen remains stationary.
+    Keyboard.dismiss();
+  };
   const isTaskActionPending = pendingTaskAction !== null;
   const openTaskActionMenu = () => {
     if (isTaskActionPending) {
@@ -438,7 +455,11 @@ export function TaskScreen({
             <View style={styles.skeletonLineWide} />
             <View style={styles.skeletonLineMid} />
             <View style={styles.skeletonLineShort} />
-            <View style={styles.terminalOverlay} testID={MOBILE_E2E_IDS.terminalOverlay}>
+            <View
+              pointerEvents={model.canRecoverTaskCreation ? "auto" : "none"}
+              style={styles.terminalOverlay}
+              testID={MOBILE_E2E_IDS.terminalOverlay}
+            >
               {isAnimatedCreation ? (
                 <LoadingText
                   label={model.overlayLabel ?? "Creating task"}
@@ -473,6 +494,7 @@ export function TaskScreen({
             <View style={styles.skeletonLineMid} />
             <View style={styles.skeletonLineShort} />
             <View
+              pointerEvents="none"
               style={styles.terminalOverlay}
               testID={MOBILE_E2E_IDS.taskBlockedPlaceholder}
             >
@@ -545,7 +567,11 @@ export function TaskScreen({
             <View style={styles.skeletonLineMid} />
             <View style={styles.skeletonLineShort} />
             {model.overlayLabel ? (
-              <View style={styles.terminalOverlay} testID={MOBILE_E2E_IDS.terminalOverlay}>
+              <View
+                pointerEvents="none"
+                style={styles.terminalOverlay}
+                testID={MOBILE_E2E_IDS.terminalOverlay}
+              >
                 {isAnimatedTerminalConnection ? (
                   <LoadingText
                     label={model.overlayLabel}
@@ -564,7 +590,10 @@ export function TaskScreen({
         <Pressable
           accessible={false}
           focusable={false}
-          style={styles.titleDismissLayer}
+          style={[
+            styles.titleDismissLayer,
+            { top: topChromeBottom ?? 64 }
+          ]}
           testID={MOBILE_E2E_IDS.taskTitleDismissLayer}
           onPress={() => setExpandedTitleTaskId(null)}
         />
@@ -580,11 +609,29 @@ export function TaskScreen({
         }}
       >
         <Pressable
-          style={styles.backButton}
+          accessibilityHint="Returns to the previous screen"
+          accessibilityLabel={isBackPending ? "Going back" : "Back"}
+          accessibilityLiveRegion="polite"
+          accessibilityRole="button"
+          accessibilityState={{
+            busy: isBackPending,
+            disabled: isBackPending
+          }}
+          disabled={isBackPending}
+          hitSlop={4}
+          style={({ pressed }) => [
+            styles.backButton,
+            pressed && !isBackPending ? styles.backButtonPressed : null,
+            isBackPending ? styles.backButtonPending : null
+          ]}
           testID={MOBILE_E2E_IDS.taskBackButton}
-          onPress={onBack}
+          onPress={navigateBack}
         >
-          <Text style={styles.backLabel}>{"<"}</Text>
+          {isBackPending ? (
+            <ActivityIndicator color="#D5DEEC" size="small" />
+          ) : (
+            <Text accessible={false} style={styles.backLabel}>{"<"}</Text>
+          )}
         </Pressable>
         <Pressable
           accessible
@@ -905,6 +952,7 @@ const styles = StyleSheet.create({
     position: "absolute",
     right: 14,
     top: 16,
+    elevation: 6,
     zIndex: 5
   },
   backButton: {
@@ -913,9 +961,16 @@ const styles = StyleSheet.create({
     borderColor: "#22304D",
     borderRadius: 999,
     borderWidth: 1,
-    height: 36,
+    height: 48,
     justifyContent: "center",
-    width: 36
+    width: 48
+  },
+  backButtonPending: {
+    opacity: 0.72
+  },
+  backButtonPressed: {
+    opacity: 0.62,
+    transform: [{ scale: 0.96 }]
   },
   backLabel: {
     color: "#D5DEEC",

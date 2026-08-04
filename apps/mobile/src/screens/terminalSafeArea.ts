@@ -1,9 +1,9 @@
 export const DEFAULT_TERMINAL_BOTTOM_INSET = 132;
 const TERMINAL_READING_GAP = 8;
 const SELECTION_TOOLBAR_CHROME_GAP = 12;
-// Approximates the collapsed top chrome (16px offset + title chip) for the
-// window before the header reports its measured layout.
-const FALLBACK_TOP_CHROME_BOTTOM = 60;
+// Approximates the collapsed top chrome (16px offset + 48px back control) for
+// the window before the header reports its measured layout.
+const FALLBACK_TOP_CHROME_BOTTOM = 64;
 
 // The fullscreen terminal underlays the floating task chrome (back button +
 // title chip), which paints above it as a later sibling. The selection

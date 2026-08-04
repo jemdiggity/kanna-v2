@@ -41,19 +41,19 @@ describe("getTerminalBottomInset", () => {
 
 describe("getTerminalSelectionToolbarTop", () => {
   it("keeps the toolbar clear of the measured floating chrome", () => {
-    // Collapsed chrome: 16px top offset + a 44px title chip.
-    expect(getTerminalSelectionToolbarTop(60)).toBe(72);
+    // Collapsed chrome: 16px top offset + a 48px back control.
+    expect(getTerminalSelectionToolbarTop(64)).toBe(76);
     // Expanded title chip pushes the toolbar further down with it.
     expect(getTerminalSelectionToolbarTop(376)).toBe(388);
   });
 
   it("rounds up fractional chrome measurements", () => {
-    expect(getTerminalSelectionToolbarTop(60.4)).toBe(73);
+    expect(getTerminalSelectionToolbarTop(64.4)).toBe(77);
   });
 
   it("falls back to collapsed-chrome clearance until the header is measured", () => {
     const fallback = getTerminalSelectionToolbarTop(null);
-    expect(fallback).toBe(72);
+    expect(fallback).toBe(76);
     expect(getTerminalSelectionToolbarTop(Number.NaN)).toBe(fallback);
     expect(getTerminalSelectionToolbarTop(Number.POSITIVE_INFINITY)).toBe(
       fallback

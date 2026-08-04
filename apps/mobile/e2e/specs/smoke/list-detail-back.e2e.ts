@@ -16,6 +16,7 @@ export const PTY_SNAPSHOT_MIN_DECODED_BYTES = 16_384;
 interface SmokeElement {
   click(): Promise<unknown>;
   getAttribute?(name: string): Promise<string | null>;
+  getSize?(): Promise<{ height: number; width: number }>;
   getText?(): Promise<string>;
   isDisplayed?(): Promise<boolean>;
   isEnabled?(): Promise<boolean>;
@@ -418,6 +419,15 @@ export async function exerciseTaskPromptExpansion(
     (await backButton.isEnabled?.()) === true;
   if (!backIsUsable) {
     throw new Error("Expected Back to remain usable while the task prompt is expanded");
+  }
+  if (!backButton.getSize) {
+    throw new Error("Appium element does not expose Back control dimensions");
+  }
+  const backSize = await backButton.getSize();
+  if (backSize.height < 48 || backSize.width < 48) {
+    throw new Error(
+      `Expected Back to expose at least a 48x48 hit target, got ${backSize.width}x${backSize.height}`
+    );
   }
 
   const expandedTaskId = await ui.getExpandedTaskId();
@@ -891,11 +901,31 @@ export async function runListDetailBackSmoke(
   await waitForRenderedPtyTerminal(ui, fixture);
   await exerciseTaskPromptExpansion(ui, promptFixture);
 
+  const taskInput = await driver.$(selectors.taskInput);
+  await taskInput.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await taskInput.click();
+  await driver.waitUntil(
+    () => driver.isKeyboardShown(),
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected the task keyboard to open before exercising Back"
+    }
+  );
+
   const backButton = await driver.$(selectors.taskBackButton);
   await backButton.click();
 
   await driver.pause(BACK_NAVIGATION_SETTLE_MS);
   await waitForTaskRows(ui);
+  await driver.waitUntil(
+    async () => !(await driver.isKeyboardShown()),
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected Back navigation to dismiss the task keyboard"
+    }
+  );
 
   const tasksTab = await driver.$(selectors.tasksTab);
   await tasksTab.click();

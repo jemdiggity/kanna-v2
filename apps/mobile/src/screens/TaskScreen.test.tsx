@@ -23,6 +23,7 @@ const hookHarness = vi.hoisted(() => ({
 const componentMocks = vi.hoisted(() => ({
   draftSetter: vi.fn(),
   keyboardDismiss: vi.fn(),
+  onBack: vi.fn(() => true),
   onAdvanceTaskStage: vi.fn(),
   onCloseTask: vi.fn(),
   onSendInput: vi.fn(),
@@ -158,6 +159,8 @@ beforeEach(() => {
   hookHarness.stateValues.length = 0;
   componentMocks.draftSetter.mockReset();
   componentMocks.keyboardDismiss.mockReset();
+  componentMocks.onBack.mockReset();
+  componentMocks.onBack.mockReturnValue(true);
   componentMocks.onAdvanceTaskStage.mockReset();
   componentMocks.onCloseTask.mockReset();
   componentMocks.onSendInput.mockReset();
@@ -185,10 +188,12 @@ interface RenderTaskScreenOptions {
   e2eTaskSnapshotMarker?: string;
   activity?: "idle" | "working" | "unread";
   draftInput?: string;
+  terminalOutput?: string;
   terminalStatus?: TaskTerminalStatus;
   taskCreationPhase?: TaskCreationPhase;
   taskCreationErrorMessage?: string | null;
   onRecoverTaskCreation?: () => void;
+  onBack?: () => boolean;
   agentStatus?: TaskTerminalStatus;
   onSendTerminalInput?: (dataB64: string) => void;
   onResolveTaskFileMentions?: (
@@ -247,10 +252,12 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     e2eTaskSnapshotMarker,
     activity = "idle",
     draftInput = "",
+    terminalOutput = "terminal",
     terminalStatus = "live",
     taskCreationPhase = "idle",
     taskCreationErrorMessage = null,
     onRecoverTaskCreation = vi.fn(),
+    onBack = componentMocks.onBack,
     agentStatus = "live",
     onSendTerminalInput,
     onResolveTaskFileMentions = vi.fn().mockResolvedValue({
@@ -300,7 +307,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
       blockedByTaskIds
     },
     blockerTasks,
-    terminalOutput: "terminal",
+    terminalOutput,
     terminalOutputEpoch,
     terminalOutputStart,
     terminalStatus,
@@ -321,7 +328,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     quickRepliesHydrated,
     pendingTaskAction,
     e2eTaskSnapshotMarker,
-    onBack: vi.fn(),
+    onBack,
     onAdvanceTaskStage: componentMocks.onAdvanceTaskStage,
     onCloseTask: componentMocks.onCloseTask,
     onSendInput: componentMocks.onSendInput,
@@ -577,8 +584,79 @@ describe("TaskScreen", () => {
       const tree = renderTaskScreen({ terminalStatus });
 
       expect(findByType(tree, "LoadingText")?.props.label).toBe("Connecting");
+      expect(
+        findByTestId(tree, MOBILE_E2E_IDS.terminalOverlay)?.props.pointerEvents
+      ).toBe("none");
     }
   );
+
+  it.each([
+    ["connected terminal", { terminalStatus: "live" as const }],
+    ["connecting terminal", { terminalStatus: "connecting" as const }],
+    [
+      "long scrollback",
+      {
+        terminalStatus: "live" as const,
+        terminalOutput: `${"scrollback line\n".repeat(20_000)}END`
+      }
+    ]
+  ])("keeps Back responsive through %s state", (_caseName, options) => {
+    let tree = renderTaskScreen(options);
+    let backButton = findByTestId(tree, MOBILE_E2E_IDS.taskBackButton);
+    const resolveStyle = backButton?.props.style as
+      | ((state: { pressed: boolean }) => unknown[])
+      | undefined;
+
+    expect(backButton?.props).toMatchObject({
+      accessibilityHint: "Returns to the previous screen",
+      accessibilityLabel: "Back",
+      accessibilityRole: "button",
+      accessibilityState: { busy: false, disabled: false },
+      disabled: false,
+      hitSlop: 4
+    });
+    expect(resolveStyle?.({ pressed: false })).toContainEqual(
+      expect.objectContaining({ height: 48, width: 48 })
+    );
+    expect(resolveStyle?.({ pressed: true })).toContainEqual(
+      expect.objectContaining({ opacity: 0.62 })
+    );
+
+    pressByTestId(tree, MOBILE_E2E_IDS.taskBackButton);
+
+    expect(componentMocks.onBack).toHaveBeenCalledOnce();
+    expect(componentMocks.keyboardDismiss).toHaveBeenCalledOnce();
+
+    tree = renderTaskScreen(options);
+    backButton = findByTestId(tree, MOBILE_E2E_IDS.taskBackButton);
+    expect(backButton?.props).toMatchObject({
+      accessibilityLabel: "Going back",
+      accessibilityState: { busy: true, disabled: true },
+      disabled: true
+    });
+    expect(findByType(backButton, "ActivityIndicator")).not.toBeNull();
+
+    pressByTestId(tree, MOBILE_E2E_IDS.taskBackButton);
+    expect(componentMocks.onBack).toHaveBeenCalledOnce();
+  });
+
+  it("does not leave Back disabled when no navigation boundary can pop", () => {
+    const onBack = vi.fn(() => false);
+    let tree = renderTaskScreen({ onBack });
+
+    pressByTestId(tree, MOBILE_E2E_IDS.taskBackButton);
+    tree = renderTaskScreen({ onBack });
+
+    expect(onBack).toHaveBeenCalledOnce();
+    expect(componentMocks.keyboardDismiss).not.toHaveBeenCalled();
+    expect(
+      findByTestId(tree, MOBILE_E2E_IDS.taskBackButton)?.props
+    ).toMatchObject({
+      accessibilityLabel: "Back",
+      accessibilityState: { busy: false, disabled: false },
+      disabled: false
+    });
+  });
 
   it.each(["closed", "error"] as const)(
     "keeps PTY %s state static",
@@ -1524,17 +1602,21 @@ describe("TaskScreen", () => {
       nestedScrollEnabled: true
     });
     expect(styleEntries(promptScroll)).toContainEqual({ maxHeight: 320 });
-    expect(findByTestId(tree, "mobile.task-title-dismiss-layer")?.props).toMatchObject({
-      accessible: false,
-      style: {
-        bottom: 0,
-        left: 0,
-        position: "absolute",
-        right: 0,
-        top: 0,
-        zIndex: 4
-      }
+    const titleDismissLayer = findByTestId(
+      tree,
+      "mobile.task-title-dismiss-layer"
+    );
+    expect(titleDismissLayer?.props.accessible).toBe(false);
+    expect(styleEntries(titleDismissLayer)).toContainEqual({
+      backgroundColor: "transparent",
+      bottom: 0,
+      left: 0,
+      position: "absolute",
+      right: 0,
+      top: 0,
+      zIndex: 4
     });
+    expect(styleEntries(titleDismissLayer)).toContainEqual({ top: 64 });
   });
 
   it("shows the complete task ID only in the expanded identity panel", () => {
@@ -1670,11 +1752,16 @@ describe("TaskScreen", () => {
     });
     expect(findByTypeAndText(tree, "Text", "in progress")).not.toBeNull();
     expect(styleEntries(topChrome)).toContainEqual(
-      expect.objectContaining({ alignItems: "flex-start", zIndex: 5 })
+      expect.objectContaining({
+        alignItems: "flex-start",
+        elevation: 6,
+        zIndex: 5
+      })
     );
     expect(styleEntries(dismissalLayer)).toContainEqual(
       expect.objectContaining({ zIndex: 4 })
     );
+    expect(styleEntries(dismissalLayer)).toContainEqual({ top: 64 });
     expect(styleEntries(bottomChrome)).toContainEqual(
       expect.objectContaining({ zIndex: 3 })
     );
