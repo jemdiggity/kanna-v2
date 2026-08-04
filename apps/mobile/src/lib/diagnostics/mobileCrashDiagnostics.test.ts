@@ -128,6 +128,41 @@ describe("MobileCrashDiagnosticRecorder", () => {
     ]);
   });
 
+  it("retains five genuine captures when stored IDs collide", async () => {
+    const fixedNow = new Date("2026-08-04T03:00:00.000Z");
+    const fixture = createRecorder(undefined, fixedNow);
+    const template = fixture.recorder.capture({
+      kind: "javascript-error",
+      message: "persisted template"
+    });
+    await fixture.recorder.read();
+    const idPrefix = fixedNow.getTime().toString(36);
+    const stored = Array.from({ length: 5 }, (_, index) => ({
+      ...template,
+      id: `${idPrefix}-${index.toString(36)}-abc123`,
+      at: `9999-12-31T23:59:59.99${index}Z`,
+      message: `colliding persisted ${index}`
+    }));
+    const storage = createStorage(JSON.stringify(stored));
+    const { recorder } = createRecorder(storage, fixedNow);
+
+    for (let index = 0; index < 5; index += 1) {
+      recorder.capture({
+        kind: "javascript-error",
+        message: `genuine capture ${index}`
+      });
+    }
+    const records = await recorder.read();
+
+    expect(records.map((record) => record.message)).toEqual([
+      "genuine capture 4",
+      "genuine capture 3",
+      "genuine capture 2",
+      "genuine capture 1",
+      "genuine capture 0"
+    ]);
+  });
+
   it("prioritizes a new capture over malformed and future persisted dates", async () => {
     const fixture = createRecorder();
     const template = fixture.recorder.capture({

@@ -88,10 +88,16 @@ interface DiagnosticEnvironment {
 }
 
 interface PendingDiagnostic {
+  captureOrder: number;
   diagnostic: MobileCrashDiagnostic;
   persistenceDeadline?: ReturnType<typeof setTimeout>;
   rejectPersistence?: (reason: unknown) => void;
   resolvePersistence?: () => void;
+}
+
+interface RetentionCandidate {
+  captureOrder?: number;
+  diagnostic: MobileCrashDiagnostic;
 }
 
 const EMPTY_CONTEXT: MobileCrashContext = {
@@ -122,7 +128,7 @@ export class MobileCrashDiagnosticRecorder {
   private pendingDiagnostics: PendingDiagnostic[] = [];
   private persistenceQueue: Promise<void> | null = null;
   private nextCaptureOrder = 0;
-  private readonly captureOrders = new Map<string, number>();
+  private retainedCaptures = new Map<string, RetentionCandidate>();
 
   constructor(
     private readonly storage: DiagnosticStorage,
@@ -219,8 +225,6 @@ export class MobileCrashDiagnosticRecorder {
       breadcrumbs: [...this.breadcrumbs],
       build
     };
-    this.captureOrders.set(diagnostic.id, captureOrder);
-
     let resolvePersistence: (() => void) | undefined;
     let rejectPersistence: ((reason: unknown) => void) | undefined;
     const persistence = trackPersistence
@@ -230,6 +234,7 @@ export class MobileCrashDiagnosticRecorder {
         })
       : Promise.resolve();
     const pending: PendingDiagnostic = {
+      captureOrder,
       diagnostic,
       ...(resolvePersistence ? { resolvePersistence } : {}),
       ...(rejectPersistence ? { rejectPersistence } : {})
@@ -267,12 +272,10 @@ export class MobileCrashDiagnosticRecorder {
           entry,
           new Error("Mobile crash diagnostic persistence backlog exceeded.")
         );
-        this.captureOrders.delete(entry.diagnostic.id);
         return false;
       }
       untrackedCount += 1;
       if (untrackedCount <= MAX_DIAGNOSTICS) return true;
-      this.captureOrders.delete(entry.diagnostic.id);
       return false;
     });
   }
@@ -310,7 +313,7 @@ export class MobileCrashDiagnosticRecorder {
   async clear(): Promise<void> {
     await this.waitForPersistence();
     await this.storage.removeItem(DIAGNOSTICS_STORAGE_KEY);
-    this.captureOrders.clear();
+    this.retainedCaptures.clear();
   }
 
   private async waitForPersistence(): Promise<void> {
@@ -356,21 +359,35 @@ export class MobileCrashDiagnosticRecorder {
           : this.pendingDiagnostics.splice(0, MAX_DIAGNOSTICS);
       try {
         const previous = await this.readStored();
-        const retained = [
-          ...batch.map((entry) => entry.diagnostic),
-          ...previous
-        ]
+        // Live batch candidates come first so an untrusted stored ID collision
+        // cannot replace the capture or consume a second retention slot.
+        const retainedCandidates = this.deduplicateRetentionCandidates([
+          ...batch.map((entry) => ({
+            captureOrder: entry.captureOrder,
+            diagnostic: entry.diagnostic
+          })),
+          ...previous.map(
+            (diagnostic) =>
+              this.retainedCaptures.get(diagnostic.id) ?? { diagnostic }
+          )
+        ])
           .sort((left, right) => this.compareRetentionOrder(left, right))
           .slice(0, MAX_DIAGNOSTICS);
+        const retained = retainedCandidates.map(
+          (candidate) => candidate.diagnostic
+        );
         await this.storage.setItem(
           DIAGNOSTICS_STORAGE_KEY,
           JSON.stringify(retained)
         );
-        this.pruneCaptureOrders(retained);
+        this.retainedCaptures = new Map(
+          retainedCandidates
+            .filter((candidate) => candidate.captureOrder !== undefined)
+            .map((candidate) => [candidate.diagnostic.id, candidate])
+        );
         for (const entry of batch) this.resolveTrackedPersistence(entry);
       } catch (error: unknown) {
         for (const entry of batch) {
-          this.captureOrders.delete(entry.diagnostic.id);
           this.rejectTrackedPersistence(
             entry,
             error instanceof Error ? error : new Error(String(error))
@@ -382,21 +399,21 @@ export class MobileCrashDiagnosticRecorder {
   }
 
   private compareRetentionOrder(
-    left: MobileCrashDiagnostic,
-    right: MobileCrashDiagnostic
+    left: RetentionCandidate,
+    right: RetentionCandidate
   ): number {
     // Persisted timestamps are untrusted. Captures from this recorder use their
     // actual enqueue order and always outrank records loaded from storage.
-    const leftCaptureOrder = this.captureOrders.get(left.id);
-    const rightCaptureOrder = this.captureOrders.get(right.id);
+    const leftCaptureOrder = left.captureOrder;
+    const rightCaptureOrder = right.captureOrder;
     if (leftCaptureOrder !== undefined && rightCaptureOrder !== undefined) {
       return rightCaptureOrder - leftCaptureOrder;
     }
     if (leftCaptureOrder !== undefined) return -1;
     if (rightCaptureOrder !== undefined) return 1;
 
-    const leftTimestamp = Date.parse(left.at);
-    const rightTimestamp = Date.parse(right.at);
+    const leftTimestamp = Date.parse(left.diagnostic.at);
+    const rightTimestamp = Date.parse(right.diagnostic.at);
     const leftHasValidTimestamp = Number.isFinite(leftTimestamp);
     const rightHasValidTimestamp = Number.isFinite(rightTimestamp);
     if (leftHasValidTimestamp !== rightHasValidTimestamp) {
@@ -406,14 +423,16 @@ export class MobileCrashDiagnosticRecorder {
     return rightTimestamp - leftTimestamp;
   }
 
-  private pruneCaptureOrders(retained: MobileCrashDiagnostic[]): void {
-    const activeIds = new Set([
-      ...retained.map((diagnostic) => diagnostic.id),
-      ...this.pendingDiagnostics.map((entry) => entry.diagnostic.id)
-    ]);
-    for (const id of this.captureOrders.keys()) {
-      if (!activeIds.has(id)) this.captureOrders.delete(id);
+  private deduplicateRetentionCandidates(
+    candidates: RetentionCandidate[]
+  ): RetentionCandidate[] {
+    const uniqueCandidates = new Map<string, RetentionCandidate>();
+    for (const candidate of candidates) {
+      if (!uniqueCandidates.has(candidate.diagnostic.id)) {
+        uniqueCandidates.set(candidate.diagnostic.id, candidate);
+      }
     }
+    return [...uniqueCandidates.values()];
   }
 
   private async readStored(): Promise<MobileCrashDiagnostic[]> {
