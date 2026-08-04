@@ -132,11 +132,11 @@ fn parses_new_repo_and_task_subcommands() {
         "--repo-id",
         "repo-1",
         "--prompt",
-        "Child",
+        "Investigate flaky release",
         "--display-name",
-        "Short child",
+        "Release investigation",
         "--notify-task",
-        "task-parent",
+        "task-manager",
     ])
     .unwrap();
     match cli.command {
@@ -147,13 +147,15 @@ fn parses_new_repo_and_task_subcommands() {
                     prompt,
                     display_name,
                     notify_task,
+                    parent_task,
                     ..
                 },
         } => {
             assert_eq!(repo_id, "repo-1");
-            assert_eq!(prompt, "Child");
-            assert_eq!(display_name.as_deref(), Some("Short child"));
-            assert_eq!(notify_task.as_deref(), Some("task-parent"));
+            assert_eq!(prompt, "Investigate flaky release");
+            assert_eq!(display_name.as_deref(), Some("Release investigation"));
+            assert_eq!(notify_task.as_deref(), Some("task-manager"));
+            assert_eq!(parent_task, None);
         }
         _ => panic!("expected task create command"),
     }

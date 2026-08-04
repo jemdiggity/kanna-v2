@@ -297,11 +297,13 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         blocker_task_id: Vec<String>,
 
-        /// Task to notify when this task reaches a terminal state
+        /// Task to notify when this task reaches a terminal state. This routes
+        /// completion independently and does not make the new task a child.
         #[arg(long)]
         notify_task: Option<String>,
 
-        /// Parent task this task is a subtask of
+        /// Durable work item this is genuinely a semantic subtask of. Omit for
+        /// ordinary top-level work and creator/orchestrator ownership.
         #[arg(long)]
         parent_task: Option<String>,
     },

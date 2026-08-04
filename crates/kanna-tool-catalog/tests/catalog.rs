@@ -383,17 +383,17 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             "kanna_create_task",
             json!({
                 "repo_id": "repo-1",
-                "prompt": "Child",
-                "notify_task_id": "task-parent"
+                "prompt": "Investigate flaky release",
+                "notify_task_id": "task-manager"
             }),
             Method::Post,
             ResponseKind::Json,
             "/v1/tasks",
             json!({
                 "repoId": "repo-1",
-                "prompt": "Child",
+                "prompt": "Investigate flaky release",
                 "agentType": "pty",
-                "notifyTaskId": "task-parent"
+                "notifyTaskId": "task-manager"
             }),
         ),
         (
@@ -868,7 +868,7 @@ fn wait_results_carry_the_task_detail_and_an_outcome_discriminator() {
 }
 
 #[test]
-fn create_task_maps_agent_override_into_the_request_body() {
+fn create_task_preserves_parent_and_notify_for_genuine_dispatch_fan_out() {
     let catalog = bundled_catalog();
     let request = resolve_request(
         &catalog,
@@ -1154,6 +1154,52 @@ fn display_name_documents_the_prompt_fallback_rather_than_a_derivation() {
         !description.contains("derived from the prompt"),
         "display_name must not promise a derivation: {description}"
     );
+}
+
+#[test]
+fn task_creation_guidance_keeps_completion_routing_independent_from_hierarchy() {
+    let catalog = bundled_catalog();
+    let create = catalog
+        .tools
+        .iter()
+        .find(|tool| tool.name == "kanna_create_task")
+        .expect("create task");
+    let description = create.description.as_str();
+    let parent = create
+        .params
+        .iter()
+        .find(|param| param.name == "parent_task_id")
+        .and_then(|param| param.description.as_deref())
+        .expect("parent_task_id description");
+    let notify = create
+        .params
+        .iter()
+        .find(|param| param.name == "notify_task_id")
+        .and_then(|param| param.description.as_deref())
+        .expect("notify_task_id description");
+
+    assert!(description.contains("Ordinary durable repository work is top-level by default"));
+    assert!(description.contains("use notify_task_id to route completion without parent_task_id"));
+    assert!(parent.contains("genuine semantic subtask"));
+    assert!(parent.contains("Omit for ordinary top-level work"));
+    assert!(notify.contains("independent of parent_task_id"));
+    assert!(notify.contains("does not make the new task its child"));
+
+    // The ordinary orchestration example routes completion but remains
+    // top-level; the genuine fan-out contract test above deliberately maps
+    // both fields for the QA dispatcher's semantic child.
+    let top_level = resolve_request(
+        &catalog,
+        "kanna_create_task",
+        &json!({
+            "repo_id": "repo-1",
+            "prompt": "Investigate flaky staging release",
+            "notify_task_id": "task-manager-1"
+        }),
+    )
+    .expect("top-level orchestrated task resolves");
+    assert_eq!(top_level.body["notifyTaskId"], json!("task-manager-1"));
+    assert!(top_level.body.get("parentTaskId").is_none());
 }
 
 /// The catalog, not the shape of the text, decides a command-line argument's

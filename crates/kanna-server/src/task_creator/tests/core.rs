@@ -2494,6 +2494,19 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
     );
     assert!(definition.prompt.contains("kanna_wait_events"));
     assert!(definition.prompt.contains("task.awaiting_input"));
+    assert!(definition.prompt.contains(
+        "Product work, bug fixes, investigations, releases, and other durable repository tasks"
+    ));
+    assert!(definition
+        .prompt
+        .contains("Do not set `parent_task_id` merely because you created"));
+    assert!(definition
+        .prompt
+        .contains("the long-running manager is never a parent/owner bucket"));
+    assert!(definition
+        .prompt
+        .contains("\"parent_task_id\": \"<durable-work-item-id>\""));
+    assert!(definition.prompt.contains("purpose-built child workflows"));
     assert!(definition.prompt.contains("latestRun"));
     assert!(definition.prompt.contains("MERGEABLE"));
     assert!(definition.prompt.contains("git rebase --onto"));
