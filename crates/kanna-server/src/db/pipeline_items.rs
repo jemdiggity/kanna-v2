@@ -496,6 +496,46 @@ impl Db {
         )
     }
 
+    /// Classify a live daemon session from durable task history. This does not
+    /// require the task to remain open: a PTY surviving a crash after task
+    /// close must not regain generic input authority during daemon handoff.
+    pub fn session_requires_operator_input(
+        &self,
+        session_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pipeline_item p
+               WHERE (p.id = ?1
+                      OR EXISTS (
+                        SELECT 1 FROM terminal_session terminal
+                        WHERE terminal.pipeline_item_id = p.id
+                          AND terminal.daemon_session_id = ?1
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM stage_run session_run
+                        WHERE session_run.task_id = p.id
+                          AND session_run.session_id = ?1
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM agent_signal_protocol session_protocol
+                        WHERE session_protocol.task_id = p.id
+                          AND session_protocol.session_id = ?1
+                      ))
+                 AND (EXISTS (
+                        SELECT 1 FROM stage_run merge_run
+                        WHERE merge_run.task_id = p.id AND merge_run.agent = 'merge'
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM agent_signal_protocol protocol
+                        WHERE protocol.task_id = p.id
+                      ))
+             )",
+            [session_id],
+            |row| row.get(0),
+        )
+    }
+
     pub fn get_task_stage_source(
         &self,
         id: &str,

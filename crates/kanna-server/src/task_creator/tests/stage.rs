@@ -417,6 +417,111 @@ async fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
+#[tokio::test]
+async fn acknowledged_rerun_keeps_completion_context_when_db_bookkeeping_fails() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let config = test_config("rerun-after-ack-context");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Rerun",
+        Some("Rerun"),
+        "in progress",
+        "2026-08-04 00:00:00",
+    )
+    .unwrap();
+    drop(db);
+
+    let prepared = PreparedStageRerun {
+        task_id: "task-1".to_string(),
+        session_id: "task-1".to_string(),
+        stage: "in progress".to_string(),
+        run_kind: "main",
+        stage_agent: Some("implement".to_string()),
+        agent_provider: "codex".to_string(),
+        model: None,
+        effort: None,
+        completion_transition: PipelineStageTransition::Manual,
+        provider_session_id: None,
+        cwd: "/tmp".to_string(),
+        env: std::collections::HashMap::new(),
+        deferred_setup: Vec::new(),
+        recovery_snapshot: None,
+        session: PreparedSessionSpawn::Pty {
+            executable: "/bin/cat".to_string(),
+            args: Vec::new(),
+            cols: 80,
+            rows: 24,
+            agent_provider: kanna_daemon::protocol::AgentProvider::Codex,
+        },
+    };
+
+    let socket_path = test_daemon_socket_path(&config.daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let db_path = config.db_path.clone();
+    let fake_daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        for expected in ["Kill", "Spawn"] {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            let response = match command {
+                kanna_daemon::protocol::Command::Kill { .. } if expected == "Kill" => {
+                    kanna_daemon::protocol::Event::Ok
+                }
+                kanna_daemon::protocol::Command::Spawn { session_id, .. }
+                    if expected == "Spawn" =>
+                {
+                    std::fs::remove_file(&db_path).unwrap();
+                    kanna_daemon::protocol::Event::SessionCreated { session_id }
+                }
+                other => panic!("expected {expected}, got {other:?}"),
+            };
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
+    let error = rerun_prepared_stage_for_api(
+        &config.db_path,
+        &mut daemon,
+        &crate::session_replacements::SessionReplacements::default(),
+        prepared,
+    )
+    .await
+    .expect_err("post-ack DB failure must reject the rerun");
+    assert!(error.contains("db error"), "error: {error}");
+    fake_daemon.await.unwrap();
+
+    let completion_dir = std::path::Path::new(&config.daemon_dir).join("runtime/completion");
+    let names = std::fs::read_dir(&completion_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names.iter().filter(|name| name.ends_with(".json")).count(),
+        1
+    );
+    assert_eq!(
+        names.iter().filter(|name| name.ends_with(".lock")).count(),
+        1
+    );
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(config.daemon_dir);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
 #[test]
 fn prepare_rerun_stage_recreates_missing_initial_worktree() {
     let repo_root = init_git_repo("rerun-missing-worktree");

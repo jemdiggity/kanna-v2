@@ -143,6 +143,22 @@ describe("MainPanel", () => {
         .findComponent({ name: "TerminalTabs" })
         .props("operatorTerminalInput"),
     ).toBe(false);
+
+    fetchTaskDetailMock.mockResolvedValue({
+      id: "task-pending",
+      stage: "in progress",
+      closedAt: null,
+      latestRun: null,
+      revisionRounds: 0,
+      revisionLimit: 3,
+      childTaskIds: [],
+      operatorTerminalInput: true,
+    });
+    const switchedPipeline = mountForPipeline("specialized-reviewers");
+    await flushPromises();
+    expect(
+      switchedPipeline.findComponent({ name: "TerminalTabs" }).props("operatorTerminalInput"),
+    ).toBe(true);
   });
 
   it("shows a dismissible command hint at the bottom even without repos or tasks and keeps it hidden after dismissal", async () => {

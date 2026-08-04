@@ -87,6 +87,13 @@ fn spawn_daemon_process() -> Result<(std::process::Child, std::path::PathBuf), S
         "KANNA_DAEMON_DIR".to_string(),
         daemon_dir.to_string_lossy().to_string(),
     ));
+    if let Ok(server_bin) = kanna_runtime_defaults::resolve_binary_from_candidates(
+        "kanna-server",
+        commands::fs::sidecar_candidates("kanna-server"),
+        |_| Err("kanna-server sidecar binary not found".to_string()),
+    ) {
+        explicit_env.push(("KANNA_SERVER_EXECUTABLE".to_string(), server_bin));
+    }
     subprocess_env::apply_child_env(&mut cmd, explicit_env);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

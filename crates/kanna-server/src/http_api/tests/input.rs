@@ -60,7 +60,7 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str) 
             reader.read_line(&mut line).await.unwrap();
             let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
             match command {
-                DaemonCommand::Input { session_id, data } => {
+                DaemonCommand::SystemInput { session_id, data } => {
                     assert_eq!(session_id, "merge-session");
                     inputs.push(data);
                 }
@@ -335,7 +335,7 @@ async fn concurrent_approvals_serialize_complete_envelopes_into_one_merge_single
                     reader.read_line(&mut line).await.unwrap();
                     let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
                     match command {
-                        DaemonCommand::Input { session_id, data } => {
+                        DaemonCommand::SystemInput { session_id, data } => {
                             assert_eq!(session_id, "merge-session");
                             observed_tx.send(data).unwrap();
                         }
@@ -495,7 +495,7 @@ async fn concurrent_approvals_prepare_exactly_one_merge_singleton_when_absent() 
             let mut line = String::new();
             input_reader.read_line(&mut line).await.unwrap();
             match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
-                DaemonCommand::Input {
+                DaemonCommand::SystemInput {
                     session_id: input_session,
                     data,
                 } => {
@@ -659,6 +659,95 @@ async fn rejected_merge_singleton_spawn_rolls_back_completion_context_artifacts(
 }
 
 #[tokio::test]
+async fn acknowledged_merge_spawn_keeps_completion_context_when_db_bookkeeping_fails() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!("merge-after-ack-context-{}", unique_test_suffix());
+    let repo_root = std::env::temp_dir().join(format!("{unique}-repo"));
+    init_test_git_repo(&repo_root);
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let config = merge_test_config(&unique, &daemon_dir);
+    let db_path = config.db_path.clone();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let spawn = serde_json::from_str::<DaemonCommand>(line.trim()).unwrap();
+        let session_id = match spawn {
+            DaemonCommand::Spawn { session_id, .. }
+            | DaemonCommand::SpawnAgent { session_id, .. } => session_id,
+            other => panic!("expected merge spawn, got {other:?}"),
+        };
+        std::fs::remove_file(&db_path).unwrap();
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionCreated {
+                        session_id: session_id.clone(),
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    seed_approvable_source(&db, "task-source", "approve-source", 72);
+    drop(db);
+
+    let response = super::router(Arc::new(super::AppState::new(config.clone())))
+        .oneshot(
+            Request::post("/v1/tasks/task-source/actions/signal-merge-handoff")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "branch": "task-source",
+                        "target": "main",
+                        "prUrl": "https://github.com/acme/repo/pull/72",
+                        "summary": "Approve task-source"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    daemon_server.await.unwrap();
+
+    let completion_dir = daemon_dir.join("runtime/completion");
+    let names = std::fs::read_dir(&completion_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names.iter().filter(|name| name.ends_with(".json")).count(),
+        1
+    );
+    assert_eq!(
+        names.iter().filter(|name| name.ends_with(".lock")).count(),
+        1
+    );
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_dir_all(repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+#[tokio::test]
 async fn lost_merge_input_response_is_quarantined_and_never_retried() {
     use kanna_daemon::protocol::Command as DaemonCommand;
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -676,7 +765,7 @@ async fn lost_merge_input_response_is_quarantined_and_never_retried() {
         reader.read_line(&mut line).await.unwrap();
         assert!(matches!(
             serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
-            DaemonCommand::Input { .. }
+            DaemonCommand::SystemInput { .. }
         ));
         // Drop the transport after consuming the command but before its Ok.
     });
@@ -781,7 +870,7 @@ async fn surviving_legacy_approve_and_merge_sessions_use_the_server_gate() {
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
             match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
-                DaemonCommand::Input { session_id, data } => {
+                DaemonCommand::SystemInput { session_id, data } => {
                     assert_eq!(session_id, "legacy-merge-session");
                     input.extend(data);
                 }
@@ -943,7 +1032,7 @@ async fn explicit_human_override_persists_and_reaches_canonical_merge_handoff() 
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
             match serde_json::from_str::<DaemonCommand>(line.trim()).unwrap() {
-                DaemonCommand::Input { session_id, data } => {
+                DaemonCommand::SystemInput { session_id, data } => {
                     assert_eq!(session_id, "merge-session");
                     input.extend(data);
                 }

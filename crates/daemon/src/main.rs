@@ -9,6 +9,7 @@ mod fd;
 mod fd_transfer;
 mod handoff;
 mod headless_terminal;
+mod operator_auth;
 mod output;
 mod paths;
 mod proc_info;

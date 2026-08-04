@@ -108,6 +108,61 @@ pub(crate) async fn try_submit_task_input(
     Ok(())
 }
 
+/// Submit the authenticated machine envelope to an operator-protected merge
+/// PTY. This is intentionally private to server-side merge signaling.
+pub(super) async fn try_submit_system_input(
+    daemon: &mut crate::daemon_client::DaemonClient,
+    session_id: &str,
+    input: &str,
+) -> Result<(), TaskInputError> {
+    async fn send(
+        daemon: &mut crate::daemon_client::DaemonClient,
+        session_id: &str,
+        data: Vec<u8>,
+    ) -> Result<(), TaskInputError> {
+        let event = daemon
+            .send_command(&DaemonCommand::SystemInput {
+                session_id: session_id.to_string(),
+                data,
+            })
+            .await
+            .map_err(|error| TaskInputError::Uncertain(format!("daemon response lost: {error}")))?;
+        match event {
+            DaemonEvent::Ok => Ok(()),
+            DaemonEvent::Error {
+                code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                ..
+            } => Err(TaskInputError::SessionNotFound),
+            DaemonEvent::Error { message, .. } => Err(TaskInputError::Other(message)),
+            other => Err(TaskInputError::Other(format!(
+                "unexpected daemon response: {other:?}"
+            ))),
+        }
+    }
+
+    let message = task_input_message(input);
+    if !message.is_empty() {
+        send(daemon, session_id, message.as_bytes().to_vec()).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(SUBMIT_ENTER_DELAY_MS)).await;
+    }
+    send(daemon, session_id, vec![b'\r'])
+        .await
+        .map_err(|error| {
+            if message.is_empty() {
+                error
+            } else {
+                TaskInputError::Uncertain(match error {
+                    TaskInputError::SessionNotFound => {
+                        format!(
+                            "session disappeared after message bytes were accepted: {session_id}"
+                        )
+                    }
+                    TaskInputError::Other(message) | TaskInputError::Uncertain(message) => message,
+                })
+            }
+        })
+}
+
 pub(crate) async fn submit_task_input(
     daemon: &mut crate::daemon_client::DaemonClient,
     session_id: &str,

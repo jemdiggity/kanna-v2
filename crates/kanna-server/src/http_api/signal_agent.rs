@@ -1,6 +1,6 @@
 use super::lan_trust::PrivilegedTaskAccess;
 use super::state::{db_write_error, AppState};
-use super::task_input::{submit_task_input, try_submit_task_input, TaskInputError};
+use super::task_input::{submit_task_input, try_submit_system_input, TaskInputError};
 use crate::config::Config;
 use crate::db::Db;
 use crate::task_creator::{PrepareTaskError, SingletonAgentOverrides};
@@ -420,7 +420,7 @@ async fn deliver_to_merge_recipient(
                     ),
                     acknowledged: false,
                 })?;
-            try_submit_task_input(&mut daemon, &identity.session_id, &message)
+            try_submit_system_input(&mut daemon, &identity.session_id, &message)
                 .await
                 .map_err(|error| match error {
                     TaskInputError::SessionNotFound => MergeDeliveryFailure {

@@ -296,10 +296,13 @@ routes it through the same server-owned gate as the dedicated endpoint. Human
 conversation is trusted only when it arrives from the native operator terminal
 channel, whose provenance is separate from task-input/MCP/KSP traffic. KSP
 terminal input is rejected for merge sessions even on loopback. Ordinary
-desktop terminals retain the persistent KSP control path; the
-`singleton-merge` terminal alone uses the timeout-bounded,
-process-authenticated native control socket unavailable to local agent
-processes. New task-bound
+desktop terminals retain the persistent KSP control path. Server-derived
+merge-agent history selects the protected terminal even after a compatible
+pipeline-name change. That terminal alone uses timeout-bounded `OperatorInput`
+on the daemon socket: the daemon rejects generic `Input`/`InputNoReply` and
+authenticates the desktop by PID, start time, and executable path. Canonical
+server-built merge envelopes use separately executable-pinned `SystemInput`.
+New task-bound
 pipeline handoffs use the dedicated route.
 
 `POST /v1/tasks/{task_id}/actions/override-approval` is deliberately absent
@@ -311,7 +314,7 @@ When the desktop adopts a healthy surviving server, it must first send an
 explicit `adopt_desktop` request on that socket. The server transfers authority
 only after the old pinned PID/start identity is no longer live and the new peer
 has the same kernel-resolved executable path; there is no reusable handoff
-secret. Override and merge-terminal requests re-attempt that adoption once so
+secret. Override requests re-attempt that adoption once so
 a same-version desktop restart has an in-product recovery path.
 Paired LAN devices require their device credential and the explicit
 human-action marker. An authenticated relay invocation carries the verified

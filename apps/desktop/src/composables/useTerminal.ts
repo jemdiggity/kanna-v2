@@ -7,7 +7,7 @@ import { useThemeRuntime } from "../theme/runtime"
 import { getSharedStreamClient } from "./desktopStreamClient"
 import type { StreamClient } from "@kanna/stream-client"
 import { useToast } from "./useToast"
-import { createTerminalInputQueue } from "./terminalInputQueue"
+import { base64ToBytes, createTerminalInputQueue } from "./terminalInputQueue"
 import { createTerminalClipboardBridge } from "./terminalClipboardBridge"
 import { initializeTerminalView } from "./terminalView"
 import { createTerminalLayoutController } from "./terminalLayout"
@@ -66,9 +66,9 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       : getTerminalStreamClient,
     sendTerminalInput: options?.operatorTerminalInput
       ? async (nativeSessionId, dataB64) => {
-          await invoke("native_terminal_input", {
-            taskId: nativeSessionId,
-            dataB64,
+          await invoke("send_operator_input", {
+            sessionId: nativeSessionId,
+            data: Array.from(base64ToBytes(dataB64)),
           })
         }
       : undefined,

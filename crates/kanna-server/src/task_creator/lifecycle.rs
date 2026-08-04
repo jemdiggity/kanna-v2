@@ -60,6 +60,7 @@ async fn spawn_prepared_task_classified(
     daemon: &mut DaemonClient,
     prepared: PreparedTaskSpawn,
 ) -> Result<CreatedTask, SpawnPreparedError> {
+    let operator_input_only = prepared.stage_agent.as_deref() == Some("merge");
     if let Some(snapshot) = prepared.recovery_snapshot.as_ref() {
         seed_recovery_snapshot(daemon, &prepared.session_id, snapshot)
             .await
@@ -71,6 +72,7 @@ async fn spawn_prepared_task_classified(
         prepared.env,
         None,
         prepared.session,
+        operator_input_only,
     );
 
     let event = daemon
@@ -311,18 +313,28 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         prepared.env.clone(),
         prepared.terminal_prelude.clone(),
         prepared.session.clone(),
+        prepared.stage_agent.as_deref() == Some("merge"),
     );
     let event = match daemon.send_command_retrying_successor(&command).await {
         Ok(event) => event,
         Err(e) => {
+            // Once Spawn has crossed the socket, response loss cannot prove
+            // that the daemon did not create the process. Keep the immutable
+            // completion identity available to any surviving child.
+            completion_context.persist();
             return Err(rollback_prepared_stage_fork(
                 &prepared,
                 format!("daemon error: {}", e),
-            ))
+            ));
         }
     };
     match event {
-        DaemonEvent::SessionCreated { .. } => {}
+        DaemonEvent::SessionCreated { .. } => {
+            // SessionCreated is the daemon's commit point. All bookkeeping
+            // below remains fallible, but the acknowledged child already has
+            // this path in its environment and must never lose the artifact.
+            completion_context.persist();
+        }
         DaemonEvent::Error { message, .. } => {
             return Err(rollback_prepared_stage_fork(
                 &prepared,
@@ -330,10 +342,11 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             ))
         }
         other => {
+            completion_context.persist();
             return Err(rollback_prepared_stage_fork(
                 &prepared,
                 format!("unexpected daemon response: {:?}", other),
-            ))
+            ));
         }
     }
 
@@ -436,8 +449,6 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             .map_err(|e| format!("db error: {}", e))?;
     }
 
-    completion_context.persist();
-
     spawn_prepared_workspace_teardown_best_effort(daemon, prepared.workspace_teardown).await;
 
     Ok(crate::mobile_api::TaskActionResponse {
@@ -515,6 +526,7 @@ pub(crate) async fn spawn_prepared_workspace_teardown_best_effort(
         prepared.env,
         None,
         prepared.session,
+        false,
     );
     match daemon.send_command_retrying_successor(&command).await {
         Ok(DaemonEvent::SessionCreated { .. }) => {
@@ -808,14 +820,19 @@ pub(crate) async fn rerun_prepared_stage_for_api(
         prepared.env,
         None,
         prepared.session,
+        stage_agent.as_deref() == Some("merge"),
     );
 
     let event = match daemon.send_command_retrying_successor(&command).await {
         Ok(event) => event,
-        Err(error) => return Err(record_failure(format!("daemon error: {error}"))),
+        Err(error) => {
+            completion_context.persist();
+            return Err(record_failure(format!("daemon error: {error}")));
+        }
     };
     match event {
         DaemonEvent::SessionCreated { .. } => {
+            completion_context.persist();
             record_rerun_stage_run(
                 db_path,
                 &task_id,
@@ -831,7 +848,6 @@ pub(crate) async fn rerun_prepared_stage_for_api(
                 &cwd,
                 &run_id,
             )?;
-            completion_context.persist();
             Ok(crate::mobile_api::TaskActionResponse {
                 task_id,
                 follow_task: None,
@@ -841,9 +857,12 @@ pub(crate) async fn rerun_prepared_stage_for_api(
         DaemonEvent::Error { message, .. } => {
             Err(record_failure(format!("daemon error: {message}")))
         }
-        other => Err(record_failure(format!(
-            "unexpected daemon response: {other:?}"
-        ))),
+        other => {
+            completion_context.persist();
+            Err(record_failure(format!(
+                "unexpected daemon response: {other:?}"
+            )))
+        }
     }
 }
 
@@ -920,6 +939,7 @@ fn spawn_session_command(
     env: std::collections::HashMap<String, String>,
     terminal_prelude: Option<Vec<u8>>,
     session: PreparedSessionSpawn,
+    operator_input_only: bool,
 ) -> DaemonCommand {
     match session {
         PreparedSessionSpawn::Pty {
@@ -938,6 +958,7 @@ fn spawn_session_command(
             rows,
             agent_provider: Some(agent_provider),
             terminal_prelude,
+            operator_input_only,
         },
         PreparedSessionSpawn::Agent {
             agent_provider,
@@ -1376,6 +1397,25 @@ fn completion_attempt_keys_from_result(result: &str) -> Vec<String> {
         .collect()
 }
 
+fn continued_running_post_for_spawned_run(
+    db: &Db,
+    spawned_run_id: &str,
+) -> Option<crate::db::StageRun> {
+    let spawned = db.stage_run(spawned_run_id).ok().flatten()?;
+    if !matches!(spawned.status.as_str(), "succeeded" | "failed") {
+        return None;
+    }
+    let latest = db.latest_stage_run(&spawned.task_id).ok().flatten()?;
+    (latest.id != spawned.id
+        && latest.kind == "post"
+        && latest.status == "running"
+        && latest.session_id.is_some()
+        && latest.session_id == spawned.session_id
+        && latest.provider_session_id == spawned.provider_session_id
+        && latest.cwd == spawned.cwd)
+        .then_some(latest)
+}
+
 /// Compile the short-lived context format from the previous release into the
 /// retry-safe format. That format could contain a successor `runId` but no
 /// history after main -> post rebinding. The run-scoped filename is immutable,
@@ -1394,10 +1434,12 @@ fn upgrade_legacy_completion_context(path: &std::path::Path, db: &Db) {
         .unwrap_or(&filename_run_id)
         .to_string();
     let needs_identity = context.spawned_run_id.is_none();
-    let needs_attempts = context.run_id != spawned_run_id
+    let continued_post = continued_running_post_for_spawned_run(db, &spawned_run_id);
+    let needs_rebind = context.run_id == spawned_run_id && continued_post.is_some();
+    let needs_attempts = (context.run_id != spawned_run_id || needs_rebind)
         && context.completed_attempts.is_empty()
         && context.completed_run_id.is_none();
-    if !needs_identity && !needs_attempts {
+    if !needs_identity && !needs_attempts && !needs_rebind {
         return;
     }
     let keys = if needs_attempts {
@@ -1416,6 +1458,9 @@ fn upgrade_legacy_completion_context(path: &std::path::Path, db: &Db) {
             current.ok_or_else(|| format!("completion context {} disappeared", path.display()))?;
         current.spawned_run_id = Some(spawned_run_id.clone());
         current.legacy_writer = true;
+        if let Some(post) = continued_post.as_ref() {
+            current.run_id = post.id.clone();
+        }
         for key in &keys {
             current.record_completed_attempt(&spawned_run_id, key);
         }
@@ -1455,29 +1500,34 @@ pub(crate) fn resolve_legacy_completion_retry_run(
             let Some(spawned_run_id) = spawned_run_id_from_context_path(&path) else {
                 continue;
             };
-            if spawned_run_id == presented_run_id
-                || !spawned_run_id.starts_with(&format!("run-{task_id}-"))
-            {
+            if !spawned_run_id.starts_with(&format!("run-{task_id}-")) {
                 continue;
             }
             let Ok(context) = kanna_tool_catalog::read_completion_context(&path) else {
                 continue;
             };
-            if context.run_id != presented_run_id {
-                continue;
-            }
             let Ok(Some(run)) = db.stage_run(spawned_run_id) else {
                 continue;
             };
-            if run.task_id == task_id
+            let matches_completed_attempt = run.task_id == task_id
                 && matches!(run.status.as_str(), "succeeded" | "failed")
                 && run.result.as_deref().is_some_and(|result| {
                     completion_attempt_keys_from_result(result)
                         .iter()
                         .any(|candidate| candidate == attempt_key)
-                })
-            {
+                });
+            if matches_completed_attempt {
                 return Some(spawned_run_id.to_string());
+            }
+            // A pre-upgrade adapter can overwrite the rebound context after
+            // startup and restore runId to the immutable filename run. The
+            // durable same-session post relation proves that the live process
+            // was continued, rather than freshly spawned; bind its new verdict
+            // to that post while retaining exact retries above on the original.
+            if context.run_id == presented_run_id && presented_run_id == spawned_run_id {
+                if let Some(post) = continued_running_post_for_spawned_run(db, spawned_run_id) {
+                    return Some(post.id);
+                }
             }
         }
     }
@@ -1787,7 +1837,9 @@ mod successor_retry_tests {
         )
         .unwrap();
         let path = completion_dir.join("run-task-old-main.json");
-        std::fs::write(&path, r#"{"runId":"run-task-old-post"}"#).unwrap();
+        // The old adapter's unlocked post-response write won and restored the
+        // original run id even though the same process is now running a post.
+        std::fs::write(&path, r#"{"runId":"run-task-old-main"}"#).unwrap();
         let attempt_key = kanna_tool_catalog::completion_attempt_key(&serde_json::json!({
             "status": "success",
             "summary": summary,
@@ -1814,17 +1866,33 @@ mod successor_retry_tests {
 
         // Even if a surviving old adapter overwrites the upgraded file, the
         // server resolves its stale successor binding from DB + filename.
-        std::fs::write(&path, r#"{"runId":"run-task-old-post"}"#).unwrap();
+        std::fs::write(&path, r#"{"runId":"run-task-old-main"}"#).unwrap();
         assert_eq!(
             resolve_legacy_completion_retry_run(
                 &daemon_dir.to_string_lossy(),
                 &db,
                 "task-old",
-                "run-task-old-post",
+                "run-task-old-main",
                 &attempt_key,
             )
             .as_deref(),
             Some("run-task-old-main")
+        );
+        let post_attempt = kanna_tool_catalog::completion_attempt_key(&serde_json::json!({
+            "status": "success",
+            "summary": "commit post completed",
+        }))
+        .unwrap();
+        assert_eq!(
+            resolve_legacy_completion_retry_run(
+                &daemon_dir.to_string_lossy(),
+                &db,
+                "task-old",
+                "run-task-old-main",
+                &post_attempt,
+            )
+            .as_deref(),
+            Some("run-task-old-post")
         );
 
         drop(db);

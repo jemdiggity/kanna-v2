@@ -1,6 +1,55 @@
 use crate::{config::Config, db, http_api, relay};
 use std::sync::Arc;
 
+async fn classify_existing_session_input(config: &Config, db: &db::Db) {
+    let mut daemon = match crate::daemon_client::DaemonClient::connect(&config.daemon_dir).await {
+        Ok(daemon) => daemon,
+        Err(error) => {
+            log::warn!("failed to connect while protecting existing merge sessions: {error}");
+            return;
+        }
+    };
+    let sessions = match daemon
+        .send_command(&kanna_daemon::protocol::Command::List)
+        .await
+    {
+        Ok(kanna_daemon::protocol::Event::SessionList { sessions }) => sessions,
+        Ok(event) => {
+            log::warn!("failed to list daemon sessions for input classification: {event:?}");
+            return;
+        }
+        Err(error) => {
+            log::warn!("failed to list daemon sessions for input classification: {error}");
+            return;
+        }
+    };
+    for session in sessions {
+        let session_id = session.session_id;
+        let operator_input_only = match db.session_requires_operator_input(&session_id) {
+            Ok(value) => value,
+            Err(error) => {
+                log::warn!("failed to classify existing session {session_id}: {error}");
+                continue;
+            }
+        };
+        match daemon
+            .send_command(&kanna_daemon::protocol::Command::ClassifyInput {
+                session_id: session_id.clone(),
+                operator_input_only,
+            })
+            .await
+        {
+            Ok(kanna_daemon::protocol::Event::Ok) => {}
+            Ok(event) => {
+                log::warn!("failed to classify existing session {session_id}: {event:?}")
+            }
+            Err(error) => {
+                log::warn!("failed to classify existing session {session_id}: {error}")
+            }
+        }
+    }
+}
+
 async fn run_human_control_service(state: Arc<http_api::AppState>) {
     match crate::human_control::serve(state).await {
         Ok(()) => log::warn!("native human control exited unexpectedly"),
@@ -17,6 +66,7 @@ pub(crate) async fn run_server_services(
     http_state: Arc<http_api::AppState>,
 ) {
     crate::task_creator::prune_completion_contexts_on_startup(&config.daemon_dir, &db);
+    classify_existing_session_input(&config, &db).await;
     if config.relay_url.trim().is_empty() {
         tokio::select! {
             result = http_api::serve(Arc::clone(&http_state)) => match result {

@@ -1063,6 +1063,8 @@ pub(crate) async fn handle_handoff(
                     provider_session_id: None,
                     agent_fd_count: 0,
                     agent_spawn: None,
+                    operator_input_only: parts.operator_input_only,
+                    input_policy_classified: parts.input_policy_classified,
                 });
                 fds.push(fd);
                 cloned_pty_fds.push(fd);
@@ -1153,6 +1155,8 @@ pub(crate) async fn handle_handoff(
             provider_session_id: record.provider_session_id.clone(),
             agent_fd_count,
             agent_spawn: Some(record.params.clone()),
+            operator_input_only: false,
+            input_policy_classified: true,
         });
         fds.extend(session_fds);
     }

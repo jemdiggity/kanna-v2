@@ -2940,6 +2940,18 @@ fn prepared_merge_singleton_is_unique_before_spawn_acknowledgement() {
     assert!(db
         .is_open_agent_task("task-merge-prepared", "merge")
         .unwrap());
+    assert!(db
+        .session_requires_operator_input("merge-session-prepared")
+        .unwrap());
+    db.connection_for_e2e_tests()
+        .execute(
+            "UPDATE pipeline_item SET closed_at = '2026-08-04 00:01:00' WHERE id = 'task-merge-prepared'",
+            [],
+        )
+        .unwrap();
+    assert!(db
+        .session_requires_operator_input("merge-session-prepared")
+        .unwrap());
 }
 
 #[test]

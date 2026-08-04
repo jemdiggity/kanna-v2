@@ -300,9 +300,22 @@ instead of being discarded.
 
 ## Configuration
 
+Merge PTYs carry an `operator_input_only` flag across handoff; it can also be
+enabled monotonically for a session adopted from an older daemon. Generic
+terminal input is refused for these sessions. `OperatorInput` requires the
+kernel-identified desktop captured at daemon launch, or a same-executable
+desktop explicitly adopted after the old process exits. `SystemInput` is
+reserved for canonical server-built merge envelopes and pins the exact server
+executable supplied at daemon launch. Neither path uses a bearer credential.
+An old daemon's handoff has no input-policy field, so the successor initially
+fences every such PTY. Before serving HTTP, the authenticated server classifies
+the adopted sessions from durable merge-agent history; classification may
+tighten a session later but can never relax one already marked protected.
+
 | Env Var | Description | Default |
 |---------|-------------|---------|
 | `KANNA_DAEMON_DIR` | Data directory (socket, PID, log files) | `~/Library/Application Support/Kanna` |
+| `KANNA_SERVER_EXECUTABLE` | Server executable allowed to submit protected machine envelopes | unset (fails closed) |
 | `RUST_LOG` | Log level filter | `info` |
 
 ## Benchmarks

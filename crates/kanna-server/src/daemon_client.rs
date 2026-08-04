@@ -434,6 +434,7 @@ mod tests {
                 rows: 24,
                 agent_provider: None,
                 terminal_prelude: None,
+                operator_input_only: false,
             },
             Event::SessionCreated {
                 session_id: "spawn-on-successor".to_string(),

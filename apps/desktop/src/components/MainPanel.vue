@@ -65,6 +65,9 @@ const isBlocked = computed(() => {
 const commandHintDismissed = ref(readCommandHintDismissed());
 const showCommandHint = computed(() => !commandHintDismissed.value);
 const taskDetail = ref<DesktopTaskDetail | null>(null);
+const operatorTerminalInput = computed(() =>
+  taskDetail.value?.operatorTerminalInput ?? item.value?.pipeline === "singleton-merge"
+);
 const revisionComposerOpen = ref(false);
 const revisionSummary = ref("");
 const revisionPrompt = ref("");
@@ -381,6 +384,7 @@ function dismissCommandHint() {
       </template>
       <template v-else>
         <TerminalTabs
+          :key="`${item.id}:${operatorTerminalInput}`"
           :session-id="item.id"
           :agent-type="item.agent_type || 'pty'"
           :agent-provider="item.agent_provider"
@@ -389,7 +393,7 @@ function dismissCommandHint() {
           :prompt="item.prompt || ''"
           :spawn-pty-session="spawnPtySession"
           :recover-task-session="recoverTaskSession"
-          :operator-terminal-input="item.pipeline === 'singleton-merge'"
+          :operator-terminal-input="operatorTerminalInput"
         />
       </template>
     </template>

@@ -485,9 +485,9 @@ describe("useTerminal", () => {
     await waitForQueuedInputFlush();
 
     expect(sendTermInput).not.toHaveBeenCalled();
-    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
-      taskId: "merge-session",
-      dataB64: bytesToBase64(new TextEncoder().encode("merge PR 992")),
+    expect(invokeMock).toHaveBeenCalledWith("send_operator_input", {
+      sessionId: "merge-session",
+      data: Array.from(new TextEncoder().encode("merge PR 992")),
     });
   });
 

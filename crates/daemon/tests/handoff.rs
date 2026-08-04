@@ -49,6 +49,10 @@ enum Cmd {
         session_id: String,
         data: Vec<u8>,
     },
+    ClassifyInput {
+        session_id: String,
+        operator_input_only: bool,
+    },
     Snapshot {
         session_id: String,
     },
@@ -98,6 +102,7 @@ enum ErrorCode {
     NotAgentSession,
     UnknownPermissionRequest,
     RetryOnSuccessor,
+    InputUnauthorized,
 }
 
 #[allow(dead_code)]
@@ -1005,10 +1010,17 @@ fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
     let mut old_churn = old.connect();
     drop(old_pty);
     let current_dir = dir.clone();
+    let server_executable = std::fs::canonicalize(std::env::current_exe().unwrap())
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
     let current_start = std::thread::spawn(move || {
         DaemonHandle::start_in_with_env(
             &current_dir,
-            &[("KANNA_TEST_HANDOFF_ACK_DELAY_MS", "1500")],
+            &[
+                ("KANNA_TEST_HANDOFF_ACK_DELAY_MS", "1500"),
+                ("KANNA_SERVER_EXECUTABLE", server_executable.as_str()),
+            ],
         )
     });
     wait_for_daemon_log_contains(
@@ -1031,6 +1043,31 @@ fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
     );
     let mut current_pty = current.connect();
     attach(&mut current_pty, "stable-pty");
+    current_pty.send(&Cmd::Input {
+        session_id: "stable-pty".to_string(),
+        data: b"fenced-before-classification\n".to_vec(),
+    });
+    loop {
+        match current_pty.recv() {
+            Evt::Error {
+                code: Some(ErrorCode::InputUnauthorized),
+                ..
+            } => break,
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("legacy handoff input was not fenced: {other:?}"),
+        }
+    }
+    current_pty.send(&Cmd::ClassifyInput {
+        session_id: "stable-pty".to_string(),
+        operator_input_only: false,
+    });
+    loop {
+        match current_pty.recv() {
+            Evt::Ok => break,
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("legacy handoff classification failed: {other:?}"),
+        }
+    }
     send_input_and_wait_for_echo(&mut current_pty, "stable-pty", b"after\n", "after");
     assert_agent_steers_after_handoff(&current, "stable-agent");
     assert_daemon_log_contains(&dir, "selected legacy-v2 mode");

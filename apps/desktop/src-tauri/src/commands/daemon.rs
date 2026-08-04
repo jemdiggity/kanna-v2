@@ -42,6 +42,7 @@ pub async fn spawn_session(
     cols: u16,
     rows: u16,
     agent_provider: Option<String>,
+    operator_input_only: Option<bool>,
 ) -> Result<(), DaemonCommandError> {
     let agent_provider = parse_agent_provider(agent_provider)?;
     let cmd = serde_json::json!({
@@ -54,6 +55,7 @@ pub async fn spawn_session(
         "cols": cols,
         "rows": rows,
         "agent_provider": agent_provider,
+        "operator_input_only": operator_input_only.unwrap_or(false),
     });
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
     send_command_expect_session_created(&state, &json).await
@@ -199,6 +201,43 @@ pub async fn send_input(
     });
     let json = serde_json::to_string(&cmd).map_err(|e| e.to_string())?;
     send_command_expect_ack(&state, &json).await
+}
+
+/// Write to a protected merge terminal through the daemon's
+/// kernel-authenticated native desktop channel.
+#[tauri::command]
+pub async fn send_operator_input(
+    state: tauri::State<'_, DaemonState>,
+    session_id: String,
+    data: Vec<u8>,
+) -> Result<(), DaemonCommandError> {
+    let input = serde_json::json!({
+        "type": "OperatorInput",
+        "session_id": session_id,
+        "data": data,
+    })
+    .to_string();
+    let operation = async {
+        match send_command_expect_ack(&state, &input).await {
+            Ok(()) => Ok(()),
+            Err(first_error) => {
+                let adopt = serde_json::json!({ "type": "AdoptOperator" }).to_string();
+                send_command_expect_ack(&state, &adopt)
+                    .await
+                    .map_err(|adopt_error| {
+                        DaemonCommandError::from(format!(
+                            "{first_error:?}; native operator re-adoption failed: {adopt_error:?}"
+                        ))
+                    })?;
+                send_command_expect_ack(&state, &input).await
+            }
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), operation)
+        .await
+        .map_err(|_| {
+            DaemonCommandError::from("native merge terminal input timed out".to_string())
+        })?
 }
 
 #[tauri::command]

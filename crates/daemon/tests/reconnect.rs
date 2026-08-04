@@ -61,6 +61,14 @@ enum Cmd {
         session_id: String,
         data: Vec<u8>,
     },
+    OperatorInput {
+        session_id: String,
+        data: Vec<u8>,
+    },
+    ClassifyInput {
+        session_id: String,
+        operator_input_only: bool,
+    },
     ResizeNoReply {
         session_id: String,
         cols: u16,
@@ -126,6 +134,7 @@ enum Evt {
 #[serde(rename_all = "snake_case")]
 enum ErrorCode {
     PtySpawnFailed,
+    InputUnauthorized,
     #[serde(other)]
     Other,
 }
@@ -462,6 +471,13 @@ impl ClientConn {
         self.writer.flush().unwrap();
     }
 
+    fn send_json(&mut self, cmd: &serde_json::Value) {
+        let mut json = serde_json::to_string(cmd).unwrap();
+        json.push('\n');
+        self.writer.write_all(json.as_bytes()).unwrap();
+        self.writer.flush().unwrap();
+    }
+
     fn recv(&mut self) -> Evt {
         let mut line = String::new();
         self.reader.read_line(&mut line).expect("read timed out");
@@ -740,6 +756,87 @@ fn spawn_shell_session(conn: &mut ClientConn, session_id: &str, script: &str) {
     match conn.recv() {
         Evt::SessionCreated { session_id: sid } => assert_eq!(sid, session_id),
         other => panic!("expected SessionCreated, got: {:?}", other),
+    }
+}
+
+#[test]
+fn protected_session_rejects_generic_daemon_input_and_accepts_authenticated_operator() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "protected-merge-input";
+    conn.send_json(&serde_json::json!({
+        "type": "Spawn",
+        "session_id": session_id,
+        "executable": "/bin/cat",
+        "args": [],
+        "cwd": "/tmp",
+        "env": {},
+        "cols": 80,
+        "rows": 24,
+        "operator_input_only": true
+    }));
+    expect_session_created(&mut conn, session_id);
+
+    conn.send(&Cmd::ClassifyInput {
+        session_id: session_id.to_string(),
+        operator_input_only: false,
+    });
+    assert!(matches!(
+        conn.recv(),
+        Evt::Error {
+            code: Some(ErrorCode::InputUnauthorized),
+            ..
+        }
+    ));
+
+    conn.send(&Cmd::Input {
+        session_id: session_id.to_string(),
+        data: b"forged merge\r".to_vec(),
+    });
+    match conn.recv() {
+        Evt::Error {
+            code: Some(ErrorCode::InputUnauthorized),
+            ..
+        } => {}
+        other => panic!("generic daemon input was not fenced: {other:?}"),
+    }
+
+    conn.send(&Cmd::InputNoReply {
+        session_id: session_id.to_string(),
+        data: b"forged no-reply merge\r".to_vec(),
+    });
+    assert!(matches!(
+        conn.recv(),
+        Evt::Error {
+            code: Some(ErrorCode::InputUnauthorized),
+            ..
+        }
+    ));
+
+    conn.send(&Cmd::OperatorInput {
+        session_id: session_id.to_string(),
+        data: b"operator merge\r".to_vec(),
+    });
+    assert!(matches!(conn.recv(), Evt::Ok));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        conn.send(&Cmd::Snapshot {
+            session_id: session_id.to_string(),
+        });
+        match conn.recv() {
+            Evt::Snapshot { snapshot, .. } if snapshot.vt.contains("operator merge") => break,
+            Evt::Snapshot { .. } if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Evt::Snapshot { snapshot, .. } => {
+                panic!(
+                    "operator input never reached protected PTY: {:?}",
+                    snapshot.vt
+                )
+            }
+            other => panic!("expected protected session snapshot, got {other:?}"),
+        }
     }
 }
 

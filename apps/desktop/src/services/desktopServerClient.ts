@@ -219,6 +219,7 @@ export interface DesktopTaskDetail {
   revisionRounds: number;
   revisionLimit: number;
   childTaskIds: string[];
+  operatorTerminalInput?: boolean;
 }
 
 export async function fetchDesktopTaskDetail(taskId: string): Promise<DesktopTaskDetail> {

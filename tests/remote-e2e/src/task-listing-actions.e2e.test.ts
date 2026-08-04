@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { stat, writeFile } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -46,6 +46,16 @@ const APPROVAL_POST_PIPELINE = JSON.stringify({
       agent: "approve",
       prompt: "Approve $TASK_PROMPT"
     }
+  }]
+});
+
+const SINGLETON_MERGE_PIPELINE = JSON.stringify({
+  name: "singleton-merge",
+  stages: [{
+    name: "in progress",
+    agent: "merge",
+    prompt: "$TASK_PROMPT",
+    policy: { transition: "manual" }
   }]
 });
 
@@ -312,6 +322,16 @@ describe("remote task listing, creation, and actions E2E", () => {
       null
     )).rejects.toThrow(/approval held/i);
 
+    const repoPath = await repoPathForTask(harness, source.taskId);
+    await mkdir(`${repoPath}/.kanna/pipelines`, { recursive: true });
+    await writeFile(
+      `${repoPath}/.kanna/pipelines/singleton-merge.json`,
+      `${SINGLETON_MERGE_PIPELINE}\n`
+    );
+    await git(repoPath, ["add", ".kanna/pipelines/singleton-merge.json"]);
+    await git(repoPath, ["commit", "-m", "Add deterministic merge pipeline"]);
+    await git(repoPath, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
     const mergeReceiver = asRecord(await invokeDesktop(
       harness,
       "POST",
@@ -320,16 +340,12 @@ describe("remote task listing, creation, and actions E2E", () => {
         repoId: source.repoId,
         prompt: "Run deterministic merge receiver",
         displayName: "Deterministic merge receiver",
+        pipelineName: "singleton-merge",
         agentProvider: "codex",
         agentType: "pty"
       }
     ));
     const mergeTaskId = getString(mergeReceiver, "taskId");
-    expect(await executeSql(
-      harness,
-      "UPDATE stage_run SET agent = 'merge' WHERE task_id = ?1",
-      [mergeTaskId]
-    )).toBe(1);
     expect(await executeSql(
       harness,
       `INSERT INTO agent_signal_protocol (task_id, session_id, merge_handoff_version)
