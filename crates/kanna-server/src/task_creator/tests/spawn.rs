@@ -227,7 +227,10 @@ async fn lost_spawn_response_is_classified_after_ack_and_never_rolled_back_as_re
         PreparedTaskDeliveryError::AfterAcknowledgement(_)
     ));
     daemon.await.unwrap();
-    assert!(db.list_stage_runs_for_task("task-1").unwrap().is_empty());
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "running");
+    assert!(db.stage_run_completion_bound(&runs[0].id).unwrap());
     let completion_dir = std::path::Path::new(&config.daemon_dir).join("runtime/completion");
     assert_eq!(
         std::fs::read_dir(completion_dir)

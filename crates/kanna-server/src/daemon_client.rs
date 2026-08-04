@@ -38,6 +38,10 @@ impl DaemonClient {
         &self.daemon_dir
     }
 
+    pub(crate) fn connected_pid(&self) -> u32 {
+        self.connected_pid
+    }
+
     pub async fn connect(daemon_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let socket_path = kanna_runtime_defaults::socket_path(Path::new(daemon_dir));
         let stream = UnixStream::connect(&socket_path).await.map_err(|e| {
@@ -154,7 +158,7 @@ impl DaemonClient {
     }
 }
 
-async fn wait_for_successor(
+pub(crate) async fn wait_for_successor(
     daemon_dir: &str,
     previous_pid: u32,
 ) -> Result<DaemonClient, Box<dyn std::error::Error>> {

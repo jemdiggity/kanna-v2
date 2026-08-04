@@ -4,10 +4,7 @@ use super::environment::resolve_binary_from_candidates_with_path_lookup;
 use super::lifecycle::spawn_prepared_task;
 use super::prompt::{build_revision_resume_message, build_revision_task_prompt, PromptContext};
 use super::provider::{AgentProvider, AgentSessionType};
-use super::types::{
-    CreatedTask, PreparedSessionSpawn, PreparedStageRerun, PreparedStageTransition,
-    PreparedTaskSpawn,
-};
+use super::types::{CreatedTask, PreparedSessionSpawn, PreparedStageTransition, PreparedTaskSpawn};
 use super::{
     build_agent_command, build_kanna_preamble, build_prepared_session, build_spawn_env,
     build_stage_prompt, create_dormant_task_for_api_with_error, prepare_advance_stage_for_api,

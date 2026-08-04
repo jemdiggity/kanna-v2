@@ -9,18 +9,50 @@ async fn classify_existing_session_input(config: &Config, db: &db::Db) {
             return;
         }
     };
+    let connected_pid = daemon.connected_pid();
+    if let Err(error) = classify_sessions_on_connected_daemon(&mut daemon, db).await {
+        // Desktop replacement and server startup intentionally overlap. A
+        // shipped v2 daemon understands List but closes when it sees the new
+        // ClassifyInput command; wait for the published handoff successor and
+        // repeat the complete classification pass there.
+        log::warn!(
+            "daemon input classification failed on pid {connected_pid}; waiting for handoff successor: {error}"
+        );
+        match crate::daemon_client::wait_for_successor(&config.daemon_dir, connected_pid).await {
+            Ok(mut successor) => {
+                if let Err(retry_error) =
+                    classify_sessions_on_connected_daemon(&mut successor, db).await
+                {
+                    log::warn!(
+                        "failed to classify inherited sessions on successor daemon: {retry_error}"
+                    );
+                }
+            }
+            Err(wait_error) => log::warn!(
+                "failed to classify inherited sessions and no successor became available: {wait_error}"
+            ),
+        }
+    }
+}
+
+async fn classify_sessions_on_connected_daemon(
+    daemon: &mut crate::daemon_client::DaemonClient,
+    db: &db::Db,
+) -> Result<(), String> {
     let sessions = match daemon
         .send_command(&kanna_daemon::protocol::Command::List)
         .await
     {
         Ok(kanna_daemon::protocol::Event::SessionList { sessions }) => sessions,
         Ok(event) => {
-            log::warn!("failed to list daemon sessions for input classification: {event:?}");
-            return;
+            return Err(format!(
+                "failed to list daemon sessions for input classification: {event:?}"
+            ));
         }
         Err(error) => {
-            log::warn!("failed to list daemon sessions for input classification: {error}");
-            return;
+            return Err(format!(
+                "failed to list daemon sessions for input classification: {error}"
+            ));
         }
     };
     for session in sessions {
@@ -44,10 +76,13 @@ async fn classify_existing_session_input(config: &Config, db: &db::Db) {
                 log::warn!("failed to classify existing session {session_id}: {event:?}")
             }
             Err(error) => {
-                log::warn!("failed to classify existing session {session_id}: {error}")
+                return Err(format!(
+                    "failed to classify existing session {session_id}: {error}"
+                ));
             }
         }
     }
+    Ok(())
 }
 
 async fn run_human_control_service(state: Arc<http_api::AppState>) {

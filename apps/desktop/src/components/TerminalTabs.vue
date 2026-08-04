@@ -36,7 +36,10 @@ function buildSpawnOptions() {
 </script>
 
 <template>
-  <div class="terminal-panel">
+  <div
+    class="terminal-panel"
+    :data-operator-terminal-input="operatorTerminalInput ? 'true' : 'false'"
+  >
     <!-- PTY mode: mount only the active terminal view -->
     <KeepAlive :max="taskTerminalWarmCacheMax">
       <TerminalView

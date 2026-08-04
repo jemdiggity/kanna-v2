@@ -178,6 +178,22 @@ pub(crate) async fn spawn_prepared_task_for_api_recording_stage_run_detailed(
         daemon.daemon_dir(),
     )
     .map_err(PreparedTaskDeliveryError::BeforeAcknowledgement)?;
+    // Publish the immutable completion identity before the child can become
+    // live. An acknowledged (or transport-uncertain) Spawn must never leave a
+    // process whose run exists only in its environment.
+    let record_db_path = db_path.to_string();
+    let record_prepared = prepared.clone();
+    let record_run_id = run_id.clone();
+    tokio::task::spawn_blocking(move || {
+        record_spawned_stage_run(&record_db_path, &record_prepared, &record_run_id)
+    })
+    .await
+    .map_err(|join_error| {
+        PreparedTaskDeliveryError::BeforeAcknowledgement(format!(
+            "stage run record worker failed before daemon spawn: {join_error}"
+        ))
+    })?
+    .map_err(PreparedTaskDeliveryError::BeforeAcknowledgement)?;
     let created = match spawn_prepared_task_classified(daemon, prepared.clone()).await {
         Ok(created) => created,
         Err(SpawnPreparedError::BeforeAcknowledgement(message)) => {
@@ -203,19 +219,6 @@ pub(crate) async fn spawn_prepared_task_for_api_recording_stage_run_detailed(
         agent_type: created.agent_type,
         worktree_path: Some(created.worktree_path),
     };
-    // Spawn bookkeeping is a synchronous SQLite write; several callers run on
-    // the shared runtime, so keep it on the blocking pool.
-    let record_db_path = db_path.to_string();
-    tokio::task::spawn_blocking(move || {
-        record_spawned_stage_run(&record_db_path, &prepared, &run_id)
-    })
-    .await
-    .map_err(|join_error| {
-        PreparedTaskDeliveryError::AfterAcknowledgement(format!(
-            "stage run record worker failed after daemon acknowledgement: {join_error}"
-        ))
-    })?
-    .map_err(PreparedTaskDeliveryError::AfterAcknowledgement)?;
     Ok(created)
 }
 
@@ -224,9 +227,19 @@ pub(crate) async fn spawn_prepared_task_for_api_with_diagnostics(
     daemon: &mut DaemonClient,
     prepared: PreparedTaskSpawn,
 ) -> Result<crate::mobile_api::CreateTaskResponse, String> {
-    match spawn_prepared_task_for_api_recording_stage_run(db_path, daemon, prepared.clone()).await {
+    match spawn_prepared_task_for_api_recording_stage_run_detailed(
+        db_path,
+        daemon,
+        prepared.clone(),
+    )
+    .await
+    {
         Ok(created) => Ok(created),
-        Err(err) => {
+        Err(PreparedTaskDeliveryError::AfterAcknowledgement(err)) => Err(format!(
+            "task {} spawn delivery is uncertain: {err}",
+            prepared.created_task.task_id
+        )),
+        Err(PreparedTaskDeliveryError::BeforeAcknowledgement(err)) => {
             let record_db_path = db_path.to_string();
             let spawn_err = err.clone();
             let task_id = prepared.created_task.task_id.clone();
@@ -307,6 +320,8 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         }
     }
 
+    record_stage_transition_run(db_path, &prepared, &run_id)?;
+
     let command = spawn_session_command(
         session_id.clone(),
         prepared.cwd.clone(),
@@ -322,10 +337,7 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             // that the daemon did not create the process. Keep the immutable
             // completion identity available to any surviving child.
             completion_context.persist();
-            return Err(rollback_prepared_stage_fork(
-                &prepared,
-                format!("daemon error: {}", e),
-            ));
+            return Err(format!("daemon spawn delivery is uncertain: {e}"));
         }
     };
     match event {
@@ -336,16 +348,14 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
             completion_context.persist();
         }
         DaemonEvent::Error { message, .. } => {
-            return Err(rollback_prepared_stage_fork(
-                &prepared,
-                format!("daemon error: {}", message),
-            ))
+            let error = format!("daemon error: {message}");
+            fail_bound_stage_run(db_path, &task_id, &run_id, &error);
+            return Err(rollback_prepared_stage_fork(&prepared, error));
         }
         other => {
             completion_context.persist();
-            return Err(rollback_prepared_stage_fork(
-                &prepared,
-                format!("unexpected daemon response: {:?}", other),
+            return Err(format!(
+                "daemon spawn delivery is uncertain after unexpected response: {other:?}"
             ));
         }
     }
@@ -360,10 +370,9 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         if let Err(error) = kill_session_replacing(daemon, replacements, &session_id).await {
             log::warn!("failed to clean up stale stage session {session_id}: {error}");
         }
-        return Err(rollback_prepared_stage_fork(
-            &prepared,
-            format!("task {task_id} closed before stage transition landed"),
-        ));
+        let error = format!("task {task_id} closed before stage transition landed");
+        fail_bound_stage_run(db_path, &task_id, &run_id, &error);
+        return Err(rollback_prepared_stage_fork(&prepared, error));
     }
     match &prepared.workspace {
         PreparedRunWorkspace::Forked(workspace) | PreparedRunWorkspace::Resumed(workspace) => {
@@ -380,10 +389,9 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                             "failed to clean up stale stage session {session_id}: {kill_error}"
                         );
                     }
-                    return Err(rollback_prepared_stage_fork(
-                        &prepared,
-                        format!("task {task_id} closed before stage transition landed"),
-                    ));
+                    let error = format!("task {task_id} closed before stage transition landed");
+                    fail_bound_stage_run(db_path, &task_id, &run_id, &error);
+                    return Err(rollback_prepared_stage_fork(&prepared, error));
                 }
                 return Err(format!("db error: {}", error));
             }
@@ -405,10 +413,9 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
                             "failed to clean up stale stage session {session_id}: {kill_error}"
                         );
                     }
-                    return Err(rollback_prepared_stage_fork(
-                        &prepared,
-                        format!("task {task_id} closed before stage transition landed"),
-                    ));
+                    let error = format!("task {task_id} closed before stage transition landed");
+                    fail_bound_stage_run(db_path, &task_id, &run_id, &error);
+                    return Err(rollback_prepared_stage_fork(&prepared, error));
                 }
                 return Err(format!("db error: {}", error));
             }
@@ -418,37 +425,6 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         .map_err(|e| format!("db error: {}", e))?;
     db.update_pipeline_item_agent_session_id(&task_id, prepared.provider_session_id.as_deref())
         .map_err(|e| format!("db error: {}", e))?;
-    db.insert_stage_run_with_completion_binding(
-        NewStageRun {
-            id: &run_id,
-            task_id: &task_id,
-            stage: &prepared.run_stage,
-            kind: prepared.run_kind,
-            agent: prepared.stage_agent.as_deref(),
-            agent_provider: Some(prepared.agent_provider.as_str()),
-            model: prepared.model.as_deref(),
-            effort: prepared.effort.as_deref(),
-            status: "running",
-            result: None,
-            feedback: prepared.feedback.as_deref(),
-            session_id: Some(&session_id),
-            provider_session_id: prepared.provider_session_id.as_deref(),
-            cwd: Some(&prepared.cwd),
-            resumed_from_run_id: prepared.resumed_from_run_id.as_deref(),
-        },
-        Some(prepared.completion_transition.as_str()),
-        true,
-    )
-    .map_err(|e| format!("db error: {}", e))?;
-    if prepared.run_kind == "post" && prepared.run_stage == "approve" {
-        db.record_approval_authorization(&task_id, &run_id)
-            .map_err(|e| format!("approval authorization error: {e}"))?;
-    }
-    if let Some(reason) = prepared.resume_fallback_reason.as_deref() {
-        db.set_stage_run_resume_fallback_reason(&run_id, reason)
-            .map_err(|e| format!("db error: {}", e))?;
-    }
-
     spawn_prepared_workspace_teardown_best_effort(daemon, prepared.workspace_teardown).await;
 
     Ok(crate::mobile_api::TaskActionResponse {
@@ -456,6 +432,57 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         follow_task: None,
         revision_budget: None,
     })
+}
+
+fn record_stage_transition_run(
+    db_path: &str,
+    prepared: &PreparedStageRunSpawn,
+    run_id: &str,
+) -> Result<(), String> {
+    let db = Db::open(db_path).map_err(|e| format!("db error: {e}"))?;
+    db.with_immediate_transaction(|db| -> rusqlite::Result<()> {
+        db.insert_stage_run_with_completion_binding(
+            NewStageRun {
+                id: run_id,
+                task_id: &prepared.task_id,
+                stage: &prepared.run_stage,
+                kind: prepared.run_kind,
+                agent: prepared.stage_agent.as_deref(),
+                agent_provider: Some(prepared.agent_provider.as_str()),
+                model: prepared.model.as_deref(),
+                effort: prepared.effort.as_deref(),
+                status: "running",
+                result: None,
+                feedback: prepared.feedback.as_deref(),
+                session_id: Some(&prepared.session_id),
+                provider_session_id: prepared.provider_session_id.as_deref(),
+                cwd: Some(&prepared.cwd),
+                resumed_from_run_id: prepared.resumed_from_run_id.as_deref(),
+            },
+            Some(prepared.completion_transition.as_str()),
+            true,
+        )?;
+        if prepared.run_kind == "post" && prepared.run_stage == "approve" {
+            db.record_approval_authorization(&prepared.task_id, run_id)?;
+        }
+        if let Some(reason) = prepared.resume_fallback_reason.as_deref() {
+            db.set_stage_run_resume_fallback_reason(run_id, reason)?;
+        }
+        Ok(())
+    })
+    .map_err(|e| format!("db error: {e}"))
+}
+
+fn fail_bound_stage_run(db_path: &str, task_id: &str, run_id: &str, error: &str) {
+    let result = format!("failed to start stage run: {error}");
+    let record = Db::open(db_path).and_then(|db| {
+        db.finish_stage_run(run_id, "failed", Some(&result), Some("stage spawn failed"))?;
+        db.update_pipeline_item_activity(task_id, "unread")?;
+        db.update_pipeline_item_agent_session_id(task_id, None)
+    });
+    if let Err(record_error) = record {
+        log::warn!("failed to terminate rejected stage run {run_id}: {record_error}");
+    }
 }
 
 fn record_stage_transition_failure(
@@ -814,6 +841,24 @@ pub(crate) async fn rerun_prepared_stage_for_api(
         }
     }
 
+    // The run row and artifact form one durable identity and must both exist
+    // before Spawn can make the child observable.
+    record_rerun_stage_run(
+        db_path,
+        &task_id,
+        &stage,
+        run_kind,
+        stage_agent.as_deref(),
+        &agent_provider,
+        model.as_deref(),
+        effort.as_deref(),
+        completion_transition.as_str(),
+        &session_id,
+        provider_session_id.as_deref(),
+        &cwd,
+        &run_id,
+    )?;
+
     let command = spawn_session_command(
         session_id.clone(),
         prepared.cwd,
@@ -827,27 +872,12 @@ pub(crate) async fn rerun_prepared_stage_for_api(
         Ok(event) => event,
         Err(error) => {
             completion_context.persist();
-            return Err(record_failure(format!("daemon error: {error}")));
+            return Err(format!("daemon spawn delivery is uncertain: {error}"));
         }
     };
     match event {
         DaemonEvent::SessionCreated { .. } => {
             completion_context.persist();
-            record_rerun_stage_run(
-                db_path,
-                &task_id,
-                &stage,
-                run_kind,
-                stage_agent.as_deref(),
-                &agent_provider,
-                model.as_deref(),
-                effort.as_deref(),
-                completion_transition.as_str(),
-                &session_id,
-                provider_session_id.as_deref(),
-                &cwd,
-                &run_id,
-            )?;
             Ok(crate::mobile_api::TaskActionResponse {
                 task_id,
                 follow_task: None,
@@ -855,13 +885,15 @@ pub(crate) async fn rerun_prepared_stage_for_api(
             })
         }
         DaemonEvent::Error { message, .. } => {
-            Err(record_failure(format!("daemon error: {message}")))
+            let error = format!("daemon error: {message}");
+            fail_bound_stage_run(db_path, &task_id, &run_id, &error);
+            Err(error)
         }
         other => {
             completion_context.persist();
-            Err(record_failure(format!(
-                "unexpected daemon response: {other:?}"
-            )))
+            Err(format!(
+                "daemon spawn delivery is uncertain after unexpected response: {other:?}"
+            ))
         }
     }
 }
@@ -1039,12 +1071,27 @@ fn record_prepared_task_spawn_failure(
 ) -> Result<(), String> {
     let task_id = prepared.created_task.task_id.as_str();
     let result = format!("failed to spawn task {task_id}: {error}");
+    let latest_run = db
+        .latest_stage_run(task_id)
+        .map_err(|e| format!("db error: {e}"))?;
+    let bound_run_id = match latest_run {
+        Some(run) if matches!(run.status.as_str(), "running" | "cancelled") => db
+            .stage_run_completion_bound(&run.id)
+            .map_err(|e| format!("db error: {e}"))?
+            .then_some(run.id),
+        _ => None,
+    };
     db.cancel_running_stage_runs(task_id)
         .map_err(|e| format!("db error: {}", e))?;
     db.update_pipeline_item_activity(task_id, "unread")
         .map_err(|e| format!("db error: {}", e))?;
     db.update_pipeline_item_agent_session_id(task_id, prepared.provider_session_id.as_deref())
         .map_err(|e| format!("db error: {}", e))?;
+    if let Some(run_id) = bound_run_id {
+        return db
+            .finish_stage_run(&run_id, "failed", Some(&result), Some("task spawn failed"))
+            .map_err(|e| format!("db error: {e}"));
+    }
     let run_id = generate_stage_run_id(task_id);
     db.insert_stage_run(NewStageRun {
         id: &run_id,
@@ -1506,6 +1553,13 @@ pub(crate) fn resolve_legacy_completion_retry_run(
             let Ok(context) = kanna_tool_catalog::read_completion_context(&path) else {
                 continue;
             };
+            // A historical artifact is relevant only when the submitting
+            // adapter actually read (or restored) that artifact's current
+            // binding. Matching completion prose alone is not lineage proof:
+            // a later independent run may legitimately return the same body.
+            if context.run_id != presented_run_id {
+                continue;
+            }
             let Ok(Some(run)) = db.stage_run(spawned_run_id) else {
                 continue;
             };

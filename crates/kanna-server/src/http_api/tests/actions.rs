@@ -4585,7 +4585,16 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
     assert_eq!(task.branch.as_deref(), Some("task-source"));
     assert!(task.closed_at.is_some());
     let runs = db.list_stage_runs_for_task("source-1").unwrap();
-    assert!(runs.iter().all(|run| run.stage != "review"));
+    let review = runs
+        .iter()
+        .find(|run| run.stage == "review")
+        .expect("the acknowledged child keeps a durable diagnostic identity");
+    assert_eq!(review.status, "failed");
+    assert!(review
+        .result
+        .as_deref()
+        .unwrap_or_default()
+        .contains("closed before stage transition landed"));
 
     if created_sidecar {
         let _ = std::fs::remove_file(&kanna_cli_path);
@@ -5194,6 +5203,123 @@ async fn pre_upgrade_adapter_cannot_complete_rebound_post_after_lost_main_respon
     assert_eq!(
         db.stage_run("run-task-1-post").unwrap().unwrap().status,
         "running"
+    );
+}
+
+#[tokio::test]
+async fn distinct_current_run_with_identical_verdict_is_not_rewritten_to_history() {
+    let summary = "the same deterministic verdict";
+    let stage_result = serde_json::json!({
+        "status": "failure",
+        "summary": summary,
+        "metadata": null,
+    })
+    .to_string();
+    let state = super::test_state_with_seed(
+        "desktop-distinct-identical-completion",
+        "Studio Mac",
+        |db| {
+            db.insert_test_repo("repo-1", "Repo One").unwrap();
+            db.insert_test_pipeline_item(
+                "task-1",
+                "repo-1",
+                "Repeat deterministic work",
+                Some("Repeat deterministic work"),
+                "in progress",
+                "2026-08-04 00:00:00",
+            )
+            .unwrap();
+            let run = |id: &'static str, status: &'static str| crate::db::NewStageRun {
+                id,
+                task_id: "task-1",
+                stage: "in progress",
+                kind: "main",
+                agent: Some("implement"),
+                agent_provider: Some("codex"),
+                model: None,
+                effort: None,
+                status,
+                result: None,
+                feedback: None,
+                session_id: Some("task-1"),
+                provider_session_id: None,
+                cwd: None,
+                resumed_from_run_id: None,
+            };
+            db.insert_stage_run_with_completion_binding(
+                run("run-task-1-old", "running"),
+                Some("manual"),
+                true,
+            )
+            .unwrap();
+            db.finish_stage_run(
+                "run-task-1-old",
+                "failed",
+                Some(&stage_result),
+                Some(summary),
+            )
+            .unwrap();
+            db.insert_stage_run_with_completion_binding(
+                run("run-task-1-new", "running"),
+                Some("manual"),
+                true,
+            )
+            .unwrap();
+        },
+    );
+    let db_path = state.config.db_path.clone();
+    let seeded = Db::open(&db_path)
+        .unwrap()
+        .latest_stage_run("task-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(seeded.id, "run-task-1-new");
+    assert_eq!(seeded.completion_transition.as_deref(), Some("manual"));
+    let context_dir = std::path::Path::new(&state.config.daemon_dir).join("runtime/completion");
+    std::fs::create_dir_all(&context_dir).unwrap();
+    std::fs::write(
+        context_dir.join("run-task-1-old.json"),
+        r#"{"runId":"run-task-1-old"}"#,
+    )
+    .unwrap();
+    let request_without_binding = serde_json::json!({
+        "status": "failure",
+        "summary": summary,
+    });
+    let attempt_key = kanna_tool_catalog::completion_attempt_key(&request_without_binding).unwrap();
+
+    let response = super::router(state)
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "runId": "run-task-1-new",
+                        "completionAttemptKey": attempt_key,
+                        "status": "failure",
+                        "summary": summary,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&response_body)
+    );
+    let db = Db::open(&db_path).unwrap();
+    assert_eq!(
+        db.stage_run("run-task-1-new").unwrap().unwrap().status,
+        "failed"
     );
 }
 

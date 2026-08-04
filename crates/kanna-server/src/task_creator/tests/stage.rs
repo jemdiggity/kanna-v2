@@ -418,39 +418,65 @@ async fn rerun_stage_uses_compiled_post_action_stage_prompt_and_stage_setup() {
 }
 
 #[tokio::test]
-async fn acknowledged_rerun_keeps_completion_context_when_db_bookkeeping_fails() {
+async fn acknowledged_stage_survives_db_failure_restart_and_can_complete() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
+    use tower::ServiceExt;
 
-    let config = test_config("rerun-after-ack-context");
+    let config = test_config("stage-after-ack-reconcile");
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo("repo-1", "Repo One").unwrap();
     db.insert_test_pipeline_item(
         "task-1",
         "repo-1",
-        "Rerun",
-        Some("Rerun"),
+        "Transition",
+        Some("Transition"),
         "in progress",
         "2026-08-04 00:00:00",
     )
     .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-original",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("task-1"),
+        provider_session_id: None,
+        cwd: Some("/tmp"),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
     drop(db);
 
-    let prepared = PreparedStageRerun {
+    let prepared = super::super::types::PreparedStageRunSpawn {
         task_id: "task-1".to_string(),
         session_id: "task-1".to_string(),
-        stage: "in progress".to_string(),
+        next_stage: "review".to_string(),
+        run_stage: "review".to_string(),
         run_kind: "main",
+        workspace: super::super::types::PreparedRunWorkspace::Current,
+        workspace_teardown: None,
         stage_agent: Some("implement".to_string()),
         agent_provider: "codex".to_string(),
         model: None,
         effort: None,
         completion_transition: PipelineStageTransition::Manual,
+        feedback: None,
         provider_session_id: None,
+        resumed_from_run_id: None,
+        resume_fallback_reason: None,
         cwd: "/tmp".to_string(),
         env: std::collections::HashMap::new(),
-        deferred_setup: Vec::new(),
-        recovery_snapshot: None,
+        terminal_prelude: None,
         session: PreparedSessionSpawn::Pty {
             executable: "/bin/cat".to_string(),
             args: Vec::new(),
@@ -458,12 +484,27 @@ async fn acknowledged_rerun_keeps_completion_context_when_db_bookkeeping_fails()
             rows: 24,
             agent_provider: kanna_daemon::protocol::AgentProvider::Codex,
         },
+        deferred_setup: None,
+        setup_hard_timeout: None,
     };
+
+    let raw = Connection::open(&config.db_path).unwrap();
+    raw.execute_batch(
+        r#"
+        CREATE TRIGGER fail_stage_landing_after_spawn
+        BEFORE UPDATE OF stage ON pipeline_item
+        WHEN NEW.id = 'task-1' AND NEW.stage = 'review'
+        BEGIN
+          SELECT RAISE(ABORT, 'injected surviving stage landing failure');
+        END;
+        "#,
+    )
+    .unwrap();
+    drop(raw);
 
     let socket_path = test_daemon_socket_path(&config.daemon_dir);
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).unwrap();
-    let db_path = config.db_path.clone();
     let fake_daemon = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
@@ -480,7 +521,6 @@ async fn acknowledged_rerun_keeps_completion_context_when_db_bookkeeping_fails()
                 kanna_daemon::protocol::Command::Spawn { session_id, .. }
                     if expected == "Spawn" =>
                 {
-                    std::fs::remove_file(&db_path).unwrap();
                     kanna_daemon::protocol::Event::SessionCreated { session_id }
                 }
                 other => panic!("expected {expected}, got {other:?}"),
@@ -492,29 +532,57 @@ async fn acknowledged_rerun_keeps_completion_context_when_db_bookkeeping_fails()
         }
     });
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
-    let error = rerun_prepared_stage_for_api(
+    let error = spawn_prepared_stage_run_for_api(
         &config.db_path,
         &mut daemon,
         &crate::session_replacements::SessionReplacements::default(),
         prepared,
     )
     .await
-    .expect_err("post-ack DB failure must reject the rerun");
-    assert!(error.contains("db error"), "error: {error}");
+    .expect_err("post-ack stage landing failure must be surfaced");
+    assert!(error.contains("injected surviving stage landing failure"));
     fake_daemon.await.unwrap();
 
+    // Reopen as startup would, then prune. The pre-spawn bound row is the
+    // latest durable identity, so the acknowledged child's artifact remains.
+    let db = Db::open(&config.db_path).unwrap();
+    let live_run = db.latest_stage_run("task-1").unwrap().unwrap();
+    assert_eq!(live_run.stage, "review");
+    assert_eq!(live_run.status, "running");
+    assert!(db.stage_run_completion_bound(&live_run.id).unwrap());
+    crate::task_creator::prune_completion_contexts_on_startup(&config.daemon_dir, &db);
     let completion_dir = std::path::Path::new(&config.daemon_dir).join("runtime/completion");
-    let names = std::fs::read_dir(&completion_dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
-        .collect::<Vec<_>>();
+    let context_path = completion_dir.join(format!("{}.json", live_run.id));
+    assert!(context_path.exists());
+    drop(db);
+
+    let response = crate::http_api::router(std::sync::Arc::new(crate::http_api::AppState::new(
+        config.clone(),
+    )))
+    .oneshot(
+        Request::post("/v1/tasks/task-1/actions/complete-stage")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "runId": live_run.id,
+                    "status": "failure",
+                    "summary": "surviving child reported after restart"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        names.iter().filter(|name| name.ends_with(".json")).count(),
-        1
-    );
-    assert_eq!(
-        names.iter().filter(|name| name.ends_with(".lock")).count(),
-        1
+        Db::open(&config.db_path)
+            .unwrap()
+            .latest_stage_run("task-1")
+            .unwrap()
+            .unwrap()
+            .status,
+        "failed"
     );
 
     let _ = std::fs::remove_file(socket_path);

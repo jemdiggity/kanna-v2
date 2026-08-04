@@ -100,7 +100,10 @@ describe("native approval control", () => {
       });
       await callVueMethod(client, "loadItems", SEED.repos.app.id);
       await callVueMethod(client, "store.selectItem", taskId);
-      const textarea = await client.waitForElement(".xterm-helper-textarea", 15_000);
+      const textarea = await client.waitForElement(
+        '.terminal-panel[data-operator-terminal-input="true"] .xterm-helper-textarea',
+        15_000,
+      );
       await client.sendKeys(textarea, `${marker}\n`);
 
       let observed = "";

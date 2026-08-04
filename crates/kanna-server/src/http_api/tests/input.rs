@@ -60,11 +60,11 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str) 
             reader.read_line(&mut line).await.unwrap();
             let command: DaemonCommand = serde_json::from_str(line.trim()).unwrap();
             match command {
-                DaemonCommand::SystemInput { session_id, data } => {
+                DaemonCommand::Input { session_id, data } => {
                     assert_eq!(session_id, "merge-session");
                     inputs.push(data);
                 }
-                other => panic!("expected Input command, got {other:?}"),
+                other => panic!("expected ordinary Input command, got {other:?}"),
             }
             write_half
                 .write_all(

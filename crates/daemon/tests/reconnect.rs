@@ -65,6 +65,10 @@ enum Cmd {
         session_id: String,
         data: Vec<u8>,
     },
+    SystemInput {
+        session_id: String,
+        data: Vec<u8>,
+    },
     ClassifyInput {
         session_id: String,
         operator_input_only: bool,
@@ -838,6 +842,92 @@ fn protected_session_rejects_generic_daemon_input_and_accepts_authenticated_oper
             other => panic!("expected protected session snapshot, got {other:?}"),
         }
     }
+}
+
+#[test]
+#[ignore = "fixture invoked by privileged_input_rejects_a_separate_process_impersonator"]
+fn privileged_input_impersonation_child() {
+    let Some(socket_path) = std::env::var_os("KANNA_IMPERSONATION_SOCKET") else {
+        return;
+    };
+    let session_id = std::env::var("KANNA_IMPERSONATION_SESSION").unwrap();
+    let stream = UnixStream::connect(socket_path).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut conn = ClientConn {
+        reader: BufReader::new(stream.try_clone().unwrap()),
+        writer: stream,
+    };
+    let commands = [
+        Cmd::OperatorInput {
+            session_id: session_id.clone(),
+            data: b"forged operator\r".to_vec(),
+        },
+        Cmd::SystemInput {
+            session_id: session_id.clone(),
+            data: b"forged system\r".to_vec(),
+        },
+        Cmd::ClassifyInput {
+            session_id,
+            operator_input_only: false,
+        },
+    ];
+    for command in commands {
+        conn.send(&command);
+        assert!(matches!(
+            conn.recv(),
+            Evt::Error {
+                code: Some(ErrorCode::InputUnauthorized),
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn privileged_input_rejects_a_separate_process_impersonator() {
+    let daemon = DaemonHandle::start();
+    let mut conn = daemon.connect();
+    let session_id = "protected-cross-process";
+    conn.send_json(&serde_json::json!({
+        "type": "Spawn",
+        "session_id": session_id,
+        "executable": "/bin/cat",
+        "args": [],
+        "cwd": "/tmp",
+        "env": {},
+        "cols": 80,
+        "rows": 24,
+        "operator_input_only": true
+    }));
+    expect_session_created(&mut conn, session_id);
+
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "privileged_input_impersonation_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("KANNA_IMPERSONATION_SOCKET", &daemon.socket_path)
+        .env("KANNA_IMPERSONATION_SESSION", session_id)
+        .status()
+        .expect("spawn separate impersonator process");
+    assert!(status.success(), "impersonator fixture assertions failed");
+
+    conn.send(&Cmd::Snapshot {
+        session_id: session_id.to_string(),
+    });
+    let snapshot = loop {
+        match conn.recv() {
+            Evt::Snapshot { snapshot, .. } => break snapshot,
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("expected protected session snapshot, got {other:?}"),
+        }
+    };
+    assert!(!snapshot.vt.contains("forged operator"));
+    assert!(!snapshot.vt.contains("forged system"));
 }
 
 #[test]

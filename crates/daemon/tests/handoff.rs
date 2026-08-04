@@ -1009,6 +1009,74 @@ fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
     // that pre-commit transfer window.
     let mut old_churn = old.connect();
     drop(old_pty);
+    let old_pid = old.child.id();
+    let classifier_dir = dir.clone();
+    let (v2_rejected_tx, v2_rejected_rx) = std::sync::mpsc::sync_channel(1);
+    let classifier = std::thread::spawn(move || {
+        let connect = || {
+            let stream = UnixStream::connect(compute_socket_path(&classifier_dir))
+                .expect("classifier connects to daemon");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            ClientConn {
+                reader: BufReader::new(stream.try_clone().unwrap()),
+                writer: stream,
+            }
+        };
+        let mut incumbent = connect();
+        incumbent
+            .try_round_trip_until(&Cmd::List, |event| matches!(event, Evt::SessionList { .. }))
+            .expect("v2 List remains compatible");
+        let rejected = incumbent.try_round_trip_until(
+            &Cmd::ClassifyInput {
+                session_id: "stable-pty".to_string(),
+                operator_input_only: false,
+            },
+            |event| matches!(event, Evt::Ok),
+        );
+        assert!(
+            rejected.is_err(),
+            "shipped v2 must reject the unknown classification command"
+        );
+        v2_rejected_tx.send(()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let published = std::fs::read_to_string(classifier_dir.join("daemon.pid"))
+                .ok()
+                .and_then(|value| value.trim().parse::<u32>().ok());
+            if published.is_some_and(|pid| pid != old_pid) {
+                if let Ok(stream) = UnixStream::connect(compute_socket_path(&classifier_dir)) {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut successor = ClientConn {
+                        reader: BufReader::new(stream.try_clone().unwrap()),
+                        writer: stream,
+                    };
+                    successor
+                        .try_round_trip_until(
+                            &Cmd::ClassifyInput {
+                                session_id: "stable-pty".to_string(),
+                                operator_input_only: false,
+                            },
+                            |event| matches!(event, Evt::Ok),
+                        )
+                        .expect("published v3 successor accepts classification");
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "classifier never reached the published v3 successor"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    });
+    v2_rejected_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("classification must race the shipped v2 incumbent");
     let current_dir = dir.clone();
     let server_executable = std::fs::canonicalize(std::env::current_exe().unwrap())
         .unwrap()
@@ -1036,6 +1104,7 @@ fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
     );
     drop(old_churn);
     let current = current_start.join().expect("current daemon start thread");
+    classifier.join().expect("classification retry thread");
 
     assert!(
         wait_for_child_exit(&mut old.child, Duration::from_secs(10)).is_some(),
@@ -1043,31 +1112,8 @@ fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
     );
     let mut current_pty = current.connect();
     attach(&mut current_pty, "stable-pty");
-    current_pty.send(&Cmd::Input {
-        session_id: "stable-pty".to_string(),
-        data: b"fenced-before-classification\n".to_vec(),
-    });
-    loop {
-        match current_pty.recv() {
-            Evt::Error {
-                code: Some(ErrorCode::InputUnauthorized),
-                ..
-            } => break,
-            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
-            other => panic!("legacy handoff input was not fenced: {other:?}"),
-        }
-    }
-    current_pty.send(&Cmd::ClassifyInput {
-        session_id: "stable-pty".to_string(),
-        operator_input_only: false,
-    });
-    loop {
-        match current_pty.recv() {
-            Evt::Ok => break,
-            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
-            other => panic!("legacy handoff classification failed: {other:?}"),
-        }
-    }
+    // Server-style classification began against shipped v2, retried only
+    // after v3 was published, and unfenced this ordinary inherited PTY.
     send_input_and_wait_for_echo(&mut current_pty, "stable-pty", b"after\n", "after");
     assert_agent_steers_after_handoff(&current, "stable-agent");
     assert_daemon_log_contains(&dir, "selected legacy-v2 mode");

@@ -102,6 +102,25 @@ pub(super) async fn send_command_expect_ack(
     .await
 }
 
+pub(super) async fn send_command_expect_ack_bounded(
+    state: &DaemonState,
+    json: &str,
+    timeout: std::time::Duration,
+) -> Result<(), DaemonCommandError> {
+    match tokio::time::timeout(timeout, send_command_expect_ack(state, json)).await {
+        Ok(result) => result,
+        Err(_) => {
+            // `read_event` may have consumed part of an acknowledgement before
+            // cancellation. Retire the entire stream so no later command can
+            // observe that acknowledgement as its own.
+            clear_daemon_client(state).await;
+            Err(DaemonCommandError::from(
+                "daemon command acknowledgement timed out".to_string(),
+            ))
+        }
+    }
+}
+
 pub(super) async fn send_command_expect_session_created(
     state: &DaemonState,
     json: &str,
@@ -128,7 +147,10 @@ pub(super) fn require_option_mut<'a, T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{require_option_mut, send_command_with_successor_retry, DaemonState};
+    use super::{
+        require_option_mut, send_command_expect_ack_bounded, send_command_with_successor_retry,
+        DaemonState,
+    };
     use crate::commands::daemon::protocol::{parse_ack, parse_session_created};
     use crate::daemon_client::DaemonClient;
     use std::sync::Arc;
@@ -262,6 +284,62 @@ mod tests {
             state.lock().await.is_none(),
             "the twice-refusing successor connection must be discarded"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn timed_out_ack_retires_stream_before_the_next_command() {
+        let dir = std::path::PathBuf::from("/tmp").join(format!(
+            "kd-slow-ack-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old_socket = dir.join("old.sock");
+        let new_socket = dir.join("new.sock");
+        let old_listener = UnixListener::bind(&old_socket).unwrap();
+        let new_listener = UnixListener::bind(&new_socket).unwrap();
+
+        let old_server = tokio::spawn(async move {
+            let (stream, _) = old_listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(read).read_line(&mut line).await.unwrap();
+            write.write_all(b"{\"type\":").await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let _ = write.write_all(b"\"Ok\"}\n").await;
+            line
+        });
+        let new_server = tokio::spawn(async move {
+            let (stream, _) = new_listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(read).read_line(&mut line).await.unwrap();
+            write.write_all(b"{\"type\":\"Ok\"}\n").await.unwrap();
+            line
+        });
+
+        let old_client = DaemonClient::connect(&old_socket).await.unwrap();
+        let state: DaemonState = Arc::new(Mutex::new(Some(old_client)));
+        let first = r#"{"type":"OperatorInput","data":[97]}"#;
+        let error =
+            send_command_expect_ack_bounded(&state, first, std::time::Duration::from_millis(20))
+                .await
+                .expect_err("the partial acknowledgement must time out");
+        assert!(error.message.contains("timed out"));
+        assert!(state.lock().await.is_none());
+
+        *state.lock().await = Some(DaemonClient::connect(&new_socket).await.unwrap());
+        let second = r#"{"type":"Resize","cols":90}"#;
+        send_command_expect_ack_bounded(&state, second, std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        assert_eq!(old_server.await.unwrap(), format!("{first}\n"));
+        assert_eq!(new_server.await.unwrap(), format!("{second}\n"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
