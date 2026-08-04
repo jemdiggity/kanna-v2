@@ -9,16 +9,21 @@ import { MOBILE_E2E_IDS } from "./e2eTestIds";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
+
 const harness = vi.hoisted(() => ({
   appStateListener: null as ((state: string) => void) | null,
+  addMobileCrashBreadcrumb: vi.fn(),
   checkAndFetchUpdate: vi.fn().mockResolvedValue({ state: "up-to-date" }),
+  captureMobileCrashDiagnostic: vi.fn(() => ({ id: "diagnostic-test" })),
   currentAppState: "background",
   currentModel: null as AppModel | null,
   quickReplyPreferences: {
     load: vi.fn(),
     save: vi.fn()
   },
-  reloadToApplyUpdate: vi.fn().mockResolvedValue(undefined)
+  reloadToApplyUpdate: vi.fn().mockResolvedValue(undefined),
+  updateMobileCrashContext: vi.fn()
 }));
 
 vi.mock("react-native", async () => {
@@ -69,6 +74,14 @@ vi.mock("./lib/updates/otaUpdates", () => ({
   reloadToApplyUpdate: (...args: unknown[]) => harness.reloadToApplyUpdate(...args)
 }));
 
+vi.mock("./lib/diagnostics/mobileCrashDiagnostics", () => ({
+  addMobileCrashBreadcrumb: harness.addMobileCrashBreadcrumb,
+  captureMobileCrashDiagnostic: harness.captureMobileCrashDiagnostic,
+  formatMobileCrashDiagnostics: (diagnostics: unknown) =>
+    JSON.stringify(diagnostics),
+  updateMobileCrashContext: harness.updateMobileCrashContext
+}));
+
 vi.mock("./state/taskQuickReplyPreferences", () => ({
   createDefaultTaskQuickReplyPreferences: vi.fn(async () =>
     harness.quickReplyPreferences
@@ -108,6 +121,7 @@ let mounted: ReactTestRenderer | null = null;
 beforeEach(() => {
   vi.stubGlobal("__DEV__", false);
   harness.appStateListener = null;
+  harness.addMobileCrashBreadcrumb.mockReset();
   harness.checkAndFetchUpdate.mockReset().mockResolvedValue({ state: "up-to-date" });
   harness.currentAppState = "background";
   harness.currentModel = null;
@@ -118,6 +132,7 @@ beforeEach(() => {
     async (replies: Array<{ id: string; text: string }>) => replies
   );
   harness.reloadToApplyUpdate.mockReset().mockResolvedValue(undefined);
+  harness.updateMobileCrashContext.mockReset();
 });
 
 afterEach(async () => {
@@ -449,6 +464,18 @@ describe("App component wiring", () => {
       });
 
       expect(refresh).toHaveBeenCalledOnce();
+      expect(harness.addMobileCrashBreadcrumb).toHaveBeenCalledWith(
+        "app-state",
+        "background->active action=refresh"
+      );
+      expect(harness.updateMobileCrashContext).toHaveBeenCalledWith(
+        expect.objectContaining({
+          appState: "background",
+          connectionState,
+          forceCloudEnabled: false,
+          terminalOutputChars: 0
+        })
+      );
     }
   );
 

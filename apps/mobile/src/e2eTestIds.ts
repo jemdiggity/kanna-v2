@@ -127,6 +127,9 @@ export const MOBILE_E2E_IDS = {
   buildInfoRunningSource: "mobile.build-info.running-source",
   buildInfoUpdateId: "mobile.build-info.update-id",
   buildInfoCopyHint: "mobile.build-info.copy-hint",
+  crashDiagnostics: "mobile.crash-diagnostics",
+  crashDiagnosticsCopy: "mobile.crash-diagnostics.copy",
+  crashDiagnosticsClear: "mobile.crash-diagnostics.clear",
   toolbarTab(tabName: string): string {
     return `mobile.toolbar.tab.${tabName}`;
   },
