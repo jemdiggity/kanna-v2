@@ -109,6 +109,14 @@ describe("QA pipeline assets", () => {
     expect(agent.agent_provider?.[0]).toBe("codex");
     expect(agent.prompt).toContain("kanna_wait_events");
     expect(agent.prompt).toContain("kanna_set_task_notify");
+    expect(agent.prompt).toContain(
+      "Product work, bug fixes, investigations, releases, and other durable repository tasks"
+    );
+    expect(agent.prompt).toContain('"notify_task_id": "$KANNA_TASK_ID"');
+    expect(agent.prompt).toContain("Do not set `parent_task_id`");
+    expect(agent.prompt).toContain("the long-running manager is never a parent/owner bucket");
+    expect(agent.prompt).toContain('"parent_task_id": "<durable-work-item-id>"');
+    expect(agent.prompt).toContain("purpose-built child workflows");
     expect(agent.prompt).toContain("latestRun");
     expect(agent.prompt).toContain(
       "short human-readable name or purpose followed by its id in parentheses"
@@ -116,6 +124,14 @@ describe("QA pipeline assets", () => {
     expect(agent.prompt).toContain("Never make a human decode a bare task id");
     expect(task).toContain("name: Kanna Task Manager");
     expect(task).toContain("agent: task-manager");
+  });
+
+  it("keeps genuine QA fan-out children parented to their dispatcher", () => {
+    const dispatcher = parseAgentDefinition(readRepoFile(".kanna/agents/qa-dispatcher/AGENT.md"));
+
+    expect(dispatcher.prompt).toContain('"parent_task_id": "$KANNA_TASK_ID"');
+    expect(dispatcher.prompt).toContain('"notify_task_id": "$KANNA_TASK_ID"');
+    expect(dispatcher.prompt).toContain("Create all children before waiting");
   });
 
   it("keeps the pipeline provider schema aligned with the generated registry", () => {
