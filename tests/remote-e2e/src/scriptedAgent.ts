@@ -1,6 +1,7 @@
 import { chmod, writeFile } from "node:fs/promises";
 
 export interface ScriptedAgentOptions {
+  redactInput?: boolean;
   snapshotHistory?: {
     sentinel: string;
   };
@@ -18,6 +19,9 @@ export async function writeScriptedAgentBinary(
 }
 
 export function scriptedAgentSource(options: ScriptedAgentOptions = {}): string {
+  const inputReport = options.redactInput
+    ? "printf 'SCRIPT_REDACTED_INPUT\\n'"
+    : "printf 'SCRIPT_INPUT:%s\\n' \"$line\"";
   const snapshotHistorySentinel =
     options.snapshotHistory?.sentinel ?? SCRIPTED_AGENT_SNAPSHOT_HISTORY_SENTINEL;
   const snapshotHistoryTrigger = options.snapshotHistory
@@ -73,6 +77,7 @@ cleanup() {
 # on option 2, but typing 1 must highlight option 1 before the separately sent
 # Enter submits that highlighted option.
 printf 'SCRIPT_MENU_CURSOR:2\\n'
+printf 'SCRIPT_INPUT_READY\\n'
 line=""
 menu_choice=""
 carriage_return=$(printf '\\r')
@@ -93,7 +98,7 @@ while :; do
       continue
     fi
 
-    printf 'SCRIPT_INPUT:%s\\n' "$line"
+    ${inputReport}
     case "$line" in
       *exit-zero*)
         printf 'SCRIPT_EXITING\\n'
