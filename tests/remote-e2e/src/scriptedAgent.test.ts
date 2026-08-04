@@ -100,6 +100,8 @@ describe("scripted remote E2E agent", () => {
     expect(source).toContain("SCRIPT_INPUT:%s");
     expect(source).toContain("*exit-zero*)");
     expect(source).toContain("*exit-one*)");
+    expect(source).toContain("*burst-output*)");
+    expect(source).toContain("burst_line -le 2000");
     expect(source).toContain("wait \"$heartbeat_pid\"");
   });
 

@@ -47,7 +47,7 @@ export function planTerminalMutation({
   const nextEnd = nextStart + nextOutput.length;
 
   if (previousEnd === nextEnd) {
-    if (!nextOutput.trim() && nextStatus !== previousStatus) {
+    if (nextOutput.length === 0 && nextStatus !== previousStatus) {
       return {
         kind: "replace",
         output: nextOutput,
@@ -58,7 +58,7 @@ export function planTerminalMutation({
     return { kind: "none" };
   }
 
-  if (!previousOutput.trim()) {
+  if (previousOutput.length === 0) {
     return {
       kind: "replace",
       output: nextOutput,

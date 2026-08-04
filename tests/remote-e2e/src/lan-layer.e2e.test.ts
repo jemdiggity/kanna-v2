@@ -137,7 +137,7 @@ describe("LAN task loop E2E", () => {
     }
   }, 45_000);
 
-  it("retains authoritative no-echo input output across a mobile terminal remount", async () => {
+  it("retains authoritative no-echo input and a live PTY burst across a mobile terminal remount", async () => {
     const task = await createScriptedTask(harness, {
       displayName: "Mobile retained terminal input task",
       redactInput: true
@@ -160,6 +160,15 @@ describe("LAN task loop E2E", () => {
       );
       expect(connectedOutput).not.toContain(submittedInput);
       expect(connectedOutput).not.toContain("composed password");
+
+      await controller.sendTaskInput(task.taskId, "burst-output");
+      const burstOutput = await waitForStoreTerminalOutput(
+        store,
+        "SCRIPT_BURST_DONE",
+        30_000
+      );
+      expect(burstOutput).toContain("SCRIPT_BURST_0001_");
+      expect(burstOutput).toContain("SCRIPT_BURST_2000_");
 
       const connectedEpoch = store.getState().taskTerminalOutputEpoch;
       controller.closeTask(task.taskId);

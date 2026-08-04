@@ -38,20 +38,27 @@ const MAX_TERMINAL_LIVE_OUTPUT_CHARS = 1_000_000;
 interface CappedTerminalOutput {
   output: string;
   droppedChars: number;
+  snapshotEnd: number;
 }
 
-function capTerminalOutput(output: string): CappedTerminalOutput {
-  const snapshotEnd = output.indexOf("\n") + 1;
+function capTerminalOutput(
+  output: string,
+  knownSnapshotEnd: number | null = null
+): CappedTerminalOutput {
+  const snapshotEnd = knownSnapshotEnd ?? output.indexOf("\n") + 1;
   if (snapshotEnd === 0) {
-    return { output, droppedChars: 0 };
+    return { output, droppedChars: 0, snapshotEnd };
   }
 
+  const liveOutputLength = output.length - snapshotEnd;
+  if (liveOutputLength <= MAX_TERMINAL_LIVE_OUTPUT_CHARS) {
+    return { output, droppedChars: 0, snapshotEnd };
+  }
+
+  // Only allocate a live-output substring when eviction is actually needed.
+  // The common append path stays O(new frame) until it reaches the cap.
   const liveOutput = output.slice(snapshotEnd);
-  if (liveOutput.length <= MAX_TERMINAL_LIVE_OUTPUT_CHARS) {
-    return { output, droppedChars: 0 };
-  }
-
-  const cut = liveOutput.length - MAX_TERMINAL_LIVE_OUTPUT_CHARS;
+  const cut = liveOutputLength - MAX_TERMINAL_LIVE_OUTPUT_CHARS;
   let retainedLiveStart: number;
   if (cut === 0 || liveOutput[cut - 1] === "\n") {
     retainedLiveStart = cut;
@@ -68,7 +75,8 @@ function capTerminalOutput(output: string): CappedTerminalOutput {
 
   return {
     output: `${output.slice(0, snapshotEnd)}${liveOutput.slice(retainedLiveStart)}`,
-    droppedChars: retainedLiveStart
+    droppedChars: retainedLiveStart,
+    snapshotEnd
   };
 }
 
@@ -322,6 +330,10 @@ export interface SessionStore {
 }
 
 export function createSessionStore(): SessionStore {
+  // The snapshot is the first newline-delimited frame. Remember its boundary
+  // for the active terminal so each live frame does not rescan the cumulative
+  // retained stream to find the same newline.
+  let terminalSnapshotEnd: number | null = null;
   let state: SessionState = {
     mobileDeviceId: null,
     connectionMode: null,
@@ -1179,6 +1191,7 @@ export function createSessionStore(): SessionStore {
     },
     beginTaskTerminal(taskId, initialOutput) {
       const capped = capTerminalOutput(initialOutput);
+      terminalSnapshotEnd = capped.snapshotEnd || null;
       state = {
         ...state,
         taskTerminalTaskId: taskId,
@@ -1198,7 +1211,11 @@ export function createSessionStore(): SessionStore {
       }
 
       const snapshotOutput = dataB64 ? `${dataB64}\n` : "";
-      const capped = capTerminalOutput(snapshotOutput);
+      const capped = capTerminalOutput(
+        snapshotOutput,
+        snapshotOutput.length || null
+      );
+      terminalSnapshotEnd = capped.snapshotEnd || null;
       state = {
         ...state,
         taskTerminalStatus: "live",
@@ -1217,7 +1234,8 @@ export function createSessionStore(): SessionStore {
       }
 
       const nextOutput = `${state.taskTerminalOutput}${chunk}`;
-      const capped = capTerminalOutput(nextOutput);
+      const capped = capTerminalOutput(nextOutput, terminalSnapshotEnd);
+      terminalSnapshotEnd = capped.snapshotEnd || null;
       state = {
         ...state,
         taskTerminalStatus: "live",
@@ -1465,6 +1483,7 @@ export function createSessionStore(): SessionStore {
         return;
       }
 
+      terminalSnapshotEnd = null;
       state = {
         ...state,
         selectedTaskId: null,
@@ -1489,6 +1508,7 @@ export function createSessionStore(): SessionStore {
       publish();
     },
     clearTaskTerminal() {
+      terminalSnapshotEnd = null;
       state = {
         ...state,
         taskTerminalTaskId: null,

@@ -1162,6 +1162,42 @@ describe("TerminalWebView", () => {
     );
   });
 
+  it("does not split retained history again for a steady-state append", async () => {
+    const initialOutput = `${Buffer.from("scrollback row\r\n".repeat(20_000)).toString("base64")}\n`;
+    const liveFrame = `${Buffer.from("one live frame\r\n").toString("base64")}\n`;
+    const updatedOutput = `${initialOutput}${liveFrame}`;
+    const initialWebView = await renderTerminalWebView({
+      output: initialOutput,
+      outputEpoch: 7
+    });
+    (initialWebView.props.onLoadStart as () => void)();
+    runEffects();
+    (initialWebView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: { data: JSON.stringify({ type: "terminal-ready" }) }
+    } as WebViewMessageEvent);
+    injectedScripts.length = 0;
+
+    const splitSpy = vi.spyOn(String.prototype, "split");
+    const trimSpy = vi.spyOn(String.prototype, "trim");
+    await renderTerminalWebView({
+      output: updatedOutput,
+      outputEpoch: 7
+    });
+    runEffects();
+
+    const splitInputs = splitSpy.mock.contexts.map((value) => String(value));
+    const trimInputs = trimSpy.mock.contexts.map((value) => String(value));
+    splitSpy.mockRestore();
+    trimSpy.mockRestore();
+    expect(splitInputs).toContain(liveFrame);
+    expect(splitInputs).not.toContain(updatedOutput);
+    expect(trimInputs).not.toContain(initialOutput);
+    expect(injectedScripts).toContain(buildTerminalAppendScript(liveFrame));
+    expect(
+      injectedScripts.some((script) => script.includes("__replaceTerminalState"))
+    ).toBe(false);
+  });
+
   it("replaces terminal state once when a new snapshot epoch arrives", async () => {
     const initialWebView = await renderTerminalWebView({
       output: "old\n",

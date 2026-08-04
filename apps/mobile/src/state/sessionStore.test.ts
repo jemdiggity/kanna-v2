@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createSessionStore } from "./sessionStore";
 import { buildCreatingTaskUiSlot } from "./taskUiSlots";
 
@@ -941,6 +941,24 @@ describe("createSessionStore", () => {
     expect(frames).toEqual([snapshotFrame, liveFrame]);
     expect(decoded).toContain("snapshot scrollback row");
     expect(decoded).toContain("LIVE-APPEND-CORRECT");
+  });
+
+  it("does not rescan the snapshot boundary for every live frame", () => {
+    const store = createSessionStore();
+    const snapshotFrame = "A".repeat(750_000);
+    const liveFrame = "bGl2ZQ==\n";
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", snapshotFrame, 132, 43);
+
+    const indexOfSpy = vi.spyOn(String.prototype, "indexOf");
+    store.appendTaskTerminal("task-1", liveFrame);
+
+    const scannedInputs = indexOfSpy.mock.contexts.map((value) => String(value));
+    indexOfSpy.mockRestore();
+    expect(scannedInputs).not.toContain(`${snapshotFrame}\n${liveFrame}`);
+    expect(store.getState().taskTerminalOutput).toBe(
+      `${snapshotFrame}\n${liveFrame}`
+    );
   });
 
   it("does not publish when repo tasks are refreshed with identical data", () => {

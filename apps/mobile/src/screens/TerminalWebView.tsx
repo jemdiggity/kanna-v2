@@ -65,7 +65,13 @@ interface TerminalWebViewHandle {
   injectJavaScript(script: string): void;
 }
 
-type PendingScriptKind = "terminal-state" | "resize" | "bottom-inset";
+type PendingScriptKind = "resize" | "bottom-inset";
+
+interface PendingTerminalState {
+  contentRevision: number;
+  output: string;
+  status: TaskTerminalStatus;
+}
 
 interface TerminalInspection {
   byteCount: number;
@@ -99,6 +105,7 @@ export function TerminalWebView({
   const webViewRef = useRef<TerminalWebViewHandle>(null);
   const bridgeReadyRef = useRef(false);
   const pendingScriptsRef = useRef<string[]>([]);
+  const pendingTerminalStateRef = useRef<PendingTerminalState | null>(null);
   const previousTaskIdRef = useRef<string | null>(null);
   const previousOutputRef = useRef("");
   const previousOutputEpochRef = useRef(0);
@@ -108,6 +115,16 @@ export function TerminalWebView({
   activeTaskIdRef.current = taskId;
   const activeOutputEpochRef = useRef(outputEpoch);
   activeOutputEpochRef.current = outputEpoch;
+  const latestTerminalStateRef = useRef<PendingTerminalState>({
+    contentRevision: outputEpoch,
+    output,
+    status
+  });
+  latestTerminalStateRef.current = {
+    contentRevision: outputEpoch,
+    output,
+    status
+  };
   const selectionContextRef = useRef({ copyPending: false, version: 0 });
   const [renderedOutputEpoch, setRenderedOutputEpoch] = useState<number | null>(
     null
@@ -133,15 +150,6 @@ export function TerminalWebView({
       }),
     [fullscreen]
   );
-  const replaceScript = useMemo(
-    () =>
-      buildTerminalReplaceScript({
-        contentRevision: outputEpoch,
-        output,
-        status
-      }),
-    [output, outputEpoch, status]
-  );
   const bottomInsetScript = useMemo(
     () => buildTerminalBottomInsetScript(resolvedBottomInset),
     [resolvedBottomInset]
@@ -156,7 +164,9 @@ export function TerminalWebView({
     cols,
     rows,
     bridgeReady: bridgeReadyRef.current,
-    pendingScriptCount: pendingScriptsRef.current.length,
+    pendingScriptCount:
+      pendingScriptsRef.current.length +
+      (pendingTerminalStateRef.current ? 1 : 0),
     renderedOutputEpoch,
     contentReady:
       status === "live" && renderedOutputEpoch === activeOutputEpochRef.current
@@ -164,7 +174,7 @@ export function TerminalWebView({
 
   const injectOrQueueScript = (
     script: string,
-    kind: PendingScriptKind = "terminal-state"
+    kind: PendingScriptKind
   ) => {
     if (!bridgeReadyRef.current) {
       if (kind === "resize") {
@@ -189,25 +199,37 @@ export function TerminalWebView({
           script,
           ...remainingScripts
         ];
-      } else {
-        // Before the bridge is ready, the current replace script already
-        // contains the authoritative snapshot plus every live frame received
-        // so far. Coalesce duplicate initial effects and pre-ready appends to
-        // that latest full state so one epoch cannot acknowledge an earlier
-        // queued copy while another copy is still applying.
-        pendingScriptsRef.current = [
-          ...pendingScriptsRef.current.filter(
-            (pendingScript) =>
-              !pendingScript.includes("__replaceTerminalState") &&
-              !pendingScript.includes("__appendTerminalChunk")
-          ),
-          replaceScript
-        ];
       }
       return;
     }
 
     webViewRef.current?.injectJavaScript(script);
+  };
+
+  const queueTerminalState = () => {
+    // Keep the authoritative state as raw data until xterm is ready. Building
+    // an injected replacement splits and serializes the full retained stream,
+    // so doing that for every pre-ready frame creates discarded O(history)
+    // work. The ready message consumes exactly the latest state once.
+    pendingTerminalStateRef.current = latestTerminalStateRef.current;
+  };
+
+  const replaceTerminalState = (terminalState: PendingTerminalState) => {
+    if (!bridgeReadyRef.current) {
+      queueTerminalState();
+      return;
+    }
+    webViewRef.current?.injectJavaScript(
+      buildTerminalReplaceScript(terminalState)
+    );
+  };
+
+  const appendTerminalChunk = (chunk: string) => {
+    if (!bridgeReadyRef.current) {
+      queueTerminalState();
+      return;
+    }
+    webViewRef.current?.injectJavaScript(buildTerminalAppendScript(chunk));
   };
 
   useEffect(() => {
@@ -225,7 +247,7 @@ export function TerminalWebView({
       previousOutputEpochRef.current = outputEpoch;
       previousOutputStartRef.current = outputStart;
       previousStatusRef.current = status;
-      injectOrQueueScript(replaceScript);
+      replaceTerminalState(latestTerminalStateRef.current);
       return;
     }
 
@@ -247,16 +269,14 @@ export function TerminalWebView({
 
     switch (mutation.kind) {
       case "append":
-        injectOrQueueScript(buildTerminalAppendScript(mutation.chunk));
+        appendTerminalChunk(mutation.chunk);
         break;
       case "replace":
-        injectOrQueueScript(
-          buildTerminalReplaceScript({
-            contentRevision: outputEpoch,
-            output: mutation.output,
-            status: mutation.status
-          })
-        );
+        replaceTerminalState({
+          contentRevision: outputEpoch,
+          output: mutation.output,
+          status: mutation.status
+        });
         break;
       case "none":
       default:
@@ -267,7 +287,6 @@ export function TerminalWebView({
     output,
     outputEpoch,
     outputStart,
-    replaceScript,
     status,
     taskId
   ]);
@@ -395,13 +414,18 @@ export function TerminalWebView({
         ? pendingScriptsRef.current
         : [
             ...(cols && rows ? [buildTerminalResizeScript(cols, rows)] : []),
-            bottomInsetScript,
-            replaceScript
+            bottomInsetScript
           ];
     pendingScriptsRef.current = [];
     for (const script of pending) {
       webViewRef.current?.injectJavaScript(script);
     }
+    const terminalState =
+      pendingTerminalStateRef.current ?? latestTerminalStateRef.current;
+    pendingTerminalStateRef.current = null;
+    webViewRef.current?.injectJavaScript(
+      buildTerminalReplaceScript(terminalState)
+    );
   };
 
   const isTerminalContentReady =
@@ -511,9 +535,9 @@ export function TerminalWebView({
           setSelectionCopyPending(false);
           pendingScriptsRef.current = [
             ...(cols && rows ? [buildTerminalResizeScript(cols, rows)] : []),
-            bottomInsetScript,
-            replaceScript
+            bottomInsetScript
           ];
+          pendingTerminalStateRef.current = latestTerminalStateRef.current;
         }}
         onError={(event) => {
           captureMobileCrashDiagnostic({
