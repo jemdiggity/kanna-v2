@@ -229,6 +229,32 @@ describe("MobileCrashDiagnosticRecorder", () => {
     expect(formatted).toContain("safe=1");
   });
 
+  it("redacts URL credentials whose delimiter lies beyond the truncation cap", async () => {
+    const { recorder, storage } = createRecorder();
+    const partialCredential = `boundary-credential:${"p".repeat(4_100)}`;
+    const unsafeUrl = `https://${partialCredential}@example.test/path`;
+
+    recorder.capture({
+      kind: "javascript-error",
+      message: unsafeUrl
+    });
+
+    const records = await recorder.read();
+    const persisted = storage.setItem.mock.calls.at(-1)?.[1] ?? "";
+    const formatted = formatMobileCrashDiagnostics([
+      {
+        ...records[0],
+        message: unsafeUrl
+      }
+    ]);
+
+    for (const output of [persisted, formatted]) {
+      expect(output).toContain("https://[REDACTED]");
+      expect(output).not.toContain("boundary-credential");
+      expect(output).not.toContain("p".repeat(100));
+    }
+  });
+
   it("recovers from malformed retained data and supports clearing", async () => {
     const storage = createStorage("not-json");
     const { recorder } = createRecorder(storage);
@@ -386,6 +412,57 @@ describe("installMobileCrashHandler", () => {
     );
   });
 
+  it("bounds a nonfatal error burst while storage is stalled", async () => {
+    let storedValue: string | null = null;
+    let releaseFirstRead: (() => void) | null = null;
+    const firstRead = new Promise<void>((resolve) => {
+      releaseFirstRead = resolve;
+    });
+    let readCount = 0;
+    const storage = {
+      getItem: vi.fn(async () => {
+        readCount += 1;
+        if (readCount === 1) await firstRead;
+        return storedValue;
+      }),
+      removeItem: vi.fn(async () => undefined),
+      setItem: vi.fn(async (_key: string, value: string) => {
+        storedValue = value;
+      })
+    };
+    const { recorder } = createRecorder(storage);
+    const previousHandler = vi.fn();
+    let installedHandler: ((error: unknown, isFatal?: boolean) => void) | null =
+      null;
+    diagnosticGlobal.ErrorUtils = {
+      getGlobalHandler: () => previousHandler,
+      setGlobalHandler: (handler) => {
+        installedHandler = handler;
+      }
+    };
+    installMobileCrashHandler(recorder.captureWithPersistence.bind(recorder));
+
+    for (let index = 0; index < 100; index += 1) {
+      installedHandler?.(new Error(`nonfatal failure ${index}`), false);
+    }
+
+    expect(previousHandler).toHaveBeenCalledTimes(100);
+    expect(storage.getItem).toHaveBeenCalledTimes(1);
+    expect(storage.setItem).not.toHaveBeenCalled();
+
+    releaseFirstRead?.();
+    const records = await recorder.read();
+
+    expect(storage.setItem).toHaveBeenCalledTimes(2);
+    expect(records.map((record) => record.message)).toEqual([
+      "Error: nonfatal failure 99",
+      "Error: nonfatal failure 98",
+      "Error: nonfatal failure 97",
+      "Error: nonfatal failure 96",
+      "Error: nonfatal failure 95"
+    ]);
+  });
+
   it("delegates after a fatal persistence failure", async () => {
     const storage = createStorage();
     storage.setItem.mockRejectedValue(new Error("disk unavailable"));
@@ -509,7 +586,8 @@ describe("installMobileCrashHandler", () => {
     };
     installMobileCrashHandler(() => ({
       diagnostic,
-      persistence
+      persistence,
+      releasePersistenceTracking: () => undefined
     }));
 
     installedHandler?.(new Error("fatal stalled storage"), true);

@@ -71,6 +71,8 @@ export interface MobileCrashDiagnosticInput {
 export interface MobileCrashDiagnosticCapture {
   diagnostic: MobileCrashDiagnostic;
   persistence: Promise<void>;
+  /** Stop record-specific waiting while leaving the record coalesced for storage. */
+  releasePersistenceTracking(): void;
 }
 
 interface DiagnosticStorage {
@@ -87,6 +89,7 @@ interface DiagnosticEnvironment {
 
 interface PendingDiagnostic {
   diagnostic: MobileCrashDiagnostic;
+  persistenceDeadline?: ReturnType<typeof setTimeout>;
   rejectPersistence?: (reason: unknown) => void;
   resolvePersistence?: () => void;
 }
@@ -221,16 +224,67 @@ export class MobileCrashDiagnosticRecorder {
       ...(resolvePersistence ? { resolvePersistence } : {}),
       ...(rejectPersistence ? { rejectPersistence } : {})
     };
-    let untrackedCount = 0;
-    this.pendingDiagnostics = [pending, ...this.pendingDiagnostics].filter(
-      (entry) => {
-        if (entry.resolvePersistence) return true;
-        untrackedCount += 1;
-        return untrackedCount <= MAX_DIAGNOSTICS;
-      }
-    );
+    if (resolvePersistence) {
+      pending.persistenceDeadline = setTimeout(() => {
+        this.rejectTrackedPersistence(
+          pending,
+          new Error("Mobile crash diagnostic persistence timed out.")
+        );
+        this.trimPendingDiagnostics();
+      }, GLOBAL_HANDLER_PERSISTENCE_DEADLINE_MS);
+    }
+    this.pendingDiagnostics.unshift(pending);
+    this.trimPendingDiagnostics();
     this.startPersistence();
-    return { diagnostic, persistence };
+    return {
+      diagnostic,
+      persistence,
+      releasePersistenceTracking: () => {
+        this.resolveTrackedPersistence(pending);
+        this.trimPendingDiagnostics();
+      }
+    };
+  }
+
+  private trimPendingDiagnostics(): void {
+    let trackedCount = 0;
+    let untrackedCount = 0;
+    this.pendingDiagnostics = this.pendingDiagnostics.filter((entry) => {
+      if (entry.resolvePersistence) {
+        trackedCount += 1;
+        if (trackedCount <= MAX_DIAGNOSTICS) return true;
+        this.rejectTrackedPersistence(
+          entry,
+          new Error("Mobile crash diagnostic persistence backlog exceeded.")
+        );
+        return false;
+      }
+      untrackedCount += 1;
+      return untrackedCount <= MAX_DIAGNOSTICS;
+    });
+  }
+
+  private rejectTrackedPersistence(
+    entry: PendingDiagnostic,
+    reason: Error
+  ): void {
+    const reject = entry.rejectPersistence;
+    if (!reject) return;
+    if (entry.persistenceDeadline) clearTimeout(entry.persistenceDeadline);
+    delete entry.persistenceDeadline;
+    delete entry.rejectPersistence;
+    delete entry.resolvePersistence;
+    reject(reason);
+  }
+
+  private resolveTrackedPersistence(entry: PendingDiagnostic): void {
+    const resolve = entry.resolvePersistence;
+    if (!resolve) return;
+    if (entry.persistenceDeadline) clearTimeout(entry.persistenceDeadline);
+    delete entry.persistenceDeadline;
+    delete entry.rejectPersistence;
+    delete entry.resolvePersistence;
+    resolve();
   }
 
   async read(): Promise<MobileCrashDiagnostic[]> {
@@ -297,9 +351,14 @@ export class MobileCrashDiagnosticRecorder {
             )
           )
         );
-        for (const entry of batch) entry.resolvePersistence?.();
+        for (const entry of batch) this.resolveTrackedPersistence(entry);
       } catch (error: unknown) {
-        for (const entry of batch) entry.rejectPersistence?.(error);
+        for (const entry of batch) {
+          this.rejectTrackedPersistence(
+            entry,
+            error instanceof Error ? error : new Error(String(error))
+          );
+        }
         throw error;
       }
     }
@@ -417,6 +476,11 @@ export function installMobileCrashHandler(
         message: normalized.message,
         stack: normalized.stack
       });
+      if (isFatal !== true) {
+        attempt.releasePersistenceTracking();
+        delegate();
+        return;
+      }
       let pendingDelegate: (() => void) | null = delegate;
       const finishDelegation = () => {
         const currentDelegate = pendingDelegate;
@@ -513,7 +577,19 @@ function redactMobileCrashDiagnostic(
 }
 
 function redactAndTruncate(value: string, length: number): string {
-  return truncate(redactSensitiveText(truncate(value, length)), length);
+  const truncated = truncate(value, length);
+  const boundarySafe =
+    value.length > length
+      ? redactUnterminatedUrlAuthority(truncated)
+      : truncated;
+  return truncate(redactSensitiveText(boundarySafe), length);
+}
+
+function redactUnterminatedUrlAuthority(value: string): string {
+  return value.replace(
+    /(\bhttps?:\/\/)[^/\s?#@]*…$/gi,
+    `$1${REDACTED_VALUE}…`
+  );
 }
 
 function redactSensitiveText(value: string): string {
