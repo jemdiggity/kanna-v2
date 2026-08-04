@@ -69,6 +69,8 @@ export const selectors = {
   accountSignInButton: `~${MOBILE_E2E_IDS.accountSignInButton}`,
   accountSignOutButton: `~${MOBILE_E2E_IDS.accountSignOutButton}`,
   moreScreen: `~${MOBILE_E2E_IDS.moreScreen}`,
+  moreHeading: `~${MOBILE_E2E_IDS.moreHeading}`,
+  moreSearchInput: `~${MOBILE_E2E_IDS.moreSearchInput}`,
   buildInfoToggle: `~${MOBILE_E2E_IDS.buildInfoToggle}`,
   buildInfoDetails: `~${MOBILE_E2E_IDS.buildInfoDetails}`,
   buildInfoNative: `~${MOBILE_E2E_IDS.buildInfoNative}`,

@@ -15,6 +15,7 @@ interface TasksScreenProps {
   selectedRepoId: string | null;
   taskCollectionStatus: TaskCollectionStatus;
   taskSlots: TaskUiSlot[];
+  scrollViewRef?: React.RefObject<ScrollView | null>;
   onSelectRepo(repoId: string): void;
   onOpenTask(taskId: string): void;
 }
@@ -35,6 +36,7 @@ export function TasksScreen({
   selectedRepoId,
   taskCollectionStatus,
   taskSlots,
+  scrollViewRef,
   onSelectRepo,
   onOpenTask
 }: TasksScreenProps) {
@@ -59,6 +61,7 @@ export function TasksScreen({
 
   return (
     <ScrollView
+      ref={scrollViewRef}
       contentContainerStyle={styles.content}
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}

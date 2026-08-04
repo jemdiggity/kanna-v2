@@ -31,6 +31,7 @@ import {
   Text,
   View
 } from "react-native";
+import type { ScrollView as NativeScrollView } from "react-native";
 import { AccountBadge } from "../components/AccountBadge";
 import { CreateTaskComposer } from "../components/CreateTaskComposer";
 import { FloatingToolbar } from "../components/FloatingToolbar";
@@ -68,6 +69,7 @@ import {
   resolvePendingTaskCreationRoute,
   resolveTaskCleanupIdentity
 } from "./taskNavigation";
+import { useTabReselectionScrollToTop } from "./useTabReselectionScrollToTop";
 
 export type {
   RootNavigatorModel,
@@ -325,6 +327,7 @@ function NavigatorTabBar(props: BottomTabBarProps) {
 
 function TasksTabRoute() {
   const { controller, pushTask, state } = useNavigationContent();
+  const scrollViewRef = useTabReselectionScrollToTop();
   return (
     <StandardScreen title="Tasks">
       <TasksScreen
@@ -332,6 +335,7 @@ function TasksTabRoute() {
         selectedRepoId={state.selectedRepoId}
         taskCollectionStatus={state.taskCollectionStatus}
         taskSlots={projectTaskUiSlots(state.repoTasks, state.taskUiSlots)}
+        scrollViewRef={scrollViewRef}
         onSelectRepo={(repoId) => {
           void controller.selectRepo(repoId);
         }}
@@ -343,6 +347,7 @@ function TasksTabRoute() {
 
 function ActivityTabRoute() {
   const { controller, pushTask, state } = useNavigationContent();
+  const scrollViewRef = useTabReselectionScrollToTop();
   return (
     <StandardScreen title="Activity">
       <TasksScreen
@@ -351,6 +356,7 @@ function ActivityTabRoute() {
         selectedRepoId={state.selectedRepoId}
         taskCollectionStatus={state.taskCollectionStatus}
         taskSlots={projectTaskUiSlots(state.recentTasks, state.taskUiSlots)}
+        scrollViewRef={scrollViewRef}
         onSelectRepo={(repoId) => {
           void controller.selectRepo(repoId);
         }}
@@ -361,9 +367,10 @@ function ActivityTabRoute() {
 }
 
 function MoreTabRoute() {
+  const scrollViewRef = useTabReselectionScrollToTop();
   return (
     <StandardScreen title="More">
-      <MoreRouteContent />
+      <MoreRouteContent scrollViewRef={scrollViewRef} />
     </StandardScreen>
   );
 }
@@ -419,7 +426,11 @@ function DesktopsRoute({ navigation }: NativeStackScreenProps<RootStackParamList
   );
 }
 
-function MoreRouteContent() {
+function MoreRouteContent({
+  scrollViewRef
+}: {
+  scrollViewRef: React.RefObject<NativeScrollView | null>;
+}) {
   const { controller, pushPreparedTask, state } = useNavigationContent();
   const commandRepos = filterCommandAvailableRepos(
     state.repos,
@@ -445,6 +456,7 @@ function MoreRouteContent() {
       }}
       repos={commandRepos}
       runningCommandId={state.runningRepoCommandId}
+      scrollViewRef={scrollViewRef}
       selectedRepoId={state.selectedRepoId}
       status={state.repoCommandStatus}
     />

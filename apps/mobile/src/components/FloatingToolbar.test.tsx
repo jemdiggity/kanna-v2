@@ -107,6 +107,32 @@ describe("FloatingToolbar", () => {
     );
   });
 
+  it("emits the active tab press without recreating navigation state", async () => {
+    if (!FloatingToolbar) throw new Error("FloatingToolbar was not loaded");
+    const navigatorProps = createNavigatorProps(0);
+
+    await act(async () => {
+      rendered = create(
+        React.createElement(FloatingToolbar, {
+          ...navigatorProps,
+          onSelectUtilityAction: vi.fn()
+        } as never)
+      );
+    });
+
+    const tasks = rendered.root.find(
+      (node) => node.props.testID?.endsWith("tasks")
+    );
+    await act(async () => tasks.props.onPress());
+
+    expect(navigatorProps.navigation.emit).toHaveBeenCalledWith({
+      type: "tabPress",
+      target: "tasks",
+      canPreventDefault: true
+    });
+    expect(navigatorProps.navigation.navigate).not.toHaveBeenCalled();
+  });
+
   it("uses opaque dark surfaces for secondary floating chrome", async () => {
     if (!FloatingToolbar) throw new Error("FloatingToolbar was not loaded");
 

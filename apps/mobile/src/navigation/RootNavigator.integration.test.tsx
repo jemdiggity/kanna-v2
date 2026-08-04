@@ -23,6 +23,9 @@ import { buildInitialNavigationState } from "./navigationState";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const navigationHarness = vi.hoisted(() => ({
+  activeScrollToTopTarget: null as {
+    current: { scrollToTop(): void } | null;
+  } | null,
   onStateChange: null as ((state: unknown) => void) | null,
   applyStackAction: null as
     | ((action: {
@@ -30,7 +33,11 @@ const navigationHarness = vi.hoisted(() => ({
         name: string;
         params?: { taskId?: string };
       }) => void)
-    | null
+    | null,
+  scrollCalls: [] as Array<{
+    options: { animated: boolean; x: number; y: number };
+    testID: string | undefined;
+  }>
 }));
 
 const keyboardHarness = vi.hoisted(() => ({
@@ -66,7 +73,20 @@ vi.mock("react-native", () => ({
     dismiss: keyboardHarness.dismiss
   },
   Pressable: "Pressable",
-  ScrollView: "ScrollView",
+  ScrollView: React.forwardRef(function ScrollView(
+    props: { children?: React.ReactNode; testID?: string },
+    ref: React.ForwardedRef<{
+      scrollTo(options: { animated: boolean; x: number; y: number }): void;
+    }>
+  ) {
+    React.useImperativeHandle(ref, () => ({
+      scrollTo: (options) => {
+        navigationHarness.scrollCalls.push({ options, testID: props.testID });
+      }
+    }));
+    const { children, testID: _testID, ...hostProps } = props;
+    return React.createElement("ScrollView", hostProps, children);
+  }),
   StyleSheet: {
     create: <T extends Record<string, unknown>>(styles: T) => styles
   },
@@ -110,6 +130,18 @@ vi.mock("@react-navigation/native", async () => {
       ReactModule.useEffect(effect, [effect]);
     },
     useIsFocused: () => true,
+    useScrollToTop: (target: {
+      current: { scrollToTop(): void } | null;
+    }) => {
+      ReactModule.useEffect(() => {
+        navigationHarness.activeScrollToTopTarget = target;
+        return () => {
+          if (navigationHarness.activeScrollToTopTarget === target) {
+            navigationHarness.activeScrollToTopTarget = null;
+          }
+        };
+      }, [target]);
+    },
     useNavigationContainerRef: () => ReactModule.useRef({
       dispatch: vi.fn((action: {
         type: string;
@@ -210,7 +242,12 @@ vi.mock("@react-navigation/bottom-tabs", async () => {
           params: undefined
         }));
         const navigation = {
-          emit: vi.fn(() => ({ defaultPrevented: false })),
+          emit: vi.fn((event: { target: string }) => {
+            if (event.target === routes[activeIndex]?.key) {
+              navigationHarness.activeScrollToTopTarget?.current?.scrollToTop();
+            }
+            return { defaultPrevented: false };
+          }),
           navigate: (name: string) => {
             const nextIndex = routes.findIndex((route) => route.name === name);
             if (nextIndex < 0) return;
@@ -302,8 +339,163 @@ afterEach(async () => {
   controller?.dispose();
   controller = null;
   navigationHarness.onStateChange = null;
+  navigationHarness.activeScrollToTopTarget = null;
+  navigationHarness.scrollCalls = [];
   keyboardHarness.dismiss.mockReset();
   keyboardHarness.listeners.clear();
+});
+
+describe("RootNavigator tab reselection integration", () => {
+  it("routes only active-tab presses to every tab's outer scroll owner", async () => {
+    const store = createSessionStore();
+    controller = createMobileController(createClientMock(), store);
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+    });
+
+    const pressTab = async (tabName: "tasks" | "recent" | "more") => {
+      await act(async () => {
+        rendered!.root.find(
+          (node) =>
+            node.props.testID === MOBILE_E2E_IDS.toolbarTab(tabName)
+        ).props.onPress();
+        await flushMicrotasks();
+      });
+    };
+
+    await pressTab("tasks");
+    expect(navigationHarness.scrollCalls).toEqual([
+      {
+        options: { animated: true, x: 0, y: 0 },
+        testID: MOBILE_E2E_IDS.tasksScreen
+      }
+    ]);
+
+    await pressTab("recent");
+    expect(navigationHarness.scrollCalls).toHaveLength(1);
+    await pressTab("recent");
+    expect(navigationHarness.scrollCalls.at(-1)).toEqual({
+      options: { animated: true, x: 0, y: 0 },
+      testID: MOBILE_E2E_IDS.recentScreen
+    });
+
+    await pressTab("more");
+    expect(navigationHarness.scrollCalls).toHaveLength(2);
+    await pressTab("more");
+    expect(navigationHarness.scrollCalls.at(-1)).toEqual({
+      options: { animated: true, x: 0, y: 0 },
+      testID: MOBILE_E2E_IDS.moreScreen
+    });
+
+    const searchInput = rendered!.root.find(
+      (node) => node.props.testID === MOBILE_E2E_IDS.moreSearchInput
+    );
+    await act(async () => searchInput.props.onChangeText("preserved query"));
+    await pressTab("more");
+
+    expect(
+      rendered!.root.find(
+        (node) => node.props.testID === MOBILE_E2E_IDS.moreSearchInput
+      ).props.value
+    ).toBe("preserved query");
+    expect(keyboardHarness.dismiss).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps the Tasks scroll owner through long, loading, empty, and error states", async () => {
+    const store = createSessionStore();
+    controller = createMobileController(createClientMock(), store);
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+    });
+
+    const pressTasks = async () => {
+      await act(async () => {
+        rendered!.root.find(
+          (node) =>
+            node.props.testID === MOBILE_E2E_IDS.toolbarTab("tasks")
+        ).props.onPress();
+      });
+    };
+
+    await pressTasks();
+    await act(async () => store.setTaskCollectionStatus("ready"));
+    await pressTasks();
+    await act(async () => store.setTaskCollectionStatus("error"));
+    await pressTasks();
+    await act(async () => {
+      store.setRepoTasks(
+        Array.from({ length: 100 }, (_, index): TaskSummary => ({
+          id: `long-task-${index}`,
+          repoId: "repo-1",
+          stage: "in progress",
+          title: `Long list task ${index}`
+        }))
+      );
+      store.setTaskCollectionStatus("ready");
+    });
+    await pressTasks();
+
+    expect(navigationHarness.scrollCalls).toHaveLength(4);
+    expect(
+      navigationHarness.scrollCalls.every(
+        (call) => call.testID === MOBILE_E2E_IDS.tasksScreen
+      )
+    ).toBe(true);
+  });
+
+  it("keeps the More scroll owner through loading, empty, error, and long command states", async () => {
+    const store = createSessionStore();
+    store.setRepos([{ id: "repo-1", name: "Repo One" }]);
+    store.setRepoCommandLoading("repo-1");
+    controller = createMobileController(createClientMock(), store);
+
+    await act(async () => {
+      rendered = create(
+        <NavigatorHarness activeController={controller!} store={store} />
+      );
+    });
+
+    const pressMore = async () => {
+      await act(async () => {
+        rendered!.root.find(
+          (node) => node.props.testID === MOBILE_E2E_IDS.toolbarTab("more")
+        ).props.onPress();
+      });
+    };
+
+    await pressMore();
+    await pressMore();
+    await act(async () =>
+      store.setRepoCommandError("repo-1", "Commands unavailable")
+    );
+    await pressMore();
+    await act(async () =>
+      store.setRepoCommandCatalog({
+        commands: Array.from({ length: 100 }, (_, index) => ({
+          description: `Long command ${index}`,
+          group: "automation" as const,
+          id: `custom:long-${index}`,
+          label: `Command ${index}`
+        })),
+        repoId: "repo-1",
+        revision: "long-catalog"
+      })
+    );
+    await pressMore();
+
+    expect(navigationHarness.scrollCalls).toHaveLength(3);
+    expect(
+      navigationHarness.scrollCalls.every(
+        (call) => call.testID === MOBILE_E2E_IDS.moreScreen
+      )
+    ).toBe(true);
+  });
 });
 
 async function flushMicrotasks(iterations = 12): Promise<void> {
