@@ -154,7 +154,7 @@ describe("MainPanel", () => {
     expect(wrapper.findComponent({ name: "TerminalTabs" }).props("operatorTerminalInput")).toBe(true);
   });
 
-  it("keeps terminal state and the last policy across refresh failure, then recovers policy", async () => {
+  it("keeps terminal state but fails closed across refresh failure, then recovers policy", async () => {
     const { default: MainPanel } = await import("../MainPanel.vue");
     fetchTaskDetailMock
       .mockResolvedValueOnce({
@@ -165,7 +165,7 @@ describe("MainPanel", () => {
         revisionRounds: 0,
         revisionLimit: 3,
         childTaskIds: [],
-        operatorTerminalInput: true,
+        operatorTerminalInput: false,
       })
       .mockRejectedValueOnce(new Error("transient detail refresh failure"))
       .mockResolvedValueOnce({
@@ -176,7 +176,7 @@ describe("MainPanel", () => {
         revisionRounds: 0,
         revisionLimit: 3,
         childTaskIds: [],
-        operatorTerminalInput: false,
+        operatorTerminalInput: true,
       });
     const wrapper = mount(MainPanel, {
       props: {
@@ -209,6 +209,8 @@ describe("MainPanel", () => {
     expect(wrapper.get('[data-testid="interactive-terminal"]').element).toBe(terminal.element);
     expect(terminal.element.value).toBe("typed-during-transition");
     expect(document.activeElement).toBe(terminal.element);
+    // The stale generic policy must not survive a failed refresh that may
+    // represent a same-id respawn into a protected merge terminal.
     expect(wrapper.findComponent({ name: "TerminalTabs" }).props("operatorTerminalInput")).toBe(true);
 
     await wrapper.setProps({
@@ -218,7 +220,7 @@ describe("MainPanel", () => {
     expect(wrapper.get('[data-testid="interactive-terminal"]').element).toBe(terminal.element);
     expect(terminal.element.value).toBe("typed-during-transition");
     expect(document.activeElement).toBe(terminal.element);
-    expect(wrapper.findComponent({ name: "TerminalTabs" }).props("operatorTerminalInput")).toBe(false);
+    expect(wrapper.findComponent({ name: "TerminalTabs" }).props("operatorTerminalInput")).toBe(true);
     wrapper.unmount();
   });
 

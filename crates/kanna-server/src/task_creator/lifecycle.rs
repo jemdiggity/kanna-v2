@@ -4,7 +4,7 @@ use super::types::{
     PreparedStageRerun, PreparedStageRunSpawn, PreparedTaskSpawn, PreparedWorkspaceTeardown,
 };
 use super::worktree::remove_prepared_worktree;
-use crate::daemon_client::DaemonClient;
+use crate::daemon_client::{DaemonClient, SpawnDeliveryError};
 use crate::db::{Db, NewStageRun};
 use crate::http_api::{try_submit_task_input, TaskInputError};
 use crate::session_replacements::SessionReplacements;
@@ -43,6 +43,20 @@ pub(super) async fn spawn_prepared_task(
         .map_err(SpawnPreparedError::into_message)
 }
 
+async fn send_session_spawn_command(
+    daemon: &mut DaemonClient,
+    command: &DaemonCommand,
+) -> Result<DaemonEvent, SpawnDeliveryError> {
+    if matches!(command, DaemonCommand::Spawn { .. }) {
+        daemon.send_spawn_command_retrying_successor(command).await
+    } else {
+        daemon
+            .send_command_retrying_successor(command)
+            .await
+            .map_err(|error| SpawnDeliveryError::AfterSubmission(error.to_string()))
+    }
+}
+
 enum SpawnPreparedError {
     BeforeAcknowledgement(String),
     UncertainDelivery(String),
@@ -76,14 +90,21 @@ async fn spawn_prepared_task_classified(
         operator_input_only,
     );
 
-    let event = daemon
-        .send_command_retrying_successor(&command)
-        .await
-        .map_err(|e| {
-            SpawnPreparedError::UncertainDelivery(format!(
-                "daemon spawn response lost after submission began: {e}"
-            ))
-        })?;
+    let event =
+        send_session_spawn_command(daemon, &command)
+            .await
+            .map_err(|error| match error {
+                SpawnDeliveryError::BeforeSubmission(message) => {
+                    SpawnPreparedError::BeforeAcknowledgement(format!(
+                        "daemon spawn failed before submission: {message}"
+                    ))
+                }
+                SpawnDeliveryError::AfterSubmission(message) => {
+                    SpawnPreparedError::UncertainDelivery(format!(
+                        "daemon spawn response lost after submission began: {message}"
+                    ))
+                }
+            })?;
 
     match event {
         DaemonEvent::SessionCreated { .. } => Ok(prepared.created_task),
@@ -344,14 +365,19 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         prepared.session.clone(),
         prepared.stage_agent.as_deref() == Some("merge"),
     );
-    let event = match daemon.send_command_retrying_successor(&command).await {
+    let event = match send_session_spawn_command(daemon, &command).await {
         Ok(event) => event,
-        Err(e) => {
+        Err(SpawnDeliveryError::AfterSubmission(message)) => {
             // Once Spawn has crossed the socket, response loss cannot prove
             // that the daemon did not create the process. Keep the immutable
             // completion identity available to any surviving child.
             completion_context.persist();
-            return Err(format!("daemon spawn delivery is uncertain: {e}"));
+            return Err(format!("daemon spawn delivery is uncertain: {message}"));
+        }
+        Err(SpawnDeliveryError::BeforeSubmission(message)) => {
+            let error = format!("daemon spawn failed before submission: {message}");
+            fail_bound_stage_run(db_path, &task_id, &run_id, &error);
+            return Err(rollback_prepared_stage_fork(&prepared, error));
         }
     };
     match event {
@@ -882,11 +908,16 @@ pub(crate) async fn rerun_prepared_stage_for_api(
         stage_agent.as_deref() == Some("merge"),
     );
 
-    let event = match daemon.send_command_retrying_successor(&command).await {
+    let event = match send_session_spawn_command(daemon, &command).await {
         Ok(event) => event,
-        Err(error) => {
+        Err(SpawnDeliveryError::AfterSubmission(message)) => {
             completion_context.persist();
-            return Err(format!("daemon spawn delivery is uncertain: {error}"));
+            return Err(format!("daemon spawn delivery is uncertain: {message}"));
+        }
+        Err(SpawnDeliveryError::BeforeSubmission(message)) => {
+            return Err(record_failure(format!(
+                "daemon spawn failed before submission: {message}"
+            )));
         }
     };
     match event {

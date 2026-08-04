@@ -33,6 +33,27 @@ pub struct DaemonClientWriter {
     writer: tokio::net::unix::OwnedWriteHalf,
 }
 
+#[derive(Debug)]
+pub(crate) enum SpawnDeliveryError {
+    BeforeSubmission(String),
+    AfterSubmission(String),
+}
+
+impl std::fmt::Display for SpawnDeliveryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BeforeSubmission(message) | Self::AfterSubmission(message) => {
+                formatter.write_str(message)
+            }
+        }
+    }
+}
+
+enum ProtectedInputNegotiationError {
+    RetryOnSuccessor(String),
+    Failed(String),
+}
+
 impl DaemonClient {
     pub(crate) fn daemon_dir(&self) -> &str {
         &self.daemon_dir
@@ -83,31 +104,83 @@ impl DaemonClient {
         self.send_serialized_command(&json).await
     }
 
-    pub(crate) async fn negotiate_protected_input(&mut self) -> Result<(), String> {
+    async fn negotiate_protected_input_once(
+        &mut self,
+    ) -> Result<(), ProtectedInputNegotiationError> {
         let version = kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION;
         match self
             .send_command(&Command::NegotiateProtectedInput { version })
             .await
-            .map_err(|error| format!("protected-input negotiation failed: {error}"))?
-        {
+            .map_err(|error| {
+                ProtectedInputNegotiationError::Failed(format!(
+                    "protected-input negotiation failed: {error}"
+                ))
+            })? {
             Event::ProtectedInputReady {
                 version: acknowledged,
             } if acknowledged == version => Ok(()),
-            Event::Error { message, .. } => Err(format!(
+            Event::Error {
+                code: Some(kanna_daemon::protocol::ErrorCode::RetryOnSuccessor),
+                message,
+            } => Err(ProtectedInputNegotiationError::RetryOnSuccessor(message)),
+            Event::Error { message, .. } => Err(ProtectedInputNegotiationError::Failed(format!(
                 "daemon refused protected-input protocol {version}: {message}"
-            )),
-            event => Err(format!(
+            ))),
+            event => Err(ProtectedInputNegotiationError::Failed(format!(
                 "daemon did not acknowledge protected-input protocol {version}: {event:?}"
-            )),
+            ))),
         }
     }
 
-    pub(crate) async fn send_protected_command_retrying_successor(
+    pub(crate) async fn negotiate_protected_input(&mut self) -> Result<(), String> {
+        self.negotiate_protected_input_once()
+            .await
+            .map_err(|error| match error {
+                ProtectedInputNegotiationError::RetryOnSuccessor(message) => {
+                    format!("protected-input negotiation requires successor: {message}")
+                }
+                ProtectedInputNegotiationError::Failed(message) => message,
+            })
+    }
+
+    pub(crate) async fn send_spawn_command_retrying_successor(
         &mut self,
         cmd: &Command,
-    ) -> Result<Event, Box<dyn std::error::Error>> {
-        self.negotiate_protected_input().await?;
-        let first = self.send_command(cmd).await?;
+    ) -> Result<Event, SpawnDeliveryError> {
+        debug_assert!(matches!(cmd, Command::Spawn { .. }));
+        let previous_pid = self.connected_pid;
+        match self.negotiate_protected_input_once().await {
+            Ok(()) => {}
+            Err(ProtectedInputNegotiationError::RetryOnSuccessor(_)) => {
+                let mut successor = wait_for_successor(&self.daemon_dir, previous_pid)
+                    .await
+                    .map_err(|error| {
+                        SpawnDeliveryError::BeforeSubmission(format!(
+                            "daemon spawn negotiation could not reach successor: {error}"
+                        ))
+                    })?;
+                successor
+                    .negotiate_protected_input_once()
+                    .await
+                    .map_err(|error| {
+                        SpawnDeliveryError::BeforeSubmission(match error {
+                            ProtectedInputNegotiationError::RetryOnSuccessor(message) => format!(
+                                "successor requested another retry before daemon spawn: {message}"
+                            ),
+                            ProtectedInputNegotiationError::Failed(message) => message,
+                        })
+                    })?;
+                *self = successor;
+            }
+            Err(ProtectedInputNegotiationError::Failed(message)) => {
+                return Err(SpawnDeliveryError::BeforeSubmission(message));
+            }
+        }
+
+        let first = self
+            .send_command(cmd)
+            .await
+            .map_err(|error| SpawnDeliveryError::AfterSubmission(error.to_string()))?;
         if !matches!(
             first,
             Event::Error {
@@ -118,10 +191,24 @@ impl DaemonClient {
             return Ok(first);
         }
         let previous_pid = self.connected_pid;
-        let mut successor = wait_for_successor(&self.daemon_dir, previous_pid).await?;
-        successor.negotiate_protected_input().await?;
+        let mut successor = wait_for_successor(&self.daemon_dir, previous_pid)
+            .await
+            .map_err(|error| SpawnDeliveryError::BeforeSubmission(error.to_string()))?;
+        successor
+            .negotiate_protected_input_once()
+            .await
+            .map_err(|error| {
+                SpawnDeliveryError::BeforeSubmission(match error {
+                    ProtectedInputNegotiationError::RetryOnSuccessor(message) => {
+                        format!("successor requested another retry before daemon spawn: {message}")
+                    }
+                    ProtectedInputNegotiationError::Failed(message) => message,
+                })
+            })?;
         *self = successor;
-        self.send_command(cmd).await
+        self.send_command(cmd)
+            .await
+            .map_err(|error| SpawnDeliveryError::AfterSubmission(error.to_string()))
     }
 
     /// Retry one daemon lifecycle command only when the daemon explicitly
@@ -132,7 +219,10 @@ impl DaemonClient {
         cmd: &Command,
     ) -> Result<Event, Box<dyn std::error::Error>> {
         if matches!(cmd, Command::Spawn { .. }) {
-            return self.send_protected_command_retrying_successor(cmd).await;
+            return self
+                .send_spawn_command_retrying_successor(cmd)
+                .await
+                .map_err(|error| error.to_string().into());
         }
         let json = serde_json::to_string(cmd)?;
         let first = self.send_serialized_command(&json).await?;
@@ -564,6 +654,49 @@ mod tests {
             ));
             assert_eq!(commands[1], format!("{expected_spawn}\n"));
         }
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn negotiation_disconnect_before_spawn_is_pre_submission() {
+        let daemon_dir = temp_daemon_dir("spawn-negotiation-disconnect");
+        let socket_path = kanna_runtime_defaults::socket_path(Path::new(&daemon_dir));
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, _write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut command = String::new();
+            reader.read_line(&mut command).await.unwrap();
+            command
+        });
+        let command = Command::Spawn {
+            session_id: "never-submitted".to_string(),
+            executable: "/bin/cat".to_string(),
+            args: Vec::new(),
+            cwd: "/tmp".to_string(),
+            env: std::collections::HashMap::new(),
+            cols: 80,
+            rows: 24,
+            agent_provider: None,
+            terminal_prelude: None,
+            operator_input_only: false,
+        };
+
+        let mut client = DaemonClient::connect(&daemon_dir).await.unwrap();
+        let error = client
+            .send_spawn_command_retrying_successor(&command)
+            .await
+            .expect_err("a disconnect during negotiation must fail before Spawn submission");
+
+        assert!(matches!(error, SpawnDeliveryError::BeforeSubmission(_)));
+        let submitted = server.await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<Command>(submitted.trim()).unwrap(),
+            Command::NegotiateProtectedInput { .. }
+        ));
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }

@@ -504,6 +504,69 @@ describe("useTerminal", () => {
     expect(sendTermInput).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps batched and acknowledgement-blocked bytes on their captured input transport", async () => {
+    let releaseFirstOperatorInput: (() => void) | undefined;
+    const firstOperatorInputPending = new Promise<void>((resolve) => {
+      releaseFirstOperatorInput = resolve;
+    });
+    let operatorInputCalls = 0;
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "send_operator_input" && operatorInputCalls++ === 0) {
+        await firstOperatorInputPending;
+      }
+      return null;
+    });
+    const sendTermInput = vi.fn();
+    streamClientMock.getSharedStreamClient.mockResolvedValue({
+      attachTerminal: vi.fn(),
+      sendTermInput,
+      sendTermResize: vi.fn(),
+      detach: vi.fn(),
+    });
+    const { useTerminal } = await import("./useTerminal");
+    const TestHarness = defineComponent({
+      setup() {
+        const { init, setOperatorTerminalInput } = useTerminal("same-id-session", undefined, {
+          agentTerminal: true,
+          operatorTerminalInput: true,
+        });
+        return { init, setOperatorTerminalInput };
+      },
+      render() {
+        return h("div");
+      },
+    });
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    const onData = terminals[0].onData.mock.calls[0]?.[0];
+    expect(onData).toBeDefined();
+    onData("old-in-flight");
+    await waitForQueuedInputFlush();
+    onData("old-batched");
+    wrapper.vm.setOperatorTerminalInput(false);
+    onData("new-generic");
+    await waitForQueuedInputFlush();
+
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "send_operator_input")).toHaveLength(1);
+    expect(sendTermInput).not.toHaveBeenCalled();
+
+    releaseFirstOperatorInput?.();
+    await flushAsyncWork();
+
+    const operatorPayloads = invokeMock.mock.calls
+      .filter(([cmd]) => cmd === "send_operator_input")
+      .map(([, args]) => new TextDecoder().decode(new Uint8Array(args.data)));
+    expect(operatorPayloads).toEqual(["old-in-flight", "old-batched"]);
+    expect(sendTermInput).toHaveBeenCalledOnce();
+    expect(sendTermInput).toHaveBeenCalledWith("same-id-session", btoa("new-generic"));
+  });
+
   it("re-attaches when the session is respawned even though the terminal still believes it is attached", async () => {
     // Stage transitions kill + respawn the same session id. The kill can race
     // ahead of (or never produce) an exit signal, so the SessionCreated

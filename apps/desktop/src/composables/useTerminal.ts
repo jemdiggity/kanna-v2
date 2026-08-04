@@ -60,19 +60,21 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     return state.streamClient
   }
 
+  const sendOperatorTerminalInput = async (nativeSessionId: string, dataB64: string) => {
+    await invoke("send_operator_input", {
+      sessionId: nativeSessionId,
+      data: Array.from(base64ToBytes(dataB64)),
+    })
+  }
+  const sendGenericTerminalInput = async (nativeSessionId: string, dataB64: string) => {
+    const client = await getTerminalStreamClient()
+    client.sendTermInput(nativeSessionId, dataB64)
+  }
   const inputQueue = createTerminalInputQueue({
     sessionId,
-    sendTerminalInput: async (nativeSessionId, dataB64) => {
-      if (operatorTerminalInput.value) {
-        await invoke("send_operator_input", {
-          sessionId: nativeSessionId,
-          data: Array.from(base64ToBytes(dataB64)),
-        })
-        return
-      }
-      const client = await getTerminalStreamClient()
-      client.sendTermInput(nativeSessionId, dataB64)
-    },
+    getSendTerminalInput: () => operatorTerminalInput.value
+      ? sendOperatorTerminalInput
+      : sendGenericTerminalInput,
   })
   const clipboardBridge = createTerminalClipboardBridge({
     sessionId,
