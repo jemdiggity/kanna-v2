@@ -2147,7 +2147,6 @@ fn failed_main_commit_pr_approve_lineage_stops_at_approval_without_override() {
         resumed_from_run_id: None,
     })
     .unwrap();
-
     match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
         PreparedStageTransition::Post(post) => assert_eq!(post.run_stage, "commit"),
         _ => panic!("failed implementation may still dispatch its diagnostic commit post"),
@@ -2665,6 +2664,13 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
         resumed_from_run_id: None,
     })
     .unwrap();
+    let completion_path =
+        std::path::Path::new(&config.daemon_dir).join("runtime/completion/run-main.json");
+    kanna_tool_catalog::write_completion_context(
+        &completion_path,
+        &kanna_tool_catalog::CompletionContext::new("run-main"),
+    )
+    .unwrap();
 
     let post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
         PreparedStageTransition::Post(post) => post,
@@ -2716,6 +2722,13 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
     assert_eq!(runs[1].agent.as_deref(), Some("implement"));
     assert_eq!(runs[1].model.as_deref(), Some("sonnet"));
     assert_eq!(runs[1].session_id.as_deref(), Some("task-1"));
+    assert_eq!(
+        kanna_tool_catalog::read_completion_context(&completion_path)
+            .unwrap()
+            .run_id,
+        runs[1].id,
+        "live post dispatch must rebind through the inherited process context, not the fallback env"
+    );
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

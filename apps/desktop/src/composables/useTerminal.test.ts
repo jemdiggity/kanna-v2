@@ -429,11 +429,7 @@ describe("useTerminal", () => {
     expect(onData).toBeDefined();
     onData("x");
     await waitForQueuedInputFlush();
-    expect(sendTermInput).not.toHaveBeenCalled();
-    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
-      taskId: "session-1",
-      dataB64: btoa("x"),
-    });
+    expect(sendTermInput).toHaveBeenCalledWith("session-1", btoa("x"));
 
     const onResize = terminal.onResize.mock.calls[0]?.[0];
     expect(onResize).toBeDefined();
@@ -452,6 +448,47 @@ describe("useTerminal", () => {
 
     wrapper.unmount();
     expect(detach).toHaveBeenCalledWith("session-1", "terminal");
+  });
+
+  it("routes only protected operator terminals through native process authentication", async () => {
+    const sendTermInput = vi.fn();
+    streamClientMock.getSharedStreamClient.mockResolvedValue({
+      attachTerminal: vi.fn(),
+      sendTermInput,
+      sendTermResize: vi.fn(),
+      detach: vi.fn(),
+    });
+    const { useTerminal } = await import("./useTerminal");
+    const TestHarness = defineComponent({
+      setup() {
+        const { init } = useTerminal("merge-session", undefined, {
+          agentTerminal: true,
+          operatorTerminalInput: true,
+        });
+        return { init };
+      },
+      render() {
+        return h("div");
+      },
+    });
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    wrapper.vm.init(terminalElement);
+
+    const onData = terminals[0].onData.mock.calls[0]?.[0];
+    expect(onData).toBeDefined();
+    onData("merge PR 992");
+    await waitForQueuedInputFlush();
+
+    expect(sendTermInput).not.toHaveBeenCalled();
+    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
+      taskId: "merge-session",
+      dataB64: bytesToBase64(new TextEncoder().encode("merge PR 992")),
+    });
   });
 
   it("re-attaches when the session is respawned even though the terminal still believes it is attached", async () => {
@@ -2147,9 +2184,9 @@ describe("useTerminal", () => {
 
     expect(dropEvent.preventDefault).toHaveBeenCalled();
     expect(dropEvent.stopPropagation).toHaveBeenCalled();
-    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
-      taskId: "session-1",
-      dataB64: bytesToBase64(new TextEncoder().encode("'/tmp/task/screenshot one.png'")),
+    expect(invokeMock).toHaveBeenCalledWith("send_input", {
+      sessionId: "session-1",
+      data: Array.from(new TextEncoder().encode("'/tmp/task/screenshot one.png'")),
     });
   });
 
@@ -2231,9 +2268,9 @@ describe("useTerminal", () => {
     terminalElement.dispatchEvent(dropEvent);
     await waitForQueuedInputFlush();
 
-    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
-      taskId: "session-1",
-      dataB64: bytesToBase64(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
+    expect(invokeMock).toHaveBeenCalledWith("send_input", {
+      sessionId: "session-1",
+      data: Array.from(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
     });
   });
 
@@ -2329,9 +2366,9 @@ describe("useTerminal", () => {
     });
     await waitForQueuedInputFlush();
 
-    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
-      taskId: "session-1",
-      dataB64: bytesToBase64(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
+    expect(invokeMock).toHaveBeenCalledWith("send_input", {
+      sessionId: "session-1",
+      data: Array.from(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
     });
   });
 
@@ -2428,9 +2465,9 @@ describe("useTerminal", () => {
     });
     await waitForQueuedInputFlush();
 
-    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
-      taskId: "session-1",
-      dataB64: bytesToBase64(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
+    expect(invokeMock).toHaveBeenCalledWith("send_input", {
+      sessionId: "session-1",
+      data: Array.from(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
     });
   });
 
@@ -2528,11 +2565,12 @@ describe("useTerminal", () => {
     nativeWebviewDragDropHandler?.(dropEvent);
     await waitForQueuedInputFlush();
 
-    expect(invokeMock).toHaveBeenCalledTimes(1);
-    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
-      taskId: "session-1",
-      dataB64: bytesToBase64(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
-    });
+    const sendInputCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "send_input");
+    expect(sendInputCalls).toHaveLength(1);
+    expect(sendInputCalls[0]).toEqual(["send_input", {
+      sessionId: "session-1",
+      data: Array.from(new TextEncoder().encode("\u001b[200~'/tmp/task/screenshot one.png'\u001b[201~")),
+    }]);
   });
 
   it("treats Copilot drops as bracketed paste even when the restored stream does not advertise bracketed mode", async () => {
@@ -2617,9 +2655,9 @@ describe("useTerminal", () => {
     });
     await waitForQueuedInputFlush();
 
-    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
-      taskId: "session-1",
-      dataB64: bytesToBase64(new TextEncoder().encode("\u001b[200~'/tmp/task/ChatGPT Image Feb 21, 2026, 12_59_00 AM.png'\u001b[201~")),
+    expect(invokeMock).toHaveBeenCalledWith("send_input", {
+      sessionId: "session-1",
+      data: Array.from(new TextEncoder().encode("\u001b[200~'/tmp/task/ChatGPT Image Feb 21, 2026, 12_59_00 AM.png'\u001b[201~")),
     });
   });
 
@@ -2794,9 +2832,9 @@ describe("useTerminal", () => {
 
     expect(allowed).toBe(false);
     expect(keyboardEvent.preventDefault).toHaveBeenCalled();
-    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", {
-      taskId: "session-1",
-      dataB64: bytesToBase64(new TextEncoder().encode("\x1b[13;2u")),
+    expect(invokeMock).toHaveBeenCalledWith("send_input", {
+      sessionId: "session-1",
+      data: Array.from(new TextEncoder().encode("\x1b[13;2u")),
     });
   });
 
@@ -2836,19 +2874,16 @@ describe("useTerminal", () => {
     onData("b");
     onData("c");
 
-    expect(invokeMock).not.toHaveBeenCalledWith("native_terminal_input", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("send_input", expect.anything());
 
     await waitForQueuedInputFlush();
 
-    const sendInputCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "native_terminal_input");
+    const sendInputCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "send_input");
     expect(sendInputCalls).toHaveLength(1);
-    expect(sendInputCalls[0]).toEqual([
-      "native_terminal_input",
-      {
-        taskId: "session-1",
-        dataB64: bytesToBase64(new TextEncoder().encode("abc")),
-      },
-    ]);
+    expect(sendInputCalls[0]).toEqual(["send_input", {
+      sessionId: "session-1",
+      data: Array.from(new TextEncoder().encode("abc")),
+    }]);
   });
 
   it("responds to kitty clipboard image reads after an explicit paste", async () => {
@@ -2914,14 +2949,14 @@ describe("useTerminal", () => {
     const kittyRequest = new TextEncoder().encode("\u001b]5522;type=read;aW1hZ2UvcG5n\u0007");
     terminalStreamHandlers.get("session-1")?.onOutput(btoa(String.fromCharCode(...kittyRequest)));
 
-    for (let attempt = 0; attempt < 10 && !invokeMock.mock.calls.some(([cmd]) => cmd === "native_terminal_input"); attempt += 1) {
+    for (let attempt = 0; attempt < 10 && !invokeMock.mock.calls.some(([cmd]) => cmd === "send_input"); attempt += 1) {
       await Promise.resolve();
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
 
-    expect(invokeMock).toHaveBeenCalledWith("native_terminal_input", expect.objectContaining({
-      taskId: "session-1",
-      dataB64: expect.any(String),
+    expect(invokeMock).toHaveBeenCalledWith("send_input", expect.objectContaining({
+      sessionId: "session-1",
+      data: expect.any(Array),
     }));
   });
 

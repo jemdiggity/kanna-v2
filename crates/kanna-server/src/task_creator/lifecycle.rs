@@ -169,23 +169,29 @@ pub(crate) async fn spawn_prepared_task_for_api_recording_stage_run_detailed(
     mut prepared: PreparedTaskSpawn,
 ) -> Result<crate::mobile_api::CreateTaskResponse, PreparedTaskDeliveryError> {
     let run_id = generate_stage_run_id(&prepared.created_task.task_id);
-    initialize_completion_context(
+    let mut completion_context = initialize_completion_context(
         &mut prepared.env,
         &prepared.created_task.task_id,
         &run_id,
         daemon.daemon_dir(),
     )
     .map_err(PreparedTaskDeliveryError::BeforeAcknowledgement)?;
-    let created = spawn_prepared_task_classified(daemon, prepared.clone())
-        .await
-        .map_err(|error| match error {
-            SpawnPreparedError::BeforeAcknowledgement(message) => {
-                PreparedTaskDeliveryError::BeforeAcknowledgement(message)
-            }
-            SpawnPreparedError::UncertainDelivery(message) => {
-                PreparedTaskDeliveryError::AfterAcknowledgement(message)
-            }
-        })?;
+    let created = match spawn_prepared_task_classified(daemon, prepared.clone()).await {
+        Ok(created) => created,
+        Err(SpawnPreparedError::BeforeAcknowledgement(message)) => {
+            return Err(PreparedTaskDeliveryError::BeforeAcknowledgement(message));
+        }
+        Err(SpawnPreparedError::UncertainDelivery(message)) => {
+            // The daemon may have created the agent even though its
+            // acknowledgement was lost. Preserve the context that process
+            // received; the caller quarantines this task instead of retrying.
+            completion_context.persist();
+            return Err(PreparedTaskDeliveryError::AfterAcknowledgement(message));
+        }
+    };
+    // From this point the daemon has acknowledged a process which owns this
+    // path. Keep it even if later database bookkeeping fails.
+    completion_context.persist();
     let created = crate::mobile_api::CreateTaskResponse {
         task_id: created.task_id,
         repo_id: created.repo_id,
@@ -252,7 +258,8 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
     let task_id = prepared.task_id.clone();
     let session_id = prepared.session_id.clone();
     let run_id = generate_stage_run_id(&task_id);
-    initialize_completion_context(&mut prepared.env, &task_id, &run_id, daemon.daemon_dir())?;
+    let mut completion_context =
+        initialize_completion_context(&mut prepared.env, &task_id, &run_id, daemon.daemon_dir())?;
     let teardown_session_id = prepared
         .workspace_teardown
         .as_ref()
@@ -428,6 +435,8 @@ pub(crate) async fn spawn_prepared_stage_run_for_api(
         db.set_stage_run_resume_fallback_reason(&run_id, reason)
             .map_err(|e| format!("db error: {}", e))?;
     }
+
+    completion_context.persist();
 
     spawn_prepared_workspace_teardown_best_effort(daemon, prepared.workspace_teardown).await;
 
@@ -645,6 +654,22 @@ pub(crate) async fn dispatch_prepared_post_for_api(
     prepared: PreparedPostDispatch,
 ) -> Result<crate::mobile_api::TaskActionResponse, String> {
     let task_id = prepared.task_id.clone();
+    let inherited_run_id = Db::open(db_path)
+        .map_err(|e| format!("db error: {e}"))?
+        .latest_stage_run(&task_id)
+        .map_err(|e| format!("db error: {e}"))?
+        .map(|run| run.id);
+    if inherited_run_id
+        .as_deref()
+        .is_some_and(|run_id| uses_legacy_completion_context(daemon.daemon_dir(), &task_id, run_id))
+    {
+        // A surviving pre-upgrade adapter can still overwrite its unlocked
+        // legacy context after receiving the main-run response. Do not
+        // continue that process into a post: replace it with a newly spawned
+        // post whose private run-scoped context is server-owned.
+        return spawn_prepared_stage_run_for_api(db_path, daemon, replacements, prepared.fallback)
+            .await;
+    }
     match try_submit_task_input(daemon, &prepared.session_id, &prepared.message).await {
         Ok(()) => {
             let db = Db::open(db_path).map_err(|e| format!("db error: {}", e))?;
@@ -701,11 +726,7 @@ pub(crate) async fn dispatch_prepared_post_for_api(
             )
             .map_err(|e| format!("db error: {}", e))?;
             if let Some(inherited_run_id) = inherited_run_id.as_deref() {
-                advance_server_completion_context(
-                    &prepared.fallback.env,
-                    inherited_run_id,
-                    &run_id,
-                );
+                advance_server_completion_context(daemon.daemon_dir(), inherited_run_id, &run_id);
             }
             if prepared.run_stage == "approve" {
                 db.record_approval_authorization(&task_id, &run_id)
@@ -742,7 +763,8 @@ pub(crate) async fn rerun_prepared_stage_for_api(
     let provider_session_id = prepared.provider_session_id.clone();
     let cwd = prepared.cwd.clone();
     let run_id = generate_stage_run_id(&task_id);
-    initialize_completion_context(&mut prepared.env, &task_id, &run_id, daemon.daemon_dir())?;
+    let mut completion_context =
+        initialize_completion_context(&mut prepared.env, &task_id, &run_id, daemon.daemon_dir())?;
     let record_failure = |error: String| match record_rerun_stage_failure(
         db_path,
         &task_id,
@@ -809,6 +831,7 @@ pub(crate) async fn rerun_prepared_stage_for_api(
                 &cwd,
                 &run_id,
             )?;
+            completion_context.persist();
             Ok(crate::mobile_api::TaskActionResponse {
                 task_id,
                 follow_task: None,
@@ -1123,15 +1146,15 @@ fn generate_stage_run_id(task_id: &str) -> String {
 
 fn initialize_completion_context(
     env: &mut std::collections::HashMap<String, String>,
-    task_id: &str,
+    _task_id: &str,
     run_id: &str,
     daemon_dir: &str,
-) -> Result<(), String> {
+) -> Result<CompletionContextArtifact, String> {
     let daemon_dir = std::path::PathBuf::from(daemon_dir);
     let path = daemon_dir
         .join("runtime")
         .join("completion")
-        .join(format!("task-{task_id}.json"));
+        .join(format!("{run_id}.json"));
     kanna_tool_catalog::write_completion_context(
         &path,
         &kanna_tool_catalog::CompletionContext::new(run_id),
@@ -1144,13 +1167,36 @@ fn initialize_completion_context(
         kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV.to_string(),
         path.to_string_lossy().to_string(),
     );
-    remove_task_completion_contexts_in(&completion_directory(&daemon_dir), task_id, Some(&path));
-    remove_task_completion_contexts_in(
-        &legacy_shared_completion_directory(&daemon_dir),
-        task_id,
-        None,
-    );
-    Ok(())
+    Ok(CompletionContextArtifact { path, keep: false })
+}
+
+struct CompletionContextArtifact {
+    path: std::path::PathBuf,
+    keep: bool,
+}
+
+impl CompletionContextArtifact {
+    fn persist(&mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for CompletionContextArtifact {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        for path in [&self.path, &self.path.with_extension("lock")] {
+            if let Err(error) = std::fs::remove_file(path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!(
+                        "failed to roll back completion context {}: {error}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn remove_completion_contexts(daemon_dir: &str, task_id: &str) {
@@ -1174,6 +1220,7 @@ pub(crate) fn prune_completion_contexts_on_startup(daemon_dir: &str, db: &Db) {
         prune_known_legacy_completion_contexts(
             &legacy_shared_completion_directory(daemon_dir),
             &tasks,
+            db,
         );
         return;
     };
@@ -1182,6 +1229,9 @@ pub(crate) fn prune_completion_contexts_on_startup(daemon_dir: &str, db: &Db) {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
+        if name.ends_with(".json") {
+            upgrade_legacy_completion_context(&path, db);
+        }
         let belongs_to_open_task = tasks.iter().any(|(task_id, open, latest_run_id)| {
             if !open {
                 return false;
@@ -1213,7 +1263,11 @@ pub(crate) fn prune_completion_contexts_on_startup(daemon_dir: &str, db: &Db) {
             }
         }
     }
-    prune_known_legacy_completion_contexts(&legacy_shared_completion_directory(daemon_dir), &tasks);
+    prune_known_legacy_completion_contexts(
+        &legacy_shared_completion_directory(daemon_dir),
+        &tasks,
+        db,
+    );
 }
 
 fn completion_directory(daemon_dir: &std::path::Path) -> std::path::PathBuf {
@@ -1261,6 +1315,7 @@ fn remove_task_completion_contexts_in(
 fn prune_known_legacy_completion_contexts(
     directory: &std::path::Path,
     tasks: &[(String, bool, Option<String>)],
+    db: &Db,
 ) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
@@ -1283,6 +1338,9 @@ fn prune_known_legacy_completion_contexts(
         } else {
             path.with_extension("json")
         };
+        if name.ends_with(".json") {
+            upgrade_legacy_completion_context(&json_path, db);
+        }
         let keep = *open
             && latest_run_id.as_deref().is_some_and(|run_id| {
                 kanna_tool_catalog::read_completion_context(&json_path)
@@ -1294,16 +1352,175 @@ fn prune_known_legacy_completion_contexts(
     }
 }
 
-fn advance_server_completion_context(
-    env: &std::collections::HashMap<String, String>,
-    inherited_run_id: &str,
-    new_run_id: &str,
-) {
-    let Some(path) = env
-        .get(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV)
-        .map(std::path::PathBuf::from)
-    else {
+fn spawned_run_id_from_context_path(path: &std::path::Path) -> Option<&str> {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| stem.starts_with("run-"))
+}
+
+fn completion_attempt_keys_from_result(result: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(result) else {
+        return Vec::new();
+    };
+    let mut candidates = vec![value.clone()];
+    if let Some(object) = value.as_object() {
+        let mut compact = object.clone();
+        compact.retain(|_, value| !value.is_null());
+        if compact != *object {
+            candidates.push(serde_json::Value::Object(compact));
+        }
+    }
+    candidates
+        .iter()
+        .filter_map(|candidate| kanna_tool_catalog::completion_attempt_key(candidate).ok())
+        .collect()
+}
+
+/// Compile the short-lived context format from the previous release into the
+/// retry-safe format. That format could contain a successor `runId` but no
+/// history after main -> post rebinding. The run-scoped filename is immutable,
+/// and the completed original run's persisted result reconstructs the exact
+/// adapter attempt keys without trusting mutable prose.
+fn upgrade_legacy_completion_context(path: &std::path::Path, db: &Db) {
+    let Some(filename_run_id) = spawned_run_id_from_context_path(path).map(str::to_string) else {
         return;
+    };
+    let Ok(context) = kanna_tool_catalog::read_completion_context(path) else {
+        return;
+    };
+    let spawned_run_id = context
+        .spawned_run_id
+        .as_deref()
+        .unwrap_or(&filename_run_id)
+        .to_string();
+    let needs_identity = context.spawned_run_id.is_none();
+    let needs_attempts = context.run_id != spawned_run_id
+        && context.completed_attempts.is_empty()
+        && context.completed_run_id.is_none();
+    if !needs_identity && !needs_attempts {
+        return;
+    }
+    let keys = if needs_attempts {
+        db.stage_run(&spawned_run_id)
+            .ok()
+            .flatten()
+            .filter(|run| matches!(run.status.as_str(), "succeeded" | "failed"))
+            .and_then(|run| run.result)
+            .map(|result| completion_attempt_keys_from_result(&result))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if let Err(error) = kanna_tool_catalog::mutate_completion_context(path, |current| {
+        let mut current =
+            current.ok_or_else(|| format!("completion context {} disappeared", path.display()))?;
+        current.spawned_run_id = Some(spawned_run_id.clone());
+        current.legacy_writer = true;
+        for key in &keys {
+            current.record_completed_attempt(&spawned_run_id, key);
+        }
+        Ok(current)
+    }) {
+        log::warn!(
+            "failed to upgrade legacy completion context {}: {error}",
+            path.display()
+        );
+    }
+}
+
+/// Resolve a retry sent by a surviving pre-upgrade adapter. Such an adapter
+/// can overwrite the context without participating in the new lock/history
+/// protocol after its original response is lost. The immutable filename plus
+/// the database's exact completed result remains server-owned authority.
+pub(crate) fn resolve_legacy_completion_retry_run(
+    daemon_dir: &str,
+    db: &Db,
+    task_id: &str,
+    presented_run_id: &str,
+    attempt_key: &str,
+) -> Option<String> {
+    let daemon_dir = std::path::Path::new(daemon_dir);
+    for directory in [
+        completion_directory(daemon_dir),
+        legacy_shared_completion_directory(daemon_dir),
+    ] {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(spawned_run_id) = spawned_run_id_from_context_path(&path) else {
+                continue;
+            };
+            if spawned_run_id == presented_run_id
+                || !spawned_run_id.starts_with(&format!("run-{task_id}-"))
+            {
+                continue;
+            }
+            let Ok(context) = kanna_tool_catalog::read_completion_context(&path) else {
+                continue;
+            };
+            if context.run_id != presented_run_id {
+                continue;
+            }
+            let Ok(Some(run)) = db.stage_run(spawned_run_id) else {
+                continue;
+            };
+            if run.task_id == task_id
+                && matches!(run.status.as_str(), "succeeded" | "failed")
+                && run.result.as_deref().is_some_and(|result| {
+                    completion_attempt_keys_from_result(result)
+                        .iter()
+                        .any(|candidate| candidate == attempt_key)
+                })
+            {
+                return Some(spawned_run_id.to_string());
+            }
+        }
+    }
+    // The immediately preceding task-scoped format has no immutable run in
+    // its filename. Only use this fallback when that legacy file itself is
+    // rebound to the presented run, then reconstruct one unambiguous exact
+    // result match. Two identical earlier verdicts deliberately conflict.
+    let task_context_path = completion_directory(daemon_dir).join(format!("task-{task_id}.json"));
+    let has_rebound_task_context = kanna_tool_catalog::read_completion_context(&task_context_path)
+        .is_ok_and(|context| {
+            (context.spawned_run_id.is_none() || context.legacy_writer)
+                && context.run_id == presented_run_id
+        });
+    if !has_rebound_task_context {
+        return None;
+    }
+    let matches = db
+        .list_stage_runs_for_task(task_id)
+        .ok()?
+        .into_iter()
+        .filter(|run| run.id != presented_run_id)
+        .filter(|run| matches!(run.status.as_str(), "succeeded" | "failed"))
+        .filter(|run| {
+            run.result.as_deref().is_some_and(|result| {
+                completion_attempt_keys_from_result(result)
+                    .iter()
+                    .any(|candidate| candidate == attempt_key)
+            })
+        })
+        .map(|run| run.id)
+        .collect::<Vec<_>>();
+    (matches.len() == 1).then(|| matches[0].clone())
+}
+
+fn advance_server_completion_context(daemon_dir: &str, inherited_run_id: &str, new_run_id: &str) {
+    let daemon_dir = std::path::Path::new(daemon_dir);
+    let private_path = completion_directory(daemon_dir).join(format!("{inherited_run_id}.json"));
+    let legacy_path =
+        legacy_shared_completion_directory(daemon_dir).join(format!("{inherited_run_id}.json"));
+    let path = if private_path.exists() {
+        private_path
+    } else {
+        legacy_path
     };
     if let Err(error) = kanna_tool_catalog::mutate_completion_context(&path, |current| {
         let mut context =
@@ -1324,12 +1541,32 @@ fn advance_server_completion_context(
     }
 }
 
+fn uses_legacy_completion_context(daemon_dir: &str, task_id: &str, run_id: &str) -> bool {
+    let daemon_dir = std::path::Path::new(daemon_dir);
+    let directory = completion_directory(daemon_dir);
+    let private_path = directory.join(format!("{run_id}.json"));
+    if private_path.exists() {
+        return kanna_tool_catalog::read_completion_context(&private_path)
+            .is_ok_and(|context| context.spawned_run_id.is_none() || context.legacy_writer);
+    }
+    let task_path = directory.join(format!("task-{task_id}.json"));
+    if task_path.exists() {
+        return kanna_tool_catalog::read_completion_context(&task_path)
+            .is_ok_and(|context| context.spawned_run_id.is_none() || context.legacy_writer);
+    }
+    let shared_path = legacy_shared_completion_directory(daemon_dir).join(format!("{run_id}.json"));
+    shared_path.exists()
+        && kanna_tool_catalog::read_completion_context(&shared_path)
+            .is_ok_and(|context| context.spawned_run_id.is_none() || context.legacy_writer)
+}
+
 #[cfg(test)]
 mod successor_retry_tests {
     use super::{
         advance_server_completion_context, initialize_completion_context, kill_session_replacing,
         legacy_shared_completion_directory, prune_completion_contexts_on_startup,
-        remove_completion_contexts,
+        remove_completion_contexts, resolve_legacy_completion_retry_run,
+        uses_legacy_completion_context,
     };
     use crate::daemon_client::DaemonClient;
     use crate::session_replacements::SessionReplacements;
@@ -1355,14 +1592,15 @@ mod successor_retry_tests {
                 .to_string_lossy()
                 .to_string(),
         )]);
-        initialize_completion_context(
+        let mut artifact = initialize_completion_context(
             &mut env,
             "task-main",
             "run-main",
             &daemon_dir.to_string_lossy(),
         )
         .unwrap();
-        advance_server_completion_context(&env, "run-main", "run-post");
+        artifact.persist();
+        advance_server_completion_context(&daemon_dir.to_string_lossy(), "run-main", "run-post");
         let path = std::path::PathBuf::from(
             env.get(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV)
                 .unwrap(),
@@ -1476,6 +1714,174 @@ mod successor_retry_tests {
         let _ = std::fs::remove_file(db_path);
         let _ = std::fs::remove_file(&foreign);
         let _ = std::fs::remove_file(foreign.with_extension("lock"));
+        std::fs::remove_dir_all(daemon_dir).unwrap();
+    }
+
+    #[test]
+    fn startup_compiles_rebound_old_format_context_from_immutable_spawn_identity() {
+        let unique = format!(
+            "completion-context-upgrade-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(&unique);
+        let completion_dir = daemon_dir.join("runtime/completion");
+        std::fs::create_dir_all(&completion_dir).unwrap();
+        let db_path = crate::db::Db::test_db_path(&unique);
+        let db = crate::db::Db::open_for_tests(&db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-old",
+            "repo-1",
+            "Old context",
+            Some("Old context"),
+            "in progress",
+            "2026-08-04T00:00:00Z",
+        )
+        .unwrap();
+        let summary = "main result whose response was lost";
+        let result = serde_json::json!({
+            "status": "success",
+            "summary": summary,
+            "metadata": null,
+        })
+        .to_string();
+        let run =
+            |id: &'static str, kind: &'static str, status: &'static str| crate::db::NewStageRun {
+                id,
+                task_id: "task-old",
+                stage: "in progress",
+                kind,
+                agent: Some("implement"),
+                agent_provider: Some("codex"),
+                model: None,
+                effort: None,
+                status,
+                result: None,
+                feedback: None,
+                session_id: Some("task-old"),
+                provider_session_id: None,
+                cwd: None,
+                resumed_from_run_id: None,
+            };
+        db.insert_stage_run_with_completion_binding(
+            run("run-task-old-main", "main", "running"),
+            None,
+            true,
+        )
+        .unwrap();
+        db.finish_stage_run(
+            "run-task-old-main",
+            "succeeded",
+            Some(&result),
+            Some(summary),
+        )
+        .unwrap();
+        db.insert_stage_run_with_completion_binding(
+            run("run-task-old-post", "post", "running"),
+            None,
+            true,
+        )
+        .unwrap();
+        let path = completion_dir.join("run-task-old-main.json");
+        std::fs::write(&path, r#"{"runId":"run-task-old-post"}"#).unwrap();
+        let attempt_key = kanna_tool_catalog::completion_attempt_key(&serde_json::json!({
+            "status": "success",
+            "summary": summary,
+        }))
+        .unwrap();
+
+        prune_completion_contexts_on_startup(&daemon_dir.to_string_lossy(), &db);
+        let upgraded = kanna_tool_catalog::read_completion_context(&path).unwrap();
+        assert_eq!(
+            upgraded.spawned_run_id.as_deref(),
+            Some("run-task-old-main")
+        );
+        assert_eq!(upgraded.run_id, "run-task-old-post");
+        assert!(upgraded.legacy_writer);
+        assert!(uses_legacy_completion_context(
+            &daemon_dir.to_string_lossy(),
+            "task-old",
+            "run-task-old-main",
+        ));
+        assert_eq!(
+            upgraded.run_for_attempt(&attempt_key),
+            Some("run-task-old-main")
+        );
+
+        // Even if a surviving old adapter overwrites the upgraded file, the
+        // server resolves its stale successor binding from DB + filename.
+        std::fs::write(&path, r#"{"runId":"run-task-old-post"}"#).unwrap();
+        assert_eq!(
+            resolve_legacy_completion_retry_run(
+                &daemon_dir.to_string_lossy(),
+                &db,
+                "task-old",
+                "run-task-old-post",
+                &attempt_key,
+            )
+            .as_deref(),
+            Some("run-task-old-main")
+        );
+
+        drop(db);
+        let _ = std::fs::remove_file(db_path);
+        std::fs::remove_dir_all(daemon_dir).unwrap();
+    }
+
+    #[test]
+    fn successor_context_is_private_and_failed_preparation_rolls_it_back() {
+        let daemon_dir = std::env::temp_dir().join(format!(
+            "kanna-private-completion-context-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let mut predecessor_env = std::collections::HashMap::new();
+        let mut predecessor = initialize_completion_context(
+            &mut predecessor_env,
+            "task-race",
+            "run-task-race-main",
+            &daemon_dir.to_string_lossy(),
+        )
+        .unwrap();
+        predecessor.persist();
+        let predecessor_path = std::path::PathBuf::from(
+            predecessor_env
+                .get(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV)
+                .unwrap(),
+        );
+
+        let successor_path = {
+            let mut successor_env = std::collections::HashMap::new();
+            let _uncommitted = initialize_completion_context(
+                &mut successor_env,
+                "task-race",
+                "run-task-race-successor",
+                &daemon_dir.to_string_lossy(),
+            )
+            .unwrap();
+            std::path::PathBuf::from(
+                successor_env
+                    .get(kanna_tool_catalog::KANNA_COMPLETION_CONTEXT_ENV)
+                    .unwrap(),
+            )
+        };
+
+        assert_eq!(
+            kanna_tool_catalog::read_completion_context(&predecessor_path)
+                .unwrap()
+                .run_id,
+            "run-task-race-main"
+        );
+        assert!(!successor_path.exists());
+        assert!(!successor_path.with_extension("lock").exists());
         std::fs::remove_dir_all(daemon_dir).unwrap();
     }
 

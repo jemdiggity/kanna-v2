@@ -466,9 +466,13 @@ pub async fn native_terminal_input(
         "task_id": task_id,
         "data_b64": data_b64,
     });
-    send_native_control_request_with_adoption(&daemon_dir, &request)
-        .await
-        .map(|_| ())
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        send_native_control_request_with_adoption(&daemon_dir, &request),
+    )
+    .await
+    .map_err(|_| "native merge terminal input timed out".to_string())?
+    .map(|_| ())
 }
 
 fn native_control_daemon_dir() -> PathBuf {

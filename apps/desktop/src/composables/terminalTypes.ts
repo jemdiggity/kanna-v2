@@ -9,6 +9,7 @@ export interface TerminalOptions {
   agentProvider?: string
   worktreePath?: string
   agentTerminal?: boolean
+  operatorTerminalInput?: boolean
   skipInitialReconnectEffects?: boolean
   recoverSession?: (sessionId: string, options?: { cols?: number; rows?: number }) => Promise<void>
 }

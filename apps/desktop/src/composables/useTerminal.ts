@@ -61,9 +61,17 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
 
   const inputQueue = createTerminalInputQueue({
     sessionId,
-    sendTerminalInput: async (taskId, dataB64) => {
-      await invoke("native_terminal_input", { taskId, dataB64 })
-    },
+    getTerminalStreamClient: options?.operatorTerminalInput
+      ? undefined
+      : getTerminalStreamClient,
+    sendTerminalInput: options?.operatorTerminalInput
+      ? async (nativeSessionId, dataB64) => {
+          await invoke("native_terminal_input", {
+            taskId: nativeSessionId,
+            dataB64,
+          })
+        }
+      : undefined,
   })
   const clipboardBridge = createTerminalClipboardBridge({
     sessionId,

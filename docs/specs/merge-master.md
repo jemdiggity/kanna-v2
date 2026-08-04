@@ -62,9 +62,12 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   channel pins and rechecks process identity over a private Unix socket. A
   replacement desktop can adopt a surviving server only after the old pinned
   process is dead and the new peer has the same kernel-resolved executable;
-  loopback/KSP traffic and reusable desktop secrets are not authority. Native
-  terminal bytes use this channel, while merge-session KSP input is rejected.
-  Ordinary advance requests and agent tools cannot claim it.
+  loopback/KSP traffic and reusable desktop secrets are not authority. Desktop
+  merge-terminal bytes use the same timeout-bounded, process-authenticated
+  native channel, while merge-session KSP input is rejected and ordinary
+  terminals retain KSP.
+  Ordinary advance requests and agent tools cannot claim override or merge
+  authority.
 - **Gated merge handoff**:
   `POST /v1/tasks/{task_id}/actions/signal-merge-handoff` rechecks the gate and
   requires an active authorized approve post, binds the handoff to that task's

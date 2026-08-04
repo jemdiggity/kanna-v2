@@ -579,6 +579,86 @@ async fn concurrent_approvals_prepare_exactly_one_merge_singleton_when_absent() 
 }
 
 #[tokio::test]
+async fn rejected_merge_singleton_spawn_rolls_back_completion_context_artifacts() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, ErrorCode, Event as DaemonEvent};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!("merge-before-ack-context-{}", unique_test_suffix());
+    let repo_root = std::env::temp_dir().join(format!("{unique}-repo"));
+    init_test_git_repo(&repo_root);
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(line.trim()).unwrap(),
+            DaemonCommand::Spawn { .. } | DaemonCommand::SpawnAgent { .. }
+        ));
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::Error {
+                        code: Some(ErrorCode::AgentSpawnFailed),
+                        message: "merge spawn rejected".to_string(),
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let config = merge_test_config(&unique, &daemon_dir);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    seed_approvable_source(&db, "task-source", "approve-source", 71);
+    drop(db);
+
+    let response = super::router(Arc::new(super::AppState::new(config.clone())))
+        .oneshot(
+            Request::post("/v1/tasks/task-source/actions/signal-merge-handoff")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "branch": "task-source",
+                        "target": "main",
+                        "prUrl": "https://github.com/acme/repo/pull/71",
+                        "summary": "Approve task-source"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    daemon_server.await.unwrap();
+
+    let completion_dir = daemon_dir.join("runtime/completion");
+    assert!(
+        std::fs::read_dir(&completion_dir).unwrap().next().is_none(),
+        "merge before-ack rollback must remove the prepared JSON and lock"
+    );
+    let db = Db::open(&config.db_path).unwrap();
+    assert!(db.find_open_merge_recipient("repo-1").unwrap().is_none());
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_dir_all(repo_root);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+#[tokio::test]
 async fn lost_merge_input_response_is_quarantined_and_never_retried() {
     use kanna_daemon::protocol::Command as DaemonCommand;
     use tokio::io::{AsyncBufReadExt, BufReader};

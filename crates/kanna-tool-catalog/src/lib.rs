@@ -11,6 +11,16 @@ pub const KANNA_COMPLETION_CONTEXT_ENV: &str = "KANNA_COMPLETION_CONTEXT";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletionContext {
+    /// Immutable identity of the run that received this context at spawn.
+    /// Older files omit it; their run-scoped filename is the authoritative
+    /// fallback during upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_run_id: Option<String>,
+    /// True when the server compiled a context created by an adapter which
+    /// predates coordinated context writes. That live process must be
+    /// replaced rather than continued into a post.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy_writer: bool,
     pub run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_attempt_key: Option<String>,
@@ -36,8 +46,11 @@ const MAX_COMPLETION_ATTEMPTS: usize = 8;
 
 impl CompletionContext {
     pub fn new(run_id: impl Into<String>) -> Self {
+        let run_id = run_id.into();
         Self {
-            run_id: run_id.into(),
+            spawned_run_id: Some(run_id.clone()),
+            legacy_writer: false,
+            run_id,
             completed_attempt_key: None,
             completed_run_id: None,
             completed_attempts: Vec::new(),
@@ -911,8 +924,21 @@ pub fn encode_path_segment(value: &str) -> String {
 
 #[cfg(test)]
 mod completion_context_tests {
-    use super::{mutate_completion_context, read_completion_context, write_completion_context};
+    use super::{
+        mutate_completion_context, read_completion_context, write_completion_context,
+        CompletionContext,
+    };
     use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn old_context_without_spawn_identity_remains_readable_for_server_upgrade() {
+        let context: CompletionContext = serde_json::from_str(r#"{"runId":"run-post"}"#).unwrap();
+        assert_eq!(context.run_id, "run-post");
+        assert_eq!(context.spawned_run_id, None);
+        assert!(!context.legacy_writer);
+        assert!(context.completed_attempts.is_empty());
+        assert_eq!(context.completed_run_id, None);
+    }
 
     #[test]
     fn concurrent_completion_record_and_post_rebind_cannot_overwrite_each_other() {

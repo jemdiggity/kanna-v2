@@ -112,6 +112,39 @@ describe("MainPanel", () => {
     localStorage.clear();
   });
 
+  it("marks only the merge singleton terminal as protected operator input", async () => {
+    const { default: MainPanel } = await import("../MainPanel.vue");
+    const mountForPipeline = (pipeline: string) => mount(MainPanel, {
+      props: {
+        uiSlot: readySlot(durableTask({ pipeline })),
+        repoPath: "/tmp/repo",
+        hasRepos: true,
+      },
+      global: {
+        mocks: { $t: (key: string) => key },
+        stubs: {
+          TaskHeader: true,
+          TerminalTabs: {
+            name: "TerminalTabs",
+            props: ["operatorTerminalInput"],
+            template: '<div data-testid="terminal-tabs" />',
+          },
+        },
+      },
+    });
+
+    expect(
+      mountForPipeline("singleton-merge")
+        .findComponent({ name: "TerminalTabs" })
+        .props("operatorTerminalInput"),
+    ).toBe(true);
+    expect(
+      mountForPipeline("specialized-reviewers")
+        .findComponent({ name: "TerminalTabs" })
+        .props("operatorTerminalInput"),
+    ).toBe(false);
+  });
+
   it("shows a dismissible command hint at the bottom even without repos or tasks and keeps it hidden after dismissal", async () => {
     const { default: MainPanel } = await import("../MainPanel.vue");
 

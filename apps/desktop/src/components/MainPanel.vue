@@ -389,6 +389,7 @@ function dismissCommandHint() {
           :prompt="item.prompt || ''"
           :spawn-pty-session="spawnPtySession"
           :recover-task-session="recoverTaskSession"
+          :operator-terminal-input="item.pipeline === 'singleton-merge'"
         />
       </template>
     </template>

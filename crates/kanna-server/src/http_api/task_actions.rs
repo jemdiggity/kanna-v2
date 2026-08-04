@@ -1365,6 +1365,7 @@ pub(super) async fn complete_stage(
     })?;
 
     let completion_attempt_key = payload.completion_attempt_key.clone();
+    let completion_attempt_key_for_record = completion_attempt_key.clone();
     let completion_run_id = payload.run_id.clone();
     let (task_id, finished_run, already_closed, replayed) = {
         let state = Arc::clone(&state);
@@ -1410,7 +1411,7 @@ pub(super) async fn complete_stage(
                         format!("task has no stage run to complete: {task_id}"),
                     )
                 })?;
-            let payload_run_id = match payload_run_id {
+            let mut payload_run_id = match payload_run_id {
                 Some(run_id) if !run_id.trim().is_empty() => run_id,
                 Some(_) => {
                     return Err((
@@ -1431,6 +1432,19 @@ pub(super) async fn complete_stage(
                     current_run.id.clone()
                 }
             };
+            if let Some(attempt_key) = completion_attempt_key_for_record.as_deref() {
+                if let Some(original_run_id) =
+                    crate::task_creator::resolve_legacy_completion_retry_run(
+                        &state.config.daemon_dir,
+                        &db,
+                        &task_id,
+                        &payload_run_id,
+                        attempt_key,
+                    )
+                {
+                    payload_run_id = original_run_id;
+                }
+            }
             if current_run.id != payload_run_id {
                 let prior = db
                     .stage_run(&payload_run_id)
@@ -1609,16 +1623,22 @@ fn mark_completion_context_succeeded(
             .join("runtime")
             .join("completion")
             .join(format!("{run_id}.json"));
-    let path = if task_path.exists() {
-        task_path
-    } else if legacy_path.exists() {
-        legacy_path
+    let path = if legacy_path.exists() {
+        Some(legacy_path)
+    } else if task_path.exists() {
+        Some(task_path)
+    } else if legacy_shared_path.exists() {
+        Some(legacy_shared_path)
     } else {
-        legacy_shared_path
+        find_rebound_completion_context(&directory, task_id, run_id).or_else(|| {
+            legacy_shared_path
+                .parent()
+                .and_then(|directory| find_rebound_completion_context(directory, task_id, run_id))
+        })
     };
-    if !path.exists() {
+    let Some(path) = path else {
         return;
-    }
+    };
     if let Err(error) = kanna_tool_catalog::mutate_completion_context(&path, |current| {
         let mut context =
             current.ok_or_else(|| format!("completion context {} disappeared", path.display()))?;
@@ -1627,6 +1647,27 @@ fn mark_completion_context_succeeded(
     }) {
         log::warn!("failed to persist completion retry binding for {run_id}: {error}");
     }
+}
+
+fn find_rebound_completion_context(
+    directory: &std::path::Path,
+    task_id: &str,
+    run_id: &str,
+) -> Option<std::path::PathBuf> {
+    let prefix = format!("run-{task_id}-");
+    std::fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension().and_then(|extension| extension.to_str()) == Some("json")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix))
+                && kanna_tool_catalog::read_completion_context(path)
+                    .is_ok_and(|context| context.run_id == run_id)
+        })
 }
 
 /// Optimistic blocker resolution: a task parked at the `pr` stage with a

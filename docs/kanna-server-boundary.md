@@ -295,8 +295,11 @@ surviving pre-upgrade approve session, parses its task id and candidate, and
 routes it through the same server-owned gate as the dedicated endpoint. Human
 conversation is trusted only when it arrives from the native operator terminal
 channel, whose provenance is separate from task-input/MCP/KSP traffic. KSP
-terminal input is rejected for merge sessions even on loopback; the desktop
-routes terminal bytes through the native control socket instead. New task-bound
+terminal input is rejected for merge sessions even on loopback. Ordinary
+desktop terminals retain the persistent KSP control path; the
+`singleton-merge` terminal alone uses the timeout-bounded,
+process-authenticated native control socket unavailable to local agent
+processes. New task-bound
 pipeline handoffs use the dedicated route.
 
 `POST /v1/tasks/{task_id}/actions/override-approval` is deliberately absent
@@ -308,7 +311,7 @@ When the desktop adopts a healthy surviving server, it must first send an
 explicit `adopt_desktop` request on that socket. The server transfers authority
 only after the old pinned PID/start identity is no longer live and the new peer
 has the same kernel-resolved executable path; there is no reusable handoff
-secret. Override and native terminal requests re-attempt that adoption once so
+secret. Override and merge-terminal requests re-attempt that adoption once so
 a same-version desktop restart has an in-product recovery path.
 Paired LAN devices require their device credential and the explicit
 human-action marker. An authenticated relay invocation carries the verified
@@ -348,17 +351,22 @@ prepared singleton remain quarantined and are never treated as safely
 retryable.
 
 Stage completion is bound to the run id fixed in the spawned agent's protected
-environment and a task-scoped completion-context file. The server is the sole
-writer after spawn: under a cross-process file lock it records a bounded mapping
-from verdict attempt keys to their original runs and rebinds the current run
-when a continued post starts. MCP and CLI adapters consult that mapping, so a
-timed-out original verdict retries its original run and can neither complete
-the post nor restore stale context. Replacement, close, and startup prune stale
-or orphaned context artifacts. The server rejects a mismatched current run but
-treats an identical retry of an already-finished run as idempotent even after a
-post or replacement starts. For rolling upgrades, `runId` may be omitted only
-for a pre-upgrade run whose durable `completion_bound` bit is false, and new
-clients tolerate old task-detail responses that lack `latestRun.id`.
+environment and an immutable run-scoped completion-context file. A successor
+gets a distinct file, so preparing it never publishes an identity to the live
+predecessor. Continued posts rebind only the inherited process's file, under a
+cross-process lock, while retaining a bounded mapping from verdict attempt keys
+to their original runs. MCP and CLI adapters consult that mapping. At startup,
+the server compiles the prior run-scoped format from its immutable filename and
+the original run's durable exact result; request handling repeats that
+server-owned check so a surviving old unlocked adapter cannot overwrite the
+protection. A timed-out original verdict therefore retries its original run
+and can neither complete the post nor restore stale context. Failed preparation,
+replacement, close, and startup prune stale or orphaned context artifacts. The
+server rejects a mismatched current run but treats an identical retry of an
+already-finished run as idempotent even after a post or replacement starts. For
+rolling upgrades, `runId` may be omitted only for a pre-upgrade run whose
+durable `completion_bound` bit is false, and new clients tolerate old task-detail
+responses that lack `latestRun.id`.
 
 ## Local Consumer Model
 

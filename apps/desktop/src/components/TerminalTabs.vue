@@ -23,6 +23,7 @@ const props = defineProps<{
     options?: { agentProvider?: AgentProvider },
   ) => Promise<void>;
   recoverTaskSession?: (sessionId: string, options?: { cols?: number; rows?: number }) => Promise<void>;
+  operatorTerminalInput?: boolean;
 }>();
 
 function buildSpawnOptions() {
@@ -48,6 +49,7 @@ function buildSpawnOptions() {
         :agent-provider="agentProvider"
         :worktree-path="worktreePath"
         :agent-terminal="true"
+        :operator-terminal-input="operatorTerminalInput"
         :recover-session="recoverTaskSession"
       />
     </KeepAlive>

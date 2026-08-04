@@ -17,6 +17,7 @@ const props = defineProps<{
   agentProvider?: string
   worktreePath?: string
   agentTerminal?: boolean
+  operatorTerminalInput?: boolean
   recoverSession?: (sessionId: string, options?: { cols?: number; rows?: number }) => Promise<void>
 }>()
 
@@ -26,6 +27,7 @@ const { terminal, init, startListening, fit, fitDeferred, redraw, ensureConnecte
   agentProvider: props.agentProvider,
   worktreePath: props.worktreePath,
   agentTerminal: props.agentTerminal,
+  operatorTerminalInput: props.operatorTerminalInput,
   recoverSession: props.recoverSession,
 })
 

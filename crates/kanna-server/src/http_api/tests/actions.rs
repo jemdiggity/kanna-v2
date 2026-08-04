@@ -5094,6 +5094,110 @@ async fn timed_out_completion_retry_is_idempotent_after_a_replacement_run_starts
 }
 
 #[tokio::test]
+async fn pre_upgrade_adapter_cannot_complete_rebound_post_after_lost_main_response() {
+    let summary = "main completed before the response was lost";
+    let stage_result = serde_json::json!({
+        "status": "success",
+        "summary": summary,
+        "metadata": null,
+    })
+    .to_string();
+    let state =
+        super::test_state_with_seed("desktop-legacy-completion-retry", "Studio Mac", |db| {
+            db.insert_test_repo("repo-1", "Repo One").unwrap();
+            db.insert_test_pipeline_item(
+                "task-1",
+                "repo-1",
+                "Complete exactly one run",
+                Some("Legacy completion retry"),
+                "in progress",
+                "2026-08-04 00:00:00",
+            )
+            .unwrap();
+            let run = |id: &'static str, kind: &'static str, status: &'static str| {
+                crate::db::NewStageRun {
+                    id,
+                    task_id: "task-1",
+                    stage: "in progress",
+                    kind,
+                    agent: Some("implement"),
+                    agent_provider: Some("codex"),
+                    model: None,
+                    effort: None,
+                    status,
+                    result: None,
+                    feedback: None,
+                    session_id: Some("task-1"),
+                    provider_session_id: None,
+                    cwd: None,
+                    resumed_from_run_id: None,
+                }
+            };
+            db.insert_stage_run_with_completion_binding(
+                run("run-task-1-original", "main", "running"),
+                None,
+                true,
+            )
+            .unwrap();
+            db.finish_stage_run(
+                "run-task-1-original",
+                "succeeded",
+                Some(&stage_result),
+                Some(summary),
+            )
+            .unwrap();
+            db.insert_stage_run_with_completion_binding(
+                run("run-task-1-post", "post", "running"),
+                None,
+                true,
+            )
+            .unwrap();
+        });
+    let db_path = state.config.db_path.clone();
+    let context_dir = std::path::Path::new(&state.config.daemon_dir).join("runtime/completion");
+    std::fs::create_dir_all(&context_dir).unwrap();
+    // Exact short-lived old format after its unlocked post-200 write raced
+    // with server rebinding: no immutable identity and no retry history.
+    std::fs::write(
+        context_dir.join("run-task-1-original.json"),
+        r#"{"runId":"run-task-1-post"}"#,
+    )
+    .unwrap();
+    let request_without_binding = serde_json::json!({
+        "status": "success",
+        "summary": summary,
+    });
+    let attempt_key = kanna_tool_catalog::completion_attempt_key(&request_without_binding).unwrap();
+
+    let response = super::router(state)
+        .oneshot(
+            Request::post("/v1/tasks/task-1/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        // A surviving old adapter reads the rebound successor
+                        // and cannot see the new history fields.
+                        "runId": "run-task-1-post",
+                        "completionAttemptKey": attempt_key,
+                        "status": "success",
+                        "summary": summary,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let db = Db::open(&db_path).unwrap();
+    assert_eq!(
+        db.stage_run("run-task-1-post").unwrap().unwrap().status,
+        "running"
+    );
+}
+
+#[tokio::test]
 async fn missing_run_id_is_legacy_only_and_cannot_complete_a_new_bound_run() {
     let seed = |db: &Db, task_id: &'static str, run_id: &'static str, bound: bool| {
         db.insert_test_pipeline_item(
