@@ -191,3 +191,83 @@ key without copying it into the worktree. A deterministic safe PTY fixture is
 also required before output and alternate-screen states can run; until then,
 only a content-free idle interval would be eligible after the app loads. Do not
 publish OTA, staging, or production as part of that unblock.
+
+### Physical-device retry after storage cleanup (2026-08-05)
+
+The retry began with 205 GiB available on `/Volumes/VHS`; after Jeremy's
+cleanup completed, the volume reported 618 GiB available. The exact requested
+self-contained workflow then built, installed, and launched successfully:
+
+```text
+KANNA_IOS_PHYSICAL_DEVICE_NAME='Jerome’s iPhone 15' \
+  ./kd mobile run --device --staging --install
+```
+
+This installed the current Release JavaScript bundle as
+`build.kanna.app.staging` on the connected iPhone16,1 running iOS 26.5.2. The
+build used the canonical private output at
+`.build/mobile/ios-device-staging`, whose target is under `/Volumes/VHS`; it
+did not depend on Metro. The matching generated app and dSYM remain in that
+build output. Nothing was published.
+
+One fixed-duration Power Profiler recording is valid. It attached to
+KannaStaging PID 47565 on the physical phone for a configured 60 seconds. The
+trace envelope ran from `2026-08-05T06:58:36.215+09:00` through
+`2026-08-05T06:59:37.876+09:00` (61.660580 seconds including instrument
+startup/teardown). The process accumulated 703,361,712 ns of
+`ProcessQOSExecution` duration-on-core: 0.703361712 CPU-seconds, or 1.17226952%
+average CPU over the fixed 60-second interval. Device thermal state was
+`Nominal` for the full 61.660579919-second envelope and the Core Location
+energy level was `None`. Power Profiler reported `0.0%/hr`, but the phone was
+USB-attached with its display at 100% brightness, so that value is recorded
+only as instrument output and is not a defensible battery-energy comparison.
+The instrument did not expose an interval mWh figure. An earlier 1.918-second
+trace used the wrong device selector and is invalid.
+
+The measured interval was **Tasks-root idle**, not idle terminal: a later
+content-free accessibility query found the app shell and Tasks view, with no
+task detail or crash boundary. It therefore cannot establish terminal-path
+performance. It is nevertheless a direct current-build comparison point
+against the stale incident process's 68% average CPU and advisory thermal
+pressure: this non-terminal idle state stayed at 1.17% average CPU and nominal
+thermal state. It does not prove that the incident's terminal hot path is fixed.
+
+A deterministic fixture was then started through the repository's remote-E2E
+harness. It used a temporary repository, fake agent, synthetic sentinel-only
+prompt, and 10,050 generated output lines; no real terminal contents,
+credentials, or user input were used or retained. The canonical physical
+device smoke workflow started WebDriverAgent but timed out waiting for the
+known fixture task row. Direct observation showed no established phone TCP
+connection to the LAN fixture port, and a repository test deep link did not
+move the app from Tasks into task detail. The harness also repeatedly reported
+that the protected-input successor daemon was not published and connectable.
+Those are boundary failures before terminal rendering, not crash or CPU
+measurements. A synthetic alternate-screen fixture exited during setup before
+the phone could reach it, so it supplies no TUI result.
+
+The staging relay matrix could not be started safely: the staging remote
+harness requires `KANNA_E2E_DEVICE_TOKEN` and `KANNA_STAGING_TEST_PASSWORD`,
+which were not present. No credentials were retrieved or copied. The installed
+staging Release bundle also cannot be redirected to the local development
+relay without rebuilding for a different app environment, so the local relay
+was not represented as staging evidence.
+
+| Transport | Terminal idle | Ordinary output | Output burst | Alternate-screen TUI |
+|---|---|---|---|---|
+| LAN | Skipped: fixture row unreachable from phone | Skipped: boundary not established | Skipped: boundary not established | Skipped: fixture setup and boundary failed |
+| Relay | Skipped: staging credentials unavailable | Skipped: staging credentials unavailable | Skipped: staging credentials unavailable | Skipped: staging credentials unavailable |
+
+The app process remained healthy during the content-free diagnostics checks.
+The current build's More/build-information view reported no retained fatal
+diagnostic, and no new device `.ips` report was found. Appium later terminated
+the app intentionally through its configured session cleanup; that lifecycle
+event is not a crash. Thus the 2026-08-04 CPU incident and later fatal JS
+exception remain correlated observations from the same stale process, not
+evidence of one root cause. This retry neither recovered the stale build's
+missing JS exception message nor reproduced a current fatal exception.
+
+No measurement proved a new defect in the reviewed output-cursor/lifecycle
+fix, so its code was left unchanged. A complete on-device terminal comparison
+still requires a phone-reachable safe LAN fixture and authorized staging relay
+credentials, followed by separately labeled fixed-duration runs for every row
+above.
