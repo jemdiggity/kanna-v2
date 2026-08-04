@@ -1,13 +1,20 @@
+import * as Clipboard from "expo-clipboard";
 import React from "react";
 import { Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
-import { captureMobileCrashDiagnostic } from "../lib/diagnostics/mobileCrashDiagnostics";
+import {
+  captureMobileCrashDiagnostic,
+  formatMobileCrashDiagnostics,
+  type MobileCrashDiagnostic
+} from "../lib/diagnostics/mobileCrashDiagnostics";
 
 interface MobileCrashBoundaryProps {
   children: React.ReactNode;
+  copyDiagnostic?(value: string): Promise<unknown>;
 }
 
 interface MobileCrashBoundaryState {
-  diagnosticId: string | null;
+  copyStatus: "idle" | "copied" | "failed";
+  diagnostic: MobileCrashDiagnostic | null;
   error: Error | null;
   retryKey: number;
 }
@@ -17,7 +24,8 @@ export class MobileCrashBoundary extends React.Component<
   MobileCrashBoundaryState
 > {
   state: MobileCrashBoundaryState = {
-    diagnosticId: null,
+    copyStatus: "idle",
+    diagnostic: null,
     error: null,
     retryKey: 0
   };
@@ -35,8 +43,23 @@ export class MobileCrashBoundary extends React.Component<
       stack: error.stack,
       componentStack: info.componentStack ?? undefined
     });
-    this.setState({ diagnosticId: diagnostic.id });
+    this.setState({ copyStatus: "idle", diagnostic });
   }
+
+  private copyDiagnostic = async (): Promise<void> => {
+    const { diagnostic } = this.state;
+    if (!diagnostic) return;
+
+    try {
+      await (this.props.copyDiagnostic ?? Clipboard.setStringAsync)(
+        formatMobileCrashDiagnostics([diagnostic])
+      );
+      this.setState({ copyStatus: "copied" });
+    } catch (error: unknown) {
+      console.warn("Mobile crash diagnostic clipboard export failed:", error);
+      this.setState({ copyStatus: "failed" });
+    }
+  };
 
   render() {
     if (!this.state.error) {
@@ -55,25 +78,47 @@ export class MobileCrashBoundary extends React.Component<
             {this.state.error.message}
           </Text>
           <Text style={styles.detail} selectable>
-            {this.state.diagnosticId
-              ? `Diagnostic ${this.state.diagnosticId} was captured. After retrying, open More → About this build to copy it.`
+            {this.state.diagnostic
+              ? `Diagnostic ${this.state.diagnostic.id} was captured and can be copied below.`
               : "Saving crash diagnostics…"}
           </Text>
+          {this.state.diagnostic ? (
+            <Pressable
+              accessibilityLabel="Copy crash diagnostics"
+              accessibilityRole="button"
+              onPress={() => void this.copyDiagnostic()}
+              style={({ pressed }) => [
+                styles.action,
+                styles.copy,
+                pressed ? styles.actionPressed : null
+              ]}
+            >
+              <Text style={styles.actionText}>
+                {this.state.copyStatus === "copied"
+                  ? "Diagnostics copied"
+                  : this.state.copyStatus === "failed"
+                    ? "Copy failed — try again"
+                    : "Copy diagnostics"}
+              </Text>
+            </Pressable>
+          ) : null}
           <Pressable
+            accessibilityLabel="Retry"
             accessibilityRole="button"
             onPress={() => {
               this.setState((state) => ({
-                diagnosticId: null,
+                copyStatus: "idle",
                 error: null,
                 retryKey: state.retryKey + 1
               }));
             }}
             style={({ pressed }) => [
+              styles.action,
               styles.retry,
-              pressed ? styles.retryPressed : null
+              pressed ? styles.actionPressed : null
             ]}
           >
-            <Text style={styles.retryText}>Retry</Text>
+            <Text style={styles.actionText}>Retry</Text>
           </Pressable>
         </View>
       </SafeAreaView>
@@ -102,15 +147,16 @@ const styles = StyleSheet.create({
   title: { color: "#F5F7FB", fontSize: 20, fontWeight: "700" },
   message: { color: "#FFC7CE", fontSize: 14, lineHeight: 20 },
   detail: { color: "#A8B7CC", fontSize: 13, lineHeight: 19 },
-  retry: {
+  action: {
     alignItems: "center",
     alignSelf: "flex-start",
-    backgroundColor: "#275C96",
     borderRadius: 12,
     minHeight: 44,
     justifyContent: "center",
     paddingHorizontal: 18
   },
-  retryPressed: { opacity: 0.76 },
-  retryText: { color: "#F5F7FB", fontSize: 14, fontWeight: "700" }
+  actionPressed: { opacity: 0.76 },
+  actionText: { color: "#F5F7FB", fontSize: 14, fontWeight: "700" },
+  copy: { backgroundColor: "#31506F" },
+  retry: { backgroundColor: "#275C96" }
 });

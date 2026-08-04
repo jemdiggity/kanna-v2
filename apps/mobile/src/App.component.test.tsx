@@ -9,6 +9,8 @@ import { MOBILE_E2E_IDS } from "./e2eTestIds";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
+
 const harness = vi.hoisted(() => ({
   appStateListener: null as ((state: string) => void) | null,
   addMobileCrashBreadcrumb: vi.fn(),
@@ -75,6 +77,8 @@ vi.mock("./lib/updates/otaUpdates", () => ({
 vi.mock("./lib/diagnostics/mobileCrashDiagnostics", () => ({
   addMobileCrashBreadcrumb: harness.addMobileCrashBreadcrumb,
   captureMobileCrashDiagnostic: harness.captureMobileCrashDiagnostic,
+  formatMobileCrashDiagnostics: (diagnostics: unknown) =>
+    JSON.stringify(diagnostics),
   updateMobileCrashContext: harness.updateMobileCrashContext
 }));
 

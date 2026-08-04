@@ -7,6 +7,9 @@ const MAX_DIAGNOSTICS = 5;
 const MAX_BREADCRUMBS = 20;
 const MAX_MESSAGE_LENGTH = 4_000;
 const MAX_STACK_LENGTH = 12_000;
+const REDACTED_VALUE = "[REDACTED]";
+const SENSITIVE_FIELD_PATTERN =
+  /authorization|proxy-authorization|(?:access|refresh|id)[_-]?token|token|password|passwd|secret|api[_-]?key|credential|cookie|session/i;
 
 export type MobileCrashDiagnosticKind =
   | "javascript-error"
@@ -62,6 +65,11 @@ export interface MobileCrashDiagnosticInput {
   stack?: string;
   componentStack?: string;
   details?: Record<string, string | number | boolean | null | undefined>;
+}
+
+export interface MobileCrashDiagnosticCapture {
+  diagnostic: MobileCrashDiagnostic;
+  persistence: Promise<void>;
 }
 
 interface DiagnosticStorage {
@@ -140,12 +148,28 @@ export class MobileCrashDiagnosticRecorder {
       {
         at: this.environment.now().toISOString(),
         category,
-        message: truncate(message, MAX_MESSAGE_LENGTH)
+        message: truncate(redactSensitiveText(message), MAX_MESSAGE_LENGTH)
       }
     ].slice(-MAX_BREADCRUMBS);
   }
 
   capture(input: MobileCrashDiagnosticInput): MobileCrashDiagnostic {
+    return this.enqueueDiagnostic(input);
+  }
+
+  captureWithPersistence(
+    input: MobileCrashDiagnosticInput
+  ): MobileCrashDiagnosticCapture {
+    const diagnostic = this.enqueueDiagnostic(input);
+    return {
+      diagnostic,
+      persistence: this.waitForPersistence()
+    };
+  }
+
+  private enqueueDiagnostic(
+    input: MobileCrashDiagnosticInput
+  ): MobileCrashDiagnostic {
     const at = this.environment.now();
     let build = UNKNOWN_BUILD;
     try {
@@ -162,12 +186,17 @@ export class MobileCrashDiagnosticRecorder {
       at: at.toISOString(),
       kind: input.kind,
       fatal: input.fatal === true,
-      message: truncate(input.message, MAX_MESSAGE_LENGTH),
+      message: truncate(redactSensitiveText(input.message), MAX_MESSAGE_LENGTH),
       ...(input.stack
-        ? { stack: truncate(input.stack, MAX_STACK_LENGTH) }
+        ? { stack: truncate(redactSensitiveText(input.stack), MAX_STACK_LENGTH) }
         : {}),
       ...(input.componentStack
-        ? { componentStack: truncate(input.componentStack, MAX_STACK_LENGTH) }
+        ? {
+            componentStack: truncate(
+              redactSensitiveText(input.componentStack),
+              MAX_STACK_LENGTH
+            )
+          }
         : {}),
       ...(input.details ? { details: normalizeDetails(input.details) } : {}),
       context: { ...this.context, appState: AppState.currentState },
@@ -175,7 +204,10 @@ export class MobileCrashDiagnosticRecorder {
       build
     };
 
-    this.pendingDiagnostics.unshift(diagnostic);
+    this.pendingDiagnostics = [diagnostic, ...this.pendingDiagnostics].slice(
+      0,
+      MAX_DIAGNOSTICS
+    );
     this.startPersistence();
     return diagnostic;
   }
@@ -188,10 +220,14 @@ export class MobileCrashDiagnosticRecorder {
   }
 
   async clear(): Promise<void> {
+    await this.waitForPersistence();
+    await this.storage.removeItem(DIAGNOSTICS_STORAGE_KEY);
+  }
+
+  private async waitForPersistence(): Promise<void> {
     while (this.persistenceQueue) {
       await this.persistenceQueue;
     }
-    await this.storage.removeItem(DIAGNOSTICS_STORAGE_KEY);
   }
 
   private startPersistence(): void {
@@ -214,7 +250,7 @@ export class MobileCrashDiagnosticRecorder {
 
   private async flushPendingDiagnostics(): Promise<void> {
     while (this.pendingDiagnostics.length > 0) {
-      const batch = this.pendingDiagnostics.splice(0);
+      const batch = this.pendingDiagnostics.splice(0, MAX_DIAGNOSTICS);
       const previous = await this.readStored();
       await this.storage.setItem(
         DIAGNOSTICS_STORAGE_KEY,
@@ -229,7 +265,10 @@ export class MobileCrashDiagnosticRecorder {
     try {
       const parsed = JSON.parse(raw) as unknown;
       if (!Array.isArray(parsed)) return [];
-      return parsed.filter(isMobileCrashDiagnostic).slice(0, MAX_DIAGNOSTICS);
+      return parsed
+        .filter(isMobileCrashDiagnostic)
+        .slice(0, MAX_DIAGNOSTICS)
+        .map(redactMobileCrashDiagnostic);
     } catch (error: unknown) {
       console.warn("Stored mobile crash diagnostics could not be parsed:", error);
       return [];
@@ -271,6 +310,12 @@ export function captureMobileCrashDiagnostic(
   return recorder.capture(input);
 }
 
+export function captureMobileCrashDiagnosticWithPersistence(
+  input: MobileCrashDiagnosticInput
+): MobileCrashDiagnosticCapture {
+  return recorder.captureWithPersistence(input);
+}
+
 export function readMobileCrashDiagnostics(): Promise<MobileCrashDiagnostic[]> {
   return recorder.read();
 }
@@ -282,7 +327,7 @@ export function clearMobileCrashDiagnostics(): Promise<void> {
 export function formatMobileCrashDiagnostics(
   diagnostics: readonly MobileCrashDiagnostic[]
 ): string {
-  return JSON.stringify(diagnostics, null, 2);
+  return JSON.stringify(diagnostics.map(redactMobileCrashDiagnostic), null, 2);
 }
 
 interface ReactNativeErrorUtils {
@@ -298,7 +343,9 @@ interface DiagnosticGlobal {
 }
 
 export function installMobileCrashHandler(
-  capture: typeof captureMobileCrashDiagnostic = captureMobileCrashDiagnostic
+  capture: (
+    input: MobileCrashDiagnosticInput
+  ) => MobileCrashDiagnosticCapture = captureMobileCrashDiagnosticWithPersistence
 ): void {
   const diagnosticGlobal = globalThis as typeof globalThis & DiagnosticGlobal;
   const errorUtils = diagnosticGlobal.ErrorUtils;
@@ -309,16 +356,27 @@ export function installMobileCrashHandler(
   diagnosticGlobal.__kannaMobileCrashHandlerInstalled = true;
   const previousHandler = errorUtils.getGlobalHandler();
   errorUtils.setGlobalHandler((error, isFatal) => {
-    const normalized = normalizeError(error);
+    let delegated = false;
+    const delegate = () => {
+      if (delegated) return;
+      delegated = true;
+      previousHandler(error, isFatal);
+    };
+
     try {
-      capture({
+      const normalized = normalizeError(error);
+      const attempt = capture({
         kind: "javascript-error",
         fatal: isFatal === true,
         message: normalized.message,
         stack: normalized.stack
       });
-    } finally {
-      previousHandler(error, isFatal);
+      void Promise.resolve(attempt.persistence).then(delegate, delegate);
+    } catch {
+      console.warn(
+        "Mobile crash diagnostic capture failed before persistence completed."
+      );
+      delegate();
     }
   });
 }
@@ -353,9 +411,63 @@ function normalizeDetails(
       )
       .map(([key, value]) => [
         key,
-        typeof value === "string" ? truncate(value, MAX_MESSAGE_LENGTH) : value
+        typeof value === "string"
+          ? truncate(
+              SENSITIVE_FIELD_PATTERN.test(key)
+                ? REDACTED_VALUE
+                : redactSensitiveText(value),
+              MAX_MESSAGE_LENGTH
+            )
+          : value
       ])
   );
+}
+
+function redactMobileCrashDiagnostic(
+  diagnostic: MobileCrashDiagnostic
+): MobileCrashDiagnostic {
+  return {
+    ...diagnostic,
+    message: redactSensitiveText(diagnostic.message),
+    ...(diagnostic.stack
+      ? { stack: redactSensitiveText(diagnostic.stack) }
+      : {}),
+    ...(diagnostic.componentStack
+      ? { componentStack: redactSensitiveText(diagnostic.componentStack) }
+      : {}),
+    ...(diagnostic.details
+      ? { details: normalizeDetails(diagnostic.details) }
+      : {}),
+    breadcrumbs: diagnostic.breadcrumbs.map((breadcrumb) => ({
+      ...breadcrumb,
+      message: redactSensitiveText(breadcrumb.message)
+    }))
+  };
+}
+
+function redactSensitiveText(value: string): string {
+  return value
+    .replace(
+      /(\bhttps?:\/\/)[^/\s?#@]+@/gi,
+      `$1${REDACTED_VALUE}@`
+    )
+    .replace(
+      /([?&](?:authorization|proxy[_-]?authorization|[A-Za-z0-9_.-]*(?:token|password|passwd|secret|credential)|api[_-]?key|cookie|session)=)[^&#\s]*/gi,
+      `$1${REDACTED_VALUE}`
+    )
+    .replace(
+      /(\bauthorization\s*[:=]\s*)(?:(?:bearer|basic)\s+)?(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      `$1${REDACTED_VALUE}`
+    )
+    .replace(/\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+/gi, `$1 ${REDACTED_VALUE}`)
+    .replace(
+      /(["']?(?:authorization|proxy[_-]?authorization|[A-Za-z0-9_.-]*(?:token|password|passwd|secret|credential)|api[_-]?key|cookie|session)["']?\s*[:=]\s*)(["'])[^"']*\2/gi,
+      `$1$2${REDACTED_VALUE}$2`
+    )
+    .replace(
+      /(\b(?:authorization|proxy[_-]?authorization|[A-Za-z0-9_.-]*(?:token|password|passwd|secret|credential)|api[_-]?key|cookie|session)\b\s*[:=]\s*)(?!\[REDACTED\])[^,\s;}\]&]+/gi,
+      `$1${REDACTED_VALUE}`
+    );
 }
 
 function truncate(value: string, length: number): string {
