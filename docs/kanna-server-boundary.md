@@ -301,7 +301,11 @@ merge-agent history selects the protected terminal even after a compatible
 pipeline-name change. That terminal alone uses timeout-bounded `OperatorInput`
 on the daemon socket: the daemon rejects generic `Input`/`InputNoReply` and
 authenticates the desktop by PID, start time, and executable path. Canonical
-server-built merge envelopes use separately executable-pinned `SystemInput`.
+server-built merge envelopes use `SystemInput` pinned to the exact server PID,
+start time, and executable. The authenticated desktop hands that identity to a
+replacement daemon when adopting a surviving server; an initial server may
+bootstrap only as the desktop's direct child. A same-executable agent process
+is not server authority.
 New task-bound
 pipeline handoffs use the dedicated route.
 

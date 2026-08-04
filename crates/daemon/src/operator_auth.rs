@@ -14,6 +14,7 @@ struct DesktopIdentity {
 pub(crate) struct OperatorAuthorizer {
     trusted: Mutex<DesktopIdentity>,
     trusted_server_executable: Option<PathBuf>,
+    trusted_server: Mutex<Option<DesktopIdentity>>,
 }
 
 impl OperatorAuthorizer {
@@ -34,6 +35,7 @@ impl OperatorAuthorizer {
                 .filter(|value| !value.is_empty())
                 .map(PathBuf::from)
                 .and_then(|path| std::fs::canonicalize(path).ok()),
+            trusted_server: Mutex::new(None),
         })
     }
 
@@ -92,13 +94,122 @@ impl OperatorAuthorizer {
             .ok_or_else(|| "system-input socket peer identity is unavailable".to_string())?;
         let peer = live_process(peer_pid)
             .ok_or_else(|| "system-input socket peer is not live".to_string())?;
-        if executable(peer_pid).as_ref() != Some(expected) {
+        let peer_executable = executable(peer_pid)
+            .ok_or_else(|| "system-input peer executable is unavailable".to_string())?;
+        if &peer_executable != expected {
             return Err("system-input peer is not the pinned kanna-server executable".to_string());
+        }
+
+        let selected = {
+            let mut trusted_server = self
+                .trusted_server
+                .lock()
+                .map_err(|_| "server identity lock was poisoned".to_string())?;
+            let pinned_server_is_live = trusted_server.as_ref().is_some_and(|identity| {
+                live_process(identity.pid).is_some_and(|process| {
+                    process.start == identity.start
+                        && executable(identity.pid).as_ref() == Some(&identity.executable)
+                })
+            });
+            if !pinned_server_is_live {
+                // Initial server/daemon startup is deliberately concurrent.
+                // Only the exact direct child of the pinned desktop may
+                // bootstrap itself or replace an exited server; a surviving
+                // server is pinned explicitly.
+                let trusted_desktop = self
+                    .trusted
+                    .lock()
+                    .map_err(|_| "operator identity lock was poisoned".to_string())?
+                    .clone();
+                let desktop_is_live = live_process(trusted_desktop.pid).is_some_and(|process| {
+                    process.start == trusted_desktop.start
+                        && executable(trusted_desktop.pid).as_ref()
+                            == Some(&trusted_desktop.executable)
+                });
+                if !desktop_is_live || peer.ppid != trusted_desktop.pid {
+                    return Err(
+                        "system-input peer is not the pinned kanna-server process".to_string()
+                    );
+                }
+                *trusted_server = Some(DesktopIdentity {
+                    pid: peer.pid,
+                    start: peer.start,
+                    executable: peer_executable.clone(),
+                });
+            }
+            trusted_server
+                .clone()
+                .ok_or_else(|| "server process identity is unavailable".to_string())?
+        };
+        if peer.pid != selected.pid
+            || peer.start != selected.start
+            || peer_executable != selected.executable
+        {
+            return Err("system-input peer is not the pinned kanna-server process".to_string());
         }
         let final_peer = live_process(peer_pid)
             .ok_or_else(|| "system-input peer exited during authorization".to_string())?;
-        if final_peer.start != peer.start || executable(peer_pid).as_ref() != Some(expected) {
+        if final_peer.start != selected.start
+            || peer_pid != selected.pid
+            || executable(peer_pid).as_ref() != Some(&selected.executable)
+        {
             return Err("system-input peer identity changed during authorization".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn authorize_server_process(
+        &self,
+        socket_fd: RawFd,
+        server_pid: u32,
+    ) -> Result<(), String> {
+        self.authorize(socket_fd, true)?;
+        let server_pid = libc::pid_t::try_from(server_pid)
+            .map_err(|_| "kanna-server pid is out of range".to_string())?;
+        let expected = self
+            .trusted_server_executable
+            .as_ref()
+            .ok_or_else(|| "daemon has no pinned kanna-server executable".to_string())?;
+        let server = live_process(server_pid)
+            .ok_or_else(|| "kanna-server process is not live".to_string())?;
+        let server_executable = executable(server_pid)
+            .ok_or_else(|| "kanna-server executable is unavailable".to_string())?;
+        if &server_executable != expected {
+            return Err("kanna-server process does not match the pinned executable".to_string());
+        }
+
+        let selected = DesktopIdentity {
+            pid: server.pid,
+            start: server.start,
+            executable: server_executable,
+        };
+        {
+            let mut trusted_server = self
+                .trusted_server
+                .lock()
+                .map_err(|_| "server identity lock was poisoned".to_string())?;
+            if let Some(current) = trusted_server.as_ref() {
+                let current_is_live = live_process(current.pid).is_some_and(|process| {
+                    process.start == current.start
+                        && executable(current.pid).as_ref() == Some(&current.executable)
+                });
+                if current_is_live
+                    && (current.pid != selected.pid || current.start != selected.start)
+                {
+                    return Err(
+                        "a different live kanna-server process is already pinned".to_string()
+                    );
+                }
+            }
+            *trusted_server = Some(selected.clone());
+        }
+
+        let final_server = live_process(server_pid)
+            .ok_or_else(|| "kanna-server exited during authorization".to_string())?;
+        if final_server.start != selected.start
+            || executable(server_pid).as_ref() != Some(&selected.executable)
+        {
+            return Err("kanna-server identity changed during authorization".to_string());
         }
         Ok(())
     }

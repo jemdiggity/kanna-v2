@@ -207,8 +207,8 @@ pub enum Command {
         data: Vec<u8>,
     },
     /// Server-originated, machine-protocol input for a protected session.
-    /// The daemon authenticates the peer's executable; this is not exposed by
-    /// agent-facing HTTP, KSP, MCP, or CLI surfaces.
+    /// The daemon authenticates the peer's exact process identity; this is not
+    /// exposed by agent-facing HTTP, KSP, MCP, or CLI surfaces.
     SystemInput {
         session_id: String,
         data: Vec<u8>,
@@ -217,6 +217,12 @@ pub enum Command {
     /// has exited. Carries no reusable credential; the daemon authenticates
     /// the socket peer from kernel process metadata.
     AdoptOperator,
+    /// Pin the exact kanna-server process authorized to submit protected
+    /// system input. Only the kernel-authenticated native desktop may perform
+    /// this handoff; the pid is revalidated with start time and executable.
+    AuthorizeServer {
+        pid: u32,
+    },
     /// Server-authenticated classification for an adopted legacy session.
     /// A classified protected session can never be relaxed.
     ClassifyInput {

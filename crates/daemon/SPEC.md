@@ -305,8 +305,12 @@ enabled monotonically for a session adopted from an older daemon. Generic
 terminal input is refused for these sessions. `OperatorInput` requires the
 kernel-identified desktop captured at daemon launch, or a same-executable
 desktop explicitly adopted after the old process exits. `SystemInput` is
-reserved for canonical server-built merge envelopes and pins the exact server
-executable supplied at daemon launch. Neither path uses a bearer credential.
+reserved for canonical server-built merge envelopes. Initial concurrent
+startup admits only the exact server executable when it is a direct child of
+the pinned desktop, then pins that process by PID and start time. For a server
+surviving desktop restart, the newly authenticated desktop explicitly hands
+the server's live process identity to the daemon. Neither path uses a bearer
+credential, and another process running the same binary is refused.
 An old daemon's handoff has no input-policy field, so the successor initially
 fences every such PTY. Before serving HTTP, the authenticated server classifies
 the adopted sessions from durable merge-agent history; classification may

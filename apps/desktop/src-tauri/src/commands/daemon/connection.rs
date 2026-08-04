@@ -107,20 +107,75 @@ pub(super) async fn send_command_expect_ack_bounded(
     json: &str,
     timeout: std::time::Duration,
 ) -> Result<(), DaemonCommandError> {
-    match tokio::time::timeout(timeout, send_command_expect_ack(state, json)).await {
-        Ok(result) => result,
-        Err(_) => {
-            // `read_event` may have consumed part of an acknowledgement before
-            // cancellation. Retire the entire stream so no later command can
-            // observe that acknowledgement as its own.
-            clear_daemon_client(state).await;
-            Err(DaemonCommandError::from(
-                "daemon command acknowledgement timed out".to_string(),
-            ))
+    async fn send_once(
+        state: &DaemonState,
+        json: &str,
+        timeout: std::time::Duration,
+    ) -> (Option<u32>, Result<(), DaemonCommandError>) {
+        // Hold the state lock through cancellation and retirement. A command
+        // already queued behind this one cannot acquire a partially consumed
+        // stream between the timeout and cleanup.
+        let mut guard = state.lock().await;
+        if guard.is_none() {
+            let socket_path = daemon_socket_path();
+            match DaemonClient::connect(&socket_path).await {
+                Ok(client) => *guard = Some(client),
+                Err(error) => return (None, Err(error.into())),
+            }
         }
+        let client = match require_option_mut(&mut guard, "daemon client") {
+            Ok(client) => client,
+            Err(error) => return (None, Err(error.into())),
+        };
+        let connected_pid = Some(client.connected_pid());
+        let round_trip = async {
+            client.send_command(json).await?;
+            let response = client.read_event().await?;
+            parse_ack(&response)
+        };
+        let result = match tokio::time::timeout(timeout, round_trip).await {
+            Ok(result) => result,
+            Err(_) => {
+                *guard = None;
+                return (
+                    connected_pid,
+                    Err(DaemonCommandError::from(
+                        "daemon command acknowledgement timed out".to_string(),
+                    )),
+                );
+            }
+        };
+        if result
+            .as_ref()
+            .is_err_and(should_clear_daemon_client_after_error)
+        {
+            *guard = None;
+        }
+        (connected_pid, result)
     }
-}
 
+    let (connected_pid, first_result) = send_once(state, json, timeout).await;
+    let error = match first_result {
+        Ok(()) => return Ok(()),
+        Err(error) if is_retryable_command_error(&error) => error,
+        Err(error) => return Err(error),
+    };
+    let Some(connected_pid) = connected_pid else {
+        return Err(error);
+    };
+    let successor = tokio::time::timeout(
+        timeout,
+        crate::daemon_lifecycle::wait_for_successor(connected_pid),
+    )
+    .await
+    .map_err(|_| DaemonCommandError::from("daemon successor wait timed out".to_string()))?
+    .map_err(DaemonCommandError::from)?;
+    // Install the successor while holding the same serialization lock used by
+    // commands. Any intervening command has finished before replacement.
+    *state.lock().await = Some(successor);
+    let (_, retry_result) = send_once(state, json, timeout).await;
+    retry_result
+}
 pub(super) async fn send_command_expect_session_created(
     state: &DaemonState,
     json: &str,
@@ -288,7 +343,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timed_out_ack_retires_stream_before_the_next_command() {
+    async fn timed_out_ack_atomically_retires_stream_before_an_already_queued_command() {
         let dir = std::path::PathBuf::from("/tmp").join(format!(
             "kd-slow-ack-{}-{}",
             std::process::id(),
@@ -325,18 +380,38 @@ mod tests {
         let old_client = DaemonClient::connect(&old_socket).await.unwrap();
         let state: DaemonState = Arc::new(Mutex::new(Some(old_client)));
         let first = r#"{"type":"OperatorInput","data":[97]}"#;
-        let error =
-            send_command_expect_ack_bounded(&state, first, std::time::Duration::from_millis(20))
-                .await
-                .expect_err("the partial acknowledgement must time out");
-        assert!(error.message.contains("timed out"));
-        assert!(state.lock().await.is_none());
-
-        *state.lock().await = Some(DaemonClient::connect(&new_socket).await.unwrap());
-        let second = r#"{"type":"Resize","cols":90}"#;
-        send_command_expect_ack_bounded(&state, second, std::time::Duration::from_secs(1))
+        let first_state = state.clone();
+        let first_task = tokio::spawn(async move {
+            send_command_expect_ack_bounded(
+                &first_state,
+                first,
+                std::time::Duration::from_millis(20),
+            )
             .await
-            .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let second_state = state.clone();
+        let second = r#"{"type":"Resize","cols":90}"#;
+        let second_task = tokio::spawn(async move {
+            let mut guard = second_state.lock().await;
+            assert!(
+                guard.is_none(),
+                "queued command observed the timed-out stream before retirement"
+            );
+            *guard = Some(DaemonClient::connect(&new_socket).await.unwrap());
+            let client = guard.as_mut().unwrap();
+            client.send_command(second).await.unwrap();
+            let response = client.read_event().await.unwrap();
+            parse_ack(&response).unwrap();
+        });
+
+        let error = first_task
+            .await
+            .unwrap()
+            .expect_err("the partial acknowledgement must time out");
+        assert!(error.message.contains("timed out"));
+        second_task.await.unwrap();
 
         assert_eq!(old_server.await.unwrap(), format!("{first}\n"));
         assert_eq!(new_server.await.unwrap(), format!("{second}\n"));

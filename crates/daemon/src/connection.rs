@@ -124,6 +124,15 @@ pub(crate) async fn handle_connection(
                 };
                 let _ = write_event(&mut *writer.lock().await, &event).await;
             }
+            Some(Command::AuthorizeServer { pid }) => {
+                let event = match operator_authorizer.authorize_server_process(raw_fd, pid) {
+                    Ok(()) => Event::Ok,
+                    Err(message) => {
+                        error_event(Some(protocol::ErrorCode::InputUnauthorized), message)
+                    }
+                };
+                let _ = write_event(&mut *writer.lock().await, &event).await;
+            }
             Some(Command::Subscribe) => {
                 if subscription_task.is_none() {
                     let mut broadcast_rx = broadcast_tx.subscribe();
@@ -1434,8 +1443,8 @@ pub(crate) async fn handle_command(
             agent_runtime::handle_agent_set_model(session_id, model, writer, agent_sessions).await;
         }
 
-        Command::AdoptOperator => {
-            let event = error_event(None, "unexpected nested operator adoption command");
+        Command::AdoptOperator | Command::AuthorizeServer { .. } => {
+            let event = error_event(None, "unexpected nested authority command");
             let _ = write_event(&mut *writer.lock().await, &event).await;
         }
     }

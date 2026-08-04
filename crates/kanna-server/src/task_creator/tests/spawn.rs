@@ -331,18 +331,17 @@ async fn rejected_spawn_rolls_back_run_scoped_completion_artifacts_immediately()
         },
     };
     let mut client = DaemonClient::connect(&config.daemon_dir).await.unwrap();
-    let error = spawn_prepared_task_for_api_recording_stage_run_detailed(
-        &config.db_path,
-        &mut client,
-        prepared,
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        PreparedTaskDeliveryError::BeforeAcknowledgement(_)
-    ));
+    let error =
+        spawn_prepared_task_for_api_recording_stage_run(&config.db_path, &mut client, prepared)
+            .await
+            .unwrap_err();
+    assert!(error.contains("rejected before acknowledgement"));
     daemon.await.unwrap();
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "failed");
+    assert_eq!(runs[0].feedback.as_deref(), Some("task spawn failed"));
+    assert!(db.stage_run_completion_bound(&runs[0].id).unwrap());
     let completion_dir = std::path::Path::new(&config.daemon_dir).join("runtime/completion");
     assert!(
         std::fs::read_dir(completion_dir).unwrap().next().is_none(),

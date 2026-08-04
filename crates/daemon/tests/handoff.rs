@@ -53,6 +53,9 @@ enum Cmd {
         session_id: String,
         operator_input_only: bool,
     },
+    AuthorizeServer {
+        pid: u32,
+    },
     Snapshot {
         session_id: String,
     },
@@ -1055,6 +1058,14 @@ fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
                         reader: BufReader::new(stream.try_clone().unwrap()),
                         writer: stream,
                     };
+                    successor
+                        .try_round_trip_until(
+                            &Cmd::AuthorizeServer {
+                                pid: std::process::id(),
+                            },
+                            |event| matches!(event, Evt::Ok),
+                        )
+                        .expect("native desktop pins the server process on the successor");
                     successor
                         .try_round_trip_until(
                             &Cmd::ClassifyInput {

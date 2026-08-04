@@ -7,7 +7,7 @@ use tauri::Manager;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 
 mod cloud_env;
 mod config;
@@ -17,7 +17,7 @@ use config::{
     server_config_matches_runtime, server_config_path_for_app_data_dir,
     server_lock_path_for_config, try_claim_server_lock, write_server_config,
 };
-use process::{find_sidecar, stop_server_on_port};
+use process::{find_sidecar, server_pids_on_port, stop_server_on_port};
 
 const LOCAL_SERVER_HOST: &str = "127.0.0.1";
 const DEFAULT_LOCAL_SERVER_PORT: u16 = kanna_runtime_defaults::PRODUCTION_MOBILE_SERVER_PORT;
@@ -75,6 +75,7 @@ pub struct MobilePairingSession {
 pub struct MobileServerManager {
     inner: Arc<Mutex<MobileServerState>>,
     server_lock: Arc<Mutex<Option<File>>>,
+    server_pid_tx: watch::Sender<Option<u32>>,
     client: reqwest::Client,
 }
 
@@ -142,6 +143,7 @@ impl MobileServerManager {
         cloud_env: Option<DesktopCloudEnvironment>,
     ) -> Self {
         let config_path = server_config_path_for_app_data_dir(&app_data_dir);
+        let (server_pid_tx, _) = watch::channel(None);
         Self {
             inner: Arc::new(Mutex::new(MobileServerState {
                 status: "stopped".to_string(),
@@ -152,7 +154,21 @@ impl MobileServerManager {
                 cloud_env,
             })),
             server_lock: Arc::new(Mutex::new(None)),
+            server_pid_tx,
             client: reqwest::Client::new(),
+        }
+    }
+
+    pub async fn wait_for_server_pid(&self) -> Result<u32, String> {
+        let mut receiver = self.server_pid_tx.subscribe();
+        loop {
+            if let Some(pid) = *receiver.borrow() {
+                return Ok(pid);
+            }
+            receiver
+                .changed()
+                .await
+                .map_err(|_| "kanna-server process identity channel closed".to_string())?;
         }
     }
 
@@ -182,10 +198,12 @@ impl MobileServerManager {
             ) && server_config_matches_runtime(&config_path, &expected_desktop_id, cloud_env)
             {
                 adopt_native_desktop(&native_control_daemon_dir()).await?;
+                let server_pid = listening_server_pid(cloud_env).await?;
                 let mut state = self.inner.lock().await;
                 state.started = true;
                 state.status = status.state;
                 state.desktop_name = status.desktop_name;
+                self.server_pid_tx.send_replace(Some(server_pid));
                 return Ok(());
             }
             stop_server_on_port(local_server_port_for_cloud_env(cloud_env)).await?;
@@ -232,6 +250,9 @@ impl MobileServerManager {
             }
         };
 
+        let server_pid = child
+            .id()
+            .ok_or_else(|| "spawned kanna-server has no process id".to_string())?;
         let status = match self.wait_for_status(&api_base_url, &mut child).await {
             Ok(status) => status,
             Err(err) => {
@@ -259,11 +280,14 @@ impl MobileServerManager {
             state.status = status.state.clone();
             state.desktop_name = status.desktop_name.clone();
         }
+        self.server_pid_tx.send_replace(Some(server_pid));
 
         let state_handle = self.inner.clone();
         let lock_handle = self.server_lock.clone();
+        let server_pid_tx = self.server_pid_tx.clone();
         tauri::async_runtime::spawn(async move {
             let exit = child.wait().await;
+            server_pid_tx.send_replace(None);
             let mut state = state_handle.lock().await;
             state.started = false;
             state.desktop_name = desktop_name;
@@ -371,6 +395,17 @@ impl MobileServerManager {
             .await
             .map_err(|e| format!("failed to decode mobile server status: {}", e))
     }
+}
+
+async fn listening_server_pid(cloud_env: Option<DesktopCloudEnvironment>) -> Result<u32, String> {
+    let pids = server_pids_on_port(local_server_port_for_cloud_env(cloud_env)).await?;
+    let [pid] = pids.as_slice() else {
+        return Err(format!(
+            "expected exactly one kanna-server listener, found {}",
+            pids.len()
+        ));
+    };
+    u32::try_from(*pid).map_err(|_| format!("invalid kanna-server pid: {pid}"))
 }
 
 #[tauri::command]

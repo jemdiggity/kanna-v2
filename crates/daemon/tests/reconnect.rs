@@ -69,6 +69,9 @@ enum Cmd {
         session_id: String,
         data: Vec<u8>,
     },
+    AuthorizeServer {
+        pid: u32,
+    },
     ClassifyInput {
         session_id: String,
         operator_input_only: bool,
@@ -860,6 +863,9 @@ fn privileged_input_impersonation_child() {
         writer: stream,
     };
     let commands = [
+        Cmd::AuthorizeServer {
+            pid: std::process::id(),
+        },
         Cmd::OperatorInput {
             session_id: session_id.clone(),
             data: b"forged operator\r".to_vec(),
@@ -887,7 +893,11 @@ fn privileged_input_impersonation_child() {
 
 #[test]
 fn privileged_input_rejects_a_separate_process_impersonator() {
-    let daemon = DaemonHandle::start();
+    let current_executable = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    let daemon = DaemonHandle::start_with_env([(
+        "KANNA_SERVER_EXECUTABLE",
+        current_executable.to_str().unwrap(),
+    )]);
     let mut conn = daemon.connect();
     let session_id = "protected-cross-process";
     conn.send_json(&serde_json::json!({
@@ -902,6 +912,11 @@ fn privileged_input_rejects_a_separate_process_impersonator() {
         "operator_input_only": true
     }));
     expect_session_created(&mut conn, session_id);
+
+    conn.send(&Cmd::AuthorizeServer {
+        pid: std::process::id(),
+    });
+    assert!(matches!(conn.recv(), Evt::Ok));
 
     let status = Command::new(std::env::current_exe().unwrap())
         .args([

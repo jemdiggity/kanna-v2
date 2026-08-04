@@ -243,6 +243,18 @@ async fn submit_operator_input(
     send_command_expect_ack_bounded(state, &input, timeout).await
 }
 
+pub(crate) async fn authorize_server_process(
+    state: &DaemonState,
+    pid: u32,
+) -> Result<(), DaemonCommandError> {
+    let command = serde_json::json!({
+        "type": "AuthorizeServer",
+        "pid": pid,
+    })
+    .to_string();
+    send_command_expect_ack(state, &command).await
+}
+
 #[tauri::command]
 pub async fn send_agent_input(
     state: tauri::State<'_, DaemonState>,
@@ -457,7 +469,7 @@ pub async fn detach_session(
 
 #[cfg(test)]
 mod operator_input_tests {
-    use super::{submit_operator_input, DaemonState};
+    use super::{authorize_server_process, submit_operator_input, DaemonState};
     use crate::daemon_client::DaemonClient;
     use std::sync::Arc;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -551,6 +563,38 @@ mod operator_input_tests {
             server.await.unwrap(),
             ["OperatorInput", "AdoptOperator", "OperatorInput"]
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn native_desktop_hands_exact_server_pid_to_daemon() {
+        let dir = std::path::PathBuf::from("/tmp").join(format!(
+            "kd-authorize-server-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(read).read_line(&mut line).await.unwrap();
+            write.write_all(b"{\"type\":\"Ok\"}\n").await.unwrap();
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()
+        });
+
+        let client = DaemonClient::connect(&socket).await.unwrap();
+        let state: DaemonState = Arc::new(Mutex::new(Some(client)));
+        authorize_server_process(&state, 42).await.unwrap();
+
+        let command = server.await.unwrap();
+        assert_eq!(command["type"], "AuthorizeServer");
+        assert_eq!(command["pid"], 42);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

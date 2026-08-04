@@ -50,3 +50,10 @@ The cross-boundary coverage is backed by narrower regressions:
   `send_operator_input` while ordinary terminals retain KSP input;
 - desktop transport tests fault-inject lost and slow acknowledgements to prove
   operator bytes are delivered at most once and timed-out streams are retired.
+
+After the exact-process server handoff and atomic timeout-retirement revision,
+a fresh clean run of the same command attached successfully and passed both
+real tests. It exercised protected merge-terminal typing through the actual
+xterm and the desktop restart/adoption flow; the xterm assertion was not
+waived. The earlier readiness failures remain recorded above as runner history,
+but they no longer block this boundary's E2E coverage.

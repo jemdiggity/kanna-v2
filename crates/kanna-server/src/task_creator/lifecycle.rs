@@ -197,6 +197,19 @@ pub(crate) async fn spawn_prepared_task_for_api_recording_stage_run_detailed(
     let created = match spawn_prepared_task_classified(daemon, prepared.clone()).await {
         Ok(created) => created,
         Err(SpawnPreparedError::BeforeAcknowledgement(message)) => {
+            let record_db_path = db_path.to_string();
+            let record_prepared = prepared.clone();
+            let record_message = message.clone();
+            let diagnostic = tokio::task::spawn_blocking(move || {
+                let db = Db::open(&record_db_path).map_err(|error| format!("db error: {error}"))?;
+                record_prepared_task_spawn_failure(&db, &record_prepared, &record_message)
+            })
+            .await;
+            let message = match diagnostic {
+                Ok(Ok(())) => message,
+                Ok(Err(error)) => format!("{message}; diagnostics failed: {error}"),
+                Err(error) => format!("{message}; diagnostics worker failed: {error}"),
+            };
             return Err(PreparedTaskDeliveryError::BeforeAcknowledgement(message));
         }
         Err(SpawnPreparedError::UncertainDelivery(message)) => {
@@ -1074,11 +1087,14 @@ fn record_prepared_task_spawn_failure(
     let latest_run = db
         .latest_stage_run(task_id)
         .map_err(|e| format!("db error: {e}"))?;
-    let bound_run_id = match latest_run {
-        Some(run) if matches!(run.status.as_str(), "running" | "cancelled") => db
-            .stage_run_completion_bound(&run.id)
-            .map_err(|e| format!("db error: {e}"))?
-            .then_some(run.id),
+    let bound_run = match latest_run {
+        Some(run)
+            if db
+                .stage_run_completion_bound(&run.id)
+                .map_err(|e| format!("db error: {e}"))? =>
+        {
+            Some(run)
+        }
         _ => None,
     };
     db.cancel_running_stage_runs(task_id)
@@ -1087,10 +1103,15 @@ fn record_prepared_task_spawn_failure(
         .map_err(|e| format!("db error: {}", e))?;
     db.update_pipeline_item_agent_session_id(task_id, prepared.provider_session_id.as_deref())
         .map_err(|e| format!("db error: {}", e))?;
-    if let Some(run_id) = bound_run_id {
-        return db
-            .finish_stage_run(&run_id, "failed", Some(&result), Some("task spawn failed"))
-            .map_err(|e| format!("db error: {e}"));
+    if let Some(run) = bound_run {
+        if run.status == "failed" && run.feedback.as_deref() == Some("task spawn failed") {
+            return Ok(());
+        }
+        if matches!(run.status.as_str(), "running" | "cancelled") {
+            return db
+                .finish_stage_run(&run.id, "failed", Some(&result), Some("task spawn failed"))
+                .map_err(|e| format!("db error: {e}"));
+        }
     }
     let run_id = generate_stage_run_id(task_id);
     db.insert_stage_run(NewStageRun {
