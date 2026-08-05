@@ -137,6 +137,52 @@ async fn get_task_via_api_fetches_single_task_path() {
     assert!(request.starts_with("GET /v1/tasks/task-123 HTTP/1.1"));
 }
 
+#[tokio::test]
+async fn list_task_children_via_api_fetches_and_preserves_verdicts() {
+    let response = http_json_response(
+        "200 OK",
+        r#"[{
+            "id":"child-1",
+            "agent":"review-security",
+            "createdAt":"2026-08-06 09:00:00",
+            "closedAt":"2026-08-06 09:30:00",
+            "latestRun":{
+                "id":"run-1",
+                "stage":"review",
+                "kind":"main",
+                "status":"succeeded",
+                "summary":"PASS: no security findings",
+                "resumedFromRunId":null,
+                "resumeFallbackReason":null,
+                "finishedAt":"2026-08-06 09:20:00"
+            }
+        }]"#,
+    );
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let children = list_task_children_via_api(&base_url, "task 123")
+        .await
+        .unwrap();
+    let request = handle.await.unwrap();
+
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].id, "child-1");
+    assert_eq!(children[0].agent.as_deref(), Some("review-security"));
+    assert_eq!(
+        children[0]
+            .latest_run
+            .as_ref()
+            .and_then(|run| run.summary.as_deref()),
+        Some("PASS: no security findings")
+    );
+    assert_eq!(
+        serde_json::to_value(&children).unwrap()[0]["latestRun"]["status"],
+        json!("succeeded"),
+        "the typed CLI must not drop the durable verdict when printing JSON"
+    );
+    assert!(request.starts_with("GET /v1/tasks/task%20123/children HTTP/1.1"));
+}
+
 fn child_task_body(activity: &str) -> String {
     json!({
         "id": "child-1",

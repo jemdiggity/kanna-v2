@@ -46,6 +46,16 @@
       ]
     },
     {
+      "name": "kanna_list_task_children",
+      "description": "List this task's direct children only, including closed children, in chronological order. Each child exposes the agent and verdict from its latest recorded stage run. Use this durable history to join and reconcile a fan-out after notifications, compaction, or session resume; it is not an arbitrary closed-task listing.",
+      "method": "GET",
+      "path": "/v1/tasks/{task_id}/children",
+      "response": "json",
+      "params": [
+        { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" }
+      ]
+    },
+    {
       "name": "kanna_wait_task",
       "description": "Block until a Kanna task finishes (agent stopped, activity 'unread') or closes, polling its detail. Returns the task detail plus waitOutcome 'resolved'. If the wait window elapses first it returns the latest detail with waitOutcome 'timeout' instead of failing — that is a normal result, so call it again in a loop to keep waiting.",
       "method": "GET",

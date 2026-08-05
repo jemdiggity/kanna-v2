@@ -24,6 +24,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_add_repo",
             "kanna_list_recent_tasks",
             "kanna_get_task",
+            "kanna_list_task_children",
             "kanna_wait_task",
             "kanna_wait_events",
             "kanna_notify_mobile",
@@ -66,6 +67,25 @@ fn generated_schema_preserves_required_order_types_and_enums() {
         json!({ "type": "object", "properties": {} })
     );
     assert_eq!(info["annotations"], json!({ "readOnlyHint": true }));
+
+    let list_task_children = tools
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|tool| tool["name"] == "kanna_list_task_children")
+        .expect("list task children tool");
+    assert_eq!(
+        list_task_children["annotations"],
+        json!({ "readOnlyHint": true })
+    );
+    assert_eq!(
+        list_task_children["inputSchema"]["required"],
+        json!(["task_id"])
+    );
+    assert_eq!(
+        list_task_children["inputSchema"]["properties"]["task_id"]["type"],
+        json!("string")
+    );
 
     let create_task = tools
         .as_array()
@@ -306,6 +326,14 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             Method::Get,
             ResponseKind::Json,
             "/v1/tasks/task%201",
+            json!({}),
+        ),
+        (
+            "kanna_list_task_children",
+            json!({ "task_id": "task 1" }),
+            Method::Get,
+            ResponseKind::Json,
+            "/v1/tasks/task%201/children",
             json!({}),
         ),
         (

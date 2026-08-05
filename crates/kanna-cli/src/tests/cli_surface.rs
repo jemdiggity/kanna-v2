@@ -1,6 +1,48 @@
 use super::*;
 
 #[test]
+fn parses_task_children_command() {
+    let cli = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "children",
+        "--task-id",
+        "task-1",
+        "--server-url",
+        "http://127.0.0.1:48120",
+    ])
+    .unwrap();
+
+    match cli.command {
+        crate::Commands::Task {
+            command:
+                crate::TaskCommands::Children {
+                    task_id,
+                    server_url,
+                },
+        } => {
+            assert_eq!(task_id, "task-1");
+            assert_eq!(server_url.as_deref(), Some("http://127.0.0.1:48120"));
+        }
+        _ => panic!("expected task children command"),
+    }
+}
+
+#[test]
+fn task_children_requires_task_id() {
+    let error = match crate::Cli::try_parse_from(["kanna-cli", "task", "children"]) {
+        Ok(_) => panic!("--task-id should be required"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
+    assert!(error.to_string().contains("--task-id"));
+}
+
+#[test]
 fn parses_dependent_tasks_exist_command() {
     let cli = crate::Cli::try_parse_from([
         "kanna-cli",

@@ -184,6 +184,16 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// List a task's direct children, including closed children and verdicts
+    Children {
+        /// The parent task/pipeline_item ID
+        #[arg(long)]
+        task_id: String,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Check whether open tasks still depend on a task's branch
     DependentTasksExist {
         /// Task whose branch may still have dependent tasks

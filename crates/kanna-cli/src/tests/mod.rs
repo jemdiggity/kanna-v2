@@ -1,12 +1,12 @@
 use crate::api::{
     advance_stage_via_api, block_task_via_api, close_task_via_api, create_task_via_api,
-    dependent_tasks_exist_path, dependent_tasks_exist_via_api, get_task_via_api, parse_wait_until,
-    rename_task_via_api, repo_agent_list_path, repo_task_list_path, request_revision_via_api,
-    rerun_stage_via_api, resume_task_via_api, send_task_input_via_api, set_task_parent_via_api,
-    set_task_pipeline_via_api, signal_agent_path, signal_agent_via_api,
-    signal_merge_handoff_via_api, task_get_path, task_list_path, task_logs_path,
-    task_matches_wait_until, task_search_path, unblock_task_via_api, wait_task_via_api,
-    WaitTaskOutcome,
+    dependent_tasks_exist_path, dependent_tasks_exist_via_api, get_task_via_api,
+    list_task_children_via_api, parse_wait_until, rename_task_via_api, repo_agent_list_path,
+    repo_task_list_path, request_revision_via_api, rerun_stage_via_api, resume_task_via_api,
+    send_task_input_via_api, set_task_parent_via_api, set_task_pipeline_via_api, signal_agent_path,
+    signal_agent_via_api, signal_merge_handoff_via_api, task_children_path, task_get_path,
+    task_list_path, task_logs_path, task_matches_wait_until, task_search_path,
+    unblock_task_via_api, wait_task_via_api, WaitTaskOutcome,
 };
 use crate::commands::guide::{
     build_guide_context, render_guide_json, render_guide_markdown, run_guide_command, GuideContext,
@@ -25,7 +25,7 @@ use crate::commands::tool::build_tool_call_args;
 use crate::config::resolve_server_base_url;
 use crate::models::{
     SetTaskParentRequest, SetTaskPipelineRequest, SignalAgentRequest, TaskCreateOptions,
-    TaskDetail, TaskInputResponse, TaskRenameRequest, TaskSummary, WaitUntil,
+    TaskDetail, TaskInputResponse, TaskLatestRun, TaskRenameRequest, TaskSummary, WaitUntil,
 };
 use clap::{Command, CommandFactory, Parser};
 use kanna_tool_catalog::{CLIENT_TOOL_CALL_BUDGET_SECS, MAX_WAIT_TIMEOUT_SECS};
@@ -75,6 +75,13 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             "kanna_get_task",
             TypedToolSurface {
                 command_path: &["task", "get"],
+                param_args: &[("task_id", "task_id")],
+            },
+        ),
+        (
+            "kanna_list_task_children",
+            TypedToolSurface {
+                command_path: &["task", "children"],
                 param_args: &[("task_id", "task_id")],
             },
         ),

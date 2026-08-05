@@ -37,6 +37,11 @@ fn task_get_uses_single_task_endpoint() {
 }
 
 #[test]
+fn task_children_uses_direct_children_endpoint() {
+    assert_eq!(task_children_path("task 1"), "/v1/tasks/task%201/children");
+}
+
+#[test]
 fn dependent_tasks_exist_uses_task_endpoint() {
     assert_eq!(
         dependent_tasks_exist_path("task 1"),
@@ -123,7 +128,16 @@ fn parses_task_detail_response_shape() {
         "commitsAhead": 2,
         "commitsBehind": 1,
         "dirty": true,
-        "latestRun": {}
+        "latestRun": {
+            "id": "run-1",
+            "stage": "in progress",
+            "kind": "main",
+            "status": "succeeded",
+            "summary": "done",
+            "resumedFromRunId": null,
+            "resumeFallbackReason": null,
+            "finishedAt": "2026-08-06 09:20:00"
+        }
     }))
     .unwrap();
 
@@ -137,5 +151,44 @@ fn parses_task_detail_response_shape() {
     assert_eq!(task.commits_ahead, 2);
     assert_eq!(task.commits_behind, 1);
     assert!(task.dirty);
-    assert_eq!(task.latest_run.and_then(|run| run.id), None);
+    let latest_run = task.latest_run.expect("latest run");
+    assert_eq!(latest_run.id.as_deref(), Some("run-1"));
+    assert_eq!(latest_run.status.as_deref(), Some("succeeded"));
+    assert_eq!(latest_run.summary.as_deref(), Some("done"));
+}
+
+#[test]
+fn parses_and_preserves_legacy_latest_run_without_id() {
+    let latest_run: TaskLatestRun = serde_json::from_value(json!({
+        "stage": "review",
+        "kind": "main",
+        "status": "succeeded",
+        "summary": "PASS: no findings",
+        "finishedAt": "2026-08-06 09:20:00"
+    }))
+    .unwrap();
+
+    assert_eq!(latest_run.id, None);
+    assert_eq!(latest_run.status.as_deref(), Some("succeeded"));
+    assert_eq!(latest_run.summary.as_deref(), Some("PASS: no findings"));
+    assert_eq!(
+        serde_json::to_value(latest_run).unwrap(),
+        json!({
+            "stage": "review",
+            "kind": "main",
+            "status": "succeeded",
+            "summary": "PASS: no findings",
+            "finishedAt": "2026-08-06 09:20:00"
+        })
+    );
+}
+
+#[test]
+fn parses_and_preserves_empty_legacy_latest_run() {
+    let latest_run: TaskLatestRun = serde_json::from_value(json!({})).unwrap();
+
+    assert_eq!(latest_run.id, None);
+    assert_eq!(latest_run.status, None);
+    assert_eq!(latest_run.summary, None);
+    assert_eq!(serde_json::to_value(latest_run).unwrap(), json!({}));
 }
