@@ -18,7 +18,6 @@ const useTerminalMock = vi.fn(() => ({
   ensureConnected: ensureConnectedMock,
   pause: pauseMock,
   dispose: disposeMock,
-  setOperatorTerminalInput: setOperatorTerminalInputMock,
 }));
 
 const focusMock = vi.fn();
@@ -30,7 +29,6 @@ const redrawMock = vi.fn();
 const ensureConnectedMock = vi.fn(async () => {});
 const pauseMock = vi.fn();
 const disposeMock = vi.fn();
-const setOperatorTerminalInputMock = vi.fn();
 const originalResizeObserver = globalThis.ResizeObserver;
 const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
 const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
@@ -77,7 +75,6 @@ describe("TerminalView", () => {
     ensureConnectedMock.mockReset();
     pauseMock.mockReset();
     disposeMock.mockReset();
-    setOperatorTerminalInputMock.mockReset();
     markTaskSwitchMountedMock.mockReset();
     markTaskSwitchReadyMock.mockReset();
     setWebviewFocusMock.mockClear();
@@ -121,30 +118,6 @@ describe("TerminalView", () => {
     expect(focusMock).toHaveBeenCalledTimes(1);
     expect(markTaskSwitchMountedMock).toHaveBeenCalledWith("session-1");
     expect(markTaskSwitchReadyMock).toHaveBeenCalledWith("session-1", "cold");
-
-    wrapper.unmount();
-  });
-
-  it("updates input policy on the existing terminal instance", async () => {
-    const wrapper = mount(TerminalView, {
-      props: {
-        sessionId: "session-1",
-        active: true,
-        operatorTerminalInput: false,
-      },
-    });
-    await flushLifecycle();
-
-    expect(useTerminalMock).toHaveBeenCalledTimes(1);
-    expect(setOperatorTerminalInputMock).toHaveBeenLastCalledWith(false);
-
-    await wrapper.setProps({ operatorTerminalInput: true });
-    expect(useTerminalMock).toHaveBeenCalledTimes(1);
-    expect(setOperatorTerminalInputMock).toHaveBeenLastCalledWith(true);
-
-    await wrapper.setProps({ operatorTerminalInput: false });
-    expect(useTerminalMock).toHaveBeenCalledTimes(1);
-    expect(setOperatorTerminalInputMock).toHaveBeenLastCalledWith(false);
 
     wrapper.unmount();
   });

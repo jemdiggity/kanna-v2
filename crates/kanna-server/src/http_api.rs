@@ -80,17 +80,8 @@ pub async fn serve(state: std::sync::Arc<AppState>) -> Result<(), String> {
 }
 pub(crate) use task_input::{
     handle_task_terminal_state, mark_task_session_interrupted, restore_task_run_for_live_session,
-    send_raw_session_input, try_submit_task_input, TaskInputError,
+    try_submit_task_input, TaskInputError,
 };
 
-pub(crate) async fn record_approval_override(
-    state: std::sync::Arc<AppState>,
-    task_id: String,
-    reason: String,
-    actor: String,
-    channel: String,
-) -> Result<crate::db::ApprovalGate, (axum::http::StatusCode, String)> {
-    task_actions::record_approval_override(state, task_id, reason, actor, channel).await
-}
 #[cfg(test)]
 pub(crate) use test_support::test_router;

@@ -54,7 +54,6 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
   detach_session: () => ({}),
   get_session_recovery_state: () => null,
   send_input: () => ({}),
-  send_operator_input: () => ({}),
   send_agent_input: () => ({}),
   resize_session: () => ({}),
   signal_session: () => ({}),

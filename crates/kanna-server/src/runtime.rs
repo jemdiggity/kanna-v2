@@ -3,17 +3,15 @@ use std::sync::Arc;
 
 async fn prepare_daemon_generation(
     daemon: &mut crate::daemon_client::DaemonClient,
-    db: &db::Db,
 ) -> Result<u32, String> {
     let connected_pid = daemon.connected_pid();
     daemon.negotiate_protected_input().await?;
-    classify_sessions_on_connected_daemon(daemon, db).await?;
+    classify_sessions_on_connected_daemon(daemon).await?;
     Ok(connected_pid)
 }
 
 async fn wait_for_protected_input_generation(
     config: &Config,
-    db: &db::Db,
     mut previous_pid: Option<u32>,
 ) -> u32 {
     let mut retry_delay = std::time::Duration::from_millis(50);
@@ -35,7 +33,7 @@ async fn wait_for_protected_input_generation(
             }
         };
         let connected_pid = daemon.connected_pid();
-        match prepare_daemon_generation(&mut daemon, db).await {
+        match prepare_daemon_generation(&mut daemon).await {
             Ok(pid) => return pid,
             Err(error) => {
                 log::warn!(
@@ -48,26 +46,14 @@ async fn wait_for_protected_input_generation(
 }
 
 async fn maintain_protected_input_generations(config: Config, mut pid: u32) {
-    let db = loop {
-        match db::Db::open(&config.db_path) {
-            Ok(db) => break db,
-            Err(error) => {
-                log::error!(
-                    "failed to open the classification database for daemon generation monitoring: {error}"
-                );
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            }
-        }
-    };
     loop {
-        pid = wait_for_protected_input_generation(&config, &db, Some(pid)).await;
+        pid = wait_for_protected_input_generation(&config, Some(pid)).await;
         log::info!("protected-input policy established on successor daemon pid {pid}");
     }
 }
 
 async fn classify_sessions_on_connected_daemon(
     daemon: &mut crate::daemon_client::DaemonClient,
-    db: &db::Db,
 ) -> Result<(), String> {
     let sessions = match daemon
         .send_command(&kanna_daemon::protocol::Command::List)
@@ -90,14 +76,10 @@ async fn classify_sessions_on_connected_daemon(
             continue;
         }
         let session_id = session.session_id;
-        let operator_input_only = match db.session_requires_operator_input(&session_id) {
-            Ok(value) => value,
-            Err(error) => {
-                return Err(format!(
-                    "failed to resolve input policy for existing session {session_id}: {error}"
-                ));
-            }
-        };
+        // Clear the retired native-terminal-only policy on every daemon
+        // generation. This also upgrades merge singletons inherited across a
+        // server restart or daemon handoff to ordinary task/KSP input.
+        let operator_input_only = false;
         match daemon
             .send_command(&kanna_daemon::protocol::Command::ClassifyInput {
                 session_id: session_id.clone(),
@@ -141,7 +123,7 @@ pub(crate) async fn run_server_services(
     http_state: Arc<http_api::AppState>,
 ) {
     crate::task_creator::prune_completion_contexts_on_startup(&config.daemon_dir, &db);
-    let protected_input_pid = wait_for_protected_input_generation(&config, &db, None).await;
+    let protected_input_pid = wait_for_protected_input_generation(&config, None).await;
     let protected_input_maintenance =
         maintain_protected_input_generations(config.clone(), protected_input_pid);
     if config.relay_url.trim().is_empty() {
@@ -252,9 +234,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generation_readiness_classifies_only_pty_sessions() {
+    async fn generation_readiness_clears_retired_policy_on_inherited_ptys() {
         let daemon_dir = unique_path("mixed-generation-replay", "dir");
-        let db_path = unique_path("mixed-generation-replay", "sqlite");
         std::fs::create_dir_all(&daemon_dir).unwrap();
         let socket_path = kanna_runtime_defaults::socket_path(std::path::Path::new(&daemon_dir));
         let listener = UnixListener::bind(&socket_path).unwrap();
@@ -269,14 +250,11 @@ mod tests {
             ],
             kanna_daemon::protocol::Event::Ok,
         ));
-        let db = db::Db::open_for_tests(&db_path).unwrap();
         let mut daemon = crate::daemon_client::DaemonClient::connect(&daemon_dir)
             .await
             .unwrap();
 
-        super::prepare_daemon_generation(&mut daemon, &db)
-            .await
-            .unwrap();
+        super::prepare_daemon_generation(&mut daemon).await.unwrap();
 
         let commands = server.await.unwrap();
         assert!(matches!(
@@ -284,17 +262,18 @@ mod tests {
             [
                 kanna_daemon::protocol::Command::NegotiateProtectedInput { .. },
                 kanna_daemon::protocol::Command::List,
-                kanna_daemon::protocol::Command::ClassifyInput { session_id, .. },
+                kanna_daemon::protocol::Command::ClassifyInput {
+                    session_id,
+                    operator_input_only: false,
+                },
             ] if session_id == "pty-session"
         ));
-        let _ = std::fs::remove_file(db_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
     #[tokio::test]
     async fn generation_readiness_tolerates_pty_disappearing_during_replay() {
         let daemon_dir = unique_path("disappearing-generation-replay", "dir");
-        let db_path = unique_path("disappearing-generation-replay", "sqlite");
         std::fs::create_dir_all(&daemon_dir).unwrap();
         let socket_path = kanna_runtime_defaults::socket_path(std::path::Path::new(&daemon_dir));
         let listener = UnixListener::bind(&socket_path).unwrap();
@@ -309,16 +288,13 @@ mod tests {
                 message: "session exited after inventory".to_string(),
             },
         ));
-        let db = db::Db::open_for_tests(&db_path).unwrap();
         let mut daemon = crate::daemon_client::DaemonClient::connect(&daemon_dir)
             .await
             .unwrap();
         let expected_pid = daemon.connected_pid();
 
         assert_eq!(
-            super::prepare_daemon_generation(&mut daemon, &db)
-                .await
-                .unwrap(),
+            super::prepare_daemon_generation(&mut daemon).await.unwrap(),
             expected_pid,
         );
 
@@ -328,7 +304,6 @@ mod tests {
             Some(kanna_daemon::protocol::Command::ClassifyInput { session_id, .. })
                 if session_id == "short-lived-pty"
         ));
-        let _ = std::fs::remove_file(db_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
 

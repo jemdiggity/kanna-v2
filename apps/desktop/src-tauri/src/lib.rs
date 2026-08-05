@@ -248,7 +248,6 @@ pub fn run() {
             commands::daemon::spawn_session,
             commands::daemon::spawn_agent_session,
             commands::daemon::send_input,
-            commands::daemon::send_operator_input,
             commands::daemon::send_agent_input,
             commands::daemon::resize_session,
             commands::daemon::signal_session,
@@ -307,8 +306,6 @@ pub fn run() {
             commands::mobile::mobile_server_status,
             commands::mobile::create_mobile_pairing_session,
             commands::mobile::desktop_cloud_credential,
-            commands::mobile::override_approval_hold,
-            commands::mobile::native_terminal_input,
             // Shell commands
             commands::shell::run_script,
             commands::shell::ensure_term_init,

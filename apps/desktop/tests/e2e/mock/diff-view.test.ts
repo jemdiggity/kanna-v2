@@ -205,7 +205,6 @@ async function waitForDiffScrollHeight(
 interface StageActionRecorderOptions {
   requestRevisionStatus?: number;
   requestRevisionBody?: string;
-  advanceHeldCount?: number;
 }
 
 interface DiffLineViewportSnapshot {
@@ -259,12 +258,6 @@ async function installStageActionRecorder(
            await db.execute("UPDATE pipeline_item SET stage = ? WHERE id = ?", ["in progress", item.id]);
          } else if (item && url.endsWith("/actions/advance-stage")) {
            window.__KANNA_NATIVE_REVIEW_ADVANCE_COUNT__ += 1;
-           if (window.__KANNA_NATIVE_REVIEW_ADVANCE_COUNT__ <= (recorderOptions.advanceHeldCount || 0)) {
-             return new Response("approval held: unresolved failed result", {
-               status: 409,
-               headers: { "content-type": "text/plain" },
-             });
-           }
            // Model the production engine: a current stage with a post parks
            // the task (stage and closed_at unchanged) behind a running post
            // stage_run; the post's own completion performs the transition.
@@ -1792,59 +1785,6 @@ describe("diff view", () => {
     );
     expect(closedState).toBe("closed-after-post");
 
-    await restoreSharedFixtureTask(task.id);
-  });
-
-  it("routes Cmd+S approval through the held override composer and records the native override before retry", async () => {
-    const task = await parkSelectedTaskAtPr(E2E_PR_APPROVE_PIPELINE_DEF);
-    const failedRunId = `e2e-held-main-${task.id}`;
-    await execDb(
-      client,
-      "INSERT INTO stage_run (id, task_id, stage, kind, status, result, feedback, finished_at) VALUES (?, ?, 'pr', 'main', 'failed', ?, ?, datetime('now'))",
-      [failedRunId, task.id, "Needs human input", "Not a merge candidate"],
-    );
-    await installStageActionRecorder(client, { advanceHeldCount: 2 });
-
-    await openDiffModal(client);
-    await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true }));
-    await client.waitForElement(".approval-override-composer", 2_000);
-    const focused = await client.executeSync<boolean>(
-      `return document.activeElement === document.querySelector(".approval-override-composer textarea");`,
-    );
-    expect(focused).toBe(true);
-    const blankSubmitDisabled = await client.executeSync<boolean>(
-      `return document.querySelector(".approval-override-composer .primary").disabled;`,
-    );
-    expect(blankSubmitDisabled).toBe(true);
-
-    await client.click(await client.findElement(".approval-override-composer button:not(.primary)"));
-    await client.waitForNoElement(".approval-override-composer", 2_000);
-    expect((await waitForRecordedStageActions(client, 1))).toHaveLength(1);
-
-    await client.executeSync(buildGlobalKeydownScript({ key: "s", meta: true }));
-    await client.waitForElement(".approval-override-composer", 2_000);
-    const reason = "Operator reviewed the failed lineage and accepts the diagnostic change.";
-    await client.sendKeys(
-      await client.findElement(".approval-override-composer textarea"),
-      reason,
-    );
-    await client.click(await client.findElement(".approval-override-composer .primary"));
-
-    const calls = await waitForRecordedStageActions(client, 3);
-    expect(calls).toHaveLength(3);
-    expect(calls.every((call) => call.url.endsWith("/actions/advance-stage"))).toBe(true);
-    await client.waitForNoElement(".approval-override-composer", 2_000);
-    const overrides = await queryDb(
-      client,
-      "SELECT actor, channel, reason FROM task_approval_override WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
-      [task.id],
-    ) as Array<{ actor: string; channel: string; reason: string }>;
-    expect(overrides[0]).toMatchObject({
-      channel: "native_desktop_process",
-      reason,
-    });
-
-    await execDb(client, "DELETE FROM stage_run WHERE id = ?", [failedRunId]);
     await restoreSharedFixtureTask(task.id);
   });
 

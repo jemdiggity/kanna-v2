@@ -229,28 +229,21 @@ describe("bundled agent flavor contracts", () => {
     expect(reviewAgentFor("specialized-reviewers")).toBe("qa-dispatcher");
   });
 
-  it("hands approval to merge@github with the server-built lineage envelope", () => {
+  it("hands approval to merge@github as an ordinary policy request", () => {
     // The GitHub preset composes pr -> approve post -> merge@github across
-    // three separate agent sessions. The dedicated server endpoint builds the
-    // envelope and merge@github parses it, so both sides must retain the same
-    // prefix and approval-state contract.
-    const HANDOFF_PREFIX = "KANNA_MERGE_HANDOFF";
+    // three separate agent sessions. The approve role sends the resolved PR
+    // details and the merge role independently applies repository policy.
+    const REQUEST_PREFIX = "MERGE <head> -> <base>";
 
     const approveAgent = read(join(agentsRoot, "approve", "AGENT.md"));
     const approveContract = read(join(agentsRoot, "approve", "CONTRACT.md"));
     const mergeGithub = read(join(agentsRoot, "merge", "flavors", "github", "AGENT.md"));
 
-    for (const [label, content] of [
-      ["approve AGENT.md", approveAgent],
-      ["approve CONTRACT.md", approveContract],
-      ["merge@github AGENT.md", mergeGithub],
-    ] as const) {
-      expect(content, label).toContain(HANDOFF_PREFIX);
-    }
-
     expect(approveAgent).toContain("kanna_signal_merge_handoff");
     expect(approveContract).toContain("kanna_signal_merge_handoff");
-    expect(mergeGithub).toContain('"approval"');
+    expect(approveContract).toContain(REQUEST_PREFIX);
+    expect(mergeGithub).toContain(REQUEST_PREFIX);
+    expect(mergeGithub).not.toContain("KANNA_MERGE_HANDOFF");
 
     // The stock preset opens an ordinary PR, so nothing needs readying. A
     // repo that opts into pr@draft-pr still reaches this agent, and

@@ -632,30 +632,6 @@ async fn resolve_task_session_id(db_path: String, task_id: String) -> Result<Str
     .map_err(|error| format!("session lookup worker failed: {error}"))?
 }
 
-async fn merge_terminal_input_forbidden(
-    state: &Arc<AppState>,
-    task_id: &str,
-) -> Result<bool, String> {
-    if task_id.starts_with("shell-") {
-        return Ok(false);
-    }
-    let db_path = state.config().db_path.clone();
-    let task_id = task_id.to_string();
-    tokio::task::spawn_blocking(move || {
-        let db = Db::open(&db_path).map_err(|error| format!("db error: {error}"))?;
-        let Some(resolved) = db
-            .resolve_pipeline_item_id(&task_id)
-            .map_err(|error| format!("db error: {error}"))?
-        else {
-            return Ok(false);
-        };
-        db.is_open_agent_task(&resolved, "merge")
-            .map_err(|error| format!("db error: {error}"))
-    })
-    .await
-    .map_err(|error| format!("merge input provenance worker failed: {error}"))?
-}
-
 fn direct_terminal_session_id(task_id: &str) -> Option<String> {
     task_id.starts_with("shell-").then(|| task_id.to_string())
 }
@@ -1353,27 +1329,6 @@ impl StreamConn {
                 self.enqueue_agent_command(task_id, AgentControlCommand::SetModel(model));
             }
             ClientFrame::TermInput { task_id, data_b64 } => {
-                match if self.auth_mode == AuthMode::AllowEmpty {
-                    merge_terminal_input_forbidden(&self.state, &task_id).await
-                } else {
-                    Ok(false)
-                } {
-                    Ok(true) => {
-                        self.error(
-                            Some(task_id),
-                            "native_operator_required",
-                            "loopback merge terminal input requires the process-authenticated native desktop channel".into(),
-                        )
-                        .await;
-                        return true;
-                    }
-                    Ok(false) => {}
-                    Err(message) => {
-                        self.error(Some(task_id), "merge_input_check_failed", message)
-                            .await;
-                        return true;
-                    }
-                }
                 let data = match base64::engine::general_purpose::STANDARD.decode(&data_b64) {
                     Ok(data) => data,
                     Err(error) => {
@@ -5403,7 +5358,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loopback_ksp_cannot_type_into_merge_singleton() {
+    async fn loopback_ksp_delivers_ordinary_input_to_merge_singleton() {
         let unique = format!(
             "ksp-merge-input-{}",
             SystemTime::now()
@@ -5411,7 +5366,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        let config = test_config(&unique, "KSP Merge Input");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let mut config = test_config(&unique, "KSP Merge Input");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         let db = Db::open_for_tests(&config.db_path).unwrap();
         db.insert_test_repo("repo-merge-ksp", "Merge KSP").unwrap();
         db.insert_test_pipeline_item(
@@ -5443,6 +5401,7 @@ mod tests {
         .unwrap();
         drop(db);
 
+        let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 1).await;
         let state = Arc::new(crate::http_api::AppState::new(config));
         let url = serve_router(crate::http_api::router(state)).await;
         let mut socket = ws_connect(&url).await;
@@ -5456,10 +5415,15 @@ mod tests {
             },
         )
         .await;
-        assert!(matches!(
-            recv_frame(&mut socket).await,
-            ServerFrame::Error { code, .. } if code == "native_operator_required"
-        ));
+        assert_command(
+            commands.recv().await,
+            DaemonCommand::InputNoReply {
+                session_id: "merge-ksp-session".into(),
+                data: b"merge PR 123\r".to_vec(),
+            },
+        );
+        daemon.await.unwrap();
+        let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
     #[tokio::test]

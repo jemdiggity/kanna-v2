@@ -47,7 +47,7 @@ pub(crate) enum TaskInputError {
 }
 
 /// Send one raw Input command to a daemon session.
-pub(crate) async fn send_raw_session_input(
+async fn send_raw_session_input(
     daemon: &mut crate::daemon_client::DaemonClient,
     session_id: &str,
     data: Vec<u8>,
@@ -108,61 +108,7 @@ pub(crate) async fn try_submit_task_input(
     Ok(())
 }
 
-/// Submit the authenticated machine envelope to an operator-protected merge
-/// PTY. This is intentionally private to server-side merge signaling.
-pub(super) async fn try_submit_system_input(
-    daemon: &mut crate::daemon_client::DaemonClient,
-    session_id: &str,
-    input: &str,
-) -> Result<(), TaskInputError> {
-    async fn send(
-        daemon: &mut crate::daemon_client::DaemonClient,
-        session_id: &str,
-        data: Vec<u8>,
-    ) -> Result<(), TaskInputError> {
-        let event = daemon
-            .send_command(&DaemonCommand::SystemInput {
-                session_id: session_id.to_string(),
-                data,
-            })
-            .await
-            .map_err(|error| TaskInputError::Uncertain(format!("daemon response lost: {error}")))?;
-        match event {
-            DaemonEvent::Ok => Ok(()),
-            DaemonEvent::Error {
-                code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
-                ..
-            } => Err(TaskInputError::SessionNotFound),
-            DaemonEvent::Error { message, .. } => Err(TaskInputError::Other(message)),
-            other => Err(TaskInputError::Other(format!(
-                "unexpected daemon response: {other:?}"
-            ))),
-        }
-    }
-
-    let message = task_input_message(input);
-    if !message.is_empty() {
-        send(daemon, session_id, message.as_bytes().to_vec()).await?;
-        tokio::time::sleep(std::time::Duration::from_millis(SUBMIT_ENTER_DELAY_MS)).await;
-    }
-    send(daemon, session_id, vec![b'\r'])
-        .await
-        .map_err(|error| {
-            if message.is_empty() {
-                error
-            } else {
-                TaskInputError::Uncertain(match error {
-                    TaskInputError::SessionNotFound => {
-                        format!(
-                            "session disappeared after message bytes were accepted: {session_id}"
-                        )
-                    }
-                    TaskInputError::Other(message) | TaskInputError::Uncertain(message) => message,
-                })
-            }
-        })
-}
-
+/// Submit ordinary input to a task session and map delivery failures to HTTP.
 pub(crate) async fn submit_task_input(
     daemon: &mut crate::daemon_client::DaemonClient,
     session_id: &str,
@@ -199,27 +145,6 @@ pub(super) async fn send_task_input(
     }
 
     let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id).await?;
-    let merge_input_forbidden = {
-        let state = Arc::clone(&state);
-        let task_id = task_id.clone();
-        super::blocking::run_handler_blocking("merge input provenance check", move || {
-            let db = Db::open(&state.config.db_path).map_err(|error| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("db error: {error}"),
-                )
-            })?;
-            db.is_open_agent_task(&task_id, "merge")
-                .map_err(|error| super::state::db_write_error("db error", error))
-        })
-        .await?
-    };
-    if merge_input_forbidden {
-        return Err((
-            axum::http::StatusCode::CONFLICT,
-            "merge singleton input requires a canonical server handoff or the native operator terminal; task-input APIs are not operator authority".into(),
-        ));
-    }
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
         .map_err(|e| {

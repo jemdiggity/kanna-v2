@@ -2,13 +2,11 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { SEED, seedDatabase } from "../helpers/seed";
-import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
+import { callVueMethod, execDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 
 const client = new WebDriverClient();
-function terminalSelector(operatorTerminalInput: boolean): string {
-  return `.terminal-panel[data-operator-terminal-input="${operatorTerminalInput}"] .xterm-helper-textarea`;
-}
+const terminalSelector = ".terminal-panel .xterm-helper-textarea";
 
 async function waitForSelectedTask(taskId: string, timeoutMs = 15_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -22,15 +20,12 @@ async function waitForSelectedTask(taskId: string, timeoutMs = 15_000): Promise<
   throw new Error(`Timed out waiting for selected task ${taskId}`);
 }
 
-async function selectTaskWithPolicy(
-  taskId: string,
-  operatorTerminalInput: boolean,
-): Promise<string> {
+async function selectTask(taskId: string): Promise<string> {
   await callVueMethod(client, "loadItems");
   await callVueMethod(client, "store.selectRepo", SEED.repos.app.id);
   await callVueMethod(client, "store.selectItem", taskId);
   await waitForSelectedTask(taskId);
-  return client.waitForElement(terminalSelector(operatorTerminalInput), 20_000);
+  return client.waitForElement(terminalSelector, 20_000);
 }
 
 async function waitForTerminalOutput(taskId: string, marker: string): Promise<string> {
@@ -81,68 +76,24 @@ describe("native approval control", () => {
     await client.deleteSession();
   });
 
-  it("persists a webview-requested override through Tauri and the authenticated Unix socket", async () => {
-    const taskId = SEED.tasks.authRefactor.id;
-    const stage = "in progress";
-    const runId = `e2e-native-override-${randomUUID()}`;
-    const reason = "E2E operator explicitly reviewed and accepted the held lineage.";
-    await execDb(
-      client,
-      `INSERT INTO stage_run
-         (id, task_id, stage, kind, agent, status, result, feedback, finished_at)
-       VALUES (?, ?, ?, 'main', 'implement', 'failed', ?, ?, datetime('now'))`,
-      [runId, taskId, stage, "Needs human input", "Not a merge candidate"],
-    );
-
-    try {
-      const response = await tauriInvoke(client, "override_approval_hold", {
-        taskId,
-        reason,
-      }) as { state?: string; overrideRecord?: { channel?: string; reason?: string } };
-      expect(response).toMatchObject({
-        state: "overridden",
-        overrideRecord: {
-          channel: "native_desktop_process",
-          reason,
-        },
-      });
-      const rows = await queryDb(
-        client,
-        `SELECT actor, channel, reason
-         FROM task_approval_override
-         WHERE task_id = ? ORDER BY created_at DESC LIMIT 1`,
-        [taskId],
-      ) as Array<{ actor: string; channel: string; reason: string }>;
-      expect(rows[0]).toMatchObject({
-        channel: "native_desktop_process",
-        reason,
-      });
-    } finally {
-      await execDb(client, "DELETE FROM task_approval_hold WHERE run_id = ?", [runId]);
-      await execDb(client, "DELETE FROM task_approval_override WHERE task_id = ?", [taskId]);
-      await execDb(client, "DELETE FROM stage_run WHERE id = ?", [runId]);
-    }
-  });
-
-  it("retains MainPanel terminal state while switching generic input to protected native authority and back", async () => {
+  it("delivers merge-policy terminal input across daemon replacement without native authority", async () => {
     const taskId = `e2e-merge-terminal-${randomUUID()}`;
     const continuityMarker = `retained-terminal-${randomUUID()}`;
-    const genericMarker = `generic-before-${randomUUID()}`;
-    const protectedMarker = `native-operator-${randomUUID()}`;
-    const genericAfterMarker = `generic-after-${randomUUID()}`;
+    const beforeMarker = `merge-before-${randomUUID()}`;
+    const afterMarker = `merge-after-${randomUUID()}`;
     const runId = `run-${taskId}`;
     await execDb(
       client,
       `INSERT INTO pipeline_item
          (id, repo_id, prompt, pipeline, stage, branch, agent_type, agent_provider, activity)
        VALUES (?, ?, ?, 'specialized-reviewers', 'in progress', ?, 'pty', 'codex', 'working')`,
-      [taskId, SEED.repos.app.id, "Protected merge terminal E2E", taskId],
+      [taskId, SEED.repos.app.id, "Merge policy terminal E2E", taskId],
     );
     await execDb(
       client,
       `INSERT INTO stage_run
        (id, task_id, stage, kind, agent, agent_provider, status, session_id, cwd)
-       VALUES (?, ?, 'in progress', 'main', 'implement', 'codex', 'running', ?, '/tmp')`,
+       VALUES (?, ?, 'in progress', 'main', 'merge', 'codex', 'running', ?, '/tmp')`,
       [runId, taskId, taskId],
     );
     await execDb(
@@ -158,52 +109,28 @@ describe("native approval control", () => {
         sessionId: taskId,
         cwd: "/tmp",
         executable: "/bin/sh",
-        args: ["-c", "printf 'generic-ready\\n'; IFS= read -r line; printf 'generic-input:%s\\n' \"$line\"; sleep 30"],
+        args: ["-c", "printf 'merge-ready\\n'; while IFS= read -r line; do printf 'merge-input:%s\\n' \"$line\"; done"],
         env: {},
         cols: 80,
         rows: 24,
         agentProvider: "codex",
         operatorInputOnly: false,
       });
-      const genericTextarea = await selectTaskWithPolicy(taskId, false);
+      const textarea = await selectTask(taskId);
       await client.executeSync<void>(`
         window.__KANNA_E2E__?.invokes?.clear();
-        const terminal = document.querySelector(${JSON.stringify(terminalSelector(false))});
+        const terminal = document.querySelector(${JSON.stringify(terminalSelector)});
         if (terminal) {
           terminal.dataset.continuityMarker = ${JSON.stringify(continuityMarker)};
           terminal.focus();
         }
       `);
-      await client.sendKeys(genericTextarea, `${genericMarker}\n`);
-      await waitForTerminalOutput(taskId, `generic-input:${genericMarker}`);
+      await client.sendKeys(textarea, `${beforeMarker}\n`);
+      await waitForTerminalOutput(taskId, `merge-input:${beforeMarker}`);
       let invokes = await client.executeSync<Array<{ cmd: string; args?: unknown }>>(
         "return window.__KANNA_E2E__?.invokes?.getAll() ?? [];",
       );
       expect(invokes.some((record) => record.cmd === "send_operator_input")).toBe(false);
-
-      await tauriInvoke(client, "kill_session", { sessionId: taskId });
-      await tauriInvoke(client, "spawn_session", {
-        sessionId: taskId,
-        cwd: "/tmp",
-        executable: "/bin/sh",
-        args: ["-c", "printf 'merge-native-ready\\n'; IFS= read -r line; printf 'merge-native-input:%s\\n' \"$line\"; sleep 30"],
-        env: {},
-        cols: 80,
-        rows: 24,
-        agentProvider: "codex",
-        operatorInputOnly: true,
-      });
-      await execDb(
-        client,
-        "UPDATE stage_run SET agent = 'merge' WHERE id = ?",
-        [runId],
-      );
-      await execDb(
-        client,
-        "UPDATE pipeline_item SET activity_revision = activity_revision + 1 WHERE id = ?",
-        [taskId],
-      );
-      await selectTaskWithPolicy(taskId, true);
       const daemonDir = await tauriInvoke(client, "read_env_var", {
         name: "KANNA_DAEMON_DIR",
       });
@@ -220,17 +147,17 @@ describe("native approval control", () => {
       }
 
       await waitForReplacementDaemonAuthorization(daemonDir, successorPid);
-      const textarea = await selectTaskWithPolicy(taskId, true);
+      const replacementTextarea = await selectTask(taskId);
       await client.executeSync<void>(`
         window.__KANNA_E2E__?.invokes?.clear();
-        document.querySelector(${JSON.stringify(terminalSelector(true))})?.focus();
+        document.querySelector(${JSON.stringify(terminalSelector)})?.focus();
       `);
-      await client.sendKeys(textarea, `${protectedMarker}\n`);
+      await client.sendKeys(replacementTextarea, `${afterMarker}\n`);
 
       await callVueMethod(client, "loadItems");
       await waitForSelectedTask(taskId);
       const continuity = await client.executeSync<{ marker: string | null; focused: boolean }>(`
-        const terminal = document.querySelector(${JSON.stringify(terminalSelector(true))});
+        const terminal = document.querySelector(${JSON.stringify(terminalSelector)});
         return {
           marker: terminal?.dataset?.continuityMarker ?? null,
           focused: document.activeElement === terminal,
@@ -238,48 +165,7 @@ describe("native approval control", () => {
       `);
       expect(continuity).toEqual({ marker: continuityMarker, focused: true });
 
-      await waitForTerminalOutput(taskId, `merge-native-input:${protectedMarker}`);
-      invokes = await client.executeSync<Array<{ cmd: string; args?: unknown }>>(
-        "return window.__KANNA_E2E__?.invokes?.getAll() ?? [];",
-      );
-      expect(invokes.some((record) => record.cmd === "send_operator_input")).toBe(true);
-      expect(invokes.some((record) => record.cmd === "send_input")).toBe(false);
-
-      await tauriInvoke(client, "kill_session", { sessionId: taskId });
-      await tauriInvoke(client, "spawn_session", {
-        sessionId: taskId,
-        cwd: "/tmp",
-        executable: "/bin/sh",
-        args: ["-c", "printf 'generic-after-ready\\n'; IFS= read -r line; printf 'generic-after-input:%s\\n' \"$line\"; sleep 30"],
-        env: {},
-        cols: 80,
-        rows: 24,
-        agentProvider: "codex",
-        operatorInputOnly: false,
-      });
-      await execDb(
-        client,
-        "UPDATE stage_run SET agent = 'implement' WHERE id = ?",
-        [runId],
-      );
-      await execDb(
-        client,
-        "UPDATE pipeline_item SET activity_revision = activity_revision + 1 WHERE id = ?",
-        [taskId],
-      );
-      const genericAfterTextarea = await selectTaskWithPolicy(taskId, false);
-      const reverseContinuity = await client.executeSync<{ marker: string | null; focused: boolean }>(`
-        const terminal = document.querySelector(${JSON.stringify(terminalSelector(false))});
-        terminal?.focus();
-        return {
-          marker: terminal?.dataset?.continuityMarker ?? null,
-          focused: document.activeElement === terminal,
-        };
-      `);
-      expect(reverseContinuity).toEqual({ marker: continuityMarker, focused: true });
-      await client.executeSync<void>("window.__KANNA_E2E__?.invokes?.clear();");
-      await client.sendKeys(genericAfterTextarea, `${genericAfterMarker}\n`);
-      await waitForTerminalOutput(taskId, `generic-after-input:${genericAfterMarker}`);
+      await waitForTerminalOutput(taskId, `merge-input:${afterMarker}`);
       invokes = await client.executeSync<Array<{ cmd: string; args?: unknown }>>(
         "return window.__KANNA_E2E__?.invokes?.getAll() ?? [];",
       );

@@ -248,7 +248,7 @@ fn generated_tools_mark_get_tools_read_only() {
 }
 
 #[test]
-fn human_approval_override_is_not_an_agent_tool() {
+fn removed_approval_override_is_not_an_agent_tool() {
     let catalog = bundled_catalog();
 
     assert!(catalog
@@ -598,8 +598,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
                 "task_id": "task-1",
                 "status": "success",
                 "summary": "done",
-                "metadata": { "review": "passed" },
-                "disposition": "not_merge_candidate"
+                "metadata": { "review": "passed" }
             }),
             Method::Post,
             ResponseKind::Json,
@@ -607,8 +606,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({
                 "status": "success",
                 "summary": "done",
-                "metadata": { "review": "passed" },
-                "disposition": "not_merge_candidate"
+                "metadata": { "review": "passed" }
             }),
         ),
         (

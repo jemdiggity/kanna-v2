@@ -103,7 +103,6 @@ describe("MainPanel", () => {
       revisionRounds: 0,
       revisionLimit: 3,
       childTaskIds: [],
-      operatorTerminalInput: false,
     }));
     invokeMock.mockImplementation((command: string) => {
       if (command === "read_env_var") return Promise.resolve("0.0.0");
@@ -113,48 +112,7 @@ describe("MainPanel", () => {
     localStorage.clear();
   });
 
-  it("waits for the authoritative input policy and never falls back to pipeline metadata", async () => {
-    const { default: MainPanel } = await import("../MainPanel.vue");
-    let resolveDetail: ((detail: object) => void) | undefined;
-    fetchTaskDetailMock.mockImplementation(() => new Promise((resolve) => {
-      resolveDetail = resolve;
-    }));
-    const wrapper = mount(MainPanel, {
-      props: {
-        uiSlot: readySlot(durableTask({ pipeline: "singleton-merge" })),
-        repoPath: "/tmp/repo",
-        hasRepos: true,
-      },
-      global: {
-        mocks: { $t: (key: string) => key },
-        stubs: {
-          TaskHeader: true,
-          TerminalTabs: {
-            name: "TerminalTabs",
-            props: ["operatorTerminalInput"],
-            template: '<div data-testid="terminal-tabs" />',
-          },
-        },
-      },
-    });
-    expect(wrapper.findComponent({ name: "TerminalTabs" }).exists()).toBe(false);
-    expect(wrapper.get('[data-testid="terminal-policy-loading"]').exists()).toBe(true);
-
-    resolveDetail?.({
-      id: "task-pending",
-      stage: "in progress",
-      closedAt: null,
-      latestRun: null,
-      revisionRounds: 0,
-      revisionLimit: 3,
-      childTaskIds: [],
-      operatorTerminalInput: true,
-    });
-    await flushPromises();
-    expect(wrapper.findComponent({ name: "TerminalTabs" }).props("operatorTerminalInput")).toBe(true);
-  });
-
-  it("keeps terminal state but fails closed across refresh failure, then recovers policy", async () => {
+  it("keeps terminal state across task-detail refresh failures", async () => {
     const { default: MainPanel } = await import("../MainPanel.vue");
     fetchTaskDetailMock
       .mockResolvedValueOnce({
@@ -165,7 +123,6 @@ describe("MainPanel", () => {
         revisionRounds: 0,
         revisionLimit: 3,
         childTaskIds: [],
-        operatorTerminalInput: false,
       })
       .mockRejectedValueOnce(new Error("transient detail refresh failure"))
       .mockResolvedValueOnce({
@@ -176,7 +133,6 @@ describe("MainPanel", () => {
         revisionRounds: 0,
         revisionLimit: 3,
         childTaskIds: [],
-        operatorTerminalInput: true,
       });
     const wrapper = mount(MainPanel, {
       props: {
@@ -191,7 +147,6 @@ describe("MainPanel", () => {
           TaskHeader: true,
           TerminalTabs: {
             name: "TerminalTabs",
-            props: ["operatorTerminalInput"],
             template: '<textarea data-testid="interactive-terminal">buffer-before-refresh</textarea>',
           },
         },
@@ -209,9 +164,6 @@ describe("MainPanel", () => {
     expect(wrapper.get('[data-testid="interactive-terminal"]').element).toBe(terminal.element);
     expect(terminal.element.value).toBe("typed-during-transition");
     expect(document.activeElement).toBe(terminal.element);
-    // The stale generic policy must not survive a failed refresh that may
-    // represent a same-id respawn into a protected merge terminal.
-    expect(wrapper.findComponent({ name: "TerminalTabs" }).props("operatorTerminalInput")).toBe(true);
 
     await wrapper.setProps({
       uiSlot: readySlot(durableTask({ activity_revision: 2 })),
@@ -220,7 +172,6 @@ describe("MainPanel", () => {
     expect(wrapper.get('[data-testid="interactive-terminal"]').element).toBe(terminal.element);
     expect(terminal.element.value).toBe("typed-during-transition");
     expect(document.activeElement).toBe(terminal.element);
-    expect(wrapper.findComponent({ name: "TerminalTabs" }).props("operatorTerminalInput")).toBe(true);
     wrapper.unmount();
   });
 

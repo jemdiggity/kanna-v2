@@ -235,7 +235,7 @@ pub enum Command {
         pid: u32,
     },
     /// Server-authenticated classification for an adopted legacy session.
-    /// A classified protected session can never be relaxed.
+    /// The authenticated server may clear retired policies after an upgrade.
     ClassifyInput {
         session_id: String,
         operator_input_only: bool,

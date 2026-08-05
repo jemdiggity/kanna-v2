@@ -1,7 +1,6 @@
 use super::{
-    configure_shared_database_connection, create_agent_signal_protocol_schema,
-    create_blocker_revision_triggers, create_task_approval_authorization_schema,
-    create_task_approval_lineage_schema, database_create_flags, Db,
+    configure_shared_database_connection, create_blocker_revision_triggers, database_create_flags,
+    Db,
 };
 use crate::db::CURRENT_SCHEMA_MIGRATIONS;
 use rusqlite::Connection;
@@ -250,9 +249,6 @@ impl Db {
             "#,
         )?;
         create_blocker_revision_triggers(&self.conn)?;
-        create_task_approval_lineage_schema(&self.conn)?;
-        create_task_approval_authorization_schema(&self.conn)?;
-        create_agent_signal_protocol_schema(&self.conn)?;
         let mut stmt = self
             .conn
             .prepare("INSERT INTO schema_migrations (id) VALUES (?1)")?;

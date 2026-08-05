@@ -132,11 +132,11 @@ describe("createLanTransport", () => {
     );
   });
 
-  it("surfaces an approval hold from advance-stage without retrying another route", async () => {
+  it("surfaces an advance-stage conflict without retrying another route", async () => {
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
       ok: false,
       status: 409,
-      json: async () => ({ error: "approval held" })
+      json: async () => ({ error: "stage conflict" })
     });
     const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
 

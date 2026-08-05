@@ -842,15 +842,8 @@ pub(crate) async fn handle_command(
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
                 return;
             };
-            let event = if session.classify_input(operator_input_only).await {
-                Event::Ok
-            } else {
-                error_event(
-                    Some(protocol::ErrorCode::InputUnauthorized),
-                    format!("refusing to relax protected session: {session_id}"),
-                )
-            };
-            let _ = write_event(&mut *writer.lock().await, &event).await;
+            session.classify_input(operator_input_only).await;
+            let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
         }
 
         Command::AttachSnapshot {

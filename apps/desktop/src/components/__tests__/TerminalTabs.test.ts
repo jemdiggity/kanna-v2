@@ -6,19 +6,18 @@ import { describe, expect, it, vi } from "vitest"
 import TerminalTabs from "../TerminalTabs.vue"
 
 describe("TerminalTabs", () => {
-  it("passes agent and protected-operator input modes to PTY terminals", () => {
+  it("marks PTY task terminals as agent terminals", () => {
     const wrapper = mount(TerminalTabs, {
       props: {
         sessionId: "agent-1",
         agentType: "pty",
         worktreePath: "/tmp/task",
-        operatorTerminalInput: true,
       },
       global: {
         stubs: {
           TerminalView: {
             name: "TerminalView",
-            props: ["agentTerminal", "operatorTerminalInput"],
+            props: ["agentTerminal"],
             template: "<div class='terminal-view-stub' />",
           },
           AgentMessageView: true,
@@ -27,7 +26,6 @@ describe("TerminalTabs", () => {
     })
 
     expect(wrapper.findComponent({ name: "TerminalView" }).props("agentTerminal")).toBe(true)
-    expect(wrapper.findComponent({ name: "TerminalView" }).props("operatorTerminalInput")).toBe(true)
   })
 
   it("keeps recently viewed PTY terminals warm across task switches", async () => {
