@@ -444,16 +444,7 @@ parent review stage (qa-dispatcher, auto)
 
 ### E2E gap
 
-The full dispatch loop (dispatcher session creating children, children
-recording verdicts, dispatcher aggregating and advancing) is driven by live
-agent behavior across daemon PTY sessions, so it is not yet covered end to
-end: the packaged-app WebDriver harness cannot deterministically drive
-multi-agent completion without external agent CLI credentials, and the fake
-daemon used by the server-boundary notify tests does not execute agent
-prompts. What would make it testable is a scripted agent provider (or
-OpenCode free-model live harness, per `pnpm test:agent-cli-compat`
-conventions) that can follow the dispatcher/specialty prompts
-deterministically. Until then, the wiring is proven piecewise by the
-server-boundary tests above: every tool call the dispatcher makes
-(list-child-history, create-with-agent, wait, get-latest-run, close,
-complete/revise) has direct coverage against the real server and DB.
+The full multi-session, multi-round carry-forward workflow is not covered end
+to end. The canonical statement of why it is not deterministic in current CI,
+what would make it testable, and which narrower tests cover the pieces is
+[QA specialty verdict history: end-to-end coverage gap](../2026-08-06-qa-specialty-verdict-history-e2e-gap.md).

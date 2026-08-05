@@ -23,6 +23,7 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - `POST /v1/tasks/{task_id}/actions/set-pipeline` (re-pin an open task to a compatible pipeline definition)
 - `GET /v1/tasks/recent`
 - `GET /v1/tasks/search?query=...`
+- `GET /v1/tasks/{task_id}/children` (durable direct-child fan-out history; includes closed children)
 - `GET /v1/task-events?taskIds=...|parentTaskId=...|repoId=...&cursor=...&timeoutSecs=...&limit=...` (multi-task event feed; blocks server-side until an event arrives or the window elapses)
 - `POST /v1/tasks`
 - `POST /v1/tasks/{task_id}/input`
@@ -369,6 +370,18 @@ durable, and a finished child is exactly what a fan-out orchestrator reconciles,
 so an empty list means "nothing was dispatched" rather than "everything already
 finished". This is deliberately unlike `GET /v1/tasks/search` and
 `GET /v1/repos/{repo_id}/tasks`, which list open tasks only.
+
+`GET /v1/tasks/{task_id}/children` is the richer join surface for that same
+parentage edge. It returns direct children only, includes closed children, and
+orders them oldest first. Each item contains `id`, optional `pipelineName`,
+optional `agent`, `createdAt`, optional `closedAt`, and optional `latestRun`
+(`stage`, `kind`, `status`, `summary`, and `finishedAt`). The pipeline
+identity and latest run let a fan-out owner reconstruct durable child verdicts
+after notifications, context compaction, or a fresh agent session; a closed
+child remains part of that history because closure is lifecycle cleanup, not
+parentage or verdict deletion. This route is scoped reconstruction for one
+parent's fan-out/join. It is not a general endpoint for listing closed tasks;
+repository task listing and search keep their existing open-task semantics.
 
 ## Activity Confirmation in `kanna-mcp`
 
