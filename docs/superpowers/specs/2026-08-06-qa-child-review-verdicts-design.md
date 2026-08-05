@@ -20,14 +20,18 @@ record the dispatcher needs to join.
 Each child record contains:
 
 - its stable task id;
+- its pipeline name, which distinguishes `specialty-review` history from
+  unrelated direct subtasks;
 - the stage-run agent name, which identifies the specialty;
 - creation and closure timestamps; and
 - its latest run's stage, kind, status, summary, and finish timestamp.
 
 The result is ordered by child creation time and then id. This makes repeated
 reviews of one specialty deterministic: the last child for that specialty is
-its carried-forward verdict. A child without a run, or without a successful
-or failed terminal verdict, is not treated as a pass.
+its carried-forward verdict. Only `specialty-review` children enter that
+ledger. A specialty-review child without a valid reviewer identity or terminal
+run is unresolved evidence and is not treated as a pass; unrelated child
+pipelines do not affect QA aggregation.
 
 This endpoint deliberately does not list arbitrary closed tasks, recurse into
 descendants, or add child history to every `TaskDetail` response. It exposes
