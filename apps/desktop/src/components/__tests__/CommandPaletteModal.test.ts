@@ -19,15 +19,18 @@ function paletteLabels() {
 }
 
 describe("CommandPaletteModal", () => {
-  it("omits shortcuts that cannot act from the palette", () => {
+  it("omits only the shortcuts whose action is the palette itself", () => {
     const labels = paletteLabels();
 
-    // Tab cycling only applies inside a tabbed modal, which is closed while the
-    // palette is open; the palette itself is the commandPalette/dismiss action.
-    expect(labels).not.toContain("shortcuts.prevTab");
-    expect(labels).not.toContain("shortcuts.nextTab");
     expect(labels).not.toContain("shortcuts.commandPalette");
     expect(labels).not.toContain("shortcuts.dismiss");
+  });
+
+  it("lists tab cycling, which dispatches to the Preferences panel beneath the palette", () => {
+    const labels = paletteLabels();
+
+    expect(labels).toContain("shortcuts.prevTab");
+    expect(labels).toContain("shortcuts.nextTab");
   });
 
   it("lists every other shortcut, including ones hidden from the shortcuts modal", () => {

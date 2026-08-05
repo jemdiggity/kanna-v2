@@ -68,10 +68,11 @@ interface ShortcutDef {
   /** Hide from shortcuts modal display */
   hidden?: boolean;
   /**
-   * Hide from the command palette. For shortcuts that cannot do anything when
-   * invoked from the palette — either because the palette itself is the action
-   * (commandPalette, dismiss) or because they only apply inside another modal
-   * that is closed while the palette is open (tab cycling).
+   * Hide from the command palette. Only for shortcuts whose action is the
+   * palette itself: opening it (commandPalette) or closing it (dismiss).
+   * Modal-scoped shortcuts still belong here — the palette stacks on top of
+   * other modals rather than replacing them, so e.g. tab cycling dispatches
+   * to the Preferences panel underneath.
    */
   paletteHidden?: boolean;
 }
@@ -126,8 +127,8 @@ export const shortcuts: ShortcutDef[] = [
   { action: "showAllShortcuts", labelKey: "shortcuts.allShortcuts",       groupKey: "shortcuts.groupAppHelp",   key: "/",                           meta: true, shift: true,  display: "⇧⌘/",     context: ["main", "file", "shell", "tree", "newTask"], hidden: true },
   { action: "showShortcuts",  labelKey: "shortcuts.keyboardShortcuts",  groupKey: "shortcuts.groupAppHelp",   key: "/",                           meta: true,               display: "⌘/",       context: ["main", "diff", "file", "shell", "tree", "graph", "newTask", "transfer"] },
   // Tab cycling — used by modals with tabs (e.g. Preferences)
-  { action: "prevTab",    labelKey: "shortcuts.prevTab",       groupKey: "shortcuts.groupMoveAround", key: ["[", "{"],                     meta: true, shift: true,  display: "⇧⌘[",     hidden: true, paletteHidden: true },
-  { action: "nextTab",    labelKey: "shortcuts.nextTab",       groupKey: "shortcuts.groupMoveAround", key: ["]", "}"],                     meta: true, shift: true,  display: "⇧⌘]",     hidden: true, paletteHidden: true },
+  { action: "prevTab",    labelKey: "shortcuts.prevTab",       groupKey: "shortcuts.groupMoveAround", key: ["[", "{"],                     meta: true, shift: true,  display: "⇧⌘[",     hidden: true },
+  { action: "nextTab",    labelKey: "shortcuts.nextTab",       groupKey: "shortcuts.groupMoveAround", key: ["]", "}"],                     meta: true, shift: true,  display: "⇧⌘]",     hidden: true },
   // Escape is special — no meta required
   { action: "dismiss",    labelKey: "shortcuts.dismiss",       groupKey: "shortcuts.groupAppHelp", key: "Escape",                                                 display: "Escape",   context: ["main", "diff", "file", "tree", "graph", "newTask", "transfer"], hidden: true, paletteHidden: true },
 ];
