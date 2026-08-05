@@ -21,6 +21,7 @@ export interface CloudTaskSnapshotInput {
     | "last_output_preview"
     | "agent_provider"
     | "agent_type"
+    | "parent_task_id"
     | "created_at"
     | "updated_at"
     | "closed_at"
@@ -71,6 +72,7 @@ export async function buildCloudTaskSnapshot(input: CloudTaskSnapshotInput) {
       destinationDesktopId: null,
     },
     blockedByTaskIds: input.blockedByTaskIds,
+    parentTaskId: input.item.parent_task_id ?? null,
     createdAt: input.item.created_at,
     updatedAt: input.item.updated_at,
     closedAt: input.item.closed_at,

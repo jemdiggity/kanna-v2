@@ -195,6 +195,55 @@ describe("mapDesktopCloudTasks", () => {
     });
   });
 
+  it("resolves an owner-published parent into the local presentation id", () => {
+    const snapshot = mapDesktopCloudTasks([
+      remoteTaskSnapshot({
+        cloudTaskId: "remote-repo-id:task-parent",
+        ownerLocalTaskId: "task-parent",
+      }),
+      remoteTaskSnapshot({
+        cloudTaskId: "remote-repo-id:task-child",
+        ownerLocalTaskId: "task-child",
+        parentTaskId: "task-parent",
+      }),
+      // Auto-id documents mint their id from the owner identity, so the parent
+      // reference has to survive that spelling too.
+      remoteTaskSnapshot({
+        cloudTaskId: undefined,
+        localRepoId: "remote-repo-id",
+        ownerLocalTaskId: "task-auto-child",
+        parentTaskId: "task-parent",
+      }),
+    ]);
+
+    expect(snapshot.items.map((item) => [item.id, item.parent_task_id])).toEqual(
+      expect.arrayContaining([
+        ["cloud:remote-repo-id:task-parent", null],
+        ["cloud:remote-repo-id:task-child", "cloud:remote-repo-id:task-parent"],
+        ["cloud:peer-primary:remote-repo-id:task-auto-child", "cloud:remote-repo-id:task-parent"],
+      ]),
+    );
+  });
+
+  it("drops parent references the owner did not publish alongside the task", () => {
+    const snapshot = mapDesktopCloudTasks([
+      remoteTaskSnapshot({
+        cloudTaskId: "remote-repo-id:task-child",
+        ownerLocalTaskId: "task-child",
+        parentTaskId: "task-closed-parent",
+      }),
+      // Same owner-side task id, published by a different desktop: not this parent.
+      remoteTaskSnapshot({
+        cloudTaskId: "other-repo-id:task-closed-parent",
+        ownerDesktopId: "peer-secondary",
+        ownerLocalTaskId: "task-closed-parent",
+      }),
+    ]);
+
+    expect(snapshot.items.find((item) => item.id === "cloud:remote-repo-id:task-child"))
+      .toMatchObject({ parent_task_id: null });
+  });
+
   it("attaches the reachable owner's transfer route to remote terminal refs", () => {
     const snapshot = mapDesktopCloudTasks([
       remoteTaskSnapshot({ ownerDesktopId: "desktop-owner" }),

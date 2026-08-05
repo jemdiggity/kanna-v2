@@ -59,6 +59,41 @@ describe("cloud task snapshot mapper", () => {
     expect(snapshot.repo.remoteUrlHash).toHaveLength(64);
   });
 
+  it("publishes the parent task id so viewers can rebuild the task hierarchy", async () => {
+    const child = await buildCloudTaskSnapshot({
+      desktopId: "desktop-1",
+      item: {
+        id: "task-child",
+        repo_id: "repo-1",
+        prompt: "Review the parent's branch",
+        stage: "in progress",
+        activity: "idle",
+        branch: "task-child",
+        base_ref: "origin/main",
+        pr_number: null,
+        pr_url: null,
+        display_name: null,
+        last_output_preview: null,
+        agent_provider: "claude",
+        agent_type: "pty",
+        parent_task_id: "task-parent",
+        created_at: "2026-08-04T00:00:00.000Z",
+        updated_at: "2026-08-04T00:01:00.000Z",
+        closed_at: null,
+      },
+      repo: {
+        id: "repo-1",
+        name: "kanna",
+        path: "/Users/test/kanna",
+        default_branch: "main",
+        remote_url: null,
+      },
+      blockedByTaskIds: [],
+    });
+
+    expect(child.parentTaskId).toBe("task-parent");
+  });
+
   it("publishes the running-post flag that drives the transition-in-flight indicator", async () => {
     const snapshot = await buildCloudTaskSnapshot({
       desktopId: "desktop-1",

@@ -1078,6 +1078,129 @@ describe("buildWorkspace", () => {
 
     expect(result.tasks[0].item).toMatchObject({ pinned: 0, pin_order: null });
   });
+
+  it("retargets a remote parent at the transport that wins the parent's presentation", () => {
+    const terminalRef = (ownerLocalTaskId: string, transport: "cloud" | "lan") => ({
+      ownerDesktopId: "desktop-a",
+      ownerLocalTaskId,
+      transport,
+    });
+    const cloudParent = item({
+      id: "cloud:remote-repo:task-parent",
+      repo_id: "cloud:remote-repo",
+      updated_at: "2026-05-23T00:00:00.000Z",
+    });
+    const lanParent = item({
+      id: "lan:peer-a:remote-repo:task-parent",
+      repo_id: "cloud:remote-repo",
+      updated_at: "2026-05-23T00:01:00.000Z",
+    });
+    const cloudChild = item({
+      id: "cloud:remote-repo:task-child",
+      repo_id: "cloud:remote-repo",
+      parent_task_id: "cloud:remote-repo:task-parent",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [],
+        items: [cloudParent, cloudChild],
+        terminalRefs: {
+          [cloudParent.id]: terminalRef("task-parent", "cloud"),
+          [cloudChild.id]: terminalRef("task-child", "cloud"),
+        },
+      },
+      lanSnapshot: {
+        repos: [],
+        items: [lanParent],
+        terminalRefs: {
+          [lanParent.id]: terminalRef("task-parent", "lan"),
+        },
+      },
+    });
+
+    const parent = result.tasks.find((task) => task.logicalTaskKey.endsWith("task-parent"));
+    const child = result.tasks.find((task) => task.logicalTaskKey.endsWith("task-child"));
+    expect(parent?.item.id).toBe("lan:peer-a:remote-repo:task-parent");
+    expect(child?.item.parent_task_id).toBe("lan:peer-a:remote-repo:task-parent");
+  });
+
+  it("retargets a remote parent at the viewer's own task when both name it", () => {
+    const localParent = item({ id: "task-parent", repo_id: "repo-local" });
+    const cloudParent = item({
+      id: "cloud:remote-repo:task-parent",
+      repo_id: "repo-local",
+      updated_at: "2026-05-23T00:01:00.000Z",
+    });
+    const cloudChild = item({
+      id: "cloud:remote-repo:task-child",
+      repo_id: "repo-local",
+      parent_task_id: "cloud:remote-repo:task-parent",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [{ repo: repo(), remoteUrlHash: null }],
+      localItems: [localParent],
+      cloudSnapshot: {
+        repos: [],
+        items: [cloudParent, cloudChild],
+        terminalRefs: {
+          [cloudParent.id]: {
+            ownerDesktopId: "desktop-a",
+            ownerLocalTaskId: "task-parent",
+            transport: "cloud",
+          },
+          [cloudChild.id]: {
+            ownerDesktopId: "desktop-a",
+            ownerLocalTaskId: "task-child",
+            transport: "cloud",
+          },
+        },
+      },
+      lanSnapshot: emptySnapshot(),
+    });
+
+    const child = result.tasks.find((task) => task.logicalTaskKey.endsWith("task-child"));
+    expect(child?.item.parent_task_id).toBe("task-parent");
+  });
+
+  it("drops a remote parent reference that is not part of the workspace", () => {
+    const cloudChild = item({
+      id: "cloud:remote-repo:task-child",
+      repo_id: "cloud:remote-repo",
+      parent_task_id: "cloud:remote-repo:task-hidden-parent",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: { repos: [], items: [cloudChild], terminalRefs: {} },
+      lanSnapshot: emptySnapshot(),
+    });
+
+    expect(result.tasks[0].item.parent_task_id).toBeNull();
+  });
+
+  it("keeps a local task's parent untouched", () => {
+    const localParent = item({ id: "task-parent", repo_id: "repo-local" });
+    const localChild = item({
+      id: "task-child",
+      repo_id: "repo-local",
+      parent_task_id: "task-parent",
+    });
+
+    const result = buildWorkspace({
+      localRepos: [{ repo: repo(), remoteUrlHash: null }],
+      localItems: [localParent, localChild],
+      cloudSnapshot: emptySnapshot(),
+      lanSnapshot: emptySnapshot(),
+    });
+
+    const child = result.tasks.find((task) => task.localTaskId === "task-child");
+    expect(child?.item.parent_task_id).toBe("task-parent");
+  });
 });
 
 describe("workspaceTaskOwnerTaskId", () => {

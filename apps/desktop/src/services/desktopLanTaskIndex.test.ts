@@ -209,6 +209,59 @@ describe("desktop LAN task index publisher", () => {
     );
     expect(publishedTask.blockedByTaskIds).toEqual([]);
   });
+
+  it("carries the task hierarchy through a LAN publish and read back", async () => {
+    setDesktopSnapshotFetcherForTests(async () => ({
+      entries: [{
+        repo: repo() as never,
+        items: [
+          openItem("task-parent") as never,
+          { ...openItem("task-child"), parent_task_id: "task-parent" } as never,
+        ],
+      }],
+      taskBlockers: [],
+      blockerTaskStates: {},
+      worktreePaths: {},
+      settings: {},
+    }));
+
+    await publishDesktopLanTaskSnapshot();
+
+    const publishCall = mocks.invoke.mock.calls.find(
+      ([command]) => command === "set_transfer_task_snapshot",
+    );
+    const published = publishCall?.[1].snapshot;
+    expect(published.tasks.map((task: { ownerLocalTaskId: string; parentTaskId: string | null }) =>
+      [task.ownerLocalTaskId, task.parentTaskId],
+    )).toEqual([["task-parent", null], ["task-child", "task-parent"]]);
+
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_transfer_task_snapshots") {
+        return [{ peer_id: "peer-owner", snapshot: published }];
+      }
+      if (command === "read_env_var") return "";
+      return null;
+    });
+
+    const snapshot = await listDesktopLanTasks({ currentDesktopId: "peer-local" });
+    const workspace = buildWorkspace({
+      localRepos: [],
+      localItems: [],
+      cloudSnapshot: {
+        repos: [],
+        items: [],
+        terminalRefs: {},
+        blockedByTaskIds: {},
+        transferMachines: [],
+      },
+      lanSnapshot: snapshot,
+    });
+
+    const parent = workspace.tasks.find((task) => task.logicalTaskKey.endsWith("task-parent"));
+    const child = workspace.tasks.find((task) => task.logicalTaskKey.endsWith("task-child"));
+    expect(parent?.item.id).toBeDefined();
+    expect(child?.item.parent_task_id).toBe(parent?.item.id);
+  });
 });
 
 describe("desktop LAN task index reader", () => {
