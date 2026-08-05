@@ -2,7 +2,16 @@ import React from "react";
 import { Window } from "happy-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WebViewMessageEvent } from "react-native-webview";
-import type { TaskTerminalStatus } from "../state/sessionStore";
+import type {
+  TaskTerminalOutputSnapshot,
+  TaskTerminalOutputSource,
+  TaskTerminalStatus
+} from "../state/sessionStore";
+import {
+  appendTerminalOutput,
+  createTerminalOutput,
+  type TerminalOutputLike
+} from "../state/terminalOutputBuffer";
 import {
   buildTerminalAppendScript,
   buildTerminalDocument,
@@ -151,7 +160,7 @@ function runEffects() {
 
 async function renderTerminalWebView(input: {
   taskId?: string;
-  output?: string;
+  output?: TerminalOutputLike;
   outputEpoch?: number;
   outputStart?: number;
   status?: TaskTerminalStatus;
@@ -164,6 +173,7 @@ async function renderTerminalWebView(input: {
   onMentionedFilesChange?: (history: TerminalFileMentionHistory) => void;
   onOpenFile?: (path: string, line?: number) => void;
   onTerminalInput?: (dataB64: string) => void;
+  terminalOutputSource?: TaskTerminalOutputSource;
 }): Promise<ElementNode> {
   resetRenderState();
   const { TerminalWebView } = await import("./TerminalWebView");
@@ -181,7 +191,8 @@ async function renderTerminalWebView(input: {
     onConsolePress: input.onConsolePress,
     onMentionedFilesChange: input.onMentionedFilesChange,
     onOpenFile: input.onOpenFile,
-    onTerminalInput: input.onTerminalInput
+    onTerminalInput: input.onTerminalInput,
+    terminalOutputSource: input.terminalOutputSource
   }) as ElementNode;
   lastTree = tree;
 
@@ -1370,10 +1381,32 @@ describe("TerminalWebView", () => {
     const frames = Array.from({ length: frameCount }, (_, index) =>
       `${Buffer.from(`BURST_${String(index + 1).padStart(4, "0")}_${"X".repeat(128)}\r\n`).toString("base64")}\n`
     );
-    let preReadyOutput = frames[0];
+    let preReadyOutput = createTerminalOutput(frames[0]);
+    let sourceSnapshot: TaskTerminalOutputSnapshot = {
+      taskId: "task-1",
+      output: preReadyOutput,
+      outputEpoch: 7,
+      outputStart: 0,
+      status: "live"
+    };
+    let sourceListener: (() => void) | null = null;
+    const terminalOutputSource: TaskTerminalOutputSource = {
+      getSnapshot: () => sourceSnapshot,
+      subscribe: vi.fn((listener) => {
+        sourceListener = listener;
+        return () => {
+          sourceListener = null;
+        };
+      })
+    };
+    const publishOutput = () => {
+      sourceSnapshot = { ...sourceSnapshot, output: preReadyOutput };
+      sourceListener?.();
+    };
     const initialWebView = await renderTerminalWebView({
       output: preReadyOutput,
-      outputEpoch: 7
+      outputEpoch: 7,
+      terminalOutputSource
     });
     (initialWebView.props.onLoadStart as () => void)();
     runEffects();
@@ -1381,13 +1414,14 @@ describe("TerminalWebView", () => {
     const splitSpy = vi.spyOn(String.prototype, "split");
     const stringifySpy = vi.spyOn(JSON, "stringify");
     for (const frame of frames.slice(1)) {
-      preReadyOutput += frame;
-      await renderTerminalWebView({ output: preReadyOutput, outputEpoch: 7 });
-      runEffects();
+      preReadyOutput = appendTerminalOutput(preReadyOutput, frame).output;
+      publishOutput();
     }
 
     expect(
-      splitSpy.mock.contexts.filter((value) => value === preReadyOutput)
+      splitSpy.mock.contexts.filter(
+        (value) => String(value).length === preReadyOutput.length
+      )
     ).toHaveLength(0);
     expect(
       stringifySpy.mock.calls.filter(
@@ -1409,8 +1443,10 @@ describe("TerminalWebView", () => {
 
     const readyScripts = [...injectedScripts];
     expect(
-      splitSpy.mock.contexts.filter((value) => value === preReadyOutput)
-    ).toHaveLength(1);
+      splitSpy.mock.contexts.filter(
+        (value) => String(value).length === preReadyOutput.length
+      )
+    ).toHaveLength(0);
     expect(
       stringifySpy.mock.calls.filter(
         ([value]) =>
@@ -1437,9 +1473,9 @@ describe("TerminalWebView", () => {
     );
     let steadyOutput = preReadyOutput;
     for (const frame of postReadyFrames) {
-      steadyOutput += frame;
-      await renderTerminalWebView({ output: steadyOutput, outputEpoch: 7 });
-      runEffects();
+      steadyOutput = appendTerminalOutput(steadyOutput, frame).output;
+      preReadyOutput = steadyOutput;
+      publishOutput();
     }
 
     const terminalMutationScripts = injectedScripts.filter((script) =>
@@ -1456,7 +1492,9 @@ describe("TerminalWebView", () => {
       )
     ).toBe(true);
     expect(
-      splitSpy.mock.contexts.filter((value) => value === steadyOutput)
+      splitSpy.mock.contexts.filter(
+        (value) => String(value).length === steadyOutput.length
+      )
     ).toHaveLength(0);
     for (const script of terminalMutationScripts) bridge.window.eval(script);
 
@@ -1464,6 +1502,7 @@ describe("TerminalWebView", () => {
     stringifySpy.mockRestore();
     expect(bridge.terminal.resets).toBe(1);
     expect(bridge.terminal.writes).toHaveLength(writesAtReady + frameCount);
+    expect(terminalOutputSource.subscribe).toHaveBeenCalledOnce();
   });
 
   it("replaces terminal state once when a new snapshot epoch arrives", async () => {

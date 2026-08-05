@@ -271,3 +271,237 @@ fix, so its code was left unchanged. A complete on-device terminal comparison
 still requires a phone-reachable safe LAN fixture and authorized staging relay
 credentials, followed by separately labeled fixed-duration runs for every row
 above.
+
+### Human-driven real-usage profile (2026-08-05)
+
+Jeremy reported that he was actively using the installed current task build on
+the connected phone. Two read-only Instruments recordings attached to the
+already-running KannaStaging PID 47710 without launching, foregrounding, or
+controlling the app. No accessibility hierarchy, screen capture, sampled
+memory, terminal text, credentials, or input was inspected or exported. The
+human-driven label comes from Jeremy's contemporaneous report; the exact
+screen, terminal state, and LAN-versus-relay transport remain unverified.
+
+The first recording is labeled **human-driven real usage**. Power Profiler was
+configured for 60 seconds and its trace envelope ran from
+`2026-08-05T07:15:04.693+09:00` through
+`2026-08-05T07:16:06.646+09:00` (61.953843 seconds including instrument
+attachment and teardown). Its 60 process-QoS windows contain 14.070230960
+CPU-seconds: 23.450385% average over the configured interval, or 22.710828%
+over the full trace envelope. The highest window of at least 500 ms was
+127.254343% across 0.961855125 seconds at trace offset 60.013635541, showing a
+short multicore burst rather than a one-minute average. Thermal state remained
+`Nominal` for the complete envelope.
+
+Power Profiler's relative process CPU-impact series had a duration-weighted
+mean of 3.336518 and range 0.0–30.0 in Instruments impact units. It reported
+`0.0%/hr` system power while the device was USB-attached/charging with display
+brightness at 99%, so that is not an absolute battery result. This template did
+not expose process watts or interval mWh; its value cannot be directly compared
+with the stale resource report's 60.30 mWh.
+
+The sequential second recording is labeled **human-driven continuation;
+idle/control state unverified**. Saving the first trace created a 22.979-second
+gap before Activity Monitor ran for a configured 30 seconds, from
+`2026-08-05T07:16:29.625+09:00` through
+`2026-08-05T07:17:00.506+09:00` (30.881049-second envelope). Process cumulative
+CPU advanced by 10.898312459 seconds, equal to 35.291264% over the envelope;
+the instrument's duration-weighted live samples averaged 36.467089% and ranged
+from 28.900417% to 45.502580%. Physical footprint began at 70.563721 MiB,
+peaked at 78.813721 MiB, and ended at 73.969971 MiB. It did not show monotonic
+growth during this short interval.
+
+The second interval began `Nominal`, changed to `Fair` after 19.111741583
+seconds (approximately `2026-08-05T07:16:48.737+09:00`), and remained `Fair`
+for its final 11.769307334 seconds. This is direct thermal evidence during
+human-driven use, but it does not identify which app view or transport caused
+the load. Neither interval reached the stale incident report's 50% CPU resource
+threshold on average.
+
+At `2026-08-05T07:19:42+09:00`, `devicectl` still found the same PID 47710
+running. The installed app metadata was Kanna Staging 0.1.0 (1), bundle
+`build.kanna.app.staging`. A metadata-only listing of `systemCrashLogs` found
+only the seven existing Kanna reports dated 2026-08-04 and no new crash,
+resource, or termination report. Although xctrace labels a successfully
+detached target `exit(0)` in its recording metadata, the same-PID liveness check
+proves the app did not terminate at the end of either interval.
+
+These observations show materially elevated current-build CPU and a transition
+to `Fair` thermal state under real human use, but no crash and no short-interval
+footprint runaway. Because the protected screen/transport state was
+intentionally not inspected, they do not establish that the proven JS output
+cursor bug recurred or connect the 2026-08-04 fatal JS exception to CPU load.
+
+### Second resource report and remaining current-build hot path
+
+The additional device report was copied read-only to
+`/tmp/KannaStaging.cpu_resource-2026-08-04-223616.ips` and inspected only as
+process metadata and sampled stacks. Its SHA-256 is
+`6157b64904f9b335abaac58d621d77ed17438e5cd2f3f1620919cd0e92775bbc`.
+No terminal or network payload, input, credential, screenshot, or sampled
+memory was read or retained.
+
+The report belongs to stale-build PID 44158, not the crashing PID 43418. It
+started at `2026-08-04T22:33:52.943+09:00`, 2.943 seconds after PID 43418's
+fatal termination, and ran for 141.98 seconds before iOS recorded another CPU
+resource violation at 22:36. The process used 90 CPU-seconds during the
+threshold interval (63% average) and 97.916 CPU-seconds in total. Thermal
+pressure was again advisory level 20, energy was 44.69 mWh, and physical
+footprint grew from 50.77 MB to 108.36 MB with a 123.08 MB maximum. All 25
+sampled process states were active.
+
+The new report has the same bundle build, executable slice UUID, and
+UUID-relative React-runtime/Hermes-heavy stack chain as the original PID 43418
+report. Absolute addresses and sample counts differ because this is a new
+process with ASLR. This establishes that the stale-build CPU hot path recurred
+immediately after relaunch. It does not make the preceding fatal JavaScript
+exception its cause: the crash report still contains no JavaScript exception
+message, and PID 44158 reached the CPU threshold without a matching fatal
+report.
+
+After the first cursor/coalescing fix, a second current-build profile attached
+to installed PID 47907 without inspecting the app UI or content. The interval
+is labeled **post-first-fix current state; view and transport unverified**.
+Power Profiler was configured for 60 seconds; its trace envelope ran from
+`2026-08-05T07:41:25.168+09:00` through
+`2026-08-05T07:42:27.199+09:00` (62.031869 seconds). The 60 configured
+process-QoS windows contain 30.457923128 CPU-seconds: 50.763205% average over
+the configured duration, or 49.100444% over the complete envelope. Thermal
+state was `Critical` for the complete envelope.
+
+A consecutive Activity Monitor recording ran from
+`2026-08-05T07:42:39.385+09:00` through
+`2026-08-05T07:43:10.284+09:00` (30.899024 seconds). Cumulative process CPU
+advanced by 9.554203124 seconds, or 30.920728% over the envelope. Physical
+footprint increased from 81.8605 MiB to 91.0011 MiB, also its maximum, and
+thermal state remained `Critical`. The same PID was alive after both
+Instruments detachments, and no new Kanna `.ips` report appeared.
+
+The stack-only Time Profiler export contains 19.920 seconds of samples:
+17.141 seconds on the React Native JavaScript thread, 0.784 seconds on the
+main thread, and 0.407 seconds in Hermes Hades GC. Overlapping symbol groups
+account for 17.723 seconds in React/Fabric, 2.672 seconds in Hermes array work,
+1.788 seconds in garbage collection, 0.838 seconds in object-spread helpers,
+and 0.532 seconds in string operations. Native WebView/WebKit symbols account
+for only 0.293 seconds. Initial samples also pass through React Native animated
+event listener teardown. A metadata-only network instrument showed continuous
+cellular TLS activity, but transport and terminal state remain unverified; no
+endpoint or payload was retained.
+
+The complete code path explains those samples. Each LAN or relay terminal
+`output` frame called `mobileController`'s `appendTaskTerminal`. Although the
+first fix bounded retained-string copying, `sessionStore.appendTaskTerminal`
+still rebuilt and published the global session snapshot for every frame.
+`AppContent` consumes that snapshot through `useSyncExternalStore`, so every
+PTY frame invalidated the application React tree, including navigation,
+`TaskScreen`, WebView props, and React Native animated bindings. The same
+global subscription in `appModel` also invoked persisted-context projection,
+comparison, and serialization for every frame. This matches the dominant
+React/Fabric, array/object-copy, GC, and animated-listener stacks; xterm's
+native WebView cost was comparatively small.
+
+The remaining fix therefore keeps terminal bytes on their stream boundary.
+The store retains every frame in an immutable segmented buffer and publishes
+live output through a dedicated terminal-output source. The mounted
+`TerminalWebView` owns that subscription and its cleanup, applies the existing
+authoritative cursor/epoch mutation planner, coalesces only before xterm is
+ready, and injects each subsequent frame once. Live frames no longer publish
+global navigation/application state and no longer trigger unrelated context
+persistence. Snapshot, status, error, selection, reconnect, and cleanup
+transitions still publish global state. This adds no polling, delay, throttle,
+optimistic echo, dropped frame, or hidden error, and preserves the reviewed
+authoritative-output cursor and lifecycle behavior.
+
+The causal regression sends 10,000 frames and proves 10,000 terminal-source
+notifications with zero global application-state notifications. A 4,000-frame
+WebView burst proves one authoritative pre-ready replacement followed by one
+xterm append per ready frame, without serializing retained history per frame.
+The segmented-buffer test uses a 750,001-character snapshot plus 10,000 frames
+and proves per-frame scanning stays at or below the 64 KiB segment target,
+while snapshot and completed-segment references remain stable and eviction
+keeps complete frames and the logical cursor. The real remote E2E boundary
+also passes across mobile client, relay, server, daemon, PTY, authoritative
+no-echo input, output burst, and terminal remount.
+
+An after-fix physical-device profile remains required before this revision is
+merge-ready. From `2026-08-05T07:55+09:00` through
+`2026-08-05T08:05:57+09:00`, CoreDevice continued to enumerate Jerome's
+iPhone 15 (iPhone16,1, iOS 26.5.2) but marked it unavailable. The host USB
+inventory contained no iPhone entry, confirming a physical-connectivity
+blocker rather than an app state. The canonical reinstall stopped safely with
+`No attached iPhone devices were found`; no alternate install path was used.
+Profiling will resume after the phone is reattached and unlocked.
+
+### Dedicated-subscription after-fix physical profile (2026-08-05)
+
+Jerome's iPhone became available again, so the dirty task worktree was built,
+installed, and launched through the canonical self-contained
+`./kd mobile run --device --staging --install` path. The installed Release
+bundle is Kanna Staging 0.1.0 (1), bundle `build.kanna.app.staging`; the app and
+matching dSYM both have arm64 UUID
+`16E6C734-CA77-3A94-BB8A-89CE11EEC3E6`. The build was made from HEAD
+`49f69f75edbb34f3c0e2b84dce97734b00946118` plus the preserved scoped dirty
+changes documented in this section. The change is JavaScript-only, so the
+mobile `runtimeVersion` was correctly left unchanged.
+
+The first launched process was suspended before Instruments attached. A
+metadata-only foreground relaunch produced PID 48680; neither operation read
+the accessibility hierarchy or app screen. Both fixed-duration recordings
+then attached to that same PID without inspecting or exporting terminal
+contents, input, credentials, screenshots, sampled memory, network endpoints,
+or payloads. Because the protected UI was deliberately not inspected, this
+run is labeled **dedicated-subscription after-fix current state; exact view and
+LAN-versus-relay transport unverified**.
+
+Power Profiler was configured for 60 seconds and its trace envelope ran from
+`2026-08-05T11:48:00.829+09:00` through
+`2026-08-05T11:49:02.730+09:00` (61.901200 seconds). The process-QoS rows
+contain 14.604050154 CPU-seconds: 24.340084% average over the configured
+interval, or 23.592515% over the complete envelope. The highest window of at
+least 500 ms was 54.285330% across 0.911698417 seconds at trace offset
+0.985343833. Process CPU-impact had a duration-weighted mean of 1.072312 and a
+range of 0.1-8.0 in Instruments impact units. Thermal state remained `Nominal`
+for the complete envelope.
+
+The sequential Activity Monitor trace ran from
+`2026-08-05T11:49:12.389+09:00` through
+`2026-08-05T11:49:43.151+09:00` (30.762163 seconds). Cumulative process CPU
+advanced by 1.306453833 seconds, or 4.246950% over the envelope; the
+duration-weighted live samples averaged 4.338784% and ranged from 1.748623% to
+8.789096%. Physical footprint began at 62.985458 MiB, peaked at 63.001083 MiB,
+and ended at 60.876083 MiB. Thermal state remained `Nominal` for the complete
+interval.
+
+Against the immediately preceding post-first-fix profile, configured-interval
+Power Profiler CPU fell from 50.763205% to 24.340084% (52.052% lower), while
+the consecutive Activity Monitor envelope fell from 30.920728% to 4.246950%
+(86.265% lower). The previous 30-second footprint increased from 81.8605 MiB
+to 91.0011 MiB and thermal state remained `Critical`; this run stayed within a
+0.015625 MiB peak band, ended 2.109375 MiB below its start, and stayed
+`Nominal` throughout.
+
+Most importantly for the causal React hot path, the Power Profiler stack-only
+export fell from 19.920 seconds of total sampled execution to 2.749 seconds.
+React Native's JavaScript thread fell from 17.141 seconds to 1.211 seconds
+(92.935% lower), and Hermes Hades GC fell from 0.407 seconds to 0.041 seconds.
+Main-thread sampling remained comparable (0.784 seconds before and 0.749
+seconds after). This selective collapse of JavaScript-thread work, together
+with the store regression proving that terminal frames no longer publish the
+global React snapshot, materially closes the proven React invalidation hot
+path rather than merely moving work onto the main or WebView thread.
+
+PID 48680 was still alive after both Instruments detachments. A metadata-only
+listing of `systemCrashLogs` found the same seven Kanna reports dated
+2026-08-04 and no new crash, CPU-resource, or termination report. As in the
+earlier traces, Instruments records a successful detach as `exit(0)` in trace
+metadata; same-PID liveness proves the app did not exit. No current fatal
+JavaScript exception was reproduced, and this after-fix evidence still does
+not connect the stale fatal exception to the stale CPU incidents.
+
+The traces and aggregate-only XML exports remain under `/private/tmp` and are
+not committed. They contain process metadata and native stack symbols but no
+terminal payload. Exact protected workload state was not observable without
+violating the incident's data-handling constraint, so the deterministic burst
+tests and the real mobile-client -> relay -> server -> daemon -> PTY boundary
+remain the reproducible workload evidence paired with this physical-device
+profile.

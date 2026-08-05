@@ -12,7 +12,18 @@ import {
   type WebViewMessageEvent,
   type WebViewProps
 } from "react-native-webview";
-import type { TaskTerminalStatus } from "../state/sessionStore";
+import type {
+  TaskTerminalOutputSnapshot,
+  TaskTerminalOutputSource,
+  TaskTerminalStatus
+} from "../state/sessionStore";
+import {
+  createTerminalOutput,
+  EMPTY_TERMINAL_OUTPUT,
+  terminalOutputLength,
+  type TerminalOutputBuffer,
+  type TerminalOutputLike
+} from "../state/terminalOutputBuffer";
 import {
   captureMobileCrashDiagnostic
 } from "../lib/diagnostics/mobileCrashDiagnostics";
@@ -37,10 +48,11 @@ import {
 
 interface TerminalWebViewProps {
   taskId: string;
-  output: string;
+  output: TerminalOutputLike;
   outputEpoch: number;
   outputStart: number;
   status: TaskTerminalStatus;
+  terminalOutputSource?: TaskTerminalOutputSource;
   cols: number | null;
   rows: number | null;
   fullscreen?: boolean;
@@ -69,7 +81,7 @@ type PendingScriptKind = "resize" | "bottom-inset";
 
 interface PendingTerminalState {
   contentRevision: number;
-  output: string;
+  output: TerminalOutputLike;
   status: TaskTerminalStatus;
 }
 
@@ -92,6 +104,7 @@ export function TerminalWebView({
   outputEpoch,
   outputStart,
   status,
+  terminalOutputSource,
   cols,
   rows,
   fullscreen = false,
@@ -107,24 +120,32 @@ export function TerminalWebView({
   const pendingScriptsRef = useRef<string[]>([]);
   const pendingTerminalStateRef = useRef<PendingTerminalState | null>(null);
   const previousTaskIdRef = useRef<string | null>(null);
-  const previousOutputRef = useRef("");
+  const previousOutputRef = useRef<TerminalOutputLike>(EMPTY_TERMINAL_OUTPUT);
   const previousOutputEpochRef = useRef(0);
   const previousOutputStartRef = useRef(0);
   const previousStatusRef = useRef<TaskTerminalStatus>("idle");
   const activeTaskIdRef = useRef(taskId);
   activeTaskIdRef.current = taskId;
   const activeOutputEpochRef = useRef(outputEpoch);
-  activeOutputEpochRef.current = outputEpoch;
+  const latestOutputStartRef = useRef(outputStart);
+  const normalizedOutput = useMemo<TerminalOutputBuffer>(
+    () => (typeof output === "string" ? createTerminalOutput(output) : output),
+    [output]
+  );
   const latestTerminalStateRef = useRef<PendingTerminalState>({
     contentRevision: outputEpoch,
-    output,
+    output: normalizedOutput,
     status
   });
-  latestTerminalStateRef.current = {
-    contentRevision: outputEpoch,
-    output,
-    status
-  };
+  if (!terminalOutputSource) {
+    activeOutputEpochRef.current = outputEpoch;
+    latestOutputStartRef.current = outputStart;
+    latestTerminalStateRef.current = {
+      contentRevision: outputEpoch,
+      output: normalizedOutput,
+      status
+    };
+  }
   const selectionContextRef = useRef({ copyPending: false, version: 0 });
   const [renderedOutputEpoch, setRenderedOutputEpoch] = useState<number | null>(
     null
@@ -157,10 +178,10 @@ export function TerminalWebView({
 
   const terminalDiagnosticDetails = () => ({
     taskId,
-    status,
-    outputChars: output.length,
-    outputEpoch,
-    outputStart,
+    status: latestTerminalStateRef.current.status,
+    outputChars: terminalOutputLength(latestTerminalStateRef.current.output),
+    outputEpoch: latestTerminalStateRef.current.contentRevision,
+    outputStart: latestOutputStartRef.current,
     cols,
     rows,
     bridgeReady: bridgeReadyRef.current,
@@ -232,6 +253,51 @@ export function TerminalWebView({
     webViewRef.current?.injectJavaScript(buildTerminalAppendScript(chunk));
   };
 
+  const applyTerminalOutputSnapshot = (
+    snapshot: TaskTerminalOutputSnapshot
+  ) => {
+    activeOutputEpochRef.current = snapshot.outputEpoch;
+    latestOutputStartRef.current = snapshot.outputStart;
+    latestTerminalStateRef.current = {
+      contentRevision: snapshot.outputEpoch,
+      output: snapshot.output,
+      status: snapshot.status
+    };
+    const mutation = planTerminalMutation({
+      previousEpoch: previousOutputEpochRef.current,
+      previousOutput: previousOutputRef.current,
+      previousStart: previousOutputStartRef.current,
+      previousStatus: previousStatusRef.current,
+      nextEpoch: snapshot.outputEpoch,
+      nextOutput: snapshot.output,
+      nextStart: snapshot.outputStart,
+      nextStatus: snapshot.status
+    });
+
+    previousOutputRef.current = snapshot.output;
+    previousOutputEpochRef.current = snapshot.outputEpoch;
+    previousOutputStartRef.current = snapshot.outputStart;
+    previousStatusRef.current = snapshot.status;
+
+    switch (mutation.kind) {
+      case "append":
+        appendTerminalChunk(mutation.chunk);
+        break;
+      case "replace":
+        replaceTerminalState({
+          contentRevision: snapshot.outputEpoch,
+          output: mutation.output,
+          status: mutation.status
+        });
+        break;
+      case "none":
+      default:
+        break;
+    }
+  };
+  const applyTerminalOutputSnapshotRef = useRef(applyTerminalOutputSnapshot);
+  applyTerminalOutputSnapshotRef.current = applyTerminalOutputSnapshot;
+
   useEffect(() => {
     const taskChanged = previousTaskIdRef.current !== taskId;
 
@@ -243,7 +309,14 @@ export function TerminalWebView({
       setSelectionCopyError(null);
       setSelectionCopyPending(false);
       previousTaskIdRef.current = taskId;
-      previousOutputRef.current = output;
+      activeOutputEpochRef.current = outputEpoch;
+      latestOutputStartRef.current = outputStart;
+      latestTerminalStateRef.current = {
+        contentRevision: outputEpoch,
+        output: normalizedOutput,
+        status
+      };
+      previousOutputRef.current = normalizedOutput;
       previousOutputEpochRef.current = outputEpoch;
       previousOutputStartRef.current = outputStart;
       previousStatusRef.current = status;
@@ -251,45 +324,35 @@ export function TerminalWebView({
       return;
     }
 
-    const mutation = planTerminalMutation({
-      previousEpoch: previousOutputEpochRef.current,
-      previousOutput: previousOutputRef.current,
-      previousStart: previousOutputStartRef.current,
-      previousStatus: previousStatusRef.current,
-      nextEpoch: outputEpoch,
-      nextOutput: output,
-      nextStart: outputStart,
-      nextStatus: status
+    applyTerminalOutputSnapshot({
+      taskId,
+      output: normalizedOutput,
+      outputEpoch,
+      outputStart,
+      status
     });
-
-    previousOutputRef.current = output;
-    previousOutputEpochRef.current = outputEpoch;
-    previousOutputStartRef.current = outputStart;
-    previousStatusRef.current = status;
-
-    switch (mutation.kind) {
-      case "append":
-        appendTerminalChunk(mutation.chunk);
-        break;
-      case "replace":
-        replaceTerminalState({
-          contentRevision: outputEpoch,
-          output: mutation.output,
-          status: mutation.status
-        });
-        break;
-      case "none":
-      default:
-        break;
-    }
   }, [
     onMentionedFilesChange,
-    output,
+    normalizedOutput,
     outputEpoch,
     outputStart,
     status,
     taskId
   ]);
+
+  useEffect(() => {
+    if (!terminalOutputSource) return;
+
+    const applyCurrentOutput = () => {
+      const snapshot = terminalOutputSource.getSnapshot();
+      if (snapshot.taskId !== activeTaskIdRef.current) return;
+      applyTerminalOutputSnapshotRef.current(snapshot);
+    };
+    const unsubscribe = terminalOutputSource.subscribe(applyCurrentOutput);
+    // Close the subscribe-after-render race without relying on a replay timer.
+    applyCurrentOutput();
+    return unsubscribe;
+  }, [taskId, terminalOutputSource]);
 
   useEffect(() => {
     if (cols && rows) {

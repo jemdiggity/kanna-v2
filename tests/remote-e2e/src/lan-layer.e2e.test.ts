@@ -9,6 +9,10 @@ import {
   createSessionStore,
   type SessionStore
 } from "../../../apps/mobile/src/state/sessionStore";
+import {
+  terminalOutputToString,
+  type TerminalOutputLike
+} from "../../../apps/mobile/src/state/terminalOutputBuffer";
 import { startRemoteHarness, type RemoteHarness } from "./harness";
 import {
   collectTerminalEvents,
@@ -172,7 +176,7 @@ describe("LAN task loop E2E", () => {
 
       const connectedEpoch = store.getState().taskTerminalOutputEpoch;
       controller.closeTask(task.taskId);
-      expect(store.getState().taskTerminalOutput).toBe("");
+      expect(terminalOutputToString(store.getState().taskTerminalOutput)).toBe("");
       controller.openTask(task.taskId);
 
       const remountedOutput = await waitForStoreTerminalOutput(
@@ -240,8 +244,8 @@ function createLanClient(harness: RemoteHarness): LanTransport {
   );
 }
 
-function decodeRetainedTerminalOutput(output: string): string {
-  return output
+function decodeRetainedTerminalOutput(output: TerminalOutputLike): string {
+  return terminalOutputToString(output)
     .split("\n")
     .map((frame) => frame.trim())
     .filter(Boolean)

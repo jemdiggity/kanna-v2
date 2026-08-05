@@ -29,8 +29,10 @@ import type {
   TaskCreationAction,
   TaskCreationPhase,
   TaskStageAction,
+  TaskTerminalOutputSource,
   TaskTerminalStatus
 } from "../state/sessionStore";
+import type { TerminalOutputLike } from "../state/terminalOutputBuffer";
 import type {
   CompanionDocumentKind,
   CompanionEvent,
@@ -75,9 +77,10 @@ interface TaskScreenProps {
   task: TaskSummary;
   blockerTasks?: readonly BlockerTaskRef[];
   e2eTaskSnapshotMarker?: string;
-  terminalOutput: string;
+  terminalOutput: TerminalOutputLike;
   terminalOutputEpoch: number;
   terminalOutputStart: number;
+  terminalOutputSource?: TaskTerminalOutputSource;
   terminalStatus: TaskTerminalStatus;
   terminalCols: number | null;
   terminalRows: number | null;
@@ -132,6 +135,7 @@ export function TaskScreen({
   terminalOutput,
   terminalOutputEpoch,
   terminalOutputStart,
+  terminalOutputSource,
   terminalStatus,
   terminalCols,
   terminalRows,
@@ -533,6 +537,7 @@ export function TaskScreen({
             output={terminalOutput}
             outputEpoch={terminalOutputEpoch}
             outputStart={terminalOutputStart}
+            terminalOutputSource={terminalOutputSource}
             status={terminalStatus}
             cols={terminalCols}
             rows={terminalRows}

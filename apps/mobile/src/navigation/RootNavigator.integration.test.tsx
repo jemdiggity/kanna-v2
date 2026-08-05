@@ -18,6 +18,7 @@ import {
   createSessionStore,
   type SessionStore
 } from "../state/sessionStore";
+import { terminalOutputToString } from "../state/terminalOutputBuffer";
 import { buildInitialNavigationState } from "./navigationState";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -870,12 +871,11 @@ describe("RootNavigator task Back integration", () => {
           });
         });
 
-        expect(
-          rendered!.root.findByType("TerminalWebView").props
-        ).toMatchObject({
-          output: `${longScrollback}\n`,
-          status: "live"
-        });
+        const terminalProps = rendered!.root.findByType("TerminalWebView").props;
+        expect(terminalProps).toMatchObject({ status: "live" });
+        expect(terminalOutputToString(terminalProps.output)).toBe(
+          `${longScrollback}\n`
+        );
         expect(
           findAllByTestId(MOBILE_E2E_IDS.taskComposerChrome)[0]?.props.style
         ).toContainEqual({ bottom: 328 });
@@ -904,9 +904,9 @@ describe("RootNavigator task Back integration", () => {
       expect(closeTerminal).toHaveBeenCalledOnce();
       expect(store.getState()).toMatchObject({
         selectedTaskId: null,
-        taskTerminalTaskId: null,
-        taskTerminalOutput: ""
+        taskTerminalTaskId: null
       });
+      expect(terminalOutputToString(store.getState().taskTerminalOutput)).toBe("");
     }
   );
 });

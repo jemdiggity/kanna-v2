@@ -46,7 +46,10 @@ import type { TaskQuickReply } from "../screens/taskQuickReplies";
 import { TasksScreen } from "../screens/TasksScreen";
 import type { MobileController } from "../state/mobileController";
 import { buildMachineInventory } from "../state/machineInventory";
-import type { SessionState } from "../state/sessionStore";
+import type {
+  SessionState,
+  TaskTerminalOutputSource
+} from "../state/sessionStore";
 import {
   projectTaskUiSlots,
   taskUiSlotForSelection,
@@ -109,6 +112,7 @@ interface RootNavigatorProps {
   quickReplies: readonly TaskQuickReply[];
   quickRepliesHydrated: boolean;
   state: SessionState;
+  terminalOutputSource?: TaskTerminalOutputSource;
 }
 
 interface NavigationContent {
@@ -125,6 +129,7 @@ interface NavigationContent {
   quickReplies: readonly TaskQuickReply[];
   quickRepliesHydrated: boolean;
   state: SessionState;
+  terminalOutputSource?: TaskTerminalOutputSource;
   taskDetailViewportRef: React.MutableRefObject<{
     width: number;
     height: number;
@@ -144,7 +149,8 @@ export default function RootNavigator({
   onOpenAccount,
   quickReplies,
   quickRepliesHydrated,
-  state
+  state,
+  terminalOutputSource
 }: RootNavigatorProps) {
   const navigationRef = useNavigationContainerRef<RootStackParamList>();
   const taskDetailViewportRef = useRef<{
@@ -219,6 +225,7 @@ export default function RootNavigator({
     quickReplies,
     quickRepliesHydrated,
     state,
+    terminalOutputSource,
     taskDetailViewportRef
   }), [
     controller,
@@ -232,7 +239,8 @@ export default function RootNavigator({
     pushTask,
     quickReplies,
     quickRepliesHydrated,
-    state
+    state,
+    terminalOutputSource
   ]);
 
   return (
@@ -472,7 +480,8 @@ function TaskDetailRoute({
     e2eTaskSnapshotMarker,
     quickReplies,
     quickRepliesHydrated,
-    state
+    state,
+    terminalOutputSource
   } = useNavigationContent();
   const routeTaskId = route.params.taskId;
   const routeTask = resolveTask(state, routeTaskId);
@@ -561,6 +570,7 @@ function TaskDetailRoute({
       terminalOutput={state.taskTerminalOutput}
       terminalOutputEpoch={state.taskTerminalOutputEpoch}
       terminalOutputStart={state.taskTerminalOutputStart}
+      terminalOutputSource={terminalOutputSource}
       terminalStatus={state.taskTerminalStatus}
       terminalCols={state.taskTerminalCols}
       terminalRows={state.taskTerminalRows}
