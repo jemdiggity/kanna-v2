@@ -12,6 +12,9 @@ import {
   type KeyboardActions,
 } from "./useKeyboardShortcuts";
 import type { ShortcutContext } from "./useShortcutContext";
+import en from "../i18n/locales/en.json";
+import ja from "../i18n/locales/ja.json";
+import ko from "../i18n/locales/ko.json";
 
 function identityTranslate(key: string): string {
   return key;
@@ -359,5 +362,27 @@ describe("useKeyboardShortcuts", () => {
 
     expect(actions.dismiss).toHaveBeenCalledTimes(1);
     wrapper.unmount();
+  });
+});
+
+describe("shortcut i18n labels", () => {
+  const locales: Record<string, unknown> = { en, ja, ko };
+
+  function lookup(messages: unknown, key: string): unknown {
+    return key.split(".").reduce<unknown>((node, segment) => {
+      if (typeof node !== "object" || node === null) return undefined;
+      return (node as Record<string, unknown>)[segment];
+    }, messages);
+  }
+
+  // Both the shortcuts modal and the command palette render these keys through
+  // t() — a missing one leaks the raw "shortcuts.prevTab" string into the UI.
+  it.each(Object.keys(locales))("resolves every shortcut label and group in %s", (locale) => {
+    const messages = locales[locale];
+    const missing = shortcuts
+      .flatMap((shortcut) => [shortcut.labelKey, shortcut.groupKey])
+      .filter((key) => typeof lookup(messages, key) !== "string");
+
+    expect([...new Set(missing)]).toEqual([]);
   });
 });

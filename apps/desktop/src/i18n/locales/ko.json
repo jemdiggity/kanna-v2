@@ -73,6 +73,8 @@
     "nextTask": "다음 작업",
     "previousRepo": "이전 리포지토리",
     "nextRepo": "다음 리포지토리",
+    "prevTab": "이전 탭",
+    "nextTab": "다음 탭",
     "filePicker": "파일 검색",
     "filePreview": "파일 미리보기",
     "openLatestAgentFile": "최신 에이전트 파일 열기",

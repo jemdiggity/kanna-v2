@@ -73,6 +73,8 @@
     "nextTask": "Next Task",
     "previousRepo": "Previous Repo",
     "nextRepo": "Next Repo",
+    "prevTab": "Previous Tab",
+    "nextTab": "Next Tab",
     "filePicker": "File Picker",
     "filePreview": "File Preview",
     "openLatestAgentFile": "Open Latest Agent File",
