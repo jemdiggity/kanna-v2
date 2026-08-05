@@ -643,6 +643,18 @@ fn local_server_port_for_cloud_env(cloud_env: Option<DesktopCloudEnvironment>) -
         })
 }
 
+fn local_transfer_port_for_cloud_env(cloud_env: Option<DesktopCloudEnvironment>) -> u16 {
+    std::env::var("KANNA_TRANSFER_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .unwrap_or_else(|| {
+            cloud_env::effective_cloud_env(cloud_env)
+                .map(|env| env.transfer_port())
+                .unwrap_or(kanna_runtime_defaults::DEFAULT_TRANSFER_PORT)
+        })
+}
+
 fn server_base_url(port: u16) -> String {
     format!("http://{}:{}", LOCAL_SERVER_HOST, port)
 }

@@ -1,6 +1,7 @@
 use super::state::{db_write_error, AppState};
 use super::task_blockers::resolve_existing_task_id;
 use crate::db::Db;
+use crate::internal_ports::reserve_internal_ports;
 use axum::extract::{Path, State};
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
@@ -28,6 +29,7 @@ pub(super) struct ClaimTaskPortsResponse {
 }
 
 fn add_reserved_ports(occupied: &mut HashSet<i64>, payload: &ClaimTaskPortsRequest) {
+    reserve_internal_ports(occupied);
     for port in &payload.reserved_ports {
         if (1..=65535).contains(port) {
             occupied.insert(*port);

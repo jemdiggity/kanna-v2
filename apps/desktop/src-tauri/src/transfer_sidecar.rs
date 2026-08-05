@@ -1772,8 +1772,7 @@ fn build_transfer_sidecar_env_from_resolved(
     let mut env = HashMap::new();
     env.insert(
         "KANNA_TRANSFER_PORT".to_string(),
-        std::env::var("KANNA_TRANSFER_PORT")
-            .unwrap_or_else(|_| kanna_runtime_defaults::DEFAULT_TRANSFER_PORT.to_string()),
+        transfer_listen_port(bundle_identifier, debug_assertions),
     );
     env.insert(
         "KANNA_TRANSFER_ROOT".to_string(),
@@ -1827,6 +1826,24 @@ fn build_transfer_sidecar_env_from_resolved(
         transfer_mobile_server_port(bundle_identifier, debug_assertions),
     );
     Ok(env)
+}
+
+/// The sidecar binds one TCP listener, so every installed environment needs its
+/// own port. Production and staging previously shared `DEFAULT_TRANSFER_PORT`,
+/// and whichever app launched second could never bind — its sidecar exited at
+/// startup and every request against it failed with a closed response channel.
+fn transfer_listen_port(bundle_identifier: &str, debug_assertions: bool) -> String {
+    std::env::var("KANNA_TRANSFER_PORT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            kanna_runtime_defaults::transfer_port_for_bundle_identifier(
+                bundle_identifier,
+                debug_assertions,
+            )
+            .unwrap_or(kanna_runtime_defaults::DEFAULT_TRANSFER_PORT)
+            .to_string()
+        })
 }
 
 fn transfer_mobile_server_port(bundle_identifier: &str, debug_assertions: bool) -> String {
@@ -2106,6 +2123,85 @@ mod tests {
         assert_eq!(
             env.get("KANNA_MOBILE_SERVER_PORT").map(String::as_str),
             Some("48121")
+        );
+    }
+
+    #[test]
+    fn transfer_sidecar_env_gives_each_installed_environment_its_own_listen_port() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::unset("KANNA_TRANSFER_PORT");
+        let _transfer_root = EnvVarGuard::unset("KANNA_TRANSFER_ROOT");
+        let temp = TestTempDir::new();
+
+        let staging = build_transfer_sidecar_env_for_bundle_identifier(
+            temp.path(),
+            Some("Jeremy's MacBook Pro"),
+            kanna_runtime_defaults::STAGING_DESKTOP_BUNDLE_IDENTIFIER,
+            false,
+        )
+        .expect("sidecar env should be built");
+        let production = build_transfer_sidecar_env_for_bundle_identifier(
+            temp.path(),
+            Some("Jeremy's MacBook Pro"),
+            kanna_runtime_defaults::DESKTOP_BUNDLE_IDENTIFIER,
+            false,
+        )
+        .expect("sidecar env should be built");
+
+        assert_eq!(
+            staging.get("KANNA_TRANSFER_PORT").map(String::as_str),
+            Some(kanna_runtime_defaults::STAGING_TRANSFER_PORT.to_string()).as_deref()
+        );
+        assert_eq!(
+            production.get("KANNA_TRANSFER_PORT").map(String::as_str),
+            Some(kanna_runtime_defaults::DEFAULT_TRANSFER_PORT.to_string()).as_deref()
+        );
+        assert_ne!(
+            staging.get("KANNA_TRANSFER_PORT"),
+            production.get("KANNA_TRANSFER_PORT"),
+            "installed environments must not contend for one transfer listener",
+        );
+    }
+
+    #[test]
+    fn transfer_sidecar_env_lets_an_explicit_transfer_port_win() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::set("KANNA_TRANSFER_PORT", "4499");
+        let _transfer_root = EnvVarGuard::unset("KANNA_TRANSFER_ROOT");
+        let temp = TestTempDir::new();
+
+        let env = build_transfer_sidecar_env_for_bundle_identifier(
+            temp.path(),
+            Some("Jeremy's MacBook Pro"),
+            kanna_runtime_defaults::STAGING_DESKTOP_BUNDLE_IDENTIFIER,
+            false,
+        )
+        .expect("sidecar env should be built");
+
+        assert_eq!(
+            env.get("KANNA_TRANSFER_PORT").map(String::as_str),
+            Some("4499")
+        );
+    }
+
+    #[test]
+    fn transfer_sidecar_env_falls_back_to_the_default_port_for_development_builds() {
+        let _lock = env_lock();
+        let _guard = EnvVarGuard::unset("KANNA_TRANSFER_PORT");
+        let _transfer_root = EnvVarGuard::unset("KANNA_TRANSFER_ROOT");
+        let temp = TestTempDir::new();
+
+        let env = build_transfer_sidecar_env_for_bundle_identifier(
+            temp.path(),
+            Some("Jeremy's MacBook Pro"),
+            kanna_runtime_defaults::STAGING_DESKTOP_BUNDLE_IDENTIFIER,
+            true,
+        )
+        .expect("sidecar env should be built");
+
+        assert_eq!(
+            env.get("KANNA_TRANSFER_PORT").map(String::as_str),
+            Some(kanna_runtime_defaults::DEFAULT_TRANSFER_PORT.to_string()).as_deref()
         );
     }
 

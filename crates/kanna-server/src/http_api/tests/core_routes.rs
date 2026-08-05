@@ -1495,6 +1495,46 @@ async fn task_port_routes_claim_reuse_and_release_allocations() {
 }
 
 #[tokio::test]
+async fn task_port_routes_never_claim_a_port_kanna_binds_for_itself() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "prompt",
+            Some("Task One"),
+            "in progress",
+            "2026-08-05 08:00:00",
+        )
+        .unwrap();
+    });
+
+    // Base sits one below the production transfer port, so the allocator's
+    // first candidate is a port Kanna itself listens on.
+    let body = serde_json::json!({
+        "ports": { "APP_PORT": kanna_runtime_defaults::DEFAULT_TRANSFER_PORT - 1 },
+    })
+    .to_string();
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-1/ports")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = from_slice(&response_body).unwrap();
+
+    // 4455 and 4456 are Kanna's, so the first free port above 4454 is 4457.
+    assert_eq!(json["portEnv"]["APP_PORT"], "4457");
+}
+
+#[tokio::test]
 async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_task_transfer(

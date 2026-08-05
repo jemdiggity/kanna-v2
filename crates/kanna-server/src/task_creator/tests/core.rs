@@ -1176,6 +1176,58 @@ fn claim_task_ports_skips_reserved_ports_and_offsets() {
 }
 
 #[test]
+fn claim_task_ports_never_hands_out_a_port_kanna_binds_for_itself() {
+    let config = test_config("internal-port-claim");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Sit next to Kanna's own ports",
+        Some("Internal ports"),
+        "in progress",
+        "2026-08-05 10:00:00",
+    )
+    .unwrap();
+    // Each base sits directly below one of Kanna's listeners, so the upward
+    // search walks into it on the very first candidate.
+    let repo_config = super::super::definitions::RepoConfig {
+        ports: Some(HashMap::from([
+            (
+                "TRANSFER_ADJACENT".to_string(),
+                kanna_runtime_defaults::DEFAULT_TRANSFER_PORT - 1,
+            ),
+            (
+                "MOBILE_ADJACENT".to_string(),
+                kanna_runtime_defaults::PRODUCTION_MOBILE_SERVER_PORT - 1,
+            ),
+        ])),
+        ..Default::default()
+    };
+
+    let port_env =
+        super::super::environment::claim_task_ports(&db, "task-1", &repo_config).unwrap();
+
+    // 4455 and 4456 are ours, so the first free port above 4454 is 4457;
+    // 48120 and 48121 are ours, so the first above 48119 is 48122.
+    assert_eq!(
+        port_env,
+        HashMap::from([
+            ("TRANSFER_ADJACENT".to_string(), "4457".to_string()),
+            ("MOBILE_ADJACENT".to_string(), "48122".to_string()),
+        ])
+    );
+    for port in kanna_runtime_defaults::RESERVED_INTERNAL_PORTS {
+        assert!(
+            !port_env
+                .values()
+                .any(|claimed| claimed == &port.to_string()),
+            "allocator handed out Kanna's own port {port}",
+        );
+    }
+}
+
+#[test]
 fn repo_definitions_pin_all_repo_owned_resources_to_remote_default_branch() {
     let temp = tempfile::tempdir().expect("create repo definitions fixture");
     let origin = temp.path().join("origin.git");
