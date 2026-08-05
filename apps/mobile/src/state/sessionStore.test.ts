@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createSessionStore } from "./sessionStore";
 import { buildCreatingTaskUiSlot } from "./taskUiSlots";
+import { terminalOutputToString } from "./terminalOutputBuffer";
+
+function terminalText(store: ReturnType<typeof createSessionStore>): string {
+  return terminalOutputToString(store.getState().taskTerminalOutput);
+}
 
 describe("createSessionStore", () => {
   const pendingTaskCreation = {
@@ -517,9 +522,9 @@ describe("createSessionStore", () => {
     expect(store.getState()).toMatchObject({
       selectedTaskId: "task-1",
       taskTerminalTaskId: "task-1",
-      taskTerminalStatus: "live",
-      taskTerminalOutput: "Existing output"
+      taskTerminalStatus: "live"
     });
+    expect(terminalText(store)).toBe("Existing output");
   });
 
   it("retags an active terminal without losing buffered state", () => {
@@ -536,10 +541,10 @@ describe("createSessionStore", () => {
       selectedTaskId: "task-published",
       taskTerminalTaskId: "task-published",
       taskTerminalStatus: "live",
-      taskTerminalOutput: "snapshot\ndelta\n",
       taskTerminalCols: 132,
       taskTerminalRows: 43
     });
+    expect(terminalText(store)).toBe("snapshot\ndelta\n");
   });
 
   it("retags an active agent without losing buffered events", () => {
@@ -823,9 +828,9 @@ describe("createSessionStore", () => {
     expect(store.getState()).toMatchObject({
       selectedTaskId: null,
       taskTerminalTaskId: null,
-      taskTerminalStatus: "idle",
-      taskTerminalOutput: ""
+      taskTerminalStatus: "idle"
     });
+    expect(terminalText(store)).toBe("");
   });
 
   it("preserves terminal stream error messages on the active terminal only", () => {
@@ -838,18 +843,18 @@ describe("createSessionStore", () => {
     expect(store.getState()).toMatchObject({
       taskTerminalTaskId: "task-1",
       taskTerminalStatus: "error",
-      taskTerminalErrorMessage: "No terminal session is available for this task",
-      taskTerminalOutput: "Existing output"
+      taskTerminalErrorMessage: "No terminal session is available for this task"
     });
+    expect(terminalText(store)).toBe("Existing output");
 
     store.clearTaskTerminal();
 
     expect(store.getState()).toMatchObject({
       taskTerminalTaskId: null,
       taskTerminalStatus: "idle",
-      taskTerminalErrorMessage: null,
-      taskTerminalOutput: ""
+      taskTerminalErrorMessage: null
     });
+    expect(terminalText(store)).toBe("");
   });
 
   it("keeps a snapshot larger than the live-output cap", () => {
@@ -859,7 +864,7 @@ describe("createSessionStore", () => {
     const snapshot = "A".repeat(1_100_000);
     store.appendTaskTerminal("task-1", `${snapshot}\n`);
 
-    expect(store.getState().taskTerminalOutput).toBe(`${snapshot}\n`);
+    expect(terminalText(store)).toBe(`${snapshot}\n`);
   });
 
   it("replaces stale output atomically when an authoritative snapshot arrives", () => {
@@ -876,13 +881,13 @@ describe("createSessionStore", () => {
 
     expect(store.getState()).toMatchObject({
       taskTerminalStatus: "live",
-      taskTerminalOutput: "fresh-snapshot\n",
       taskTerminalOutputEpoch: previousEpoch + 1,
       taskTerminalOutputStart: 0,
       taskTerminalCols: 132,
       taskTerminalRows: 43,
       taskTerminalErrorMessage: null
     });
+    expect(terminalText(store)).toBe("fresh-snapshot\n");
     expect(publishes).toBe(1);
   });
 
@@ -900,7 +905,9 @@ describe("createSessionStore", () => {
     }
 
     const state = store.getState();
-    const frames = state.taskTerminalOutput.split("\n").filter(Boolean);
+    const frames = terminalOutputToString(state.taskTerminalOutput)
+      .split("\n")
+      .filter(Boolean);
     expect(frames).toEqual([snapshot, ...liveFrames.slice(-3)]);
     expect(state.taskTerminalOutputStart).toBe(300_001);
   });
@@ -914,9 +921,7 @@ describe("createSessionStore", () => {
     store.appendTaskTerminal("task-1", `${snapshot}\n`);
     store.appendTaskTerminal("task-1", `${liveFrame}\n`);
 
-    expect(store.getState().taskTerminalOutput).toBe(
-      `${snapshot}\n${liveFrame}\n`
-    );
+    expect(terminalText(store)).toBe(`${snapshot}\n${liveFrame}\n`);
   });
 
   it("keeps a large snapshot plus live frames decodable through the accumulation cap", () => {
@@ -933,7 +938,9 @@ describe("createSessionStore", () => {
     store.appendTaskTerminal("task-1", `${liveFrame}\n`);
 
     const state = store.getState();
-    const frames = state.taskTerminalOutput.split("\n").filter(Boolean);
+    const frames = terminalOutputToString(state.taskTerminalOutput)
+      .split("\n")
+      .filter(Boolean);
     const decoded = frames.map((frame) => Buffer.from(frame, "base64").toString("utf8")).join("");
 
     expect(state.taskTerminalCols).toBe(220);
@@ -941,6 +948,76 @@ describe("createSessionStore", () => {
     expect(frames).toEqual([snapshotFrame, liveFrame]);
     expect(decoded).toContain("snapshot scrollback row");
     expect(decoded).toContain("LIVE-APPEND-CORRECT");
+  });
+
+  it("does not rescan the snapshot boundary for every live frame", () => {
+    const store = createSessionStore();
+    const snapshotFrame = "A".repeat(750_000);
+    const liveFrame = "bGl2ZQ==\n";
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", snapshotFrame, 132, 43);
+
+    const indexOfSpy = vi.spyOn(String.prototype, "indexOf");
+    store.appendTaskTerminal("task-1", liveFrame);
+
+    const scannedInputs = indexOfSpy.mock.contexts.map((value) => String(value));
+    indexOfSpy.mockRestore();
+    expect(scannedInputs).not.toContain(`${snapshotFrame}\n${liveFrame}`);
+    expect(terminalText(store)).toBe(`${snapshotFrame}\n${liveFrame}`);
+  });
+
+  it("routes live terminal frames outside the application-state render boundary", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "c25hcHNob3Q=", 132, 43);
+    let applicationPublications = 0;
+    let terminalPublications = 0;
+    store.subscribe(() => {
+      applicationPublications += 1;
+    });
+    store.taskTerminalOutputSource.subscribe(() => {
+      terminalPublications += 1;
+    });
+
+    const frameCount = 10_000;
+    for (let index = 0; index < frameCount; index += 1) {
+      store.appendTaskTerminal(
+        "task-1",
+        `${Buffer.from(`frame-${index}`).toString("base64")}\n`
+      );
+    }
+
+    expect(applicationPublications).toBe(0);
+    expect(terminalPublications).toBe(frameCount);
+    expect(store.taskTerminalOutputSource.getSnapshot()).toMatchObject({
+      taskId: "task-1",
+      outputEpoch: store.getState().taskTerminalOutputEpoch,
+      outputStart: store.getState().taskTerminalOutputStart,
+      status: "live"
+    });
+    expect(terminalText(store)).toContain(
+      Buffer.from(`frame-${frameCount - 1}`).toString("base64")
+    );
+  });
+
+  it("publishes the one application-state transition when output recovers an error", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.setTaskTerminalError("task-1", "Connection interrupted");
+    let applicationPublications = 0;
+    store.subscribe(() => {
+      applicationPublications += 1;
+    });
+
+    store.appendTaskTerminal("task-1", "cmVjb3ZlcmVk\n");
+    store.appendTaskTerminal("task-1", "c3RlYWR5\n");
+
+    expect(applicationPublications).toBe(1);
+    expect(store.getState()).toMatchObject({
+      taskTerminalStatus: "live",
+      taskTerminalErrorMessage: null
+    });
+    expect(terminalText(store)).toContain("c3RlYWR5");
   });
 
   it("does not publish when repo tasks are refreshed with identical data", () => {

@@ -1,4 +1,9 @@
 import type { TaskTerminalStatus } from "../state/sessionStore";
+import {
+  sliceTerminalOutput,
+  terminalOutputLength,
+  type TerminalOutputLike
+} from "../state/terminalOutputBuffer";
 
 export type TerminalMutation =
   | {
@@ -6,7 +11,7 @@ export type TerminalMutation =
     }
   | {
       kind: "replace";
-      output: string;
+      output: TerminalOutputLike;
       status: TaskTerminalStatus;
     }
   | {
@@ -16,11 +21,11 @@ export type TerminalMutation =
 
 interface PlanTerminalMutationOptions {
   previousEpoch: number;
-  previousOutput: string;
+  previousOutput: TerminalOutputLike;
   previousStart: number;
   previousStatus: TaskTerminalStatus;
   nextEpoch: number;
-  nextOutput: string;
+  nextOutput: TerminalOutputLike;
   nextStart: number;
   nextStatus: TaskTerminalStatus;
 }
@@ -43,11 +48,13 @@ export function planTerminalMutation({
     };
   }
 
-  const previousEnd = previousStart + previousOutput.length;
-  const nextEnd = nextStart + nextOutput.length;
+  const previousOutputLength = terminalOutputLength(previousOutput);
+  const nextOutputLength = terminalOutputLength(nextOutput);
+  const previousEnd = previousStart + previousOutputLength;
+  const nextEnd = nextStart + nextOutputLength;
 
   if (previousEnd === nextEnd) {
-    if (!nextOutput.trim() && nextStatus !== previousStatus) {
+    if (nextOutputLength === 0 && nextStatus !== previousStatus) {
       return {
         kind: "replace",
         output: nextOutput,
@@ -58,7 +65,7 @@ export function planTerminalMutation({
     return { kind: "none" };
   }
 
-  if (!previousOutput.trim()) {
+  if (previousOutputLength === 0) {
     return {
       kind: "replace",
       output: nextOutput,
@@ -69,7 +76,7 @@ export function planTerminalMutation({
   if (previousEnd >= nextStart && previousEnd <= nextEnd) {
     return {
       kind: "append",
-      chunk: nextOutput.slice(previousEnd - nextStart)
+      chunk: sliceTerminalOutput(nextOutput, previousEnd - nextStart)
     };
   }
 

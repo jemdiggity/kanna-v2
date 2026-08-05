@@ -20,6 +20,11 @@ import { createCloudLanClient } from "../lib/sources/cloudLanClient";
 import { createRemoteTransport, type RemoteDesktopInvoker } from "../lib/transports/remoteTransport";
 import { mapCloudTaskSnapshot } from "../lib/firebase/taskIndex";
 import type { MachinePairingService } from "../lib/pairing/machinePairing";
+import { terminalOutputToString } from "./terminalOutputBuffer";
+
+function terminalText(store: ReturnType<typeof createSessionStore>): string {
+  return terminalOutputToString(store.getState().taskTerminalOutput);
+}
 
 function createDeferred<T>(): {
   promise: Promise<T>;
@@ -2932,7 +2937,6 @@ describe("createMobileController", () => {
       selectedTaskId: null,
       taskTerminalTaskId: null,
       taskTerminalStatus: "idle",
-      taskTerminalOutput: "",
       taskTerminalCols: null,
       taskTerminalRows: null,
       taskTerminalErrorMessage: null,
@@ -4189,9 +4193,9 @@ describe("createMobileController", () => {
 
     expect(store.getState()).toMatchObject({
       selectedTaskId: store.getState().taskUiSlots[0]?.slotId,
-      taskTerminalTaskId: "task-created-raw",
-      taskTerminalOutput: "cmF3LWNyZWF0ZQ==\n"
+      taskTerminalTaskId: "task-created-raw"
     });
+    expect(terminalText(store)).toBe("cmF3LWNyZWF0ZQ==\n");
     const stableSlotId = store.getState().taskUiSlots[0]?.slotId;
 
     publishTasks?.([], { cloudAuthoritative: false });
@@ -4213,7 +4217,6 @@ describe("createMobileController", () => {
     expect(store.getState()).toMatchObject({
       selectedTaskId: stableSlotId,
       taskTerminalTaskId: "task-created-raw",
-      taskTerminalOutput: "cmF3LWNyZWF0ZQ==\n",
       taskUiSlots: [
         {
           slotId: stableSlotId,
@@ -4222,6 +4225,7 @@ describe("createMobileController", () => {
         }
       ]
     });
+    expect(terminalText(store)).toBe("cmF3LWNyZWF0ZQ==\n");
     expect(client.__terminalStream.subscription.close).not.toHaveBeenCalled();
 
     const publishedTask: TaskSummary = {
@@ -4247,9 +4251,9 @@ describe("createMobileController", () => {
     expect(store.getState()).toMatchObject({
       selectedTaskId: null,
       taskTerminalTaskId: null,
-      taskTerminalOutput: "",
       taskUiSlots: []
     });
+    expect(terminalText(store)).toBe("");
     expect(client.__terminalStream.subscription.close).toHaveBeenCalledOnce();
   });
 
@@ -5263,9 +5267,9 @@ describe("createMobileController", () => {
       selectedTaskId: "task-1",
       taskTerminalStatus: "live"
     });
-    expect(store.getState().taskTerminalOutput).toContain("Rmlyc3QgbGluZQo=");
-    expect(store.getState().taskTerminalOutput).toContain("U2Vjb25kIGxpbmU=");
-    expect(store.getState().taskTerminalOutput).not.toContain("First line");
+    expect(terminalText(store)).toContain("Rmlyc3QgbGluZQo=");
+    expect(terminalText(store)).toContain("U2Vjb25kIGxpbmU=");
+    expect(terminalText(store)).not.toContain("First line");
   });
 
   it("replaces stale replay output with an authoritative reconnect snapshot", async () => {
@@ -5303,9 +5307,11 @@ describe("createMobileController", () => {
 
     expect(store.getState()).toMatchObject({
       taskTerminalCols: 132,
-      taskTerminalRows: 43,
-      taskTerminalOutput: `${reconnectSnapshot}\nZnJlc2ggbGl2ZSBvdXRwdXQ=\n`
+      taskTerminalRows: 43
     });
+    expect(terminalText(store)).toBe(
+      `${reconnectSnapshot}\nZnJlc2ggbGl2ZSBvdXRwdXQ=\n`
+    );
   });
 
   it("owns one companion stream beside the task view and sends only while active", async () => {
@@ -5533,13 +5539,13 @@ describe("createMobileController", () => {
     });
 
     expect(store.getState()).toMatchObject({
-      taskTerminalOutput: "ZnJlc2gtc25hcHNob3Q=\n",
       taskTerminalOutputEpoch: previousEpoch + 1,
       taskTerminalOutputStart: 0,
       taskTerminalCols: 132,
       taskTerminalRows: 43,
       taskTerminalStatus: "live"
     });
+    expect(terminalText(store)).toBe("ZnJlc2gtc25hcHNob3Q=\n");
   });
 
   it("rebinds the selected terminal when its effective route changes", async () => {
@@ -5622,9 +5628,9 @@ describe("createMobileController", () => {
 
     expect(store.getState()).toMatchObject({
       taskTerminalTaskId: "task-1",
-      taskTerminalOutput: "owner-b-output\n",
       taskTerminalStatus: "live"
     });
+    expect(terminalText(store)).toBe("owner-b-output\n");
   });
 
   it("opens an agent stream instead of a terminal stream for agent tasks", async () => {
@@ -6430,9 +6436,9 @@ describe("createMobileController", () => {
     expect(store.getState()).toMatchObject({
       selectedTaskId: null,
       taskTerminalTaskId: null,
-      taskTerminalStatus: "idle",
-      taskTerminalOutput: ""
+      taskTerminalStatus: "idle"
     });
+    expect(terminalText(store)).toBe("");
     vi.useRealTimers();
   });
 

@@ -9,6 +9,10 @@ import {
   createSessionStore,
   type SessionStore
 } from "../../../apps/mobile/src/state/sessionStore";
+import {
+  terminalOutputToString,
+  type TerminalOutputLike
+} from "../../../apps/mobile/src/state/terminalOutputBuffer";
 import { startRemoteHarness, type RemoteHarness } from "./harness";
 import {
   collectTerminalEvents,
@@ -137,7 +141,7 @@ describe("LAN task loop E2E", () => {
     }
   }, 45_000);
 
-  it("retains authoritative no-echo input output across a mobile terminal remount", async () => {
+  it("retains authoritative no-echo input and a live PTY burst across a mobile terminal remount", async () => {
     const task = await createScriptedTask(harness, {
       displayName: "Mobile retained terminal input task",
       redactInput: true
@@ -161,20 +165,37 @@ describe("LAN task loop E2E", () => {
       expect(connectedOutput).not.toContain(submittedInput);
       expect(connectedOutput).not.toContain("composed password");
 
-      const connectedEpoch = store.getState().taskTerminalOutputEpoch;
+      await controller.sendTaskInput(task.taskId, "burst-output");
+      const burstOutput = await waitForStoreTerminalOutput(
+        store,
+        "SCRIPT_BURST_DONE",
+        30_000
+      );
+      expect(burstOutput).toContain("SCRIPT_BURST_0001_");
+      expect(burstOutput).toContain("SCRIPT_BURST_2000_");
+
+      const connectedEpoch =
+        store.taskTerminalOutputSource.getSnapshot().outputEpoch;
       controller.closeTask(task.taskId);
-      expect(store.getState().taskTerminalOutput).toBe("");
+      expect(
+        terminalOutputToString(
+          store.taskTerminalOutputSource.getSnapshot().output
+        )
+      ).toBe("");
       controller.openTask(task.taskId);
 
       const remountedOutput = await waitForStoreTerminalOutput(
         store,
-        "SCRIPT_REDACTED_INPUT",
+        "SCRIPT_BURST_DONE",
         30_000
       );
       expect(remountedOutput).not.toContain(submittedInput);
-      expect(store.getState().taskTerminalOutputEpoch).toBeGreaterThan(
-        connectedEpoch
-      );
+      expect(remountedOutput).not.toContain("composed password");
+      expect(remountedOutput).toContain("SCRIPT_BURST_0001_");
+      expect(remountedOutput).toContain("SCRIPT_BURST_2000_");
+      expect(
+        store.taskTerminalOutputSource.getSnapshot().outputEpoch
+      ).toBeGreaterThan(connectedEpoch);
     } finally {
       controller.dispose();
     }
@@ -228,8 +249,8 @@ function createLanClient(harness: RemoteHarness): LanTransport {
   );
 }
 
-function decodeRetainedTerminalOutput(output: string): string {
-  return output
+function decodeRetainedTerminalOutput(output: TerminalOutputLike): string {
+  return terminalOutputToString(output)
     .split("\n")
     .map((frame) => frame.trim())
     .filter(Boolean)
@@ -243,7 +264,7 @@ async function waitForStoreTerminalOutput(
   timeoutMs: number
 ): Promise<string> {
   const currentOutput = decodeRetainedTerminalOutput(
-    store.getState().taskTerminalOutput
+    store.taskTerminalOutputSource.getSnapshot().output
   );
   if (currentOutput.includes(marker)) {
     return currentOutput;
@@ -255,9 +276,9 @@ async function waitForStoreTerminalOutput(
       unsubscribe();
       reject(new Error(`timed out waiting for retained terminal output ${marker}`));
     }, timeoutMs);
-    unsubscribe = store.subscribe(() => {
+    const resolveIfPresent = () => {
       const output = decodeRetainedTerminalOutput(
-        store.getState().taskTerminalOutput
+        store.taskTerminalOutputSource.getSnapshot().output
       );
       if (!output.includes(marker)) {
         return;
@@ -265,7 +286,10 @@ async function waitForStoreTerminalOutput(
       clearTimeout(timeout);
       unsubscribe();
       resolve(output);
-    });
+    };
+    unsubscribe = store.taskTerminalOutputSource.subscribe(resolveIfPresent);
+    // Close the read-before-subscribe race against a direct terminal frame.
+    resolveIfPresent();
   });
 }
 

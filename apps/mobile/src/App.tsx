@@ -325,6 +325,7 @@ function AppContent() {
             quickReplies={quickReplies}
             quickRepliesHydrated={quickRepliesHydrated}
             state={state}
+            terminalOutputSource={model.sessionStore.taskTerminalOutputSource}
             onForceCloudChange={(enabled) => {
               setForceCloudEnabled(enabled);
               model.setForceCloud(enabled);

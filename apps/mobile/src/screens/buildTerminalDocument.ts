@@ -1,4 +1,5 @@
 import type { TaskTerminalStatus } from "../state/sessionStore";
+import type { TerminalOutputLike } from "../state/terminalOutputBuffer";
 import {
   XTERM_WEBVIEW_CSS,
   XTERM_WEBVIEW_FIT_ADDON_SCRIPT,
@@ -12,7 +13,7 @@ interface BuildTerminalDocumentOptions {
 
 interface BuildTerminalUpdateScriptOptions {
   contentRevision: number;
-  output: string;
+  output: TerminalOutputLike;
   status: TaskTerminalStatus;
 }
 
@@ -1531,8 +1532,9 @@ export function buildTerminalReplaceScript({
   output,
   status
 }: BuildTerminalUpdateScriptOptions): string {
-  const state = output.trim()
-    ? { chunksB64: terminalChunksFromOutput(output), contentRevision }
+  const chunksB64 = terminalChunksFromOutput(output);
+  const state = chunksB64.length > 0
+    ? { chunksB64, contentRevision }
     : { text: getStatusCopy(status), contentRevision };
   return `window.__replaceTerminalState(${JSON.stringify(state)}); true;`;
 }
@@ -1566,9 +1568,17 @@ function getStatusCopy(status: TaskTerminalStatus): string {
   }
 }
 
-function terminalChunksFromOutput(output: string): string[] {
-  return output
-    .split("\n")
-    .map((chunk) => chunk.trim())
-    .filter((chunk) => chunk.length > 0);
+function terminalChunksFromOutput(output: TerminalOutputLike): string[] {
+  const segments =
+    typeof output === "string"
+      ? [output]
+      : [output.snapshot, ...output.liveSegments];
+  const chunks: string[] = [];
+  for (const segment of segments) {
+    for (const chunk of segment.split("\n")) {
+      const trimmed = chunk.trim();
+      if (trimmed) chunks.push(trimmed);
+    }
+  }
+  return chunks;
 }

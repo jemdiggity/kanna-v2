@@ -100,6 +100,14 @@ while :; do
 
     ${inputReport}
     case "$line" in
+      *burst-output*)
+        burst_line=1
+        while [ $burst_line -le 2000 ]; do
+          printf 'SCRIPT_BURST_%04d_%s\n' "$burst_line" '${"X".repeat(128)}'
+          burst_line=$((burst_line + 1))
+        done
+        printf 'SCRIPT_BURST_DONE\n'
+        ;;
       *exit-zero*)
         printf 'SCRIPT_EXITING\\n'
         exit 0

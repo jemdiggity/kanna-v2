@@ -26,51 +26,20 @@ import {
   taskUiSlotForSelection,
   type TaskUiSlot
 } from "./taskUiSlots";
+import {
+  appendTerminalOutput,
+  createTerminalOutput,
+  EMPTY_TERMINAL_OUTPUT,
+  type TerminalOutputBuffer
+} from "./terminalOutputBuffer";
 
 // Terminal output is accumulated as newline-delimited base64 frames and replayed
 // into xterm.js on WebView (re)mount. The first frame is the full attachment
 // snapshot and must survive intact; only subsequent live frames are bounded.
 // Always evict at frame boundaries so replay never receives partial base64.
-// droppedChars tracks only evicted live-output characters, allowing an already
-// mounted xterm to append from the logical stream end without replaying history.
-const MAX_TERMINAL_LIVE_OUTPUT_CHARS = 1_000_000;
-
-interface CappedTerminalOutput {
-  output: string;
-  droppedChars: number;
-}
-
-function capTerminalOutput(output: string): CappedTerminalOutput {
-  const snapshotEnd = output.indexOf("\n") + 1;
-  if (snapshotEnd === 0) {
-    return { output, droppedChars: 0 };
-  }
-
-  const liveOutput = output.slice(snapshotEnd);
-  if (liveOutput.length <= MAX_TERMINAL_LIVE_OUTPUT_CHARS) {
-    return { output, droppedChars: 0 };
-  }
-
-  const cut = liveOutput.length - MAX_TERMINAL_LIVE_OUTPUT_CHARS;
-  let retainedLiveStart: number;
-  if (cut === 0 || liveOutput[cut - 1] === "\n") {
-    retainedLiveStart = cut;
-  } else {
-    const nextFrameEnd = liveOutput.indexOf("\n", cut);
-    if (nextFrameEnd >= 0 && nextFrameEnd + 1 < liveOutput.length) {
-      retainedLiveStart = nextFrameEnd + 1;
-    } else {
-      // The newest frame alone crosses the soft limit (or is incomplete).
-      // Keep it whole, starting after the preceding complete frame.
-      retainedLiveStart = liveOutput.lastIndexOf("\n", cut - 1) + 1;
-    }
-  }
-
-  return {
-    output: `${output.slice(0, snapshotEnd)}${liveOutput.slice(retainedLiveStart)}`,
-    droppedChars: retainedLiveStart
-  };
-}
+// The segmented buffer keeps completed ranges by reference. A live append
+// copies at most one 64 KiB segment instead of the full retained megabyte,
+// while outputStart preserves the authoritative logical cursor across eviction.
 
 export type ConnectionState = "idle" | "connecting" | "connected" | "error";
 export type MobileView = "tasks" | "recent" | "search" | "desktops" | "more";
@@ -186,7 +155,7 @@ export interface SessionState {
   taskUiSlots: TaskUiSlot[];
   taskTerminalTaskId: string | null;
   taskTerminalStatus: TaskTerminalStatus;
-  taskTerminalOutput: string;
+  taskTerminalOutput: TerminalOutputBuffer;
   taskTerminalOutputEpoch: number;
   taskTerminalOutputStart: number;
   taskTerminalCols: number | null;
@@ -210,9 +179,23 @@ export interface SessionState {
   taskCompanionEventStatus: TaskCompanionEventStatus;
 }
 
+export interface TaskTerminalOutputSnapshot {
+  taskId: string | null;
+  output: TerminalOutputBuffer;
+  outputEpoch: number;
+  outputStart: number;
+  status: TaskTerminalStatus;
+}
+
+export interface TaskTerminalOutputSource {
+  getSnapshot(): TaskTerminalOutputSnapshot;
+  subscribe(listener: () => void): () => void;
+}
+
 export interface SessionStore {
   getState(): SessionState;
   subscribe(listener: () => void): () => void;
+  taskTerminalOutputSource: TaskTerminalOutputSource;
   getPersistedContext(): PersistedSessionContext;
   hydrateContext(context: PersistedSessionContext): void;
   ensureMobileDeviceId(generate: () => string): string;
@@ -369,7 +352,7 @@ export function createSessionStore(): SessionStore {
     taskUiSlots: [],
     taskTerminalTaskId: null,
     taskTerminalStatus: "idle",
-    taskTerminalOutput: "",
+    taskTerminalOutput: EMPTY_TERMINAL_OUTPUT,
     taskTerminalOutputEpoch: 0,
     taskTerminalOutputStart: 0,
     taskTerminalCols: null,
@@ -389,8 +372,28 @@ export function createSessionStore(): SessionStore {
   };
 
   const listeners = new Set<() => void>();
+  const terminalOutputListeners = new Set<() => void>();
+  let terminalOutputSnapshot: TaskTerminalOutputSnapshot = {
+    taskId: state.taskTerminalTaskId,
+    output: state.taskTerminalOutput,
+    outputEpoch: state.taskTerminalOutputEpoch,
+    outputStart: state.taskTerminalOutputStart,
+    status: state.taskTerminalStatus
+  };
   const publish = () => {
     for (const listener of listeners) {
+      listener();
+    }
+  };
+  const publishTerminalOutput = () => {
+    terminalOutputSnapshot = {
+      taskId: state.taskTerminalTaskId,
+      output: state.taskTerminalOutput,
+      outputEpoch: state.taskTerminalOutputEpoch,
+      outputStart: state.taskTerminalOutputStart,
+      status: state.taskTerminalStatus
+    };
+    for (const listener of terminalOutputListeners) {
       listener();
     }
   };
@@ -462,6 +465,15 @@ export function createSessionStore(): SessionStore {
       return () => {
         listeners.delete(listener);
       };
+    },
+    taskTerminalOutputSource: {
+      getSnapshot: () => terminalOutputSnapshot,
+      subscribe(listener) {
+        terminalOutputListeners.add(listener);
+        return () => {
+          terminalOutputListeners.delete(listener);
+        };
+      }
     },
     getPersistedContext() {
       const selectedSlot = taskUiSlotForSelection(
@@ -886,7 +898,9 @@ export function createSessionStore(): SessionStore {
         taskTerminalStatus:
           selectedTaskId === null ? "idle" : state.taskTerminalStatus,
         taskTerminalOutput:
-          selectedTaskId === null ? "" : state.taskTerminalOutput,
+          selectedTaskId === null
+            ? EMPTY_TERMINAL_OUTPUT
+            : state.taskTerminalOutput,
         taskTerminalOutputEpoch:
           selectedTaskId === null
             ? state.taskTerminalOutputEpoch + 1
@@ -922,6 +936,9 @@ export function createSessionStore(): SessionStore {
         taskCompanionEventStatus:
           selectedTaskId === null ? "idle" : state.taskCompanionEventStatus
       };
+      if (selectedTaskId === null) {
+        publishTerminalOutput();
+      }
       publish();
     },
     beginTaskAction(taskId, action) {
@@ -1178,18 +1195,19 @@ export function createSessionStore(): SessionStore {
       publish();
     },
     beginTaskTerminal(taskId, initialOutput) {
-      const capped = capTerminalOutput(initialOutput);
+      const terminalOutput = createTerminalOutput(initialOutput);
       state = {
         ...state,
         taskTerminalTaskId: taskId,
         taskTerminalStatus: "connecting",
-        taskTerminalOutput: capped.output,
+        taskTerminalOutput: terminalOutput,
         taskTerminalOutputEpoch: state.taskTerminalOutputEpoch + 1,
-        taskTerminalOutputStart: capped.droppedChars,
+        taskTerminalOutputStart: initialOutput.length - terminalOutput.length,
         taskTerminalCols: null,
         taskTerminalRows: null,
         taskTerminalErrorMessage: null
       };
+      publishTerminalOutput();
       publish();
     },
     replaceTaskTerminalSnapshot(taskId, dataB64, cols, rows) {
@@ -1198,17 +1216,18 @@ export function createSessionStore(): SessionStore {
       }
 
       const snapshotOutput = dataB64 ? `${dataB64}\n` : "";
-      const capped = capTerminalOutput(snapshotOutput);
+      const terminalOutput = createTerminalOutput(snapshotOutput);
       state = {
         ...state,
         taskTerminalStatus: "live",
-        taskTerminalOutput: capped.output,
+        taskTerminalOutput: terminalOutput,
         taskTerminalOutputEpoch: state.taskTerminalOutputEpoch + 1,
-        taskTerminalOutputStart: capped.droppedChars,
+        taskTerminalOutputStart: 0,
         taskTerminalCols: cols,
         taskTerminalRows: rows,
         taskTerminalErrorMessage: null
       };
+      publishTerminalOutput();
       publish();
     },
     appendTaskTerminal(taskId, chunk) {
@@ -1216,17 +1235,32 @@ export function createSessionStore(): SessionStore {
         return;
       }
 
-      const nextOutput = `${state.taskTerminalOutput}${chunk}`;
-      const capped = capTerminalOutput(nextOutput);
+      const terminalMetadataChanged =
+        state.taskTerminalStatus !== "live" ||
+        state.taskTerminalErrorMessage !== null;
+      const appended =
+        state.taskTerminalOutput.length === 0
+          ? {
+              output: createTerminalOutput(chunk),
+              droppedChars: 0
+            }
+          : appendTerminalOutput(state.taskTerminalOutput, chunk);
       state = {
         ...state,
         taskTerminalStatus: "live",
-        taskTerminalOutput: capped.output,
+        taskTerminalOutput: appended.output,
         taskTerminalOutputStart:
-          state.taskTerminalOutputStart + capped.droppedChars,
+          state.taskTerminalOutputStart + appended.droppedChars,
         taskTerminalErrorMessage: null
       };
-      publish();
+      // Live PTY bytes are an imperative terminal stream, not application
+      // navigation state. Notify the mounted terminal directly so each frame
+      // is retained and written once without invalidating the complete React
+      // tree or re-running unrelated session persistence.
+      publishTerminalOutput();
+      if (terminalMetadataChanged) {
+        publish();
+      }
     },
     setTaskTerminalDims(taskId, cols, rows) {
       if (state.taskTerminalTaskId !== taskId) {
@@ -1250,6 +1284,7 @@ export function createSessionStore(): SessionStore {
         taskTerminalErrorMessage:
           taskTerminalStatus === "error" ? state.taskTerminalErrorMessage : null
       };
+      publishTerminalOutput();
       publish();
     },
     setTaskTerminalError(taskId, taskTerminalErrorMessage) {
@@ -1262,6 +1297,7 @@ export function createSessionStore(): SessionStore {
         taskTerminalStatus: "error",
         taskTerminalErrorMessage
       };
+      publishTerminalOutput();
       publish();
     },
     beginTaskAgent(taskId) {
@@ -1470,7 +1506,7 @@ export function createSessionStore(): SessionStore {
         selectedTaskId: null,
         taskTerminalTaskId: null,
         taskTerminalStatus: "idle",
-        taskTerminalOutput: "",
+        taskTerminalOutput: EMPTY_TERMINAL_OUTPUT,
         taskTerminalOutputEpoch: state.taskTerminalOutputEpoch + 1,
         taskTerminalOutputStart: 0,
         taskTerminalErrorMessage: null,
@@ -1486,6 +1522,7 @@ export function createSessionStore(): SessionStore {
         taskCompanionEventId: null,
         taskCompanionEventStatus: "idle"
       };
+      publishTerminalOutput();
       publish();
     },
     clearTaskTerminal() {
@@ -1493,11 +1530,12 @@ export function createSessionStore(): SessionStore {
         ...state,
         taskTerminalTaskId: null,
         taskTerminalStatus: "idle",
-        taskTerminalOutput: "",
+        taskTerminalOutput: EMPTY_TERMINAL_OUTPUT,
         taskTerminalOutputEpoch: state.taskTerminalOutputEpoch + 1,
         taskTerminalOutputStart: 0,
         taskTerminalErrorMessage: null
       };
+      publishTerminalOutput();
       publish();
     },
     clearTaskAgent() {

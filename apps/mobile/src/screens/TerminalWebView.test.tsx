@@ -1,9 +1,20 @@
 import React from "react";
+import { Window } from "happy-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WebViewMessageEvent } from "react-native-webview";
-import type { TaskTerminalStatus } from "../state/sessionStore";
+import type {
+  TaskTerminalOutputSnapshot,
+  TaskTerminalOutputSource,
+  TaskTerminalStatus
+} from "../state/sessionStore";
+import {
+  appendTerminalOutput,
+  createTerminalOutput,
+  type TerminalOutputLike
+} from "../state/terminalOutputBuffer";
 import {
   buildTerminalAppendScript,
+  buildTerminalDocument,
   buildTerminalReplaceScript,
   buildTerminalResizeScript
 } from "./buildTerminalDocument";
@@ -149,7 +160,7 @@ function runEffects() {
 
 async function renderTerminalWebView(input: {
   taskId?: string;
-  output?: string;
+  output?: TerminalOutputLike;
   outputEpoch?: number;
   outputStart?: number;
   status?: TaskTerminalStatus;
@@ -162,6 +173,7 @@ async function renderTerminalWebView(input: {
   onMentionedFilesChange?: (history: TerminalFileMentionHistory) => void;
   onOpenFile?: (path: string, line?: number) => void;
   onTerminalInput?: (dataB64: string) => void;
+  terminalOutputSource?: TaskTerminalOutputSource;
 }): Promise<ElementNode> {
   resetRenderState();
   const { TerminalWebView } = await import("./TerminalWebView");
@@ -179,7 +191,8 @@ async function renderTerminalWebView(input: {
     onConsolePress: input.onConsolePress,
     onMentionedFilesChange: input.onMentionedFilesChange,
     onOpenFile: input.onOpenFile,
-    onTerminalInput: input.onTerminalInput
+    onTerminalInput: input.onTerminalInput,
+    terminalOutputSource: input.terminalOutputSource
   }) as ElementNode;
   lastTree = tree;
 
@@ -200,6 +213,219 @@ async function renderTerminalWebView(input: {
 
 function bottomInsetScript(bottomInset: number): string {
   return `window.__setTerminalBottomInset(${JSON.stringify({ bottomInset })}); true;`;
+}
+
+interface BurstTerminalBuffer {
+  type: "normal" | "alternate";
+  baseY: number;
+  viewportY: number;
+  length: number;
+  getLine(): undefined;
+}
+
+class BurstTerminal {
+  cols: number;
+  rows = 42;
+  options: { fontSize: number; smoothScrollDuration?: number; wordSeparator?: string };
+  resets = 0;
+  writes: unknown[] = [];
+  dimensions = {
+    css: { cell: { width: 9, height: 18 } }
+  };
+  private normalBuffer: BurstTerminalBuffer = {
+    type: "normal",
+    baseY: 0,
+    viewportY: 0,
+    length: 0,
+    getLine: () => undefined
+  };
+  private alternateBuffer: BurstTerminalBuffer = {
+    type: "alternate",
+    baseY: 0,
+    viewportY: 0,
+    length: 0,
+    getLine: () => undefined
+  };
+  buffer = {
+    active: this.normalBuffer,
+    normal: this.normalBuffer,
+    alternate: this.alternateBuffer
+  };
+
+  constructor(options: {
+    cols: number;
+    fontSize: number;
+    smoothScrollDuration?: number;
+  }) {
+    this.cols = options.cols;
+    this.options = {
+      fontSize: options.fontSize,
+      smoothScrollDuration: options.smoothScrollDuration
+    };
+  }
+
+  loadAddon(): void {}
+
+  open(root: HTMLElement): void {
+    const xterm = root.ownerDocument.createElement("div");
+    xterm.className = "xterm";
+    const screen = root.ownerDocument.createElement("div");
+    screen.className = "xterm-screen";
+    screen.getBoundingClientRect = () => ({
+      x: 0,
+      y: 0,
+      width: this.cols * 9,
+      height: this.rows * 18,
+      top: 0,
+      right: this.cols * 9,
+      bottom: this.rows * 18,
+      left: 0,
+      toJSON: () => ({})
+    });
+    xterm.append(screen);
+    root.append(xterm);
+  }
+
+  onScroll(): { dispose(): void } {
+    return { dispose() {} };
+  }
+
+  onData(): { dispose(): void } {
+    return { dispose() {} };
+  }
+
+  onBinary(): { dispose(): void } {
+    return { dispose() {} };
+  }
+
+  onSelectionChange(): { dispose(): void } {
+    return { dispose() {} };
+  }
+
+  registerLinkProvider(): { dispose(): void } {
+    return { dispose() {} };
+  }
+
+  getSelection(): string {
+    return "";
+  }
+
+  clearSelection(): void {}
+
+  resize(cols: number, rows: number): void {
+    this.cols = cols;
+    this.rows = rows;
+  }
+
+  scrollToBottom(): void {
+    this.buffer.active.viewportY = this.buffer.active.baseY;
+  }
+
+  scrollToLine(line: number): void {
+    this.buffer.active.viewportY = line;
+  }
+
+  select(): void {}
+
+  write(data: unknown, done?: () => void): void {
+    this.writes.push(data);
+    const bytes =
+      typeof data === "string"
+        ? new TextEncoder().encode(data)
+        : ArrayBuffer.isView(data)
+          ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+          : new Uint8Array(0);
+    let addedLines = 0;
+    for (const byte of bytes) {
+      if (byte === 10) addedLines += 1;
+    }
+    this.normalBuffer.length += Math.max(1, addedLines);
+    this.normalBuffer.baseY = Math.max(0, this.normalBuffer.length - this.rows);
+    this.normalBuffer.viewportY = this.normalBuffer.baseY;
+    done?.();
+  }
+
+  reset(): void {
+    this.resets += 1;
+    for (const buffer of [this.normalBuffer, this.alternateBuffer]) {
+      buffer.baseY = 0;
+      buffer.viewportY = 0;
+      buffer.length = 0;
+    }
+    this.buffer.active = this.normalBuffer;
+  }
+}
+
+function extractTerminalScript(html: string): string {
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
+    (match) => match[1]
+  );
+  return scripts.at(-1) ?? "";
+}
+
+function createBurstTerminalDocument(): {
+  terminal: BurstTerminal;
+  window: Window & typeof globalThis;
+} {
+  const html = buildTerminalDocument({
+    bottomInset: 24,
+    enableE2EInspection: false
+  });
+  const window = new Window() as Window & typeof globalThis;
+  window.document.documentElement.innerHTML =
+    html.match(/<html[^>]*>([\s\S]*)<\/html>/)?.[1] ?? html;
+  window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+    callback(0);
+    return 1;
+  }) as typeof window.requestAnimationFrame;
+  // File-mention debounce work is unrelated to the terminal write bound under
+  // test, so keep it pending just as it would be during one continuous burst.
+  window.setTimeout = (() => 1) as typeof window.setTimeout;
+  window.clearTimeout = (() => undefined) as typeof window.clearTimeout;
+  window.ReactNativeWebView = { postMessage() {} };
+
+  let terminal: BurstTerminal | null = null;
+  window.Terminal = class extends BurstTerminal {
+    constructor(options: {
+      cols: number;
+      fontSize: number;
+      smoothScrollDuration?: number;
+    }) {
+      super(options);
+      terminal = this;
+    }
+  };
+  window.FitAddon = {
+    FitAddon: class {
+      proposeDimensions(): { rows: number } {
+        return { rows: 42 };
+      }
+      fit(): void {}
+    }
+  };
+
+  const viewport = window.document.getElementById("viewport");
+  if (!viewport) throw new Error("generated terminal viewport was not rendered");
+  Object.defineProperties(viewport, {
+    clientWidth: { configurable: true, value: 390 },
+    clientHeight: { configurable: true, value: 844 },
+    scrollHeight: { configurable: true, value: 1000 }
+  });
+  window.eval(extractTerminalScript(html));
+  if (!terminal) throw new Error("generated terminal script did not initialize xterm");
+  return { terminal, window };
+}
+
+function burstTerminalText(terminal: BurstTerminal): string {
+  return terminal.writes
+    .map((write) => {
+      if (typeof write === "string") return write;
+      if (!ArrayBuffer.isView(write)) return "";
+      return new TextDecoder().decode(
+        new Uint8Array(write.buffer, write.byteOffset, write.byteLength)
+      );
+    })
+    .join("");
 }
 
 function resolvedSelectionToolbarTop(tree: ElementNode | null): number | null {
@@ -1159,6 +1385,197 @@ describe("TerminalWebView", () => {
     expect(injectedScripts).toContain(buildTerminalAppendScript("C\n"));
     expect(injectedScripts.some((script) => script.includes("__replaceTerminalState"))).toBe(
       false
+    );
+  });
+
+  it("bounds pre-ready coalescing and steady-state xterm work for large bursts", async () => {
+    const frameCount = 2_000;
+    const frames = Array.from({ length: frameCount }, (_, index) =>
+      `${Buffer.from(`BURST_${String(index + 1).padStart(4, "0")}_${"X".repeat(128)}\r\n`).toString("base64")}\n`
+    );
+    let preReadyOutput = createTerminalOutput(frames[0]);
+    let sourceSnapshot: TaskTerminalOutputSnapshot = {
+      taskId: "task-1",
+      output: preReadyOutput,
+      outputEpoch: 7,
+      outputStart: 0,
+      status: "live"
+    };
+    let sourceListener: (() => void) | null = null;
+    const terminalOutputSource: TaskTerminalOutputSource = {
+      getSnapshot: () => sourceSnapshot,
+      subscribe: vi.fn((listener) => {
+        sourceListener = listener;
+        return () => {
+          sourceListener = null;
+        };
+      })
+    };
+    const publishOutput = () => {
+      sourceSnapshot = { ...sourceSnapshot, output: preReadyOutput };
+      sourceListener?.();
+    };
+    const initialWebView = await renderTerminalWebView({
+      output: preReadyOutput,
+      outputEpoch: 7,
+      terminalOutputSource
+    });
+    (initialWebView.props.onLoadStart as () => void)();
+    runEffects();
+
+    const splitSpy = vi.spyOn(String.prototype, "split");
+    const stringifySpy = vi.spyOn(JSON, "stringify");
+    for (const frame of frames.slice(1)) {
+      preReadyOutput = appendTerminalOutput(preReadyOutput, frame).output;
+      publishOutput();
+    }
+
+    expect(
+      splitSpy.mock.contexts.filter(
+        (value) => String(value).length === preReadyOutput.length
+      )
+    ).toHaveLength(0);
+    expect(
+      stringifySpy.mock.calls.filter(
+        ([value]) =>
+          typeof value === "object" &&
+          value !== null &&
+          "chunksB64" in value &&
+          Array.isArray(value.chunksB64) &&
+          value.chunksB64.length > 1
+      )
+    ).toHaveLength(0);
+    expect(
+      injectedScripts.filter((script) => script.includes("__replaceTerminalState"))
+    ).toHaveLength(0);
+
+    (initialWebView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: { data: JSON.stringify({ type: "terminal-ready" }) }
+    } as WebViewMessageEvent);
+
+    const readyScripts = [...injectedScripts];
+    expect(
+      splitSpy.mock.contexts.filter(
+        (value) => String(value).length === preReadyOutput.length
+      )
+    ).toHaveLength(0);
+    expect(
+      stringifySpy.mock.calls.filter(
+        ([value]) =>
+          typeof value === "object" &&
+          value !== null &&
+          "chunksB64" in value &&
+          Array.isArray(value.chunksB64) &&
+          value.chunksB64.length === frameCount
+      )
+    ).toHaveLength(1);
+    expect(
+      readyScripts.filter((script) => script.includes("__replaceTerminalState"))
+    ).toHaveLength(1);
+
+    const bridge = createBurstTerminalDocument();
+    for (const script of readyScripts) bridge.window.eval(script);
+    expect(bridge.terminal.resets).toBe(1);
+    expect(bridge.terminal.writes).toHaveLength(frameCount);
+
+    injectedScripts.length = 0;
+    const writesAtReady = bridge.terminal.writes.length;
+    const postReadyFrames = frames.map((_frame, index) =>
+      `${Buffer.from(`LIVE_${String(index + 1).padStart(4, "0")}_${"Y".repeat(128)}\r\n`).toString("base64")}\n`
+    );
+    let steadyOutput = preReadyOutput;
+    for (const frame of postReadyFrames) {
+      steadyOutput = appendTerminalOutput(steadyOutput, frame).output;
+      preReadyOutput = steadyOutput;
+      publishOutput();
+    }
+
+    const terminalMutationScripts = injectedScripts.filter((script) =>
+      script.includes("__appendTerminalChunk") ||
+      script.includes("__replaceTerminalState")
+    );
+    expect(terminalMutationScripts).toHaveLength(frameCount);
+    expect(
+      terminalMutationScripts.every(
+        (script) =>
+          script.includes("__appendTerminalChunk") &&
+          !script.includes("__replaceTerminalState") &&
+          script.length < 512
+      )
+    ).toBe(true);
+    expect(
+      splitSpy.mock.contexts.filter(
+        (value) => String(value).length === steadyOutput.length
+      )
+    ).toHaveLength(0);
+    for (const script of terminalMutationScripts) bridge.window.eval(script);
+
+    splitSpy.mockRestore();
+    stringifySpy.mockRestore();
+    expect(bridge.terminal.resets).toBe(1);
+    expect(bridge.terminal.writes).toHaveLength(writesAtReady + frameCount);
+    expect(terminalOutputSource.subscribe).toHaveBeenCalledOnce();
+  });
+
+  it("does not roll back a direct source frame when stale prop effects run", async () => {
+    const initialFrame = `${Buffer.from("FRAME_N\r\n").toString("base64")}\n`;
+    const directFrame = `${Buffer.from("FRAME_N_PLUS_1\r\n").toString("base64")}\n`;
+    let sourceSnapshot: TaskTerminalOutputSnapshot = {
+      taskId: "task-1",
+      output: createTerminalOutput(initialFrame),
+      outputEpoch: 4,
+      outputStart: 0,
+      status: "live"
+    };
+    let sourceListener: (() => void) | null = null;
+    const terminalOutputSource: TaskTerminalOutputSource = {
+      getSnapshot: () => sourceSnapshot,
+      subscribe: (listener) => {
+        sourceListener = listener;
+        return () => {
+          sourceListener = null;
+        };
+      }
+    };
+    const initialWebView = await renderTerminalWebView({
+      output: sourceSnapshot.output,
+      outputEpoch: sourceSnapshot.outputEpoch,
+      terminalOutputSource
+    });
+    (initialWebView.props.onLoadStart as () => void)();
+    runEffects();
+    (initialWebView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: { data: JSON.stringify({ type: "terminal-ready" }) }
+    } as WebViewMessageEvent);
+
+    const bridge = createBurstTerminalDocument();
+    for (const script of injectedScripts) bridge.window.eval(script);
+    injectedScripts.length = 0;
+
+    await renderTerminalWebView({
+      output: sourceSnapshot.output,
+      outputEpoch: sourceSnapshot.outputEpoch,
+      terminalOutputSource
+    });
+    sourceSnapshot = {
+      ...sourceSnapshot,
+      output: appendTerminalOutput(sourceSnapshot.output, directFrame).output
+    };
+    sourceListener?.();
+    runEffects();
+
+    const terminalMutationScripts = injectedScripts.filter((script) =>
+      script.includes("__appendTerminalChunk") ||
+      script.includes("__replaceTerminalState")
+    );
+    expect(terminalMutationScripts).toEqual([
+      buildTerminalAppendScript(directFrame)
+    ]);
+    for (const script of terminalMutationScripts) bridge.window.eval(script);
+    expect(bridge.terminal.resets).toBe(1);
+    expect(bridge.terminal.writes).toHaveLength(2);
+    expect(burstTerminalText(bridge.terminal)).toBe(
+      "FRAME_N\r\nFRAME_N_PLUS_1\r\n"
     );
   });
 
