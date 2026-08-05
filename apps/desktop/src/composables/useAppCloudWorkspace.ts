@@ -14,6 +14,7 @@ import {
 import { invoke } from "../invoke";
 import { listDesktopLanTasks, publishDesktopLanTaskSnapshot } from "../services/desktopLanTaskIndex";
 import { associateDesktopCloudCredential } from "../services/desktopCloudAssociation";
+import { isDesktopCloudCredentialConflict } from "../services/desktopCloudCredentialConflict";
 import { getCachedRepoRemoteMetadata } from "../services/repoRemoteUrl";
 import {
   createConfiguredDesktopRelayTerminalClient,
@@ -109,6 +110,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
   const activeMarkReadClients = new Set<ActiveMarkReadClient>();
   const remoteStageAdvancesPending = new Map<string, RemoteStageAdvancePending>();
   const associatedCloudUsers = new Set<string>();
+  const cloudCredentialConflictUsers = new Set<string>();
   const shownLanPeerIssues = new Set<string>();
   let e2eLanRefreshFrozen = false;
   let e2eNextRemoteActionFailure: string | null = null;
@@ -418,6 +420,25 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     toast.error(`Cloud sync failed: ${cloudBackendErrorLabel(error)}`);
   }
 
+  /**
+   * A credential conflict is a standing state, not a transient backend fault:
+   * it stays denied until the account that owns this desktop releases it. Say
+   * what to do about it, and say it once per signed-in user rather than on the
+   * generic backend-error cadence.
+   */
+  function showCloudCredentialAssociationErrorToast(uid: string, error: unknown): void {
+    if (!isDesktopCloudCredentialConflict(error)) {
+      showCloudBackendErrorToast(error);
+      return;
+    }
+    if (cloudCredentialConflictUsers.has(uid)) return;
+    cloudCredentialConflictUsers.add(uid);
+    toast.error(
+      "Cloud sync is off: this desktop is registered to a different Kanna account. "
+      + "Sign in as that account and sign out to release it.",
+    );
+  }
+
   function cloudBackendErrorLabel(error: unknown): string {
     if (typeof error === "object" && error !== null && "code" in error) {
       const code = (error as { code?: unknown }).code;
@@ -561,7 +582,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
             })
             .catch((error) => {
               console.warn("[cloud] failed to associate desktop credential:", error);
-              showCloudBackendErrorToast(error);
+              showCloudCredentialAssociationErrorToast(state.user.uid, error);
             });
         }
         startCloudTaskSubscription(state.user.uid);
@@ -573,6 +594,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
         });
       } else {
         associatedCloudUsers.clear();
+        cloudCredentialConflictUsers.clear();
         stopCloudTaskSubscription();
         cloudSnapshotRevision += 1;
         cloudAuthoritativeGeneration.value += 1;

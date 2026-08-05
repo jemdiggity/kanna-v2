@@ -13,6 +13,7 @@ import {
   WINDOW_WORKSPACE_NATIVE_NEW_WINDOW_EVENT,
 } from "./windowWorkspace";
 import type { DesktopCloudSnapshot } from "./services/desktopCloudTaskIndex";
+import { DesktopCloudCredentialConflictError } from "./services/desktopCloudCredentialConflict";
 import { updateDesktopServerClientHandlersForTests } from "./services/desktopServerClient";
 
 async function flushPromises() {
@@ -1251,6 +1252,33 @@ describe("App", () => {
 
     expect(toastErrorMock).toHaveBeenCalledTimes(1);
     expect(toastErrorMock).toHaveBeenCalledWith("Cloud sync failed: permission-denied");
+
+    wrapper.unmount();
+  });
+
+  it("explains a desktop credential conflict once instead of the generic backend toast", async () => {
+    associateDesktopCloudCredentialMock.mockRejectedValue(
+      new DesktopCloudCredentialConflictError("desktop-1"),
+    );
+
+    const wrapper = await mountApp(SidebarWithRepoStub);
+    await waitForCondition(() => associateDesktopCloudCredentialMock.mock.calls.length === 1);
+    await flushPromises();
+
+    for (const listener of desktopAuthStateListeners) {
+      listener({
+        status: "signedIn",
+        user: { uid: "user-1", email: "upvote.sieve.7t@icloud.com" },
+      });
+    }
+    await waitForCondition(() => associateDesktopCloudCredentialMock.mock.calls.length === 2);
+    await flushPromises();
+
+    expect(toastErrorMock).toHaveBeenCalledTimes(1);
+    expect(toastErrorMock).toHaveBeenCalledWith(
+      "Cloud sync is off: this desktop is registered to a different Kanna account. "
+      + "Sign in as that account and sign out to release it.",
+    );
 
     wrapper.unmount();
   });

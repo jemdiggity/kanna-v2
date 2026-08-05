@@ -15,11 +15,22 @@ export interface EmailPasswordSignInInput {
   password: string;
 }
 
+/**
+ * Signing out is also the only moment that releases this desktop's cloud
+ * credential for another account to claim, and that release can fail on its own
+ * (offline, or the credential already belongs to someone else). The local
+ * session ends either way, so the outcome is reported rather than thrown:
+ * a caller that swallows it strands the machine on the old account.
+ */
+export interface DesktopSignOutResult {
+  desktopCredentialError: string | null;
+}
+
 export interface DesktopAuthSdk {
   getCurrentUser(): DesktopAuthUser | null;
   onAuthStateChanged(listener: (user: DesktopAuthUser | null) => void): () => void;
   signInWithEmailPassword(email: string, password: string): Promise<DesktopAuthUser>;
-  signOut(): Promise<void>;
+  signOut(): Promise<DesktopSignOutResult>;
   getIdToken(forceRefresh?: boolean): Promise<string | null>;
 }
 
@@ -28,7 +39,7 @@ export interface DesktopAuthSession {
   getState(): DesktopAuthState;
   subscribe(listener: (state: DesktopAuthState) => void): () => void;
   signInWithEmailPassword(input: EmailPasswordSignInInput): Promise<void>;
-  signOut(): Promise<void>;
+  signOut(): Promise<DesktopSignOutResult>;
   getIdToken(forceRefresh?: boolean): Promise<string | null>;
 }
 
@@ -87,8 +98,9 @@ export function createDesktopAuthSession({
       }
     },
     async signOut() {
-      await sdk.signOut();
+      const result = await sdk.signOut();
       publish({ status: "signedOut" });
+      return result;
     },
     getIdToken(forceRefresh) {
       return sdk.getIdToken(forceRefresh);
@@ -106,7 +118,7 @@ export function createDisabledDesktopAuthSession(message: string): DesktopAuthSe
     signInWithEmailPassword: async () => {
       throw new Error(message);
     },
-    signOut: async () => undefined,
+    signOut: async () => ({ desktopCredentialError: null }),
     getIdToken: async () => null,
   };
 
