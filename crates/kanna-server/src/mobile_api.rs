@@ -148,6 +148,7 @@ pub struct TaskLatestRun {
 pub struct TaskChild {
     pub id: String,
     pub agent: Option<String>,
+    pub pipeline_name: Option<String>,
     pub created_at: Option<String>,
     pub closed_at: Option<String>,
     pub latest_run: Option<TaskLatestRun>,
@@ -617,7 +618,7 @@ impl MobileApi {
             .map_err(|e| format!("db error: {}", e))?;
         children
             .into_iter()
-            .map(|(id, created_at, closed_at)| {
+            .map(|(id, pipeline_name, created_at, closed_at)| {
                 let latest_run = self
                     ._db
                     .latest_stage_run(&id)
@@ -626,6 +627,7 @@ impl MobileApi {
                 Ok(TaskChild {
                     id,
                     agent,
+                    pipeline_name,
                     created_at,
                     closed_at,
                     latest_run: latest_run.map(map_task_latest_run),

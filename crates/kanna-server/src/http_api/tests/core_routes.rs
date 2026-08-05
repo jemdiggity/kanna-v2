@@ -2540,6 +2540,7 @@ async fn list_task_children_route_returns_open_and_closed_direct_children_with_v
             ("task-child-security", "2026-08-06 09:00:00"),
             ("task-child-compat", "2026-08-06 10:00:00"),
             ("task-child-no-run", "2026-08-06 10:30:00"),
+            ("task-child-default-no-run", "2026-08-06 10:45:00"),
             ("task-grandchild", "2026-08-06 11:00:00"),
             ("task-unrelated", "2026-08-06 12:00:00"),
         ] {
@@ -2559,8 +2560,18 @@ async fn list_task_children_route_returns_open_and_closed_direct_children_with_v
             .unwrap();
         db.update_pipeline_item_parent("task-child-no-run", Some("task-parent"))
             .unwrap();
+        db.update_pipeline_item_parent("task-child-default-no-run", Some("task-parent"))
+            .unwrap();
         db.update_pipeline_item_parent("task-grandchild", Some("task-child-security"))
             .unwrap();
+        db.update_test_pipeline_item_stage_context(
+            "task-child-no-run",
+            "branch-task-child-no-run",
+            "specialty-review",
+            None,
+            "claude",
+        )
+        .unwrap();
         db.set_test_pipeline_item_closed_at("task-child-compat", "2026-08-06 10:30:00")
             .unwrap();
         db.insert_stage_run(crate::db::NewStageRun {
@@ -2646,6 +2657,7 @@ async fn list_task_children_route_returns_open_and_closed_direct_children_with_v
             {
                 "id": "task-child-security",
                 "agent": "review-security",
+                "pipelineName": "default",
                 "createdAt": "2026-08-06 09:00:00",
                 "closedAt": null,
                 "latestRun": {
@@ -2662,6 +2674,7 @@ async fn list_task_children_route_returns_open_and_closed_direct_children_with_v
             {
                 "id": "task-child-compat",
                 "agent": "review-compat",
+                "pipelineName": "default",
                 "createdAt": "2026-08-06 10:00:00",
                 "closedAt": "2026-08-06 10:30:00",
                 "latestRun": {
@@ -2678,7 +2691,16 @@ async fn list_task_children_route_returns_open_and_closed_direct_children_with_v
             {
                 "id": "task-child-no-run",
                 "agent": null,
+                "pipelineName": "specialty-review",
                 "createdAt": "2026-08-06 10:30:00",
+                "closedAt": null,
+                "latestRun": null
+            },
+            {
+                "id": "task-child-default-no-run",
+                "agent": null,
+                "pipelineName": "default",
+                "createdAt": "2026-08-06 10:45:00",
                 "closedAt": null,
                 "latestRun": null
             }

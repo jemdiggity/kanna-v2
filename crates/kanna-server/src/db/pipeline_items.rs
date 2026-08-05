@@ -216,14 +216,15 @@ impl Db {
     pub fn list_pipeline_item_children(
         &self,
         parent_id: &str,
-    ) -> Result<Vec<(String, Option<String>, Option<String>)>, rusqlite::Error> {
+    ) -> Result<Vec<(String, Option<String>, Option<String>, Option<String>)>, rusqlite::Error>
+    {
         let mut stmt = self.conn.prepare(
-            "SELECT id, created_at, closed_at \
+            "SELECT id, pipeline, created_at, closed_at \
              FROM pipeline_item WHERE parent_task_id = ? \
              ORDER BY datetime(created_at) ASC, id ASC",
         )?;
         let rows = stmt.query_map([parent_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })?;
         rows.collect()
     }
