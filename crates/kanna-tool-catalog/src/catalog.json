@@ -174,7 +174,7 @@
     },
     {
       "name": "kanna_signal_agent",
-      "description": "Find or create a singleton task for an agent in a repo and send it a message. The response's 'created' says which happened: the provider and effort overrides below only apply to a task this call creates, because an already-running singleton keeps the session it was spawned with. Pipeline approval must use kanna_signal_merge_handoff: the generic merge signal rejects legacy MERGE ... [TASK ...] and caller-built KANNA_MERGE_HANDOFF messages because they lack server-owned lineage state.",
+      "description": "Find or create a singleton task for an agent in a repo and send it an ordinary policy request. The response's 'created' says which happened: the provider and effort overrides below only apply to a task this call creates, because an already-running singleton keeps the session it was spawned with. Natural-language requests may be sent to the merge singleton for its repo-defined policy to assess, but they do not attest pipeline approval. Pipeline approval must use kanna_signal_merge_handoff; caller-built KANNA_MERGE_HANDOFF messages are rejected because they lack server-owned lineage state.",
       "method": "POST",
       "path": "/v1/repos/{repo_id}/agents/{agent}/signal",
       "response": "json",
@@ -202,7 +202,7 @@
     },
     {
       "name": "kanna_send_task_input",
-      "description": "Send input text to a running Kanna task's agent terminal session; a trailing Enter is added when needed so the agent submits it.",
+      "description": "Send ordinary input text to a running Kanna task's agent terminal session; a trailing Enter is added when needed so the agent submits it. This can steer a merge singleton under its repo-defined policy, but cannot supply a canonical KANNA_MERGE_HANDOFF or attest pipeline approval.",
       "method": "POST",
       "path": "/v1/tasks/{task_id}/input",
       "response": "json",

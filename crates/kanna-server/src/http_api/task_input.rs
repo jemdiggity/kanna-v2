@@ -35,6 +35,15 @@ pub(super) fn task_input_message(input: &str) -> &str {
     input.trim_end_matches(['\r', '\n'])
 }
 
+pub(crate) const CANONICAL_MERGE_HANDOFF_MARKER: &str = "⟦SERVER⟧";
+
+pub(crate) fn is_canonical_merge_handoff(input: &str) -> bool {
+    input.contains('⟦')
+        || task_input_message(input)
+            .split(['\r', '\n'])
+            .any(|line| line.trim_start().starts_with("KANNA_MERGE_HANDOFF "))
+}
+
 /// A task-input submission failure, distinguishing "the session does not
 /// exist" (a post dispatch falls back to spawning a fresh session) from
 /// everything else.
@@ -47,7 +56,7 @@ pub(crate) enum TaskInputError {
 }
 
 /// Send one raw Input command to a daemon session.
-pub(crate) async fn send_raw_session_input(
+async fn send_raw_session_input(
     daemon: &mut crate::daemon_client::DaemonClient,
     session_id: &str,
     data: Vec<u8>,
@@ -108,8 +117,9 @@ pub(crate) async fn try_submit_task_input(
     Ok(())
 }
 
-/// Submit the authenticated machine envelope to an operator-protected merge
-/// PTY. This is intentionally private to server-side merge signaling.
+/// Submit the authenticated machine envelope used only by server-side merge
+/// signaling. Ordinary requests use `Input`; this distinct command preserves
+/// the server provenance of canonical approval handoffs at the daemon boundary.
 pub(super) async fn try_submit_system_input(
     daemon: &mut crate::daemon_client::DaemonClient,
     session_id: &str,
@@ -191,6 +201,16 @@ pub(super) async fn send_task_input(
     axum::extract::Path(task_id): axum::extract::Path<String>,
     Json(payload): Json<TaskInputRequest>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
+    // Canonical approval handoffs are server attestations, not text callers
+    // can type into any task and later quote as trusted provenance.
+    if is_canonical_merge_handoff(&payload.input) {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            "caller-built merge handoffs are forbidden; use the canonical task handoff action"
+                .into(),
+        ));
+    }
+
     #[cfg(test)]
     if let Some(task_input_sender) = state.task_input_sender.clone() {
         return task_input_sender(task_id, payload.input)
@@ -199,27 +219,6 @@ pub(super) async fn send_task_input(
     }
 
     let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id).await?;
-    let merge_input_forbidden = {
-        let state = Arc::clone(&state);
-        let task_id = task_id.clone();
-        super::blocking::run_handler_blocking("merge input provenance check", move || {
-            let db = Db::open(&state.config.db_path).map_err(|error| {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("db error: {error}"),
-                )
-            })?;
-            db.is_open_agent_task(&task_id, "merge")
-                .map_err(|error| super::state::db_write_error("db error", error))
-        })
-        .await?
-    };
-    if merge_input_forbidden {
-        return Err((
-            axum::http::StatusCode::CONFLICT,
-            "merge singleton input requires a canonical server handoff or the native operator terminal; task-input APIs are not operator authority".into(),
-        ));
-    }
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
         .map_err(|e| {

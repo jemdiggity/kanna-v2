@@ -23,7 +23,6 @@ const props = defineProps<{
     options?: { agentProvider?: AgentProvider },
   ) => Promise<void>;
   recoverTaskSession?: (sessionId: string, options?: { cols?: number; rows?: number }) => Promise<void>;
-  operatorTerminalInput?: boolean;
 }>();
 
 function buildSpawnOptions() {
@@ -36,10 +35,7 @@ function buildSpawnOptions() {
 </script>
 
 <template>
-  <div
-    class="terminal-panel"
-    :data-operator-terminal-input="operatorTerminalInput ? 'true' : 'false'"
-  >
+  <div class="terminal-panel">
     <!-- PTY mode: mount only the active terminal view -->
     <KeepAlive :max="taskTerminalWarmCacheMax">
       <TerminalView
@@ -52,7 +48,6 @@ function buildSpawnOptions() {
         :agent-provider="agentProvider"
         :worktree-path="worktreePath"
         :agent-terminal="true"
-        :operator-terminal-input="operatorTerminalInput"
         :recover-session="recoverTaskSession"
       />
     </KeepAlive>

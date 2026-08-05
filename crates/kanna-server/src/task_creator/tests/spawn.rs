@@ -1,8 +1,8 @@
 use super::*;
 
 #[tokio::test]
-async fn protected_merge_pty_negotiates_before_spawn() {
-    let config = test_config("protected-merge-negotiation");
+async fn merge_pty_spawns_with_ordinary_input_policy() {
+    let config = test_config("merge-ordinary-input");
     let socket_path = test_daemon_socket_path(&config.daemon_dir);
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path).unwrap();
@@ -72,7 +72,7 @@ async fn protected_merge_pty_negotiates_before_spawn() {
     assert!(matches!(
         commands.get(1),
         Some(kanna_daemon::protocol::Command::Spawn {
-            operator_input_only: true,
+            operator_input_only: false,
             ..
         })
     ));

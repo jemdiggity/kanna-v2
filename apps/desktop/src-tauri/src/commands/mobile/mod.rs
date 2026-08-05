@@ -470,37 +470,6 @@ pub async fn override_approval_hold(
         .ok_or_else(|| "native approval override returned no body".to_string())
 }
 
-/// Route genuine renderer terminal input through the process-authenticated
-/// native channel. KSP remains the output/resize transport, but an agent that
-/// can open a loopback websocket cannot impersonate operator input to merge.
-#[tauri::command]
-pub async fn native_terminal_input(
-    app: tauri::AppHandle,
-    task_id: String,
-    data_b64: String,
-) -> Result<(), String> {
-    let manager = app.state::<MobileServerManager>();
-    let daemon_dir = {
-        let state = manager.inner.lock().await;
-        if !state.started {
-            return Err("kanna-server is not running".to_string());
-        }
-        native_control_daemon_dir()
-    };
-    let request = serde_json::json!({
-        "action": "terminal_input",
-        "task_id": task_id,
-        "data_b64": data_b64,
-    });
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        send_native_control_request_with_adoption(&daemon_dir, &request),
-    )
-    .await
-    .map_err(|_| "native merge terminal input timed out".to_string())?
-    .map(|_| ())
-}
-
 fn native_control_daemon_dir() -> PathBuf {
     std::env::var("KANNA_DAEMON_DIR")
         .map(PathBuf::from)
@@ -1055,7 +1024,7 @@ mod tests {
     use tokio::process::{Child, Command};
 
     const RESTART_ORDINARY_SESSION: &str = "shell-restart-ordinary";
-    const RESTART_PROTECTED_SESSION: &str = "shell-restart-protected";
+    const RESTART_LEGACY_PROTECTED_SESSION: &str = "shell-restart-legacy-protected";
 
     pub(super) fn env_lock() -> &'static Mutex<()> {
         crate::test_env_lock()
@@ -1573,11 +1542,11 @@ mod tests {
         let server =
             start_test_kanna_server_with_stderr(&config_path, port, Stdio::from(lifecycle_log))
                 .await;
-        persist_restart_protected_session(&config_path, RESTART_PROTECTED_SESSION);
+        persist_restart_protected_session(&config_path, RESTART_LEGACY_PROTECTED_SESSION);
         spawn_restart_terminal(&daemon_dir, RESTART_ORDINARY_SESSION, false).await;
-        // The replacement-generation replay must be what makes this session
-        // protected. Handoff alone deliberately carries an ordinary policy.
-        spawn_restart_terminal(&daemon_dir, RESTART_PROTECTED_SESSION, false).await;
+        // Preserve a legacy DB classification so the replacement generation
+        // proves it clears the rejected native-terminal-only policy.
+        spawn_restart_terminal(&daemon_dir, RESTART_LEGACY_PROTECTED_SESSION, true).await;
         std::mem::forget(server);
         std::mem::forget(daemon);
     }
@@ -1688,27 +1657,15 @@ mod tests {
             }),
         )
         .await;
-        let protected_error = daemon_round_trip(
+        assert_daemon_ack(
             &daemon_dir,
             serde_json::json!({
                 "type": "Input",
-                "session_id": RESTART_PROTECTED_SESSION,
+                "session_id": RESTART_LEGACY_PROTECTED_SESSION,
                 "data": [102, 111, 114, 103, 101, 100, 10]
             }),
         )
         .await;
-        assert_eq!(protected_error["type"], "Error");
-        assert_eq!(protected_error["code"], "input_unauthorized");
-        assert_daemon_ack(
-            &daemon_dir,
-            serde_json::json!({
-                "type": "OperatorInput",
-                "session_id": RESTART_PROTECTED_SESSION,
-                "data": [111, 112, 101, 114, 97, 116, 111, 114, 10]
-            }),
-        )
-        .await;
-
         stop_server_on_port(port)
             .await
             .expect("cleanup should stop server");

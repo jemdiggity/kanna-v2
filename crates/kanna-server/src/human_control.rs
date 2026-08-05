@@ -22,7 +22,6 @@ struct TrustedDesktopIdentity {
 enum HumanControlRequest {
     AdoptDesktop,
     OverrideApproval { task_id: String, reason: String },
-    TerminalInput { task_id: String, data_b64: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -162,22 +161,6 @@ async fn handle_connection(
                 },
             }
         }
-        HumanControlRequest::TerminalInput { task_id, data_b64 } => {
-            match submit_native_terminal_input(Arc::clone(&state), task_id, data_b64).await {
-                Ok(()) => HumanControlResponse {
-                    ok: true,
-                    status: 204,
-                    body: Some(serde_json::Value::Null),
-                    error: None,
-                },
-                Err(error) => HumanControlResponse {
-                    ok: false,
-                    status: 500,
-                    body: None,
-                    error: Some(error),
-                },
-            }
-        }
     };
     let mut encoded = serde_json::to_vec(&response)
         .map_err(|error| format!("failed to encode native control response: {error}"))?;
@@ -280,46 +263,6 @@ fn authorize_or_adopt_desktop(
         peer.pid,
         peer.executable.display()
     ))
-}
-
-async fn submit_native_terminal_input(
-    state: Arc<AppState>,
-    task_id: String,
-    data_b64: String,
-) -> Result<(), String> {
-    use base64::Engine;
-    let data = base64::engine::general_purpose::STANDARD
-        .decode(data_b64)
-        .map_err(|error| format!("invalid terminal input: {error}"))?;
-    if data.is_empty() {
-        return Ok(());
-    }
-    let session_id = if task_id.starts_with("shell-") {
-        task_id
-    } else {
-        let db_path = state.config().db_path.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::db::Db::open(&db_path)
-                .map_err(|error| format!("db error: {error}"))?
-                .resolve_task_terminal_session_id(&task_id)
-                .map_err(|error| format!("db error: {error}"))?
-                .ok_or_else(|| format!("no session for task {task_id}"))
-        })
-        .await
-        .map_err(|error| format!("terminal session lookup failed: {error}"))??
-    };
-    let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config().daemon_dir)
-        .await
-        .map_err(|error| format!("daemon error: {error}"))?;
-    crate::http_api::send_raw_session_input(&mut daemon, &session_id, data)
-        .await
-        .map_err(|error| match error {
-            crate::http_api::TaskInputError::SessionNotFound => {
-                format!("session not found: {session_id}")
-            }
-            crate::http_api::TaskInputError::Other(message)
-            | crate::http_api::TaskInputError::Uncertain(message) => message,
-        })
 }
 
 fn trusted_desktop_identity() -> Option<TrustedDesktopIdentity> {

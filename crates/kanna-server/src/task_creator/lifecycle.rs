@@ -74,8 +74,6 @@ async fn spawn_prepared_task_classified(
     daemon: &mut DaemonClient,
     prepared: PreparedTaskSpawn,
 ) -> Result<CreatedTask, SpawnPreparedError> {
-    let operator_input_only = prepared.stage_agent.as_deref() == Some("merge")
-        && matches!(&prepared.session, PreparedSessionSpawn::Pty { .. });
     if let Some(snapshot) = prepared.recovery_snapshot.as_ref() {
         seed_recovery_snapshot(daemon, &prepared.session_id, snapshot)
             .await
@@ -87,7 +85,7 @@ async fn spawn_prepared_task_classified(
         prepared.env,
         None,
         prepared.session,
-        operator_input_only,
+        false,
     );
 
     let event =

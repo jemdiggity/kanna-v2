@@ -287,31 +287,30 @@ revision or rerun supersedes stale failure. An inferred success, a main result
 from another stage, or any commit/PR/approve post cannot resolve it. A later
 hold is newer than an existing override and requires a new decision.
 
-The generic repo-agent signal endpoint and the task-input API reject
-natural-language agent requests and caller-built `KANNA_MERGE_HANDOFF`
-messages for the `merge` singleton. The signal endpoint accepts only the exact
-former automated `MERGE ... [TASK ...]` shape from a
-surviving pre-upgrade approve session, parses its task id and candidate, and
-routes it through the same server-owned gate as the dedicated endpoint. Human
-conversation is trusted only when it arrives from the native operator terminal
-channel, whose provenance is separate from task-input/MCP/KSP traffic. KSP
-terminal input is rejected for merge sessions even on loopback. Ordinary
-desktop terminals retain the persistent KSP control path. Server-derived
-merge-agent history selects the protected terminal even after a compatible
-pipeline-name change. That terminal alone uses timeout-bounded `OperatorInput`
-on the daemon socket: the daemon rejects generic `Input`/`InputNoReply` and
-authenticates the desktop by PID, start time, and executable path. Canonical
-server-built merge envelopes use `SystemInput` pinned to the exact server PID,
-start time, and executable. The authenticated desktop hands that identity to a
-replacement daemon when adopting a surviving server; an initial server may
-bootstrap only as the desktop's direct child. A same-executable agent process
-is not server authority. Before binding the LAN API or relay, kanna-server must
-receive the active daemon generation's versioned protected-input
-acknowledgement and classify every inherited PTY from durable task state. It
-repeats that full pass after every daemon replacement. Classification is
-lifecycle-fenced against the handoff snapshot, and merge PTYs cannot cross a
-legacy-v2 handoff; an old server therefore cannot silently create or inherit an
-unfenced merge terminal on a new daemon.
+The generic repo-agent signal endpoint, task-input API, desktop task terminal,
+and KSP/relay steering all deliver ordinary natural-language requests to the
+`merge` singleton. That message is policy input: the resolved repo agent
+definition independently accepts or declines it. It is not an approval-gate
+attestation. These caller-controlled paths reject a
+`KANNA_MERGE_HANDOFF` prefix or the reserved `⟦SERVER⟧` marker for a merge singleton, so caller text cannot
+masquerade as the server-owned envelope. The signal endpoint also accepts the
+exact former automated `MERGE ... [TASK ...]` shape from a surviving
+pre-upgrade approve session, parses its task id and candidate, and routes it
+through the same server-owned gate as the dedicated endpoint.
+
+Canonical server-built merge envelopes continue to use daemon `SystemInput`
+pinned to the exact server PID, start time, and executable. The authenticated
+desktop hands that identity to a replacement daemon when adopting a surviving
+server; an initial server may bootstrap only as the desktop's direct child. A
+same-executable agent process is not server authority. Merge PTYs themselves
+are no longer operator-input-only. New sessions are created with ordinary
+input enabled, and before binding the LAN API or relay kanna-server clears the
+retired classification on every inherited PTY. It repeats that pass after each
+daemon replacement, so daemon/server restarts and singleton reuse cannot
+restore the rejected native-terminal-only policy. The negotiation and
+lifecycle fence remain only for authenticated `SystemInput`, safe successor
+selection, and compatibility with a protected session inherited from the
+previous release.
 New task-bound
 pipeline handoffs use the dedicated route.
 
@@ -341,7 +340,7 @@ signaling. The server requires the task's currently running approve post and a
 durable authorization snapshot captured when that post began, binds the
 candidate repo/branch/target/PR to the task, checks the gate again under the
 task mutation lease, and constructs the canonical
-`KANNA_MERGE_HANDOFF` JSON delivered to the merge singleton. Its `approval`
+server-marked `KANNA_MERGE_HANDOFF ⟦SERVER⟧` JSON delivered to the merge singleton. Its `approval`
 member is machine-readable `eligible` or `overridden`; the latter carries the
 durable override record. A caller cannot supply or forge that member. The
 bundled merge agent holds legacy agent-sent merge lines and malformed override
@@ -355,8 +354,9 @@ server-validated `MERGE ... [TASK ...]` form for clean eligible lineages only;
 an override requires restarting that singleton. A surviving old approve post
 may submit its exact legacy structured line through the generic signal route,
 but the server parses it and runs the same task-bound authorization checks.
-Natural-language agent calls to the generic merge signal or task-input routes
-are rejected. Delivery is reserved to that exact task/session/protocol,
+Natural-language calls through generic merge signal, task input, or KSP are
+delivered as ordinary policy requests; only the dedicated gate produces the
+canonical envelope. Delivery is reserved to that exact task/session/protocol,
 recorded only after the daemon acknowledges it, and quarantined rather than
 duplicated if the recipient changes after acknowledgement. Failures before
 acknowledgement release the reservation for retry. A repo-scoped delivery lease

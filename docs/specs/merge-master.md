@@ -62,12 +62,10 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   channel pins and rechecks process identity over a private Unix socket. A
   replacement desktop can adopt a surviving server only after the old pinned
   process is dead and the new peer has the same kernel-resolved executable;
-  loopback/KSP traffic and reusable desktop secrets are not authority. Desktop
-  merge-terminal bytes use the same timeout-bounded, process-authenticated
-  native channel, while merge-session KSP input is rejected and ordinary
-  terminals retain KSP.
-  Ordinary advance requests and agent tools cannot claim override or merge
-  authority.
+  loopback/KSP traffic and reusable desktop secrets are not override authority.
+  Merge terminals use ordinary KSP input like other policy agents. Ordinary
+  advance requests and agent tools may ask that policy agent to assess work,
+  but cannot claim a human override or a server-attested approval.
 - **Gated merge handoff**:
   `POST /v1/tasks/{task_id}/actions/signal-merge-handoff` rechecks the gate and
   requires an active authorized approve post, binds the handoff to that task's
@@ -100,12 +98,15 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
 ## Resolved contract choices
 
 - Signal payload shape is a server-built typed line over the existing session
-  input boundary: `KANNA_MERGE_HANDOFF {json}`. The JSON is canonical and
+  input boundary: `KANNA_MERGE_HANDOFF ⟦SERVER⟧ {json}`. The reserved marker
+  cannot be delivered by ordinary task/KSP input. The JSON is canonical and
   contains server-owned approval state, while delivery retains the mature
   singleton/session lifecycle.
-- Generic task input, MCP input, and KSP stream steering are never canonical
-  merge authority. Only the server handoff above or an independently
-  provenance-authenticated native operator terminal action may release a hold.
+- Generic task input, MCP input, and KSP/relay steering deliver ordinary
+  requests for the resolved repo merge policy to accept or decline. They are
+  never canonical approval attestations and cannot supply a
+  unmarked `KANNA_MERGE_HANDOFF` prefix. Only the server-marked handoff above proves that a task
+  passed its durable approval gate; unresolved holds cannot use that path.
 - ~~Whether the default pipeline ships the approve post or it stays an
   opt-in example. Default-off until the singleton endpoint exists.~~
   Resolved: the singleton signal endpoint

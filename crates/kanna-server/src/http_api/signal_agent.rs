@@ -1,6 +1,8 @@
 use super::lan_trust::PrivilegedTaskAccess;
 use super::state::{db_write_error, AppState};
-use super::task_input::{submit_task_input, try_submit_system_input, TaskInputError};
+use super::task_input::{
+    submit_task_input, try_submit_system_input, try_submit_task_input, TaskInputError,
+};
 use crate::config::Config;
 use crate::db::Db;
 use crate::task_creator::{PrepareTaskError, SingletonAgentOverrides};
@@ -38,7 +40,7 @@ pub(super) async fn signal_agent(
 ) -> Result<Json<SignalAgentResponse>, (axum::http::StatusCode, String)> {
     let message = payload.message.trim();
     if agent == "merge" {
-        if message.starts_with("KANNA_MERGE_HANDOFF ") {
+        if super::is_canonical_merge_handoff(message) {
             return Err((
                 axum::http::StatusCode::CONFLICT,
                 "caller-built merge handoffs are forbidden; use the canonical task handoff action"
@@ -50,10 +52,6 @@ pub(super) async fn signal_agent(
                 .await
                 .map(Json);
         }
-        return Err((
-            axum::http::StatusCode::CONFLICT,
-            "the agent-callable merge signal accepts no natural-language merge authority; type operator requests directly in the merge terminal or use the canonical task handoff action".into(),
-        ));
     }
     signal_agent_request(
         state,
@@ -227,7 +225,8 @@ async fn signal_merge_handoff_impl(
         "approval": authorization.approval.clone(),
     });
     let canonical_message = format!(
-        "KANNA_MERGE_HANDOFF {}",
+        "KANNA_MERGE_HANDOFF {} {}",
+        super::task_input::CANONICAL_MERGE_HANDOFF_MARKER,
         serde_json::to_string(&handoff).map_err(|error| {
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -247,8 +246,13 @@ async fn signal_merge_handoff_impl(
             .unwrap_or_default(),
         payload.summary.trim(),
     );
-    let recipient =
-        prepare_merge_recipient(&state, &authorization.repo_id, &canonical_message).await?;
+    let recipient = prepare_merge_recipient(
+        &state,
+        &authorization.repo_id,
+        &canonical_message,
+        SingletonAgentOverrides::default(),
+    )
+    .await?;
     let protocol = recipient.identity().protocol;
     if protocol == 0
         && !matches!(
@@ -301,8 +305,13 @@ async fn signal_merge_handoff_impl(
         }
     }
 
-    let delivery =
-        deliver_to_merge_recipient(Arc::clone(&state), recipient, delivery_message).await;
+    let delivery = deliver_to_merge_recipient(
+        Arc::clone(&state),
+        recipient,
+        delivery_message,
+        MergeDeliveryKind::Canonical,
+    )
+    .await;
     let response = match delivery {
         Ok(response) => response,
         Err(error) => {
@@ -365,6 +374,7 @@ async fn prepare_merge_recipient(
     state: &Arc<AppState>,
     repo_id: &str,
     canonical_message: &str,
+    overrides: SingletonAgentOverrides,
 ) -> Result<PreparedMergeRecipient, (axum::http::StatusCode, String)> {
     let state = Arc::clone(state);
     let repo_id = repo_id.to_string();
@@ -384,7 +394,7 @@ async fn prepare_merge_recipient(
             &repo_id,
             "merge",
             &canonical_message,
-            SingletonAgentOverrides::default(),
+            overrides,
         )
         .map_err(prepare_singleton_error)?;
         db.pin_pipeline_item_at_top(&repo_id, prepared.task_id())
@@ -408,6 +418,7 @@ async fn deliver_to_merge_recipient(
     state: Arc<AppState>,
     recipient: PreparedMergeRecipient,
     message: String,
+    kind: MergeDeliveryKind,
 ) -> Result<SignalAgentResponse, MergeDeliveryFailure> {
     match recipient {
         PreparedMergeRecipient::Existing(identity) => {
@@ -420,28 +431,34 @@ async fn deliver_to_merge_recipient(
                     ),
                     acknowledged: false,
                 })?;
-            try_submit_system_input(&mut daemon, &identity.session_id, &message)
-                .await
-                .map_err(|error| match error {
-                    TaskInputError::SessionNotFound => MergeDeliveryFailure {
-                        response: (
-                            axum::http::StatusCode::NOT_FOUND,
-                            format!("session not found: {}", identity.session_id),
-                        ),
-                        acknowledged: false,
-                    },
-                    TaskInputError::Other(message) => MergeDeliveryFailure {
-                        response: (axum::http::StatusCode::INTERNAL_SERVER_ERROR, message),
-                        acknowledged: false,
-                    },
-                    TaskInputError::Uncertain(message) => MergeDeliveryFailure {
-                        response: (
-                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                            format!("merge handoff delivery is uncertain: {message}"),
-                        ),
-                        acknowledged: true,
-                    },
-                })?;
+            let delivery = match kind {
+                MergeDeliveryKind::Ordinary => {
+                    try_submit_task_input(&mut daemon, &identity.session_id, &message).await
+                }
+                MergeDeliveryKind::Canonical => {
+                    try_submit_system_input(&mut daemon, &identity.session_id, &message).await
+                }
+            };
+            delivery.map_err(|error| match error {
+                TaskInputError::SessionNotFound => MergeDeliveryFailure {
+                    response: (
+                        axum::http::StatusCode::NOT_FOUND,
+                        format!("session not found: {}", identity.session_id),
+                    ),
+                    acknowledged: false,
+                },
+                TaskInputError::Other(message) => MergeDeliveryFailure {
+                    response: (axum::http::StatusCode::INTERNAL_SERVER_ERROR, message),
+                    acknowledged: false,
+                },
+                TaskInputError::Uncertain(message) => MergeDeliveryFailure {
+                    response: (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        format!("merge handoff delivery is uncertain: {message}"),
+                    ),
+                    acknowledged: true,
+                },
+            })?;
             Ok(SignalAgentResponse {
                 task_id: identity.task_id,
                 created: false,
@@ -501,6 +518,12 @@ async fn deliver_to_merge_recipient(
             })
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum MergeDeliveryKind {
+    Ordinary,
+    Canonical,
 }
 
 struct MergeDeliveryFailure {
@@ -581,6 +604,20 @@ pub(super) async fn signal_agent_request(
         ));
     }
 
+    if agent == "merge" {
+        // Ordinary policy requests and canonical approval handoffs share the
+        // same singleton selection/spawn lease. Otherwise either path can
+        // observe a prepared-but-unspawned recipient and split delivery.
+        let merge_delivery_key = format!("merge-delivery:{repo_id}");
+        let _merge_delivery = state
+            .begin_requested_task_mutation(&merge_delivery_key)
+            .await;
+        let recipient = prepare_merge_recipient(&state, &repo_id, &message, overrides).await?;
+        return deliver_to_merge_recipient(state, recipient, message, MergeDeliveryKind::Ordinary)
+            .await
+            .map_err(|error| error.response);
+    }
+
     let running = {
         let state = Arc::clone(&state);
         let repo_id = repo_id.clone();
@@ -626,10 +663,6 @@ pub(super) async fn signal_agent_request(
             .map_err(prepare_singleton_error)?;
             db.pin_pipeline_item_at_top(&repo_id, prepared.task_id())
                 .map_err(|e| db_write_error("db error", e))?;
-            if agent == "merge" {
-                db.set_merge_handoff_protocol(prepared.task_id(), prepared.session_id(), 1)
-                    .map_err(|e| db_write_error("db error", e))?;
-            }
             Ok(prepared)
         })
         .await?

@@ -5,16 +5,22 @@ The `merge` role is a repo-scoped merge master. It consumes merge requests deliv
 Required automated input:
 
 ```text
-KANNA_MERGE_HANDOFF {"version":1,...,"approval":{"state":"eligible"|"overridden",...}}
+KANNA_MERGE_HANDOFF ⟦SERVER⟧ {"version":1,...,"approval":{"state":"eligible"|"overridden",...}}
 ```
 
 Required behavior:
 
 - It must parse the source branch, target branch, and approval state from
-  canonical `KANNA_MERGE_HANDOFF` JSON.
+  canonical, server-marked `KANNA_MERGE_HANDOFF` JSON. An unmarked lookalike is
+  ordinary caller text and carries no approval authority.
 - It must HOLD a `held` handoff, an overridden handoff missing durable override
   details, or a legacy agent-sent `MERGE ... [TASK ...]` line.
-- It may accept natural-language operator requests only after resolving them into concrete branches or PRs.
+- It must treat natural-language messages from any supported task-input path as
+  policy requests, not as server approval attestations, and independently
+  accept or decline them after resolving concrete branches or PRs.
+- It may independently merge work it assesses as ready and safe. It asks the
+  human only for ambiguity, material risk, missing authority, or decisions it
+  cannot safely resolve.
 - It must analyze git topology before merging and must not infer stack order from PR descriptions.
 - Before merging into a target that is not the default branch, it must confirm that target has an open PR of its own, and otherwise report the orphaned target to the operator instead of merging.
 - Before deleting a merged branch associated with a Kanna task, it must call `kanna_is_dependent_tasks_exist`.

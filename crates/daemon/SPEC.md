@@ -303,21 +303,21 @@ instead of being discarded.
 
 ## Configuration
 
-Merge PTYs carry an `operator_input_only` flag across handoff; it can also be
-enabled monotonically for a session adopted from an older daemon. Generic
-terminal input is refused for these sessions. `OperatorInput` requires the
-kernel-identified desktop captured at daemon launch, or a same-executable
-desktop explicitly adopted after the old process exits. `SystemInput` is
-reserved for canonical server-built merge envelopes. Initial concurrent
+New PTYs, including merge singletons, use ordinary input. The
+`operator_input_only` field and `OperatorInput` command remain as wire and
+handoff compatibility for a protected session created by the previous
+release; the server clears that retired classification after every daemon
+generation. `SystemInput` is reserved for canonical server-built merge
+envelopes and is accepted independently of the retired session flag. Initial concurrent
 startup admits only the exact server executable when it is a direct child of
 the pinned desktop, then pins that process by PID and start time. For a server
 surviving desktop restart, the newly authenticated desktop explicitly hands
 the server's live process identity to the daemon. Neither path uses a bearer
 credential, and another process running the same binary is refused.
-An old daemon's handoff has no input-policy field, so the successor initially
-fences every such PTY. Before serving HTTP, the authenticated server classifies
-the adopted sessions from durable merge-agent history; classification may
-tighten a session later but can never relax one already marked protected.
+Before serving HTTP, the authenticated server classifies inherited PTYs as
+ordinary input, including merge singletons adopted from a protected release.
+The same replay runs after daemon replacement so restart and handoff cannot
+restore the retired native-terminal-only merge policy.
 `NegotiateProtectedInput` version 1 must be acknowledged by the active daemon
 before the server exposes HTTP/relay or creates a merge PTY. The daemon records
 the exact negotiating server process and refuses server-originated PTY spawns

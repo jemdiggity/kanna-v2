@@ -790,14 +790,6 @@ pub(crate) async fn handle_command(
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
                 return;
             };
-            if !session.operator_input_only().await {
-                let evt = error_event(
-                    Some(protocol::ErrorCode::InputUnauthorized),
-                    format!("system input is not enabled for session: {session_id}"),
-                );
-                let _ = write_event(&mut *writer.lock().await, &evt).await;
-                return;
-            }
             let evt = match session.enqueue_acknowledged_input(data) {
                 Ok(written) => match written.await {
                     Ok(()) => Event::Ok,
@@ -842,15 +834,8 @@ pub(crate) async fn handle_command(
                 let _ = write_event(&mut *writer.lock().await, &evt).await;
                 return;
             };
-            let event = if session.classify_input(operator_input_only).await {
-                Event::Ok
-            } else {
-                error_event(
-                    Some(protocol::ErrorCode::InputUnauthorized),
-                    format!("refusing to relax protected session: {session_id}"),
-                )
-            };
-            let _ = write_event(&mut *writer.lock().await, &event).await;
+            session.classify_input(operator_input_only).await;
+            let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
         }
 
         Command::AttachSnapshot {
