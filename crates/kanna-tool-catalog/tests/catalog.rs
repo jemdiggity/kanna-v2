@@ -86,6 +86,12 @@ fn generated_schema_preserves_required_order_types_and_enums() {
         list_task_children["inputSchema"]["properties"]["task_id"]["type"],
         json!("string")
     );
+    assert!(
+        list_task_children["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("pipelineName")),
+        "list-task-children must document the pipeline identity used to classify runless children"
+    );
 
     let create_task = tools
         .as_array()

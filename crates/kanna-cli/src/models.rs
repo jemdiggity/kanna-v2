@@ -143,6 +143,8 @@ pub(crate) struct TaskLatestRun {
 pub(crate) struct TaskChild {
     pub(crate) id: String,
     pub(crate) agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pipeline_name: Option<String>,
     pub(crate) created_at: Option<String>,
     pub(crate) closed_at: Option<String>,
     pub(crate) latest_run: Option<TaskLatestRun>,

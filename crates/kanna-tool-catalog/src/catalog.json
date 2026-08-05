@@ -47,7 +47,7 @@
     },
     {
       "name": "kanna_list_task_children",
-      "description": "List this task's direct children only, including closed children, in chronological order. Each child exposes the agent and verdict from its latest recorded stage run. Use this durable history to join and reconcile a fan-out after notifications, compaction, or session resume; it is not an arbitrary closed-task listing.",
+      "description": "List this task's direct children only, including closed children, in chronological order. Each child exposes its pipeline identity (pipelineName), plus the agent and verdict from its latest recorded stage run; pipelineName distinguishes runless specialty-review children from unrelated direct children. Use this durable history to join and reconcile a fan-out after notifications, compaction, or session resume; it is not an arbitrary closed-task listing.",
       "method": "GET",
       "path": "/v1/tasks/{task_id}/children",
       "response": "json",

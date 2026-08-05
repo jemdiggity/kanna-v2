@@ -144,6 +144,7 @@ async fn list_task_children_via_api_fetches_and_preserves_verdicts() {
         r#"[{
             "id":"child-1",
             "agent":"review-security",
+            "pipelineName":"specialty-review",
             "createdAt":"2026-08-06 09:00:00",
             "closedAt":"2026-08-06 09:30:00",
             "latestRun":{
@@ -175,8 +176,14 @@ async fn list_task_children_via_api_fetches_and_preserves_verdicts() {
             .and_then(|run| run.summary.as_deref()),
         Some("PASS: no security findings")
     );
+    let rendered = serde_json::to_value(&children).unwrap();
     assert_eq!(
-        serde_json::to_value(&children).unwrap()[0]["latestRun"]["status"],
+        rendered[0]["pipelineName"],
+        json!("specialty-review"),
+        "the typed CLI must not drop the pipeline identity when printing JSON"
+    );
+    assert_eq!(
+        rendered[0]["latestRun"]["status"],
         json!("succeeded"),
         "the typed CLI must not drop the durable verdict when printing JSON"
     );
