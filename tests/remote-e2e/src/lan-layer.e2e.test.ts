@@ -174,9 +174,14 @@ describe("LAN task loop E2E", () => {
       expect(burstOutput).toContain("SCRIPT_BURST_0001_");
       expect(burstOutput).toContain("SCRIPT_BURST_2000_");
 
-      const connectedEpoch = store.getState().taskTerminalOutputEpoch;
+      const connectedEpoch =
+        store.taskTerminalOutputSource.getSnapshot().outputEpoch;
       controller.closeTask(task.taskId);
-      expect(terminalOutputToString(store.getState().taskTerminalOutput)).toBe("");
+      expect(
+        terminalOutputToString(
+          store.taskTerminalOutputSource.getSnapshot().output
+        )
+      ).toBe("");
       controller.openTask(task.taskId);
 
       const remountedOutput = await waitForStoreTerminalOutput(
@@ -188,9 +193,9 @@ describe("LAN task loop E2E", () => {
       expect(remountedOutput).not.toContain("composed password");
       expect(remountedOutput).toContain("SCRIPT_BURST_0001_");
       expect(remountedOutput).toContain("SCRIPT_BURST_2000_");
-      expect(store.getState().taskTerminalOutputEpoch).toBeGreaterThan(
-        connectedEpoch
-      );
+      expect(
+        store.taskTerminalOutputSource.getSnapshot().outputEpoch
+      ).toBeGreaterThan(connectedEpoch);
     } finally {
       controller.dispose();
     }
@@ -259,7 +264,7 @@ async function waitForStoreTerminalOutput(
   timeoutMs: number
 ): Promise<string> {
   const currentOutput = decodeRetainedTerminalOutput(
-    store.getState().taskTerminalOutput
+    store.taskTerminalOutputSource.getSnapshot().output
   );
   if (currentOutput.includes(marker)) {
     return currentOutput;
@@ -271,9 +276,9 @@ async function waitForStoreTerminalOutput(
       unsubscribe();
       reject(new Error(`timed out waiting for retained terminal output ${marker}`));
     }, timeoutMs);
-    unsubscribe = store.subscribe(() => {
+    const resolveIfPresent = () => {
       const output = decodeRetainedTerminalOutput(
-        store.getState().taskTerminalOutput
+        store.taskTerminalOutputSource.getSnapshot().output
       );
       if (!output.includes(marker)) {
         return;
@@ -281,7 +286,10 @@ async function waitForStoreTerminalOutput(
       clearTimeout(timeout);
       unsubscribe();
       resolve(output);
-    });
+    };
+    unsubscribe = store.taskTerminalOutputSource.subscribe(resolveIfPresent);
+    // Close the read-before-subscribe race against a direct terminal frame.
+    resolveIfPresent();
   });
 }
 

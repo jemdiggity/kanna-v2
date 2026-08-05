@@ -416,6 +416,18 @@ function createBurstTerminalDocument(): {
   return { terminal, window };
 }
 
+function burstTerminalText(terminal: BurstTerminal): string {
+  return terminal.writes
+    .map((write) => {
+      if (typeof write === "string") return write;
+      if (!ArrayBuffer.isView(write)) return "";
+      return new TextDecoder().decode(
+        new Uint8Array(write.buffer, write.byteOffset, write.byteLength)
+      );
+    })
+    .join("");
+}
+
 function resolvedSelectionToolbarTop(tree: ElementNode | null): number | null {
   const toolbar = findByAccessibilityLabel(
     tree,
@@ -1503,6 +1515,68 @@ describe("TerminalWebView", () => {
     expect(bridge.terminal.resets).toBe(1);
     expect(bridge.terminal.writes).toHaveLength(writesAtReady + frameCount);
     expect(terminalOutputSource.subscribe).toHaveBeenCalledOnce();
+  });
+
+  it("does not roll back a direct source frame when stale prop effects run", async () => {
+    const initialFrame = `${Buffer.from("FRAME_N\r\n").toString("base64")}\n`;
+    const directFrame = `${Buffer.from("FRAME_N_PLUS_1\r\n").toString("base64")}\n`;
+    let sourceSnapshot: TaskTerminalOutputSnapshot = {
+      taskId: "task-1",
+      output: createTerminalOutput(initialFrame),
+      outputEpoch: 4,
+      outputStart: 0,
+      status: "live"
+    };
+    let sourceListener: (() => void) | null = null;
+    const terminalOutputSource: TaskTerminalOutputSource = {
+      getSnapshot: () => sourceSnapshot,
+      subscribe: (listener) => {
+        sourceListener = listener;
+        return () => {
+          sourceListener = null;
+        };
+      }
+    };
+    const initialWebView = await renderTerminalWebView({
+      output: sourceSnapshot.output,
+      outputEpoch: sourceSnapshot.outputEpoch,
+      terminalOutputSource
+    });
+    (initialWebView.props.onLoadStart as () => void)();
+    runEffects();
+    (initialWebView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: { data: JSON.stringify({ type: "terminal-ready" }) }
+    } as WebViewMessageEvent);
+
+    const bridge = createBurstTerminalDocument();
+    for (const script of injectedScripts) bridge.window.eval(script);
+    injectedScripts.length = 0;
+
+    await renderTerminalWebView({
+      output: sourceSnapshot.output,
+      outputEpoch: sourceSnapshot.outputEpoch,
+      terminalOutputSource
+    });
+    sourceSnapshot = {
+      ...sourceSnapshot,
+      output: appendTerminalOutput(sourceSnapshot.output, directFrame).output
+    };
+    sourceListener?.();
+    runEffects();
+
+    const terminalMutationScripts = injectedScripts.filter((script) =>
+      script.includes("__appendTerminalChunk") ||
+      script.includes("__replaceTerminalState")
+    );
+    expect(terminalMutationScripts).toEqual([
+      buildTerminalAppendScript(directFrame)
+    ]);
+    for (const script of terminalMutationScripts) bridge.window.eval(script);
+    expect(bridge.terminal.resets).toBe(1);
+    expect(bridge.terminal.writes).toHaveLength(2);
+    expect(burstTerminalText(bridge.terminal)).toBe(
+      "FRAME_N\r\nFRAME_N_PLUS_1\r\n"
+    );
   });
 
   it("replaces terminal state once when a new snapshot epoch arrives", async () => {

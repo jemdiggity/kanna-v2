@@ -309,20 +309,35 @@ export function TerminalWebView({
       setSelectionCopyError(null);
       setSelectionCopyPending(false);
       previousTaskIdRef.current = taskId;
-      activeOutputEpochRef.current = outputEpoch;
-      latestOutputStartRef.current = outputStart;
+      const sourceSnapshot = terminalOutputSource?.getSnapshot();
+      const initialSnapshot =
+        sourceSnapshot?.taskId === taskId
+          ? sourceSnapshot
+          : {
+              taskId,
+              output: normalizedOutput,
+              outputEpoch,
+              outputStart,
+              status
+            };
+      activeOutputEpochRef.current = initialSnapshot.outputEpoch;
+      latestOutputStartRef.current = initialSnapshot.outputStart;
       latestTerminalStateRef.current = {
-        contentRevision: outputEpoch,
-        output: normalizedOutput,
-        status
+        contentRevision: initialSnapshot.outputEpoch,
+        output: initialSnapshot.output,
+        status: initialSnapshot.status
       };
-      previousOutputRef.current = normalizedOutput;
-      previousOutputEpochRef.current = outputEpoch;
-      previousOutputStartRef.current = outputStart;
-      previousStatusRef.current = status;
+      previousOutputRef.current = initialSnapshot.output;
+      previousOutputEpochRef.current = initialSnapshot.outputEpoch;
+      previousOutputStartRef.current = initialSnapshot.outputStart;
+      previousStatusRef.current = initialSnapshot.status;
       replaceTerminalState(latestTerminalStateRef.current);
       return;
     }
+
+    // The dedicated source can advance after render but before passive effects.
+    // Never let the render-time prop snapshot overwrite that newer output.
+    if (terminalOutputSource) return;
 
     applyTerminalOutputSnapshot({
       taskId,
@@ -337,7 +352,8 @@ export function TerminalWebView({
     outputEpoch,
     outputStart,
     status,
-    taskId
+    taskId,
+    terminalOutputSource
   ]);
 
   useEffect(() => {
