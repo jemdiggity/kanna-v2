@@ -145,6 +145,16 @@ pub struct TaskLatestRun {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct TaskChild {
+    pub id: String,
+    pub agent: Option<String>,
+    pub created_at: Option<String>,
+    pub closed_at: Option<String>,
+    pub latest_run: Option<TaskLatestRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct AddRepoRequest {
     pub path: String,
     pub name: Option<String>,
@@ -580,6 +590,49 @@ impl MobileApi {
                 blocked_by_task_ids,
             },
         )))
+    }
+
+    pub fn list_task_children(
+        &self,
+        task_or_branch_id: &str,
+    ) -> Result<Option<Vec<TaskChild>>, String> {
+        let Some(task_id) = self
+            ._db
+            .resolve_pipeline_item_id(task_or_branch_id)
+            .map_err(|e| format!("db error: {}", e))?
+        else {
+            return Ok(None);
+        };
+        if self
+            ._db
+            .get_pipeline_item(&task_id)
+            .map_err(|e| format!("db error: {}", e))?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let children = self
+            ._db
+            .list_pipeline_item_children(&task_id)
+            .map_err(|e| format!("db error: {}", e))?;
+        children
+            .into_iter()
+            .map(|(id, created_at, closed_at)| {
+                let latest_run = self
+                    ._db
+                    .latest_stage_run(&id)
+                    .map_err(|e| format!("db error: {}", e))?;
+                let agent = latest_run.as_ref().and_then(|run| run.agent.clone());
+                Ok(TaskChild {
+                    id,
+                    agent,
+                    created_at,
+                    closed_at,
+                    latest_run: latest_run.map(map_task_latest_run),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map(Some)
     }
 }
 

@@ -213,6 +213,21 @@ impl Db {
         rows.collect()
     }
 
+    pub fn list_pipeline_item_children(
+        &self,
+        parent_id: &str,
+    ) -> Result<Vec<(String, Option<String>, Option<String>)>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, created_at, closed_at \
+             FROM pipeline_item WHERE parent_task_id = ? \
+             ORDER BY datetime(created_at) ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([parent_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        rows.collect()
+    }
+
     pub fn get_pipeline_item(&self, id: &str) -> Result<Option<PipelineItem>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage, \
