@@ -29,6 +29,7 @@ function createSdkMock(initialUser: DesktopAuthUser | null = null): DesktopAuthS
     signOut: vi.fn(async () => {
       currentUser = null;
       for (const listener of listeners) listener(null);
+      return { desktopCredentialError: null };
     }),
     getIdToken: vi.fn(async () => currentUser ? `token:${currentUser.uid}` : null),
   };

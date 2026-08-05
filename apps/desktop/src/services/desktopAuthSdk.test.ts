@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   createDesktopAuthSettingsPersistence: vi.fn(),
   verifyFirebaseAuthIndexedDbStorage: vi.fn(),
   invoke: vi.fn(),
+  revokeDesktopCloudCredential: vi.fn(),
 }));
 
 const MockDesktopPersistence = vi.hoisted(() => class {
@@ -50,6 +51,10 @@ vi.mock("./desktopAuthStorage", () => ({
   verifyFirebaseAuthIndexedDbStorage: mocks.verifyFirebaseAuthIndexedDbStorage,
 }));
 
+vi.mock("./desktopCloudAssociation", () => ({
+  revokeDesktopCloudCredential: mocks.revokeDesktopCloudCredential,
+}));
+
 describe("getConfiguredDesktopAuthSession", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -63,8 +68,9 @@ describe("getConfiguredDesktopAuthSession", () => {
       return () => undefined;
     });
     mocks.signInWithEmailAndPassword.mockReset();
-    mocks.firebaseSignOut.mockReset();
+    mocks.firebaseSignOut.mockReset().mockResolvedValue(undefined);
     mocks.invoke.mockReset();
+    mocks.revokeDesktopCloudCredential.mockReset().mockResolvedValue(undefined);
     mocks.resolveDesktopFirebaseConfig.mockReset().mockResolvedValue({
       app: {
         apiKey: "kanna-local",
@@ -116,6 +122,46 @@ describe("getConfiguredDesktopAuthSession", () => {
       },
     );
     expect(mocks.getAuth).not.toHaveBeenCalled();
+  });
+
+  it("revokes the desktop cloud credential before ending the local session", async () => {
+    const { getConfiguredDesktopAuthSession } = await import("./desktopAuthSdk");
+    const session = await getConfiguredDesktopAuthSession();
+    await session.initialize();
+
+    await expect(session.signOut()).resolves.toEqual({ desktopCredentialError: null });
+
+    expect(mocks.revokeDesktopCloudCredential).toHaveBeenCalledOnce();
+    expect(mocks.firebaseSignOut).toHaveBeenCalledOnce();
+    expect(mocks.revokeDesktopCloudCredential.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.firebaseSignOut.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("signs out locally even when revoking the desktop cloud credential fails", async () => {
+    mocks.revokeDesktopCloudCredential.mockRejectedValue(
+      Object.assign(new Error("Missing or insufficient permissions."), {
+        code: "permission-denied",
+      }),
+    );
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const { getConfiguredDesktopAuthSession } = await import("./desktopAuthSdk");
+    const session = await getConfiguredDesktopAuthSession();
+    await session.initialize();
+
+    await expect(session.signOut()).resolves.toEqual({
+      desktopCredentialError: "Missing or insufficient permissions.",
+    });
+
+    expect(mocks.firebaseSignOut).toHaveBeenCalledOnce();
+    expect(session.getState()).toEqual({ status: "signedOut" });
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[cloud] failed to release desktop credential during sign-out:",
+      expect.objectContaining({ code: "permission-denied" }),
+    );
+
+    warnSpy.mockRestore();
   });
 
   it("keeps auth state signed out when Firebase observer initialization reports an error", async () => {

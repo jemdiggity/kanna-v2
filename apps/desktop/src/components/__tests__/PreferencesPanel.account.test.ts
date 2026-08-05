@@ -45,7 +45,10 @@ function signedOutSession(): DesktopAuthSession {
       user: { uid: "user-1", email, displayName: null },
     });
   });
-  authSession.signOut.mockResolvedValue(undefined);
+  authSession.signOut.mockImplementation(async () => {
+    listener?.({ status: "signedOut" });
+    return { desktopCredentialError: null };
+  });
   authSession.getIdToken.mockResolvedValue("id-token");
   return session;
 }
@@ -115,6 +118,27 @@ describe("PreferencesPanel account sign-in", () => {
 
     await wrapper.get('[data-testid="account-toggle-password"]').trigger("click");
     expect(passwordInput.element.type).toBe("password");
+  });
+
+  it("warns when sign-out left this desktop claimed by the previous account", async () => {
+    authSession.signOut.mockResolvedValue({
+      desktopCredentialError: "cannot release this desktop: its local credential is unavailable",
+    });
+
+    const wrapper = mountPreferences();
+    await flushPromises();
+
+    await wrapper.get('[data-testid="preferences-account-tab"]').trigger("click");
+    await wrapper.get('[data-testid="account-email"]').setValue("upvote.sieve.7t@icloud.com");
+    await wrapper.get('[data-testid="account-password"]').setValue("password123");
+    await wrapper.get('[data-testid="account-sign-in"]').trigger("submit");
+    await flushPromises();
+
+    await wrapper.get('[data-testid="account-sign-out"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("this desktop was not released from the previous account");
+    expect(wrapper.text()).toContain("its local credential is unavailable");
   });
 
   it("shows the current desktop id on the Account tab", async () => {

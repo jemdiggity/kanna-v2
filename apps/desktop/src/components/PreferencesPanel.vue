@@ -184,7 +184,16 @@ async function signInAccount() {
 
 async function signOutAccount() {
   accountMessage.value = ""
-  await authSession.value?.signOut()
+  const result = await authSession.value?.signOut()
+  // Sign-out is the only thing that releases this desktop for another account.
+  // If it did not land, say so now — the next account is refused by the cloud
+  // rules, and this is the last moment the previous one can still release it.
+  if (result?.desktopCredentialError) {
+    accountMessage.value =
+      `Signed out, but this desktop was not released from the previous account `
+      + `(${result.desktopCredentialError}). Sign back in as that account and sign out `
+      + `again, or the next account cannot use cloud sync on this machine.`
+  }
 }
 
 function handleDefaultAgentChange(value: string) {
@@ -354,7 +363,12 @@ defineExpose({ cycleTab })
           <div v-if="signedInUserEmail" class="account-signed-in">
             <span class="account-label">Signed in</span>
             <strong>{{ signedInUserEmail }}</strong>
-            <button type="button" class="secondary-button" @click="signOutAccount">
+            <button
+              type="button"
+              class="secondary-button"
+              data-testid="account-sign-out"
+              @click="signOutAccount"
+            >
               Sign out
             </button>
           </div>

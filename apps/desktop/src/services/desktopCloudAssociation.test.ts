@@ -3,6 +3,7 @@ import {
   associateDesktopCloudCredential,
   revokeDesktopCloudCredential,
 } from "./desktopCloudAssociation";
+import { DesktopCloudCredentialConflictError } from "./desktopCloudCredentialConflict";
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -35,7 +36,7 @@ vi.mock("./desktopCloudTaskIndex", () => ({
 
 describe("desktop cloud credential association", () => {
   beforeEach(() => {
-    mocks.setDoc.mockClear();
+    mocks.setDoc.mockReset().mockImplementation(async () => undefined);
     mocks.doc.mockClear();
     mocks.invoke.mockImplementation(async (command: string) => {
       if (command === "desktop_cloud_credential") {
@@ -80,6 +81,67 @@ describe("desktop cloud credential association", () => {
       (ref as { segments: unknown[] }).segments.includes("desktopCredentials"));
     expect(desktopWrites).toHaveLength(2);
     expect(desktopWrites[0]).toEqual(desktopWrites[1]);
+  });
+
+  it("reports a credential conflict when the desktop document is denied", async () => {
+    mocks.setDoc.mockImplementation(async (ref: unknown) => {
+      if ((ref as { segments: unknown[] }).segments.includes("desktopCredentials")) {
+        throw Object.assign(new Error("Missing or insufficient permissions."), {
+          code: "permission-denied",
+        });
+      }
+    });
+
+    await expect(associateDesktopCloudCredential()).rejects.toBeInstanceOf(
+      DesktopCloudCredentialConflictError,
+    );
+    await expect(associateDesktopCloudCredential()).rejects.toMatchObject({
+      desktopId: "desktop-1",
+    });
+  });
+
+  it("raises rather than silently skipping revocation when the local credential is unavailable", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "desktop_cloud_credential") throw new Error("mobile server unavailable");
+      if (command === "mobile_server_status") return { desktopName: "Studio Mac" };
+      return "";
+    });
+
+    await expect(revokeDesktopCloudCredential()).rejects.toThrow("mobile server unavailable");
+    expect(mocks.setDoc).not.toHaveBeenCalled();
+  });
+
+  it("raises rather than silently skipping revocation when the credential payload is blank", async () => {
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "desktop_cloud_credential") return { desktopId: "  ", desktopSecretHash: "" };
+      if (command === "mobile_server_status") return { desktopName: "Studio Mac" };
+      return "";
+    });
+
+    await expect(revokeDesktopCloudCredential()).rejects.toThrow(
+      "cannot release this desktop: its local credential is unavailable",
+    );
+    expect(mocks.setDoc).not.toHaveBeenCalled();
+  });
+
+  it("reports a credential conflict when revocation is denied", async () => {
+    mocks.setDoc.mockRejectedValue(
+      Object.assign(new Error("Missing or insufficient permissions."), {
+        code: "permission-denied",
+      }),
+    );
+
+    await expect(revokeDesktopCloudCredential()).rejects.toBeInstanceOf(
+      DesktopCloudCredentialConflictError,
+    );
+    expect(mocks.reconnectDesktopCloudRelay).not.toHaveBeenCalled();
+  });
+
+  it("passes non-permission association failures through unchanged", async () => {
+    const unavailable = Object.assign(new Error("backend unavailable"), { code: "unavailable" });
+    mocks.setDoc.mockRejectedValue(unavailable);
+
+    await expect(associateDesktopCloudCredential()).rejects.toBe(unavailable);
   });
 
   it("tombstones the canonical credential before account sign-out", async () => {

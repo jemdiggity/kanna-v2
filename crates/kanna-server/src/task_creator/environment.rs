@@ -3,6 +3,7 @@ use super::definitions::RepoConfig;
 use super::provider::AgentProvider;
 use crate::config::Config;
 use crate::db::Db;
+use crate::internal_ports::reserve_internal_ports;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -57,6 +58,7 @@ pub(super) fn claim_task_ports(
 }
 
 fn add_reserved_ports(occupied: &mut HashSet<i64>, repo_config: &RepoConfig) {
+    reserve_internal_ports(occupied);
     for port in &repo_config.reserved_ports {
         if (1..=65535).contains(port) {
             occupied.insert(*port);

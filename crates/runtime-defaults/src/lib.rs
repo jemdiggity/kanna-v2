@@ -17,7 +17,25 @@ pub const STAGING_FIREBASE_PROJECT_ID: &str = "kanna-staging";
 pub const LOCAL_FIREBASE_PROJECT_ID: &str = "kanna-local";
 pub const PRODUCTION_MOBILE_SERVER_PORT: u16 = 48_120;
 pub const STAGING_MOBILE_SERVER_PORT: u16 = 48_121;
+/// Fallback for callers with no environment in hand (the sidecar reading its own
+/// env, `kd`'s defaults). Equal to the production port by construction — an
+/// installed app must resolve `DesktopCloudEnvironment::transfer_port` instead,
+/// or staging and production contend for one listener and the loser never binds.
 pub const DEFAULT_TRANSFER_PORT: u16 = 4_455;
+pub const STAGING_TRANSFER_PORT: u16 = 4_456;
+
+/// Ports an installed Kanna binds on the user's machine. The per-task port
+/// allocator seeds these as occupied so a project's dev server is never handed
+/// a port Kanna will take from under it (or vice versa, depending on start
+/// order). Development instances are absent on purpose: their ports come from
+/// `kd`/`.kanna/config.json` and vary per worktree, so they cannot be enumerated
+/// here.
+pub const RESERVED_INTERNAL_PORTS: [u16; 4] = [
+    PRODUCTION_MOBILE_SERVER_PORT,
+    STAGING_MOBILE_SERVER_PORT,
+    DEFAULT_TRANSFER_PORT,
+    STAGING_TRANSFER_PORT,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesktopCloudEnvironment {
@@ -54,6 +72,13 @@ impl DesktopCloudEnvironment {
         }
     }
 
+    pub fn transfer_port(self) -> u16 {
+        match self {
+            Self::Staging => STAGING_TRANSFER_PORT,
+            Self::Production => DEFAULT_TRANSFER_PORT,
+        }
+    }
+
     pub fn daemon_dir_for_home(self, home: &Path) -> PathBuf {
         match self {
             Self::Staging => daemon_dir_for_bundle_identifier_for_home(
@@ -87,6 +112,14 @@ pub fn mobile_server_port_for_bundle_identifier(
 ) -> Option<u16> {
     desktop_cloud_environment_for_bundle_identifier(bundle_identifier, debug_assertions)
         .map(|env| env.mobile_server_port())
+}
+
+pub fn transfer_port_for_bundle_identifier(
+    bundle_identifier: &str,
+    debug_assertions: bool,
+) -> Option<u16> {
+    desktop_cloud_environment_for_bundle_identifier(bundle_identifier, debug_assertions)
+        .map(|env| env.transfer_port())
 }
 
 pub fn desktop_cloud_environment_from_env(value: Option<&str>) -> Option<DesktopCloudEnvironment> {
@@ -908,6 +941,58 @@ mod tests {
             DesktopCloudEnvironment::Production.mobile_server_port(),
             DesktopCloudEnvironment::Staging.mobile_server_port()
         );
+    }
+
+    #[test]
+    fn desktop_cloud_environment_carries_distinct_transfer_ports() {
+        assert_eq!(
+            DesktopCloudEnvironment::Production.transfer_port(),
+            DEFAULT_TRANSFER_PORT
+        );
+        assert_eq!(
+            DesktopCloudEnvironment::Staging.transfer_port(),
+            STAGING_TRANSFER_PORT
+        );
+        assert_ne!(
+            DesktopCloudEnvironment::Production.transfer_port(),
+            DesktopCloudEnvironment::Staging.transfer_port()
+        );
+    }
+
+    #[test]
+    fn transfer_port_resolves_from_release_bundle_identifier() {
+        assert_eq!(
+            transfer_port_for_bundle_identifier(STAGING_DESKTOP_BUNDLE_IDENTIFIER, false),
+            Some(STAGING_TRANSFER_PORT)
+        );
+        assert_eq!(
+            transfer_port_for_bundle_identifier(DESKTOP_BUNDLE_IDENTIFIER, false),
+            Some(DEFAULT_TRANSFER_PORT)
+        );
+        assert_eq!(
+            transfer_port_for_bundle_identifier(STAGING_DESKTOP_BUNDLE_IDENTIFIER, true),
+            None
+        );
+    }
+
+    #[test]
+    fn reserved_internal_ports_cover_every_installed_listener() {
+        for environment in [
+            DesktopCloudEnvironment::Production,
+            DesktopCloudEnvironment::Staging,
+        ] {
+            assert!(RESERVED_INTERNAL_PORTS.contains(&environment.mobile_server_port()));
+            assert!(RESERVED_INTERNAL_PORTS.contains(&environment.transfer_port()));
+        }
+
+        let mut unique = RESERVED_INTERNAL_PORTS;
+        unique.sort_unstable();
+        let deduped = {
+            let mut deduped = unique.to_vec();
+            deduped.dedup();
+            deduped
+        };
+        assert_eq!(deduped.len(), RESERVED_INTERNAL_PORTS.len());
     }
 
     #[test]

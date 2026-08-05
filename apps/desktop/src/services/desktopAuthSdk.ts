@@ -114,9 +114,21 @@ export function createFirebaseDesktopAuthSdk(auth: Auth, _app: FirebaseApp): Des
       return mapSignedInFirebaseUser(credential.user);
     },
     async signOut() {
-      const { revokeDesktopCloudCredential } = await import("./desktopCloudAssociation");
-      await revokeDesktopCloudCredential();
+      // Releasing the cloud credential needs Firestore, and is refused outright
+      // once this desktop's credential belongs to another account. Neither may
+      // trap the user in a session they asked to leave, so the local sign-out
+      // always proceeds — but the failure is reported, because it is what
+      // decides whether the next account can claim this machine.
+      let desktopCredentialError: string | null = null;
+      try {
+        const { revokeDesktopCloudCredential } = await import("./desktopCloudAssociation");
+        await revokeDesktopCloudCredential();
+      } catch (error) {
+        desktopCredentialError = error instanceof Error ? error.message : String(error);
+        console.warn("[cloud] failed to release desktop credential during sign-out:", error);
+      }
       await firebaseSignOut(auth);
+      return { desktopCredentialError };
     },
     async getIdToken(forceRefresh) {
       return auth.currentUser?.getIdToken(forceRefresh) ?? null;

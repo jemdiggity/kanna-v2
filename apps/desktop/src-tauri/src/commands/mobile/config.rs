@@ -5,8 +5,9 @@ use super::cloud_env::{
 use super::process::find_sidecar;
 use super::{
     current_server_version, default_desktop_name, desktop_credential, escape_toml_string,
-    file_sha256_hex, generate_device_token, local_server_port_for_cloud_env, resolved_db_path,
-    server_base_url, server_environment, MobileServerState,
+    file_sha256_hex, generate_device_token, local_server_port_for_cloud_env,
+    local_transfer_port_for_cloud_env, resolved_db_path, server_base_url, server_environment,
+    MobileServerState,
 };
 use kanna_runtime_defaults::DesktopCloudEnvironment;
 use std::fs::{File, OpenOptions};
@@ -167,13 +168,12 @@ pub(super) fn build_server_config(state: &MobileServerState) -> Result<String, S
     let server_binary_sha256_line = sidecar_sha256_config_line("kanna-server")
         .map(|line| format!("{line}\n"))
         .unwrap_or_default();
-    let transfer_port = std::env::var("KANNA_TRANSFER_PORT")
-        .unwrap_or_else(|_| kanna_runtime_defaults::DEFAULT_TRANSFER_PORT.to_string())
-        .parse::<u16>()
-        .map_err(|_| "KANNA_TRANSFER_PORT must be a valid nonzero port".to_string())?;
-    if transfer_port == 0 {
-        return Err("KANNA_TRANSFER_PORT must be a valid nonzero port".to_string());
+    if let Ok(raw) = std::env::var("KANNA_TRANSFER_PORT") {
+        if raw.parse::<u16>().ok().filter(|port| *port != 0).is_none() {
+            return Err("KANNA_TRANSFER_PORT must be a valid nonzero port".to_string());
+        }
     }
+    let transfer_port = local_transfer_port_for_cloud_env(state.cloud_env);
 
     Ok(format!(
         "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}{}desktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nversion = \"{}\"\nenvironment = \"{}\"\n{}lan_host = \"0.0.0.0\"\nlan_port = {}\ntransfer_port = {}\npairing_store_path = \"{}\"\n",
@@ -260,14 +260,12 @@ pub(super) fn server_config_matches_runtime(
         ),
         format!("lan_port = {}", local_server_port_for_cloud_env(cloud_env)),
     ];
-    let expected_transfer_port = std::env::var("KANNA_TRANSFER_PORT")
-        .unwrap_or_else(|_| kanna_runtime_defaults::DEFAULT_TRANSFER_PORT.to_string())
-        .parse::<u16>()
-        .ok()
-        .filter(|port| *port != 0);
-    let Some(expected_transfer_port) = expected_transfer_port else {
-        return false;
-    };
+    if let Ok(raw) = std::env::var("KANNA_TRANSFER_PORT") {
+        if raw.parse::<u16>().ok().filter(|port| *port != 0).is_none() {
+            return false;
+        }
+    }
+    let expected_transfer_port = local_transfer_port_for_cloud_env(cloud_env);
     required_lines.push(format!("transfer_port = {expected_transfer_port}"));
     if let Some(device_token) = expected_device_token {
         required_lines.push(format!(
@@ -608,6 +606,74 @@ mod tests {
         }
 
         assert!(config.contains("transfer_port = 4459"));
+    }
+
+    #[test]
+    fn build_server_config_writes_a_distinct_transfer_port_per_installed_environment() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_TRANSFER_PORT");
+        }
+
+        let config_for = |cloud_env| {
+            let state = MobileServerState {
+                status: "stopped".to_string(),
+                desktop_name: "Studio Mac".to_string(),
+                api_base_url: server_base_url(48120),
+                config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
+                started: false,
+                cloud_env,
+            };
+            build_server_config(&state).unwrap()
+        };
+
+        let staging = config_for(Some(DesktopCloudEnvironment::Staging));
+        let production = config_for(Some(DesktopCloudEnvironment::Production));
+
+        assert!(staging.contains(&format!(
+            "transfer_port = {}",
+            kanna_runtime_defaults::STAGING_TRANSFER_PORT
+        )));
+        assert!(production.contains(&format!(
+            "transfer_port = {}",
+            kanna_runtime_defaults::DEFAULT_TRANSFER_PORT
+        )));
+    }
+
+    #[test]
+    fn server_config_matches_runtime_rejects_the_other_environments_transfer_port() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_TRANSFER_PORT");
+        }
+
+        let dir = unique_test_root("transfer-port-match");
+        std::fs::create_dir_all(&dir).expect("test root should be created");
+        let config_path = dir.join("server.toml");
+        let credential = desktop_credential(&config_path).expect("credential should resolve");
+        let staging_config = build_server_config(&MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48121),
+            config_path: config_path.clone(),
+            started: false,
+            cloud_env: Some(DesktopCloudEnvironment::Staging),
+        })
+        .expect("staging config should build");
+        std::fs::write(&config_path, &staging_config).expect("config should be written");
+
+        assert!(server_config_matches_runtime(
+            &config_path,
+            &credential.desktop_id,
+            Some(DesktopCloudEnvironment::Staging),
+        ));
+        // The same file read as production must not be accepted: its transfer
+        // port belongs to the other install, and reusing it is the collision.
+        assert!(!server_config_matches_runtime(
+            &config_path,
+            &credential.desktop_id,
+            Some(DesktopCloudEnvironment::Production),
+        ));
     }
 
     #[test]
