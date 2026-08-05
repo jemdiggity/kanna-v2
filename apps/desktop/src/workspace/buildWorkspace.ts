@@ -66,15 +66,47 @@ export function buildWorkspace(input: BuildWorkspaceInput): BuildWorkspaceResult
     tasksByKey.set(candidate.logicalKey, next);
   }
 
-  const tasks = [...tasksByKey.values()].sort((a, b) =>
-    b.item.created_at.localeCompare(a.item.created_at),
+  const logicalKeyByRemoteTaskId = new Map(
+    remote.map((candidate) => [candidate.item.id, candidate.logicalKey]),
   );
+  const tasks = [...tasksByKey.values()]
+    .map((task) => withResolvedParent(task, tasksByKey, logicalKeyByRemoteTaskId))
+    .sort((a, b) => b.item.created_at.localeCompare(a.item.created_at));
 
   return {
     repos: repoContext.repos,
     tasks,
     diagnostics: tasks.map(diagnosticsForTask),
   };
+}
+
+/**
+ * A remote task's parent arrives as a presentation id minted by the transport that
+ * advertised it, but the parent may be presented under a different id here — the
+ * viewer's own task after a transfer, or the sibling advertisement from the other
+ * transport. Retarget it at the merged task through the shared logical key, and drop
+ * the reference when the parent is not part of this workspace.
+ */
+function withResolvedParent(
+  task: WorkspaceTask,
+  tasksByKey: ReadonlyMap<string, WorkspaceTask>,
+  logicalKeyByRemoteTaskId: ReadonlyMap<string, string>,
+): WorkspaceTask {
+  const parentTaskId = task.item.parent_task_id;
+  if (!parentTaskId || task.localTaskId !== null) return task;
+
+  const parentLogicalKey = logicalKeyByRemoteTaskId.get(parentTaskId);
+  const parentTask = parentLogicalKey ? tasksByKey.get(parentLogicalKey) : undefined;
+  const resolved = parentTask && parentTask.logicalTaskKey !== task.logicalTaskKey
+    ? workspaceTaskDurableTaskId(parentTask)
+    : null;
+  if (resolved === parentTaskId) return task;
+  return { ...task, item: { ...task.item, parent_task_id: resolved } };
+}
+
+/** The id a workspace task is addressed by once projected into the sidebar. */
+function workspaceTaskDurableTaskId(task: WorkspaceTask): string {
+  return task.localTaskId ?? task.item.id;
 }
 
 function buildRepoContext(localRepos: LocalRepoWithRemote[], remoteRepos: RemoteRepo[]) {

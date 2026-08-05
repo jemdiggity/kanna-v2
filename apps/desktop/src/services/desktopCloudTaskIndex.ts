@@ -32,6 +32,8 @@ export interface DesktopCloudTaskSnapshot {
   status: string;
   hasRunningPost?: boolean;
   blockedByTaskIds?: string[];
+  /** Owner-side durable id of this task's parent, in the publisher's task-id space. */
+  parentTaskId?: string | null;
   repo: {
     cloudRepoId: string;
     name: string;
@@ -326,7 +328,16 @@ export function mapDesktopCloudTasks(
       ...(options.localClosedItems ?? []).map((item) => `${item.repo_id}:${item.id}`),
     ],
   );
-  for (const snapshot of authoritativeTaskSnapshots(snapshots)) {
+  const authoritative = authoritativeTaskSnapshots(snapshots);
+  // Parents are published in the owner's task-id space; resolve them against the
+  // presentation ids this mapping mints so nesting survives the trip.
+  const presentationIdByOwnerTask = new Map(
+    authoritative.map((snapshot) => [
+      ownerTaskKey(snapshot, snapshot.ownerLocalTaskId),
+      presentationTaskId(snapshot),
+    ]),
+  );
+  for (const snapshot of authoritative) {
     const snapshotLocalRepoId = snapshot.localRepoId ?? snapshot.repo.cloudRepoId;
     const exactLocalRepo = localRepoById.get(snapshotLocalRepoId);
     const localRepo = exactLocalRepo ?? (snapshot.repo.remoteUrlHash
@@ -352,9 +363,11 @@ export function mapDesktopCloudTasks(
       });
     }
 
-    const itemId = snapshot.cloudTaskId
-      ? cloudTaskId(snapshot.cloudTaskId)
-      : cloudTaskId(`${snapshot.ownerDesktopId}:${snapshotLocalRepoId}:${snapshot.ownerLocalTaskId}`);
+    const itemId = presentationTaskId(snapshot);
+    const parentOwnerTaskId = nonblankString(snapshot.parentTaskId ?? null);
+    const parentItemId = parentOwnerTaskId
+      ? presentationIdByOwnerTask.get(ownerTaskKey(snapshot, parentOwnerTaskId)) ?? null
+      : null;
     const uniqueBlockerIds = [...new Set(
       (snapshot.blockedByTaskIds ?? []).filter((id) => id.trim().length > 0),
     )];
@@ -418,7 +431,7 @@ export function mapDesktopCloudTasks(
       agent_provider: normalizeAgentProvider(snapshot.agent?.provider),
       agent_type: snapshot.agent?.type ?? "pty",
       teardown_started_at: null,
-      parent_task_id: null,
+      parent_task_id: parentItemId === itemId ? null : parentItemId,
       last_output_preview: snapshot.waitingPromptSnippet ?? null,
       notify_task_id: null,
       notified_at: null,
@@ -533,6 +546,20 @@ function cloudRepoId(id: string): string {
 
 function cloudTaskId(id: string): string {
   return `cloud:${id}`;
+}
+
+/** The id a snapshot is presented under locally, stable for every reference to it. */
+function presentationTaskId(snapshot: DesktopCloudTaskSnapshot): string {
+  const localRepoId = snapshot.localRepoId ?? snapshot.repo.cloudRepoId;
+  return snapshot.cloudTaskId
+    ? cloudTaskId(snapshot.cloudTaskId)
+    : cloudTaskId(`${snapshot.ownerDesktopId}:${localRepoId}:${snapshot.ownerLocalTaskId}`);
+}
+
+/** Owner-side identity of a task published by `snapshot`'s desktop and repo. */
+function ownerTaskKey(snapshot: DesktopCloudTaskSnapshot, ownerLocalTaskId: string): string {
+  const localRepoId = snapshot.localRepoId ?? snapshot.repo.cloudRepoId;
+  return JSON.stringify([snapshot.ownerDesktopId, localRepoId, ownerLocalTaskId]);
 }
 
 function normalizeActivity(activity: string | undefined): PipelineItem["activity"] {

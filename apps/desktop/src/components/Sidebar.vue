@@ -182,6 +182,17 @@ function subtaskIndentStyle(depth: number): Record<string, string> {
   return depth > 0 ? { paddingLeft: `${14 + depth * 16}px` } : {};
 }
 
+/**
+ * Remote subtasks render nested from the owner's published task graph, but
+ * reparenting is an owner-side edit, so the detach affordance stays local-only.
+ */
+function canDetachSubtask(row: SidebarTaskTreeRow): boolean {
+  return row.depth > 0
+    && row.item.state === "ready"
+    && !isRemoteTask(row.item)
+    && editingSlotId.value !== row.item.slot_id;
+}
+
 function totalItemsForRepo(repoId: string): number {
   return props.taskSlots.filter((i) => i.repo_id === repoId && i.closed_at == null).length;
 }
@@ -731,7 +742,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                   >
                     <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
                   <button
-                    v-if="row.depth > 0 && row.item.state === 'ready' && editingSlotId !== row.item.slot_id"
+                    v-if="canDetachSubtask(row)"
                     type="button"
                     class="subtask-detach"
                     :title="$t('sidebar.detachSubtask')"
@@ -839,7 +850,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     >
                       <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
                     <button
-                      v-if="row.depth > 0 && row.item.state === 'ready' && editingSlotId !== row.item.slot_id"
+                      v-if="canDetachSubtask(row)"
                       type="button"
                       class="subtask-detach"
                       :title="$t('sidebar.detachSubtask')"
@@ -906,7 +917,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                   >{{ $t('sidebar.blockedBy') }} {{ blockerNames[row.item.task_id] }}</span>
                 </div>
                 <button
-                  v-if="row.depth > 0 && row.item.state === 'ready' && editingSlotId !== row.item.slot_id"
+                  v-if="canDetachSubtask(row)"
                   type="button"
                   class="subtask-detach"
                   :title="$t('sidebar.detachSubtask')"

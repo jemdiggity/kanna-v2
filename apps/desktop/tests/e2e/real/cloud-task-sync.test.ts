@@ -208,6 +208,7 @@ async function sidebarItemsForPrompt(client: typeof primary, prompt: string): Pr
   repo_id: string;
   stage: string;
   isRemote: boolean;
+  parentTaskId: string | null;
 }>> {
   return await client.executeSync(`
     const ctx = window.__KANNA_E2E__.setupState;
@@ -218,6 +219,7 @@ async function sidebarItemsForPrompt(client: typeof primary, prompt: string): Pr
       repo_id: item.repo_id,
       stage: item.stage,
       isRemote: Boolean(item.remote_task),
+      parentTaskId: item.parent_task_id ?? null,
     }))));
   `);
 }
@@ -1218,5 +1220,82 @@ describe("cloud task sync", () => {
       state.some((item) => item.isRemote || item.id.startsWith("cloud:") || item.id.startsWith("lan:"))
     )).toBe(false);
     await waitForSidebarTaskToDisappear(primary, prompt);
+  });
+
+  it("nests a cloud subtask under its parent when viewed from another desktop", async () => {
+    const parentPrompt = "Cloud hierarchy parent";
+    const childPrompt = "Cloud hierarchy subtask";
+    const hierarchyRepo = {
+      cloudRepoId: "hierarchy-repo",
+      name: "hierarchy-repo",
+      remoteUrl: "https://example.invalid/hierarchy.git",
+      remoteUrlHash: "hierarchy-remote",
+      defaultBranch: "main",
+    };
+    const hierarchyTask = (
+      ownerLocalTaskId: string,
+      prompt: string,
+      parentTaskId: string | null,
+    ) => ({
+      cloudTaskId: `hierarchy:${ownerLocalTaskId}`,
+      ownerDesktopId: "desktop-hierarchy",
+      ownerLocalTaskId,
+      title: prompt,
+      promptSnippet: prompt,
+      displayName: null,
+      stage: "in progress",
+      activity: "idle",
+      status: "active",
+      repo: hierarchyRepo,
+      branch: `task-${ownerLocalTaskId}`,
+      baseRef: "origin/main",
+      prNumber: null,
+      prUrl: null,
+      agent: { provider: "codex", type: "pty" },
+      transfer: {
+        state: "none",
+        transferId: null,
+        sourceDesktopId: null,
+        destinationDesktopId: null,
+      },
+      blockedByTaskIds: [],
+      parentTaskId,
+      createdAt: "2026-08-04T00:00:00.000Z",
+      updatedAt: "2026-08-04T00:01:00.000Z",
+      closedAt: null,
+    });
+
+    await seedCloudTaskSnapshot(hierarchyTask("hierarchy-parent", parentPrompt, null));
+    await seedCloudTaskSnapshot(hierarchyTask("hierarchy-child", childPrompt, "hierarchy-parent"));
+
+    await waitForSidebarTask(secondary, childPrompt);
+    const [parentItem] = await sidebarItemsForPrompt(secondary, parentPrompt);
+    expect(parentItem).toEqual(expect.objectContaining({
+      id: "cloud:hierarchy:hierarchy-parent",
+      isRemote: true,
+      parentTaskId: null,
+    }));
+    expect(await sidebarItemsForPrompt(secondary, childPrompt)).toEqual([
+      expect.objectContaining({
+        id: "cloud:hierarchy:hierarchy-child",
+        repo_id: parentItem.repo_id,
+        isRemote: true,
+        parentTaskId: parentItem.id,
+      }),
+    ]);
+
+    // The owner's hierarchy has to reach the rendered rows, not just the model:
+    // the subtask row renders indented, and without a local detach affordance.
+    const childRow = await secondary.executeSync<{
+      indented: boolean;
+      detachable: boolean;
+    }>(`
+      const row = document.querySelector('.sidebar .pipeline-item[data-task-id="cloud:hierarchy:hierarchy-child"]');
+      return {
+        indented: Boolean(row && row.classList.contains("subtask")),
+        detachable: Boolean(row && row.querySelector(".subtask-detach")),
+      };
+    `);
+    expect(childRow).toEqual({ indented: true, detachable: false });
   });
 });
