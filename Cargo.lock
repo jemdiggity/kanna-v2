@@ -2944,6 +2944,7 @@ dependencies = [
  "base64 0.22.1",
  "dirs",
  "flexi_logger",
+ "flume",
  "futures-util",
  "if-addrs",
  "ignore",
