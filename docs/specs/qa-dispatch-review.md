@@ -97,21 +97,32 @@ the generic review agent — including this one.
 
 ### Server surface changes
 
-Three gaps stood between the dispatcher and the existing primitives:
+Four gaps stood between the dispatcher and the existing primitives:
 
 1. **`agent` override on `kanna_create_task`.** The HTTP API already accepted
    `CreateTaskRequest.agent` (it overrides the pinned pipeline stage's agent
    binding); the shared tool catalog now exposes it to MCP/CLI callers, and
    `kanna-cli task create` grew a matching `--agent` flag. The `stage`
    override remains deliberately unexposed.
-2. **`latestRun` on `TaskDetail`.** The task-graph spec promises a child's
+2. **Durable direct-child history.** `GET /v1/tasks/{task_id}/children`, exposed
+   MCP-first as `kanna_list_task_children {"task_id": "..."}` and through the
+   typed fallback `kanna-cli task children --task-id "..."`, returns all direct
+   children, including closed children, in chronological oldest-first order.
+   Each item carries `id`, optional `pipelineName`, `agent`, `createdAt`,
+   `closedAt`, and `latestRun`, so the dispatcher can reconstruct actual prior
+   panel outcomes instead of inferring that an untouched surface passed.
+   `pipelineName` is the discriminator that keeps unrelated direct subtasks out
+   of the panel ledger. This reuses the durable task and stage-run records:
+   there is no schema migration and no duplicate aggregate verdict table or
+   snapshot to keep consistent.
+3. **`latestRun` on `TaskDetail`.** The task-graph spec promises a child's
    terminal `stage_run.result` is queryable via `kanna_get_task` /
    `kanna_wait_task`; the detail payload now carries
    `latestRun {stage, kind, status, summary, finishedAt}` populated from the
    task's most recent stage run. Verdict summaries are parsed out of the run's
    result JSON; non-verdict results (e.g. orphaned-workspace markers) pass
    through as-is.
-3. **A wait window the caller survives.** `kanna_wait_task` is the dispatcher's
+4. **A wait window the caller survives.** `kanna_wait_task` is the dispatcher's
    join primitive, and MCP clients abort a `tools/call` on their own timer
    (Codex and Claude Code both at 300s), destroying the result. The wait window
    is therefore capped at `MAX_WAIT_TIMEOUT_SECS` = 240s — in
@@ -245,7 +256,9 @@ branch (`task-{id}`, `task-{id}-2`, `-3`, …, never deleted while the task
 lives), and a review workspace never commits — so a previous review branch
 still points at exactly the commit that round reviewed. This is the
 load-bearing reason to keep the `task-{id}-{n}` workspace-branch naming: it is
-the task's round history, readable from git alone with no new engine state.
+the task's change-range history, readable from git alone with no new engine
+state. Git does not carry verdicts; those come from the durable direct-child
+query below.
 
 Note which stage the markers come from. A Claude revision *resumes* the
 implementing agent in its original workspace instead of forking, so implement
@@ -277,12 +290,68 @@ narrowing that round actually needed. Path 2 is what keeps the mechanism from
 quietly no-opping on any repo that rebases.
 
 Dispatch is then gated on the round's change: a specialty whose surface this
-round did not touch is not re-dispatched, because the code it judged has not
-moved since the round that judged it. Children receive both ranges — the review
-range they judge, and the full branch they read for context, since a defect can
-live in how the round's change meets what earlier rounds built. The aggregate
-summary names the specialties that were not re-reviewed and why, so a human
-sees the whole panel rather than one round's slice.
+round did not touch is not normally re-dispatched, because the code it judged
+has not moved since the round that judged it. Children receive both ranges —
+the review range they judge, and the full branch they read for context, since a
+defect can live in how the round's change meets what earlier rounds built.
+
+Before selecting that panel, the dispatcher queries all direct children of its
+task with `kanna_list_task_children` (typed CLI fallback only when MCP is
+unavailable). Closed children are deliberately included: closing a specialty
+child is lifecycle cleanup, not verdict deletion. The response is oldest first,
+so reduction is deterministic:
+
+- First select only children whose `pipelineName` is `specialty-review`.
+  Children from every other pipeline are unrelated subtasks and are ignored,
+  even when runless or when their `agent` happens to start with `review-`.
+- Within that selected history, every syntactically valid stored `review-*`
+  `agent` is a historical specialty key. It remains valid if the repo-defined
+  reviewer is later removed or renamed. For a child with that attribution,
+  `latestRun.status` `succeeded` records PASS while `failed` records FAIL.
+  Walking oldest to newest leaves the latest terminal verdict for each
+  specialty. Current discovery controls only new dispatch; it does not rewrite
+  history.
+- A FAIL remains unresolved until a later child for that same specialty records
+  PASS. Skipping its untouched surface is not evidence that the finding was
+  fixed. A new round's terminal child verdict joins this same chronology and
+  becomes the specialty's latest verdict.
+- For a `specialty-review` child, missing `agent` or an agent that does not
+  syntactically match `review-*` is malformed attribution and prevents
+  aggregate success. A closed malformed child cannot be re-dispatched to an
+  unknown intended specialty: the dispatcher records broken dispatch once with
+  its child id, then stops without retrying or guessing from the title/prompt.
+- With a valid historical specialty key, missing or malformed `latestRun` and
+  nonterminal statuses never imply PASS. A running child may be joined; when
+  appropriate, a currently dispatchable specialty may be re-dispatched once.
+  A later terminal child for the same historical key supersedes that unresolved
+  evidence. If that finite repair path fails—or a retired specialty cannot be
+  dispatched—the dispatcher records broken dispatch once instead of looping.
+- An older endpoint payload may omit `pipelineName`. Every such record is
+  version-incomplete history and prevents aggregate success because it cannot
+  be classified as panel or unrelated. The dispatcher may retry the supported
+  MCP/typed CLI query once only when that surface can return the current shape.
+  If `pipelineName` remains absent, it records broken dispatch with the child id
+  and an explicit incompatible-server/upgrade-required reason. It never infers
+  PASS, overwrites an actual prior terminal verdict, or enters a retry loop.
+- A specialty that has never been reviewed and is untouched this round has no
+  verdict. The dispatcher neither runs it without a relevant surface nor
+  invents a PASS.
+
+The aggregate summary cites each new or carried verdict with child-id and
+available `createdAt`/`latestRun.finishedAt` timestamp provenance and explicitly
+names untouched specialties whose actual verdict was carried. It keeps the
+current aggregate round and reviewed range, but does not invent the exact round
+of a historical child because that field is not in this endpoint. This is a
+reduction over normalized task/run records, not a migrated or duplicated
+aggregate: no backfill is required, and closed historical children remain
+queryable.
+
+A carried FAIL is detected, not blindly made blocking. Its underlying finding
+is re-evaluated against the current full branch, original task, and common scope
+bar. If the finding no longer clears that bar, the dispatcher explains the
+non-blocking disposition without falsifying the recorded FAIL as a PASS. If it
+still clears the bar, it survives in the revision's closed list even though the
+specialty was untouched this round.
 
 Three fallbacks keep the narrowing honest:
 
@@ -323,6 +392,8 @@ findings.
 
 ```
 parent review stage (qa-dispatcher, auto)
+  ├─ kanna_list_task_children(parent) → closed + open children, oldest first
+  │    └─ select pipelineName=specialty-review, then reduce latest terminal latestRun per review-* agent
   ├─ kanna_create_task {pipeline_name: specialty-review, agent: review-ui,   base_ref: $BRANCH, parent/notify: self,
   │                     display_name: "UI review: <subject> (round n)"}
   ├─ kanna_create_task {pipeline_name: specialty-review, agent: review-sec…, base_ref: $BRANCH, parent/notify: self,
@@ -330,7 +401,7 @@ parent review stage (qa-dispatcher, auto)
   ├─ kanna_wait_task until finished (per child; waitOutcome timeout → call again; notify "TASK <id> DONE" doubles as a wake-up)
   ├─ kanna_get_task → latestRun.status/summary   (succeeded=PASS / failed=FAIL)
   ├─ kanna_close_task (every child, after collecting its verdict)
-  ├─ filter findings against the scope bar (caused by this diff AND blocking)
+  ├─ filter new and carried findings against the scope bar (caused by this diff AND blocking)
   └─ nothing blocking → kanna_complete_stage success → auto-advance to pr
      blocking findings → kanna_request_revision "in progress" with the closed list
        ├─ under budget  → revision round N of M starts
@@ -340,9 +411,10 @@ parent review stage (qa-dispatcher, auto)
 ## Test coverage
 
 - `crates/kanna-tool-catalog/tests/catalog.rs` — the `agent` param is exposed
-  and maps into the create body; `stage` remains rejected.
-- `crates/kanna-cli` — typed `task create --agent` surface matches the
-  catalog; request body serialization includes `agent`.
+  and maps into the create body; `stage` remains rejected; the direct-child
+  list tool maps `task_id` to the task-children endpoint.
+- `crates/kanna-cli` — typed `task create --agent` and `task children
+  --task-id` surfaces match the catalog/API contracts.
 - `crates/kanna-server` `task_creator::tests::core` — the builtin
   `specialized-reviewers`/`specialty-review` pipelines and all four dispatch agents
   resolve from compiled resources; a dispatcher-style create request
@@ -367,7 +439,8 @@ parent review stage (qa-dispatcher, auto)
   `origin: "human"`, which is what exempts a user-requested revision from the
   agent budget.
 - `packages/core` `qa-assets.test.ts` — the new agents satisfy the built-in
-  agent completion-protocol contract (MCP-first with CLI fallback).
+  agent completion-protocol contract, and the dispatcher asset is pinned to
+  MCP-first durable child-history reduction with fail-closed carry-forward.
 
 ### E2E gap
 
@@ -382,5 +455,5 @@ OpenCode free-model live harness, per `pnpm test:agent-cli-compat`
 conventions) that can follow the dispatcher/specialty prompts
 deterministically. Until then, the wiring is proven piecewise by the
 server-boundary tests above: every tool call the dispatcher makes
-(create-with-agent, wait, get-latest-run, close, complete/revise) has direct
-coverage against the real server and DB.
+(list-child-history, create-with-agent, wait, get-latest-run, close,
+complete/revise) has direct coverage against the real server and DB.
