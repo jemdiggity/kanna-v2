@@ -15,6 +15,28 @@ export interface TransferArtifactPayload {
   materialization: TransferArtifactMaterialization;
 }
 
+/**
+ * How the source session ended before its state was staged.
+ *
+ * The SIGINT that finalizes a PTY source is refused outright for *adopted*
+ * sessions — every session older than the running daemon, i.e. every task that
+ * predates an app upgrade (`crates/daemon/src/pty.rs`, fails closed by design).
+ * That is common enough that a hard failure would block all post-upgrade
+ * transfers, so a refused signal or a session that never exits is recorded as a
+ * degradation and carried to the receiver instead of being swallowed.
+ */
+export interface TransferFinalizationState {
+  cleanly_finalized: boolean;
+  degraded_reason: string | null;
+}
+
+/** Bounds what a peer can push into our persisted payload and toasts. */
+const TRANSFER_DEGRADED_REASON_MAX_LENGTH = 512;
+
+export function cleanTransferFinalizationState(): TransferFinalizationState {
+  return { cleanly_finalized: true, degraded_reason: null };
+}
+
 export interface OutgoingTransferPayload {
   target_peer_id: string;
   target_desktop_id: string | null;
@@ -48,6 +70,7 @@ export interface OutgoingTransferPayload {
   };
   recovery: SessionRecoveryState | null;
   artifacts?: TransferArtifactPayload[];
+  finalization: TransferFinalizationState;
 }
 
 export interface BuildOutgoingTransferPayloadInput {
@@ -66,12 +89,69 @@ export interface BuildOutgoingTransferPayloadInput {
   repoRemoteUrl: string | null;
   recovery: SessionRecoveryState | null;
   artifacts?: TransferArtifactPayload[];
+  finalization?: TransferFinalizationState;
   targetHasRepo: boolean;
   bundle: {
     artifactId: string;
     filename: string;
     refName: string | null;
   } | null;
+}
+
+/**
+ * The artifact each provider must ship for a resume to mean anything.
+ *
+ * Claude's conversation is the cwd-keyed transcript, not the
+ * `~/.claude/tasks/<id>` lock directory, so the transcript is the load-bearing
+ * one. Providers absent from this table keep no transferable session state, so
+ * for them an empty artifact list is not a defect.
+ */
+const REQUIRED_SESSION_ARTIFACT_KINDS: Partial<
+  Record<NonNullable<PipelineItem["agent_provider"]>, TransferArtifactKind>
+> = {
+  claude: "session-transcript",
+  codex: "session-rollout",
+  copilot: "session-archive",
+};
+
+export interface SessionArtifactRequirementInput {
+  agentType: string | null;
+  agentProvider: PipelineItem["agent_provider"] | null;
+  resumeSessionId: string | null;
+}
+
+/**
+ * Which artifact kind a transfer of this task must carry, or `null` when a
+ * missing artifact is a legitimate absence: the agent never ran (no session
+ * id), the task is not a PTY session, or the provider keeps nothing to ship.
+ */
+export function requiredSessionArtifactKind(
+  input: SessionArtifactRequirementInput,
+): TransferArtifactKind | null {
+  if (!input.resumeSessionId || !input.agentProvider) return null;
+  if (input.agentType !== "pty") return null;
+  return REQUIRED_SESSION_ARTIFACT_KINDS[input.agentProvider] ?? null;
+}
+
+/**
+ * A transfer promised a resumable session and could not back it. Typed rather
+ * than string-matched because both sides act on it: the source fails the
+ * transfer instead of shipping an artifact-less payload, and the receiver
+ * refuses the import instead of minting a fresh session.
+ */
+export class MissingTransferSessionArtifactError extends Error {
+  readonly missingTransferSessionArtifact = true;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "MissingTransferSessionArtifactError";
+  }
+}
+
+export function isMissingTransferSessionArtifactError(error: unknown): boolean {
+  return error instanceof Error
+    && (error as Error & { missingTransferSessionArtifact?: unknown })
+      .missingTransferSessionArtifact === true;
 }
 
 export interface OutgoingTransferPreflightResult {
@@ -266,6 +346,34 @@ function parseRecoveryState(value: unknown, invalidMessage: string): SessionReco
     cursorVisible: record.cursorVisible,
     savedAt: number("savedAt"),
     sequence: number("sequence"),
+  };
+}
+
+function parseFinalizationState(
+  value: unknown,
+  invalidMessage: string,
+): TransferFinalizationState {
+  // Senders predating this field report nothing; read that as clean rather
+  // than inventing a degradation for every older peer.
+  if (value === undefined || value === null) return cleanTransferFinalizationState();
+  const record = asRecord(value);
+  if (!record) {
+    throw new Error(`${invalidMessage}: finalization must be an object or null`);
+  }
+  const cleanlyFinalized = record.cleanly_finalized ?? record.cleanlyFinalized;
+  if (typeof cleanlyFinalized !== "boolean") {
+    throw new Error(`${invalidMessage}: finalization.cleanly_finalized must be a boolean`);
+  }
+  const degradedReason = readNullableString(
+    record,
+    ["degraded_reason", "degradedReason"],
+    `${invalidMessage}: finalization.degraded_reason must be a string or null`,
+  );
+  return {
+    cleanly_finalized: cleanlyFinalized,
+    degraded_reason: degradedReason === null
+      ? null
+      : degradedReason.slice(0, TRANSFER_DEGRADED_REASON_MAX_LENGTH),
   };
 }
 
@@ -634,6 +742,7 @@ function normalizeOutgoingTransferPayload(
     },
     recovery: parseRecoveryState(payloadRecord.recovery, invalidMessage),
     artifacts,
+    finalization: parseFinalizationState(payloadRecord.finalization, invalidMessage),
   };
 }
 
@@ -701,6 +810,7 @@ export function buildOutgoingTransferPayload(
     },
     recovery: input.recovery,
     artifacts: input.artifacts ?? [],
+    finalization: input.finalization ?? cleanTransferFinalizationState(),
   };
 }
 

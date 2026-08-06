@@ -176,7 +176,10 @@
     "stageSetupFailed": "단계 설정 스크립트 실패",
     "stageNotFound": "파이프라인에서 단계를 찾을 수 없습니다",
     "latestAgentFileHint": "팁: ⌘L을 눌러 에이전트가 언급한 최신 파일을 여세요.",
-    "noTerminalFileLink": "이 터미널에서 파일 링크를 찾을 수 없습니다."
+    "noTerminalFileLink": "이 터미널에서 파일 링크를 찾을 수 없습니다.",
+    "transferFinalizationFailed": "작업 전송에 실패했습니다",
+    "transferFinalizationDegraded": "소스를 정상 종료하지 못한 채 인계했습니다",
+    "transferFinalizationUnclean": "소스 에이전트 세션이 정상적으로 종료되지 않았습니다"
   },
   "tags": {
     "inProgress": "진행 중",

@@ -371,3 +371,85 @@ describe("parseIncomingTransferRequest artifact validation", () => {
     ]))).toThrow(/at most two/i);
   });
 });
+
+describe("transfer finalization state", () => {
+  function requestWithFinalization(finalization: unknown) {
+    return {
+      type: "incoming_transfer_request",
+      transfer_id: "transfer-1",
+      source_peer_id: "peer-source",
+      source_task_id: "task-source",
+      payload: {
+        target_peer_id: "peer-target",
+        target_desktop_id: null,
+        task: {
+          cloud_task_id: "task-source",
+          source_peer_id: "peer-source",
+          source_desktop_id: null,
+          source_task_id: "task-source",
+          resume_session_id: null,
+          prompt: "Fix handoff",
+          stage: "in progress",
+          branch: "task-source",
+          pipeline: "default",
+          display_name: null,
+          base_ref: "origin/main",
+          agent_type: "pty",
+          agent_provider: "claude",
+        },
+        repo: {
+          mode: "reuse-local",
+          remote_url: null,
+          path: "/tmp/repo-1",
+          name: "repo-1",
+          default_branch: "main",
+          bundle: null,
+        },
+        recovery: null,
+        finalization,
+      },
+    };
+  }
+
+  it("reads a peer that predates the field as cleanly finalized", () => {
+    expect(parseIncomingTransferRequest(requestWithFinalization(undefined)).payload.finalization)
+      .toEqual({ cleanly_finalized: true, degraded_reason: null });
+  });
+
+  it("carries a degraded handoff to the receiver", () => {
+    expect(parseIncomingTransferRequest(requestWithFinalization({
+      cleanly_finalized: false,
+      degraded_reason: "the source agent session did not exit within 1500ms",
+    })).payload.finalization).toEqual({
+      cleanly_finalized: false,
+      degraded_reason: "the source agent session did not exit within 1500ms",
+    });
+  });
+
+  it("bounds a reason a peer could otherwise make unbounded", () => {
+    const finalization = parseIncomingTransferRequest(requestWithFinalization({
+      cleanly_finalized: false,
+      degraded_reason: "x".repeat(4096),
+    })).payload.finalization;
+    expect(finalization.degraded_reason).toHaveLength(512);
+  });
+
+  it("rejects a finalization state that is not a boolean verdict", () => {
+    expect(() => parseIncomingTransferRequest(requestWithFinalization({
+      cleanly_finalized: "no",
+    }))).toThrow(/cleanly_finalized must be a boolean/);
+  });
+
+  it("defaults a built payload to a clean finalization", () => {
+    expect(buildOutgoingTransferPayload({
+      sourcePeerId: "peer-source",
+      sourceTaskId: "task-source",
+      targetPeerId: "peer-target",
+      item: buildPayload().task as never,
+      repoRemoteUrl: null,
+      recovery: null,
+      targetHasRepo: true,
+      bundle: null,
+    }).finalization).toEqual({ cleanly_finalized: true, degraded_reason: null });
+  });
+});

@@ -42,12 +42,13 @@ use super::tasks::{
     set_task_notify, update_task,
 };
 use super::transfers::{
-    claim_pending_incoming_transfer, complete_task_transfer, fail_pending_incoming_transfer,
-    get_task_transfer, insert_task_transfer, insert_task_transfer_provenance,
-    list_incoming_transfer_cleanup_candidates, list_pending_incoming_transfers,
-    mark_incoming_transfer_awaiting_acknowledgment, mark_incoming_transfer_importing,
-    mark_incoming_transfer_sidecar_cleanup_completed, reject_task_transfer,
-    renew_incoming_transfer_claim, set_task_cloud_identity, update_task_transfer_payload,
+    claim_pending_incoming_transfer, complete_task_transfer, fail_outgoing_transfer,
+    fail_pending_incoming_transfer, get_task_transfer, insert_task_transfer,
+    insert_task_transfer_provenance, list_incoming_transfer_cleanup_candidates,
+    list_pending_incoming_transfers, mark_incoming_transfer_awaiting_acknowledgment,
+    mark_incoming_transfer_importing, mark_incoming_transfer_sidecar_cleanup_completed,
+    reject_task_transfer, renew_incoming_transfer_claim, set_task_cloud_identity,
+    update_task_transfer_payload,
 };
 use super::window_workspace::mutate_window_workspace;
 use axum::body::Body;
@@ -263,6 +264,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/transfers/{transfer_id}/actions/fail",
             post(fail_pending_incoming_transfer),
+        )
+        .route(
+            "/v1/transfers/{transfer_id}/actions/fail-outgoing",
+            post(fail_outgoing_transfer),
         )
         .route(
             "/v1/transfers/{transfer_id}/actions/sidecar-cleanup-complete",

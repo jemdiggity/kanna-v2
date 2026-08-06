@@ -37,13 +37,16 @@ vi.mock("../listen", () => ({
   listen: vi.fn(async () => () => undefined),
 }));
 
+const toastMock = vi.hoisted(() => ({
+  toasts: { value: [] },
+  dismiss: vi.fn(),
+  info: vi.fn(),
+  warning: vi.fn(),
+  error: vi.fn(),
+}));
+
 vi.mock("../composables/useToast", () => ({
-  useToast: () => ({
-    toasts: { value: [] },
-    dismiss: vi.fn(),
-    warning: vi.fn(),
-    error: vi.fn(),
-  }),
+  useToast: () => toastMock,
 }));
 
 function buildRepo(): Repo {
@@ -401,6 +404,20 @@ function createTransferDb(initial: {
       const row = tables.task_transfer.find((transfer) => transfer.id === transferId);
       if (!row) return false;
       row.status = "rejected";
+      row.completed_at = new Date().toISOString();
+      row.error = reason;
+      return true;
+    },
+    failOutgoingTaskTransfer: async (transferId: string, reason: string) => {
+      const row = tables.task_transfer.find((transfer) => transfer.id === transferId);
+      if (
+        !row
+        || row.direction !== "outgoing"
+        || ["completed", "rejected", "failed"].includes(String(row.status))
+      ) {
+        return false;
+      }
+      row.status = "failed";
       row.completed_at = new Date().toISOString();
       row.error = reason;
       return true;
@@ -1139,7 +1156,7 @@ describe("pushTaskToPeer", () => {
     });
   });
 
-  it("includes the source resume session id in the outgoing payload", async () => {
+  it("refuses to push a resumable session it cannot ship rather than committing an artifact-less payload", async () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");
     const store = useKannaStore();
@@ -1168,20 +1185,15 @@ describe("pushTaskToPeer", () => {
       return null;
     });
 
-    await expect(store.pushTaskToPeer("task-source", "peer-target")).resolves.toBeUndefined();
+    await expect(store.pushTaskToPeer("task-source", "peer-target")).rejects.toThrow(
+      /carries no|could not be found/,
+    );
 
+    // `artifacts: []` beside a valid resume id is the exact payload that lost a
+    // conversation in the field; it must never reach the commit phase.
     const prepareCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer");
-    expect(prepareCalls[1]?.[1]).toMatchObject({
-      payload: {
-        phase: "commit",
-        transferId: "transfer-123",
-        payload: {
-          task: {
-            resume_session_id: "019d9a8c-9f39-7240-818f-88367a7c31df",
-          },
-        },
-      },
-    });
+    expect(prepareCalls).toHaveLength(1);
+    expect(prepareCalls[0]?.[1]).toMatchObject({ payload: { phase: "preflight" } });
   });
 
   it("stages the local codex rollout file and includes it in the outgoing payload", async () => {
@@ -1299,11 +1311,17 @@ describe("pushTaskToPeer", () => {
       if (cmd === "run_script") {
         return "";
       }
-      if (cmd === "stage_transfer_artifact") {
+      if (cmd === "locate_claude_transcript") {
         return {
-          transferId: "transfer-123",
-          artifactId: "transfer-123-claude-session",
+          absolutePath:
+            "/Users/tester/.claude/projects/-tmp-repo-1--kanna-worktrees-task-task-source/364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+          homeRelPath:
+            ".claude/projects/-tmp-repo-1--kanna-worktrees-task-task-source/364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+          filename: "364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
         };
+      }
+      if (cmd === "stage_transfer_artifact") {
+        return { transferId: "transfer-123", artifactId: args?.artifactId };
       }
       return null;
     });
@@ -1330,13 +1348,15 @@ describe("pushTaskToPeer", () => {
         phase: "commit",
         transferId: "transfer-123",
         payload: {
-          artifacts: [{
-            artifact_id: "transfer-123-claude-session",
-            provider: "claude",
-            kind: "session-archive",
-            materialization: "extract-tar-gz",
-            home_rel_path: ".claude/tasks/364643cc-5e6d-48fc-86ca-ca7764380900",
-          }],
+          artifacts: expect.arrayContaining([
+            expect.objectContaining({
+              artifact_id: "transfer-123-claude-session",
+              provider: "claude",
+              kind: "session-archive",
+              materialization: "extract-tar-gz",
+              home_rel_path: ".claude/tasks/364643cc-5e6d-48fc-86ca-ca7764380900",
+            }),
+          ]),
         },
       },
     });
@@ -2765,95 +2785,33 @@ describe("incoming transfer approval", () => {
     );
   });
 
-  it("falls back to a fresh codex launch when no rollout artifact is available", async () => {
-    setActivePinia(createPinia());
-    const { useKannaStore } = await import("./kanna");
-    const store = useKannaStore();
-    const payload = buildIncomingTransferPayload();
-    payload.task.agent_provider = "codex";
-    payload.task.agent_type = "pty";
-    payload.task.resume_session_id = "019d9a8c-9f39-7240-818f-88367a7c31df";
-    const fakeDb = createTransferDb({
-      transfers: [{
-        id: "transfer-1",
-        direction: "incoming",
-        status: "pending",
-        source_peer_id: "peer-source",
-        target_peer_id: null,
-        source_task_id: "task-source",
-        local_task_id: null,
-        started_at: new Date().toISOString(),
-        completed_at: null,
-        error: null,
-        payload_json: JSON.stringify(payload),
-      }],
-    });
-
-    await store.init(fakeDb);
-
-    mockIncomingTransferApprovalInvoke(payload, async (cmd, args) => {
-      if (cmd === "file_exists") {
-        return (args?.path as string) === "/tmp/repo-1";
-      }
-      if (cmd === "read_text_file") {
-        return "";
-      }
-      if (cmd === "read_builtin_resource") {
-        throw new Error("missing builtin resource");
-      }
-      if (cmd === "git_default_branch") {
-        return "main";
-      }
-      if (cmd === "which_binary") {
-        return args?.name === "codex" ? "/usr/bin/codex" : null;
-      }
-      if (cmd === "get_app_data_dir") {
-        return "/tmp/kanna-mock-data";
-      }
-      if (cmd === "get_pipeline_socket_path") {
-        return "/tmp/kanna.sock";
-      }
-      if (
-        cmd === "git_worktree_add" ||
-        cmd === "acknowledge_incoming_transfer_commit"
-      ) {
-        return null;
-      }
-      if (cmd === "spawn_session") {
-        return null;
-      }
-      throw new Error(`unexpected invoke: ${cmd}`);
-    });
-
-    const localTaskId = await store.approveIncomingTransfer("transfer-1");
-    await flushBackgroundSetup();
-
-    expect(fakeDb.tables.pipeline_item[0]).toMatchObject({
-      id: localTaskId,
-      agent_session_id: null,
-    });
-    const spawnCall = invokeMock.mock.calls.find(([cmd]) => cmd === "spawn_session");
-    expect(spawnCall).toBeTruthy();
-    expect(JSON.stringify(spawnCall?.[1])).not.toContain("codex resume");
-  });
-
+  // A payload that promises a resumable session and ships no way to resume it
+  // used to mint a fresh one, silently discarding the conversation the source
+  // machine had already given up. Refusing is the only honest answer: the
+  // source still holds the only copy.
   it.each([
     {
       provider: "claude" as const,
       resumeSessionId: "364643cc-5e6d-48fc-86ca-ca7764380900",
-      forbiddenText: "--resume 364643cc-5e6d-48fc-86ca-ca7764380900",
+      missingKind: "session-transcript",
       binary: "claude",
     },
     {
       provider: "copilot" as const,
       resumeSessionId: "5fc2bd17-1d1b-4ae9-bed8-011fa4011100",
-      forbiddenText: "--resume=5fc2bd17-1d1b-4ae9-bed8-011fa4011100",
+      missingKind: "session-archive",
       binary: "copilot",
     },
-  ])("falls back to a fresh $provider launch when no session artifact is available", async ({
+    {
+      provider: "codex" as const,
+      resumeSessionId: "019d9a8c-9f39-7240-818f-88367a7c31df",
+      missingKind: "session-rollout",
+      binary: "codex",
+    },
+  ])("refuses a $provider import that resumes a session it cannot restore", async ({
     provider,
     resumeSessionId,
-    forbiddenText,
+    missingKind,
     binary,
   }) => {
     setActivePinia(createPinia());
@@ -2915,16 +2873,14 @@ describe("incoming transfer approval", () => {
       throw new Error(`unexpected invoke: ${cmd}`);
     });
 
-    const localTaskId = await store.approveIncomingTransfer("transfer-1");
+    await expect(store.approveIncomingTransfer("transfer-1")).rejects.toThrow(
+      `carries no ${missingKind} artifact`,
+    );
     await flushBackgroundSetup();
 
-    expect(fakeDb.tables.pipeline_item[0]).toMatchObject({
-      id: localTaskId,
-    });
-    expect(fakeDb.tables.pipeline_item[0]?.agent_session_id).not.toBe(resumeSessionId);
-    const spawnCall = invokeMock.mock.calls.find(([cmd]) => cmd === "spawn_session");
-    expect(spawnCall).toBeTruthy();
-    expect(JSON.stringify(spawnCall?.[1])).not.toContain(forbiddenText);
+    // No destination task at all — a fresh session here is the data loss.
+    expect(fakeDb.tables.pipeline_item).toHaveLength(0);
+    expect(invokeMock).not.toHaveBeenCalledWith("spawn_session", expect.anything());
   });
 
   it("imports a transferred claude session archive before resuming", async () => {
@@ -2937,14 +2893,27 @@ describe("incoming transfer approval", () => {
     payload.task.agent_provider = "claude";
     payload.task.agent_type = "pty";
     payload.task.resume_session_id = "364643cc-5e6d-48fc-86ca-ca7764380900";
-    payload.artifacts = [{
-      artifact_id: "artifact-claude-session",
-      filename: "claude-session.tar.gz",
-      provider: "claude",
-      kind: "session-archive",
-      materialization: "extract-tar-gz",
-      home_rel_path: ".claude/tasks/364643cc-5e6d-48fc-86ca-ca7764380900",
-    }];
+    payload.artifacts = [
+      {
+        artifact_id: "artifact-claude-session",
+        filename: "claude-session.tar.gz",
+        provider: "claude",
+        kind: "session-archive",
+        materialization: "extract-tar-gz",
+        home_rel_path: ".claude/tasks/364643cc-5e6d-48fc-86ca-ca7764380900",
+      },
+      // The transcript is what makes the resume legal at all; the archive rides
+      // along for its highwatermark.
+      {
+        artifact_id: "artifact-claude-transcript",
+        filename: "364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+        provider: "claude",
+        kind: "session-transcript",
+        materialization: "copy-file",
+        home_rel_path:
+          ".claude/projects/-tmp-repo-1--kanna-worktrees-task-task-source/364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+      },
+    ];
     const fakeDb = createTransferDb({
       transfers: [{
         id: "transfer-1",
@@ -2990,8 +2959,10 @@ describe("incoming transfer approval", () => {
       if (cmd === "fetch_transfer_artifact") {
         return {
           transferId: "transfer-1",
-          artifactId: "artifact-claude-session",
-          path: "/tmp/fetched-claude-session.tar.gz",
+          artifactId: args?.artifactId,
+          path: args?.artifactId === "artifact-claude-transcript"
+            ? "/tmp/fetched-claude-transcript.jsonl"
+            : "/tmp/fetched-claude-session.tar.gz",
         };
       }
       if (cmd === "read_env_var") {
@@ -3149,6 +3120,59 @@ describe("incoming transfer approval", () => {
     );
   });
 
+  it("tells the receiving operator when the source could not be shut down cleanly", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const payload = buildIncomingTransferPayload() as ReturnType<typeof buildIncomingTransferPayload> & {
+      finalization?: Record<string, unknown>;
+    };
+    payload.finalization = {
+      cleanly_finalized: false,
+      degraded_reason: "the source agent session could not be signalled to finish",
+    };
+    const fakeDb = createTransferDb({
+      transfers: [{
+        id: "transfer-1",
+        direction: "incoming",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: null,
+        source_task_id: "task-source",
+        local_task_id: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(payload),
+      }],
+    });
+
+    await store.init(fakeDb);
+    toastMock.warning.mockClear();
+
+    mockIncomingTransferApprovalInvoke(payload, async (cmd, args) => {
+      if (cmd === "file_exists") return (args?.path as string) === "/tmp/repo-1";
+      if (cmd === "read_text_file") return "";
+      if (cmd === "read_builtin_resource") throw new Error("missing builtin resource");
+      if (cmd === "git_default_branch") return "main";
+      if (cmd === "which_binary") return args?.name === "claude" ? "/usr/bin/claude" : null;
+      if (cmd === "get_app_data_dir") return "/tmp/kanna-mock-data";
+      if (cmd === "get_pipeline_socket_path") return "/tmp/kanna.sock";
+      if (cmd === "git_worktree_add" || cmd === "acknowledge_incoming_transfer_commit") return null;
+      if (cmd === "spawn_session") return null;
+      throw new Error(`unexpected invoke: ${cmd}`);
+    });
+
+    // The task still arrives — a degraded handoff is not a failed one — but the
+    // operator who now owns it is told, on this machine too.
+    await expect(store.approveIncomingTransfer("transfer-1")).resolves.toEqual(expect.any(String));
+    await flushBackgroundSetup();
+
+    expect(toastMock.warning).toHaveBeenCalledWith(
+      expect.stringContaining("could not be signalled to finish"),
+    );
+  });
+
   it("imports a transferred copilot session archive before resuming", async () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");
@@ -3259,16 +3283,11 @@ describe("incoming transfer approval", () => {
     );
   });
 
+  // A destination that already holds the provider's session-state directory is
+  // a legitimate skip, not a failure — nothing was lost, the state is simply
+  // already here. Claude is deliberately absent: its conversation lives in the
+  // transcript, so a pre-existing lock directory must not veto a resume.
   it.each([
-    {
-      provider: "claude" as const,
-      binary: "claude",
-      resumeSessionId: "364643cc-5e6d-48fc-86ca-ca7764380900",
-      artifactId: "artifact-claude-session",
-      artifactPath: "/tmp/fetched-claude-session.tar.gz",
-      homeRelPath: ".claude/tasks/364643cc-5e6d-48fc-86ca-ca7764380900",
-      forbiddenText: "--resume 364643cc-5e6d-48fc-86ca-ca7764380900",
-    },
     {
       provider: "copilot" as const,
       binary: "copilot",
@@ -3554,8 +3573,19 @@ describe("source transfer finalization", () => {
     store.items = [sourceItem];
     loadSessionRecoveryStateMock.mockResolvedValue(null);
 
-    invokeMock.mockImplementation(async (cmd) => {
-      if (cmd === "signal_session") return null;
+    invokeMock.mockImplementation(async (cmd, args) => {
+      if (cmd === "read_env_var") return "/Users/tester";
+      if (cmd === "file_exists") return true;
+      if (cmd === "list_dir") {
+        const path = args?.path;
+        if (path === "/Users/tester/.codex/sessions") return ["2026"];
+        if (path === "/Users/tester/.codex/sessions/2026") return ["04"];
+        if (path === "/Users/tester/.codex/sessions/2026/04") return ["18"];
+        if (path === "/Users/tester/.codex/sessions/2026/04/18") {
+          return ["rollout-2026-04-18T06-27-04-019d-initial.jsonl"];
+        }
+        return [];
+      }
       return null;
     });
 
@@ -3568,8 +3598,151 @@ describe("source transfer finalization", () => {
       signal: "SIGINT",
     });
     expect(result.transferId).toBe("transfer-123");
-    expect(result.finalizedCleanly).toBe(false);
     expect(result.payload.task.source_task_id).toBe("task-source");
+    // The session never exited inside the wait, so the handoff is degraded —
+    // recorded on the payload the receiver reads, not just logged here.
+    expect(result.finalizedCleanly).toBe(false);
+    expect(result.payload.finalization).toEqual({
+      cleanly_finalized: false,
+      degraded_reason: "the source agent session did not exit within 1500ms",
+    });
+  });
+
+  it("fails the transfer and leaves the source session running when the conversation cannot be staged", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const sourceItem = buildItem();
+    sourceItem.agent_session_id = "364643cc-5e6d-48fc-86ca-ca7764380900";
+    const outgoingPayload = buildOutgoingTransferPayload({
+      sourcePeerId: "peer-source",
+      sourceTaskId: sourceItem.id,
+      targetPeerId: "peer-target",
+      item: sourceItem,
+      repoPath: "/tmp/repo-1",
+      repoName: "repo-1",
+      repoDefaultBranch: "main",
+      repoRemoteUrl: null,
+      recovery: null,
+      artifacts: [],
+      targetHasRepo: true,
+      bundle: null,
+    });
+    const fakeDb = createTransferDb({
+      repos: [buildRepo()],
+      items: [sourceItem],
+      transfers: [{
+        id: "transfer-no-transcript",
+        direction: "outgoing",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: "peer-target",
+        source_task_id: sourceItem.id,
+        local_task_id: sourceItem.id,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(outgoingPayload),
+      }],
+    });
+
+    await store.init(fakeDb);
+    store.repos = [buildRepo()];
+    store.items = [sourceItem];
+    loadSessionRecoveryStateMock.mockResolvedValue(null);
+
+    invokeMock.mockImplementation(async (cmd) => {
+      if (cmd === "read_env_var") return "/Users/tester";
+      if (cmd === "file_exists") return true;
+      // No transcript for this worktree — the shape that shipped `artifacts: []`
+      // beside a valid resume id and lost 2.1 MB of conversation.
+      if (cmd === "locate_claude_transcript") return null;
+      return null;
+    });
+
+    // The refusal lands before any wait: nothing has been signalled yet.
+    await expect(store.finalizeOutgoingTransfer("transfer-no-transcript"))
+      .rejects.toThrow("no transcript exists");
+
+    const row = fakeDb.tables.task_transfer[0];
+    expect(row).toMatchObject({ status: "failed" });
+    expect(String(row?.error)).toContain("no transcript exists");
+    // The payload on the row is the pre-finalization one: an artifact-less
+    // finalized payload must never be persisted.
+    expect(JSON.parse(String(row?.payload_json)).artifacts).toEqual([]);
+    // The source agent was never signalled, so its task is intact and running.
+    expect(invokeMock).not.toHaveBeenCalledWith("signal_session", expect.anything());
+    expect(fakeDb.tables.pipeline_item[0]?.closed_at).toBeNull();
+  });
+
+  it("records a refused finalization signal as a degradation instead of swallowing it", async () => {
+    vi.useFakeTimers();
+
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const sourceItem = buildItem();
+    sourceItem.agent_session_id = null;
+    const outgoingPayload = buildOutgoingTransferPayload({
+      sourcePeerId: "peer-source",
+      sourceTaskId: sourceItem.id,
+      targetPeerId: "peer-target",
+      item: sourceItem,
+      repoPath: "/tmp/repo-1",
+      repoName: "repo-1",
+      repoDefaultBranch: "main",
+      repoRemoteUrl: null,
+      recovery: null,
+      artifacts: [],
+      targetHasRepo: true,
+      bundle: null,
+    });
+    const fakeDb = createTransferDb({
+      repos: [buildRepo()],
+      items: [sourceItem],
+      transfers: [{
+        id: "transfer-adopted",
+        direction: "outgoing",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: "peer-target",
+        source_task_id: sourceItem.id,
+        local_task_id: sourceItem.id,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(outgoingPayload),
+      }],
+    });
+
+    await store.init(fakeDb);
+    store.repos = [buildRepo()];
+    store.items = [sourceItem];
+    loadSessionRecoveryStateMock.mockResolvedValue(null);
+
+    // What the daemon does for every session it adopted through a handoff —
+    // i.e. every task older than the running daemon, so every task that
+    // survived an app upgrade.
+    invokeMock.mockImplementation(async (cmd) => {
+      if (cmd === "signal_session") {
+        throw new Error("cannot signal adopted session");
+      }
+      return null;
+    });
+
+    const finalizePromise = store.finalizeOutgoingTransfer("transfer-adopted");
+    await vi.advanceTimersByTimeAsync(1500);
+    const result = await finalizePromise;
+
+    // Degraded, not failed: the transcript is appended continuously, so the
+    // conversation still crosses. Blocking here would block every transfer
+    // after an app upgrade.
+    expect(result.finalizedCleanly).toBe(false);
+    expect(result.payload.finalization.cleanly_finalized).toBe(false);
+    expect(result.payload.finalization.degraded_reason).toContain(
+      "could not be signalled to finish",
+    );
+    expect(result.payload.finalization.degraded_reason).toContain("adopted session");
   });
 
   it("stops finalization before snapshot persistence after delivery ownership is lost", async () => {
@@ -3620,6 +3793,15 @@ describe("source transfer finalization", () => {
     invokeMock.mockImplementation(async (cmd) => {
       if (cmd === "read_env_var") return "/Users/tester";
       if (cmd === "file_exists") return true;
+      if (cmd === "locate_claude_transcript") {
+        return {
+          absolutePath:
+            "/Users/tester/.claude/projects/-tmp-repo-1--kanna-worktrees-task-task-source/claude-session-owner-lost.jsonl",
+          homeRelPath:
+            ".claude/projects/-tmp-repo-1--kanna-worktrees-task-task-source/claude-session-owner-lost.jsonl",
+          filename: "claude-session-owner-lost.jsonl",
+        };
+      }
       return null;
     });
 

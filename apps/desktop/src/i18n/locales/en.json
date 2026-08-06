@@ -176,7 +176,10 @@
     "stageSetupFailed": "Stage setup script failed",
     "stageNotFound": "Stage not found in pipeline",
     "latestAgentFileHint": "Tip: Press ⌘L to open the latest file mentioned by the agent.",
-    "noTerminalFileLink": "No file link found in this terminal."
+    "noTerminalFileLink": "No file link found in this terminal.",
+    "transferFinalizationFailed": "Task transfer failed",
+    "transferFinalizationDegraded": "Task transfer handed off without a clean shutdown",
+    "transferFinalizationUnclean": "the source agent session did not end cleanly"
   },
   "tags": {
     "inProgress": "In Progress",
