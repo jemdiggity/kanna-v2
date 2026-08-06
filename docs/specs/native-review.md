@@ -156,8 +156,8 @@ setup path frictionless and tested:
    `.kanna/agents/pr/AGENT.md` or `.kanna/agents/pr/EXTEND.md` apply even
    when the stage selects `agent: pr@push-only`.
 2. **Contracts.** A role is defined by the tool calls it must make —
-   `pr` ends with `kanna_complete_stage` (+ `metadata.pr_url` when a PR
-   exists); `merge` consumes a `MERGE <branch> → <target>` signal;
+   `pr` ends with `kanna_complete_stage` (+ resolved `metadata.pr_url` when a PR exists); `merge`
+   consumes a server-owned candidate handoff;
    `review` ends with `kanna_complete_stage` or `kanna_request_revision`
    (file:line-formatted feedback). Contracts are documented per role and
    enforced by tests: prompt renders, referenced tools exist in the

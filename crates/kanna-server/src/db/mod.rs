@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod analytics;
-mod approval;
 mod blockers;
 mod create_intents;
 mod notifications;
@@ -26,11 +25,6 @@ mod worktrees;
 
 #[allow(unused_imports)]
 pub use analytics::RepoAnalytics;
-#[allow(unused_imports)]
-pub use approval::{
-    ApprovalDeliveryReservation, ApprovalGate, ApprovalGateState, ApprovalHold,
-    ApprovalOverrideRecord, ExplicitStageDisposition,
-};
 pub use blockers::ReplaceTaskBlockersError;
 #[allow(unused_imports)]
 pub use operator_events::NewOperatorEvent;
@@ -95,6 +89,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "044_task_approval_authorization",
     "045_agent_signal_protocol",
     "046_completion_and_merge_delivery_binding",
+    "047_remove_approval_gate",
 ];
 
 #[derive(Debug, Serialize)]
@@ -382,13 +377,6 @@ pub struct ClaimedTaskNotification {
 pub struct OpenAgentTask {
     pub task_id: String,
     pub session_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MergeSignalRecipient {
-    pub task_id: String,
-    pub session_id: String,
-    pub protocol: i64,
 }
 
 #[derive(Debug)]
@@ -725,7 +713,7 @@ fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         "#,
     )?;
-    create_task_approval_lineage_schema(conn)
+    Ok(())
 }
 
 fn has_migration(conn: &Connection, id: &str) -> Result<bool, rusqlite::Error> {
@@ -1500,9 +1488,8 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
                   AND succeeded.rowid > failed.rowid
               );
 
-            -- One-time compatibility for successful diagnostic posts that
-            -- explicitly carried the old prose disposition. New writes use
-            -- CompleteStageRequest.disposition and never depend on parsing.
+            -- Historical compatibility for the approval projection introduced
+            -- by this migration. Migration 047 removes that projection.
             INSERT OR IGNORE INTO task_approval_hold
               (task_id, run_id, scope_stage, kind, summary, created_at)
             SELECT
@@ -1601,6 +1588,24 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             "TEXT",
         )?;
         add_column(conn, "agent_signal_protocol", "session_id", "TEXT")
+    })?;
+
+    run_migration(conn, "047_remove_approval_gate", |conn| {
+        conn.execute_batch(
+            r#"
+            DROP TRIGGER IF EXISTS stage_run_failed_main_approval_hold_insert;
+            DROP TRIGGER IF EXISTS stage_run_failed_main_approval_hold_update;
+            DROP TRIGGER IF EXISTS stage_run_structured_approval_hold_insert;
+            DROP TRIGGER IF EXISTS stage_run_structured_approval_hold_update;
+            DROP TRIGGER IF EXISTS stage_run_success_main_resolve_approval_hold_insert;
+            DROP TRIGGER IF EXISTS stage_run_success_main_resolve_approval_hold_update;
+            DROP TABLE task_approval_authorization;
+            DROP TABLE task_approval_hold;
+            DROP TABLE task_approval_override;
+            DROP TABLE IF EXISTS agent_signal_protocol;
+            DROP TABLE IF EXISTS merge_handoff_delivery;
+            "#,
+        )
     })?;
 
     Ok(())

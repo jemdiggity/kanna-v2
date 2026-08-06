@@ -21,15 +21,12 @@ use super::repos::{
 use super::settings::{delete_setting, get_setting, put_cloud_transfer_identity, put_setting};
 use super::signal_agent::{signal_agent, signal_merge_handoff};
 use super::snapshot::get_snapshot;
-use super::state::{
-    AppState, AuthenticatedHttpInvoke, AuthenticatedHumanHttpInvoke, HttpInvokeResponse,
-    TunneledHttpInvoke,
-};
+use super::state::{AppState, AuthenticatedHttpInvoke, HttpInvokeResponse, TunneledHttpInvoke};
 use super::status::status;
 use super::task_actions::{
-    abort_task_creation, advance_stage, close_task, complete_stage, override_approval_hold,
-    pin_task, reopen_task, reorder_pinned_tasks, request_revision, rerun_stage, resume_task,
-    run_merge_agent, set_task_parent, set_task_pipeline, unpin_task,
+    abort_task_creation, advance_stage, close_task, complete_stage, pin_task, reopen_task,
+    reorder_pinned_tasks, request_revision, rerun_stage, resume_task, run_merge_agent,
+    set_task_parent, set_task_pipeline, unpin_task,
 };
 use super::task_activity::{apply_runtime_status, mark_task_read};
 use super::task_agent_session::put_task_agent_session;
@@ -176,10 +173,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/tasks/{task_id}/actions/complete-stage",
             post(complete_stage),
-        )
-        .route(
-            "/v1/tasks/{task_id}/actions/override-approval",
-            post(override_approval_hold),
         )
         .route(
             "/v1/tasks/{task_id}/actions/signal-merge-handoff",
@@ -437,14 +430,7 @@ async fn dispatch_http_invoke_with_access(
             .extensions_mut()
             .insert(super::task_files::AuthenticatedTaskFileAccess);
     }
-    if let Some(actor) = authenticated_human_actor {
-        request
-            .extensions_mut()
-            .insert(AuthenticatedHumanHttpInvoke {
-                actor,
-                channel: "authenticated_relay".into(),
-            });
-    }
+    let _ = authenticated_human_actor;
 
     match router(state).oneshot(request).await {
         Ok(response) => response_to_http_invoke(response).await,

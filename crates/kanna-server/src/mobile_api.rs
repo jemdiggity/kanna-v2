@@ -126,14 +126,6 @@ pub struct TaskDetail {
     /// them would make an empty list mean two different things.
     #[serde(default)]
     pub child_task_ids: Vec<String>,
-    /// Server-owned approval state derived from the task's stage-run lineage.
-    /// A held gate cannot enter an approval/merge boundary without a separate
-    /// recorded human override.
-    pub approval_gate: crate::db::ApprovalGate,
-    /// Server-derived from durable merge-agent history/protocol. Unlike the
-    /// mutable pipeline name, this remains true when a compatible pipeline
-    /// switch leaves the protected merge session running.
-    pub operator_terminal_input: bool,
     #[serde(default)]
     pub blocked_by_task_ids: Vec<String>,
 }
@@ -262,32 +254,6 @@ pub struct CompleteStageRequest {
     pub status: String,
     pub summary: String,
     pub metadata: Option<serde_json::Value>,
-    /// A structured hold disposition. Omitted successful main results can
-    /// resolve an earlier hold in the same stage; posts never can.
-    #[serde(default)]
-    pub disposition: Option<StageDisposition>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum StageDisposition {
-    NeedsHumanInput,
-    NotMergeCandidate,
-}
-
-impl StageDisposition {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NeedsHumanInput => "needs_human_input",
-            Self::NotMergeCandidate => "not_merge_candidate",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ApprovalOverrideRequest {
-    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -557,14 +523,6 @@ impl MobileApi {
             ._db
             .list_child_task_ids(&item.id)
             .map_err(|e| format!("db error: {}", e))?;
-        let approval_gate = self
-            ._db
-            .task_approval_gate(&item.id)
-            .map_err(|e| format!("db error: {}", e))?;
-        let operator_terminal_input = self
-            ._db
-            .is_open_agent_task(&item.id, "merge")
-            .map_err(|e| format!("db error: {}", e))?;
         Ok(Some(map_task_detail(
             item,
             repo.as_ref(),
@@ -574,8 +532,6 @@ impl MobileApi {
                 resolved_model,
                 resolved_effort,
                 child_task_ids,
-                approval_gate,
-                operator_terminal_input,
                 blocked_by_task_ids,
             },
         )))
@@ -706,8 +662,6 @@ struct TaskDetailRelations {
     resolved_model: Option<String>,
     resolved_effort: Option<String>,
     child_task_ids: Vec<String>,
-    approval_gate: crate::db::ApprovalGate,
-    operator_terminal_input: bool,
     blocked_by_task_ids: Vec<String>,
 }
 
@@ -722,8 +676,6 @@ fn map_task_detail(
         resolved_model,
         resolved_effort,
         child_task_ids,
-        approval_gate,
-        operator_terminal_input,
         blocked_by_task_ids,
     } = relations;
     let prompt = item.prompt.clone();
@@ -795,8 +747,6 @@ fn map_task_detail(
         revision_limit,
         parent_task_id: item.parent_task_id,
         child_task_ids,
-        approval_gate,
-        operator_terminal_input,
         blocked_by_task_ids,
     }
 }

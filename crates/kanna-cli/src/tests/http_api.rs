@@ -15,7 +15,7 @@ async fn advance_stage_posts_to_task_action_path_with_empty_json_body() {
 }
 
 #[tokio::test]
-async fn signal_merge_handoff_posts_only_candidate_details_to_the_gated_route() {
+async fn signal_merge_handoff_posts_the_resolved_policy_request_details() {
     let response = http_json_response(
         "200 OK",
         r#"{"taskId":"merge-master-task","created":false}"#,

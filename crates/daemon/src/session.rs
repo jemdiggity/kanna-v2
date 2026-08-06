@@ -290,17 +290,10 @@ impl SessionHandle {
         self.state.lock().await.operator_input_only
     }
 
-    pub async fn classify_input(&self, operator_input_only: bool) -> bool {
+    pub async fn classify_input(&self, operator_input_only: bool) {
         let mut state = self.state.lock().await;
-        if state.input_policy_classified {
-            if operator_input_only {
-                state.operator_input_only = true;
-            }
-            return operator_input_only || !state.operator_input_only;
-        }
         state.operator_input_only = operator_input_only;
         state.input_policy_classified = true;
-        true
     }
 
     pub async fn stream_control(&self) -> Option<StreamControl> {
@@ -1141,12 +1134,12 @@ mod tests {
         let handle = SessionHandle::new(record);
 
         assert!(handle.operator_input_only().await);
-        assert!(handle.classify_input(false).await);
+        handle.classify_input(false).await;
         assert!(!handle.operator_input_only().await);
-        assert!(handle.classify_input(true).await);
+        handle.classify_input(true).await;
         assert!(handle.operator_input_only().await);
-        assert!(!handle.classify_input(false).await);
-        assert!(handle.operator_input_only().await);
+        handle.classify_input(false).await;
+        assert!(!handle.operator_input_only().await);
         handle.kill().await.unwrap();
     }
 

@@ -74,8 +74,6 @@ async fn spawn_prepared_task_classified(
     daemon: &mut DaemonClient,
     prepared: PreparedTaskSpawn,
 ) -> Result<CreatedTask, SpawnPreparedError> {
-    let operator_input_only = prepared.stage_agent.as_deref() == Some("merge")
-        && matches!(&prepared.session, PreparedSessionSpawn::Pty { .. });
     if let Some(snapshot) = prepared.recovery_snapshot.as_ref() {
         seed_recovery_snapshot(daemon, &prepared.session_id, snapshot)
             .await
@@ -87,7 +85,7 @@ async fn spawn_prepared_task_classified(
         prepared.env,
         None,
         prepared.session,
-        operator_input_only,
+        false,
     );
 
     let event =
@@ -502,9 +500,6 @@ fn record_stage_transition_run(
             Some(prepared.completion_transition.as_str()),
             true,
         )?;
-        if prepared.run_kind == "post" && prepared.run_stage == "approve" {
-            db.record_approval_authorization(&prepared.task_id, run_id)?;
-        }
         if let Some(reason) = prepared.resume_fallback_reason.as_deref() {
             db.set_stage_run_resume_fallback_reason(run_id, reason)?;
         }
@@ -806,10 +801,6 @@ pub(crate) async fn dispatch_prepared_post_for_api(
             .map_err(|e| format!("db error: {}", e))?;
             if let Some(inherited_run_id) = inherited_run_id.as_deref() {
                 advance_server_completion_context(daemon.daemon_dir(), inherited_run_id, &run_id);
-            }
-            if prepared.run_stage == "approve" {
-                db.record_approval_authorization(&task_id, &run_id)
-                    .map_err(|e| format!("approval authorization error: {e}"))?;
             }
             Ok(crate::mobile_api::TaskActionResponse {
                 task_id,

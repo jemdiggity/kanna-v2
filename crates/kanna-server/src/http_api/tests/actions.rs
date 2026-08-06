@@ -1756,7 +1756,7 @@ async fn unblock_task_route_removes_blockers() {
 }
 
 #[tokio::test]
-async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically() {
+async fn pr_completion_starts_dormant_dependent_from_current_branch_optimistically() {
     use kanna_daemon::protocol::{AgentProvider, Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -2017,7 +2017,9 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
                         "runId": "task-a-pr-run",
                         "status": "success",
                         "summary": "PR is ready",
-                        "metadata": { "pr_url": "https://github.com/acme/repo/pull/7" }
+                        "metadata": {
+                            "pr_url": "https://github.com/acme/repo/pull/7"
+                        }
                     })
                     .to_string(),
                 ))
@@ -2061,7 +2063,8 @@ async fn complete_pr_stage_with_pr_url_starts_dormant_dependent_optimistically()
         blocker.pr_url.as_deref(),
         Some("https://github.com/acme/repo/pull/7")
     );
-    // ...while the dependent already runs, stacked on the renamed branch.
+    // ...while the dependent already runs, stacked on the recorded remote PR
+    // head rather than the different local worktree branch.
     let dependent_item = db.get_pipeline_item(&dependent.task_id).unwrap().unwrap();
     assert_eq!(dependent_item.base_ref.as_deref(), Some("task-a-pr"));
     assert_eq!(dependent_item.activity.as_deref(), Some("working"));
@@ -5004,10 +5007,6 @@ async fn delayed_completion_cannot_finish_a_replacement_run() {
             .status,
         "running"
     );
-    assert_eq!(
-        db.task_approval_gate("task-1").unwrap().state,
-        crate::db::ApprovalGateState::Held
-    );
 }
 
 #[tokio::test]
@@ -5738,262 +5737,6 @@ async fn complete_stage_for_already_closed_task_is_idempotent() {
         .unwrap();
     let completed: TaskActionResponse = from_slice(&body).unwrap();
     assert_eq!(completed.task_id, "task-1");
-}
-
-#[tokio::test]
-async fn advance_stage_on_builtin_default_pr_stage_parks_behind_approve_post_until_completion() {
-    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use std::sync::Arc;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use tokio::io::{AsyncWriteExt, BufReader};
-    use tokio::net::UnixListener;
-
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    // No .kanna directory: the pipeline resolves to the compiled built-in
-    // default definition, whose pr stage ships the approve post.
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-builtin-approve-{unique}"));
-    init_test_git_repo(&repo_root);
-    assert!(Command::new("git")
-        .args(["branch", "task-source"])
-        .current_dir(&repo_root)
-        .status()
-        .unwrap()
-        .success());
-
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-builtin-approve-daemon-{unique}"));
-    std::fs::create_dir_all(&daemon_dir).unwrap();
-    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
-    let _ = std::fs::remove_file(&socket_path);
-    let daemon_listener = UnixListener::bind(&socket_path).unwrap();
-    // Tolerant multi-connection fake daemon: log every command, answer each
-    // with a sane default, and keep serving until the test ends. The advance
-    // injects the post prompt as Input; the post-completion close later kills
-    // sessions on its own connections.
-    let commands_log: Arc<tokio::sync::Mutex<Vec<DaemonCommand>>> = Arc::default();
-    let log_for_daemon = commands_log.clone();
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = daemon_listener.accept().await else {
-                break;
-            };
-            let log = log_for_daemon.clone();
-            tokio::spawn(async move {
-                let (read_half, mut write_half) = stream.into_split();
-                let mut reader = BufReader::new(read_half);
-                loop {
-                    let Some(command) =
-                        read_test_daemon_command_optional(&mut reader, &mut write_half).await
-                    else {
-                        break;
-                    };
-                    let response = match &command {
-                        DaemonCommand::Spawn { session_id, .. } => DaemonEvent::SessionCreated {
-                            session_id: session_id.clone(),
-                        },
-                        DaemonCommand::SpawnAgent { session_id, .. } => {
-                            DaemonEvent::SessionCreated {
-                                session_id: session_id.clone(),
-                            }
-                        }
-                        _ => DaemonEvent::Ok,
-                    };
-                    log.lock().await.push(command);
-                    if write_half
-                        .write_all(
-                            format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
-                        )
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            });
-        }
-    });
-
-    let config = Config {
-        relay_url: "wss://relay.example".to_string(),
-        device_token: "device-token".to_string(),
-        firebase_project_id: "kanna-local".to_string(),
-        firebase_auth_emulator_url: None,
-        firebase_firestore_emulator_host: None,
-        daemon_dir: daemon_dir.to_string_lossy().to_string(),
-        db_path: Db::test_db_path(&format!("http-api-builtin-approve-{unique}")),
-        kanna_cli_path: None,
-        desktop_id: "desktop-1".to_string(),
-        desktop_secret: Some("desktop-secret".to_string()),
-        desktop_name: "Studio Mac".to_string(),
-        version: "test-version".to_string(),
-        environment: "development".to_string(),
-        lan_host: "127.0.0.1".to_string(),
-        lan_port: 48120,
-        transfer_port: 4455,
-        pairing_store_path: format!("/tmp/kanna-pairings-builtin-approve-{unique}.json"),
-    };
-    let db = Db::open_for_tests(&config.db_path).unwrap();
-    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
-        .unwrap();
-    db.insert_test_pipeline_item(
-        "task-1",
-        "repo-1",
-        "Ship the feature",
-        Some("Ship the feature"),
-        "pr",
-        "2026-07-11 00:00:00",
-    )
-    .unwrap();
-    db.update_test_pipeline_item_stage_context("task-1", "task-source", "default", None, "claude")
-        .unwrap();
-    // The pr agent session is live: the approve post is injected into it.
-    db.insert_stage_run(crate::db::NewStageRun {
-        id: "run-pr-main",
-        task_id: "task-1",
-        stage: "pr",
-        kind: "main",
-        agent: Some("pr"),
-        agent_provider: Some("claude"),
-        model: None,
-        effort: None,
-        status: "running",
-        result: None,
-        feedback: None,
-        session_id: Some("task-1"),
-        provider_session_id: None,
-        cwd: None,
-        resumed_from_run_id: None,
-    })
-    .unwrap();
-    drop(db);
-
-    let app = super::router(Arc::new(super::AppState::new(config.clone())));
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/v1/tasks/task-1/actions/advance-stage")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    // The advance dispatches the approve post: a running post run appears
-    // while the task stays open and parked at pr.
-    let db = Db::open(&config.db_path).unwrap();
-    let mut post_run = None;
-    for _ in 0..100 {
-        let runs = db.list_stage_runs_for_task("task-1").unwrap();
-        if let Some(run) = runs
-            .iter()
-            .find(|run| run.kind == "post" && run.status == "running")
-        {
-            post_run = Some(run.clone());
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    let post_run = post_run.expect("advance never dispatched a running approve post run");
-    assert_eq!(post_run.stage, "approve");
-    let task = db.get_pipeline_item("task-1").unwrap().unwrap();
-    assert_eq!(task.stage.as_deref(), Some("pr"));
-    assert!(
-        task.closed_at.is_none(),
-        "the advance must not close the task while the approve post runs"
-    );
-
-    let duplicate = app
-        .clone()
-        .oneshot(
-            Request::post("/v1/tasks/task-1/actions/advance-stage")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(duplicate.status(), StatusCode::OK);
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let task_after_duplicate = db.get_pipeline_item("task-1").unwrap().unwrap();
-    assert_eq!(task_after_duplicate.stage.as_deref(), Some("pr"));
-    assert!(
-        task_after_duplicate.closed_at.is_none(),
-        "a running-post snapshot must make duplicate advance idempotent"
-    );
-    assert_eq!(
-        db.list_stage_runs_for_task("task-1")
-            .unwrap()
-            .iter()
-            .filter(|run| run.kind == "post" && run.stage == "approve")
-            .count(),
-        1,
-    );
-
-    // The approve prompt went to the live session as typed input.
-    let logged = commands_log.lock().await;
-    let prompt_input = logged
-        .iter()
-        .find_map(|command| match command {
-            DaemonCommand::Input { session_id, data } if session_id == "task-1" => {
-                let text = String::from_utf8(data.clone()).unwrap_or_default();
-                if text.contains("Approve the PR") {
-                    Some(text)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        })
-        .expect("approve post prompt was never sent to the live session");
-    assert!(
-        prompt_input.contains("Approve the PR for branch task-source"),
-        "post prompt must substitute $BRANCH, got: {prompt_input}"
-    );
-    assert!(
-        prompt_input.contains("signal the merge master"),
-        "post prompt must carry the merge-master handoff, got: {prompt_input}"
-    );
-    drop(logged);
-
-    // The post's successful completion — not the advance — performs the
-    // final-stage transition and closes the task.
-    let response = app
-        .oneshot(
-            Request::post("/v1/tasks/task-1/actions/complete-stage")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "runId": post_run.id,
-                        "status": "success",
-                        "summary": "PR approved and merge master signaled"
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let task = wait_for_task_closed(&db, "task-1").await;
-    assert_eq!(task.stage.as_deref(), Some("pr"));
-    let runs = db.list_stage_runs_for_task("task-1").unwrap();
-    let finished_post = runs
-        .iter()
-        .find(|run| run.kind == "post" && run.stage == "approve")
-        .unwrap();
-    assert_eq!(finished_post.status, "succeeded");
-
-    let _ = std::fs::remove_file(&socket_path);
-    let _ = std::fs::remove_dir_all(&daemon_dir);
-    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 /// The advance-stage handler's prepare step resolves repository definitions

@@ -30,7 +30,6 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - `POST /v1/tasks/{task_id}/actions/request-revision`
 - `POST /v1/tasks/{task_id}/actions/close`
 - `POST /v1/tasks/{task_id}/actions/advance-stage`
-- `POST /v1/tasks/{task_id}/actions/override-approval` (authenticated human action; not in the agent tool catalog)
 - `POST /v1/tasks/{task_id}/actions/signal-merge-handoff`
 - `POST /v1/tasks/{task_id}/actions/rerun-stage`
 - `POST /v1/tasks/{task_id}/actions/run-merge-agent`
@@ -261,110 +260,33 @@ Delivery is claimed once via `pipeline_item.notified_at` and goes through the
 same two-step input helper as `POST /v1/tasks/{task_id}/input`. All of it is
 server/daemon-side; it must not depend on the desktop event bridge being open.
 
-## Approval Lineage Gate
+## Merge Handoff
 
-Approval is a server-owned projection of durable stage results, not an agent
-interpretation of `$PREV_RESULT`. A failed main `stage_run`, a structured
-`needs_human_input` disposition, or a structured `not_merge_candidate`
-disposition creates a hold. Successful post runs never resolve a hold, so a
-commit agent can preserve diagnostic work without laundering the main agent's
-failure. The migration also recognizes legacy successful post results that
-explicitly contain “not a merge candidate”; this prose check is compatibility
-for existing histories, not the steady-state contract.
+The generic repo-agent signal endpoint, task-input API, desktop task terminal,
+KSP/relay steering, and the approve-post helper all deliver ordinary requests
+to the `merge` singleton. The resolved repo agent definition independently
+accepts or declines each request under the repository's checked-in policy.
+Kanna does not interpret review history, bind a saved PR candidate, police
+branch names, or attach an approval attestation.
 
-The task detail response exposes `approvalGate` with one of three states:
+The approve-post helper resolves the task's repository and sends this compact
+ordinary request through the same singleton signal path:
 
-- `eligible`: there are no unresolved holds.
-- `held`: `holds` identifies the originating run, stage, kind, summary, and
-  creation time. An approval-boundary advance returns `409 Conflict`.
-- `overridden`: the active holds are covered by a durable override whose
-  record includes the available actor identity, authenticated channel, time,
-  and mandatory reason.
+```text
+MERGE <head> -> <base> [TASK <task-id>] [PR <url>]: <summary>
+```
 
-Resolution is stage-scoped. Only a later explicit, successful **main** result
-in the same stage resolves that stage's older holds. This is how a genuine
-revision or rerun supersedes stale failure. An inferred success, a main result
-from another stage, or any commit/PR/approve post cannot resolve it. A later
-hold is newer than an existing override and requires a new decision.
+New merge sessions accept ordinary terminal input. On startup and after daemon
+replacement, kanna-server clears the retired native-terminal-only
+classification from inherited PTYs so older merge singletons also use the
+normal input path. This compatibility cleanup is unrelated to daemon process
+handoff and descriptor transfer, which continue to preserve PTY sessions
+across desktop/server/daemon restarts and upgrades.
 
-The generic repo-agent signal endpoint and the task-input API reject
-natural-language agent requests and caller-built `KANNA_MERGE_HANDOFF`
-messages for the `merge` singleton. The signal endpoint accepts only the exact
-former automated `MERGE ... [TASK ...]` shape from a
-surviving pre-upgrade approve session, parses its task id and candidate, and
-routes it through the same server-owned gate as the dedicated endpoint. Human
-conversation is trusted only when it arrives from the native operator terminal
-channel, whose provenance is separate from task-input/MCP/KSP traffic. KSP
-terminal input is rejected for merge sessions even on loopback. Ordinary
-desktop terminals retain the persistent KSP control path. Server-derived
-merge-agent history selects the protected terminal even after a compatible
-pipeline-name change. That terminal alone uses timeout-bounded `OperatorInput`
-on the daemon socket: the daemon rejects generic `Input`/`InputNoReply` and
-authenticates the desktop by PID, start time, and executable path. Canonical
-server-built merge envelopes use `SystemInput` pinned to the exact server PID,
-start time, and executable. The authenticated desktop hands that identity to a
-replacement daemon when adopting a surviving server; an initial server may
-bootstrap only as the desktop's direct child. A same-executable agent process
-is not server authority. Before binding the LAN API or relay, kanna-server must
-receive the active daemon generation's versioned protected-input
-acknowledgement and classify every inherited PTY from durable task state. It
-repeats that full pass after every daemon replacement. Classification is
-lifecycle-fenced against the handoff snapshot, and merge PTYs cannot cross a
-legacy-v2 handoff; an old server therefore cannot silently create or inherit an
-unfenced merge terminal on a new daemon.
-New task-bound
-pipeline handoffs use the dedicated route.
-
-`POST /v1/tasks/{task_id}/actions/override-approval` is deliberately absent
-from the MCP/tool catalog and agent CLI. It requires a non-empty reason. The
-native desktop uses a private Unix control socket whose peer PID, process start
-time, and executable path are pinned and rechecked by the server; the reusable
-desktop bearer secret and loopback/KSP tunnel are never override authority.
-Peer eligibility is checked before reading a request, and the initial request
-frame has a fixed deadline so idle or unauthorized local connections cannot
-retain server tasks and descriptors indefinitely.
-When the desktop adopts a healthy surviving server, it must first send an
-explicit `adopt_desktop` request on that socket. The server transfers authority
-only after the old pinned PID/start identity is no longer live and the new peer
-has the same kernel-resolved executable path; there is no reusable handoff
-secret. Override requests re-attempt that adoption once so
-a same-version desktop restart has an in-product recovery path.
-Paired LAN devices require their device credential and the explicit
-human-action marker. An authenticated relay invocation carries the verified
-Firebase user id. The server records that actual identity and channel rather
-than inventing a person. Repeating the ordinary advance action is never an
-override.
-
-Approval posts must call the catalog-backed
-`POST /v1/tasks/{task_id}/actions/signal-merge-handoff`, not generic singleton
-signaling. The server requires the task's currently running approve post and a
-durable authorization snapshot captured when that post began, binds the
-candidate repo/branch/target/PR to the task, checks the gate again under the
-task mutation lease, and constructs the canonical
-`KANNA_MERGE_HANDOFF` JSON delivered to the merge singleton. Its `approval`
-member is machine-readable `eligible` or `overridden`; the latter carries the
-durable override record. A caller cannot supply or forge that member. The
-bundled merge agent holds legacy agent-sent merge lines and malformed override
-handoffs as defense in depth.
-
-Upgrade compatibility is negotiated per exact surviving merge singleton
-session. New merge sessions record protocol version 1 against their daemon
-session id and receive `KANNA_MERGE_HANDOFF`. A session
-created before this contract has no capability row and receives the old
-server-validated `MERGE ... [TASK ...]` form for clean eligible lineages only;
-an override requires restarting that singleton. A surviving old approve post
-may submit its exact legacy structured line through the generic signal route,
-but the server parses it and runs the same task-bound authorization checks.
-Natural-language agent calls to the generic merge signal or task-input routes
-are rejected. Delivery is reserved to that exact task/session/protocol,
-recorded only after the daemon acknowledges it, and quarantined rather than
-duplicated if the recipient changes after acknowledgement. Failures before
-acknowledgement release the reservation for retry. A repo-scoped delivery lease
-serializes singleton selection, the complete text-plus-Enter envelope, and the
-durable acknowledgement across approvals. Once daemon submission begins, a
-lost Input or Spawn response is uncertain acknowledgement: the reservation and
-prepared singleton remain quarantined and are never treated as safely
-retryable.
+The native desktop still uses a private Unix control socket for desktop
+adoption. Peer eligibility is checked before reading a request, and the initial
+request frame has a fixed deadline so idle or unauthorized local connections
+cannot retain server tasks and descriptors indefinitely.
 
 Stage completion is bound to the run id fixed in the spawned agent's protected
 environment and an immutable run-scoped completion-context file. A successor
@@ -395,8 +317,7 @@ The CLI remains the shell/script interface; MCP is the structured agent-tool int
 
 - `kanna-cli task send-input --task-id <TASK_ID> --message <MESSAGE> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/input` and prints `{ "ok": true }` as JSON.
 - `kanna-cli task advance-stage --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/advance-stage` and prints the action response as JSON.
-- `kanna-cli task signal-merge --task-id <TASK_ID> --branch <HEAD> --target <BASE> --summary <SUMMARY> [--pr-url <URL>] [--server-url <URL>]` calls the gated merge-handoff route. The server, not the CLI, attaches approval state.
-- `kanna-cli stage-complete ... --disposition needs_human_input|not_merge_candidate` records a structured hold when the result cannot be approved normally.
+- `kanna-cli task signal-merge --task-id <TASK_ID> --branch <HEAD> --target <BASE> --summary <SUMMARY> [--pr-url <URL>] [--server-url <URL>]` sends an ordinary request to the repository's merge agent.
 - `kanna-cli task resume --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/resume`. It resumes a dead latest run's provider conversation when its durable transcript and original worktree pass the shared revision-resume checks; otherwise the replacement run records `resumeFallbackReason`.
 - `kanna-cli task rerun-stage --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/rerun-stage`. This is always an explicit fresh provider conversation, not recovery.
 

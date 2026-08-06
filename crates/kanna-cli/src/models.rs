@@ -114,8 +114,6 @@ pub(crate) struct TaskDetail {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) child_task_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) approval_gate: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) latest_run: Option<TaskLatestRun>,
 }
 
@@ -210,8 +208,6 @@ pub(crate) struct CompleteStageRequest {
     pub(crate) summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) metadata: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) disposition: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]

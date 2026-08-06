@@ -8,7 +8,6 @@ fn builds_complete_stage_payload() {
         "success".to_string(),
         "review passed".to_string(),
         Some(json!({ "coverage": "sufficient" })),
-        None,
     );
 
     assert_eq!(
@@ -18,28 +17,6 @@ fn builds_complete_stage_payload() {
             "status": "success",
             "summary": "review passed",
             "metadata": { "coverage": "sufficient" },
-        })
-    );
-}
-
-#[test]
-fn builds_structured_non_merge_candidate_stage_payload() {
-    let request = build_complete_stage_request(
-        Some("run-2".to_string()),
-        None,
-        "success".to_string(),
-        "diagnostic work committed".to_string(),
-        None,
-        Some("not_merge_candidate".to_string()),
-    );
-
-    assert_eq!(
-        serde_json::to_value(request).unwrap(),
-        json!({
-            "runId": "run-2",
-            "status": "success",
-            "summary": "diagnostic work committed",
-            "disposition": "not_merge_candidate",
         })
     );
 }

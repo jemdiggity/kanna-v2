@@ -17,10 +17,10 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
 }
 
 describe("remote transport", () => {
-  it("propagates an approval hold from the owning desktop without retrying", async () => {
+  it("propagates an advance-stage conflict from the owning desktop without retrying", async () => {
     const held = new RemoteTransportError(
       "remote_invocation_failed",
-      "Remote desktop request failed (409): approval held"
+      "Remote desktop request failed (409): stage conflict"
     );
     const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockRejectedValue(held);
     const transport = createRemoteTransport({

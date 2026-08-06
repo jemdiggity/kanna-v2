@@ -2480,7 +2480,7 @@ fn builtin_merge_agent_accepts_natural_language_open_pr_requests() {
 
     assert!(definition
         .prompt
-        .contains("Natural-language merge requests"));
+        .contains("Natural-language messages delivered"));
     assert!(definition.prompt.contains("merge all open"));
     assert!(definition.prompt.contains("gh pr list"));
 

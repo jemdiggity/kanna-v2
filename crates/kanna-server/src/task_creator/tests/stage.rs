@@ -2230,25 +2230,6 @@ fn write_post_pipeline_fixtures(repo_root: &std::path::Path) {
     publish_origin_main(repo_root, "publish post pipeline definitions");
 }
 
-fn add_approval_post_to_fixture(repo_root: &std::path::Path) {
-    std::fs::create_dir_all(repo_root.join(".kanna/agents/approve")).unwrap();
-    let pipeline_path = repo_root.join(".kanna/pipelines/default.json");
-    let mut pipeline: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&pipeline_path).unwrap()).unwrap();
-    pipeline["stages"][1]["post"] = serde_json::json!({
-        "name": "approve",
-        "agent": "approve",
-        "prompt": "Approve $PREV_RESULT"
-    });
-    std::fs::write(&pipeline_path, pipeline.to_string()).unwrap();
-    std::fs::write(
-        repo_root.join(".kanna/agents/approve/AGENT.md"),
-        "---\nname: approve\ndescription: Signal merge\nagent_provider: claude\n---\nApprove agent.",
-    )
-    .unwrap();
-    publish_origin_main(repo_root, "add approval post fixture");
-}
-
 fn seed_post_pipeline_task(config: &Config, db: &Db, repo_root: &std::path::Path) {
     assert!(Command::new("git")
         .args(["branch", "task-source"])
@@ -2283,134 +2264,6 @@ fn seed_post_pipeline_task(config: &Config, db: &Db, repo_root: &std::path::Path
     db.update_test_pipeline_item_stage_context("task-1", "task-source", "default", None, "claude")
         .unwrap();
     let _ = config;
-}
-
-#[test]
-fn failed_main_commit_pr_approve_lineage_stops_at_approval_without_override() {
-    let repo_root = init_git_repo("approval-lineage-regression");
-    write_post_pipeline_fixtures(&repo_root);
-    add_approval_post_to_fixture(&repo_root);
-    let config = test_config("approval-lineage-regression");
-    let db = Db::open_for_tests(&config.db_path).unwrap();
-    seed_post_pipeline_task(&config, &db, &repo_root);
-
-    db.insert_stage_run(NewStageRun {
-        id: "run-main-failed",
-        task_id: "task-1",
-        stage: "in progress",
-        kind: "main",
-        agent: Some("implement"),
-        agent_provider: Some("claude"),
-        model: None,
-        effort: None,
-        status: "failed",
-        result: Some("Needs human input. Not a merge candidate."),
-        feedback: Some("Needs human input. Not a merge candidate."),
-        session_id: Some("task-1"),
-        provider_session_id: None,
-        cwd: None,
-        resumed_from_run_id: None,
-    })
-    .unwrap();
-    match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
-        PreparedStageTransition::Post(post) => assert_eq!(post.run_stage, "commit"),
-        _ => panic!("failed implementation may still dispatch its diagnostic commit post"),
-    }
-    db.insert_stage_run(NewStageRun {
-        id: "run-commit-success",
-        task_id: "task-1",
-        stage: "commit",
-        kind: "post",
-        agent: Some("commit"),
-        agent_provider: Some("claude"),
-        model: None,
-        effort: None,
-        status: "succeeded",
-        result: Some("Diagnostic work committed; original criteria not met"),
-        feedback: Some("Diagnostic work committed; original criteria not met"),
-        session_id: Some("task-1"),
-        provider_session_id: None,
-        cwd: None,
-        resumed_from_run_id: None,
-    })
-    .unwrap();
-    db.apply_explicit_stage_disposition(crate::db::ExplicitStageDisposition {
-        task_id: "task-1",
-        run_id: "run-commit-success",
-        run_stage: "commit",
-        run_kind: "post",
-        run_status: "succeeded",
-        logical_stage: "in progress",
-        disposition: Some("not_merge_candidate"),
-        summary: "Diagnostic work committed; original criteria not met",
-    })
-    .unwrap();
-
-    let pr_run = match prepare_stage_completion_for_api(&db, &config, "task-1", Some("post"), None)
-        .unwrap()
-        .expect("commit completion should advance to pr")
-    {
-        PreparedStageTransition::Run(run) => run,
-        _ => panic!("commit completion should prepare the pr main run"),
-    };
-    let pr_branch = pr_run
-        .forked_workspace()
-        .expect("pr transition should fork a workspace")
-        .branch
-        .clone();
-    db.update_pipeline_item_stage_and_branch("task-1", "pr", &pr_branch)
-        .unwrap();
-    db.insert_stage_run(NewStageRun {
-        id: "run-pr-success",
-        task_id: "task-1",
-        stage: "pr",
-        kind: "main",
-        agent: Some("pr"),
-        agent_provider: Some("claude"),
-        model: None,
-        effort: None,
-        status: "succeeded",
-        result: Some("PR created"),
-        feedback: Some("PR created"),
-        session_id: Some("task-1"),
-        provider_session_id: None,
-        cwd: None,
-        resumed_from_run_id: None,
-    })
-    .unwrap();
-    db.apply_explicit_stage_disposition(crate::db::ExplicitStageDisposition {
-        task_id: "task-1",
-        run_id: "run-pr-success",
-        run_stage: "pr",
-        run_kind: "main",
-        run_status: "succeeded",
-        logical_stage: "pr",
-        disposition: None,
-        summary: "PR created",
-    })
-    .unwrap();
-
-    let error = match prepare_advance_stage_for_api(&db, &config, "task-1") {
-        Ok(_) => panic!("approve post must not dispatch while lineage is held"),
-        Err(error) => error,
-    };
-    assert!(error.starts_with("approval held:"), "error: {error}");
-
-    assert!(db
-        .record_approval_override(
-            "task-1",
-            "override-1",
-            "desktop-1",
-            "desktop_loopback",
-            "Merge only the independently useful diagnostic fixes",
-        )
-        .unwrap());
-    match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
-        PreparedStageTransition::Post(post) => assert_eq!(post.run_stage, "approve"),
-        _ => panic!("recorded override should permit approve post dispatch"),
-    }
-
-    let _ = std::fs::remove_dir_all(&repo_root);
 }
 
 #[test]
@@ -2606,42 +2459,6 @@ fn prepare_advance_stage_swaps_after_succeeded_post() {
     assert_ne!(fork.branch, "task-source");
     assert!(std::path::Path::new(&fork.worktree_path).is_dir());
     assert_eq!(run.cwd, fork.worktree_path);
-
-    let _ = std::fs::remove_dir_all(&repo_root);
-}
-
-#[test]
-fn prepare_advance_stage_does_not_treat_repeated_advance_as_post_override() {
-    let repo_root = init_git_repo("advance-does-not-override-running-post");
-    write_post_pipeline_fixtures(&repo_root);
-
-    let config = test_config("advance-does-not-override-running-post");
-    let db = Db::open_for_tests(&config.db_path).unwrap();
-    seed_post_pipeline_task(&config, &db, &repo_root);
-    db.insert_stage_run(NewStageRun {
-        id: "run-post",
-        task_id: "task-1",
-        stage: "commit",
-        kind: "post",
-        agent: Some("implement"),
-        agent_provider: Some("claude"),
-        model: None,
-        effort: None,
-        status: "running",
-        result: None,
-        feedback: None,
-        session_id: Some("task-1"),
-        provider_session_id: None,
-        cwd: None,
-        resumed_from_run_id: None,
-    })
-    .unwrap();
-
-    let error = match prepare_advance_stage_for_api(&db, &config, "task-1") {
-        Ok(_) => panic!("repeated advance must not bypass a running post"),
-        Err(error) => error,
-    };
-    assert!(error.contains("post is still running"), "error: {error}");
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

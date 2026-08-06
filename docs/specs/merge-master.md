@@ -7,11 +7,9 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
 ## Principles
 
 - **git ≠ gh.** Pull requests are forge artifacts; git is the substrate.
-  Everything a merge needs exists forge-free in Kanna's model: the head
-  branch (`pipeline_item.branch`, rename-aware via worktree HEAD), the
-  target (`base_ref` when stacked, else the repo default branch), and the
-  diff (⌘D branch scope). `pr_url` is optional metadata a verdict may
-  carry — never load-bearing.
+  Workspace lifecycle continues to use `pipeline_item.branch`, while a
+  successful PR stage records `pr_url` for the next stage. The engine remains
+  forge-neutral: the user-space agents resolve the live PR details when needed.
 - **Forge behavior lives in user-space.** Agents and pipelines are
   `.kanna/` files the user owns. The stock flow opens an ordinary PR; a repo
   that opts into `pr@draft-pr` also owns what readies the draft before the
@@ -32,15 +30,12 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
 
 1. Task walks the pipeline to `pr` (manual). The pr agent published the
    branch per the user's forge convention (draft PR, or plain push) and
-   reported `pr_url` metadata if one exists.
+   reported the final `pr_url` after any reuse or retargeting.
 2. Human reviews **in Kanna**: ⌘D branch diff. Verdicts are stage actions:
    - request changes → `request-revision` with feedback (exists);
-   - approve → ⌘S, which first checks the server-owned approval-lineage gate
-     and dispatches the pr stage's **approve post** only when the lineage is
-     eligible or has a recorded human override. The post signals through the
-     gated merge-handoff route; the server emits canonical
-     `KANNA_MERGE_HANDOFF` JSON with the approval state. Post success at the
-     final stage closes the task.
+   - approve → ⌘S, which dispatches the pr stage's **approve post**. The post
+     resolves the live PR and signals the merge master through the dedicated
+     handoff route. Post success at the final stage closes the task.
 3. The merge master folds the request into its picture, merges when safe
    (git-first; `gh` only when a PR URL was provided), and reports risks.
 
@@ -51,35 +46,11 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   task running `{agent}` in the repo, creating it (pinned, message as
   first prompt) when absent. The approve post addresses "the merge master"
   without knowing a task id; the engine owns singleton existence.
-- **Durable approval lineage**: failed/needs-human/not-merge-candidate results
-  create holds. Only a later explicit successful main result in the same stage
-  resolves them; posts and unrelated later stages do not. Task detail exposes
-  the projection as `approvalGate`.
-- **Explicit human override**:
-  `POST /v1/tasks/{task_id}/actions/override-approval` requires an authenticated
-  native desktop process channel, paired device, or authenticated relay user
-  and a reason, and records the available actor, channel, and time. The native
-  channel pins and rechecks process identity over a private Unix socket. A
-  replacement desktop can adopt a surviving server only after the old pinned
-  process is dead and the new peer has the same kernel-resolved executable;
-  loopback/KSP traffic and reusable desktop secrets are not authority. Desktop
-  merge-terminal bytes use the same timeout-bounded, process-authenticated
-  native channel, while merge-session KSP input is rejected and ordinary
-  terminals retain KSP.
-  Ordinary advance requests and agent tools cannot claim override or merge
-  authority.
-- **Gated merge handoff**:
-  `POST /v1/tasks/{task_id}/actions/signal-merge-handoff` rechecks the gate and
-  requires an active authorized approve post, binds the handoff to that task's
-  repo/branch/target/PR, and creates the machine-readable singleton message.
-  It refuses unresolved holds and includes the complete override record when
-  one exists. Surviving pre-upgrade approve and merge sessions use a
-  server-validated eligible-only legacy envelope; overrides require a
-  protocol-v1 merge session. Capability, reservation, acknowledgement, and
-  durable delivery all bind to the same task/session under a repo-scoped lease.
-  Explicit daemon errors before submission acknowledgement remain retryable;
-  transport response loss after Input or Spawn begins is quarantined as
-  uncertain and never automatically duplicated.
+- **Explicit merge handoff**:
+  `POST /v1/tasks/{task_id}/actions/signal-merge-handoff` resolves the task's
+  repository and uses the ordinary singleton signal path to send the supplied
+  task, PR, head, base, and summary. It does not interpret stage results,
+  compare branch names with saved metadata, or attest approval eligibility.
 - Later: a verdict UI on tasks parked at `pr` (request-changes composer →
   request-revision; approve button → advance). Forge-blind — it fires
   stage actions. Line-anchored diff feedback is a follow-up (needs an
@@ -88,8 +59,8 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
 
 ## User-space work (reference implementations, all `.kanna/` files)
 
-- pr AGENT.md: create the PR (draft only via the opt-in `pr@draft-pr`
-  flavor); report `pr_url` metadata.
+- pr AGENT.md: create or reuse the PR (draft only via the opt-in `pr@draft-pr`
+  flavor); report the final `pr_url` metadata.
 - pr stage `post: approve` in the built-in pipelines (all three ship it):
   signal the merge master.
 - merge AGENT.md rewritten git-first: resolve target from runtime
@@ -99,13 +70,13 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
 
 ## Resolved contract choices
 
-- Signal payload shape is a server-built typed line over the existing session
-  input boundary: `KANNA_MERGE_HANDOFF {json}`. The JSON is canonical and
-  contains server-owned approval state, while delivery retains the mature
-  singleton/session lifecycle.
-- Generic task input, MCP input, and KSP stream steering are never canonical
-  merge authority. Only the server handoff above or an independently
-  provenance-authenticated native operator terminal action may release a hold.
+- Approval posts send the ordinary compact line
+  `MERGE <head> -> <base> [TASK <task-id>] [PR <url>]: <summary>` over the same
+  singleton/session input boundary as other requests. There is no server
+  approval marker or privileged merge transport.
+- Generic task input, MCP input, KSP/relay steering, and approval posts all
+  deliver policy requests for the resolved repo merge agent to accept or
+  decline.
 - ~~Whether the default pipeline ships the approve post or it stays an
   opt-in example. Default-off until the singleton endpoint exists.~~
   Resolved: the singleton signal endpoint

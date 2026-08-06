@@ -183,7 +183,6 @@ Use this branch as the default when the user does not specify a target branch. B
     undoClose: tasks.undoClose,
 
     advanceStage: pipeline.advanceStage,
-    overrideApprovalHold: pipeline.overrideApprovalHold,
     requestRevision: pipeline.requestRevision,
     rerunStage: pipeline.rerunStage,
     loadPipeline: pipeline.loadPipeline,

@@ -5,10 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PipelineItem } from "@kanna/db";
 import { createPipelineApi } from "./pipeline";
 import type { StoreContext } from "./state";
-import {
-  setDesktopServerClientHandlersForTests,
-  updateDesktopServerClientHandlersForTests,
-} from "../services/desktopServerClient";
 
 const { invokeMock, resolveBaseUrlMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(async (_command: string, _args?: Record<string, unknown>) => null),
@@ -45,7 +41,6 @@ describe("advanceStage running-post guard", () => {
   });
 
   afterEach(() => {
-    setDesktopServerClientHandlersForTests(null);
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
@@ -70,70 +65,4 @@ describe("advanceStage running-post guard", () => {
     expect(toastWarning).toHaveBeenCalledWith("toasts.stagePostRunning");
   });
 
-  it("returns a distinct hold result instead of treating a conflict as ordinary blocking", async () => {
-    const fetchMock = vi.fn(async () => new Response(
-      "approval held: unresolved failed_result",
-      { status: 409 },
-    ));
-    vi.stubGlobal("fetch", fetchMock);
-    updateDesktopServerClientHandlersForTests({
-      fetchRepoPipelineDefinition: async () => ({
-        revision: "approval-hold-test",
-        definition: {
-          name: "default",
-          stages: [{
-            name: "pr",
-            policy: { transition: "manual" },
-          }],
-        },
-      }),
-    });
-    const toastWarning = vi.fn();
-    const context = {
-      state: {
-        items: ref([makeItem()]),
-        repos: ref([]),
-        selectedItemId: ref(null),
-        selectedRepoId: ref("repo-1"),
-        lastSelectedItemByRepo: ref({}),
-        pipelineCache: new Map(),
-        agentCache: new Map(),
-      },
-      services: {
-        selectedTaskId: ref(null),
-        sortedItemsForCurrentRepo: ref([makeItem()]),
-      },
-      toast: { warning: toastWarning, error: vi.fn() },
-      tt: (key: string) => key,
-    } as unknown as StoreContext;
-
-    await expect(createPipelineApi(context).advanceStage("task-1")).resolves.toBe("held");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(toastWarning).toHaveBeenCalledWith(
-      "approval held: unresolved failed_result",
-    );
-  });
-
-  it("records a deliberate override through the native desktop authority bridge", async () => {
-    const reloadSnapshot = vi.fn(async () => undefined);
-    const context = {
-      state: {
-        items: ref([makeItem()]),
-        repos: ref([]),
-      },
-      services: { reloadSnapshot },
-      toast: { warning: vi.fn(), error: vi.fn() },
-      tt: (key: string) => key,
-    } as unknown as StoreContext;
-
-    await expect(createPipelineApi(context).overrideApprovalHold(
-      "task-1",
-      "  Accept the diagnostic-only scope  ",
-    )).resolves.toBe(true);
-    expect(invokeMock).toHaveBeenCalledWith("override_approval_hold", {
-      taskId: "task-1",
-      reason: "Accept the diagnostic-only scope",
-    });
-    expect(reloadSnapshot).toHaveBeenCalledTimes(1);
-  });
 });

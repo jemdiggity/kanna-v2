@@ -196,7 +196,6 @@ export interface StoreServices {
   loadPipeline?: (repoId: string, pipelineName: string) => Promise<PipelineDefinition>;
   loadAgent?: (repoId: string, agentName: string) => Promise<AgentDefinition>;
   advanceStage?: (taskId: string, options?: AdvanceStageOptions) => Promise<AdvanceStageResult>;
-  overrideApprovalHold?: (taskId: string, reason: string) => Promise<boolean>;
   requestRevision?: (taskId: string, options: RequestRevisionOptions) => Promise<boolean>;
   rerunStage?: (taskId: string) => Promise<void>;
   spawnShellSession?: (

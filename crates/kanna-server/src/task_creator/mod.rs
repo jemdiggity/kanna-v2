@@ -60,10 +60,12 @@ pub(crate) use lifecycle::{
     prepared_task_id, prune_completion_contexts_on_startup, remove_completion_contexts,
     rerun_prepared_stage_for_api, resolve_legacy_completion_retry_run,
     rollback_prepared_task_for_api, spawn_prepared_stage_run_for_api,
-    spawn_prepared_task_for_api_recording_stage_run,
-    spawn_prepared_task_for_api_recording_stage_run_detailed,
-    spawn_prepared_task_for_api_with_diagnostics, spawn_prepared_workspace_teardown_best_effort,
-    DaemonSessionPresence, PreparedTaskDeliveryError,
+    spawn_prepared_task_for_api_recording_stage_run, spawn_prepared_task_for_api_with_diagnostics,
+    spawn_prepared_workspace_teardown_best_effort, DaemonSessionPresence,
+};
+#[cfg(test)]
+pub(crate) use lifecycle::{
+    spawn_prepared_task_for_api_recording_stage_run_detailed, PreparedTaskDeliveryError,
 };
 pub(crate) use merge::prepare_merge_agent_for_api;
 pub use merge::run_merge_agent;

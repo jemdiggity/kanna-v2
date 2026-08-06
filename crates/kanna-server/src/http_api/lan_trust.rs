@@ -1,6 +1,4 @@
-use super::state::{
-    AppState, AuthenticatedHttpInvoke, AuthenticatedHumanHttpInvoke, TunneledHttpInvoke,
-};
+use super::state::{AppState, AuthenticatedHttpInvoke, TunneledHttpInvoke};
 use crate::pairing::PairingStore;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, FromRequestParts, State};
@@ -12,26 +10,11 @@ use std::sync::Arc;
 
 pub(super) const DEVICE_ID_HEADER: &str = "x-kanna-device-id";
 pub(super) const DEVICE_SECRET_HEADER: &str = "x-kanna-device-secret";
-pub(super) const HUMAN_ACTION_HEADER: &str = "x-kanna-human-action";
-pub(super) const APPROVAL_OVERRIDE_ACTION: &str = "approval-override";
 
 /// Marker inserted when a genuine LAN request presented a paired device's
 /// id + secret and the secret verified against the pairing store.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TrustedLanDeviceAccess;
-
-#[derive(Debug, Clone)]
-struct TrustedLanDeviceIdentity(String);
-
-/// Deliberate human authority for approval overrides. This extractor is not
-/// used by ordinary advance routes. Native desktop overrides use the
-/// peer-authenticated Unix control channel; HTTP accepts only a paired LAN
-/// device or a relay-authenticated human account.
-#[derive(Debug, Clone)]
-pub(super) struct HumanApprovalOverrideAccess {
-    pub(super) actor: String,
-    pub(super) channel: String,
-}
 
 /// Authorization extractor for privileged task controls.
 ///
@@ -81,51 +64,6 @@ impl FromRequestParts<Arc<AppState>> for DesktopLocalAccess {
     }
 }
 
-impl FromRequestParts<Arc<AppState>> for HumanApprovalOverrideAccess {
-    type Rejection = (StatusCode, String);
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &Arc<AppState>,
-    ) -> Result<Self, Self::Rejection> {
-        privileged_task_access(&parts.extensions)?;
-
-        if let Some(identity) = parts.extensions.get::<AuthenticatedHumanHttpInvoke>() {
-            return Ok(Self {
-                actor: identity.actor.clone(),
-                channel: identity.channel.clone(),
-            });
-        }
-        if parts.extensions.get::<TunneledHttpInvoke>().is_some() {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                "approval override requires an authenticated human channel".into(),
-            ));
-        }
-        let deliberate = parts
-            .headers
-            .get(HUMAN_ACTION_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value == APPROVAL_OVERRIDE_ACTION);
-        if !deliberate {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "approval override requires an explicit human action".into(),
-            ));
-        }
-        if let Some(identity) = parts.extensions.get::<TrustedLanDeviceIdentity>() {
-            return Ok(Self {
-                actor: identity.0.clone(),
-                channel: "paired_lan_device".into(),
-            });
-        }
-        Err((
-            StatusCode::UNAUTHORIZED,
-            "desktop approval override requires the native control channel".into(),
-        ))
-    }
-}
-
 fn unauthorized_privileged_task() -> (StatusCode, String) {
     (
         StatusCode::UNAUTHORIZED,
@@ -148,9 +86,6 @@ pub(super) async fn attach_trusted_lan_device(
             if let Ok(store) = PairingStore::load(Path::new(&config.pairing_store_path)) {
                 if store.verify_device_secret(&config.desktop_id, &device_id, &device_secret) {
                     request.extensions_mut().insert(TrustedLanDeviceAccess);
-                    request
-                        .extensions_mut()
-                        .insert(TrustedLanDeviceIdentity(device_id));
                 }
             }
         }

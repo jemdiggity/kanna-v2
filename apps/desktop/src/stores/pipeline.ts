@@ -17,12 +17,11 @@ export interface PipelineApi {
   loadPipeline: (repoId: string, pipelineName: string) => Promise<PipelineDefinition>;
   loadAgent: (repoId: string, agentName: string) => Promise<AgentDefinition>;
   advanceStage: (taskId: string, options?: AdvanceStageOptions) => Promise<AdvanceStageResult>;
-  overrideApprovalHold: (taskId: string, reason: string) => Promise<boolean>;
   requestRevision: (taskId: string, options: RequestRevisionOptions) => Promise<boolean>;
   rerunStage: (taskId: string) => Promise<void>;
 }
 
-export type AdvanceStageResult = "advanced" | "held" | "ignored" | "failed";
+export type AdvanceStageResult = "advanced" | "ignored" | "failed";
 
 export interface RequestRevisionOptions {
   targetStage: string;
@@ -303,10 +302,6 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
         if (!response.ok) {
           const message = await response.text();
           if (response.status === 409) {
-            if (message.startsWith("approval held:")) {
-              context.toast.warning(message);
-              return "held" as const;
-            }
             context.toast.warning(context.tt("mainPanel.taskBlocked"));
             return "ignored" as const;
           }
@@ -330,20 +325,6 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
       console.error("[store] advanceStage: server action failed:", error);
       context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
       return "failed";
-    }
-  }
-
-  async function overrideApprovalHold(taskId: string, reason: string): Promise<boolean> {
-    const normalizedReason = reason.trim();
-    if (!normalizedReason) return false;
-    try {
-      await invoke("override_approval_hold", { taskId, reason: normalizedReason });
-      await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-      return true;
-    } catch (error) {
-      console.error("[store] overrideApprovalHold: server action failed:", error);
-      context.toast.error(`${context.tt("toasts.agentStartFailed")}: ${error instanceof Error ? error.message : error}`);
-      return false;
     }
   }
 
@@ -402,7 +383,6 @@ export function createPipelineApi(context: StoreContext): PipelineApi {
     loadPipeline,
     loadAgent,
     advanceStage,
-    overrideApprovalHold,
     requestRevision,
     rerunStage,
   };

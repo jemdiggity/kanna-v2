@@ -1010,6 +1010,61 @@ fn privileged_input_rejects_a_separate_process_impersonator() {
 }
 
 #[test]
+fn authenticated_server_declassifies_a_legacy_session_for_ordinary_input() {
+    let current_executable = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+    let daemon = DaemonHandle::start_with_env([(
+        "KANNA_SERVER_EXECUTABLE",
+        current_executable.to_str().unwrap(),
+    )]);
+    let mut conn = daemon.connect();
+    let session_id = "ordinary-system-input";
+    conn.send_json(&serde_json::json!({
+        "type": "Spawn",
+        "session_id": session_id,
+        "executable": "/bin/cat",
+        "args": [],
+        "cwd": "/tmp",
+        "env": {},
+        "cols": 80,
+        "rows": 24,
+        "operator_input_only": true
+    }));
+    expect_session_created(&mut conn, session_id);
+
+    conn.send(&Cmd::AuthorizeServer {
+        pid: std::process::id(),
+    });
+    assert!(matches!(conn.recv(), Evt::Ok));
+    conn.send(&Cmd::ClassifyInput {
+        session_id: session_id.to_string(),
+        operator_input_only: false,
+    });
+    assert!(matches!(conn.recv(), Evt::Ok));
+    conn.send(&Cmd::Input {
+        session_id: session_id.to_string(),
+        data: b"ordinary policy request\r".to_vec(),
+    });
+    loop {
+        match conn.recv() {
+            Evt::Ok => break,
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("expected ordinary input acknowledgement, got {other:?}"),
+        }
+    }
+    conn.send(&Cmd::Snapshot {
+        session_id: session_id.to_string(),
+    });
+    let snapshot = loop {
+        match conn.recv() {
+            Evt::Snapshot { snapshot, .. } => break snapshot,
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("expected ordinary session snapshot, got {other:?}"),
+        }
+    };
+    assert!(snapshot.vt.contains("ordinary policy request"));
+}
+
+#[test]
 fn pty_spawn_enxio_reports_live_daemon_occupancy() {
     let daemon = DaemonHandle::start_with_env([("KANNA_TEST_PTY_ENXIO_AFTER", "1")]);
     let mut conn = daemon.connect();
