@@ -333,6 +333,7 @@ pub fn run() {
             commands::transfer::stage_transfer_artifact,
             commands::transfer::fetch_transfer_artifact,
             commands::transfer::materialize_transfer_artifact,
+            commands::transfer::locate_claude_transcript,
             commands::transfer::claim_transfer_event_consumer,
             commands::transfer::release_transfer_event_consumer,
             commands::transfer::acknowledge_transfer_lifecycle_event,

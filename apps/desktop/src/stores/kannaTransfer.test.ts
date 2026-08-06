@@ -162,6 +162,15 @@ function mockIncomingTransferApprovalInvoke(
   });
 }
 
+/** Mirrors the store's pre-creation destination task id derivation. */
+async function destinationTaskIdForTransfer(transferId: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`kanna-transfer-destination:${transferId}`),
+  );
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 async function flushBackgroundSetup(): Promise<void> {
   await Promise.resolve();
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1327,6 +1336,85 @@ describe("pushTaskToPeer", () => {
             kind: "session-archive",
             materialization: "extract-tar-gz",
             home_rel_path: ".claude/tasks/364643cc-5e6d-48fc-86ca-ca7764380900",
+          }],
+        },
+      },
+    });
+  });
+
+  it("ships the claude conversation transcript alongside the session archive", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const fakeDb = createTransferDb({});
+
+    await store.init(fakeDb);
+    store.repos = [buildRepo()];
+    store.items = [buildItem()];
+    store.items[0]!.agent_provider = "claude";
+    store.items[0]!.agent_session_id = "364643cc-5e6d-48fc-86ca-ca7764380900";
+
+    loadSessionRecoveryStateMock.mockResolvedValue(null);
+
+    invokeMock.mockImplementation(async (cmd, args) => {
+      if (cmd === "prepare_outgoing_transfer") {
+        const payload = args?.payload as Record<string, unknown> | undefined;
+        if (payload?.phase === "preflight") {
+          return {
+            transferId: "transfer-123",
+            sourcePeerId: "peer-real-source",
+            targetHasRepo: true,
+          };
+        }
+        return { ok: true };
+      }
+      if (cmd === "read_env_var") return "/Users/tester";
+      // The `~/.claude/tasks/<id>` directory is absent, which is exactly the
+      // shape that used to ship an empty artifact list beside a valid resume id.
+      if (cmd === "file_exists") return false;
+      if (cmd === "locate_claude_transcript") {
+        return {
+          absolutePath:
+            "/Users/tester/.claude/projects/-tmp-repo-1--kanna-worktrees-task-task-source/364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+          homeRelPath:
+            ".claude/projects/-tmp-repo-1--kanna-worktrees-task-task-source/364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+          filename: "364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+        };
+      }
+      if (cmd === "stage_transfer_artifact") {
+        return { transferId: "transfer-123", artifactId: args?.artifactId };
+      }
+      return null;
+    });
+
+    await expect(store.pushTaskToPeer("task-source", "peer-target")).resolves.toBeUndefined();
+
+    expect(invokeMock).toHaveBeenCalledWith("locate_claude_transcript", {
+      worktreePath: "/tmp/repo-1/.kanna-worktrees/task-task-source",
+      sessionId: "364643cc-5e6d-48fc-86ca-ca7764380900",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("stage_transfer_artifact", {
+      transferId: "transfer-123",
+      artifactId: "transfer-123-claude-transcript",
+      path:
+        "/Users/tester/.claude/projects/-tmp-repo-1--kanna-worktrees-task-task-source/364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+      owned: false,
+    });
+
+    const prepareCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer");
+    expect(prepareCalls[1]?.[1]).toMatchObject({
+      payload: {
+        phase: "commit",
+        transferId: "transfer-123",
+        payload: {
+          artifacts: [{
+            artifact_id: "transfer-123-claude-transcript",
+            filename: "364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+            provider: "claude",
+            kind: "session-transcript",
+            materialization: "copy-file",
+            home_rel_path:
+              ".claude/projects/-tmp-repo-1--kanna-worktrees-task-task-source/364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
           }],
         },
       },
@@ -2946,6 +3034,116 @@ describe("incoming transfer approval", () => {
         agentProvider: "claude",
         args: expect.arrayContaining([
           expect.stringContaining("--resume 364643cc-5e6d-48fc-86ca-ca7764380900"),
+        ]),
+      }),
+    );
+  });
+
+  it("re-keys a transferred claude transcript to the destination worktree before resuming", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const sessionId = "364643cc-5e6d-48fc-86ca-ca7764380900";
+    const payload = buildIncomingTransferPayload() as ReturnType<typeof buildIncomingTransferPayload> & {
+      artifacts?: Array<Record<string, unknown>>;
+    };
+    payload.task.agent_provider = "claude";
+    payload.task.agent_type = "pty";
+    payload.task.resume_session_id = sessionId;
+    payload.artifacts = [
+      {
+        artifact_id: "artifact-claude-session",
+        filename: "claude-session.tar.gz",
+        provider: "claude",
+        kind: "session-archive",
+        materialization: "extract-tar-gz",
+        home_rel_path: `.claude/tasks/${sessionId}`,
+      },
+      {
+        artifact_id: "artifact-claude-transcript",
+        filename: `${sessionId}.jsonl`,
+        provider: "claude",
+        kind: "session-transcript",
+        materialization: "copy-file",
+        home_rel_path: `.claude/projects/-tmp-repo-1--kanna-worktrees-task-task-source/${sessionId}.jsonl`,
+      },
+    ];
+    const fakeDb = createTransferDb({
+      transfers: [{
+        id: "transfer-1",
+        direction: "incoming",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: null,
+        source_task_id: "task-source",
+        local_task_id: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(payload),
+      }],
+    });
+
+    await store.init(fakeDb);
+
+    mockIncomingTransferApprovalInvoke(payload, async (cmd, args) => {
+      if (cmd === "file_exists") return (args?.path as string) === "/tmp/repo-1";
+      if (cmd === "read_text_file") return "";
+      if (cmd === "read_builtin_resource") throw new Error("missing builtin resource");
+      if (cmd === "git_default_branch") return "main";
+      if (cmd === "which_binary") return args?.name === "claude" ? "/usr/bin/claude" : null;
+      if (cmd === "get_app_data_dir") return "/tmp/kanna-mock-data";
+      if (cmd === "get_pipeline_socket_path") return "/tmp/kanna.sock";
+      if (cmd === "read_env_var") return "/Users/tester";
+      if (cmd === "fetch_transfer_artifact") {
+        return {
+          transferId: "transfer-1",
+          artifactId: args?.artifactId,
+          path: `/tmp/fetched-${args?.artifactId as string}`,
+        };
+      }
+      if (cmd === "materialize_transfer_artifact") {
+        // A pre-existing `~/.claude/tasks/<id>` lock directory must not veto a
+        // resume whose conversation transcript landed.
+        return args?.kind !== "session-archive";
+      }
+      if (cmd === "git_worktree_add" || cmd === "acknowledge_incoming_transfer_commit") return null;
+      if (cmd === "spawn_session") return null;
+      throw new Error(`unexpected invoke: ${cmd}`);
+    });
+
+    const localTaskId = await store.approveIncomingTransfer("transfer-1");
+    await flushBackgroundSetup();
+
+    // The destination task id is derived from the transfer id alone, so the
+    // worktree — and therefore the transcript's slug — is known before the task
+    // exists.
+    const destinationTaskId = await destinationTaskIdForTransfer("transfer-1");
+    expect(invokeMock).toHaveBeenCalledWith("materialize_transfer_artifact", {
+      sourcePath: "/tmp/fetched-artifact-claude-transcript",
+      provider: "claude",
+      resumeSessionId: sessionId,
+      filename: `${sessionId}.jsonl`,
+      kind: "session-transcript",
+      materialization: "copy-file",
+      destinationWorktreePath: `/tmp/repo-1/.kanna-worktrees/task-${destinationTaskId}`,
+    });
+    // The archive keeps the sender-independent contract: no destination path.
+    expect(invokeMock).toHaveBeenCalledWith("materialize_transfer_artifact", {
+      sourcePath: "/tmp/fetched-artifact-claude-session",
+      provider: "claude",
+      resumeSessionId: sessionId,
+      filename: "claude-session.tar.gz",
+      kind: "session-archive",
+      materialization: "extract-tar-gz",
+    });
+    expect(invokeMock).toHaveBeenCalledWith(
+      "spawn_session",
+      expect.objectContaining({
+        sessionId: localTaskId,
+        agentProvider: "claude",
+        args: expect.arrayContaining([
+          expect.stringContaining(`--resume ${sessionId}`),
         ]),
       }),
     );
