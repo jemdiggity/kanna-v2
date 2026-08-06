@@ -73,6 +73,8 @@
     "nextTask": "次のタスク",
     "previousRepo": "前のリポジトリ",
     "nextRepo": "次のリポジトリ",
+    "prevTab": "前のタブ",
+    "nextTab": "次のタブ",
     "filePicker": "ファイル検索",
     "filePreview": "ファイルプレビュー",
     "openLatestAgentFile": "最新のエージェントファイルを開く",

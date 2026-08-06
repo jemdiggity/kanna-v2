@@ -67,6 +67,14 @@ interface ShortcutDef {
   context?: ShortcutContext[];
   /** Hide from shortcuts modal display */
   hidden?: boolean;
+  /**
+   * Hide from the command palette. Only for shortcuts whose action is the
+   * palette itself: opening it (commandPalette) or closing it (dismiss).
+   * Modal-scoped shortcuts still belong here — the palette stacks on top of
+   * other modals rather than replacing them, so e.g. tab cycling dispatches
+   * to the Preferences panel underneath.
+   */
+  paletteHidden?: boolean;
 }
 
 const PREVIEW_MODAL_CONTEXTS: ShortcutContext[] = ["main", "diff", "file", "shell", "tree", "graph"];
@@ -94,7 +102,7 @@ export const shortcuts: ShortcutDef[] = [
   { action: "openFile",       labelKey: "shortcuts.filePicker",     groupKey: "shortcuts.groupOpenInspect", key: "p",                         meta: true,               display: "⌘P",       context: PREVIEW_MODAL_CONTEXTS },
   { action: "openLatestFileLink", labelKey: "shortcuts.openLatestAgentFile", groupKey: "shortcuts.groupOpenInspect", key: "l", meta: true, display: "⌘L", context: PREVIEW_MODAL_CONTEXTS },
   { action: "toggleFilePreview", labelKey: "shortcuts.filePreview", groupKey: "shortcuts.groupOpenInspect", key: "p", code: "KeyP",            meta: true, alt: true,    display: "⌥⌘P",      context: ["main", "file"] },
-  { action: "commandPalette", labelKey: "shortcuts.commandPalette", groupKey: "shortcuts.groupOpenInspect", key: ["P", "p"],                  meta: true, shift: true,  display: "⇧⌘P",     context: ["main"] },
+  { action: "commandPalette", labelKey: "shortcuts.commandPalette", groupKey: "shortcuts.groupOpenInspect", key: ["P", "p"],                  meta: true, shift: true,  display: "⇧⌘P",     context: ["main"], paletteHidden: true },
   { action: "showDiff",       labelKey: "shortcuts.viewDiff",       groupKey: "shortcuts.groupOpenInspect", key: "d",                         meta: true, display: "⌘D",                       context: PREVIEW_MODAL_CONTEXTS },
   { action: "showCommitGraph", labelKey: "shortcuts.commitGraph", groupKey: "shortcuts.groupOpenInspect", key: "g", meta: true, display: "⌘G", context: PREVIEW_MODAL_CONTEXTS },
   { action: "openShell",      labelKey: "shortcuts.shellTerminal",  groupKey: "shortcuts.groupOpenInspect", key: "j",                         meta: true,               display: "⌘J",       context: PREVIEW_MODAL_CONTEXTS },
@@ -122,7 +130,7 @@ export const shortcuts: ShortcutDef[] = [
   { action: "prevTab",    labelKey: "shortcuts.prevTab",       groupKey: "shortcuts.groupMoveAround", key: ["[", "{"],                     meta: true, shift: true,  display: "⇧⌘[",     hidden: true },
   { action: "nextTab",    labelKey: "shortcuts.nextTab",       groupKey: "shortcuts.groupMoveAround", key: ["]", "}"],                     meta: true, shift: true,  display: "⇧⌘]",     hidden: true },
   // Escape is special — no meta required
-  { action: "dismiss",    labelKey: "shortcuts.dismiss",       groupKey: "shortcuts.groupAppHelp", key: "Escape",                                                 display: "Escape",   context: ["main", "diff", "file", "tree", "graph", "newTask", "transfer"], hidden: true },
+  { action: "dismiss",    labelKey: "shortcuts.dismiss",       groupKey: "shortcuts.groupAppHelp", key: "Escape",                                                 display: "Escape",   context: ["main", "diff", "file", "tree", "graph", "newTask", "transfer"], hidden: true, paletteHidden: true },
 ];
 
 function matches(def: ShortcutDef, e: KeyboardEvent): boolean {

@@ -4,6 +4,12 @@ import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase } from "../helpers/reset";
 import { tauriInvoke } from "../helpers/vue";
 
+async function activeTabLabel(client: WebDriverClient): Promise<string> {
+  return client.executeSync<string>(
+    `return document.querySelector(".prefs-panel .tab.active")?.textContent?.trim() ?? "";`
+  );
+}
+
 describe("preferences", () => {
   const client = new WebDriverClient();
 
@@ -134,5 +140,42 @@ describe("preferences", () => {
         : {};
     `);
     expect(persisted).toEqual({ appTheme: "light", codeTheme: "dark" });
+  });
+
+  // The palette stacks on top of Preferences rather than replacing it, so its tab
+  // commands dispatch through AppModalLayer into the panel underneath.
+  it("cycles preferences tabs from the command palette", async () => {
+    await client.executeSync(buildGlobalKeydownScript({ key: ",", meta: true }));
+    await client.waitForElement(".prefs-panel", 2_000);
+    expect(await activeTabLabel(client)).toBe("Preferences");
+
+    await client.executeSync(buildGlobalKeydownScript({ key: "P", meta: true, shift: true }));
+    await client.waitForElement(".palette-modal", 2_000);
+    expect(await client.findElements(".prefs-panel")).toHaveLength(1);
+
+    const labels = await client.executeSync<string[]>(
+      `return Array.from(document.querySelectorAll(".palette-modal .command-label"))
+        .map((element) => element.textContent?.trim() ?? "");`
+    );
+    expect(labels).toContain("Previous Tab");
+    expect(labels).toContain("Next Tab");
+    // The original bug: untranslated keys leaking into the palette.
+    expect(labels.filter((label) => label.startsWith("shortcuts."))).toEqual([]);
+
+    const input = await client.waitForElement(".palette-modal .palette-input");
+    await client.sendKeys(input, "Next Tab");
+    await client.waitForText(".palette-modal .command-item", "Next Tab", 2_000);
+    const clicked = await client.executeSync<boolean>(
+      `const command = Array.from(document.querySelectorAll(".palette-modal .command-item"))
+        .find((element) => element.textContent?.includes("Next Tab"));
+       if (!command) return false;
+       command.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+       return true;`
+    );
+    expect(clicked).toBe(true);
+
+    await client.waitForNoElement(".palette-modal", 5_000);
+    await client.waitForElement(".prefs-panel", 2_000);
+    expect(await activeTabLabel(client)).toBe("Account");
   });
 });

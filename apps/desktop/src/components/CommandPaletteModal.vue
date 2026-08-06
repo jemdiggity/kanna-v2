@@ -76,7 +76,7 @@ const allCommands = computed<UnifiedCommand[]>(() => {
 
   // Static shortcut commands
   const shortcutCommands: UnifiedCommand[] = shortcuts
-    .filter((s) => s.action !== "dismiss" && s.action !== "commandPalette")
+    .filter((s) => !s.paletteHidden)
     .map((s) => ({
       id: `shortcut-${s.action}`,
       label: t(s.labelKey),
