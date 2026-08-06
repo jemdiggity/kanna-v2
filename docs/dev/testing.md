@@ -26,7 +26,7 @@ Plus the static checks: `pnpm exec tsc --noEmit`, `cargo clippy`,
 | Rust unit/integration | crate `tests/` dirs across `crates/` | `./kd test rust` | — |
 | Daemon tests | `crates/daemon/tests/` | `./kd test rust` | spawns real daemon processes |
 | CLI contract (offline) | `tests/cli-contract/tests/offline/` | `pnpm test` | — |
-| CLI contract (live) | `tests/cli-contract/tests/live/` | `pnpm test:agent-cli-compat` | installed + authenticated agent CLIs; consumes quota |
+| CLI contract (live) | `tests/cli-contract/tests/live/` | `pnpm test:agent-cli-compat` | installed + authenticated agent CLIs; consumes quota. The TUI-driven pins also need `/usr/bin/python3` (it hosts the PTY — see `helpers/pty.ts`). Everything skips, rather than fails, when a CLI or the PTY is unavailable |
 | TUI fidelity | `tests/tui-fidelity/` | `pnpm test:tui-fidelity` | live/process-heavy |
 | Remote E2E | `tests/remote-e2e/` | `pnpm test:remote-e2e` | see `docs/2026-07-09-remote-e2e-layer-c-d-runbook.md` |
 | Desktop E2E | `apps/desktop/tests/e2e/` | `cd apps/desktop && pnpm test:e2e` | a running worktree dev instance (below) |
