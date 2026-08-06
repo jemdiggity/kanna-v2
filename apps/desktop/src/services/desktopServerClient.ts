@@ -4,6 +4,7 @@ import type { AgentDefinition, PipelineDefinition } from "../../../../packages/c
 import type { BlockerTaskStates, PipelineItem, Repo, TaskBlocker } from "../types/kanna";
 import type { TaskTransfer } from "../types/kanna";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
+import type { TransferImportSummary } from "../stores/transferImportSummary";
 import { invoke } from "../invoke";
 
 export interface DesktopSnapshotEntry {
@@ -249,6 +250,7 @@ export interface CreateDesktopTaskRequest {
   setupCmds?: string[];
   resumeSessionId?: string | null;
   recoverySnapshot?: SessionRecoveryState | null;
+  transferImport?: TransferImportSummary | null;
   blockerTaskIds?: string[];
   notifyTaskId?: string;
   parentTaskId?: string;

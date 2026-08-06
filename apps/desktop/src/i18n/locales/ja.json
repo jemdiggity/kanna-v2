@@ -125,6 +125,8 @@
     "newTaskTooltip": "新規タスク (⌘N)",
     "removeRepoTooltip": "リポジトリを削除",
     "remoteTaskTooltip": "リモートタスク",
+    "transferringTaskTooltip": "マシン間で転送中",
+    "transferFailedTaskTooltip": "転送に失敗しました",
     "detachSubtask": "親を解除",
     "sectionMergeQueue": "マージキュー",
     "sectionPullRequests": "プルリクエスト",

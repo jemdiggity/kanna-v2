@@ -125,6 +125,8 @@
     "newTaskTooltip": "New Task (⌘N)",
     "removeRepoTooltip": "Remove Repo",
     "remoteTaskTooltip": "Remote task",
+    "transferringTaskTooltip": "Transferring between machines",
+    "transferFailedTaskTooltip": "Transfer failed",
     "detachSubtask": "Remove parent",
     "sectionMergeQueue": "Merge Queue",
     "sectionPullRequests": "Pull Requests",

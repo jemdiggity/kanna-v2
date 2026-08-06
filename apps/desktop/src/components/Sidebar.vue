@@ -211,11 +211,63 @@ function itemTitle(item: SidebarTaskItem): string {
 }
 
 function itemTooltip(item: SidebarTaskItem): string | undefined {
-  return itemTitle(item);
+  const marker = transferMarker(item);
+  return marker ? `${itemTitle(item)} — ${marker.label}` : itemTitle(item);
 }
 
 function isRemoteTask(item: SidebarTaskItem): boolean {
   return item.remote_task === true;
+}
+
+/**
+ * A cross-machine transfer moves a task off this machine (or onto it) while
+ * both sidebars would otherwise show nothing at all. `transfer_status` is the
+ * same field for either direction: a task being pushed away and a task still
+ * importing both sit in one of these in-flight states.
+ */
+const IN_FLIGHT_TRANSFER_STATUSES: ReadonlySet<string> = new Set([
+  "pending",
+  "claimed",
+  "streaming",
+  "importing",
+  "awaiting_acknowledgment",
+]);
+
+type TransferDisplayState = "transferring" | "failed";
+
+interface TransferMarker {
+  state: TransferDisplayState;
+  glyph: string;
+  label: string;
+}
+
+/**
+ * Rows are re-derived per repo group and rendered from four call sites, so the
+ * marker is resolved once per snapshot and looked up by slot.
+ */
+const transferMarkers = computed<ReadonlyMap<string, TransferMarker>>(() => {
+  const markers = new Map<string, TransferMarker>();
+  for (const item of props.taskSlots) {
+    const status = item.transfer_status ?? "";
+    if (IN_FLIGHT_TRANSFER_STATUSES.has(status)) {
+      markers.set(item.slot_id, {
+        state: "transferring",
+        glyph: "⇄",
+        label: t("sidebar.transferringTaskTooltip"),
+      });
+    } else if (status === "failed") {
+      markers.set(item.slot_id, {
+        state: "failed",
+        glyph: "⇄✗",
+        label: t("sidebar.transferFailedTaskTooltip"),
+      });
+    }
+  }
+  return markers;
+});
+
+function transferMarker(item: SidebarTaskItem): TransferMarker | undefined {
+  return transferMarkers.value.get(item.slot_id);
 }
 
 function isReadyTask(item: SidebarTaskItem | null | undefined): item is ReadySidebarTaskItem {
@@ -708,6 +760,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                   class="pipeline-item"
                   :data-slot-id="row.item.slot_id"
                   :data-task-id="row.item.task_id"
+                  :data-transfer-state="transferMarker(row.item)?.state"
                   :aria-busy="row.item.state === 'creating' ? 'true' : undefined"
                   :class="{
                     selected: selectedSlotId === row.item.slot_id,
@@ -740,7 +793,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     }"
                     :title="itemTooltip(row.item)"
                   >
-                    <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
+                    <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
                   <button
                     v-if="canDetachSubtask(row)"
                     type="button"
@@ -816,6 +869,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     class="pipeline-item"
                     :data-slot-id="row.item.slot_id"
                     :data-task-id="row.item.task_id"
+                    :data-transfer-state="transferMarker(row.item)?.state"
                     :aria-busy="row.item.state === 'creating' ? 'true' : undefined"
                     :class="{
                       selected: selectedSlotId === row.item.slot_id,
@@ -848,7 +902,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                       }"
                       :title="itemTooltip(row.item)"
                     >
-                      <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
+                      <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
                     <button
                       v-if="canDetachSubtask(row)"
                       type="button"
@@ -879,6 +933,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                 class="pipeline-item"
                 :data-slot-id="row.item.slot_id"
                 :data-task-id="row.item.task_id"
+                :data-transfer-state="transferMarker(row.item)?.state"
                 :aria-busy="row.item.state === 'creating' ? 'true' : undefined"
                 :class="{
                   selected: selectedSlotId === row.item.slot_id,
@@ -910,7 +965,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     }"
                     :title="itemTooltip(row.item)"
                   >
-                    <span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
+                    <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
                   <span
                     v-if="row.item.task_id && blockerNames?.[row.item.task_id]"
                     class="blocked-by-text"
@@ -940,6 +995,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                 class="pipeline-item"
                 :data-slot-id="item.slot_id"
                 :data-task-id="item.task_id"
+                :data-transfer-state="transferMarker(item)?.state"
                 :aria-busy="item.state === 'creating' ? 'true' : undefined"
                 :class="{
                   selected: selectedSlotId === item.slot_id,
@@ -970,7 +1026,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                   }"
                   :title="itemTooltip(item)"
                 >
-                  <span v-if="isRemoteTask(item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(item) }}</span>
+                  <span v-if="transferMarker(item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(item)?.state}`" :aria-label="transferMarker(item)?.label">{{ transferMarker(item)?.glyph }} </span><span v-if="isRemoteTask(item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(item) }}</span>
               </div>
             </div>
           </template>
@@ -1299,6 +1355,32 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 .remote-task-marker {
   color: var(--kn-accent);
   font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+}
+
+/* A transfer is the one thing that can move a task off this machine while its
+   row still looks ordinary. Same glyph language as the remote marker. */
+.transfer-task-marker {
+  font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+}
+
+.transfer-task-marker-transferring {
+  color: var(--kn-accent);
+  animation: transfer-marker-pulse 1.6s ease-in-out infinite;
+}
+
+.transfer-task-marker-failed {
+  color: var(--kn-danger);
+}
+
+@keyframes transfer-marker-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transfer-task-marker-transferring {
+    animation: none;
+  }
 }
 
 .awaiting-verdict-badge {

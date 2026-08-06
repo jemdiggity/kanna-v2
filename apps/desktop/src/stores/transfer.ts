@@ -28,6 +28,7 @@ import {
   type OutgoingTransferPayload,
   type TransferArtifactPayload,
 } from "../utils/taskTransfer";
+import { buildTransferImportSummary } from "./transferImportSummary";
 import type { QueriesApi } from "./queries";
 import type { SessionsApi } from "./sessions";
 import type { StoreContext } from "./state";
@@ -1067,6 +1068,7 @@ export function createTransferApi(
             displayName: payload.task.display_name,
             resumeSessionId,
             recoverySnapshot: payload.recovery,
+            transferImport: await buildTransferImportSummary(payload, resumeSessionId),
           },
         ),
       );

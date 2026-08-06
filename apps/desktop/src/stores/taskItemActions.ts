@@ -133,6 +133,7 @@ export function createTaskItemActions(
         setupCmds: opts?.customTask?.setup,
         resumeSessionId: opts?.resumeSessionId,
         recoverySnapshot: opts?.recoverySnapshot,
+        transferImport: opts?.transferImport,
         blockerTaskIds: opts?.blockerTaskIds?.length ? opts.blockerTaskIds : undefined,
       });
       createdTaskId = created.taskId;
