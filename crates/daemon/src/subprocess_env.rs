@@ -1,7 +1,24 @@
 use std::collections::HashMap;
 
 const STRIPPED_ENV_PREFIXES: &[&str] = &["KANNA_"];
-const STRIPPED_ENV_VARS: &[&str] = &["TAURI_WEBDRIVER_PORT", "NO_COLOR"];
+// Claude-session identity markers: when Kanna itself was launched from inside
+// a Claude Code session, these leak into the daemon and every agent CLI it
+// spawns. A spawned `claude` then believes it is a nested child session and
+// disables transcript persistence — which silently breaks revision resume and
+// task transfer, both of which depend on the transcript existing. Kanna agent
+// sessions are top-level by definition, so the markers are stripped. This is
+// an explicit list, not a `CLAUDE_` prefix: intentional user configuration
+// such as CLAUDE_CONFIG_DIR must pass through.
+const STRIPPED_ENV_VARS: &[&str] = &[
+    "TAURI_WEBDRIVER_PORT",
+    "NO_COLOR",
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_PID",
+];
 
 fn should_strip_inherited_env_var(key: &str) -> bool {
     STRIPPED_ENV_PREFIXES
@@ -78,6 +95,40 @@ mod tests {
         assert!(!env.contains_key("KANNA_DB_PATH"));
         assert!(!env.contains_key("KANNA_TMUX_SESSION"));
         assert!(!env.contains_key("TAURI_WEBDRIVER_PORT"));
+    }
+
+    #[test]
+    fn strips_inherited_claude_session_markers_but_keeps_user_config() {
+        let env = build_child_env_from_iter(
+            [
+                ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+                ("CLAUDECODE".to_string(), "1".to_string()),
+                ("CLAUDE_CODE_CHILD_SESSION".to_string(), "1".to_string()),
+                (
+                    "CLAUDE_CODE_SESSION_ID".to_string(),
+                    "4eb73497-1c57-4e60-b0eb-dd9db12f8dbe".to_string(),
+                ),
+                ("CLAUDE_CODE_ENTRYPOINT".to_string(), "cli".to_string()),
+                ("CLAUDE_CODE_EXECPATH".to_string(), "/x/claude".to_string()),
+                ("CLAUDE_PID".to_string(), "41455".to_string()),
+                (
+                    "CLAUDE_CONFIG_DIR".to_string(),
+                    "/Users/test/.claude".to_string(),
+                ),
+            ],
+            HashMap::<String, String>::new(),
+        );
+
+        assert!(!env.contains_key("CLAUDECODE"));
+        assert!(!env.contains_key("CLAUDE_CODE_CHILD_SESSION"));
+        assert!(!env.contains_key("CLAUDE_CODE_SESSION_ID"));
+        assert!(!env.contains_key("CLAUDE_CODE_ENTRYPOINT"));
+        assert!(!env.contains_key("CLAUDE_CODE_EXECPATH"));
+        assert!(!env.contains_key("CLAUDE_PID"));
+        assert_eq!(
+            env.get("CLAUDE_CONFIG_DIR"),
+            Some(&"/Users/test/.claude".to_string())
+        );
     }
 
     #[test]
