@@ -1720,6 +1720,71 @@ async fn transfer_routes_list_claim_and_fail_pending_incoming_transfers() {
     );
 }
 
+/// The incoming side has always had a fail route; the outgoing side had none,
+/// so a source whose finalization could not ship the agent's session state left
+/// its row `pending` forever — invisible, and blocking a retry of the task.
+#[tokio::test]
+async fn fail_outgoing_transfer_route_terminalizes_only_live_outgoing_rows() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        for (id, direction, status) in [
+            ("transfer-outgoing", "outgoing", "pending"),
+            ("transfer-outgoing-done", "outgoing", "completed"),
+            ("transfer-incoming", "incoming", "pending"),
+        ] {
+            db.insert_test_task_transfer(id, direction, status, Some("{}"))
+                .unwrap();
+        }
+    });
+
+    let fail = |transfer_id: &'static str| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::post(format!("/v1/transfers/{transfer_id}/actions/fail-outgoing"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({ "reason": "no session transcript to ship" })
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            from_slice::<serde_json::Value>(&body).unwrap()["updated"]
+                .as_bool()
+                .unwrap()
+        }
+    };
+
+    assert!(fail("transfer-outgoing").await);
+    // Terminal rows and the incoming side are not this route's to move.
+    assert!(!fail("transfer-outgoing").await);
+    assert!(!fail("transfer-outgoing-done").await);
+    assert!(!fail("transfer-incoming").await);
+
+    let read = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/transfers/transfer-outgoing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(read.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(json["transfer"]["status"], "failed");
+    assert_eq!(json["transfer"]["error"], "no session transcript to ship");
+    assert!(!json["transfer"]["completed_at"].is_null());
+}
+
 #[tokio::test]
 async fn incoming_cleanup_candidates_include_completed_rejected_and_failed_rows() {
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {

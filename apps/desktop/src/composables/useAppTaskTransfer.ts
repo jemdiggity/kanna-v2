@@ -4,6 +4,7 @@ import type { DbHandle } from "../types/kanna";
 import { isTauri } from "../tauri-mock";
 import { invoke } from "../invoke";
 import {
+  isMissingTransferSessionArtifactError,
   parsePairingResult,
   parseTransferPeers,
   type TransferPeerOption,
@@ -69,6 +70,20 @@ export function useAppTaskTransfer({
     { promise: Promise<boolean>; ownershipConfirmed: boolean }
   >();
 
+  async function cleanupTerminalIncomingTransfer(transferId: string): Promise<void> {
+    try {
+      await invoke("mark_incoming_transfer_ack_completed", { transferId });
+      if (!await markIncomingTransferSidecarCleanupCompleted(transferId)) {
+        throw new Error(`failed to mark sidecar cleanup completed: ${transferId}`);
+      }
+    } catch (error: unknown) {
+      console.warn("[App] failed to clean up terminal incoming transfer reservation:", {
+        transferId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   async function importIncomingTransfer(
     transferId: string,
     recovery: boolean,
@@ -132,6 +147,18 @@ export function useAppTaskTransfer({
           const reason = error instanceof Error ? error.message : String(error);
           if (reason.includes("incoming transfer ownership was lost")) {
             throw error;
+          }
+          if (isMissingTransferSessionArtifactError(error)) {
+            // Retrying cannot conjure session state the payload never carried,
+            // so this transfer is terminal now rather than after the claim
+            // lease expires — both machines need a visible end state.
+            if (await failPendingIncomingTransfer(transferId, reason, ownerToken)) {
+              await cleanupTerminalIncomingTransfer(transferId);
+            }
+            console.error("[App] refused an incoming transfer with no resumable session:", {
+              transferId,
+              reason,
+            });
           }
           throw new ClaimedIncomingTransferError(reason, ownerToken);
         }
@@ -347,20 +374,6 @@ export function useAppTaskTransfer({
 
   async function importPendingIncomingTransfers() {
     void db;
-    async function cleanupTerminalIncomingTransfer(transferId: string): Promise<void> {
-      try {
-        await invoke("mark_incoming_transfer_ack_completed", { transferId });
-        if (!await markIncomingTransferSidecarCleanupCompleted(transferId)) {
-          throw new Error(`failed to mark sidecar cleanup completed: ${transferId}`);
-        }
-      } catch (error: unknown) {
-        console.warn("[App] failed to clean up terminal incoming transfer reservation:", {
-          transferId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-
     try {
       const cleanupCandidates = await fetchIncomingTransferCleanupCandidates();
       for (const transferId of cleanupCandidates) {

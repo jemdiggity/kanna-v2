@@ -366,4 +366,25 @@ impl Db {
         )?;
         Ok(rows_affected == 1)
     }
+
+    /// Drives an outgoing transfer to its terminal failed state.
+    ///
+    /// The incoming side has had a fail route since the beginning; the outgoing
+    /// side had none, so a source whose finalization could not ship the agent's
+    /// session state left its row `pending` forever — invisible to the operator
+    /// and blocking any retry of the same task.
+    pub fn fail_outgoing_task_transfer(
+        &self,
+        transfer_id: &str,
+        reason: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE task_transfer
+             SET status = 'failed', completed_at = datetime('now'), error = ?
+             WHERE id = ? AND direction = 'outgoing'
+               AND status NOT IN ('completed', 'rejected', 'failed')",
+            (reason, transfer_id),
+        )?;
+        Ok(rows_affected == 1)
+    }
 }

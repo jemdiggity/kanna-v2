@@ -176,7 +176,10 @@
     "stageSetupFailed": "ステージのセットアップスクリプトが失敗しました",
     "stageNotFound": "パイプラインにステージが見つかりません",
     "latestAgentFileHint": "ヒント: ⌘Lでエージェントが言及した最新のファイルを開けます。",
-    "noTerminalFileLink": "このターミナルにファイルリンクが見つかりません。"
+    "noTerminalFileLink": "このターミナルにファイルリンクが見つかりません。",
+    "transferFinalizationFailed": "タスク転送に失敗しました",
+    "transferFinalizationDegraded": "転送元を正常に終了できないまま引き継ぎました",
+    "transferFinalizationUnclean": "転送元のエージェントセッションが正常に終了しませんでした"
   },
   "tags": {
     "inProgress": "進行中",

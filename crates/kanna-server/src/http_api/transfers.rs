@@ -264,6 +264,18 @@ pub(super) async fn fail_pending_incoming_transfer(
     Ok(Json(TransferUpdateResponse { updated }))
 }
 
+pub(super) async fn fail_outgoing_transfer(
+    State(state): State<Arc<AppState>>,
+    Path(transfer_id): Path<String>,
+    Json(payload): Json<FailTransferRequest>,
+) -> Result<Json<TransferUpdateResponse>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    let updated = db
+        .fail_outgoing_task_transfer(&transfer_id, &payload.reason)
+        .map_err(db_error)?;
+    Ok(Json(TransferUpdateResponse { updated }))
+}
+
 pub(super) async fn set_task_cloud_identity(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,

@@ -85,6 +85,7 @@ export interface DesktopServerClientHandlersForTests {
     reason: string,
     ownerToken?: string,
   ) => MaybePromise<boolean>;
+  failOutgoingTaskTransfer?: (transferId: string, reason: string) => MaybePromise<boolean>;
   fetchClosedTaskIdentities?: () => MaybePromise<ClosedTaskIdentity[]>;
   fetchTaskDetail?: (taskId: string) => MaybePromise<DesktopTaskDetail>;
   patchTask?: (taskId: string, input: PatchDesktopTaskInput) => MaybePromise<void>;
@@ -997,6 +998,25 @@ export async function failPendingIncomingTransfer(
       method: "POST",
       body: { reason, claimOwnerToken: ownerToken },
     },
+  );
+  return response.updated;
+}
+
+/**
+ * Drives an outgoing transfer to its terminal failed state. The source needs
+ * this whenever finalization cannot ship the agent's session state: without it
+ * the row stays `pending`, invisible to the operator and blocking any retry.
+ */
+export async function failOutgoingTaskTransfer(
+  transferId: string,
+  reason: string,
+): Promise<boolean> {
+  if (clientHandlersForTests?.failOutgoingTaskTransfer) {
+    return await clientHandlersForTests.failOutgoingTaskTransfer(transferId, reason);
+  }
+  const response = await requestJson<{ updated: boolean }>(
+    `/v1/transfers/${encodeURIComponent(transferId)}/actions/fail-outgoing`,
+    { method: "POST", body: { reason } },
   );
   return response.updated;
 }

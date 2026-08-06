@@ -7,6 +7,7 @@ import {
   insertDesktopTaskTransferProvenance,
   markDesktopTaskTransferAwaitingAcknowledgment,
   markDesktopTaskTransferImporting,
+  failOutgoingTaskTransfer,
   markIncomingTransferSidecarCleanupCompleted,
   rejectDesktopTaskTransfer,
   setDesktopTaskCloudIdentity,
@@ -18,15 +19,19 @@ import { fileExistsSafe } from "../utils/invokeHelpers";
 import { defaultReposHome } from "../utils/reposHome";
 import {
   buildOutgoingTransferPayload,
+  MissingTransferSessionArtifactError,
   parseFinalizedOutgoingTransferResult,
   parseOutgoingTransferPreflightResult,
   parsePersistedOutgoingTransferPayload,
+  requiredSessionArtifactKind,
   resolveIncomingTransferBaseBranch,
   type FinalizedOutgoingTransferResult,
   type IncomingTransferRequest,
   type OutgoingTransferCommittedEvent,
   type OutgoingTransferPayload,
+  type TransferArtifactKind,
   type TransferArtifactPayload,
+  type TransferFinalizationState,
 } from "../utils/taskTransfer";
 import { buildTransferImportSummary } from "./transferImportSummary";
 import type { QueriesApi } from "./queries";
@@ -103,6 +108,15 @@ export interface TransferApi {
     event: OutgoingTransferCommittedEvent,
     ownership?: TransferLifecycleOwnership,
   ) => Promise<void>;
+}
+
+/**
+ * Ownership loss means another renderer may still be driving this delivery, so
+ * it is never grounds for declaring the transfer failed.
+ */
+function isLifecycleOwnershipLossError(error: unknown): boolean {
+  return error instanceof Error
+    && error.message.includes("lifecycle delivery ownership was lost");
 }
 
 function isDuplicateTaskTransferError(error: unknown): boolean {
@@ -265,10 +279,11 @@ async function findClaudeTranscriptArtifact(
     filename: string;
   } | null>("locate_claude_transcript", { worktreePath, sessionId })
     .catch((error: unknown) => {
-      // A failed lookup must not cost the session archive its place in the
-      // payload. (T2 turns a missing transcript into a loud transfer failure.)
+      // A lookup that *failed* is not a transcript that is absent, so it must
+      // not be flattened into `null` — the planner would then report a missing
+      // conversation for what is really a broken lookup.
       console.error("[store] failed to locate the claude session transcript:", error);
-      return null;
+      throw error;
     });
   if (!located) return null;
   return {
@@ -309,6 +324,7 @@ async function findCodexRolloutArtifact(sessionId: string): Promise<LocatedTrans
     }
   } catch (error) {
     console.error("[store] failed to locate codex rollout artifact:", error);
+    throw error;
   }
 
   return null;
@@ -331,15 +347,10 @@ async function stageSessionArchiveArtifact(
   transferId: string,
   sessionId: string,
   repoPath: string,
-  home: string,
+  sourceRoot: string,
   config: SessionArchiveConfig,
   ownership?: TransferLifecycleOwnership,
 ): Promise<TransferArtifactPayload[]> {
-  const sourceRoot = `${home}/${config.sourceRootRelativePath}`;
-  const sourceDir = `${sourceRoot}/${sessionId}`;
-  const exists = await fileExistsSafe(sourceDir);
-  if (!exists) return [];
-
   const archivePath = buildTransferArchivePath(
     transferId,
     config.archiveSuffix,
@@ -383,38 +394,159 @@ async function stageSessionArchiveArtifact(
   }];
 }
 
-async function stageClaudeTranscriptArtifact(
+interface PlannedSessionFileArtifact {
+  located: LocatedTransferArtifact;
+  kind: Extract<TransferArtifactKind, "session-transcript" | "session-rollout">;
+  provider: NonNullable<PipelineItem["agent_provider"]>;
+  label: string;
+  artifactId: (transferId: string) => string;
+}
+
+/**
+ * Everything a transfer of this task will ship, located but not yet staged.
+ *
+ * Locating is separated from staging so the source can prove it *can* ship the
+ * conversation before it does anything destructive to the live session. A
+ * transfer that cannot must fail with the source task still running.
+ */
+interface PlannedSessionArtifacts {
+  sessionId: string;
+  archive: { config: SessionArchiveConfig; sourceRoot: string } | null;
+  files: PlannedSessionFileArtifact[];
+}
+
+/** The task identity a plan was located against; a change invalidates it. */
+function sessionPlanIdentity(item: PipelineItem): string {
+  return [item.agent_session_id, item.agent_provider, item.agent_type, item.branch].join(" ");
+}
+
+async function planTransferredSessionArtifacts(
+  item: PipelineItem,
+  repoPath: string,
+): Promise<PlannedSessionArtifacts | null> {
+  const sessionId = item.agent_session_id;
+  const provider = item.agent_provider;
+  if (!sessionId || !provider) return null;
+  const requiredKind = requiredSessionArtifactKind({
+    agentType: item.agent_type,
+    agentProvider: provider,
+    resumeSessionId: sessionId,
+  });
+
+  const missing = (detail: string): MissingTransferSessionArtifactError =>
+    new MissingTransferSessionArtifactError(
+      `task ${item.id} resumes ${provider} session ${sessionId} but ${detail}`,
+    );
+
+  if (provider === "codex") {
+    const rollout = await findCodexRolloutArtifact(sessionId);
+    if (!rollout) {
+      if (requiredKind) throw missing("its rollout could not be found under ~/.codex/sessions");
+      return null;
+    }
+    return {
+      sessionId,
+      archive: null,
+      files: [{
+        located: rollout,
+        kind: "session-rollout",
+        provider: "codex",
+        label: "Codex rollout",
+        artifactId: buildCodexRolloutArtifactId,
+      }],
+    };
+  }
+
+  const config = SESSION_ARCHIVE_CONFIGS.find((candidate) => candidate.provider === provider);
+  if (!config) {
+    // No transferable session state exists for this provider at all, so an
+    // empty artifact list is the truth rather than a silent drop.
+    return null;
+  }
+
+  const home = await invoke<string>("read_env_var", { name: "HOME" });
+  const sourceRoot = `${home}/${config.sourceRootRelativePath}`;
+  const archiveExists = await fileExistsSafe(`${sourceRoot}/${sessionId}`);
+  const files: PlannedSessionFileArtifact[] = [];
+
+  if (provider === "claude") {
+    // The `~/.claude/tasks/<id>` archive holds only lock and highwatermark
+    // state. The conversation itself lives in the cwd-keyed transcript, so
+    // ship it alongside — neither one is sufficient on its own.
+    const worktreePath = taskWorktreePath(repoPath, item.branch);
+    const transcript = worktreePath
+      ? await findClaudeTranscriptArtifact(worktreePath, sessionId)
+      : null;
+    if (transcript) {
+      files.push({
+        located: transcript,
+        kind: "session-transcript",
+        provider: "claude",
+        label: "Claude transcript",
+        artifactId: buildClaudeTranscriptArtifactId,
+      });
+    } else if (requiredKind === "session-transcript") {
+      throw missing(
+        worktreePath
+          ? `no transcript exists for its worktree ${worktreePath}`
+          : "it has no worktree to derive a transcript path from",
+      );
+    }
+  }
+
+  if (!archiveExists) {
+    if (requiredKind === "session-archive") {
+      throw missing(`its session state is missing from ${sourceRoot}`);
+    }
+    return files.length > 0 ? { sessionId, archive: null, files } : null;
+  }
+
+  return { sessionId, archive: { config, sourceRoot }, files };
+}
+
+async function stagePlannedSessionArtifacts(
   transferId: string,
-  sessionId: string,
-  worktreePath: string | null,
+  plan: PlannedSessionArtifacts,
+  repoPath: string,
   ownership?: TransferLifecycleOwnership,
 ): Promise<TransferArtifactPayload[]> {
-  if (!worktreePath) return [];
-  const transcript = await findClaudeTranscriptArtifact(worktreePath, sessionId);
-  if (!transcript) return [];
+  const artifacts: TransferArtifactPayload[] = plan.archive
+    ? await stageSessionArchiveArtifact(
+        transferId,
+        plan.sessionId,
+        repoPath,
+        plan.archive.sourceRoot,
+        plan.archive.config,
+        ownership,
+      )
+    : [];
 
-  const artifactId = buildClaudeTranscriptArtifactId(transferId);
-  await ownership?.assertOwnership?.("Claude transcript staging");
-  await invoke("stage_transfer_artifact", {
-    transferId,
-    artifactId,
-    path: transcript.absolutePath,
-    owned: false,
-    ...(ownership?.deliveryId
-      ? {
-          deliveryId: ownership.deliveryId,
-          consumerIncarnation: ownership.consumerIncarnation,
-        }
-      : {}),
-  });
-  return [{
-    artifact_id: artifactId,
-    filename: transcript.filename,
-    provider: "claude",
-    kind: "session-transcript",
-    materialization: "copy-file",
-    home_rel_path: transcript.homeRelPath,
-  }];
+  for (const file of plan.files) {
+    const artifactId = file.artifactId(transferId);
+    await ownership?.assertOwnership?.(`${file.label} staging`);
+    await invoke("stage_transfer_artifact", {
+      transferId,
+      artifactId,
+      path: file.located.absolutePath,
+      owned: false,
+      ...(ownership?.deliveryId
+        ? {
+            deliveryId: ownership.deliveryId,
+            consumerIncarnation: ownership.consumerIncarnation,
+          }
+        : {}),
+    });
+    artifacts.push({
+      artifact_id: artifactId,
+      filename: file.located.filename,
+      provider: file.provider,
+      kind: file.kind,
+      materialization: "copy-file",
+      home_rel_path: file.located.homeRelPath,
+    });
+  }
+
+  return artifacts;
 }
 
 async function stageTransferredSessionArtifacts(
@@ -423,76 +555,9 @@ async function stageTransferredSessionArtifacts(
   repoPath: string,
   ownership?: TransferLifecycleOwnership,
 ): Promise<TransferArtifactPayload[]> {
-  if (!item.agent_session_id || !item.agent_provider) {
-    return [];
-  }
-
-  try {
-    if (item.agent_provider === "codex") {
-      const rollout = await findCodexRolloutArtifact(item.agent_session_id);
-      if (!rollout) return [];
-
-      const artifactId = buildCodexRolloutArtifactId(transferId);
-      await ownership?.assertOwnership?.("Codex rollout staging");
-      await invoke("stage_transfer_artifact", {
-        transferId,
-        artifactId,
-        path: rollout.absolutePath,
-        owned: false,
-        ...(ownership?.deliveryId
-          ? {
-              deliveryId: ownership.deliveryId,
-              consumerIncarnation: ownership.consumerIncarnation,
-            }
-          : {}),
-      });
-      return [{
-        artifact_id: artifactId,
-        filename: rollout.filename,
-        provider: "codex",
-        kind: "session-rollout",
-        materialization: "copy-file",
-        home_rel_path: rollout.homeRelPath,
-      }];
-    }
-
-    const config = SESSION_ARCHIVE_CONFIGS.find((candidate) => candidate.provider === item.agent_provider);
-    if (!config) return [];
-
-    const home = await invoke<string>("read_env_var", { name: "HOME" });
-    const artifacts = await stageSessionArchiveArtifact(
-      transferId,
-      item.agent_session_id,
-      repoPath,
-      home,
-      config,
-      ownership,
-    );
-    if (item.agent_provider === "claude") {
-      // The `~/.claude/tasks/<id>` archive holds only lock and highwatermark
-      // state. The conversation itself lives in the cwd-keyed transcript, so
-      // ship it alongside — neither one is sufficient on its own.
-      artifacts.push(
-        ...await stageClaudeTranscriptArtifact(
-          transferId,
-          item.agent_session_id,
-          taskWorktreePath(repoPath, item.branch),
-          ownership,
-        ),
-      );
-    }
-    return artifacts;
-  } catch (error) {
-    if (
-      error instanceof Error
-      && error.message.includes("lifecycle delivery ownership was lost")
-    ) {
-      throw error;
-    }
-    console.error("[store] failed to stage provider session artifacts:", error);
-  }
-
-  return [];
+  const plan = await planTransferredSessionArtifacts(item, repoPath);
+  if (!plan) return [];
+  return await stagePlannedSessionArtifacts(transferId, plan, repoPath, ownership);
 }
 
 async function importTransferredResumeState(
@@ -506,7 +571,21 @@ async function importTransferredResumeState(
     return resumeSessionId;
   }
 
+  const requiredKind = requiredSessionArtifactKind({
+    agentType: payload.task.agent_type,
+    agentProvider: provider,
+    resumeSessionId,
+  });
   const artifacts = payload.artifacts?.filter((candidate) => candidate.provider === provider) ?? [];
+  // A payload that promises a resumable session and ships no way to resume it
+  // must not be imported: minting a fresh session here is what silently left
+  // the conversation behind on the source machine.
+  if (requiredKind && !artifacts.some((candidate) => candidate.kind === requiredKind)) {
+    throw new MissingTransferSessionArtifactError(
+      `incoming transfer ${transferId} resumes ${provider} session ${resumeSessionId} `
+      + `but carries no ${requiredKind} artifact`,
+    );
+  }
   if (artifacts.length === 0) return null;
 
   try {
@@ -877,9 +956,40 @@ export function createTransferApi(
     await queries.reloadSnapshot();
   }
 
+  /**
+   * A finalization that cannot honour the payload it is about to write fails
+   * the transfer instead of shipping whatever happened to be on disk. The
+   * source task is deliberately left alone: losing the transfer is recoverable,
+   * losing the conversation is not.
+   */
   async function finalizeOutgoingTransfer(
     transferId: string,
     ownership: TransferLifecycleOwnership = {},
+  ): Promise<FinalizedOutgoingTransferResult> {
+    try {
+      return await runOutgoingTransferFinalization(transferId, ownership);
+    } catch (error: unknown) {
+      console.error("[store] outgoing transfer finalization failed:", error);
+      if (isLifecycleOwnershipLossError(error)) {
+        // Another consumer may still own and complete this delivery, so its
+        // transfer is not ours to declare dead.
+        throw error;
+      }
+      const reason = error instanceof Error ? error.message : String(error);
+      await failOutgoingTaskTransfer(transferId, reason).catch((failError: unknown) => {
+        console.error("[store] failed to mark the outgoing transfer failed:", failError);
+      });
+      context.toast.error(`${context.tt("toasts.transferFinalizationFailed")}: ${reason}`);
+      await queries.reloadSnapshot().catch((reloadError: unknown) => {
+        console.error("[store] failed to refresh after an outgoing transfer failure:", reloadError);
+      });
+      throw error;
+    }
+  }
+
+  async function runOutgoingTransferFinalization(
+    transferId: string,
+    ownership: TransferLifecycleOwnership,
   ): Promise<FinalizedOutgoingTransferResult> {
     const transfer = await getDesktopTaskTransfer(transferId);
     if (!transfer) {
@@ -905,22 +1015,43 @@ export function createTransferApi(
       throw new Error(`repo not found for outgoing transfer: ${transferId}`);
     }
 
+    // Locate the session state this payload will promise *before* signalling
+    // the agent: a transfer that cannot ship the conversation must fail with
+    // the source task still alive and running, not after it has been shut down.
+    const plannedIdentity = sessionPlanIdentity(item);
+    const plan = await planTransferredSessionArtifacts(item, repo.path);
+
     let finalizedCleanly = item.agent_type !== "pty";
+    let degradedReason: string | null = null;
     if (item.agent_type === "pty") {
       await ownership.assertOwnership?.("PTY finalization signal");
       const shouldSignal = ownership.claimPhase
         ? await ownership.claimPhase("pty-finalization-signal")
         : true;
+      let signalFailure: string | null = null;
       if (shouldSignal) {
         await invoke("signal_session", { sessionId: item.id, signal: "SIGINT" }).catch((error: unknown) => {
+          // The daemon refuses signals for adopted sessions by design — every
+          // session older than the running daemon, so every task predating an
+          // app upgrade. Too common to fail the transfer over, too important
+          // to swallow: it degrades the transfer instead.
           console.error("[store] transfer finalization signal failed:", error);
+          signalFailure = error instanceof Error ? error.message : String(error);
         });
       }
-      finalizedCleanly = await waitForSessionExitWithin(
+      const exited = await waitForSessionExitWithin(
         sessions.waitForSessionExit,
         item.id,
         TRANSFER_SOURCE_FINALIZATION_WAIT_MS,
       );
+      finalizedCleanly = exited && signalFailure === null;
+      if (signalFailure !== null) {
+        degradedReason =
+          `the source agent session could not be signalled to finish: ${String(signalFailure)}`;
+      } else if (!exited) {
+        degradedReason =
+          `the source agent session did not exit within ${TRANSFER_SOURCE_FINALIZATION_WAIT_MS}ms`;
+      }
     }
 
     await ownership.assertOwnership?.("finalization snapshot refresh");
@@ -940,12 +1071,18 @@ export function createTransferApi(
       : null;
     const sourcePeerId = transfer.source_peer_id ?? existingPayload.task.source_peer_id;
     const sourceTaskId = transfer.source_task_id ?? existingPayload.task.source_task_id;
-    const artifacts = await stageTransferredSessionArtifacts(
-      transferId,
-      refreshedItem,
-      repo.path,
-      ownership,
-    );
+    const finalization: TransferFinalizationState = {
+      cleanly_finalized: finalizedCleanly,
+      degraded_reason: degradedReason,
+    };
+    // The plan was located against the pre-signal task; re-plan only if the
+    // session identity moved under us while the agent was shutting down.
+    const finalPlan = sessionPlanIdentity(refreshedItem) === plannedIdentity
+      ? plan
+      : await planTransferredSessionArtifacts(refreshedItem, repo.path);
+    const artifacts = finalPlan
+      ? await stagePlannedSessionArtifacts(transferId, finalPlan, repo.path, ownership)
+      : [];
     const payload = buildOutgoingTransferPayload({
       sourcePeerId,
       sourceDesktopId: transfer.source_desktop_id ?? existingPayload.task.source_desktop_id,
@@ -959,6 +1096,7 @@ export function createTransferApi(
       repoRemoteUrl: repoRemoteUrl ?? null,
       recovery: await loadSessionRecoveryState(item.id),
       artifacts,
+      finalization,
       targetHasRepo: existingPayload.repo.mode === "reuse-local",
       bundle,
     });
@@ -966,6 +1104,14 @@ export function createTransferApi(
     await ownership.assertOwnership?.("finalized payload persistence");
     await updateDesktopTaskTransferPayload(transferId, JSON.stringify(payload));
     await queries.reloadSnapshot();
+
+    if (degradedReason) {
+      // Persisted on the payload above and surfaced here — a degraded handoff
+      // that only reached console.error is how the last one went unnoticed.
+      context.toast.warning(
+        `${context.tt("toasts.transferFinalizationDegraded")}: ${degradedReason}`,
+      );
+    }
 
     return {
       transferId,
@@ -1028,6 +1174,15 @@ export function createTransferApi(
       }
       payload = finalized.payload;
       assertIncomingPayloadMatchesTransfer(transfer, payload);
+      if (!payload.finalization.cleanly_finalized) {
+        // The source could not shut its agent down cleanly. The conversation
+        // still crosses, but the operator on *this* machine has to know the
+        // handoff was degraded — it is their task now.
+        context.toast.warning(
+          `${context.tt("toasts.transferFinalizationDegraded")}: `
+          + `${payload.finalization.degraded_reason ?? context.tt("toasts.transferFinalizationUnclean")}`,
+        );
+      }
       if (!await updateDesktopTaskTransferPayload(
         transferId,
         JSON.stringify(payload),

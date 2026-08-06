@@ -7,6 +7,7 @@ import {
 } from "../services/desktopServerClient";
 import type { IncomingTransferOwnership } from "../stores/transfer";
 import type { WorkspaceTask } from "../workspace/types";
+import { MissingTransferSessionArtifactError } from "../utils/taskTransfer";
 import { invoke } from "../invoke";
 import { useAppTaskTransfer } from "./useAppTaskTransfer";
 
@@ -229,6 +230,57 @@ describe("useAppTaskTransfer", () => {
       expect.anything(),
     );
     warnSpy.mockRestore();
+  });
+
+  it("terminalizes a live import that refuses a payload with no resumable session", async () => {
+    const failPending = vi.fn(async () => true);
+    setDesktopServerClientHandlersForTests({
+      claimPendingIncomingTransfer: async () => true,
+      renewIncomingTransferClaim: async () => true,
+      failPendingIncomingTransfer: failPending,
+      markIncomingTransferSidecarCleanupCompleted: async () => true,
+    });
+    const { controller, store } = createController();
+    store.approveIncomingTransfer.mockRejectedValue(
+      new MissingTransferSessionArtifactError(
+        "incoming transfer transfer-artifactless resumes claude session s1 "
+        + "but carries no session-transcript artifact",
+      ),
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // Retrying cannot conjure state the payload never carried, so this must be
+    // terminal on the live delivery — not left claimed until the lease expires.
+    await expect(controller.importIncomingTransfer("transfer-artifactless", false))
+      .rejects.toThrow("carries no session-transcript artifact");
+
+    const claimToken = store.approveIncomingTransfer.mock.calls[0]?.[1];
+    expect(failPending).toHaveBeenCalledWith(
+      "transfer-artifactless",
+      expect.stringContaining("carries no session-transcript artifact"),
+      claimToken,
+    );
+    expect(invokeMock).toHaveBeenCalledWith("mark_incoming_transfer_ack_completed", {
+      transferId: "transfer-artifactless",
+    });
+    errorSpy.mockRestore();
+  });
+
+  it("leaves a recoverable import failure retryable instead of terminalizing it", async () => {
+    const failPending = vi.fn(async () => true);
+    setDesktopServerClientHandlersForTests({
+      claimPendingIncomingTransfer: async () => true,
+      renewIncomingTransferClaim: async () => true,
+      failPendingIncomingTransfer: failPending,
+    });
+    const { controller, store } = createController();
+    store.approveIncomingTransfer.mockRejectedValue(new Error("git clone timed out"));
+
+    await expect(controller.importIncomingTransfer("transfer-transient", false)).rejects.toThrow(
+      "git clone timed out",
+    );
+
+    expect(failPending).not.toHaveBeenCalled();
   });
 
   it("offers same-account cloud machines without requiring LAN pairing", async () => {
