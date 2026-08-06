@@ -408,10 +408,15 @@ describe("QA pipeline assets", () => {
     expect(mergeAgent).toContain("PR metadata can explain intent, but topology decides ordering.");
     expect(mergeAgent).toContain("Do not infer stack relationships from PR titles or descriptions");
     expect(mergeAgent).toContain("Do not delete a parent branch while an unmerged child still uses it");
-    expect(approveAgent).toContain("canonical `KANNA_MERGE_HANDOFF` line");
-    expect(approveAgent).not.toContain("MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>");
-    expect(mergeAgent).toContain("KANNA_MERGE_HANDOFF");
-    expect(mergeAgent).not.toContain("MERGE <branch> -> <target> [TASK <task_id>] [PR <url>]: <summary>");
+    // Merge approval is delegated to this checked-in policy, not to a
+    // privileged server-built envelope: approve sends an ordinary request and
+    // the merge master decides. The compact request line is the shape both
+    // sides agree on, so pin it here rather than a `KANNA_MERGE_HANDOFF` blob.
+    expect(approveAgent).toContain("kanna_signal_merge_handoff");
+    expect(approveAgent).toContain("ordinary request to the repo's merge policy agent");
+    expect(approveAgent).not.toContain("KANNA_MERGE_HANDOFF");
+    expect(mergeAgent).toContain("MERGE <head> -> <base> [TASK <task-id>] [PR <url>]: <summary>");
+    expect(mergeAgent).not.toContain("KANNA_MERGE_HANDOFF");
     expect(mergeAgent).toContain("Before deleting any merged remote branch, call `kanna_is_dependent_tasks_exist` with the merged task id");
     expect(mergeAgent).toContain("If it returns `exists: true`, do not delete the remote branch");
     expect(mergeAgent).toContain('If MCP is unavailable, use `kanna-cli task dependent-tasks-exist --task-id "<task_id>"`.');
@@ -498,20 +503,15 @@ describe("QA pipeline assets", () => {
     );
   });
 
-  it("stops approve and the merge master from shipping into an orphaned base", () => {
-    // The same blind spot, one and two steps later: approve signals a merge
-    // for a target it never checked, and the merge master merges it. Both
-    // guards are one `gh pr list` call, and after the merge the mistake is
-    // invisible — so both are worth paying for.
-    const approveAgent = readRepoPhrases(".kanna/agents/approve/AGENT.md");
-    const approveContract = readRepoPhrases(".kanna/agents/approve/CONTRACT.md");
+  it("stops the merge master from shipping into an orphaned base", () => {
+    // Approve no longer gates on the base: it sends an ordinary request and
+    // the merge master owns the decision, so the orphaned-target guard lives
+    // on the merge side only. It is one `gh pr list` call, and after the merge
+    // the mistake is invisible — so it is worth paying for on every flavor.
     const mergeAgent = readRepoPhrases(".kanna/agents/merge/AGENT.md");
     const mergeGithub = readRepoPhrases(".kanna/agents/merge/flavors/github/AGENT.md");
     const mergeContract = readRepoPhrases(".kanna/agents/merge/CONTRACT.md");
 
-    expect(approveAgent).toContain("gh pr list --state open --head <baseRefName> --json number,url");
-    expect(approveAgent).toContain("do not signal the merge master");
-    expect(approveContract).toContain("it must finish with status `failure` and signal no merge");
     expect(mergeAgent).toContain("A requested target is not automatically a live one");
     expect(mergeAgent).toContain("ask the operator whether to retarget before merging");
     expect(mergeGithub).toContain("Confirm the resolved target is live before merging");
