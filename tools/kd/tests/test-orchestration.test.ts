@@ -11,14 +11,20 @@ const cliContractLiveTestsDir = resolve(cliContractTestsDir, "live");
 const expectedLiveCliContractTests = [
   "agent-protocol-flags.test.ts",
   "claude-model-ids.test.ts",
+  "claude-resume-rekey.test.ts",
+  "claude-transcript-append.test.ts",
+  "claude-transcript-location.test.ts",
   "codex-exec-json.test.ts",
   "codex-model-ids.test.ts",
+  "codex-rollout-timing.test.ts",
+  "codex-tui-quit.test.ts",
   "copilot-flags.test.ts",
   "copilot-prompt.test.ts",
   "flags.test.ts",
   "kanna-mcp-flags.test.ts",
   "opencode-exec-json.test.ts",
   "opencode-flags.test.ts",
+  "opencode-injected-input.test.ts",
   "output.test.ts",
   "settings.test.ts",
 ];
@@ -26,6 +32,7 @@ const expectedLiveCliContractTests = [
 const expectedOfflineCliContractTests = [
   "agent-flavor-contracts.test.ts",
   "claude-helper.test.ts",
+  "claude-project-slug.test.ts",
   "task-effort-spawn-contract.test.ts",
   "task-model-spawn-contract.test.ts",
 ];
