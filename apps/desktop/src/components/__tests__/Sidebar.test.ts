@@ -731,6 +731,72 @@ describe("Sidebar", () => {
     expect(titles[1]?.find(".remote-task-marker").exists()).toBe(false);
   });
 
+  it("marks tasks with an in-flight transfer in either direction and distinguishes a failed one", () => {
+    const wrapper = mountSidebar([
+      item("task-pushing", {
+        display_name: "Pushed away",
+        created_at: "2026-01-01T14:00:00.000Z",
+        transfer_direction: "outgoing",
+        transfer_status: "streaming",
+      }),
+      item("task-importing", {
+        display_name: "Arriving here",
+        created_at: "2026-01-01T13:00:00.000Z",
+        transfer_direction: "incoming",
+        transfer_status: "importing",
+      }),
+      item("task-failed", {
+        display_name: "Transfer broke",
+        created_at: "2026-01-01T12:00:00.000Z",
+        transfer_direction: "outgoing",
+        transfer_status: "failed",
+      }),
+      item("task-done", {
+        display_name: "Transfer finished",
+        created_at: "2026-01-01T11:00:00.000Z",
+        transfer_direction: "incoming",
+        transfer_status: "completed",
+      }),
+      item("task-local", {
+        display_name: "Never transferred",
+        created_at: "2026-01-01T10:00:00.000Z",
+      }),
+    ], null);
+
+    const rows = wrapper.findAll(".pipeline-item");
+    const stateByTaskId = new Map(
+      rows.map((row) => [row.attributes("data-task-id"), row.attributes("data-transfer-state")]),
+    );
+    expect(stateByTaskId.get("task-pushing")).toBe("transferring");
+    expect(stateByTaskId.get("task-importing")).toBe("transferring");
+    expect(stateByTaskId.get("task-failed")).toBe("failed");
+    expect(stateByTaskId.get("task-done")).toBeUndefined();
+    expect(stateByTaskId.get("task-local")).toBeUndefined();
+
+    const markerBySlot = new Map(
+      rows.map((row) => [row.attributes("data-task-id"), row.find(".transfer-task-marker")]),
+    );
+    expect(markerBySlot.get("task-pushing")?.classes()).toContain(
+      "transfer-task-marker-transferring",
+    );
+    expect(markerBySlot.get("task-failed")?.classes()).toContain("transfer-task-marker-failed");
+    expect(markerBySlot.get("task-failed")?.text()).not.toBe(
+      markerBySlot.get("task-pushing")?.text(),
+    );
+    expect(markerBySlot.get("task-local")?.exists()).toBe(false);
+
+    const titleByTaskId = new Map(
+      rows.map((row) => [row.attributes("data-task-id"), row.find(".item-title")]),
+    );
+    expect(titleByTaskId.get("task-importing")?.attributes("title")).toBe(
+      "Arriving here — sidebar.transferringTaskTooltip",
+    );
+    expect(titleByTaskId.get("task-failed")?.attributes("title")).toBe(
+      "Transfer broke — sidebar.transferFailedTaskTooltip",
+    );
+    expect(titleByTaskId.get("task-local")?.attributes("title")).toBe("Never transferred");
+  });
+
   it("switches the sidebar into a filtered visual state and shows filtered repo counts", async () => {
     const pipelineItems = [
       item("task-1", {

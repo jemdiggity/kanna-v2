@@ -96,6 +96,7 @@ fn build_merge_task_request() -> Result<TaskCreationRequest, String> {
         task_template: None,
         resume_session_id: None,
         recovery_snapshot: None,
+        transfer_import: None,
         notify_task_id: None,
         parent_task_id: None,
     })

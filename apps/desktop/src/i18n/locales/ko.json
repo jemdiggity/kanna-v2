@@ -125,6 +125,8 @@
     "newTaskTooltip": "새 작업 (⌘N)",
     "removeRepoTooltip": "저장소 삭제",
     "remoteTaskTooltip": "원격 작업",
+    "transferringTaskTooltip": "기기 간 전송 중",
+    "transferFailedTaskTooltip": "전송 실패",
     "detachSubtask": "상위 작업 해제",
     "sectionMergeQueue": "머지 큐",
     "sectionPullRequests": "풀 리퀘스트",

@@ -260,6 +260,11 @@ pub(super) async fn create_task_with_requested_id(
             .validate()
             .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
     }
+    if let Some(transfer_import) = payload.transfer_import.as_ref() {
+        transfer_import
+            .validate()
+            .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
+    }
 
     #[cfg(test)]
     if let Some(task_creator) = state.task_creator.clone() {

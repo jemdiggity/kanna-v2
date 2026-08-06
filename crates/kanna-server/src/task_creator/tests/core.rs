@@ -61,6 +61,7 @@ fn repo_command_template_identity_persists_the_selected_teardown_for_close() {
             task_template: launch.task_template,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -546,6 +547,7 @@ fn create_task_rejects_model_for_provider_without_a_verified_flag() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -597,6 +599,7 @@ fn create_task_rejects_unsupported_effort_before_persisting_state() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -652,6 +655,7 @@ fn create_task_rejects_unsupported_provider_before_persisting_state() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -999,6 +1003,7 @@ fn task_creation_uses_one_remote_default_branch_definition_context() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3003,6 +3008,7 @@ fn prepare_task_rejects_unsupported_headless_provider_before_persisting_state() 
                 task_template: None,
                 resume_session_id: None,
                 recovery_snapshot: None,
+                transfer_import: None,
                 blocker_task_ids: None,
                 notify_task_id: None,
                 parent_task_id: None,
@@ -3415,6 +3421,7 @@ fn prepare_task_defaults_to_pty_session_for_claude_and_codex() {
                 task_template: None,
                 resume_session_id: None,
                 recovery_snapshot: None,
+                transfer_import: None,
                 notify_task_id: None,
                 parent_task_id: None,
                 blocker_task_ids: None,
@@ -3500,6 +3507,7 @@ fn prepare_task_uses_requested_initial_terminal_geometry() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3553,6 +3561,7 @@ fn prepare_task_uses_default_initial_terminal_geometry_for_oversized_request() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3615,6 +3624,7 @@ fn prepare_task_uses_create_request_agent_selector() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3687,6 +3697,7 @@ fn prepare_task_named_agent_without_provider_uses_configured_default() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3752,6 +3763,7 @@ fn prepare_task_binds_specialty_agent_on_specialty_review_pipeline() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: Some("parent-1".to_string()),
             parent_task_id: Some("parent-1".to_string()),
             blocker_task_ids: None,
@@ -3813,6 +3825,7 @@ fn prepare_task_persists_create_spawn_options_and_custom_setup() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3894,6 +3907,7 @@ fn prepare_task_for_api_resumes_requested_claude_session() {
             task_template: None,
             resume_session_id: Some(resume_session_id.to_string()),
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -3910,6 +3924,125 @@ fn prepare_task_for_api_resumes_requested_claude_session() {
             let command = args.join(" ");
             assert!(command.contains(&format!("--resume '{resume_session_id}'")));
             assert!(!command.contains("--session-id"));
+        }
+        _ => panic!("expected pty spawn"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn prepare_task_for_api_prints_transfer_import_summary_before_the_agent() {
+    let repo_root = init_git_repo("create-transfer-import");
+    let config = test_config("create-transfer-import");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Continue the transferred work".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: None,
+            recovery_snapshot: None,
+            transfer_import: Some(crate::mobile_api::TransferImportSummary {
+                source_machine: Some("Primary".to_string()),
+                repo_mode: Some("bundle-repo".to_string()),
+                session_restored: true,
+            }),
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    match prepared.session {
+        PreparedSessionSpawn::Pty { args, .. } => {
+            let command = args.last().expect("PTY command").clone();
+            let banner_index = command
+                .find("Imported transferred task")
+                .expect("import banner");
+            assert!(command.contains("source machine: Primary"));
+            assert!(command.contains("repository: restored from a transferred git bundle"));
+            assert!(command.contains("session history: restored"));
+            let agent_index = command
+                .find("--dangerously-skip-permissions")
+                .expect("agent command");
+            assert!(banner_index < agent_index, "command: {command}");
+        }
+        _ => panic!("expected pty spawn"),
+    }
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn prepare_task_for_api_omits_the_import_banner_for_local_tasks() {
+    let repo_root = init_git_repo("create-no-transfer-import");
+    let config = test_config("create-no-transfer-import");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+
+    let prepared = prepare_task_for_api(
+        &db,
+        &config,
+        CreateTaskRequest {
+            repo_id: "repo-1".to_string(),
+            prompt: "Do local work".to_string(),
+            display_name: None,
+            pipeline_name: None,
+            stage: None,
+            base_ref: None,
+            agent: None,
+            agent_provider: Some("claude".to_string()),
+            agent_type: Some("pty".to_string()),
+            terminal_cols: None,
+            terminal_rows: None,
+            model: None,
+            effort: None,
+            permission_mode: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_turns: None,
+            max_budget_usd: None,
+            setup_cmds: None,
+            task_template: None,
+            resume_session_id: None,
+            recovery_snapshot: None,
+            transfer_import: None,
+            notify_task_id: None,
+            parent_task_id: None,
+            blocker_task_ids: None,
+        },
+    )
+    .unwrap();
+
+    match prepared.session {
+        PreparedSessionSpawn::Pty { args, .. } => {
+            let command = args.join(" ");
+            assert!(!command.contains("Imported transferred task"), "{command}");
         }
         _ => panic!("expected pty spawn"),
     }
@@ -3951,6 +4084,7 @@ fn prepare_task_for_api_creates_worktree_without_cargo_config() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -4008,6 +4142,7 @@ fn prepare_task_for_api_uses_requested_task_id() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -4055,6 +4190,7 @@ fn create_dormant_task_for_api_uses_requested_task_id() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -4111,6 +4247,7 @@ fn dormant_start_preparation_rechecks_open_blockers() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -4175,6 +4312,7 @@ fn dormant_task_preserves_explicit_provider_and_model_until_spawn() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -4271,6 +4409,7 @@ fn dormant_task_composes_repo_preference_with_complete_persisted_spawn_options()
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -4410,6 +4549,7 @@ fn dormant_start_uses_stored_explicit_agent_provider_and_model() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: Some(vec!["blocker-explicit".to_string()]),
@@ -4489,6 +4629,7 @@ fn dormant_start_uses_repo_provider_preference_without_stored_explicit_values() 
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: Some(vec!["blocker-repo".to_string()]),
@@ -4584,6 +4725,7 @@ fn prepare_task_for_api_classifies_requested_task_id_primary_key_collision() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -4645,6 +4787,7 @@ fn create_dormant_task_for_api_classifies_requested_task_id_primary_key_collisio
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -4701,6 +4844,7 @@ fn prepare_codex_agent_uses_resolved_executable_for_headless_spawn() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -4775,6 +4919,7 @@ fn prepare_headless_agent_uses_worktree_workspace_path_for_executable_resolution
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -4837,6 +4982,7 @@ fn prepare_task_defaults_to_pty_session_for_copilot() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -4921,6 +5067,7 @@ fn prepare_pty_task_restores_workspace_path_inside_login_shell_command() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -4999,6 +5146,7 @@ fn prepare_task_stores_parent_task_id_for_subtasks() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: Some("parent-1".to_string()),
@@ -5050,6 +5198,7 @@ fn prepare_task_rejects_missing_parent_task() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: Some("missing-parent".to_string()),
@@ -5191,6 +5340,7 @@ fn prepare_task_uses_builtin_default_pipeline_when_repo_has_no_local_default_pip
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             blocker_task_ids: None,
             notify_task_id: None,
 
@@ -5313,6 +5463,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             blocker_task_ids: None,
             notify_task_id: None,
 
@@ -5366,6 +5517,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -5422,6 +5574,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             blocker_task_ids: None,
             notify_task_id: None,
             parent_task_id: None,
@@ -5462,6 +5615,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             blocker_task_ids: None,
             notify_task_id: None,
 
@@ -5518,6 +5672,7 @@ fn create_task_model_and_provider_precedence_reaches_claude_and_codex_pty_argv()
         task_template: None,
         resume_session_id: None,
         recovery_snapshot: None,
+        transfer_import: None,
         blocker_task_ids: None,
         notify_task_id: None,
         parent_task_id: None,
@@ -5679,6 +5834,7 @@ fn create_task_effort_reaches_every_provider_native_pty_control() {
         task_template: None,
         resume_session_id: None,
         recovery_snapshot: None,
+        transfer_import: None,
         blocker_task_ids: None,
         notify_task_id: None,
         parent_task_id: None,

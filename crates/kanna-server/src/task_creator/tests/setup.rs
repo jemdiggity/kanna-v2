@@ -107,6 +107,7 @@ fn pty_setup_keeps_sidecar_provider_directory_as_path_fallback() {
         &["true".to_string()],
         false,
         None,
+        None,
     )
     .unwrap();
 
@@ -217,6 +218,7 @@ async fn initial_pty_task_streams_setup_before_starting_setup_created_provider()
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -322,6 +324,7 @@ fn pty_setup_failure_keeps_output_and_prevents_provider_launch() {
         "touch provider-ran",
         &["printf 'SETUP_FAILURE_OUTPUT\\n' && exit 23".to_string()],
         None,
+        None,
         Some("/usr/bin:/bin"),
     );
 
@@ -382,6 +385,7 @@ fn initial_pty_task_binds_first_provider_before_setup() {
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,
@@ -450,6 +454,7 @@ async fn initial_headless_task_runs_setup_before_resolving_workspace_provider() 
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
             blocker_task_ids: None,

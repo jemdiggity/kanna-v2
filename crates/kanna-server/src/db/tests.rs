@@ -535,6 +535,96 @@ fn snapshot_selects_latest_relevant_transfer_for_open_task() {
     let _ = std::fs::remove_file(path);
 }
 
+// A transfer that broke used to vanish from the snapshot along with the ones
+// that succeeded, so the sidebar could not tell an operator their task never
+// made it. A failure is reported until something newer is in flight.
+#[test]
+fn snapshot_reports_a_failed_transfer_but_prefers_one_still_in_flight() {
+    let path = Db::test_db_path("snapshot-failed-task-transfer");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Kanna").expect("insert repo");
+    db.insert_test_pipeline_item(
+        "task-stranded",
+        "repo-1",
+        "Transfer that broke",
+        None,
+        "in progress",
+        "2026-08-06 00:00:00",
+    )
+    .expect("insert task");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-failed-outgoing",
+        "outgoing",
+        "failed",
+        Some("task-stranded"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert failed outgoing transfer");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-completed-outgoing",
+        "outgoing",
+        "completed",
+        Some("task-stranded"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert completed outgoing transfer");
+    for (id, started_at, completed_at) in [
+        (
+            "transfer-failed-outgoing",
+            "2026-08-06 00:01:00",
+            Some("2026-08-06 00:02:00"),
+        ),
+        (
+            "transfer-completed-outgoing",
+            "2026-08-06 00:03:00",
+            Some("2026-08-06 00:04:00"),
+        ),
+    ] {
+        db.conn
+            .execute(
+                "UPDATE task_transfer
+                 SET started_at = ?, completed_at = ?
+                 WHERE id = ?",
+                (started_at, completed_at, id),
+            )
+            .expect("set deterministic transfer timestamps");
+    }
+
+    let snapshot = db.ui_snapshot().expect("load snapshot");
+    let item = &snapshot.entries[0].items[0];
+    assert_eq!(
+        item.transfer_id.as_deref(),
+        Some("transfer-failed-outgoing")
+    );
+    assert_eq!(item.transfer_status.as_deref(), Some("failed"));
+
+    // A retry started after the failure is the current truth about the task.
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-retry-outgoing",
+        "outgoing",
+        "streaming",
+        Some("task-stranded"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert retried outgoing transfer");
+    db.conn
+        .execute(
+            "UPDATE task_transfer SET started_at = ?, completed_at = NULL WHERE id = ?",
+            ("2026-08-05 00:00:00", "transfer-retry-outgoing"),
+        )
+        .expect("start the retry before the failure to prove ordering");
+
+    let snapshot = db.ui_snapshot().expect("reload snapshot");
+    let item = &snapshot.entries[0].items[0];
+    assert_eq!(item.transfer_id.as_deref(), Some("transfer-retry-outgoing"));
+    assert_eq!(item.transfer_status.as_deref(), Some("streaming"));
+
+    let _ = std::fs::remove_file(path);
+}
+
 #[test]
 fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
     let path = Db::test_db_path("incoming-transfer-state-machine");

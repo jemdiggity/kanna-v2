@@ -100,7 +100,7 @@ impl Db {
                  AND (
                    (
                      candidate.direction = 'outgoing'
-                     AND candidate.status IN ('pending', 'streaming')
+                     AND candidate.status IN ('pending', 'streaming', 'failed')
                    )
                    OR (
                      candidate.direction = 'incoming'
@@ -109,11 +109,18 @@ impl Db {
                        'claimed',
                        'streaming',
                        'importing',
-                       'awaiting_acknowledgment'
+                       'awaiting_acknowledgment',
+                       'failed'
                      )
                    )
                  )
-               ORDER BY datetime(COALESCE(candidate.completed_at, candidate.started_at)) DESC,
+               -- A failed transfer is reported so the UI can show that the move
+               -- broke, but it never outranks a live one: a retry already in
+               -- flight is the current truth about the task. Terminal
+               -- 'completed'/'rejected' stay unreported — there is nothing left
+               -- to say about them.
+               ORDER BY (candidate.status = 'failed') ASC,
+                        datetime(COALESCE(candidate.completed_at, candidate.started_at)) DESC,
                         candidate.rowid DESC
                LIMIT 1
              )

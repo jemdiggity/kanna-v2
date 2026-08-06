@@ -120,6 +120,8 @@ export interface CreateItemOptions {
   selectOnCreate?: boolean;
   resumeSessionId?: string | null;
   recoverySnapshot?: SessionRecoveryState | null;
+  /** Set only by the receiver side of a cross-machine transfer; display only. */
+  transferImport?: import("./transferImportSummary").TransferImportSummary | null;
   blockerTaskIds?: string[];
 }
 
