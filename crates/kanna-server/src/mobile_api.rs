@@ -227,6 +227,11 @@ impl TransferImportSummary {
                     Self::MAX_FIELD_CHARS
                 ));
             }
+            if value.is_some_and(|value| value.chars().any(char::is_control)) {
+                return Err(format!(
+                    "transferImport.{label} must not contain control characters"
+                ));
+            }
         }
         Ok(())
     }
@@ -1001,7 +1006,7 @@ pub fn build_mobile_server_status(
 
 #[cfg(test)]
 mod tests {
-    use super::CreateTaskRequest;
+    use super::{CreateTaskRequest, TransferImportSummary};
     use crate::config::Config;
     use crate::db::Db;
     use serde_json::json;
@@ -1077,6 +1082,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(request.display_name.as_deref(), Some("Short task title"));
+    }
+
+    #[test]
+    fn transfer_import_summary_rejects_terminal_control_characters() {
+        let valid = TransferImportSummary {
+            source_machine: Some("Primary Mac".to_string()),
+            repo_mode: Some("bundle-repo".to_string()),
+            session_restored: true,
+        };
+        assert_eq!(valid.validate(), Ok(()));
+
+        for unsafe_value in ["Primary\nMac", "Primary\u{1b}]2;spoof\u{7}"] {
+            let summary = TransferImportSummary {
+                source_machine: Some(unsafe_value.to_string()),
+                ..valid.clone()
+            };
+            assert!(summary
+                .validate()
+                .is_err_and(|error| error.contains("control characters")));
+        }
     }
 
     #[test]
