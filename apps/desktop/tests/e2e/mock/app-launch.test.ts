@@ -22,6 +22,16 @@ describe("app launch", () => {
     await client.deleteSession();
   });
 
+  it("loads the frontend from this instance's dev server", async () => {
+    // Tauri compiles `build.devUrl` into the binary, but each instance gets its own port
+    // at launch. When a cached build keeps an earlier run's port the window is refused and
+    // sits at about:blank — see apps/desktop/src-tauri/src/dev_url.rs.
+    const devPort = process.env.KANNA_DEV_PORT;
+    expect(devPort).toBeTruthy();
+    const origin = await client.executeSync<string>("return location.origin;");
+    expect(origin).toBe(`http://localhost:${devPort}`);
+  });
+
   it("renders with title Kanna", async () => {
     await pauseForSlowMode("before title assertion");
     const title = await client.getTitle();
