@@ -32,6 +32,7 @@ const OPERATIONS: &[&str] = &[
     "accept-pairing",
     "reject-pairing",
     "prepare-outgoing-transfer",
+    "abandon-outgoing-transfer",
     "request-task-pull",
     "stage-artifact",
     "fetch-artifact",
@@ -270,6 +271,14 @@ pub async fn dispatch(
                 .get("payload")
                 .ok_or("prepare-outgoing-transfer requires a payload")?;
             prepare_outgoing_transfer(client, payload).await
+        }
+        "abandon-outgoing-transfer" => {
+            transfer_id_reply(
+                client,
+                "abandon_outgoing_transfer",
+                json!({ "transfer_id": required_string(&params, &["transferId"])? }),
+            )
+            .await
         }
         "request-task-pull" => {
             let transport = transfer_transport(&params)?;
@@ -540,6 +549,7 @@ mod tests {
         assert!(is_transfer_control_operation(
             "complete-outgoing-transfer-finalization"
         ));
+        assert!(is_transfer_control_operation("abandon-outgoing-transfer"));
         assert!(!is_transfer_control_operation("shutdown"));
         assert!(!is_transfer_control_operation(""));
     }

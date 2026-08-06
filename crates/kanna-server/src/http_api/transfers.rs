@@ -5,6 +5,11 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Discriminator clients match on to tell "this push is already in flight" from
+/// any other write failure. Kept stable: `stores/transfer.ts` keys its
+/// idempotent push path off this exact string.
+pub(super) const ACTIVE_OUTGOING_TRANSFER_CONFLICT: &str = "active_outgoing_transfer_exists";
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SetCloudTaskIdentityRequest {
@@ -111,14 +116,49 @@ pub(super) async fn mark_incoming_transfer_sidecar_cleanup_completed(
     Ok(Json(TransferUpdateResponse { updated }))
 }
 
+/// A duplicate outgoing push is a race, not a server fault.
+///
+/// Two `task-pull-requested` deliveries for the same source task both passed a
+/// stale renderer-snapshot eligibility check on 2026-08-06; the loser's insert
+/// tripped `idx_task_transfer_active_outgoing_source` and surfaced as a raw
+/// 500, leaving the caller no way to tell "already in flight" from "the write
+/// broke". 409 with this body is that distinction, and it is what lets the
+/// caller release the sidecar reservation its preflight had already made.
 pub(super) async fn insert_task_transfer(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UpsertTransferRequest>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<serde_json::Value>)> {
+    let db = open_db(&state).map_err(json_error)?;
+    match db.insert_task_transfer(&payload.transfer) {
+        Ok(()) => Ok(Json(serde_json::json!({ "id": payload.transfer.id }))),
+        Err(error) if crate::db::is_active_outgoing_transfer_conflict(&error) => {
+            let source_task_id = payload.transfer.source_task_id.clone();
+            let existing = source_task_id
+                .as_deref()
+                .and_then(|task_id| db.active_outgoing_transfer_for_source(task_id).ok())
+                .flatten();
+            Err((
+                axum::http::StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": ACTIVE_OUTGOING_TRANSFER_CONFLICT,
+                    "sourceTaskId": source_task_id,
+                    "transferId": existing.map(|transfer| transfer.id),
+                })),
+            ))
+        }
+        Err(error) => Err(json_error(db_error(error))),
+    }
+}
+
+pub(super) async fn get_active_outgoing_transfer(
+    State(state): State<Arc<AppState>>,
+    Path(source_task_id): Path<String>,
+) -> Result<Json<TransferResponse>, (axum::http::StatusCode, String)> {
     let db = open_db(&state)?;
-    db.insert_task_transfer(&payload.transfer)
+    let transfer = db
+        .active_outgoing_transfer_for_source(&source_task_id)
         .map_err(db_error)?;
-    Ok(Json(serde_json::json!({ "id": payload.transfer.id })))
+    Ok(Json(TransferResponse { transfer }))
 }
 
 pub(super) async fn get_task_transfer(
@@ -330,4 +370,10 @@ fn db_error(error: rusqlite::Error) -> (axum::http::StatusCode, String) {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
         format!("db error: {error}"),
     )
+}
+
+fn json_error(
+    (status, message): (axum::http::StatusCode, String),
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    (status, Json(serde_json::json!({ "error": message })))
 }

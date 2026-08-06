@@ -597,6 +597,87 @@ async fn prepare_transfer_rejects_forged_stale_and_replayed_envelopes_before_res
     );
 }
 
+/// A duplicate push discovers it lost the race only after its preflight has
+/// already written a durable reservation and staged artifacts for it. On
+/// 2026-08-06 that state was simply left behind. Abandoning has to clear both,
+/// and has to survive the caller not knowing whether the reservation existed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoning_an_outgoing_transfer_clears_its_reservation_and_staged_artifacts() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-source", "Source", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_millis(500)),
+    )
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination").await;
+
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination", "task-source")
+        .await
+        .unwrap();
+    let staged = temp.path().join("session.tar.gz");
+    std::fs::write(&staged, b"session").unwrap();
+    source
+        .stage_transfer_artifact(
+            &preflight.transfer_id,
+            "claude-session",
+            staged.clone(),
+            true,
+        )
+        .await
+        .unwrap();
+    let owned_artifact = source
+        .fetch_transfer_artifact(&preflight.transfer_id, "claude-session")
+        .await
+        .unwrap()
+        .path;
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-source", "reservations"),
+        1,
+    );
+    assert!(owned_artifact.exists());
+
+    source
+        .abandon_outgoing_transfer(&preflight.transfer_id)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-source", "reservations"),
+        0,
+        "abandoned reservation stayed on disk",
+    );
+    assert!(
+        !owned_artifact.exists(),
+        "abandoned artifact stayed on disk"
+    );
+    assert!(source
+        .fetch_transfer_artifact(&preflight.transfer_id, "claude-session")
+        .await
+        .is_err());
+
+    // The caller's job is to leave nothing behind, not to prove something was
+    // there — a second release, or one for a transfer this process never
+    // reserved, is a no-op rather than an error it would have to swallow.
+    source
+        .abandon_outgoing_transfer(&preflight.transfer_id)
+        .await
+        .unwrap();
+    source
+        .abandon_outgoing_transfer("transfer-never-reserved")
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finalize_transfer_authenticates_reserved_target_and_rejects_replay_before_events() {
     let temp = tempfile::tempdir().unwrap();

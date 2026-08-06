@@ -642,6 +642,22 @@ impl TransferRuntime {
         }
     }
 
+    /// Releases an outgoing reservation whose transfer will never be committed.
+    ///
+    /// A preflight writes a durable reservation to the registry dir and may be
+    /// followed by staged artifacts (repo bundle, session archives) before the
+    /// caller discovers the push is a duplicate. Without this the reservation
+    /// and its temp files sit on disk until the TTL sweeper notices — the leak
+    /// the duplicate-push race left behind on 2026-08-06. Abandoning an unknown
+    /// transfer id is deliberately not an error: the caller's job is to make
+    /// sure nothing is left, not to prove something was.
+    pub async fn abandon_outgoing_transfer(&self, transfer_id: &str) -> Result<(), RuntimeError> {
+        self.outgoing_transfers.lock().await.remove(transfer_id);
+        self.replay_store.remove_reservation(transfer_id);
+        self.cleanup_transfer_artifacts(transfer_id).await;
+        Ok(())
+    }
+
     pub async fn mark_import_ack_completed(&self, transfer_id: &str) -> Result<(), RuntimeError> {
         self.incoming_reservations.lock().await.remove(transfer_id);
         self.replay_store.remove_incoming_reservation(transfer_id);

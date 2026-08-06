@@ -399,6 +399,45 @@ describe("handleTaskPullRequested", () => {
     expect(pushTaskToPeer).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * The snapshot pre-filter is deliberately cheap and therefore stale: a second
+   * delivery that arrives before `store.items` reloads still reaches the push.
+   * The push is where the DB-backed check lives, and it answers "already in
+   * flight" by resolving — so this delivery must settle as delivered rather
+   * than be retried or reported as an operational error.
+   */
+  it("settles a second delivery the stale snapshot could not filter out", async () => {
+    const pushTaskToPeer = vi.fn(async () => {});
+    const reportOperationalError = vi.fn();
+    const inFlight = new Map();
+    const event = {
+      requestId: "pull-1",
+      requesterPeerId: "peer-requester",
+      sourceTaskId: "task-source",
+    };
+    // The first push already inserted the transfer row; this renderer's
+    // snapshot has not reloaded, so the source still looks eligible.
+    const store = { items: [item()], pushTaskToPeer };
+
+    await expect(handleTaskPullRequested(
+      event,
+      store as never,
+      inFlight,
+      [machine()],
+      { reportOperationalError },
+    )).resolves.toBe("delivered");
+    await expect(handleTaskPullRequested(
+      event,
+      store as never,
+      inFlight,
+      [machine()],
+      { reportOperationalError },
+    )).resolves.toBe("delivered");
+
+    expect(pushTaskToPeer).toHaveBeenCalledTimes(2);
+    expect(reportOperationalError).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["missing", [], "task-missing"],
     ["closed", [item({ closed_at: "2026-07-26T00:00:00Z" })], "task-source"],

@@ -34,7 +34,8 @@ pub use stage_runs::FinishedStageRun;
 pub use task_events::{appended as task_event_appended, TaskEvent, TaskEventKind, TaskEventScope};
 #[allow(unused_imports)]
 pub use transfers::{
-    NewTaskTransfer, NewTaskTransferProvenance, PendingIncomingTransfer, TaskTransfer,
+    is_active_outgoing_transfer_conflict, NewTaskTransfer, NewTaskTransferProvenance,
+    PendingIncomingTransfer, TaskTransfer,
 };
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 10_000;

@@ -399,6 +399,22 @@ pub async fn prepare_outgoing_transfer(
     .await
 }
 
+/// Releases the sidecar reservation a preflight made for a transfer the caller
+/// has decided not to commit — the duplicate-push case, where the DB row
+/// belongs to an earlier push and this one has nothing left to do.
+#[tauri::command]
+pub async fn abandon_outgoing_transfer(
+    app: tauri::AppHandle,
+    transfer_id: String,
+) -> Result<Value, String> {
+    transfer_control(
+        &app,
+        "abandon-outgoing-transfer",
+        json!({ "transferId": transfer_id }),
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn request_task_pull(
     app: tauri::AppHandle,

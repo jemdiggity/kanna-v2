@@ -1,9 +1,11 @@
 import type { PipelineItem, Repo } from "../types/kanna";
 import {
   completeDesktopTaskTransfer,
+  fetchActiveOutgoingTaskTransfer,
   fetchClosedTaskIdentities,
   getDesktopTaskTransfer,
   insertDesktopTaskTransfer,
+  isActiveOutgoingTransferConflict,
   insertDesktopTaskTransferProvenance,
   markDesktopTaskTransferAwaitingAcknowledgment,
   markDesktopTaskTransferImporting,
@@ -780,6 +782,35 @@ export function createTransferApi(
     throw new Error(`unsupported repo acquisition mode: ${payload.repo.mode satisfies never}`);
   }
 
+  /**
+   * Hands a never-to-be-committed preflight reservation back to the sidecar.
+   *
+   * The reservation is durable (registry dir) and may already own staged
+   * artifacts, so failing to release it leaks disk state. A release that itself
+   * fails is reported rather than swallowed: the reservation is then genuinely
+   * orphaned, and the operator is the only one who can tell.
+   */
+  async function releaseOutgoingTransferReservation(transferId: string): Promise<void> {
+    try {
+      await invoke("abandon_outgoing_transfer", { transferId });
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(
+        `[store] failed to release abandoned transfer reservation ${transferId}:`,
+        error,
+      );
+      context.toast.warning(
+        `${context.tt("toasts.transferReservationOrphaned")}: ${transferId} (${reason})`,
+      );
+    }
+  }
+
+  /**
+   * A push for a task that already has a transfer in flight is a duplicate
+   * delivery, not an error: the earlier push owns the transfer and this one has
+   * nothing left to do. Resolving (rather than throwing) is what keeps the pull
+   * requester's retry loop from treating the race as a dropped delivery.
+   */
   async function pushTaskToPeer(
     taskId: string,
     peerId: string,
@@ -789,20 +820,34 @@ export function createTransferApi(
     if (!item) {
       throw new Error(`task not found: ${taskId}`);
     }
+    if (item.closed_at != null) {
+      throw new Error(`task is closed: ${taskId}`);
+    }
     if (
-      item.closed_at != null
-      || ["pending", "claimed", "streaming", "importing", "awaiting_acknowledgment"].includes(
+      ["pending", "claimed", "streaming", "importing", "awaiting_acknowledgment"].includes(
         item.transfer_status ?? "",
       )
       || outgoingPushesInFlight.has(taskId)
       || outgoingPushesDurablyStarted.has(taskId)
     ) {
-      throw new Error(`task is already transferring: ${taskId}`);
+      console.debug(`[store] task already transferring, skipping duplicate push: ${taskId}`);
+      return;
     }
 
     const repo = context.state.repos.value.find((candidate) => candidate.id === item.repo_id);
     if (!repo) {
       throw new Error(`repo not found for task: ${taskId}`);
+    }
+
+    // The snapshot guards above only see this renderer's last reload; the DB is
+    // the one place that knows about a push another delivery — or another run
+    // of this app — already started.
+    const activeTransfer = await fetchActiveOutgoingTaskTransfer(taskId);
+    if (activeTransfer) {
+      console.debug(
+        `[store] task already has an active outgoing transfer ${activeTransfer.id}, skipping duplicate push: ${taskId}`,
+      );
+      return;
     }
 
     outgoingPushesInFlight.add(taskId);
@@ -905,19 +950,33 @@ export function createTransferApi(
         bundle,
       });
 
-      await insertDesktopTaskTransfer({
-        id: preflight.transferId,
-        direction: "outgoing",
-        status: "pending",
-        source_peer_id: preflight.sourcePeerId,
-        target_peer_id: peerId,
-        source_desktop_id: payload.task.source_desktop_id,
-        target_desktop_id: payload.target_desktop_id,
-        source_task_id: taskId,
-        local_task_id: taskId,
-        error: null,
-        payload_json: JSON.stringify(payload),
-      });
+      try {
+        await insertDesktopTaskTransfer({
+          id: preflight.transferId,
+          direction: "outgoing",
+          status: "pending",
+          source_peer_id: preflight.sourcePeerId,
+          target_peer_id: peerId,
+          source_desktop_id: payload.task.source_desktop_id,
+          target_desktop_id: payload.target_desktop_id,
+          source_task_id: taskId,
+          local_task_id: taskId,
+          error: null,
+          payload_json: JSON.stringify(payload),
+        });
+      } catch (error: unknown) {
+        if (!isActiveOutgoingTransferConflict(error)) throw error;
+        // Another push won the race between the DB read above and this insert.
+        // This one's preflight already reserved sidecar state and staged
+        // artifacts, so release them here — an abandoned reservation otherwise
+        // sits in the registry dir until the TTL sweeper notices.
+        console.warn(
+          `[store] outgoing transfer already in flight for ${taskId}; releasing duplicate reservation ${preflight.transferId}`,
+        );
+        await releaseOutgoingTransferReservation(preflight.transferId);
+        await queries.reloadSnapshot();
+        return;
+      }
       outgoingPushesDurablyStarted.add(taskId);
 
       await invoke("prepare_outgoing_transfer", {

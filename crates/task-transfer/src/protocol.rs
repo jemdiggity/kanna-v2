@@ -121,6 +121,11 @@ pub enum ControlRequest {
         transfer_id: String,
         payload: serde_json::Value,
     },
+    /// Releases a preflight reservation that will never be committed.
+    AbandonOutgoingTransfer {
+        request_id: String,
+        transfer_id: String,
+    },
     FinalizeOutgoingTransfer {
         request_id: String,
         transfer_id: String,
@@ -250,6 +255,10 @@ pub enum ControlResponse {
         pull_request_id: String,
     },
     PrepareTransferCommit {
+        request_id: String,
+        transfer_id: String,
+    },
+    AbandonOutgoingTransfer {
         request_id: String,
         transfer_id: String,
     },

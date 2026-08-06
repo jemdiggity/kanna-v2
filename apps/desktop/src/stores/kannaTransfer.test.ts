@@ -192,6 +192,14 @@ function createTransferDb(initial: {
     task_transfer_provenance: [] as Array<Record<string, unknown>>,
   };
 
+  const findActiveOutgoingTransfer = (sourceTaskId: string | null | undefined) =>
+    sourceTaskId == null
+      ? undefined
+      : tables.task_transfer.find((row) =>
+        row.direction === "outgoing"
+        && row.source_task_id === sourceTaskId
+        && ["pending", "streaming"].includes(String(row.status)));
+
   setDesktopSnapshotFetcherForTests(async () => ({
     entries: tables.repo.map((repo) => ({
       repo,
@@ -361,6 +369,10 @@ function createTransferDb(initial: {
       if (tables.task_transfer.some((row) => row.id === transfer.id)) {
         throw new Error("UNIQUE constraint failed: task_transfer.id");
       }
+      // Mirrors `idx_task_transfer_active_outgoing_source` from migration 036.
+      if (transfer.direction === "outgoing" && findActiveOutgoingTransfer(transfer.source_task_id)) {
+        throw new Error("UNIQUE constraint failed: task_transfer.source_task_id");
+      }
       tables.task_transfer.push({
         ...transfer,
         started_at: new Date().toISOString(),
@@ -369,6 +381,8 @@ function createTransferDb(initial: {
     },
     getTaskTransfer: async (transferId: string) =>
       tables.task_transfer.find((transfer) => transfer.id === transferId) as never ?? null,
+    fetchActiveOutgoingTaskTransfer: async (sourceTaskId: string) =>
+      findActiveOutgoingTransfer(sourceTaskId) as never ?? null,
     updateTaskTransferPayload: async (transferId: string, payloadJson: string) => {
       const row = tables.task_transfer.find((transfer) => transfer.id === transferId);
       if (!row) return false;
@@ -871,6 +885,7 @@ describe("pushTaskToPeer", () => {
     const { useKannaStore } = await import("./kanna");
     const store = useKannaStore();
 
+    createTransferDb({});
     store.repos = [buildRepo()];
     store.items = [buildItem()];
 
@@ -903,6 +918,7 @@ describe("pushTaskToPeer", () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");
     const store = useKannaStore();
+    createTransferDb({});
     store.repos = [buildRepo()];
     store.items = [buildItem()];
     invokeMock.mockImplementation(async (cmd) => {
@@ -1038,13 +1054,159 @@ describe("pushTaskToPeer", () => {
     expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer")).toHaveLength(2);
     expect(fakeDb.tables.task_transfer).toHaveLength(1);
 
+    // The row the failed commit left behind is still the task's active
+    // outgoing transfer, so a further push has nothing to do — and saying so by
+    // throwing would make the pull requester treat it as a dropped delivery.
     await expect(store.pushTaskToPeer("task-source", "peer-target", {
       transport: "lan",
       cloudFallback: true,
       targetDesktopId: "desktop-target",
-    })).rejects.toThrow("already transferring");
+    })).resolves.toBeUndefined();
     expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer")).toHaveLength(2);
     expect(fakeDb.tables.task_transfer).toHaveLength(1);
+  });
+
+  /**
+   * The renderer's in-memory push guards die with the app; the row does not.
+   * A fresh store — the app-restart case — has to reach the same answer.
+   */
+  it("skips a push for a task the DB already has an outgoing transfer for", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const fakeDb = createTransferDb({
+      transfers: [{
+        id: "transfer-existing",
+        direction: "outgoing",
+        status: "pending",
+        source_task_id: "task-source",
+        local_task_id: "task-source",
+      }],
+    });
+    await store.init(fakeDb);
+    store.repos = [buildRepo()];
+    // The snapshot has not caught up with the row, so only the DB read can
+    // stop this push.
+    store.items = [buildItem()];
+    invokeMock.mockImplementation(async () => null);
+
+    await expect(store.pushTaskToPeer("task-source", "peer-target")).resolves.toBeUndefined();
+
+    expect(invokeMock).not.toHaveBeenCalledWith("prepare_outgoing_transfer", expect.anything());
+    expect(fakeDb.tables.task_transfer).toHaveLength(1);
+  });
+
+  /**
+   * The 2026-08-06 incident: two `task-pull-requested` deliveries raced past a
+   * stale snapshot, the loser's insert hit
+   * `idx_task_transfer_active_outgoing_source`, and the raw 500 left its
+   * preflight reservation on disk.
+   */
+  it("keeps two racing pushes to one transfer row and releases the loser's reservation", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const fakeDb = createTransferDb({});
+    await store.init(fakeDb);
+    store.repos = [buildRepo()];
+    store.items = [buildItem()];
+    loadSessionRecoveryStateMock.mockResolvedValue(null);
+    toastMock.warning.mockClear();
+
+    let preflights = 0;
+    const abandoned: string[] = [];
+    let releasePreflight!: () => void;
+    const bothPreflightsIssued = new Promise<void>((resolve) => { releasePreflight = resolve; });
+    invokeMock.mockImplementation(async (cmd, args) => {
+      if (cmd === "abandon_outgoing_transfer") {
+        abandoned.push(String(args?.transferId));
+        return { transferId: args?.transferId };
+      }
+      if (cmd === "prepare_outgoing_transfer") {
+        const payload = args?.payload as Record<string, unknown>;
+        if (payload.phase !== "preflight") return { ok: true };
+        preflights += 1;
+        const reservation = preflights;
+        // Hold both pushes past their DB eligibility read so they race the
+        // insert, exactly as the two deliveries did. Each still gets its own
+        // reservation, as the target peer would mint.
+        if (preflights === 2) releasePreflight();
+        await bothPreflightsIssued;
+        return {
+          transferId: `transfer-race-${reservation}`,
+          sourcePeerId: "peer-source",
+          targetHasRepo: true,
+        };
+      }
+      return null;
+    });
+
+    // Both deliveries clear the snapshot and in-flight guards before either
+    // reaches the DB, which is exactly how the incident's second push got
+    // started.
+    await expect(Promise.all([
+      store.pushTaskToPeer("task-source", "peer-target"),
+      store.pushTaskToPeer("task-source", "peer-target"),
+    ])).resolves.toEqual([undefined, undefined]);
+
+    expect(preflights).toBe(2);
+    expect(fakeDb.tables.task_transfer).toHaveLength(1);
+    expect(abandoned).toHaveLength(1);
+    expect(abandoned[0]).not.toBe(fakeDb.tables.task_transfer[0]!.id);
+    expect(toastMock.warning).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A reservation that could not be released really is orphaned on disk, and
+   * only the operator can clear it — so this one is said out loud rather than
+   * logged and forgotten.
+   */
+  it("surfaces a duplicate reservation it could not release", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const fakeDb = createTransferDb({
+      transfers: [{
+        id: "transfer-winner",
+        direction: "outgoing",
+        status: "pending",
+        source_task_id: "task-source",
+        local_task_id: "task-source",
+      }],
+    });
+    await store.init(fakeDb);
+    store.repos = [buildRepo()];
+    store.items = [buildItem()];
+    loadSessionRecoveryStateMock.mockResolvedValue(null);
+    toastMock.warning.mockClear();
+
+    invokeMock.mockImplementation(async (cmd, args) => {
+      if (cmd === "abandon_outgoing_transfer") {
+        throw new Error("transfer sidecar is not running");
+      }
+      if (cmd === "prepare_outgoing_transfer") {
+        const payload = args?.payload as Record<string, unknown>;
+        if (payload.phase !== "preflight") return { ok: true };
+        return {
+          transferId: "transfer-loser",
+          sourcePeerId: "peer-source",
+          targetHasRepo: true,
+        };
+      }
+      return null;
+    });
+
+    // The DB pre-check would normally stop this push; skipping straight to the
+    // insert is what a push that lost the race after its own read looks like.
+    updateDesktopServerClientHandlersForTests({
+      fetchActiveOutgoingTaskTransfer: async () => null,
+    });
+
+    await expect(store.pushTaskToPeer("task-source", "peer-target")).resolves.toBeUndefined();
+
+    expect(fakeDb.tables.task_transfer).toHaveLength(1);
+    expect(toastMock.warning).toHaveBeenCalledTimes(1);
+    expect(toastMock.warning.mock.calls[0]?.[0]).toContain("transfer-loser");
   });
 
   it("uses preflight sourcePeerId and targetHasRepo to build the final payload", async () => {

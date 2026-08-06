@@ -99,6 +99,7 @@ export interface DesktopServerClientHandlersForTests {
   reorderPinnedTasks?: (repoId: string, orderedIds: string[]) => MaybePromise<void>;
   insertTaskTransfer?: (transfer: NewTaskTransferInput) => MaybePromise<void>;
   getTaskTransfer?: (transferId: string) => MaybePromise<TaskTransfer | null>;
+  fetchActiveOutgoingTaskTransfer?: (sourceTaskId: string) => MaybePromise<TaskTransfer | null>;
   updateTaskTransferPayload?: (
     transferId: string,
     payloadJson: string,
@@ -142,6 +143,42 @@ async function ensureDesktopServerRunning(): Promise<void> {
   await invoke("ensure_mobile_server");
 }
 
+/**
+ * A non-2xx answer from `kanna-server`, carrying the status and body so callers
+ * can act on the distinction the server drew instead of pattern-matching prose.
+ */
+export class DesktopServerRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly body: string,
+  ) {
+    super(message);
+    this.name = "DesktopServerRequestError";
+  }
+
+  /** The body parsed as JSON, or null when the server answered with prose. */
+  parsedBody(): Record<string, unknown> | null {
+    try {
+      const parsed: unknown = JSON.parse(this.body);
+      return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * Statuses that describe the request rather than a transient server condition.
+ * Retrying them only delays the caller's own handling.
+ */
+const TERMINAL_REQUEST_STATUSES = new Set([404, 409]);
+
+function isTerminalRequestError(error: unknown): boolean {
+  return error instanceof DesktopServerRequestError
+    && TERMINAL_REQUEST_STATUSES.has(error.status);
+}
+
 async function requestJson<T>(
   path: string,
   options: { method?: string; body?: unknown; retryMs?: number } = {},
@@ -165,13 +202,17 @@ async function requestJson<T>(
         return await response.json() as T;
       }
       const responseBody = await response.text().catch(() => "");
-      lastError = new Error(`${method} ${path} failed: ${response.status}${responseBody ? ` ${responseBody}` : ""}`);
-      if (response.status === 404) {
+      lastError = new DesktopServerRequestError(
+        `${method} ${path} failed: ${response.status}${responseBody ? ` ${responseBody}` : ""}`,
+        response.status,
+        responseBody,
+      );
+      if (isTerminalRequestError(lastError)) {
         throw lastError;
       }
     } catch (error) {
       lastError = error;
-      if (error instanceof Error && error.message.includes("failed: 404")) {
+      if (isTerminalRequestError(error)) {
         throw error;
       }
     }
@@ -1043,15 +1084,97 @@ export interface NewTaskTransferProvenanceInput {
   source_machine_task_label: string | null;
 }
 
-export async function insertDesktopTaskTransfer(transfer: NewTaskTransferInput): Promise<void> {
-  if (clientHandlersForTests?.insertTaskTransfer) {
-    await clientHandlersForTests.insertTaskTransfer(transfer);
-    return;
+/**
+ * Server-side discriminator for "this source task already has an outgoing
+ * transfer in flight". Kept in sync with `kanna-server`'s
+ * `ACTIVE_OUTGOING_TRANSFER_CONFLICT`.
+ */
+const ACTIVE_OUTGOING_TRANSFER_CONFLICT = "active_outgoing_transfer_exists";
+
+/**
+ * The partial unique index `idx_task_transfer_active_outgoing_source` rejecting
+ * the insert. Recognised alongside the 409 so a duplicate push stays idempotent
+ * even against a server that predates the structured answer.
+ */
+const ACTIVE_OUTGOING_TRANSFER_CONSTRAINT =
+  "UNIQUE constraint failed: task_transfer.source_task_id";
+
+/**
+ * A second outgoing push for a task that already has one in flight. This is a
+ * race between two deliveries, not a failure: the first push owns the transfer
+ * and the second has nothing left to do.
+ */
+export class ActiveOutgoingTransferConflictError extends Error {
+  constructor(
+    readonly sourceTaskId: string | null,
+    readonly existingTransferId: string | null,
+  ) {
+    super(`task already has an active outgoing transfer: ${sourceTaskId ?? "unknown task"}`);
+    this.name = "ActiveOutgoingTransferConflictError";
   }
-  await requestJson<{ id: string }>("/v1/transfers", {
-    method: "POST",
-    body: { transfer },
-  });
+}
+
+export function isActiveOutgoingTransferConflict(error: unknown): boolean {
+  return error instanceof ActiveOutgoingTransferConflictError
+    || (error instanceof Error && error.message.includes(ACTIVE_OUTGOING_TRANSFER_CONSTRAINT));
+}
+
+function activeOutgoingTransferConflict(
+  error: unknown,
+  transfer: NewTaskTransferInput,
+): ActiveOutgoingTransferConflictError | null {
+  if (error instanceof DesktopServerRequestError && error.status === 409) {
+    const body = error.parsedBody();
+    if (body?.error === ACTIVE_OUTGOING_TRANSFER_CONFLICT) {
+      const existing = body.transferId;
+      return new ActiveOutgoingTransferConflictError(
+        transfer.source_task_id,
+        typeof existing === "string" ? existing : null,
+      );
+    }
+  }
+  if (error instanceof Error && error.message.includes(ACTIVE_OUTGOING_TRANSFER_CONSTRAINT)) {
+    return new ActiveOutgoingTransferConflictError(transfer.source_task_id, null);
+  }
+  return null;
+}
+
+export async function insertDesktopTaskTransfer(transfer: NewTaskTransferInput): Promise<void> {
+  try {
+    if (clientHandlersForTests?.insertTaskTransfer) {
+      await clientHandlersForTests.insertTaskTransfer(transfer);
+      return;
+    }
+    await requestJson<{ id: string }>("/v1/transfers", {
+      method: "POST",
+      body: { transfer },
+    });
+  } catch (error: unknown) {
+    const conflict = activeOutgoingTransferConflict(error, transfer);
+    if (conflict) throw conflict;
+    throw error;
+  }
+}
+
+/**
+ * The outgoing transfer this task already has in flight, read from the DB
+ * rather than a renderer snapshot.
+ *
+ * `store.items` lags the DB, so a second `task-pull-requested` delivery could
+ * pass eligibility and race the first into the unique index. This read is the
+ * authoritative pre-check, and unlike the renderer's in-memory push guards it
+ * still holds after an app restart.
+ */
+export async function fetchActiveOutgoingTaskTransfer(
+  sourceTaskId: string,
+): Promise<TaskTransfer | null> {
+  if (clientHandlersForTests?.fetchActiveOutgoingTaskTransfer) {
+    return await clientHandlersForTests.fetchActiveOutgoingTaskTransfer(sourceTaskId);
+  }
+  const response = await requestJson<{ transfer: TaskTransfer | null }>(
+    `/v1/transfers/outgoing/active/${encodeURIComponent(sourceTaskId)}`,
+  );
+  return response.transfer;
 }
 
 export async function getDesktopTaskTransfer(transferId: string): Promise<TaskTransfer | null> {
