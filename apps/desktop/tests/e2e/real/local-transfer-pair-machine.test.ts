@@ -109,6 +109,7 @@ async function waitForPeer(
 
 async function waitForPairPickerReady(timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let observed = "never sampled";
 
   while (Date.now() < deadline) {
     const mode = await getVueState(primary, "peerPickerMode");
@@ -117,10 +118,13 @@ async function waitForPairPickerReady(timeoutMs = 20_000): Promise<void> {
     if (mode === "pair" && visible === true && loading === false) {
       return;
     }
+    // Three separate conditions fail this wait; without the last sample the
+    // failure cannot be told apart from a picker that never opened.
+    observed = `mode=${String(mode)} visible=${String(visible)} loading=${String(loading)}`;
     await sleep(250);
   }
 
-  throw new Error("timed out waiting for Pair Machine picker to load peers");
+  throw new Error(`timed out waiting for Pair Machine picker to load peers (${observed})`);
 }
 
 async function waitForPrimaryButtonEnabled(timeoutMs = 5_000): Promise<void> {

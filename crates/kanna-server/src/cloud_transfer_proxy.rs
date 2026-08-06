@@ -1,3 +1,15 @@
+//! Outbound cloud transfer tunnels, owned by `kanna-server`.
+//!
+//! This cannot ride the server's own relay connection. The relay only honours
+//! `tunnel_request` from a socket authenticated with a Firebase user
+//! `id_token` (`services/relay/src/router.ts` — `from === "phone"`); the
+//! server authenticates as a *desktop* with its device token / desktop secret
+//! and is never allowed to open one. The signed-in renderer holds the only
+//! Firebase credential, so it pushes and rotates the ID token through
+//! `POST /v1/transfers/cloud-proxies` and this module dials the relay with it.
+//! Each cloud peer is modelled to the sidecar as a loopback "external peer"
+//! pointing at the listener bound here.
+
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -318,14 +330,14 @@ async fn run_proxy_listener(
                         ));
                     }
                     Err(error) => {
-                        eprintln!("[cloud-transfer-proxy] listener accept failed: {error}");
+                        log::warn!("cloud transfer proxy listener accept failed: {error}");
                         break;
                     }
                 }
             }
             Some(result) = connections.join_next(), if !connections.is_empty() => {
                 if let Err(error) = result {
-                    eprintln!("[cloud-transfer-proxy] connection task failed: {error}");
+                    log::warn!("cloud transfer proxy connection task failed: {error}");
                 }
             }
         }
@@ -333,7 +345,7 @@ async fn run_proxy_listener(
 
     while let Some(result) = connections.join_next().await {
         if let Err(error) = result {
-            eprintln!("[cloud-transfer-proxy] connection task failed during shutdown: {error}");
+            log::warn!("cloud transfer proxy connection task failed during shutdown: {error}");
         }
     }
 }
@@ -362,9 +374,10 @@ async fn run_proxy_connection(
         }
     };
     if let Err(error) = result {
-        eprintln!(
-            "[cloud-transfer-proxy] peer {} connection failed: {}",
-            config.peer_id, error
+        log::warn!(
+            "cloud transfer proxy peer {} connection failed: {}",
+            config.peer_id,
+            error
         );
     }
 }

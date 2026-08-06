@@ -1,4 +1,3 @@
-mod cloud_transfer_proxy;
 mod commands;
 mod daemon_client;
 mod daemon_lifecycle;
@@ -34,8 +33,6 @@ pub(crate) const KANNA_BUILD_COMMIT: &str = env!("KANNA_BUILD_COMMIT");
 pub(crate) const KANNA_BUILD_TASK_ID: &str = env!("KANNA_BUILD_TASK_ID");
 pub(crate) const KANNA_BUILD_WORKTREE: &str = env!("KANNA_BUILD_WORKTREE");
 pub(crate) const KANNA_BUILD_INFO: &str = env!("KANNA_BUILD_INFO");
-pub type CloudTransferProxyState = cloud_transfer_proxy::CloudTransferProxyState;
-pub type TransferServiceState = Arc<Mutex<Option<Arc<transfer_sidecar::TransferSidecarClient>>>>;
 pub type TransferEventConsumerState = transfer_sidecar::TransferEventConsumerState;
 static RUNTIME_BUNDLE_IDENTIFIER: OnceLock<String> = OnceLock::new();
 
@@ -112,11 +109,9 @@ pub fn run() {
             std::collections::HashMap<String, (u16, u16)>,
         >::new())) as WindowSessionSizes)
         .manage(Arc::new(Mutex::new(None)) as PipelineSocketState)
-        .manage(Arc::new(Mutex::new(None)) as TransferServiceState)
         .manage(Arc::new(std::sync::Mutex::new(
             transfer_sidecar::TransferEventConsumer::default(),
         )) as TransferEventConsumerState)
-        .manage(Arc::new(Mutex::new(std::collections::HashMap::new())) as CloudTransferProxyState)
         .setup(|app| {
             #[cfg(target_os = "macos")]
             {
@@ -206,6 +201,11 @@ pub fn run() {
                     eprintln!("[mobile] failed to start kanna-server: {}", err);
                 }
             });
+            // The sidecar's events now arrive over the server's event stream
+            // rather than a stdout pipe this process owns, so the reader runs
+            // for the app's lifetime instead of per sidecar spawn.
+            transfer_sidecar::spawn_transfer_event_poller(app.handle().clone());
+            transfer_sidecar::spawn_lifecycle_redelivery(app.handle().clone());
 
             // Restore webview focus when the window gains focus.
             // This catches fullscreen exit (green button, View menu) and app

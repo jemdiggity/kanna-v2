@@ -26,6 +26,8 @@ pub struct AppState {
     pub(super) e2e_lan_http_enabled: Arc<AtomicBool>,
     pub(super) session_replacements: crate::session_replacements::SessionReplacements,
     pub(super) terminal_attachments: crate::terminal_attachments::TerminalAttachments,
+    transfer_sidecar: Arc<crate::transfer_sidecar::TransferSidecarSupervisor>,
+    cloud_transfer_proxies: crate::cloud_transfer_proxy::CloudTransferProxyState,
     pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
     requested_task_operations: Arc<RequestedTaskOperations>,
     relay_reconnect: Arc<Notify>,
@@ -199,6 +201,21 @@ impl AppState {
         self.terminal_attachments.clone()
     }
 
+    /// The sidecar owner. The inbound tunnel bridge holds this too: a relay
+    /// tunnel arriving for a never-yet-used sidecar must start it rather than
+    /// fail to connect to an unbound port.
+    pub(crate) fn transfer_sidecar(
+        &self,
+    ) -> Arc<crate::transfer_sidecar::TransferSidecarSupervisor> {
+        Arc::clone(&self.transfer_sidecar)
+    }
+
+    pub(super) fn cloud_transfer_proxies(
+        &self,
+    ) -> &crate::cloud_transfer_proxy::CloudTransferProxyState {
+        &self.cloud_transfer_proxies
+    }
+
     pub fn new(config: Config) -> Self {
         if let Err(err) = pairing::PairingStore::load(Path::new(&config.pairing_store_path)) {
             log::warn!(
@@ -209,8 +226,13 @@ impl AppState {
         }
 
         let (mobile_notification_tx, mobile_notification_rx) = mpsc::channel(16);
+        let transfer_sidecar = Arc::new(crate::transfer_sidecar::TransferSidecarSupervisor::new(
+            config.clone(),
+        ));
         Self {
             config,
+            transfer_sidecar,
+            cloud_transfer_proxies: Arc::new(Mutex::new(HashMap::new())),
             pairing_session: Arc::new(Mutex::new(None)),
             #[cfg(debug_assertions)]
             e2e_lan_http_enabled: Arc::new(AtomicBool::new(true)),

@@ -518,19 +518,32 @@ pub(crate) async fn run_relay_loop(
                                             .await;
                                         }
                                         TunnelService::TaskTransfer => {
-                                            let result =
-                                                task_transfer_tunnel::bridge_task_transfer_tunnel(
-                                                    socket,
-                                                    tunnel_config.transfer_port,
-                                                    tunnel_id.clone(),
-                                                )
-                                                .await;
-                                            if let Err(error) = result {
-                                                log::error!(
-                                                    "Task-transfer relay tunnel {} failed: {}",
+                                            match tunnel_state
+                                                .transfer_sidecar()
+                                                .ensure_running_for_inbound_tunnel()
+                                                .await
+                                            {
+                                                Ok(_) => {
+                                                    let result =
+                                                        task_transfer_tunnel::bridge_task_transfer_tunnel(
+                                                            socket,
+                                                            tunnel_config.transfer_port,
+                                                            tunnel_id.clone(),
+                                                        )
+                                                        .await;
+                                                    if let Err(error) = result {
+                                                        log::error!(
+                                                            "Task-transfer relay tunnel {} failed: {}",
+                                                            tunnel_id,
+                                                            error
+                                                        );
+                                                    }
+                                                }
+                                                Err(error) => log::error!(
+                                                    "Task-transfer relay tunnel {} could not start the sidecar: {}",
                                                     tunnel_id,
                                                     error
-                                                );
+                                                ),
                                             }
                                         }
                                     },
@@ -1483,6 +1496,9 @@ mod tests {
         };
         let database = db::Db::open_for_tests(&db_path).expect("open test database");
         let state = Arc::new(http_api::AppState::new(config.clone()));
+        // `transfer_listener` above stands in for the sidecar on the configured
+        // port; the supervisor must not race it by spawning a real one.
+        state.transfer_sidecar().assume_externally_owned_for_test();
         let relay_loop = run_relay_loop(config, database, state);
         tokio::pin!(relay_loop);
 

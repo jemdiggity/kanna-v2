@@ -19,7 +19,9 @@ pub struct Config {
     pub environment: String,
     pub lan_host: String,
     pub lan_port: u16,
-    #[allow(dead_code)] // Consumed by the task-transfer tunnel bridge added in the next plan task.
+    /// The port the transfer sidecar listens on. Derived by the desktop, and
+    /// the single owner of that derivation: the server hands it to the sidecar
+    /// it spawns and dials the same port from the inbound tunnel bridge.
     pub transfer_port: u16,
     pub pairing_store_path: String,
 }
