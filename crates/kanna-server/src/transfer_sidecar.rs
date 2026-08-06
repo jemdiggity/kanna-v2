@@ -87,16 +87,52 @@ struct TransferEventLogInner {
 /// prunes everything at or below it, which is what keeps durable events from
 /// accumulating forever when the sidecar is busy. One desktop process owns one
 /// server, so there is exactly one reader.
-#[derive(Default)]
 pub struct TransferEventLog {
+    /// Identifies this in-memory sequence space. Unlike `/v1/task-events`,
+    /// whose cursor is a durable `task_event.seq`, these sequences restart at
+    /// zero with every server process — and `kanna-server` restarts
+    /// independently of the desktop that holds the cursor. Without this, a
+    /// cursor carried across a restart would prune and discard the first N
+    /// events of the fresh log, durable lifecycle events included, and report
+    /// nothing missed.
+    stream_id: String,
     inner: StdMutex<TransferEventLogInner>,
     appended: Notify,
     drained: Notify,
 }
 
+impl Default for TransferEventLog {
+    fn default() -> Self {
+        Self {
+            stream_id: new_transfer_event_stream_id(),
+            inner: StdMutex::new(TransferEventLogInner::default()),
+            appended: Notify::new(),
+            drained: Notify::new(),
+        }
+    }
+}
+
+/// Only has to distinguish one server process's log from the next one's, so
+/// the pid plus a start timestamp is enough — this is not a secret and is
+/// never used for authorization. The counter keeps two logs constructed inside
+/// one clock tick distinct, which the timestamp alone does not guarantee.
+fn new_transfer_event_stream_id() -> String {
+    static NEXT_STREAM: AtomicU64 = AtomicU64::new(1);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    format!(
+        "{}-{nanos}-{}",
+        std::process::id(),
+        NEXT_STREAM.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 pub struct TransferEventBatch {
     pub events: Vec<Value>,
     pub cursor: u64,
+    pub stream_id: String,
     pub has_more: bool,
     pub missed_events: bool,
 }
@@ -155,10 +191,23 @@ impl TransferEventLog {
 
     /// Read everything after `cursor` and prune through it. `None` starts from
     /// whatever is still retained.
-    pub fn read(&self, cursor: Option<u64>, limit: usize) -> TransferEventBatch {
+    ///
+    /// The cursor is honoured only when `stream_id` names *this* log. A cursor
+    /// from an earlier server process addresses a sequence space that no longer
+    /// exists, so it is discarded rather than applied to positions it never
+    /// referred to, and the batch says events were missed.
+    pub fn read(
+        &self,
+        cursor: Option<u64>,
+        stream_id: Option<&str>,
+        limit: usize,
+    ) -> TransferEventBatch {
         let mut inner = self.lock();
-        let after_seq = cursor.unwrap_or(0);
-        let missed_events = cursor.is_some_and(|seq| seq < inner.evicted_through_seq);
+        let resumes_this_stream = stream_id.is_some_and(|id| id == self.stream_id);
+        let stale_cursor = cursor.is_some() && !resumes_this_stream;
+        let after_seq = if stale_cursor { 0 } else { cursor.unwrap_or(0) };
+        let missed_events = stale_cursor
+            || cursor.is_some_and(|seq| resumes_this_stream && seq < inner.evicted_through_seq);
         while inner
             .entries
             .front()
@@ -191,6 +240,7 @@ impl TransferEventLog {
         TransferEventBatch {
             events,
             cursor: batch_cursor,
+            stream_id: self.stream_id.clone(),
             has_more,
             missed_events,
         }
@@ -206,16 +256,18 @@ impl TransferEventLog {
     pub async fn wait_for_events(
         &self,
         cursor: Option<u64>,
+        stream_id: Option<&str>,
         limit: usize,
         timeout: std::time::Duration,
     ) -> TransferEventBatch {
         let deadline = tokio::time::Instant::now() + timeout;
         let mut cursor = cursor;
+        let mut stream_id = stream_id.map(str::to_string);
         let mut missed_events = false;
         loop {
             let mut appended = Box::pin(self.appended.notified());
             appended.as_mut().enable();
-            let mut batch = self.read(cursor, limit);
+            let mut batch = self.read(cursor, stream_id.as_deref(), limit);
             missed_events |= batch.missed_events;
             batch.missed_events = missed_events;
             let now = tokio::time::Instant::now();
@@ -223,8 +275,11 @@ impl TransferEventLog {
                 return batch;
             }
             // Advance the in-flight checkpoint so a recheck never rescans the
-            // history this call already proved empty.
+            // history this call already proved empty. The checkpoint belongs to
+            // this log, so the recheck resumes it rather than being treated as
+            // another caller's stale cursor.
             cursor = Some(batch.cursor);
+            stream_id = Some(batch.stream_id);
             let _ = tokio::time::timeout((deadline - now).min(EVENT_WAIT_RECHECK), appended).await;
         }
     }
@@ -315,12 +370,11 @@ pub struct TransferSidecarClient {
 
 impl TransferSidecarClient {
     fn spawn(
-        config: &crate::config::Config,
+        sidecar_path: &std::path::Path,
+        env: Vec<(String, String)>,
         events: Arc<TransferEventLog>,
     ) -> Result<Self, String> {
-        let sidecar_path = resolve_sidecar_binary()?;
-        let env = build_transfer_sidecar_env(config)?;
-        let mut child = Command::new(&sidecar_path)
+        let mut child = Command::new(sidecar_path)
             .envs(env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -537,6 +591,11 @@ pub struct TransferSidecarSupervisor {
     /// of a real sidecar without this supervisor trying to spawn one.
     #[cfg(test)]
     externally_owned: AtomicBool,
+    /// Which binary to spawn. Production resolves the bundled sidecar; a test
+    /// points this at a stub speaking the same stdio protocol, so respawn-on-
+    /// death can be exercised against a process it is allowed to kill.
+    #[cfg(test)]
+    binary_override: Option<PathBuf>,
 }
 
 impl TransferSidecarSupervisor {
@@ -547,7 +606,25 @@ impl TransferSidecarSupervisor {
             events: Arc::new(TransferEventLog::default()),
             #[cfg(test)]
             externally_owned: AtomicBool::new(false),
+            #[cfg(test)]
+            binary_override: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_binary_for_test(config: crate::config::Config, binary: PathBuf) -> Self {
+        Self {
+            binary_override: Some(binary),
+            ..Self::new(config)
+        }
+    }
+
+    fn sidecar_binary(&self) -> Result<PathBuf, String> {
+        #[cfg(test)]
+        if let Some(binary) = &self.binary_override {
+            return Ok(binary.clone());
+        }
+        resolve_sidecar_binary()
     }
 
     #[cfg(test)]
@@ -577,7 +654,8 @@ impl TransferSidecarSupervisor {
         }
         if guard.is_none() {
             *guard = Some(Arc::new(TransferSidecarClient::spawn(
-                &self.config,
+                &self.sidecar_binary()?,
+                build_transfer_sidecar_env(&self.config)?,
                 Arc::clone(&self.events),
             )?));
         }
@@ -644,15 +722,51 @@ mod tests {
         assert!(log.try_append(event("pairing_started"), false));
         assert!(log.try_append(event("task_pull_requested"), true));
 
-        let first = log.read(None, 10);
+        let first = log.read(None, None, 10);
         assert_eq!(first.events.len(), 2);
         assert_eq!(first.cursor, 2);
         assert!(!first.missed_events);
 
-        let second = log.read(Some(first.cursor), 10);
+        let second = log.read(Some(first.cursor), Some(&first.stream_id), 10);
         assert!(second.events.is_empty());
         assert_eq!(second.cursor, 2);
         assert_eq!(log.lock().entries.len(), 0);
+    }
+
+    /// The desktop outlives any one `kanna-server`, and these sequences restart
+    /// at zero with each. A cursor carried across that restart addresses events
+    /// it never saw, so honouring it would prune the new log's first entries —
+    /// durable lifecycle events included — and report nothing missed.
+    #[test]
+    fn a_cursor_from_a_previous_server_incarnation_is_refused_not_applied() {
+        let restarted = TransferEventLog::default();
+        for _ in 0..3 {
+            assert!(restarted.try_append(event("task_pull_requested"), true));
+        }
+
+        let batch = restarted.read(Some(2), Some("some-earlier-server"), 10);
+        assert_eq!(
+            batch.events.len(),
+            3,
+            "a stale cursor must not consume events from the new stream"
+        );
+        assert!(batch.missed_events);
+        assert_ne!(batch.stream_id, "some-earlier-server");
+
+        // Resuming with the id this log actually issued behaves normally again.
+        let resumed = restarted.read(Some(batch.cursor), Some(&batch.stream_id), 10);
+        assert!(resumed.events.is_empty());
+        assert!(!resumed.missed_events);
+    }
+
+    #[test]
+    fn a_cursor_without_a_stream_id_starts_from_what_is_retained() {
+        let log = TransferEventLog::default();
+        assert!(log.try_append(event("task_pull_requested"), true));
+
+        let batch = log.read(Some(5), None, 10);
+        assert_eq!(batch.events.len(), 1);
+        assert!(batch.missed_events);
     }
 
     #[test]
@@ -663,7 +777,8 @@ mod tests {
         }
         assert!(log.try_append(event("task_pull_requested"), true));
 
-        let batch = log.read(Some(1), MAX_TRANSFER_EVENT_ENTRIES + 1);
+        let stream_id = log.stream_id.clone();
+        let batch = log.read(Some(1), Some(&stream_id), MAX_TRANSFER_EVENT_ENTRIES + 1);
         assert!(
             batch.events.iter().any(|entry| entry["durable"] == true),
             "the durable event must survive eviction"
@@ -688,11 +803,25 @@ mod tests {
         for _ in 0..MAX_TRANSFER_EVENT_ENTRIES + 2 {
             log.try_append(event("pairing_started"), false);
         }
-        assert!(log.read(Some(1), 10).missed_events);
+        let stream_id = log.stream_id.clone();
+        assert!(log.read(Some(1), Some(&stream_id), 10).missed_events);
         // A cursor already past everything evicted did not miss anything.
         assert!(
-            !log.read(Some(MAX_TRANSFER_EVENT_ENTRIES as u64), 10)
-                .missed_events
+            !log.read(
+                Some(MAX_TRANSFER_EVENT_ENTRIES as u64),
+                Some(&stream_id),
+                10
+            )
+            .missed_events
+        );
+    }
+
+    /// Two logs in the same process must not answer each other's cursors.
+    #[test]
+    fn each_log_gets_its_own_stream_id() {
+        assert_ne!(
+            TransferEventLog::default().stream_id,
+            TransferEventLog::default().stream_id
         );
     }
 
@@ -785,5 +914,115 @@ mod tests {
         let error = build_transfer_sidecar_env(&test_config(4455, 48120))
             .expect_err("identity is required");
         assert!(error.contains("KANNA_TRANSFER_ROOT"), "{error}");
+    }
+
+    /// Stands in for `kanna-task-transfer`: speaks the same newline-JSON stdio
+    /// protocol, records each incarnation's pid so the test can kill exactly
+    /// the process it spawned, and emits one event so the shared event log is
+    /// exercised across a respawn too.
+    fn write_stub_sidecar(root: &std::path::Path) -> PathBuf {
+        std::fs::create_dir_all(root).expect("stub root");
+        let stub = root.join("stub-sidecar.sh");
+        std::fs::write(
+            &stub,
+            r#"#!/bin/sh
+printf '%s\n' "$$" >> "$KANNA_TRANSFER_ROOT/pids"
+printf '{"type":"pairing_started"}\n'
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+  printf '{"request_id":"%s","peers":[]}\n' "$id"
+done
+"#,
+        )
+        .expect("write stub");
+        std::fs::set_permissions(
+            &stub,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .expect("chmod stub");
+        stub
+    }
+
+    fn stub_sidecar_pids(root: &std::path::Path) -> Vec<i32> {
+        std::fs::read_to_string(root.join("pids"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.trim().parse::<i32>().ok())
+            .collect()
+    }
+
+    /// The sidecar dying must not wedge the control plane: the next call has to
+    /// either succeed against a fresh child or fail out loud, never hang. This
+    /// is the server-side half of the E2E expectation for a mid-flow crash.
+    ///
+    /// The env guard has to span the awaits rather than be dropped before them:
+    /// the sidecar is spawned lazily *inside* `control`, and that spawn is what
+    /// reads the identity environment this test sets.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_dead_sidecar_is_replaced_rather_than_left_wedged() {
+        let _guard = crate::test_sidecar_guard();
+        let root = std::env::temp_dir().join(format!(
+            "kanna-transfer-respawn-{}-{}",
+            std::process::id(),
+            new_transfer_event_stream_id()
+        ));
+        clear_identity_env();
+        std::env::set_var("KANNA_TRANSFER_ROOT", &root);
+        std::env::set_var("KANNA_TRANSFER_PEER_ID", "peer-test");
+        std::env::set_var("KANNA_TRANSFER_DISPLAY_NAME", "Test Machine");
+        let stub = write_stub_sidecar(&root);
+        let supervisor =
+            TransferSidecarSupervisor::with_binary_for_test(test_config(4455, 48120), stub.clone());
+
+        supervisor
+            .control("list-peers", json!({}))
+            .await
+            .expect("the first control call spawns the sidecar and answers");
+        let first = stub_sidecar_pids(&root);
+        assert_eq!(first.len(), 1, "exactly one sidecar should have spawned");
+
+        // Kill only the pid this test's stub reported — never a name match.
+        assert_eq!(
+            unsafe { libc::kill(first[0], libc::SIGKILL) },
+            0,
+            "the stub sidecar should still be alive to kill"
+        );
+
+        // Every attempt returns or errors; one of them has to succeed, and the
+        // bound is what proves there is no silent hang.
+        let mut recovered = false;
+        let mut last_error = None;
+        for _ in 0..40 {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                supervisor.control("list-peers", json!({})),
+            )
+            .await
+            .expect("a control call must never hang after a sidecar crash")
+            {
+                Ok(_) => {
+                    recovered = true;
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+        assert!(recovered, "control never recovered: {last_error:?}");
+
+        let after = stub_sidecar_pids(&root);
+        assert_eq!(after.len(), 2, "the supervisor should respawn exactly once");
+        assert_ne!(after[0], after[1], "the respawn must be a new process");
+
+        // Both incarnations wrote into the one event log the desktop polls, so
+        // a respawn does not silently reset the stream the cursor tracks.
+        let batch = supervisor.events().read(None, None, 10);
+        assert_eq!(batch.events.len(), 2);
+
+        clear_identity_env();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -138,7 +138,7 @@ pub async fn remove_cloud_transfer_proxy(
     app: tauri::AppHandle,
     peer_id: String,
 ) -> Result<(), String> {
-    let encoded = urlencoding_component(&peer_id);
+    let encoded = percent_encode_component(&peer_id);
     delete_cloud_proxy_path(&app, &format!("/v1/transfers/cloud-proxies/{encoded}")).await
 }
 
@@ -147,9 +147,10 @@ pub async fn clear_cloud_transfer_proxies(app: tauri::AppHandle) -> Result<(), S
     delete_cloud_proxy_path(&app, "/v1/transfers/cloud-proxies").await
 }
 
-/// Percent-encode a path segment. Peer ids are opaque strings from a remote
-/// machine, so they cannot be pasted into a URL unescaped.
-fn urlencoding_component(value: &str) -> String {
+/// Percent-encode a path segment or query value. Peer ids are opaque strings
+/// from a remote machine and the event stream id is opaque server output, so
+/// neither can be pasted into a URL unescaped.
+pub(crate) fn percent_encode_component(value: &str) -> String {
     value
         .bytes()
         .map(|byte| match byte {
@@ -764,13 +765,13 @@ pub async fn complete_outgoing_transfer_finalization(
 
 #[cfg(test)]
 mod tests {
-    use super::urlencoding_component;
+    use super::percent_encode_component;
 
     #[test]
     fn peer_ids_are_percent_encoded_into_the_proxy_path() {
-        assert_eq!(urlencoding_component("peer-secondary"), "peer-secondary");
+        assert_eq!(percent_encode_component("peer-secondary"), "peer-secondary");
         assert_eq!(
-            urlencoding_component("peer/../secret?x"),
+            percent_encode_component("peer/../secret?x"),
             "peer%2F..%2Fsecret%3Fx"
         );
     }

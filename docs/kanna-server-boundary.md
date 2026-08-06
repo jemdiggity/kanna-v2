@@ -55,9 +55,15 @@ reachable only by whoever held a private stdio pipe.
   a fixed allowlist (`crates/kanna-server/src/transfer_control.rs`), taking and
   returning camelCase JSON. The route cannot hand the sidecar an arbitrary
   message.
-- `GET /v1/transfers/sidecar/events?cursor=...&timeoutSecs=...&limit=...` —
-  long-poll of sidecar events, following the `/v1/task-events` cursor contract:
-  pass the returned cursor back and nothing fired between two calls is missed.
+- `GET /v1/transfers/sidecar/events?cursor=...&streamId=...&timeoutSecs=...&limit=...`
+  — long-poll of sidecar events, following the `/v1/task-events` cursor
+  contract: pass the returned cursor back and nothing fired between two calls is
+  missed. Unlike `/v1/task-events`, whose cursor is a durable `task_event.seq`,
+  this log is in memory and its sequence restarts at zero with every server
+  process — while the desktop that holds the cursor outlives those restarts. So
+  a cursor is only accepted alongside the `streamId` it was issued with; a
+  cursor from an earlier incarnation is discarded and answered with
+  `missedEvents` rather than applied to sequence numbers it never referred to.
   Single-consumer: a read prunes through the cursor it is given, so exactly one
   desktop process subscribes. The four state-mutating events
   (`incoming_transfer_request`, `task_pull_requested`,

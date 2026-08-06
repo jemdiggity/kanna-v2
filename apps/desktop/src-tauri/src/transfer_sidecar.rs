@@ -713,6 +713,12 @@ pub fn claim_transfer_lifecycle_phase_in_state(
 /// here and only advanced once an event has been queued or emitted, so a
 /// failed hand-off is retried rather than skipped. The server prunes through
 /// the cursor it is given, which is why exactly one of these runs per app.
+///
+/// The cursor travels with the `streamId` it came from. `kanna-server` restarts
+/// independently of this process and its event sequence restarts at zero with
+/// it, so a cursor replayed into a new server would otherwise prune the fresh
+/// log's first events — durable lifecycle events among them. Pairing the two
+/// makes the server discard the stale position instead.
 pub fn spawn_transfer_event_poller(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         // App startup owns starting kanna-server. Polling before it is up
@@ -720,20 +726,25 @@ pub fn spawn_transfer_event_poller(app: AppHandle) {
         // fail, so wait for it rather than starting a second one.
         crate::commands::mobile::wait_for_server_started(&app).await;
         let client = reqwest::Client::new();
-        let mut cursor: Option<u64> = None;
+        let mut position: Option<TransferEventPosition> = None;
         loop {
-            match poll_transfer_events(&app, &client, cursor).await {
+            match poll_transfer_events(&app, &client, position.as_ref()).await {
                 Ok(batch) => {
                     if batch.missed_events {
                         eprintln!(
-                            "[transfer-events] server dropped advisory transfer events before cursor {:?}",
-                            cursor
+                            "[transfer-events] resumed at cursor {:?}; the server reports events \
+                             were missed (its stream is {})",
+                            position.as_ref().map(|position| position.cursor),
+                            batch.stream_id
                         );
                     }
                     for entry in batch.events {
                         deliver_transfer_event(&app, &entry).await;
                     }
-                    cursor = Some(batch.cursor);
+                    position = Some(TransferEventPosition {
+                        cursor: batch.cursor,
+                        stream_id: batch.stream_id,
+                    });
                 }
                 Err(error) => {
                     // The server restarts independently of this process; a
@@ -746,10 +757,19 @@ pub fn spawn_transfer_event_poller(app: AppHandle) {
     });
 }
 
+/// A cursor is only meaningful within the server incarnation that issued it,
+/// so the two are never carried apart.
+#[derive(Debug)]
+struct TransferEventPosition {
+    cursor: u64,
+    stream_id: String,
+}
+
 #[derive(Debug)]
 struct TransferEventBatch {
     events: Vec<TransferEventEntry>,
     cursor: u64,
+    stream_id: String,
     missed_events: bool,
 }
 
@@ -762,12 +782,16 @@ struct TransferEventEntry {
 async fn poll_transfer_events(
     app: &AppHandle,
     client: &reqwest::Client,
-    cursor: Option<u64>,
+    position: Option<&TransferEventPosition>,
 ) -> Result<TransferEventBatch, String> {
     let base_url = crate::commands::mobile::ensure_server_base_url(app).await?;
     let mut url = format!("{base_url}/v1/transfers/sidecar/events?timeoutSecs=25");
-    if let Some(cursor) = cursor {
-        url.push_str(&format!("&cursor={cursor}"));
+    if let Some(position) = position {
+        url.push_str(&format!(
+            "&cursor={}&streamId={}",
+            position.cursor,
+            crate::commands::transfer::percent_encode_component(&position.stream_id)
+        ));
     }
     let response = client
         .get(&url)
@@ -795,6 +819,15 @@ fn parse_transfer_event_batch(body: &Value) -> Result<TransferEventBatch, String
         .get("cursor")
         .and_then(Value::as_u64)
         .ok_or_else(|| "transfer event response missing cursor".to_string())?;
+    // Resuming without knowing which server incarnation issued the cursor is
+    // exactly the mistake the stream id exists to prevent, so an absent one is
+    // a failed poll rather than a resume from an unknown position.
+    let stream_id = body
+        .get("streamId")
+        .and_then(Value::as_str)
+        .filter(|stream_id| !stream_id.is_empty())
+        .ok_or_else(|| "transfer event response missing streamId".to_string())?
+        .to_string();
     let events = body
         .get("events")
         .and_then(Value::as_array)
@@ -816,6 +849,7 @@ fn parse_transfer_event_batch(body: &Value) -> Result<TransferEventBatch, String
     Ok(TransferEventBatch {
         events,
         cursor,
+        stream_id,
         missed_events: body
             .get("missedEvents")
             .and_then(Value::as_bool)
@@ -856,6 +890,7 @@ mod tests {
     fn transfer_event_batches_carry_durability_and_advance_the_cursor() {
         let batch = parse_transfer_event_batch(&json!({
             "cursor": 7,
+            "streamId": "1234-9999",
             "missedEvents": true,
             "events": [
                 {
@@ -867,6 +902,7 @@ mod tests {
         }))
         .expect("batch should parse");
         assert_eq!(batch.cursor, 7);
+        assert_eq!(batch.stream_id, "1234-9999");
         assert!(batch.missed_events);
         assert_eq!(batch.events.len(), 1);
         assert!(batch.events[0].durable);
@@ -880,10 +916,30 @@ mod tests {
     fn a_batch_entry_without_durability_fails_instead_of_being_skipped() {
         let error = parse_transfer_event_batch(&json!({
             "cursor": 1,
+            "streamId": "1234-9999",
             "events": [{ "seq": 1, "event": { "type": "task_pull_requested" } }],
         }))
         .expect_err("a malformed entry must not be silently dropped");
         assert!(error.contains("durable"), "{error}");
+    }
+
+    /// A cursor without the incarnation that issued it is unusable: replayed
+    /// into a restarted server it would prune the fresh log's first events.
+    #[test]
+    fn a_batch_without_a_stream_id_fails_rather_than_resuming_blind() {
+        let error = parse_transfer_event_batch(&json!({
+            "cursor": 4,
+            "events": [],
+        }))
+        .expect_err("a cursor with no stream id must not be adopted");
+        assert!(error.contains("streamId"), "{error}");
+    }
+
+    #[test]
+    fn stream_ids_are_escaped_into_the_poll_query() {
+        use crate::commands::transfer::percent_encode_component;
+        assert_eq!(percent_encode_component("4321-17"), "4321-17");
+        assert_eq!(percent_encode_component("a&b=c"), "a%26b%3Dc");
     }
 
     #[test]

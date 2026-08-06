@@ -55,12 +55,19 @@ pub(super) async fn run_transfer_control(
 #[serde(rename_all = "camelCase")]
 pub(super) struct TransferEventsQuery {
     cursor: Option<u64>,
+    stream_id: Option<String>,
     limit: Option<usize>,
     timeout_secs: Option<u64>,
 }
 
 /// Long-poll the sidecar event stream, following `/v1/task-events`: pass the
 /// returned cursor back and nothing fired between two calls is missed.
+///
+/// Unlike `/v1/task-events`, the cursor is not durable — the log is in memory
+/// and dies with this process — so a cursor must be paired with the
+/// `streamId` it came from. A cursor from an earlier server process is
+/// discarded and answered with `missedEvents`, rather than being applied to
+/// sequence numbers it never referred to.
 ///
 /// Reading through a cursor also prunes it, so this is a single-consumer feed
 /// — the desktop process. A caller that omits the cursor gets whatever is
@@ -81,11 +88,17 @@ pub(super) async fn wait_transfer_events(
     let batch = state
         .transfer_sidecar()
         .events()
-        .wait_for_events(query.cursor, limit, Duration::from_secs(timeout_secs))
+        .wait_for_events(
+            query.cursor,
+            query.stream_id.as_deref(),
+            limit,
+            Duration::from_secs(timeout_secs),
+        )
         .await;
     Ok(Json(json!({
         "waitOutcome": if batch.events.is_empty() { "timeout" } else { "events" },
         "cursor": batch.cursor,
+        "streamId": batch.stream_id,
         "events": batch.events,
         "hasMore": batch.has_more,
         "missedEvents": batch.missed_events,
