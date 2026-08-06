@@ -31,6 +31,9 @@ pub(super) struct TaskCreationRequest {
     pub(super) task_template: Option<crate::mobile_api::TaskTemplateLaunch>,
     pub(super) resume_session_id: Option<String>,
     pub(super) recovery_snapshot: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
+    /// Display-only import notice for a task arriving by cross-machine
+    /// transfer; printed once into the destination PTY before the agent runs.
+    pub(super) transfer_import: Option<crate::mobile_api::TransferImportSummary>,
     pub(super) notify_task_id: Option<String>,
     pub(super) parent_task_id: Option<String>,
 }

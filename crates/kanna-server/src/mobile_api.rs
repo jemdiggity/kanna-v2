@@ -196,6 +196,42 @@ impl CreateTaskRecoverySnapshot {
     }
 }
 
+/// Display-only provenance for a task imported by a cross-machine transfer.
+/// The destination terminal prints it once, before the agent starts, so the
+/// import is visible instead of a task that simply appeared.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferImportSummary {
+    #[serde(default)]
+    pub source_machine: Option<String>,
+    /// Raw acquisition mode from the transfer payload: `reuse-local`,
+    /// `clone-remote`, or `bundle-repo`. Unknown values are printed verbatim
+    /// rather than dropped, so a newer sender still shows something true.
+    #[serde(default)]
+    pub repo_mode: Option<String>,
+    #[serde(default)]
+    pub session_restored: bool,
+}
+
+impl TransferImportSummary {
+    const MAX_FIELD_CHARS: usize = 200;
+
+    pub fn validate(&self) -> Result<(), String> {
+        for (label, value) in [
+            ("sourceMachine", self.source_machine.as_deref()),
+            ("repoMode", self.repo_mode.as_deref()),
+        ] {
+            if value.is_some_and(|value| value.chars().count() > Self::MAX_FIELD_CHARS) {
+                return Err(format!(
+                    "transferImport.{label} exceeds {} characters",
+                    Self::MAX_FIELD_CHARS
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTaskRequest {
@@ -223,6 +259,10 @@ pub struct CreateTaskRequest {
     pub task_template: Option<TaskTemplateLaunch>,
     pub resume_session_id: Option<String>,
     pub recovery_snapshot: Option<CreateTaskRecoverySnapshot>,
+    /// Absent for every locally created task; set only by the receiver side of
+    /// a cross-machine transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_import: Option<TransferImportSummary>,
     pub blocker_task_ids: Option<Vec<String>>,
     pub notify_task_id: Option<String>,
     pub parent_task_id: Option<String>,

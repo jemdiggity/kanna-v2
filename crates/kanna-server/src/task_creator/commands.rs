@@ -1,4 +1,5 @@
 use super::provider::AgentProvider;
+use crate::mobile_api::TransferImportSummary;
 use kanna_agent_protocol::mcp::{
     codex_mcp_config_overrides, opencode_mcp_config_content, read_kanna_mcp_server,
 };
@@ -265,9 +266,64 @@ fn get_agent_permission_flags(
     }
 }
 
+/// Human-readable rendering of a transfer payload's repo acquisition mode.
+/// Unknown modes are echoed verbatim: a wrong-but-honest label beats silence.
+fn transfer_repo_mode_label(mode: &str) -> String {
+    match mode {
+        "reuse-local" => "reused this machine's existing clone".to_string(),
+        "clone-remote" => "cloned from its remote".to_string(),
+        "bundle-repo" => "restored from a transferred git bundle".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// One-time import notice for a task that arrived by cross-machine transfer.
+/// It is printed before the agent command in the destination PTY, using the
+/// same pre-agent `printf` pattern as the setup banner, because nothing else
+/// tells the operator that this workspace came from another machine.
+fn build_transfer_import_banner(summary: &TransferImportSummary) -> String {
+    let mut lines = vec!["printf '\\033[33mImported transferred task\\033[0m\\n'".to_string()];
+    let mut detail = |text: String| {
+        lines.push(format!(
+            "printf '\\033[2m  %s\\033[0m\\n' '{}'",
+            shell_single_quote(&text)
+        ));
+    };
+    if let Some(source_machine) = summary
+        .source_machine
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        detail(format!("source machine: {source_machine}"));
+    }
+    if let Some(repo_mode) = summary
+        .repo_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        detail(format!(
+            "repository: {}",
+            transfer_repo_mode_label(repo_mode)
+        ));
+    }
+    detail(format!(
+        "session history: {}",
+        if summary.session_restored {
+            "restored"
+        } else {
+            "not restored"
+        }
+    ));
+    lines.push("printf '\\n'".to_string());
+    lines.join(" && ")
+}
+
 pub(super) fn build_task_shell_command(
     agent_cmd: &str,
     setup_cmds: &[String],
+    transfer_import: Option<&TransferImportSummary>,
     kanna_cli_path: Option<&str>,
     spawn_path: Option<&str>,
 ) -> String {
@@ -284,6 +340,12 @@ pub(super) fn build_task_shell_command(
             let parent = shell_single_quote(parent.to_string_lossy().as_ref());
             command_parts.push(format!("export PATH='{}':\"$PATH\"", parent));
         }
+    }
+
+    // The import notice comes before setup: it explains where the workspace
+    // the setup commands are about to run in came from.
+    if let Some(transfer_import) = transfer_import {
+        command_parts.push(build_transfer_import_banner(transfer_import));
     }
 
     if !setup_cmds.is_empty() {

@@ -525,6 +525,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         &stage_setup,
         defer_headless_setup,
         None,
+        None,
     )?;
     let session_id = db
         .resolve_task_terminal_session_id(task_id)
@@ -660,6 +661,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
             &resolved.setup,
             defer_headless_setup,
             resolved.resume_session_id.as_deref(),
+            resolved.transfer_import.as_ref(),
         )?;
         if let Some((initial_cols, initial_rows)) = resolved.initial_terminal_geometry {
             if let PreparedSessionSpawn::Pty { cols, rows, .. } = &mut session {
@@ -727,6 +729,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
             task_template: request.task_template,
             resume_session_id: request.resume_session_id,
             recovery_snapshot: request.recovery_snapshot,
+            transfer_import: request.transfer_import,
             notify_task_id: request.notify_task_id,
             parent_task_id: request.parent_task_id,
         },
@@ -773,6 +776,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
         &setup,
         defer_headless_setup,
         resolved.resume_session_id.as_deref(),
+        resolved.transfer_import.as_ref(),
     )?;
     if let Some((initial_cols, initial_rows)) = resolved.initial_terminal_geometry {
         if let PreparedSessionSpawn::Pty { cols, rows, .. } = &mut session {
@@ -987,6 +991,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             &setup,
             !setup.is_empty(),
             resume_session_id.as_deref(),
+            None,
         )?;
         let deferred_setup = (!setup.is_empty()).then(|| DeferredStageSetup {
             commands: setup,
@@ -1137,6 +1142,7 @@ pub(crate) fn finish_deferred_stage_setup(
         &[],
         false,
         deferred.resume_session_id.as_deref(),
+        None,
     )?;
     prepared.agent_provider = provider.as_str().to_string();
     prepared.provider_session_id = provider_session_id;
@@ -1394,6 +1400,7 @@ fn build_prepared_session(
     setup: &[String],
     defer_headless_setup: bool,
     resume_session_id: Option<&str>,
+    transfer_import: Option<&crate::mobile_api::TransferImportSummary>,
 ) -> Result<(PreparedSessionSpawn, Option<String>), String> {
     validate_provider_model(provider, model.as_deref())?;
     validate_provider_effort(provider, effort.as_deref())?;
@@ -1472,6 +1479,7 @@ fn build_prepared_session(
             let full_cmd = build_task_shell_command(
                 &agent_cmd,
                 setup,
+                transfer_import,
                 spawn_env.get("KANNA_CLI_PATH").map(String::as_str),
                 shell_path.as_deref(),
             );
@@ -1620,6 +1628,7 @@ pub(crate) fn prepare_task_for_api_with_error(
             task_template: request.task_template,
             resume_session_id: request.resume_session_id,
             recovery_snapshot: request.recovery_snapshot,
+            transfer_import: request.transfer_import,
             notify_task_id: request.notify_task_id,
             parent_task_id,
         },
@@ -1706,6 +1715,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: None,
         },
@@ -1806,6 +1816,7 @@ completion with status success so Kanna can run the commit post and close this i
             task_template: None,
             resume_session_id: None,
             recovery_snapshot: None,
+            transfer_import: None,
             notify_task_id: None,
             parent_task_id: Some(dependent_task_id.to_string()),
         },
@@ -2246,6 +2257,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         &setup,
         false,
         None,
+        None,
     ) {
         Ok(prepared) => prepared,
         Err(error) => return Err(rollback_start(error.into())),
@@ -2336,6 +2348,7 @@ struct ResolvedTaskSpawn {
     task_template: Option<crate::mobile_api::TaskTemplateLaunch>,
     resume_session_id: Option<String>,
     recovery_snapshot: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
+    transfer_import: Option<crate::mobile_api::TransferImportSummary>,
     base_ref: Option<String>,
     stored_base_ref: Option<String>,
     notify_task_id: Option<String>,
@@ -2363,6 +2376,8 @@ struct ResolvedCreateTaskIntent {
     max_budget_usd: Option<f64>,
     resume_session_id: Option<String>,
     recovery_snapshot: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
+    #[serde(default)]
+    transfer_import: Option<crate::mobile_api::TransferImportSummary>,
 }
 
 fn resolved_create_task_intent_json(
@@ -2398,6 +2413,7 @@ fn resolved_create_task_intent_json(
             max_budget_usd: resolved.max_budget_usd,
             resume_session_id: resolved.resume_session_id.clone(),
             recovery_snapshot: resolved.recovery_snapshot.clone(),
+            transfer_import: resolved.transfer_import.clone(),
         })
         .map_err(|error| format!("serialize error: {error}"))?,
     );
@@ -2799,6 +2815,7 @@ fn resolve_task_spawn(
         task_template: request.task_template,
         resume_session_id: request.resume_session_id,
         recovery_snapshot: request.recovery_snapshot,
+        transfer_import: request.transfer_import,
         base_ref: request.base_ref,
         stored_base_ref,
         notify_task_id: request.notify_task_id,
@@ -3103,6 +3120,7 @@ fn prepare_new_task_session(
         session_setup,
         false,
         resolved.resume_session_id.as_deref(),
+        resolved.transfer_import.as_ref(),
     )?;
     if let Some((initial_cols, initial_rows)) = resolved.initial_terminal_geometry {
         if let PreparedSessionSpawn::Pty { cols, rows, .. } = &mut session {
