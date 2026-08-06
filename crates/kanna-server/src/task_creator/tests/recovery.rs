@@ -2,6 +2,14 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 
 const RECOVERY_SESSION_ID: &str = "7f7d2f7a-1b2e-4c3d-9a8b-123456789abc";
+/// The task's explicit model override. It lives only on its stage runs, so a
+/// restart that re-derives the model from the stage definition silently
+/// demotes the task — which is exactly what the recovered sidecar task lost.
+const RECOVERY_MODEL: &str = "claude-opus-4-5";
+/// Requested changes carried by a resumed revision run. A fresh conversation
+/// only knows what its prompt says, so losing these would quietly turn a
+/// revision into a re-run of the stage.
+const REVIEW_FEEDBACK: &str = "Add end-to-end coverage for the rejected resume.";
 
 fn init_recovery_fixture(label: &str) -> (std::path::PathBuf, Config, Db) {
     let repo_root = init_git_repo(label);
@@ -60,7 +68,7 @@ fn init_recovery_fixture(label: &str) -> (std::path::PathBuf, Config, Db) {
         kind: "main",
         agent: None,
         agent_provider: Some("claude"),
-        model: None,
+        model: Some(RECOVERY_MODEL),
         effort: None,
         status: "running",
         result: None,
@@ -72,6 +80,236 @@ fn init_recovery_fixture(label: &str) -> (std::path::PathBuf, Config, Db) {
     })
     .unwrap();
     (repo_root, config, db)
+}
+
+/// Put the task where a resume launch has just been made: the interrupted run
+/// closed, and a `--resume` run of it recorded as running.
+fn record_resume_attempt(db: &Db, worktree: &std::path::Path, feedback: Option<&str>) {
+    db.finish_stage_run(
+        "run-killed-mid-turn",
+        "failed",
+        Some("agent session exited before recording a stage verdict (exit code 143)"),
+        None,
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-resume-attempt",
+        task_id: "recovery-task",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("claude"),
+        model: Some(RECOVERY_MODEL),
+        effort: None,
+        status: "running",
+        result: None,
+        feedback,
+        session_id: Some("recovery-task"),
+        provider_session_id: Some(RECOVERY_SESSION_ID),
+        cwd: Some(worktree.to_string_lossy().as_ref()),
+        resumed_from_run_id: Some("run-killed-mid-turn"),
+    })
+    .unwrap();
+}
+
+/// What `claude --resume <id>` prints when its own store has no such
+/// conversation — the transcript existed at preflight, or never did, but the
+/// CLI is the one that decides.
+fn rejected_resume_screen() -> String {
+    format!(
+        "\u{1b}[2m$ claude --resume {RECOVERY_SESSION_ID}\u{1b}[0m\n\
+         No conversation found with session ID: {RECOVERY_SESSION_ID}\n"
+    )
+}
+
+/// Fake daemon for the rejected-resume recovery: the classifier reads the
+/// exited session's terminal on one connection, then the replacement spawn
+/// runs on the next. `accept_spawn` is false for the case where the fresh
+/// relaunch itself cannot start.
+async fn spawn_rejected_resume_fake_daemon(
+    daemon_dir: String,
+    snapshot_vt: String,
+    accept_spawn: bool,
+) -> tokio::task::JoinHandle<Vec<kanna_daemon::protocol::Command>> {
+    let socket_path = test_daemon_socket_path(&daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let mut commands = Vec::new();
+
+        let (snapshot_stream, _) = listener.accept().await.unwrap();
+        let (snapshot_read, mut snapshot_write) = snapshot_stream.into_split();
+        let mut snapshot_reader = BufReader::new(snapshot_read);
+        let command = read_fake_daemon_command(&mut snapshot_reader, &mut snapshot_write).await;
+        assert!(
+            matches!(command, kanna_daemon::protocol::Command::Snapshot { .. }),
+            "expected the recovery to read the session terminal, got {command:?}"
+        );
+        commands.push(command);
+        let event = kanna_daemon::protocol::Event::Snapshot {
+            session_id: "recovery-task".to_string(),
+            snapshot: kanna_daemon::protocol::TerminalSnapshot {
+                version: 1,
+                rows: 24,
+                cols: 80,
+                cursor_row: 0,
+                cursor_col: 0,
+                cursor_visible: true,
+                saved_at: 0,
+                sequence: 0,
+                vt: snapshot_vt,
+            },
+        };
+        snapshot_write
+            .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())
+            .await
+            .unwrap();
+        drop(snapshot_write);
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        loop {
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+            let response = match &command {
+                kanna_daemon::protocol::Command::Kill { .. } => {
+                    kanna_daemon::protocol::Event::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    }
+                }
+                kanna_daemon::protocol::Command::Spawn {
+                    session_id,
+                    args,
+                    cwd,
+                    env,
+                    ..
+                } if accept_spawn => {
+                    let command_line = args.last().expect("provider command");
+                    let status = tokio::process::Command::new("/bin/sh")
+                        .args(["-c", command_line])
+                        .current_dir(cwd)
+                        .envs(env)
+                        .status()
+                        .await
+                        .unwrap();
+                    assert!(status.success(), "fake fresh provider failed: {status}");
+                    kanna_daemon::protocol::Event::SessionCreated {
+                        session_id: session_id.clone(),
+                    }
+                }
+                kanna_daemon::protocol::Command::Spawn { .. } => {
+                    kanna_daemon::protocol::Event::Error {
+                        code: None,
+                        message: "no pty available".to_string(),
+                    }
+                }
+                other => panic!("unexpected daemon command: {other:?}"),
+            };
+            let spawned = matches!(command, kanna_daemon::protocol::Command::Spawn { .. });
+            commands.push(command);
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            if !spawned {
+                continue;
+            }
+            if accept_spawn {
+                return commands;
+            }
+            // A relaunch that could not start falls back to the ordinary
+            // completion path, which opens its own connection to deliver the
+            // notification (the message, then the discrete Enter).
+            drop(write_half);
+            let (notify_stream, _) = listener.accept().await.unwrap();
+            let (notify_read, mut notify_write) = notify_stream.into_split();
+            let mut notify_reader = BufReader::new(notify_read);
+            loop {
+                let command = read_fake_daemon_command(&mut notify_reader, &mut notify_write).await;
+                let enter = matches!(
+                    &command,
+                    kanna_daemon::protocol::Command::Input { data, .. } if data == b"\r"
+                );
+                commands.push(command);
+                notify_write
+                    .write_all(
+                        format!(
+                            "{}\n",
+                            serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                if enter {
+                    return commands;
+                }
+            }
+        }
+    })
+}
+
+/// Fake daemon for the exit that follows a fresh relaunch: it serves the
+/// completion notification and fails the test if anything tries to spawn a
+/// second replacement.
+async fn spawn_notification_only_fake_daemon(
+    daemon_dir: String,
+) -> tokio::task::JoinHandle<Vec<Vec<u8>>> {
+    let socket_path = test_daemon_socket_path(&daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut inputs = Vec::new();
+        loop {
+            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
+            let enter = match &command {
+                kanna_daemon::protocol::Command::Input { data, .. } => {
+                    inputs.push(data.clone());
+                    data == b"\r"
+                }
+                other => panic!("the rejected resume retried more than once: {other:?}"),
+            };
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&kanna_daemon::protocol::Event::Ok).unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            if enter {
+                return inputs;
+            }
+        }
+    })
+}
+
+/// A fresh Claude launch: proves it was started without `--resume` and that
+/// the task's model override survived.
+fn write_fresh_claude_probe(worktree: &std::path::Path) {
+    let fake_claude = worktree.join(".kanna/test-provider-bin/claude");
+    std::fs::write(
+        &fake_claude,
+        r#"#!/bin/sh
+model=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --resume) echo "resumed after rejection" > fresh-proof.txt; exit 7 ;;
+    --model) model="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s' "$model" > fresh-proof.txt
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 fn write_recovery_transcript(config_dir: &std::path::Path, worktree: &std::path::Path) {
@@ -355,6 +593,7 @@ printf 'retained' > resume-proof.txt
         Some("run-killed-mid-turn")
     );
     assert_eq!(run.resume_fallback_reason, None);
+    assert_eq!(run.model.as_deref(), Some(RECOVERY_MODEL));
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
@@ -383,6 +622,8 @@ async fn resume_fallback_records_why_the_provider_context_was_not_restored() {
         prepared.resume_fallback_reason.as_deref(),
         Some("no claude CLI transcript for the previous session")
     );
+    // Losing the provider transcript must not also lose the task's model.
+    assert_eq!(prepared.model.as_deref(), Some(RECOVERY_MODEL));
 
     let fake_daemon = spawn_fake_daemon_fork_transition(config.daemon_dir.clone(), 1).await;
     let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
@@ -402,6 +643,216 @@ async fn resume_fallback_records_why_the_provider_context_was_not_restored() {
         run.resume_fallback_reason.as_deref(),
         Some("no claude CLI transcript for the previous session")
     );
+    assert_eq!(run.model.as_deref(), Some(RECOVERY_MODEL));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// The second half of the incident: the transcript passes preflight (or the
+/// preflight cannot see the CLI's own verdict), the resume launches, and the
+/// CLI rejects the session. The task must not be left dead with a transcript
+/// that will never come back.
+#[tokio::test]
+async fn rejected_claude_resume_relaunches_the_stage_with_a_fresh_conversation() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-rejected");
+    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
+    record_resume_attempt(&db, &worktree, Some(REVIEW_FEEDBACK));
+    // A notification target proves the dead attempt reports nothing: this
+    // stage has not failed, it has not run.
+    db.update_pipeline_item_notify_task("recovery-task", Some("task-parent"))
+        .unwrap();
+    write_fresh_claude_probe(&worktree);
+
+    let fake_daemon = spawn_rejected_resume_fake_daemon(
+        config.daemon_dir.clone(),
+        rejected_resume_screen(),
+        true,
+    )
+    .await;
+    crate::http_api::handle_task_terminal_state(
+        &crate::http_api::AppState::new(config.clone()),
+        "recovery-task",
+        1,
+    )
+    .await
+    .unwrap();
+    let commands = fake_daemon.await.unwrap();
+
+    let command_line = commands
+        .iter()
+        .find_map(|command| match command {
+            kanna_daemon::protocol::Command::Spawn { args, .. } => args.last(),
+            _ => None,
+        })
+        .expect("replacement spawn command");
+    assert!(
+        !command_line.contains("--resume"),
+        "the relaunch must not ask for the rejected session again: {command_line}"
+    );
+    assert!(command_line.contains(&format!("--model '{RECOVERY_MODEL}'")));
+    assert!(
+        command_line.contains(REVIEW_FEEDBACK),
+        "the fresh conversation must still be told what was asked for: {command_line}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("fresh-proof.txt")).unwrap(),
+        RECOVERY_MODEL
+    );
+
+    let rejected = db.stage_run("run-resume-attempt").unwrap().unwrap();
+    assert_eq!(rejected.status, "failed");
+    assert!(
+        rejected
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains("rejected the recorded provider session")),
+        "the rejected attempt should say why it never ran: {:?}",
+        rejected.result
+    );
+
+    let replacement = db.latest_stage_run("recovery-task").unwrap().unwrap();
+    assert_eq!(replacement.status, "running");
+    assert_eq!(replacement.resumed_from_run_id, None);
+    assert_eq!(replacement.model.as_deref(), Some(RECOVERY_MODEL));
+    assert_eq!(replacement.feedback.as_deref(), Some(REVIEW_FEEDBACK));
+    assert_eq!(replacement.stage, "in progress");
+    assert!(
+        replacement
+            .resume_fallback_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("No conversation found with session ID")),
+        "the replacement must record that it runs on fresh context: {:?}",
+        replacement.resume_fallback_reason
+    );
+
+    let item = db.get_pipeline_item("recovery-task").unwrap().unwrap();
+    assert_eq!(item.activity.as_deref(), Some("working"));
+    assert!(
+        item.notified_at.is_none(),
+        "a rejected resume must not fire a completion notification"
+    );
+
+    // Exactly once: the replacement is a fresh run, so an exit that prints the
+    // same rejection is reported as the failure it is instead of starting yet
+    // another session.
+    let fake_daemon = spawn_notification_only_fake_daemon(config.daemon_dir.clone()).await;
+    crate::http_api::handle_task_terminal_state(
+        &crate::http_api::AppState::new(config.clone()),
+        "recovery-task",
+        1,
+    )
+    .await
+    .unwrap();
+    let inputs = fake_daemon.await.unwrap();
+    assert_eq!(
+        inputs
+            .first()
+            .map(|data| String::from_utf8_lossy(data).to_string()),
+        Some("TASK recovery-task DONE [failure]: Recovery".to_string())
+    );
+    assert_eq!(
+        db.latest_stage_run("recovery-task").unwrap().unwrap().id,
+        replacement.id,
+        "no third run may be started for the same rejection"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// The recovery is best-effort: when the fresh relaunch cannot start, the exit
+/// must still be reported as the failure it was, not silently swallowed.
+#[tokio::test]
+async fn failed_fresh_relaunch_reports_the_original_agent_failure() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-rejected-fail");
+    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
+    record_resume_attempt(&db, &worktree, None);
+    db.update_pipeline_item_notify_task("recovery-task", Some("task-parent"))
+        .unwrap();
+    write_fresh_claude_probe(&worktree);
+
+    let fake_daemon = spawn_rejected_resume_fake_daemon(
+        config.daemon_dir.clone(),
+        rejected_resume_screen(),
+        false,
+    )
+    .await;
+    crate::http_api::handle_task_terminal_state(
+        &crate::http_api::AppState::new(config.clone()),
+        "recovery-task",
+        1,
+    )
+    .await
+    .unwrap();
+    let commands = fake_daemon.await.unwrap();
+
+    let inputs = commands
+        .iter()
+        .filter_map(|command| match command {
+            kanna_daemon::protocol::Command::Input { data, .. } => Some(data.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        inputs
+            .first()
+            .map(|data| String::from_utf8_lossy(data).to_string()),
+        Some("TASK recovery-task DONE [failure]: Recovery".to_string())
+    );
+    assert!(
+        !worktree.join("fresh-proof.txt").exists(),
+        "a rejected spawn must not have started a provider"
+    );
+
+    let latest = db.latest_stage_run("recovery-task").unwrap().unwrap();
+    assert_eq!(latest.status, "failed");
+    assert!(
+        latest
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains("failed to start stage run")),
+        "the failed relaunch should record why it never started: {:?}",
+        latest.result
+    );
+    let item = db.get_pipeline_item("recovery-task").unwrap().unwrap();
+    assert_eq!(item.activity.as_deref(), Some("unread"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// An ordinary agent failure is not a resume failure: nothing may be retried
+/// with a fresh conversation just because the session died.
+#[tokio::test]
+async fn ordinary_agent_failure_in_a_resumed_run_is_not_retried_fresh() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-not-rejected");
+    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
+    record_resume_attempt(&db, &worktree, None);
+
+    let fake_daemon = spawn_rejected_resume_fake_daemon(
+        config.daemon_dir.clone(),
+        "error: the test suite failed\n".to_string(),
+        false,
+    )
+    .await;
+    crate::http_api::handle_task_terminal_state(
+        &crate::http_api::AppState::new(config.clone()),
+        "recovery-task",
+        1,
+    )
+    .await
+    .unwrap();
+
+    let latest = db.latest_stage_run("recovery-task").unwrap().unwrap();
+    assert_eq!(latest.id, "run-resume-attempt");
+    assert_eq!(latest.status, "failed");
+    assert!(
+        latest
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains("use kanna_resume_task")),
+        "an ordinary failure keeps the interrupted-session reporting: {:?}",
+        latest.result
+    );
+    fake_daemon.abort();
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }

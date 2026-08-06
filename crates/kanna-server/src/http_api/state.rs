@@ -438,22 +438,34 @@ impl AppState {
         loop {
             let mut changed = Box::pin(self.requested_task_mutations.changed.notified());
             changed.as_mut().enable();
-            {
-                let mut active = self
-                    .requested_task_mutations
-                    .active
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if !active.contains_key(task_id) {
-                    active.insert(task_id.to_string(), RequestedTaskMutationKind::Other);
-                    return RequestedTaskMutation {
-                        task_id: task_id.to_string(),
-                        mutations: Arc::clone(&self.requested_task_mutations),
-                    };
-                }
+            if let Some(mutation) = self.try_begin_requested_task_mutation(task_id) {
+                return mutation;
             }
             changed.await;
         }
+    }
+
+    /// Non-blocking acquire for callers that must not park: the daemon event
+    /// loop handles every task's exits, so waiting there for one task's
+    /// in-flight mutation would stall the others. A caller that cannot take
+    /// the guard stands down — whatever holds it owns the task's next session.
+    pub(super) fn try_begin_requested_task_mutation(
+        &self,
+        task_id: &str,
+    ) -> Option<RequestedTaskMutation> {
+        let mut active = self
+            .requested_task_mutations
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.contains_key(task_id) {
+            return None;
+        }
+        active.insert(task_id.to_string(), RequestedTaskMutationKind::Other);
+        Some(RequestedTaskMutation {
+            task_id: task_id.to_string(),
+            mutations: Arc::clone(&self.requested_task_mutations),
+        })
     }
 
     #[cfg(test)]

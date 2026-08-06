@@ -73,9 +73,10 @@ pub(crate) use merge::prepare_merge_agent_for_api;
 pub use merge::run_merge_agent;
 pub(crate) use prompt::RevisionRound;
 pub(crate) use stages::{
-    prepare_advance_stage_for_api, prepare_resume_task_for_api, prepare_revision_task_for_api,
-    prepare_stage_completion_for_api, resolve_revision_budget, resolve_revision_limit,
-    resolve_stage_transition, stage_declares_merge_approve_post, RevisionBudget,
+    prepare_advance_stage_for_api, prepare_fresh_restart_after_rejected_resume,
+    prepare_resume_task_for_api, prepare_revision_task_for_api, prepare_stage_completion_for_api,
+    resolve_revision_budget, resolve_revision_limit, resolve_stage_transition,
+    stage_declares_merge_approve_post, RevisionBudget,
 };
 pub(crate) use worktree::{local_branch_exists, resolve_current_source_worktree_branch};
 
@@ -917,6 +918,10 @@ pub(crate) fn prepare_create_task_repair_for_api(
 /// `RunWorkspaceSpec::Resume` adopts a previous run's worktree and resumes
 /// its agent-CLI session; `Current` keeps the task's current workspace (post
 /// fallbacks, reruns).
+///
+/// `overrides` carries the provider, model, and effort a restarted run must
+/// keep (see `SpawnAgentOverrides`); a plain stage transition passes the
+/// default and lets the stage's own definitions decide.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::task_creator) fn prepare_stage_run_spawn(
     db: &Db,

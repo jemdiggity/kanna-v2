@@ -242,6 +242,20 @@ pub(crate) async fn handle_task_terminal_state(
     task_id: &str,
     exit_code: i32,
 ) -> Result<(), String> {
+    // A Claude session that exited because it could not resume its transcript
+    // never ran the stage at all. Relaunching it fresh happens before any of
+    // the bookkeeping below, so the dead attempt cannot finalize the run or
+    // fire a completion notification against work that has not been done.
+    match super::resume_recovery::recover_rejected_claude_resume(state, task_id, exit_code).await {
+        super::resume_recovery::RejectedResumeRecovery::Relaunched => return Ok(()),
+        super::resume_recovery::RejectedResumeRecovery::RelaunchFailed(error) => {
+            log::warn!(
+                "fresh relaunch after a rejected claude resume failed for {task_id}: {error}; \
+                 reporting the original failure"
+            );
+        }
+        super::resume_recovery::RejectedResumeRecovery::NotApplicable => {}
+    }
     let interrupted_status = if exit_code == 0 {
         "cancelled"
     } else {
