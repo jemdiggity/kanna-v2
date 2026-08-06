@@ -189,6 +189,10 @@ describe("parseTaskPullRequestedEvent", () => {
 
 describe("parseIncomingTransferRequest artifact validation", () => {
   function requestWithArtifact(artifact: Record<string, unknown>) {
+    return requestWithArtifacts([artifact]);
+  }
+
+  function requestWithArtifacts(artifacts: Record<string, unknown>[]) {
     return {
       type: "incoming_transfer_request",
       transfer_id: "transfer-1",
@@ -221,7 +225,7 @@ describe("parseIncomingTransferRequest artifact validation", () => {
           bundle: null,
         },
         recovery: null,
-        artifacts: [artifact],
+        artifacts,
       },
     };
   }
@@ -298,5 +302,72 @@ describe("parseIncomingTransferRequest artifact validation", () => {
       materialization: "extract-tar-gz",
       home_rel_path: ".claude/tasks/364643cc-5e6d-48fc-86ca-ca7764380900",
     }]);
+  });
+
+  const CLAUDE_ARCHIVE = {
+    artifact_id: "artifact-1",
+    filename: "claude-session.tar.gz",
+    provider: "claude",
+    kind: "session-archive",
+    materialization: "extract-tar-gz",
+    home_rel_path: ".claude/tasks/364643cc-5e6d-48fc-86ca-ca7764380900",
+  };
+  const CLAUDE_TRANSCRIPT = {
+    artifact_id: "artifact-2",
+    filename: "364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+    provider: "claude",
+    kind: "session-transcript",
+    materialization: "copy-file",
+    home_rel_path:
+      ".claude/projects/-Users-x--kanna-repos-r--kanna-worktrees-task-source/364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+  };
+
+  it("accepts a Claude conversation transcript shipped alongside the session archive", () => {
+    const request = parseIncomingTransferRequest(
+      requestWithArtifacts([CLAUDE_ARCHIVE, CLAUDE_TRANSCRIPT]),
+    );
+
+    expect(request.payload.artifacts).toEqual([CLAUDE_ARCHIVE, CLAUDE_TRANSCRIPT]);
+  });
+
+  it.each([
+    "/Users/x/.claude/projects/slug/364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+    ".claude/projects/../../.ssh/364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+    ".claude/projects/a/b/364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+    ".claude/tasks/364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+  ])("rejects a transcript home_rel_path outside the Claude projects contract: %s", (homeRelPath) => {
+    expect(() => parseIncomingTransferRequest(requestWithArtifact({
+      ...CLAUDE_TRANSCRIPT,
+      home_rel_path: homeRelPath,
+    }))).toThrow(/transcript|path|artifact/i);
+  });
+
+  it("rejects a transcript whose filename is not the resume session id", () => {
+    expect(() => parseIncomingTransferRequest(requestWithArtifact({
+      ...CLAUDE_TRANSCRIPT,
+      filename: "019d9a8c-9f39-7240-818f-88367a7c31df.jsonl",
+    }))).toThrow(/contract/i);
+  });
+
+  it("rejects two artifacts of the same kind", () => {
+    expect(() => parseIncomingTransferRequest(requestWithArtifacts([
+      CLAUDE_TRANSCRIPT,
+      { ...CLAUDE_TRANSCRIPT, artifact_id: "artifact-3" },
+    ]))).toThrow(/duplicate artifact kind/i);
+  });
+
+  it("rejects two artifacts sharing one artifact id", () => {
+    expect(() => parseIncomingTransferRequest(requestWithArtifacts([
+      CLAUDE_ARCHIVE,
+      { ...CLAUDE_TRANSCRIPT, artifact_id: CLAUDE_ARCHIVE.artifact_id },
+    ]))).toThrow(/duplicate artifact id/i);
+  });
+
+  it("rejects more artifacts than the provider session contract allows", () => {
+    expect(() => parseIncomingTransferRequest(requestWithArtifacts([
+      CLAUDE_ARCHIVE,
+      CLAUDE_TRANSCRIPT,
+      { ...CLAUDE_ARCHIVE, artifact_id: "artifact-3" },
+    ]))).toThrow(/at most two/i);
   });
 });

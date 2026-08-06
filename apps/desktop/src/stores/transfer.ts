@@ -163,6 +163,10 @@ function buildClaudeSessionArtifactId(transferId: string): string {
   return `${transferId}-claude-session`;
 }
 
+function buildClaudeTranscriptArtifactId(transferId: string): string {
+  return `${transferId}-claude-transcript`;
+}
+
 function buildCopilotSessionArtifactId(transferId: string): string {
   return `${transferId}-copilot-session`;
 }
@@ -240,6 +244,38 @@ const SESSION_ARCHIVE_CONFIGS: readonly SessionArchiveConfig[] = [
     artifactId: buildCopilotSessionArtifactId,
   },
 ];
+
+function taskWorktreePath(repoPath: string, branch: string | null): string | null {
+  return branch ? `${repoPath}/.kanna-worktrees/${branch}` : null;
+}
+
+/**
+ * Claude transcripts are keyed by the session's working directory — the task's
+ * worktree — not by the session id alone, so the lookup runs in Rust where the
+ * slug derivation and path canonicalization are shared with the receiver.
+ */
+async function findClaudeTranscriptArtifact(
+  worktreePath: string,
+  sessionId: string,
+): Promise<LocatedTransferArtifact | null> {
+  const located = await invoke<{
+    absolutePath: string;
+    homeRelPath: string;
+    filename: string;
+  } | null>("locate_claude_transcript", { worktreePath, sessionId })
+    .catch((error: unknown) => {
+      // A failed lookup must not cost the session archive its place in the
+      // payload. (T2 turns a missing transcript into a loud transfer failure.)
+      console.error("[store] failed to locate the claude session transcript:", error);
+      return null;
+    });
+  if (!located) return null;
+  return {
+    absolutePath: located.absolutePath,
+    homeRelPath: located.homeRelPath,
+    filename: located.filename,
+  };
+}
 
 async function findCodexRolloutArtifact(sessionId: string): Promise<LocatedTransferArtifact | null> {
   try {
@@ -346,6 +382,40 @@ async function stageSessionArchiveArtifact(
   }];
 }
 
+async function stageClaudeTranscriptArtifact(
+  transferId: string,
+  sessionId: string,
+  worktreePath: string | null,
+  ownership?: TransferLifecycleOwnership,
+): Promise<TransferArtifactPayload[]> {
+  if (!worktreePath) return [];
+  const transcript = await findClaudeTranscriptArtifact(worktreePath, sessionId);
+  if (!transcript) return [];
+
+  const artifactId = buildClaudeTranscriptArtifactId(transferId);
+  await ownership?.assertOwnership?.("Claude transcript staging");
+  await invoke("stage_transfer_artifact", {
+    transferId,
+    artifactId,
+    path: transcript.absolutePath,
+    owned: false,
+    ...(ownership?.deliveryId
+      ? {
+          deliveryId: ownership.deliveryId,
+          consumerIncarnation: ownership.consumerIncarnation,
+        }
+      : {}),
+  });
+  return [{
+    artifact_id: artifactId,
+    filename: transcript.filename,
+    provider: "claude",
+    kind: "session-transcript",
+    materialization: "copy-file",
+    home_rel_path: transcript.homeRelPath,
+  }];
+}
+
 async function stageTransferredSessionArtifacts(
   transferId: string,
   item: PipelineItem,
@@ -389,7 +459,7 @@ async function stageTransferredSessionArtifacts(
     if (!config) return [];
 
     const home = await invoke<string>("read_env_var", { name: "HOME" });
-    return await stageSessionArchiveArtifact(
+    const artifacts = await stageSessionArchiveArtifact(
       transferId,
       item.agent_session_id,
       repoPath,
@@ -397,6 +467,20 @@ async function stageTransferredSessionArtifacts(
       config,
       ownership,
     );
+    if (item.agent_provider === "claude") {
+      // The `~/.claude/tasks/<id>` archive holds only lock and highwatermark
+      // state. The conversation itself lives in the cwd-keyed transcript, so
+      // ship it alongside — neither one is sufficient on its own.
+      artifacts.push(
+        ...await stageClaudeTranscriptArtifact(
+          transferId,
+          item.agent_session_id,
+          taskWorktreePath(repoPath, item.branch),
+          ownership,
+        ),
+      );
+    }
+    return artifacts;
   } catch (error) {
     if (
       error instanceof Error
@@ -413,6 +497,7 @@ async function stageTransferredSessionArtifacts(
 async function importTransferredResumeState(
   transferId: string,
   payload: OutgoingTransferPayload,
+  destinationWorktreePath: string,
 ): Promise<string | null> {
   const resumeSessionId = payload.task.resume_session_id ?? null;
   const provider = payload.task.agent_provider;
@@ -420,26 +505,40 @@ async function importTransferredResumeState(
     return resumeSessionId;
   }
 
-  const artifact = payload.artifacts?.find((candidate) => candidate.provider === provider) ?? null;
-  if (!artifact) return null;
+  const artifacts = payload.artifacts?.filter((candidate) => candidate.provider === provider) ?? [];
+  if (artifacts.length === 0) return null;
 
   try {
-    const fetched = await invoke<{ path: string }>("fetch_transfer_artifact", {
-      transferId,
-      artifactId: artifact.artifact_id,
-    });
-    const materialized = await invoke<boolean>("materialize_transfer_artifact", {
-      sourcePath: fetched.path,
-      provider,
-      resumeSessionId,
-      filename: artifact.filename,
-      kind: artifact.kind,
-      materialization: artifact.materialization,
-    });
-    if (!materialized) {
-      if (provider === "codex") {
-        return resumeSessionId;
-      }
+    const materialized = new Map<string, boolean>();
+    for (const artifact of artifacts) {
+      const fetched = await invoke<{ path: string }>("fetch_transfer_artifact", {
+        transferId,
+        artifactId: artifact.artifact_id,
+      });
+      materialized.set(
+        artifact.artifact_id,
+        await invoke<boolean>("materialize_transfer_artifact", {
+          sourcePath: fetched.path,
+          provider,
+          resumeSessionId,
+          filename: artifact.filename,
+          kind: artifact.kind,
+          materialization: artifact.materialization,
+          // A Claude transcript is cwd-keyed, so only the receiver can name
+          // where it lands. The sender never supplies a destination path.
+          ...(artifact.kind === "session-transcript" ? { destinationWorktreePath } : {}),
+        }),
+      );
+    }
+
+    // An already-present destination only means "abandon the resume" when it
+    // means the conversation state could not be established at all. The
+    // transcript is the conversation, so it decides when one shipped; a
+    // pre-existing `~/.claude/tasks/<id>` lock directory must not veto it.
+    const decisive = artifacts.find((candidate) => candidate.kind === "session-transcript")
+      ?? artifacts.find((candidate) => candidate.kind === "session-archive")
+      ?? artifacts[0]!;
+    if (decisive.kind === "session-archive" && !materialized.get(decisive.artifact_id)) {
       console.warn(
         "[store] skipping transferred session import because the provider destination already exists",
         { provider, resumeSessionId },
@@ -940,9 +1039,17 @@ export function createTransferApi(
         "repository acquisition",
         async () => await ensureIncomingTransferRepo(transferId, payload),
       );
+      // The destination task id — and therefore its worktree — is deterministic
+      // before creation, which is what lets the transcript be re-keyed to the
+      // destination slug before the agent spawns with `--resume`.
+      const destinationTaskId = await destinationTaskIdForTransfer(transferId);
       const resumeSessionId = await runOwnedPhase(
         "artifact materialization",
-        async () => await importTransferredResumeState(transferId, payload),
+        async () => await importTransferredResumeState(
+          transferId,
+          payload,
+          `${repoPath}/.kanna-worktrees/task-${destinationTaskId}`,
+        ),
       );
       localTaskId = await runOwnedPhase(
         "task creation",
@@ -952,7 +1059,7 @@ export function createTransferApi(
           payload.task.prompt ?? "",
           payload.task.agent_type === "agent" || payload.task.agent_type === "sdk" ? "agent" : "pty",
           {
-            requestedTaskId: await destinationTaskIdForTransfer(transferId),
+            requestedTaskId: destinationTaskId,
             agentProvider: payload.task.agent_provider,
             baseBranch: resolveIncomingTransferBaseBranch(payload),
             pipelineName: payload.task.pipeline,

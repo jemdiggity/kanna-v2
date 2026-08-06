@@ -6,13 +6,76 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_ARCHIVE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_EXPANDED_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Claude keys a conversation transcript by the session's working directory:
+/// `~/.claude/projects/<slug(cwd)>/<session-id>.jsonl`. The slug replaces every
+/// character outside `[A-Za-z0-9]` with `-`.
+///
+/// Pinned empirically, not from folklore: across 481 real transcripts under
+/// `~/.claude/projects/`, comparing each transcript's recorded `cwd` against the
+/// directory it lives in, this rule matched every one — including `/`, `.` and
+/// `_`. The slug is computed by Claude in JavaScript, whose `String.replace`
+/// walks UTF-16 code units, so an astral character contributes two dashes.
+pub fn claude_project_slug(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let mut slug = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character);
+        } else {
+            for _ in 0..character.len_utf16() {
+                slug.push('-');
+            }
+        }
+    }
+    slug
+}
+
+/// A process's working directory is always fully resolved by the kernel, so the
+/// path Claude records — and therefore the slug — is the realpath. The
+/// destination worktree does not exist yet when a transfer materializes its
+/// transcript, so resolve the longest existing ancestor and re-append the rest.
+pub fn resolve_session_cwd(path: &Path) -> PathBuf {
+    let mut trailing = Vec::new();
+    let mut candidate = path;
+    loop {
+        if let Ok(resolved) = candidate.canonicalize() {
+            return trailing
+                .iter()
+                .rev()
+                .fold(resolved, |resolved, component| resolved.join(component));
+        }
+        let Some(parent) = candidate.parent() else {
+            return path.to_path_buf();
+        };
+        let Some(name) = candidate.file_name() else {
+            return path.to_path_buf();
+        };
+        trailing.push(name.to_os_string());
+        candidate = parent;
+    }
+}
+
+fn is_session_uuid(value: &str) -> bool {
+    let groups = [8usize, 4, 4, 4, 12];
+    let mut parts = value.split('-');
+    for length in groups {
+        let Some(part) = parts.next() else {
+            return false;
+        };
+        if part.len() != length || !part.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
+}
 
 enum ArtifactDestination {
     File {
@@ -25,24 +88,27 @@ enum ArtifactDestination {
     },
 }
 
+/// The payload-declared shape of one transfer artifact, plus the one field the
+/// payload may never carry: where the file lands. A Claude transcript is
+/// cwd-keyed, so its destination is computed here from a receiver-supplied
+/// worktree path — the sender never names a destination.
+pub struct TransferArtifactContract<'a> {
+    pub provider: &'a str,
+    pub resume_session_id: &'a str,
+    pub filename: &'a str,
+    pub kind: &'a str,
+    pub materialization: &'a str,
+    pub destination_worktree_path: Option<&'a Path>,
+}
+
 pub fn materialize_transfer_artifact_at_home(
     home: &Path,
     source_path: &Path,
-    provider: &str,
-    resume_session_id: &str,
-    filename: &str,
-    kind: &str,
-    materialization: &str,
+    contract: TransferArtifactContract<'_>,
 ) -> Result<bool, String> {
     #[cfg(unix)]
     {
-        let destination = validate_artifact_contract(
-            provider,
-            resume_session_id,
-            filename,
-            kind,
-            materialization,
-        )?;
+        let destination = validate_artifact_contract(&contract)?;
         let canonical_home = home
             .canonicalize()
             .map_err(|error| format!("failed to resolve transfer artifact home: {error}"))?;
@@ -86,16 +152,48 @@ pub fn materialize_transfer_artifact_at_home(
     }
     #[cfg(not(unix))]
     {
-        let _ = (
-            home,
-            source_path,
-            provider,
-            resume_session_id,
-            filename,
-            kind,
-            materialization,
-        );
+        let _ = (home, source_path, contract);
         Err("secure transfer artifact materialization is unsupported on this platform".into())
+    }
+}
+
+/// Where a Claude session's transcript lives for a session that ran in
+/// `worktree_path`. Returns `None` when the file is absent so the caller keeps
+/// the existing skip-and-continue staging shape.
+pub struct LocatedClaudeTranscript {
+    pub absolute_path: PathBuf,
+    pub home_rel_path: String,
+    pub filename: String,
+}
+
+pub fn locate_claude_transcript_at_home(
+    home: &Path,
+    worktree_path: &Path,
+    session_id: &str,
+) -> Result<Option<LocatedClaudeTranscript>, String> {
+    if !is_session_uuid(session_id) {
+        // Claude names transcripts by session uuid, so there is nothing to find
+        // — not an error, just no transcript for this session.
+        return Ok(None);
+    }
+    let slug = claude_project_slug(&resolve_session_cwd(worktree_path));
+    validate_component(&slug, "Claude project slug")?;
+    let filename = format!("{session_id}.jsonl");
+    let home_rel_path = format!(".claude/projects/{slug}/{filename}");
+    let absolute_path = home
+        .join(".claude")
+        .join("projects")
+        .join(&slug)
+        .join(&filename);
+    match std::fs::symlink_metadata(&absolute_path) {
+        Ok(metadata) if metadata.is_file() => Ok(Some(LocatedClaudeTranscript {
+            absolute_path,
+            home_rel_path,
+            filename,
+        })),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("failed to inspect Claude transcript: {error}")),
     }
 }
 
@@ -113,15 +211,46 @@ fn validate_component(value: &str, label: &str) -> Result<(), String> {
 }
 
 fn validate_artifact_contract(
-    provider: &str,
-    session_id: &str,
-    filename: &str,
-    kind: &str,
-    materialization: &str,
+    contract: &TransferArtifactContract<'_>,
 ) -> Result<ArtifactDestination, String> {
+    let TransferArtifactContract {
+        provider,
+        resume_session_id: session_id,
+        filename,
+        kind,
+        materialization,
+        destination_worktree_path,
+    } = *contract;
     validate_component(session_id, "transfer resume session id")?;
     validate_component(filename, "transfer artifact filename")?;
     match provider {
+        "claude" if kind == "session-transcript" && materialization == "copy-file" => {
+            // Transcripts are cwd-keyed, so the sender cannot name where this
+            // file must land — the destination worktree exists only here. The
+            // slug is computed from a receiver-supplied path and never from
+            // anything in the payload.
+            if !is_session_uuid(session_id) {
+                return Err("transfer resume session id is not a Claude session uuid".to_string());
+            }
+            if filename != format!("{session_id}.jsonl") {
+                return Err(
+                    "transfer artifact filename does not match the Claude transcript contract"
+                        .to_string(),
+                );
+            }
+            let worktree_path = destination_worktree_path.ok_or_else(|| {
+                "Claude transcript materialization requires a destination worktree path".to_string()
+            })?;
+            if !worktree_path.is_absolute() {
+                return Err("transfer destination worktree path must be absolute".into());
+            }
+            let slug = claude_project_slug(&resolve_session_cwd(worktree_path));
+            validate_component(&slug, "transfer destination project slug")?;
+            Ok(ArtifactDestination::File {
+                directories: vec![".claude".into(), "projects".into(), slug],
+                filename: filename.into(),
+            })
+        }
         "claude"
             if filename == "claude-session.tar.gz"
                 && kind == "session-archive"
@@ -708,7 +837,10 @@ fn renameat_no_replace(
 
 #[cfg(test)]
 mod tests {
-    use super::materialize_transfer_artifact_at_home;
+    use super::{
+        claude_project_slug, locate_claude_transcript_at_home,
+        materialize_transfer_artifact_at_home, TransferArtifactContract,
+    };
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use std::path::{Path, PathBuf};
@@ -787,11 +919,14 @@ mod tests {
             materialize_transfer_artifact_at_home(
                 fixture.path(),
                 &archive,
-                "claude",
-                CLAUDE_SESSION,
-                "claude-session.tar.gz",
-                "session-archive",
-                "extract-tar-gz",
+                TransferArtifactContract {
+                    provider: "claude",
+                    resume_session_id: CLAUDE_SESSION,
+                    filename: "claude-session.tar.gz",
+                    kind: "session-archive",
+                    materialization: "extract-tar-gz",
+                    destination_worktree_path: None,
+                },
             ),
             Ok(true),
         );
@@ -823,11 +958,14 @@ mod tests {
         assert!(materialize_transfer_artifact_at_home(
             fixture.path(),
             &archive,
-            "claude",
-            CLAUDE_SESSION,
-            "claude-session.tar.gz",
-            "session-archive",
-            "extract-tar-gz",
+            TransferArtifactContract {
+                provider: "claude",
+                resume_session_id: CLAUDE_SESSION,
+                filename: "claude-session.tar.gz",
+                kind: "session-archive",
+                materialization: "extract-tar-gz",
+                destination_worktree_path: None,
+            },
         )
         .is_err());
         assert!(!outside.path().join(CLAUDE_SESSION).exists());
@@ -849,11 +987,14 @@ mod tests {
         assert!(materialize_transfer_artifact_at_home(
             fixture.path(),
             &rollout,
-            "codex",
-            CODEX_SESSION,
-            CODEX_FILENAME,
-            "session-rollout",
-            "copy-file",
+            TransferArtifactContract {
+                provider: "codex",
+                resume_session_id: CODEX_SESSION,
+                filename: CODEX_FILENAME,
+                kind: "session-rollout",
+                materialization: "copy-file",
+                destination_worktree_path: None,
+            },
         )
         .is_err());
         assert!(!outside.path().join(CODEX_FILENAME).exists());
@@ -875,11 +1016,14 @@ mod tests {
             materialize_transfer_artifact_at_home(
                 fixture.path(),
                 &rollout,
-                "codex",
-                CODEX_SESSION,
-                CODEX_FILENAME,
-                "session-rollout",
-                "copy-file",
+                TransferArtifactContract {
+                    provider: "codex",
+                    resume_session_id: CODEX_SESSION,
+                    filename: CODEX_FILENAME,
+                    kind: "session-rollout",
+                    materialization: "copy-file",
+                    destination_worktree_path: None,
+                },
             ),
             Ok(true),
         );
@@ -892,11 +1036,14 @@ mod tests {
             materialize_transfer_artifact_at_home(
                 fixture.path(),
                 &rollout,
-                "codex",
-                CODEX_SESSION,
-                CODEX_FILENAME,
-                "session-rollout",
-                "copy-file",
+                TransferArtifactContract {
+                    provider: "codex",
+                    resume_session_id: CODEX_SESSION,
+                    filename: CODEX_FILENAME,
+                    kind: "session-rollout",
+                    materialization: "copy-file",
+                    destination_worktree_path: None,
+                },
             ),
             Ok(false),
         );
@@ -920,11 +1067,14 @@ mod tests {
         assert!(materialize_transfer_artifact_at_home(
             fixture.path(),
             &archive,
-            "claude",
-            CLAUDE_SESSION,
-            "claude-session.tar.gz",
-            "session-archive",
-            "extract-tar-gz",
+            TransferArtifactContract {
+                provider: "claude",
+                resume_session_id: CLAUDE_SESSION,
+                filename: "claude-session.tar.gz",
+                kind: "session-archive",
+                materialization: "extract-tar-gz",
+                destination_worktree_path: None,
+            },
         )
         .is_err());
         assert!(!fixture.path().join(".claude/tasks/other-session").exists());
@@ -944,11 +1094,14 @@ mod tests {
         assert!(materialize_transfer_artifact_at_home(
             fixture.path(),
             &archive,
-            "claude",
-            CLAUDE_SESSION,
-            "claude-session.tar.gz",
-            "session-archive",
-            "extract-tar-gz",
+            TransferArtifactContract {
+                provider: "claude",
+                resume_session_id: CLAUDE_SESSION,
+                filename: "claude-session.tar.gz",
+                kind: "session-archive",
+                materialization: "extract-tar-gz",
+                destination_worktree_path: None,
+            },
         )
         .is_err());
         assert!(!fixture
@@ -971,17 +1124,297 @@ mod tests {
             materialize_transfer_artifact_at_home(
                 fixture.path(),
                 &archive,
-                "claude",
-                CLAUDE_SESSION,
-                "claude-session.tar.gz",
-                "session-archive",
-                "extract-tar-gz",
+                TransferArtifactContract {
+                    provider: "claude",
+                    resume_session_id: CLAUDE_SESSION,
+                    filename: "claude-session.tar.gz",
+                    kind: "session-archive",
+                    materialization: "extract-tar-gz",
+                    destination_worktree_path: None,
+                },
             ),
             Ok(false),
         );
         assert_eq!(
             std::fs::read(destination.join("keep")).expect("read existing state"),
             b"original",
+        );
+    }
+
+    // --- Claude conversation transcripts ------------------------------------
+    //
+    // Transcripts are cwd-keyed, so the destination directory is computed here
+    // from a receiver-supplied worktree path. The sender never names it.
+
+    const TRANSCRIPT: &[u8] = b"{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n";
+
+    fn transcript_filename() -> String {
+        format!("{CLAUDE_SESSION}.jsonl")
+    }
+
+    fn write_transcript(path: &Path) {
+        std::fs::write(path, TRANSCRIPT).expect("write transcript");
+    }
+
+    #[test]
+    fn derives_the_claude_project_slug_by_replacing_every_non_alphanumeric_character() {
+        // Pinned against real `~/.claude/projects/` directories: `/`, `.` and
+        // `_` all collapse to `-`, and case is preserved.
+        assert_eq!(
+            claude_project_slug(Path::new("/Users/x/.kanna/repos/kanna-7")),
+            "-Users-x--kanna-repos-kanna-7",
+        );
+        assert_eq!(
+            claude_project_slug(Path::new("/private/tmp/probe/wt/a.b_c")),
+            "-private-tmp-probe-wt-a-b-c",
+        );
+        assert_eq!(
+            claude_project_slug(Path::new("/tmp/kanna-test-CSEH7S")),
+            "-tmp-kanna-test-CSEH7S",
+        );
+        assert_eq!(claude_project_slug(Path::new("/a b/c+d")), "-a-b-c-d");
+    }
+
+    #[test]
+    fn resolves_the_session_cwd_through_symlinked_and_missing_ancestors() {
+        let fixture = TempDir::new();
+        let repo = fixture.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repo");
+        let canonical_repo = repo.canonicalize().expect("canonicalize repo");
+        // The destination worktree does not exist yet at materialization time.
+        let worktree = repo.join(".kanna-worktrees").join("task-abc");
+
+        assert_eq!(
+            super::resolve_session_cwd(&worktree),
+            canonical_repo.join(".kanna-worktrees").join("task-abc"),
+        );
+    }
+
+    #[test]
+    fn imports_a_claude_transcript_under_the_receiver_derived_slug() {
+        let fixture = TempDir::new();
+        let source = fixture.path().join("source.jsonl");
+        write_transcript(&source);
+        let worktree = fixture.path().join("repo/.kanna-worktrees/task-dest");
+        std::fs::create_dir_all(&worktree).expect("create destination worktree");
+        let slug = claude_project_slug(&worktree.canonicalize().expect("canonicalize worktree"));
+
+        assert_eq!(
+            materialize_transfer_artifact_at_home(
+                fixture.path(),
+                &source,
+                TransferArtifactContract {
+                    provider: "claude",
+                    resume_session_id: CLAUDE_SESSION,
+                    filename: &transcript_filename(),
+                    kind: "session-transcript",
+                    materialization: "copy-file",
+                    destination_worktree_path: Some(&worktree),
+                },
+            ),
+            Ok(true),
+        );
+        assert_eq!(
+            std::fs::read(
+                fixture
+                    .path()
+                    .join(".claude/projects")
+                    .join(&slug)
+                    .join(transcript_filename())
+            )
+            .expect("read imported transcript"),
+            TRANSCRIPT,
+        );
+    }
+
+    #[test]
+    fn rejects_a_claude_transcript_without_a_receiver_supplied_destination() {
+        let fixture = TempDir::new();
+        let source = fixture.path().join("source.jsonl");
+        write_transcript(&source);
+
+        assert!(materialize_transfer_artifact_at_home(
+            fixture.path(),
+            &source,
+            TransferArtifactContract {
+                provider: "claude",
+                resume_session_id: CLAUDE_SESSION,
+                filename: &transcript_filename(),
+                kind: "session-transcript",
+                materialization: "copy-file",
+                destination_worktree_path: None,
+            },
+        )
+        .is_err());
+        assert!(!fixture.path().join(".claude/projects").exists());
+    }
+
+    #[test]
+    fn rejects_a_claude_transcript_filename_that_is_not_the_validated_session_id() {
+        let fixture = TempDir::new();
+        let source = fixture.path().join("source.jsonl");
+        write_transcript(&source);
+        let worktree = fixture.path().join("repo/.kanna-worktrees/task-dest");
+        std::fs::create_dir_all(&worktree).expect("create destination worktree");
+
+        for filename in [
+            "019d9a8c-9f39-7240-818f-88367a7c31df.jsonl",
+            "364643cc-5e6d-48fc-86ca-ca7764380900.json",
+            "transcript.jsonl",
+        ] {
+            assert!(
+                materialize_transfer_artifact_at_home(
+                    fixture.path(),
+                    &source,
+                    TransferArtifactContract {
+                        provider: "claude",
+                        resume_session_id: CLAUDE_SESSION,
+                        filename,
+                        kind: "session-transcript",
+                        materialization: "copy-file",
+                        destination_worktree_path: Some(&worktree),
+                    },
+                )
+                .is_err(),
+                "expected {filename} to be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_claude_transcript_whose_session_id_is_not_a_uuid() {
+        let fixture = TempDir::new();
+        let source = fixture.path().join("source.jsonl");
+        write_transcript(&source);
+        let worktree = fixture.path().join("repo/.kanna-worktrees/task-dest");
+        std::fs::create_dir_all(&worktree).expect("create destination worktree");
+
+        assert!(materialize_transfer_artifact_at_home(
+            fixture.path(),
+            &source,
+            TransferArtifactContract {
+                provider: "claude",
+                resume_session_id: "resume-fenced",
+                filename: "resume-fenced.jsonl",
+                kind: "session-transcript",
+                materialization: "copy-file",
+                destination_worktree_path: Some(&worktree),
+            },
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_symlinked_claude_projects_slug_directory_without_writing_outside_home() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = TempDir::new();
+        let outside = TempDir::new();
+        let source = fixture.path().join("source.jsonl");
+        write_transcript(&source);
+        let worktree = fixture.path().join("repo/.kanna-worktrees/task-dest");
+        std::fs::create_dir_all(&worktree).expect("create destination worktree");
+        let slug = claude_project_slug(&worktree.canonicalize().expect("canonicalize worktree"));
+        std::fs::create_dir_all(fixture.path().join(".claude/projects"))
+            .expect("create projects root");
+        symlink(
+            outside.path(),
+            fixture.path().join(".claude/projects").join(&slug),
+        )
+        .expect("create slug symlink");
+
+        assert!(materialize_transfer_artifact_at_home(
+            fixture.path(),
+            &source,
+            TransferArtifactContract {
+                provider: "claude",
+                resume_session_id: CLAUDE_SESSION,
+                filename: &transcript_filename(),
+                kind: "session-transcript",
+                materialization: "copy-file",
+                destination_worktree_path: Some(&worktree),
+            },
+        )
+        .is_err());
+        assert!(!outside.path().join(transcript_filename()).exists());
+    }
+
+    #[test]
+    fn leaves_an_existing_claude_transcript_untouched() {
+        let fixture = TempDir::new();
+        let source = fixture.path().join("source.jsonl");
+        write_transcript(&source);
+        let worktree = fixture.path().join("repo/.kanna-worktrees/task-dest");
+        std::fs::create_dir_all(&worktree).expect("create destination worktree");
+        let slug = claude_project_slug(&worktree.canonicalize().expect("canonicalize worktree"));
+        let destination = fixture.path().join(".claude/projects").join(&slug);
+        std::fs::create_dir_all(&destination).expect("create existing destination");
+        std::fs::write(destination.join(transcript_filename()), b"original")
+            .expect("write existing transcript");
+
+        assert_eq!(
+            materialize_transfer_artifact_at_home(
+                fixture.path(),
+                &source,
+                TransferArtifactContract {
+                    provider: "claude",
+                    resume_session_id: CLAUDE_SESSION,
+                    filename: &transcript_filename(),
+                    kind: "session-transcript",
+                    materialization: "copy-file",
+                    destination_worktree_path: Some(&worktree),
+                },
+            ),
+            Ok(false),
+        );
+        assert_eq!(
+            std::fs::read(destination.join(transcript_filename())).expect("read existing"),
+            b"original",
+        );
+    }
+
+    #[test]
+    fn locates_a_claude_transcript_under_the_source_worktree_slug() {
+        let fixture = TempDir::new();
+        let worktree = fixture.path().join("repo/.kanna-worktrees/task-source");
+        std::fs::create_dir_all(&worktree).expect("create source worktree");
+        let slug = claude_project_slug(&worktree.canonicalize().expect("canonicalize worktree"));
+        let transcript_dir = fixture.path().join(".claude/projects").join(&slug);
+        std::fs::create_dir_all(&transcript_dir).expect("create transcript directory");
+        write_transcript(&transcript_dir.join(transcript_filename()));
+
+        let located = locate_claude_transcript_at_home(fixture.path(), &worktree, CLAUDE_SESSION)
+            .expect("locate transcript")
+            .expect("transcript is present");
+        assert_eq!(
+            located.absolute_path,
+            transcript_dir.join(transcript_filename())
+        );
+        assert_eq!(
+            located.home_rel_path,
+            format!(".claude/projects/{slug}/{}", transcript_filename()),
+        );
+        assert_eq!(located.filename, transcript_filename());
+    }
+
+    #[test]
+    fn reports_a_missing_claude_transcript_without_failing() {
+        let fixture = TempDir::new();
+        let worktree = fixture.path().join("repo/.kanna-worktrees/task-source");
+        std::fs::create_dir_all(&worktree).expect("create source worktree");
+
+        assert!(
+            locate_claude_transcript_at_home(fixture.path(), &worktree, CLAUDE_SESSION)
+                .expect("locate transcript")
+                .is_none()
+        );
+        // A legacy non-uuid session id has no transcript to find; it must not
+        // fail the lookup and cost the session archive its place in the payload.
+        assert!(
+            locate_claude_transcript_at_home(fixture.path(), &worktree, "resume-fenced")
+                .expect("locate transcript")
+                .is_none()
         );
     }
 }

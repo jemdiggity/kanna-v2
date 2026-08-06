@@ -405,6 +405,7 @@ pub async fn materialize_transfer_artifact(
     filename: String,
     kind: String,
     materialization: String,
+    destination_worktree_path: Option<String>,
 ) -> Result<bool, String> {
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
@@ -413,15 +414,51 @@ pub async fn materialize_transfer_artifact(
         crate::transfer_artifact::materialize_transfer_artifact_at_home(
             &home,
             std::path::Path::new(&source_path),
-            &provider,
-            &resume_session_id,
-            &filename,
-            &kind,
-            &materialization,
+            crate::transfer_artifact::TransferArtifactContract {
+                provider: &provider,
+                resume_session_id: &resume_session_id,
+                filename: &filename,
+                kind: &kind,
+                materialization: &materialization,
+                destination_worktree_path: destination_worktree_path
+                    .as_deref()
+                    .map(std::path::Path::new),
+            },
         )
     })
     .await
     .map_err(|error| format!("transfer artifact materialization task failed: {error}"))?
+}
+
+/// Locate the Claude conversation transcript for a session that ran in
+/// `worktree_path`. The slug derivation lives in Rust so the source and the
+/// receiver share one implementation of Claude's cwd keying.
+#[tauri::command]
+pub async fn locate_claude_transcript(
+    worktree_path: String,
+    session_id: String,
+) -> Result<Option<Value>, String> {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "HOME is unavailable for Claude transcript lookup".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::transfer_artifact::locate_claude_transcript_at_home(
+            &home,
+            std::path::Path::new(&worktree_path),
+            &session_id,
+        )
+        .map(|located| {
+            located.map(|transcript| {
+                serde_json::json!({
+                    "absolutePath": transcript.absolute_path.to_string_lossy(),
+                    "homeRelPath": transcript.home_rel_path,
+                    "filename": transcript.filename,
+                })
+            })
+        })
+    })
+    .await
+    .map_err(|error| format!("Claude transcript lookup task failed: {error}"))?
 }
 
 #[tauri::command]

@@ -111,6 +111,7 @@ const invokeHandlers: Record<string, (...args: any[]) => any> = {
     path: "/tmp/mock-transfer-1.bundle",
   }),
   materialize_transfer_artifact: () => true,
+  locate_claude_transcript: () => null,
   claim_transfer_event_consumer: () => ({
     authoritative: true,
     consumerIncarnation: "mock-consumer-incarnation",

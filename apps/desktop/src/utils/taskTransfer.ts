@@ -3,7 +3,7 @@ import type { PipelineItem } from "../types/kanna";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 
 export type RepoAcquisitionMode = "reuse-local" | "clone-remote" | "bundle-repo";
-export type TransferArtifactKind = "session-rollout" | "session-archive";
+export type TransferArtifactKind = "session-rollout" | "session-archive" | "session-transcript";
 export type TransferArtifactMaterialization = "copy-file" | "extract-tar-gz";
 
 export interface TransferArtifactPayload {
@@ -283,16 +283,56 @@ function validateSimpleComponent(value: string, label: string): string {
   return value;
 }
 
-function canonicalArtifactHomePath(
+const SESSION_UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const CLAUDE_PROJECT_SLUG_PATTERN = /^[A-Za-z0-9-]{1,1024}$/;
+
+interface ArtifactContract {
+  kind: TransferArtifactKind;
+  materialization: TransferArtifactMaterialization;
+  /**
+   * Returns the accepted `home_rel_path`, or throws. Most contracts pin one
+   * exact path; the Claude transcript cannot, because its path is keyed by the
+   * *source* session's cwd. The receiver derives its own destination, so that
+   * field is only checked for shape here and never used to place a file.
+   */
+  assertHomeRelPath: (value: string) => string;
+}
+
+function exactHomeRelPath(homeRelPath: string): (value: string) => string {
+  return (value: string) => {
+    if (value !== homeRelPath) {
+      throw new Error("transfer artifact path does not match the provider session contract");
+    }
+    return homeRelPath;
+  };
+}
+
+function canonicalArtifactContract(
   provider: TransferArtifactPayload["provider"],
   resumeSessionId: string,
   filename: string,
-): {
-  kind: TransferArtifactKind;
-  materialization: TransferArtifactMaterialization;
-  homeRelPath: string;
-} {
+): ArtifactContract {
   const sessionId = validateSimpleComponent(resumeSessionId, "transfer resume session id");
+  if (provider === "claude" && filename === `${sessionId}.jsonl`) {
+    if (!SESSION_UUID_PATTERN.test(sessionId)) {
+      throw new Error("transfer resume session id is not a Claude session uuid");
+    }
+    return {
+      kind: "session-transcript",
+      materialization: "copy-file",
+      assertHomeRelPath: (value: string) => {
+        const slug = value.startsWith(".claude/projects/") && value.endsWith(`/${filename}`)
+          ? value.slice(".claude/projects/".length, value.length - filename.length - 1)
+          : null;
+        if (!slug || !CLAUDE_PROJECT_SLUG_PATTERN.test(slug)) {
+          throw new Error(
+            "transfer artifact path does not match the Claude transcript contract",
+          );
+        }
+        return value;
+      },
+    };
+  }
   if (provider === "claude") {
     if (filename !== "claude-session.tar.gz") {
       throw new Error("transfer artifact filename does not match the Claude session contract");
@@ -300,7 +340,7 @@ function canonicalArtifactHomePath(
     return {
       kind: "session-archive",
       materialization: "extract-tar-gz",
-      homeRelPath: `.claude/tasks/${sessionId}`,
+      assertHomeRelPath: exactHomeRelPath(`.claude/tasks/${sessionId}`),
     };
   }
   if (provider === "copilot") {
@@ -310,7 +350,7 @@ function canonicalArtifactHomePath(
     return {
       kind: "session-archive",
       materialization: "extract-tar-gz",
-      homeRelPath: `.copilot/session-state/${sessionId}`,
+      assertHomeRelPath: exactHomeRelPath(`.copilot/session-state/${sessionId}`),
     };
   }
   if (provider === "codex") {
@@ -329,7 +369,9 @@ function canonicalArtifactHomePath(
     return {
       kind: "session-rollout",
       materialization: "copy-file",
-      homeRelPath: `.codex/sessions/${match[1]}/${match[2]}/${match[3]}/${filename}`,
+      assertHomeRelPath: exactHomeRelPath(
+        `.codex/sessions/${match[1]}/${match[2]}/${match[3]}/${filename}`,
+      ),
     };
   }
   throw new Error(`transfer artifacts are unsupported for provider ${provider}`);
@@ -345,14 +387,19 @@ function parseTransferArtifacts(
   if (!Array.isArray(value)) {
     throw new Error(`${invalidMessage}: artifacts must be an array`);
   }
-  if (value.length > 1) {
-    throw new Error(`${invalidMessage}: at most one resume artifact is supported`);
+  // A Claude PTY task ships two: the `~/.claude/tasks/<id>` session archive and
+  // the conversation transcript. One artifact per kind, so neither can be
+  // duplicated into a second destination.
+  if (value.length > 2) {
+    throw new Error(`${invalidMessage}: at most two resume artifacts are supported`);
   }
   if (value.length === 0) return [];
   if (!resumeSessionId) {
     throw new Error(`${invalidMessage}: artifact requires a resume session id`);
   }
 
+  const seenKinds = new Set<TransferArtifactKind>();
+  const seenArtifactIds = new Set<string>();
   return value.map((candidate, index) => {
     const artifact = asRecord(candidate);
     if (!artifact) throw new Error(`${invalidMessage}: artifact ${index} must be an object`);
@@ -380,11 +427,15 @@ function parseTransferArtifacts(
       ),
       "transfer artifact filename",
     );
-    const contract = canonicalArtifactHomePath(provider, resumeSessionId, filename);
+    if (seenArtifactIds.has(artifactId)) {
+      throw new Error(`${invalidMessage}: duplicate artifact id ${artifactId}`);
+    }
+    seenArtifactIds.add(artifactId);
+    const contract = canonicalArtifactContract(provider, resumeSessionId, filename);
     const kind = readRequiredEnum(
       artifact,
       ["kind"],
-      ["session-rollout", "session-archive"] as const,
+      ["session-rollout", "session-archive", "session-transcript"] as const,
       `${invalidMessage}: artifact ${index} missing kind`,
     );
     const materialization = artifact.materialization === undefined
@@ -400,21 +451,21 @@ function parseTransferArtifacts(
       ["home_rel_path", "homeRelPath"],
       `${invalidMessage}: artifact ${index} missing home_rel_path`,
     );
-    if (
-      kind !== contract.kind
-      || materialization !== contract.materialization
-      || homeRelPath !== contract.homeRelPath
-    ) {
+    if (kind !== contract.kind || materialization !== contract.materialization) {
       throw new Error(
         `${invalidMessage}: artifact kind, materialization, or path does not match the provider session contract`,
       );
     }
+    if (seenKinds.has(kind)) {
+      throw new Error(`${invalidMessage}: duplicate artifact kind ${kind}`);
+    }
+    seenKinds.add(kind);
     return {
       artifact_id: artifactId,
       filename,
       provider,
       kind,
-      home_rel_path: contract.homeRelPath,
+      home_rel_path: contract.assertHomeRelPath(homeRelPath),
       materialization,
     };
   });
