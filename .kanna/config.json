@@ -1,6 +1,7 @@
 {
   "$schema": "https://schemas.kanna.build/config.schema.json",
   "setup": [
+    "unset CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID 2>/dev/null || true",
     "pnpm install",
     "./kd env sync",
     "./kd rust-cache warm",
