@@ -33,16 +33,35 @@ impl ProtectedInputWait {
     }
 }
 
-async fn wait_for_protected_input_generation(
+/// Establish the protected-input contract on whichever daemon is serving now,
+/// retrying until one accepts it, and hand back the connection it was
+/// established on.
+async fn establish_protected_input_generation(
     config: &Config,
     wait: ProtectedInputWait,
-    mut previous_pid: Option<u32>,
-) -> u32 {
+) -> crate::daemon_client::DaemonClient {
     let mut retry_delay = std::time::Duration::from_millis(50);
+    // Set only when a *connected* daemon refuses the contract because it is
+    // already handing off. That successor is imminent and unannounced, which
+    // is the one question `wait_for_successor`'s bounded poll answers. "Has
+    // this healthy daemon been replaced yet?" is a different question, and
+    // asking it here — of a daemon nothing was replacing — is what spun this
+    // module until 2026-08-08: the bounded wait expired every ~17s, the
+    // expiry read as a connection failure, and the retry re-negotiated with
+    // the same daemon forever.
+    let mut awaiting_successor_to: Option<u32> = None;
     loop {
-        let connection = match previous_pid {
-            Some(pid) => crate::daemon_client::wait_for_successor(&config.daemon_dir, pid).await,
-            None => crate::daemon_client::DaemonClient::connect(&config.daemon_dir).await,
+        // Both connectors report a boxed non-`Send` error. Reduced to its text
+        // here so that nothing un-`Send` is alive across the retry sleep below
+        // and this future can be spawned as a task, not only polled inside a
+        // `select!`.
+        let connection = match awaiting_successor_to {
+            Some(pid) => crate::daemon_client::wait_for_successor(&config.daemon_dir, pid)
+                .await
+                .map_err(|error| error.to_string()),
+            None => crate::daemon_client::DaemonClient::connect(&config.daemon_dir)
+                .await
+                .map_err(|error| error.to_string()),
         };
         let mut daemon = match connection {
             Ok(daemon) => daemon,
@@ -51,7 +70,7 @@ async fn wait_for_protected_input_generation(
                     "protected-input daemon generation is not ready; {}: {error}",
                     wait.degraded()
                 );
-                previous_pid = None;
+                awaiting_successor_to = None;
                 tokio::time::sleep(retry_delay).await;
                 retry_delay = std::cmp::min(retry_delay * 2, std::time::Duration::from_secs(2));
                 continue;
@@ -59,26 +78,43 @@ async fn wait_for_protected_input_generation(
         };
         let connected_pid = daemon.connected_pid();
         match prepare_daemon_generation(&mut daemon).await {
-            Ok(pid) => return pid,
+            Ok(_) => return daemon,
             Err(error) => {
                 log::warn!(
                     "daemon pid {connected_pid} lacks the protected-input contract; waiting for a successor: {error}"
                 );
-                previous_pid = Some(connected_pid);
+                awaiting_successor_to = Some(connected_pid);
             }
         }
     }
 }
 
-async fn maintain_protected_input_generations(config: Config, mut pid: u32) {
+/// Re-establish the contract on every *new* daemon generation, and only on a
+/// new one.
+///
+/// A daemon that keeps serving is not an event, so this parks on the
+/// connection the contract was negotiated over and costs nothing until that
+/// daemon stops serving it: no negotiation, no session classification, no log
+/// line. Every daemon that replaces this one — handoff, crash, restart —
+/// closes that connection on its way out, so the wake-up is prompt without
+/// anything polling for it.
+async fn maintain_protected_input_generations(
+    config: Config,
+    mut daemon: crate::daemon_client::DaemonClient,
+) {
     loop {
-        pid = wait_for_protected_input_generation(
-            &config,
-            ProtectedInputWait::SteadyState,
-            Some(pid),
-        )
-        .await;
-        log::info!("protected-input policy established on successor daemon pid {pid}");
+        let previous_pid = daemon.connected_pid();
+        let ended = daemon.wait_until_disconnected().await;
+        log::info!(
+            "daemon pid {previous_pid} ended its protected-input generation ({ended}); \
+             re-establishing the policy on its successor"
+        );
+        daemon =
+            establish_protected_input_generation(&config, ProtectedInputWait::SteadyState).await;
+        log::info!(
+            "protected-input policy established on successor daemon pid {}",
+            daemon.connected_pid()
+        );
     }
 }
 
@@ -153,10 +189,10 @@ pub(crate) async fn run_server_services(
     http_state: Arc<http_api::AppState>,
 ) {
     crate::task_creator::prune_completion_contexts_on_startup(&config.daemon_dir, &db);
-    let protected_input_pid =
-        wait_for_protected_input_generation(&config, ProtectedInputWait::Startup, None).await;
+    let protected_input_daemon =
+        establish_protected_input_generation(&config, ProtectedInputWait::Startup).await;
     let protected_input_maintenance =
-        maintain_protected_input_generations(config.clone(), protected_input_pid);
+        maintain_protected_input_generations(config.clone(), protected_input_daemon);
     // The transfer engine is a peer of the LAN API, not a child of it: a
     // transfer must keep making progress whether or not anything is connected.
     //
@@ -349,6 +385,216 @@ mod tests {
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
 
+    fn daemon_only_config(daemon_dir: &str) -> Config {
+        Config {
+            relay_url: String::new(),
+            device_token: String::new(),
+            firebase_project_id: "kanna-local".into(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: daemon_dir.to_string(),
+            db_path: String::new(),
+            kanna_cli_path: None,
+            desktop_id: "desktop-1".into(),
+            desktop_secret: None,
+            desktop_name: "Studio Mac".into(),
+            version: "test-version".into(),
+            environment: "development".into(),
+            lan_host: "127.0.0.1".into(),
+            lan_port: 0,
+            transfer_port: 0,
+            pairing_store_path: String::new(),
+        }
+    }
+
+    /// The daemon side of one generation setup: acknowledge the negotiation,
+    /// then report an empty session inventory.
+    fn answer_generation_command(
+        command: &kanna_daemon::protocol::Command,
+        negotiations: &AtomicUsize,
+    ) -> kanna_daemon::protocol::Event {
+        match command {
+            kanna_daemon::protocol::Command::NegotiateProtectedInput { version } => {
+                negotiations.fetch_add(1, Ordering::SeqCst);
+                kanna_daemon::protocol::Event::ProtectedInputReady { version: *version }
+            }
+            kanna_daemon::protocol::Command::List => kanna_daemon::protocol::Event::SessionList {
+                sessions: Vec::new(),
+            },
+            other => panic!("unexpected daemon command {other:?}"),
+        }
+    }
+
+    /// Answers a generation's commands and then behaves like a live daemon:
+    /// the connection stays open, waiting for a command that never comes.
+    /// Returns only when the server hangs up.
+    async fn serve_live_generation(
+        stream: tokio::net::UnixStream,
+        negotiations: Arc<AtomicUsize>,
+    ) -> Vec<kanna_daemon::protocol::Command> {
+        let (read, mut write) = stream.into_split();
+        let mut reader = tokio::io::BufReader::new(read);
+        let mut commands = Vec::new();
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line).await {
+                Ok(0) | Err(_) => return commands,
+                Ok(_) => {}
+            }
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            let response = answer_generation_command(&command, &negotiations);
+            commands.push(command);
+            write
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Serves exactly one generation setup — the negotiation and the session
+    /// inventory that follows it — then hangs up, so the caller learns when
+    /// the server has finished establishing the policy here.
+    async fn serve_generation_setup(
+        stream: tokio::net::UnixStream,
+        negotiations: Arc<AtomicUsize>,
+    ) -> Vec<kanna_daemon::protocol::Command> {
+        let (read, mut write) = stream.into_split();
+        let mut reader = tokio::io::BufReader::new(read);
+        let mut commands = Vec::new();
+        for _ in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            let response = answer_generation_command(&command, &negotiations);
+            commands.push(command);
+            write
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+        commands
+    }
+
+    /// A daemon that is never replaced must be negotiated with exactly once,
+    /// however long the server runs. Before 2026-08-08 the maintenance loop
+    /// treated "no successor appeared" as a failed wait and re-ran the whole
+    /// generation setup — negotiation plus a `List` and a `ClassifyInput` per
+    /// PTY — roughly every 17 seconds for the life of the server.
+    #[tokio::test(start_paused = true)]
+    async fn a_stable_daemon_is_negotiated_with_once() {
+        let daemon_dir = unique_path("stable-generation", "dir");
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(std::path::Path::new(&daemon_dir));
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let negotiations = Arc::new(AtomicUsize::new(0));
+        let connections = Arc::new(AtomicUsize::new(0));
+        let daemon_negotiations = Arc::clone(&negotiations);
+        let daemon_connections = Arc::clone(&connections);
+        let fake_daemon = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                daemon_connections.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(serve_live_generation(
+                    stream,
+                    Arc::clone(&daemon_negotiations),
+                ));
+            }
+        });
+
+        let config = daemon_only_config(&daemon_dir);
+        let daemon = super::establish_protected_input_generation(
+            &config,
+            super::ProtectedInputWait::Startup,
+        )
+        .await;
+        let maintenance = tokio::spawn(super::maintain_protected_input_generations(config, daemon));
+        // The clock is paused, so this is 10 minutes of the loop's own time —
+        // more than thirty of the old spin's cycles — without 10 minutes of
+        // wall clock.
+        tokio::time::sleep(Duration::from_secs(600)).await;
+
+        assert!(
+            !maintenance.is_finished(),
+            "maintenance loop exited while the daemon was still serving"
+        );
+        assert_eq!(
+            negotiations.load(Ordering::SeqCst),
+            1,
+            "a daemon that keeps serving must be negotiated with exactly once"
+        );
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            1,
+            "a daemon that keeps serving must not be reconnected to"
+        );
+
+        maintenance.abort();
+        fake_daemon.abort();
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    /// The other half of the same contract: a daemon that really is replaced
+    /// must have the policy re-established on its successor, promptly and
+    /// without anyone asking the server to look.
+    #[tokio::test]
+    async fn a_replaced_daemon_gets_its_successor_negotiated() {
+        let daemon_dir = unique_path("replaced-generation", "dir");
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = kanna_runtime_defaults::socket_path(std::path::Path::new(&daemon_dir));
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let negotiations = Arc::new(AtomicUsize::new(0));
+        let daemon_negotiations = Arc::clone(&negotiations);
+        let successor_socket = socket_path.clone();
+        let (retire_outgoing, retired) = tokio::sync::oneshot::channel::<()>();
+        let fake_daemons = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let outgoing = tokio::spawn(serve_live_generation(
+                stream,
+                Arc::clone(&daemon_negotiations),
+            ));
+            retired.await.unwrap();
+            // Exit the way a handed-off daemon does: the outgoing daemon drops
+            // its connections and its socket, and only then does the successor
+            // become reachable.
+            outgoing.abort();
+            drop(listener);
+            let _ = std::fs::remove_file(&successor_socket);
+            let successor = UnixListener::bind(&successor_socket).unwrap();
+            let (stream, _) = successor.accept().await.unwrap();
+            serve_generation_setup(stream, daemon_negotiations).await
+        });
+
+        let config = daemon_only_config(&daemon_dir);
+        let daemon = super::establish_protected_input_generation(
+            &config,
+            super::ProtectedInputWait::Startup,
+        )
+        .await;
+        assert_eq!(negotiations.load(Ordering::SeqCst), 1);
+        let maintenance = tokio::spawn(super::maintain_protected_input_generations(config, daemon));
+        retire_outgoing.send(()).unwrap();
+
+        let successor_commands = tokio::time::timeout(Duration::from_secs(30), fake_daemons)
+            .await
+            .expect("the successor daemon was never negotiated with")
+            .expect("successor fixture should not panic");
+        assert_eq!(negotiations.load(Ordering::SeqCst), 2);
+        maintenance.abort();
+        assert!(
+            matches!(
+                successor_commands.as_slice(),
+                [
+                    kanna_daemon::protocol::Command::NegotiateProtectedInput { .. },
+                    kanna_daemon::protocol::Command::List,
+                ]
+            ),
+            "successor generation received {successor_commands:?}"
+        );
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
     #[tokio::test]
     async fn two_renderer_clients_share_one_authoritative_relay_publisher() {
         let relay_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -454,6 +700,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            // A real daemon keeps serving after the generation is established,
+            // and the server holds that connection for as long as it does.
+            // Hanging up here would tell the server its daemon had been
+            // replaced. Aborted with the task below.
+            std::future::pending::<()>().await;
         });
         let lan_port = free_port().await;
         let config = Config {

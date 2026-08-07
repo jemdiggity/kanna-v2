@@ -36,3 +36,7 @@ ignore = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
+# `test-util` for the paused clock: proving that a stable daemon generation
+# costs nothing takes minutes of the maintenance loop's time, not of the test
+# suite's. Same line as `crates/daemon`, which shares this bazel resolve.
+tokio = { version = "1", features = ["full", "test-util"] }
