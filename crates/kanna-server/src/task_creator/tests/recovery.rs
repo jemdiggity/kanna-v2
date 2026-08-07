@@ -208,6 +208,66 @@ async fn spawn_listing_fake_daemon(
     })
 }
 
+/// Recovery respawns the interrupted run, so it must respawn with what that
+/// run was actually using. The model and effort used to be re-resolved from
+/// the stage and agent definition, which silently moved a recovered task onto
+/// a different binding than the conversation it was continuing — the same
+/// shape as the rerun bug, one level down.
+#[tokio::test]
+async fn resume_respawns_with_the_interrupted_runs_model_and_effort() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-binding");
+    // What the definition would resolve to if the recorded run were ignored.
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        serde_json::json!({
+            "workspace": { "path": { "prepend": [".kanna/test-provider-bin"] } },
+            "agentProviders": {
+                "*": { "provider": ["claude"], "model": "repo-default-model", "effort": "low" }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish recovery provider preference");
+    // What the interrupted run was actually holding its conversation with.
+    Connection::open(&config.db_path)
+        .unwrap()
+        .execute(
+            "UPDATE stage_run SET model = 'recorded-run-model', effort = 'high' WHERE id = ?",
+            ["run-killed-mid-turn"],
+        )
+        .unwrap();
+
+    crate::http_api::handle_task_terminal_state(
+        &crate::http_api::AppState::new(config.clone()),
+        "recovery-task",
+        137,
+    )
+    .await
+    .unwrap();
+
+    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
+    let config_dir = repo_root.join("claude-config");
+    write_recovery_transcript(&config_dir, &worktree);
+    let prepared = {
+        let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+        let prepared = prepare_resume_task_for_api(&db, &config, "recovery-task");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        prepared.unwrap()
+    };
+
+    assert!(
+        prepared.resumed_workspace().is_some(),
+        "the transcript is present, so this must be a resumed run"
+    );
+    assert_eq!(prepared.agent_provider, "claude");
+    assert_eq!(prepared.model.as_deref(), Some("recorded-run-model"));
+    assert_eq!(prepared.effort.as_deref(), Some("high"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
 #[tokio::test]
 async fn killed_task_resume_restores_the_provider_transcript_context() {
     let (repo_root, config, db) = init_recovery_fixture("task-recovery-context");

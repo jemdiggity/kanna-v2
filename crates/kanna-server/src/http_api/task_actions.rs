@@ -3,7 +3,9 @@ use super::state::{db_write_error, AppState};
 use super::task_blockers::{
     resolve_existing_task_id, start_dependents_unblocked_by_close_with_daemon,
 };
-use super::task_input::{notify_task_completion, submit_task_input, TaskCompletionTrigger};
+use super::task_input::{
+    notify_task_completion_best_effort, submit_task_input, TaskCompletionTrigger,
+};
 use crate::db::Db;
 use axum::extract::State;
 use axum::Json;
@@ -614,14 +616,15 @@ pub(super) async fn close_task(
     }
     crate::task_creator::remove_completion_contexts(&state.config.daemon_dir, &pipeline_item_id);
     // A direct close reaches no verdict, so it is reported as `closed` — never
-    // as a failure the receiving agent would try to diagnose.
-    notify_task_completion(
+    // as a failure the receiving agent would try to diagnose. Best-effort:
+    // the close has already committed, and a lost notification must not
+    // report it as failed nor skip the dependents this close unblocked.
+    notify_task_completion_best_effort(
         state.as_ref(),
         &pipeline_item_id,
         TaskCompletionTrigger::DirectClose,
     )
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    .await;
     start_dependents_unblocked_by_close_with_daemon(&state, &mut daemon, &pipeline_item_id).await;
     state.publish_state_changed(StateChangeScope::Tasks);
     state.publish_state_changed(StateChangeScope::Blockers);
@@ -787,14 +790,15 @@ async fn close_task_after_final_stage(
     }
     // Reaching the end of the pipeline is a normal completion: the reported
     // status comes from the run that terminated the task, not from the fact
-    // that closing it killed the session.
-    notify_task_completion(
+    // that closing it killed the session. Best-effort for the same reason as
+    // the direct close: the item is already closed, and the dependents this
+    // close unblocks must be started whether or not the message lands.
+    notify_task_completion_best_effort(
         state.as_ref(),
         &task_id,
         TaskCompletionTrigger::PipelineCompleted,
     )
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    .await;
     start_dependents_unblocked_by_close_with_daemon(state, daemon, &task_id).await;
     state.publish_state_changed(StateChangeScope::Tasks);
     state.publish_state_changed(StateChangeScope::Blockers);

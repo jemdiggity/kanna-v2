@@ -88,6 +88,15 @@ fn task_blocker_replacement_error(
     (status, error.to_string())
 }
 
+/// Same-repo branches a dependent should inherit from its resolved blockers:
+/// the first becomes the dependent's base ref, the rest are merged in.
+///
+/// Only branches git actually has are returned. A blocker that never started
+/// its first stage still carries a `pipeline_item.branch`, but no such ref
+/// exists — feeding that name to `git worktree add` or `git merge` fails the
+/// whole unblock ("not something we can merge") and leaves every dependent
+/// permanently dormant. A blocker with nothing to inherit is simply not an
+/// inheritance source.
 fn blocker_branches_for_task(
     db: &Db,
     blocked_task_id: &str,
@@ -128,18 +137,25 @@ fn blocker_branches_for_task(
         let repo = db
             .get_repo(&blocker.repo_id)
             .map_err(|e| db_write_error("db error", e))?;
+        let Some(repo) = repo else {
+            continue;
+        };
         let resolved_branch = db
             .get_pipeline_item_pr_branch(&blocker_id)
             .map_err(|e| db_write_error("db error", e))?
             .or_else(|| {
-                repo.as_ref().and_then(|repo| {
-                    crate::task_creator::resolve_current_source_worktree_branch(
-                        &repo.path,
-                        Some(branch),
-                    )
-                })
+                crate::task_creator::resolve_current_source_worktree_branch(
+                    &repo.path,
+                    Some(branch),
+                )
             })
             .unwrap_or_else(|| branch.to_string());
+        if !crate::task_creator::local_branch_exists(&repo.path, &resolved_branch) {
+            log::info!(
+                "blocker {blocker_id} of {blocked_task_id} has no branch {resolved_branch} to inherit; skipping it"
+            );
+            continue;
+        }
         branches.push(resolved_branch);
     }
     Ok(branches)
