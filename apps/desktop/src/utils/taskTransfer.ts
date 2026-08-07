@@ -3,8 +3,42 @@ import type { PipelineItem } from "../types/kanna";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 
 export type RepoAcquisitionMode = "reuse-local" | "clone-remote" | "bundle-repo";
-export type TransferArtifactKind = "session-rollout" | "session-archive" | "session-transcript";
-export type TransferArtifactMaterialization = "copy-file" | "extract-tar-gz";
+export type TransferArtifactKind =
+  | "session-rollout"
+  | "session-archive"
+  | "session-transcript"
+  | "session-export";
+/**
+ * How the receiver turns a fetched artifact into resumable session state.
+ *
+ * `copy-file` and `extract-tar-gz` place bytes under `$HOME` through the Rust
+ * fence in `transfer_artifact.rs`. `opencode-import` does not place anything:
+ * OpenCode keeps every conversation in one shared SQLite store, so the only
+ * supported way in is its own `opencode import`, run in the destination
+ * worktree. That artifact must therefore never reach the filesystem fence.
+ */
+export type TransferArtifactMaterialization = "copy-file" | "extract-tar-gz" | "opencode-import";
+
+/** The one filename an OpenCode session export may travel under. */
+export const OPENCODE_SESSION_EXPORT_FILENAME = "opencode-session.json";
+
+/**
+ * The CLI-owned data directory `opencode import` writes into, recorded so the
+ * payload still describes where session state lands. It is a description, not
+ * an instruction: no code derives a destination from it, and `XDG_DATA_HOME`
+ * can move the real directory elsewhere.
+ */
+export const OPENCODE_SESSION_DATA_DIR_HOME_REL_PATH = ".local/share/opencode";
+
+/**
+ * OpenCode session ids are `ses_` followed by base62 — not a uuid, unlike every
+ * other provider Kanna resumes.
+ */
+const OPENCODE_SESSION_ID_PATTERN = /^ses_[A-Za-z0-9]{1,64}$/;
+
+export function isOpencodeSessionId(value: string): boolean {
+  return OPENCODE_SESSION_ID_PATTERN.test(value);
+}
 
 export interface TransferArtifactPayload {
   artifact_id: string;
@@ -83,6 +117,13 @@ export interface BuildOutgoingTransferPayloadInput {
     PipelineItem,
     "id" | "cloud_task_id" | "prompt" | "stage" | "branch" | "pipeline" | "display_name" | "base_ref" | "agent_type" | "agent_provider" | "agent_session_id"
   >;
+  /**
+   * The session the payload promises, when the task row does not carry it.
+   * OpenCode ids are discovered at transfer time rather than assigned at spawn
+   * (see `planOpencodeSessionExport`), so `agent_session_id` is null for a task
+   * that has a perfectly good conversation to ship.
+   */
+  resumeSessionId?: string | null;
   repoPath?: string | null;
   repoName?: string | null;
   repoDefaultBranch?: string | null;
@@ -103,8 +144,10 @@ export interface BuildOutgoingTransferPayloadInput {
  *
  * Claude's conversation is the cwd-keyed transcript, not the
  * `~/.claude/tasks/<id>` lock directory, so the transcript is the load-bearing
- * one. Providers absent from this table keep no transferable session state, so
- * for them an empty artifact list is not a defect.
+ * one. OpenCode keeps no per-session file at all — its conversations live in a
+ * shared SQLite store — so its conversation ships as an `opencode export`.
+ * Providers absent from this table keep no transferable session state, so for
+ * them an empty artifact list is not a defect.
  */
 const REQUIRED_SESSION_ARTIFACT_KINDS: Partial<
   Record<NonNullable<PipelineItem["agent_provider"]>, TransferArtifactKind>
@@ -112,6 +155,7 @@ const REQUIRED_SESSION_ARTIFACT_KINDS: Partial<
   claude: "session-transcript",
   codex: "session-rollout",
   copilot: "session-archive",
+  opencode: "session-export",
 };
 
 export interface SessionArtifactRequirementInput {
@@ -461,6 +505,22 @@ function canonicalArtifactContract(
       assertHomeRelPath: exactHomeRelPath(`.copilot/session-state/${sessionId}`),
     };
   }
+  if (provider === "opencode") {
+    if (!OPENCODE_SESSION_ID_PATTERN.test(sessionId)) {
+      throw new Error("transfer resume session id is not an OpenCode session id");
+    }
+    if (filename !== OPENCODE_SESSION_EXPORT_FILENAME) {
+      throw new Error("transfer artifact filename does not match the OpenCode session contract");
+    }
+    return {
+      kind: "session-export",
+      materialization: "opencode-import",
+      // Nothing is written to this path: `opencode import` owns its store and
+      // the receiver never derives a destination from the payload. The value is
+      // pinned anyway so a peer cannot smuggle a path through the field.
+      assertHomeRelPath: exactHomeRelPath(OPENCODE_SESSION_DATA_DIR_HOME_REL_PATH),
+    };
+  }
   if (provider === "codex") {
     validateSimpleComponent(filename, "Codex rollout filename");
     const match = /^rollout-(\d{4})-(\d{2})-(\d{2})T.+\.jsonl$/.exec(filename);
@@ -543,7 +603,7 @@ function parseTransferArtifacts(
     const kind = readRequiredEnum(
       artifact,
       ["kind"],
-      ["session-rollout", "session-archive", "session-transcript"] as const,
+      ["session-rollout", "session-archive", "session-transcript", "session-export"] as const,
       `${invalidMessage}: artifact ${index} missing kind`,
     );
     const materialization = artifact.materialization === undefined
@@ -551,7 +611,7 @@ function parseTransferArtifacts(
       : readRequiredEnum(
           artifact,
           ["materialization"],
-          ["copy-file", "extract-tar-gz"] as const,
+          ["copy-file", "extract-tar-gz", "opencode-import"] as const,
           `${invalidMessage}: artifact ${index} missing materialization`,
         );
     const homeRelPath = readRequiredString(
@@ -780,7 +840,7 @@ export function buildOutgoingTransferPayload(
       source_peer_id: input.sourcePeerId,
       source_desktop_id: input.sourceDesktopId ?? null,
       source_task_id: input.sourceTaskId,
-      resume_session_id: input.item.agent_session_id,
+      resume_session_id: input.resumeSessionId ?? input.item.agent_session_id,
       prompt: input.item.prompt,
       stage: input.item.stage,
       branch: input.item.branch,

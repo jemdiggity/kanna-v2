@@ -21,7 +21,10 @@ import { fileExistsSafe } from "../utils/invokeHelpers";
 import { defaultReposHome } from "../utils/reposHome";
 import {
   buildOutgoingTransferPayload,
+  isOpencodeSessionId,
   MissingTransferSessionArtifactError,
+  OPENCODE_SESSION_DATA_DIR_HOME_REL_PATH,
+  OPENCODE_SESSION_EXPORT_FILENAME,
   parseFinalizedOutgoingTransferResult,
   parseOutgoingTransferPreflightResult,
   parsePersistedOutgoingTransferPayload,
@@ -188,6 +191,26 @@ function buildCopilotSessionArtifactId(transferId: string): string {
   return `${transferId}-copilot-session`;
 }
 
+function buildOpencodeSessionArtifactId(transferId: string): string {
+  return `${transferId}-opencode-session`;
+}
+
+/**
+ * Where an OpenCode export is written before it is staged.
+ *
+ * Deliberately short, and unique by randomness rather than by naming the
+ * transfer: a staged `owned` artifact is stored under
+ * `<artifact-id>-<basename>` on the source and then fetched into
+ * `<artifact-id>-<that name>` on the receiver, so the artifact id is spent
+ * twice and a descriptive basename pushes the receiver's filename past the
+ * 255-byte limit — which surfaces only as `File name too long` mid-transfer.
+ */
+function buildOpencodeExportPath(): string {
+  const nonce = Array.from(crypto.getRandomValues(new Uint8Array(6)), (byte) =>
+    byte.toString(16).padStart(2, "0")).join("");
+  return `/tmp/kanna-oc-session-${nonce}.json`;
+}
+
 async function destinationTaskIdForTransfer(transferId: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -295,6 +318,101 @@ async function findClaudeTranscriptArtifact(
   };
 }
 
+/**
+ * Marks where the session listing starts in the locator script's output. A
+ * login shell may print its own banner before the script runs, so the resolved
+ * worktree path is read as the last line *before* this marker rather than as
+ * the first line of the output.
+ */
+const OPENCODE_SESSION_LIST_MARKER = "__kanna_opencode_session_list__";
+
+interface OpencodeSessionListing {
+  id: string;
+  directory: string;
+  updated: number;
+}
+
+function parseOpencodeSessionListings(value: unknown): OpencodeSessionListing[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== "object") return [];
+    const record = candidate as Record<string, unknown>;
+    const id = record.id;
+    const directory = record.directory;
+    if (typeof id !== "string" || typeof directory !== "string") return [];
+    const updated = typeof record.updated === "number" ? record.updated : 0;
+    return [{ id, directory, updated }];
+  });
+}
+
+/**
+ * The OpenCode session this task's agent has been talking to, or `null` when it
+ * has none yet.
+ *
+ * Unlike every other provider Kanna resumes, OpenCode's id cannot be known
+ * before the agent runs: `opencode run` has no flag that *assigns* a session id
+ * (`--session` with an unknown id is "Session not found"), and the id never
+ * appears in the terminal, so nothing upstream of here has it to persist. What
+ * OpenCode does record is the session's working directory, and a task's
+ * worktree is unique to that task — so the session is looked up by worktree at
+ * transfer time, when it is guaranteed to exist.
+ *
+ * Scoped deliberately to the transfer path: making Kanna track OpenCode session
+ * ids for every task (resume-after-restart, revisions) is a larger change than
+ * shipping the conversation, and this lookup does not stand in its way.
+ */
+async function findOpencodeSessionId(worktreePath: string): Promise<string | null> {
+  let output: string;
+  try {
+    output = await invoke<string>("run_script", {
+      // `pwd -P`, not the worktree path as written: OpenCode records the
+      // kernel-resolved cwd, and a worktree can sit under a symlinked root.
+      script: `pwd -P && printf '%s\\n' ${shellQuote(OPENCODE_SESSION_LIST_MARKER)} `
+        + "&& opencode session list --format json",
+      cwd: worktreePath,
+      env: applyWorktreeProcessIsolation({ KANNA_WORKTREE: "1" }),
+    });
+  } catch (error) {
+    // A failed lookup is not an absent session, so it must not be flattened
+    // into `null` — the planner would then report "no conversation" for what is
+    // really a broken CLI.
+    console.error("[store] failed to list opencode sessions:", error);
+    throw error;
+  }
+
+  const markerIndex = output.indexOf(`${OPENCODE_SESSION_LIST_MARKER}\n`);
+  if (markerIndex < 0) {
+    throw new Error("opencode session listing did not produce the expected marker");
+  }
+  const resolvedWorktree = output
+    .slice(0, markerIndex)
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .at(-1);
+  if (!resolvedWorktree) {
+    throw new Error(`failed to resolve the worktree path for ${worktreePath}`);
+  }
+  const listingJson = output.slice(markerIndex + OPENCODE_SESSION_LIST_MARKER.length + 1);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(listingJson);
+  } catch (error) {
+    throw new Error(
+      `opencode session listing is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  const matches = parseOpencodeSessionListings(parsed)
+    .filter((session) => session.directory === resolvedWorktree)
+    .sort((left, right) => right.updated - left.updated);
+  const sessionId = matches[0]?.id ?? null;
+  if (sessionId !== null && !isOpencodeSessionId(sessionId)) {
+    throw new Error(`opencode reported an unrecognized session id: ${sessionId}`);
+  }
+  return sessionId;
+}
+
 async function findCodexRolloutArtifact(sessionId: string): Promise<LocatedTransferArtifact | null> {
   try {
     const home = await invoke<string>("read_env_var", { name: "HOME" });
@@ -396,6 +514,56 @@ async function stageSessionArchiveArtifact(
   }];
 }
 
+/**
+ * Asks OpenCode for a self-contained JSON copy of one conversation and stages
+ * it. `opencode export` writes the session to stdout (its progress line goes to
+ * stderr), and the receiver feeds the file straight back to `opencode import`.
+ */
+async function stageOpencodeSessionExport(
+  transferId: string,
+  sessionId: string,
+  worktreePath: string,
+  ownership?: TransferLifecycleOwnership,
+): Promise<TransferArtifactPayload[]> {
+  const exportPath = buildOpencodeExportPath();
+  const artifactId = buildOpencodeSessionArtifactId(transferId);
+  let staged = false;
+  try {
+    await ownership?.assertOwnership?.("OpenCode session export");
+    await invoke("run_script", {
+      script: `opencode export ${shellQuote(sessionId)} > ${shellQuote(exportPath)}`,
+      cwd: worktreePath,
+      env: applyWorktreeProcessIsolation({ KANNA_WORKTREE: "1" }),
+    });
+    await ownership?.assertOwnership?.("OpenCode session export staging");
+    await invoke("stage_transfer_artifact", {
+      transferId,
+      artifactId,
+      path: exportPath,
+      owned: true,
+      ...(ownership?.deliveryId
+        ? {
+            deliveryId: ownership.deliveryId,
+            consumerIncarnation: ownership.consumerIncarnation,
+          }
+        : {}),
+    });
+    staged = true;
+  } finally {
+    if (!staged) {
+      await invoke("remove_file", { path: exportPath }).catch(() => {});
+    }
+  }
+  return [{
+    artifact_id: artifactId,
+    filename: OPENCODE_SESSION_EXPORT_FILENAME,
+    provider: "opencode",
+    kind: "session-export",
+    materialization: "opencode-import",
+    home_rel_path: OPENCODE_SESSION_DATA_DIR_HOME_REL_PATH,
+  }];
+}
+
 interface PlannedSessionFileArtifact {
   located: LocatedTransferArtifact;
   kind: Extract<TransferArtifactKind, "session-transcript" | "session-rollout">;
@@ -415,6 +583,12 @@ interface PlannedSessionArtifacts {
   sessionId: string;
   archive: { config: SessionArchiveConfig; sourceRoot: string } | null;
   files: PlannedSessionFileArtifact[];
+  /**
+   * OpenCode's conversation is not a file on disk — it lives in a shared SQLite
+   * store — so it is staged by asking the CLI to export it rather than by
+   * locating a path. Carries the worktree the export runs in.
+   */
+  opencodeExport: { worktreePath: string } | null;
 }
 
 /** The task identity a plan was located against; a change invalidates it. */
@@ -426,9 +600,13 @@ async function planTransferredSessionArtifacts(
   item: PipelineItem,
   repoPath: string,
 ): Promise<PlannedSessionArtifacts | null> {
-  const sessionId = item.agent_session_id;
   const provider = item.agent_provider;
-  if (!sessionId || !provider) return null;
+  if (!provider) return null;
+  if (provider === "opencode") {
+    return await planOpencodeSessionExport(item, repoPath);
+  }
+  const sessionId = item.agent_session_id;
+  if (!sessionId) return null;
   const requiredKind = requiredSessionArtifactKind({
     agentType: item.agent_type,
     agentProvider: provider,
@@ -456,6 +634,7 @@ async function planTransferredSessionArtifacts(
         label: "Codex rollout",
         artifactId: buildCodexRolloutArtifactId,
       }],
+      opencodeExport: null,
     };
   }
 
@@ -500,10 +679,34 @@ async function planTransferredSessionArtifacts(
     if (requiredKind === "session-archive") {
       throw missing(`its session state is missing from ${sourceRoot}`);
     }
-    return files.length > 0 ? { sessionId, archive: null, files } : null;
+    return files.length > 0 ? { sessionId, archive: null, files, opencodeExport: null } : null;
   }
 
-  return { sessionId, archive: { config, sourceRoot }, files };
+  return { sessionId, archive: { config, sourceRoot }, files, opencodeExport: null };
+}
+
+/**
+ * OpenCode's half of the plan: find the session this worktree has been talking
+ * to, and promise to export it.
+ *
+ * The absence of a session is a legitimate absence — the agent never got a turn
+ * in — and is reported as "nothing to ship". Once a session *does* exist, the
+ * export is required: shipping a resume id with no conversation behind it is
+ * the exact shape that lost 2.1 MB of Claude transcript.
+ */
+async function planOpencodeSessionExport(
+  item: PipelineItem,
+  repoPath: string,
+): Promise<PlannedSessionArtifacts | null> {
+  if (item.agent_type !== "pty") return null;
+  const worktreePath = taskWorktreePath(repoPath, item.branch);
+  if (!worktreePath) return null;
+  const worktreeExists = await fileExistsSafe(worktreePath);
+  if (!worktreeExists) return null;
+
+  const sessionId = await findOpencodeSessionId(worktreePath);
+  if (!sessionId) return null;
+  return { sessionId, archive: null, files: [], opencodeExport: { worktreePath } };
 }
 
 async function stagePlannedSessionArtifacts(
@@ -512,6 +715,15 @@ async function stagePlannedSessionArtifacts(
   repoPath: string,
   ownership?: TransferLifecycleOwnership,
 ): Promise<TransferArtifactPayload[]> {
+  if (plan.opencodeExport) {
+    return await stageOpencodeSessionExport(
+      transferId,
+      plan.sessionId,
+      plan.opencodeExport.worktreePath,
+      ownership,
+    );
+  }
+
   const artifacts: TransferArtifactPayload[] = plan.archive
     ? await stageSessionArchiveArtifact(
         transferId,
@@ -556,10 +768,46 @@ async function stageTransferredSessionArtifacts(
   item: PipelineItem,
   repoPath: string,
   ownership?: TransferLifecycleOwnership,
-): Promise<TransferArtifactPayload[]> {
+): Promise<{ artifacts: TransferArtifactPayload[]; sessionId: string | null }> {
   const plan = await planTransferredSessionArtifacts(item, repoPath);
-  if (!plan) return [];
-  return await stagePlannedSessionArtifacts(transferId, plan, repoPath, ownership);
+  if (!plan) return { artifacts: [], sessionId: null };
+  return {
+    artifacts: await stagePlannedSessionArtifacts(transferId, plan, repoPath, ownership),
+    sessionId: plan.sessionId,
+  };
+}
+
+/**
+ * Replays a shipped OpenCode conversation into this machine's session store.
+ *
+ * `opencode import` keeps the session's id and re-keys it to the directory the
+ * import runs in, which is why it must run in the destination worktree: OpenCode
+ * resumes by matching the session's recorded directory against the current
+ * working directory, and `opencode run --session <id>` from anywhere else is a
+ * *silent* no-op — the same failure shape as the transcript loss this whole
+ * artifact contract exists to stop.
+ *
+ * The worktree is created here rather than waited for: the destination task —
+ * and therefore its worktree path — is deterministic before creation, but the
+ * checkout only happens once the task is created, which is after the agent
+ * would need the session. `git worktree add` accepts an existing empty
+ * directory, so claiming the path early costs nothing and a failed import
+ * leaves only an empty directory behind.
+ */
+async function importOpencodeSessionExport(
+  exportPath: string,
+  resumeSessionId: string,
+  destinationWorktreePath: string,
+): Promise<void> {
+  if (!isOpencodeSessionId(resumeSessionId)) {
+    throw new Error(`incoming transfer resume id is not an OpenCode session id: ${resumeSessionId}`);
+  }
+  await invoke("ensure_directory", { path: destinationWorktreePath });
+  await invoke("run_script", {
+    script: `opencode import ${shellQuote(exportPath)}`,
+    cwd: destinationWorktreePath,
+    env: applyWorktreeProcessIsolation({ KANNA_WORKTREE: "1" }),
+  });
 }
 
 async function importTransferredResumeState(
@@ -597,6 +845,15 @@ async function importTransferredResumeState(
         transferId,
         artifactId: artifact.artifact_id,
       });
+      if (artifact.materialization === "opencode-import") {
+        await importOpencodeSessionExport(
+          fetched.path,
+          resumeSessionId,
+          destinationWorktreePath,
+        );
+        materialized.set(artifact.artifact_id, true);
+        continue;
+      }
       materialized.set(
         artifact.artifact_id,
         await invoke<boolean>("materialize_transfer_artifact", {
@@ -618,6 +875,7 @@ async function importTransferredResumeState(
     // transcript is the conversation, so it decides when one shipped; a
     // pre-existing `~/.claude/tasks/<id>` lock directory must not veto it.
     const decisive = artifacts.find((candidate) => candidate.kind === "session-transcript")
+      ?? artifacts.find((candidate) => candidate.kind === "session-export")
       ?? artifacts.find((candidate) => candidate.kind === "session-archive")
       ?? artifacts[0]!;
     if (decisive.kind === "session-archive" && !materialized.get(decisive.artifact_id)) {
@@ -928,7 +1186,7 @@ export function createTransferApi(
         };
       }
 
-      const artifacts = await stageTransferredSessionArtifacts(
+      const { artifacts, sessionId } = await stageTransferredSessionArtifacts(
         preflight.transferId,
         item,
         repo.path,
@@ -940,6 +1198,7 @@ export function createTransferApi(
         targetPeerId: peerId,
         targetDesktopId: options.targetDesktopId,
         item,
+        resumeSessionId: sessionId,
         repoPath: repo.path,
         repoName: repo.name,
         repoDefaultBranch: repo.default_branch,
@@ -1149,6 +1408,7 @@ export function createTransferApi(
       targetPeerId: transfer.target_peer_id ?? existingPayload.target_peer_id,
       targetDesktopId: transfer.target_desktop_id ?? existingPayload.target_desktop_id,
       item: refreshedItem,
+      resumeSessionId: finalPlan?.sessionId ?? null,
       repoPath: repo.path,
       repoName: repo.name,
       repoDefaultBranch: repo.default_branch,

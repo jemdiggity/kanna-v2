@@ -1157,6 +1157,77 @@ mod tests {
     }
 
     #[test]
+    fn refuses_to_place_an_opencode_session_export_anywhere_under_home() {
+        // OpenCode keeps its conversations in a shared SQLite store that only
+        // `opencode import` may write, so the receiver never routes a
+        // `session-export` here. If one ever reaches this fence it is either a
+        // hostile payload or a wiring mistake — both must fail closed, and
+        // nothing may be created under $HOME on the way out.
+        let fixture = TempDir::new();
+        let source = fixture.path().join("opencode-session.json");
+        std::fs::write(&source, b"{\"info\":{}}").expect("write export");
+        let worktree = fixture.path().join("repo/.kanna-worktrees/task-dest");
+        std::fs::create_dir_all(&worktree).expect("create destination worktree");
+
+        for (kind, materialization) in [
+            ("session-export", "opencode-import"),
+            ("session-export", "copy-file"),
+            ("session-transcript", "copy-file"),
+            ("session-archive", "extract-tar-gz"),
+        ] {
+            assert!(
+                materialize_transfer_artifact_at_home(
+                    fixture.path(),
+                    &source,
+                    TransferArtifactContract {
+                        provider: "opencode",
+                        resume_session_id: "ses_02645d9aaffeeOgwt2rbXIcTdp",
+                        filename: "opencode-session.json",
+                        kind,
+                        materialization,
+                        destination_worktree_path: Some(&worktree),
+                    },
+                )
+                .is_err(),
+                "expected opencode {kind}/{materialization} to be refused",
+            );
+        }
+        assert!(!fixture.path().join(".local").exists());
+        assert!(!fixture.path().join(".opencode").exists());
+    }
+
+    #[test]
+    fn refuses_an_opencode_import_materialization_for_every_other_provider() {
+        // The one materialization that does not place a file must not become a
+        // way to smuggle a path past the arms that do.
+        let fixture = TempDir::new();
+        let source = fixture.path().join("source.jsonl");
+        write_transcript(&source);
+        let worktree = fixture.path().join("repo/.kanna-worktrees/task-dest");
+        std::fs::create_dir_all(&worktree).expect("create destination worktree");
+
+        for provider in ["claude", "codex", "copilot"] {
+            assert!(
+                materialize_transfer_artifact_at_home(
+                    fixture.path(),
+                    &source,
+                    TransferArtifactContract {
+                        provider,
+                        resume_session_id: CLAUDE_SESSION,
+                        filename: &transcript_filename(),
+                        kind: "session-export",
+                        materialization: "opencode-import",
+                        destination_worktree_path: Some(&worktree),
+                    },
+                )
+                .is_err(),
+                "expected {provider} session-export/opencode-import to be refused",
+            );
+        }
+        assert!(!fixture.path().join(".claude").exists());
+    }
+
+    #[test]
     fn derives_the_claude_project_slug_by_replacing_every_non_alphanumeric_character() {
         // Pinned against real `~/.claude/projects/` directories: `/`, `.` and
         // `_` all collapse to `-`, and case is preserved.
