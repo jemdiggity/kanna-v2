@@ -152,16 +152,12 @@ describe("local transfer Claude conversation continuity", () => {
     for (const directory of materializedTranscriptDirs) {
       await rm(directory, { recursive: true, force: true }).catch(() => undefined);
     }
-    const acquired = (await queryDb(
-      secondary,
-      "SELECT path FROM repo WHERE path LIKE ?",
-      [`${homedir()}/.kanna/repos/local-transfer-claude-transcript%`],
-    ).catch(() => [])) as RepoRow[];
     await cleanupWorktrees(primary, testRepoPath).catch(() => undefined);
     await cleanupWorktrees(secondary, testRepoPath).catch(() => undefined);
-    await cleanupFixtureRepos(
-      [testRepoPath, ...acquired.map((repo) => repo.path)].filter(Boolean),
-    ).catch(() => undefined);
+    // Only the fixture repo is removed here. The clone the destination acquires
+    // lands in the operator's real `~/.kanna/repos`, outside every E2E-owned
+    // fixture base, so `cleanupFixtureRepos` refuses it by design.
+    await cleanupFixtureRepos([testRepoPath].filter(Boolean)).catch(() => undefined);
     await primary.deleteSession().catch(() => undefined);
     await secondary.deleteSession().catch(() => undefined);
   });

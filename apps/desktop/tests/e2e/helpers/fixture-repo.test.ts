@@ -167,21 +167,25 @@ describe("fixture removal guard", () => {
     await expect(access(PACKAGE_ROOT)).resolves.toBeUndefined();
   });
 
-  it("permits a clone the app acquired for a fixture this process created", async () => {
+  it("still refuses same-named paths outside the fixture base once that fixture exists", async () => {
     const { assertRemovableFixturePath, createFixtureRepo } = await import("./fixture-repo");
-    const acquiredRoot = join(homedir(), ".kanna", "repos");
+    const fixtureName = "removal-guard-outside-base";
+    const fixtureRepoPath = await createFixtureRepo(fixtureName);
+    createdRepoPaths.push(fixtureRepoPath);
 
-    expect(() =>
-      assertRemovableFixturePath(join(acquiredRoot, "removal-guard-acquired-origin")),
-    ).toThrow(/refusing to remove/);
+    expect(() => assertRemovableFixturePath(fixtureRepoPath)).not.toThrow();
 
-    createdRepoPaths.push(await createFixtureRepo("removal-guard-acquired"));
-
-    expect(() =>
-      assertRemovableFixturePath(join(acquiredRoot, "removal-guard-acquired-origin")),
-    ).not.toThrow();
-    expect(() =>
-      assertRemovableFixturePath(join(acquiredRoot, "some-other-checkout")),
-    ).toThrow(/refusing to remove/);
+    // Creating a fixture must not authorize anything that merely shares its
+    // name. A repo the app cloned into the operator's home is not ours to
+    // remove, however it is named.
+    const impostors = [
+      join(homedir(), ".kanna", "repos", fixtureName),
+      join(homedir(), ".kanna", "repos", `${fixtureName}-origin`),
+      join(tmpdir(), fixtureName),
+      join(FIXTURE_TEMP_ROOT, fixtureName),
+    ];
+    for (const impostor of impostors) {
+      expect(() => assertRemovableFixturePath(impostor), impostor).toThrow(/refusing to remove/);
+    }
   });
 });
