@@ -550,6 +550,73 @@ async fn handle_connection(
                 },
             }
         }
+        Ok(PeerRequest::AbandonTransfer {
+            request_id,
+            transfer_id,
+            source_peer_id,
+            sealed_payload,
+        }) => match async {
+            let authenticated = authenticate_peer_request(
+                &context,
+                &source_peer_id,
+                Some(&sealed_payload),
+                "abandon_transfer",
+                &request_id,
+            )
+            .await?;
+            ensure_authenticated_argument(&authenticated, "source_peer_id", &source_peer_id)?;
+            ensure_authenticated_argument(&authenticated, "transfer_id", &transfer_id)?;
+            ensure_authenticated_argument(
+                &authenticated,
+                "reserved_target_peer_id",
+                &context.self_peer_id,
+            )?;
+
+            let mut reservations = context.incoming_reservations.lock().await;
+            context
+                .replay_store
+                .prune_incoming_reservations(&mut reservations);
+            match reservations.get(&transfer_id) {
+                // Idempotent for an id this runtime does not hold: the caller's
+                // job is to guarantee nothing is left, not to prove something
+                // was. A retry after a half-failed release must still settle.
+                None => {}
+                Some(reservation) if reservation.source_peer_id != source_peer_id => {
+                    return Err(RuntimeError::Protocol(format!(
+                        "peer {source_peer_id} cannot abandon transfer {transfer_id} reserved for another source",
+                    )));
+                }
+                // A committed reservation carries a payload this machine has
+                // already been told about — releasing it would strand an
+                // incoming transfer the operator can see. Only the un-committed
+                // half of a duplicate push is releasable this way.
+                Some(reservation) if reservation.committed => {
+                    return Err(RuntimeError::Protocol(format!(
+                        "transfer {transfer_id} is already committed and cannot be abandoned",
+                    )));
+                }
+                Some(_) => {
+                    reservations.remove(&transfer_id);
+                    context
+                        .replay_store
+                        .remove_incoming_reservation_checked(&transfer_id)
+                        .map_err(RuntimeError::from)?;
+                }
+            }
+
+            Ok::<PeerResponse, RuntimeError>(PeerResponse::AbandonTransfer {
+                request_id: request_id.clone(),
+                transfer_id,
+            })
+        }
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => PeerResponse::Error {
+                request_id,
+                message: error.to_string(),
+            },
+        },
         Ok(PeerRequest::FinalizeTransfer {
             request_id,
             transfer_id,

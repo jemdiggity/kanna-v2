@@ -20,7 +20,27 @@ Three pieces, across three processes:
   retry loop does not treat the race as a dropped delivery.
 - The losing push releases its preflight reservation through the new sidecar
   `abandon_outgoing_transfer` control request (durable registry entry + staged
-  artifacts). A release that fails is surfaced as a toast, not swallowed.
+  artifacts). A release that fails is surfaced to the operator, not swallowed.
+
+### Follow-up landed in T6: the destination half of the release
+
+T3 released only the *source* reservation. A preflight also writes
+`incoming-reservations/<transfer_id>.json` on the destination
+(`crates/task-transfer/src/runtime/listener.rs`), and until T6 nothing but the
+TTL sweeper ever removed it — so a losing duplicate push left the destination
+holding a reservation against its own admission cap.
+
+`abandon_outgoing_transfer` now releases both. A new authenticated
+`PeerRequest::AbandonTransfer` (sealed with `source_peer_id`, `transfer_id`,
+and `reserved_target_peer_id`, exactly as `prepare_transfer`/`finalize_transfer`
+are) asks the destination to drop its reservation. The handler refuses a source
+that did not reserve the transfer and a reservation that has already committed —
+a committed one is an incoming transfer the destination has been told about, and
+releasing it would strand a transfer the operator can see — while staying
+idempotent for an id it does not hold, which is what makes a half-failed release
+retriable. The remote leg runs *before* any local state is dropped: the local
+reservation is the only record of which peer holds the matching incoming one, so
+a failed remote leg keeps it for the retry.
 
 ## What is covered, and where
 
@@ -31,7 +51,11 @@ Three pieces, across three processes:
 - `crates/task-transfer/tests/runtime.rs` — abandoning clears both the durable
   reservation and its owned artifacts, and is a no-op for an unknown transfer id
   (the caller must be able to guarantee nothing is left, not that something
-  was).
+  was). Two live runtimes also cover the destination half: a release clears the
+  destination's `incoming-reservations` entry, an unknown id still settles, a
+  peer that did not reserve the transfer is refused, a committed reservation is
+  refused, and a refused remote leg leaves the source reservation in place so
+  the retry can still resolve the peer.
 - `apps/desktop/src/stores/kannaTransfer.test.ts` — two concurrent pushes that
   both clear the snapshot and in-flight guards produce **one** `task_transfer`
   row, no throw, and exactly one released reservation (the loser's); a fresh

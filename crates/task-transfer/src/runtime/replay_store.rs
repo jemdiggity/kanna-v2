@@ -295,6 +295,18 @@ impl TransferReplayStore {
         self.remove_record(&self.incoming_reservation_path(transfer_id));
     }
 
+    /// Deletes an incoming reservation and says whether the disk agreed.
+    ///
+    /// The peer-side release answers a source that is about to drop its own
+    /// reservation, so reporting success over a file that survived leaves the
+    /// leak with nobody left to notice it. Sweeps keep the best-effort variant.
+    pub(super) fn remove_incoming_reservation_checked(
+        &self,
+        transfer_id: &str,
+    ) -> std::io::Result<()> {
+        self.remove_record_checked(&self.incoming_reservation_path(transfer_id))
+    }
+
     pub(super) fn max_incoming_reservations(&self) -> usize {
         self.max_incoming_reservations
     }

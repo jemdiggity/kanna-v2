@@ -335,6 +335,17 @@ pub enum PeerRequest {
         transfer_id: String,
         sealed_payload: String,
     },
+    /// Releases the destination-side reservation a preflight created for a
+    /// transfer that will never be committed — the losing half of a duplicate
+    /// push. Without it the source drops its own reservation while
+    /// `incoming-reservations/<transfer_id>.json` sits on the destination until
+    /// the TTL sweeper notices.
+    AbandonTransfer {
+        request_id: String,
+        transfer_id: String,
+        source_peer_id: String,
+        sealed_payload: String,
+    },
     FinalizeTransfer {
         request_id: String,
         transfer_id: String,
@@ -436,6 +447,10 @@ pub enum PeerResponse {
         request_id: String,
     },
     SubmitTransferPayload {
+        request_id: String,
+        transfer_id: String,
+    },
+    AbandonTransfer {
         request_id: String,
         transfer_id: String,
     },
