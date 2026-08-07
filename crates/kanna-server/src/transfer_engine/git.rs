@@ -599,6 +599,7 @@ pub fn import_opencode_session(
     export_path: &Path,
     session_id: &str,
     destination_worktree: &Path,
+    live_worktrees: &LiveLocalWorktrees,
 ) -> Result<(), OpencodeImportError> {
     if !super::payload::is_opencode_session_id(session_id) {
         return Err(OpencodeImportError::Refused(format!(
@@ -653,11 +654,28 @@ pub fn import_opencode_session(
         // it. Both peers run on one machine in development and share a single
         // OpenCode store, so the destination legitimately finds the very
         // session it is importing — and re-keying *that* one to the new
-        // worktree is what the transfer means. The export names the directory
-        // the source had it at, so this is the shipped conversation rather than
-        // a stranger's.
+        // worktree is what the transfer means.
+        //
+        // Two things have to hold, and only the second is load-bearing for
+        // safety. The export naming the directory the local store reports keeps
+        // an unrelated conversation that merely shares an id — the operator's
+        // own `opencode` use somewhere outside Kanna — from being yanked out of
+        // its directory. But that value comes out of the peer's own export, and
+        // a peer holds it verbatim for every session this machine ever shipped
+        // it, so on its own it authorizes a replay: push the id back with the
+        // directory it was told, and the import re-keys a session of *this*
+        // operator's into a worktree running the peer's prompt.
+        //
+        // So the arm is gated on a fact this machine owns and the peer cannot
+        // assert: the session must not be sitting in a worktree one of this
+        // instance's own open tasks is using. That is the harm — a live task
+        // silently losing its resume — and it is the case the shared-store
+        // reading never covers, because the session the destination finds there
+        // belongs to the *other* instance's task and is absent from this
+        // instance's worktree table.
         LocalOpencodeSession::Present { directory }
-            if exported_directory.as_deref() == Some(directory.as_path()) =>
+            if exported_directory.as_deref() == Some(directory.as_path())
+                && !live_worktrees.owns(&directory) =>
         {
             log::info!(
                 "re-keying OpenCode session {session_id} from {} to the destination worktree",
@@ -682,6 +700,43 @@ pub fn import_opencode_session(
     opencode(destination_worktree, &["import", export_path])
         .map(|_| ())
         .map_err(OpencodeImportError::Unavailable)
+}
+
+/// The worktrees this instance's own open tasks are working in.
+///
+/// The unforgeable half of the OpenCode re-key guard. A peer supplies the
+/// session id and, through its export, the directory it claims that session
+/// sits at; it supplies nothing here. Read from this instance's own database
+/// immediately before the import, so a session an operator is actively using
+/// cannot be re-keyed out from under the task using it.
+///
+/// Open tasks only. A closed task's worktree is removed and has no resume left
+/// to lose, so protecting it would refuse the ordinary case — re-importing a
+/// conversation this machine transferred away earlier — for nothing.
+#[derive(Debug, Default)]
+pub struct LiveLocalWorktrees {
+    paths: Vec<PathBuf>,
+}
+
+impl LiveLocalWorktrees {
+    pub fn new(paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        Self {
+            // Canonicalized on the way in, because the directory it is compared
+            // against comes back canonicalized from OpenCode's store and a
+            // worktree path can reach it through a symlinked temp dir or a
+            // `/var` → `/private/var` prefix.
+            paths: paths.into_iter().map(canonical_or_self).collect(),
+        }
+    }
+
+    fn owns(&self, directory: &Path) -> bool {
+        let directory = canonical_or_self(directory.to_path_buf());
+        self.paths.iter().any(|path| path == &directory)
+    }
+}
+
+fn canonical_or_self(path: PathBuf) -> PathBuf {
+    path.canonicalize().unwrap_or(path)
 }
 
 /// Why an OpenCode import did not happen.
@@ -906,8 +961,13 @@ mod opencode_tests {
         let temp = tempfile::tempdir().expect("temp");
         let export = write_export(temp.path(), "ses_0299051920000tGF3K0qC5s5G9a");
 
-        let error = import_opencode_session(&export, SESSION_ID, &temp.path().join("worktree"))
-            .expect_err("a mismatched export was imported");
+        let error = import_opencode_session(
+            &export,
+            SESSION_ID,
+            &temp.path().join("worktree"),
+            &LiveLocalWorktrees::default(),
+        )
+        .expect_err("a mismatched export was imported");
         assert!(
             matches!(error, OpencodeImportError::Refused(_)),
             "{error:?}",
@@ -935,8 +995,13 @@ esac"#,
         let temp = tempfile::tempdir().expect("temp");
         let export = write_export(temp.path(), SESSION_ID);
 
-        let error = import_opencode_session(&export, SESSION_ID, &temp.path().join("worktree"))
-            .expect_err("an occupied destination was overwritten");
+        let error = import_opencode_session(
+            &export,
+            SESSION_ID,
+            &temp.path().join("worktree"),
+            &LiveLocalWorktrees::default(),
+        )
+        .expect_err("an occupied destination was overwritten");
         assert!(
             matches!(error, OpencodeImportError::DestinationExists(_)),
             "{error:?}",
@@ -1078,8 +1143,13 @@ esac"#,
         let temp = tempfile::tempdir().expect("temp");
         let export = write_export(temp.path(), SESSION_ID);
 
-        let error = import_opencode_session(&export, SESSION_ID, &temp.path().join("worktree"))
-            .expect_err("an unprovable absence was imported over");
+        let error = import_opencode_session(
+            &export,
+            SESSION_ID,
+            &temp.path().join("worktree"),
+            &LiveLocalWorktrees::default(),
+        )
+        .expect_err("an unprovable absence was imported over");
         assert!(
             matches!(error, OpencodeImportError::Unavailable(_)),
             "{error:?}",
@@ -1122,8 +1192,90 @@ esac"#,
         )
         .expect("write export");
 
-        import_opencode_session(&export, SESSION_ID, &temp.path().join("destination"))
-            .expect("the shipped conversation was refused as a collision");
+        import_opencode_session(
+            &export,
+            SESSION_ID,
+            &temp.path().join("destination"),
+            &LiveLocalWorktrees::default(),
+        )
+        .expect("the shipped conversation was refused as a collision");
+        assert!(
+            stub.calls().iter().any(|call| call.starts_with("import")),
+            "the re-key never ran: {:?}",
+            stub.calls(),
+        );
+    }
+
+    /// The case that distinguishes the guard from no guard: a peer replaying
+    /// the directory it was told.
+    ///
+    /// Every value the arm above reads is one the peer holds verbatim once this
+    /// machine has shipped it that session — the export it received carried
+    /// `info.id` and `info.directory`. So a paired peer can push the task back
+    /// with the same id and a replayed directory. If the directory alone
+    /// authorized the re-key, `opencode import` would pull *this* operator's
+    /// live session out of the worktree its task is working in and splice it
+    /// onto a task running the peer's prompt: the local task silently loses its
+    /// resume, and the peer's task resumes a conversation it was never part of.
+    ///
+    /// The worktree table is what the peer cannot assert, so the same replay
+    /// against a session sitting in one of this instance's open-task worktrees
+    /// is the ordinary collision instead.
+    #[test]
+    fn a_peer_replaying_a_directory_it_was_shipped_cannot_rekey_a_live_local_session() {
+        let temp = tempfile::tempdir().expect("temp");
+        let live_worktree = temp.path().join("live-local-task");
+        std::fs::create_dir_all(&live_worktree).expect("live worktree");
+        let resolved_live = live_worktree.canonicalize().expect("resolved live");
+
+        // This machine's store holds the session, keyed to a worktree one of
+        // its own open tasks is using.
+        let stub = StubOpencode::responding(&format!(
+            r#"printf '%s\n' "$*" >> "$(dirname "$0")/calls"
+case "$1" in
+  export) printf '{{"info":{{"id":"%s","directory":"{}"}}}}' "$2" ;;
+esac"#,
+            resolved_live.display(),
+        ));
+        // The peer's export replays exactly what it was shipped, so the
+        // directory comparison the arm used to rest on matches.
+        let export = temp.path().join("export.json");
+        std::fs::write(
+            &export,
+            serde_json::json!({
+                "info": { "id": SESSION_ID, "directory": resolved_live.to_string_lossy() },
+                "messages": [],
+            })
+            .to_string(),
+        )
+        .expect("write export");
+
+        let error = import_opencode_session(
+            &export,
+            SESSION_ID,
+            &temp.path().join("destination"),
+            &LiveLocalWorktrees::new([live_worktree.clone()]),
+        )
+        .expect_err("a replayed directory re-keyed a live local session");
+        assert!(
+            matches!(error, OpencodeImportError::DestinationExists(_)),
+            "{error:?}",
+        );
+        assert!(
+            stub.calls().iter().all(|call| !call.starts_with("import")),
+            "the import ran over a live local session: {:?}",
+            stub.calls(),
+        );
+
+        // Same replay, same directory — but no open task of this instance's is
+        // working there, which is the shared-store case the arm exists for.
+        import_opencode_session(
+            &export,
+            SESSION_ID,
+            &temp.path().join("destination"),
+            &LiveLocalWorktrees::new([temp.path().join("some-other-task")]),
+        )
+        .expect("the shared-store re-key was refused");
         assert!(
             stub.calls().iter().any(|call| call.starts_with("import")),
             "the re-key never ran: {:?}",
@@ -1154,8 +1306,13 @@ esac"#,
         )
         .expect("write export");
 
-        let error = import_opencode_session(&export, SESSION_ID, &temp.path().join("destination"))
-            .expect_err("an unrelated conversation was re-keyed");
+        let error = import_opencode_session(
+            &export,
+            SESSION_ID,
+            &temp.path().join("destination"),
+            &LiveLocalWorktrees::default(),
+        )
+        .expect_err("an unrelated conversation was re-keyed");
         assert!(
             matches!(error, OpencodeImportError::DestinationExists(_)),
             "{error:?}",
@@ -1186,8 +1343,13 @@ esac"#,
         ));
         let export = write_export(temp.path(), SESSION_ID);
 
-        import_opencode_session(&export, SESSION_ID, &worktree)
-            .expect("our own prior import was reported as a collision");
+        import_opencode_session(
+            &export,
+            SESSION_ID,
+            &worktree,
+            &LiveLocalWorktrees::default(),
+        )
+        .expect("our own prior import was reported as a collision");
         assert!(
             stub.calls().iter().all(|call| !call.starts_with("import")),
             "an already-imported session was imported again: {:?}",
@@ -1212,8 +1374,13 @@ esac"#,
         let temp = tempfile::tempdir().expect("temp");
         let export = write_export(temp.path(), SESSION_ID);
 
-        let error = import_opencode_session(&export, SESSION_ID, &temp.path().join("worktree"))
-            .expect_err("a locked store reported success");
+        let error = import_opencode_session(
+            &export,
+            SESSION_ID,
+            &temp.path().join("worktree"),
+            &LiveLocalWorktrees::default(),
+        )
+        .expect_err("a locked store reported success");
         assert!(
             matches!(error, OpencodeImportError::Unavailable(_)),
             "{error:?}",
@@ -1233,7 +1400,13 @@ esac"#,
         let export = write_export(temp.path(), SESSION_ID);
         let worktree = temp.path().join("worktree");
 
-        import_opencode_session(&export, SESSION_ID, &worktree).expect("import");
+        import_opencode_session(
+            &export,
+            SESSION_ID,
+            &worktree,
+            &LiveLocalWorktrees::default(),
+        )
+        .expect("import");
 
         let resolved = worktree.canonicalize().expect("resolved worktree");
         let import_call = stub

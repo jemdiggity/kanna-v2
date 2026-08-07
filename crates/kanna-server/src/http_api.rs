@@ -94,4 +94,4 @@ pub(crate) use task_input::{
 };
 
 #[cfg(test)]
-pub(crate) use test_support::test_router;
+pub(crate) use test_support::{test_router, test_state_with_seed};

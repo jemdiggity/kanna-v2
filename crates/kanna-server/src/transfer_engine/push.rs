@@ -964,6 +964,134 @@ mod tests {
         assert!(refuse_session_downgrade(None, Some("ses_x"), Some("opencode")).is_ok());
     }
 
+    fn finalize_work_item(id: &str) -> crate::db::TransferWorkItem {
+        crate::db::TransferWorkItem {
+            id: id.to_string(),
+            kind: super::super::queue::KIND_FINALIZE.to_string(),
+            transfer_id: Some("transfer-finalize".to_string()),
+            payload_json: "{}".to_string(),
+            attempts: 2,
+        }
+    }
+
+    fn finalize_payload_json() -> String {
+        serde_json::json!({
+            "target_peer_id": "peer-destination",
+            "task": {
+                "source_peer_id": "peer-source",
+                "source_task_id": "task-source",
+                "resume_session_id": null,
+                "stage": "in progress",
+                "pipeline": "single-reviewer",
+                "agent_type": "pty",
+                "agent_provider": "claude",
+            },
+            "repo": { "mode": "reuse-local", "path": "/repo" },
+            "artifacts": [],
+        })
+        .to_string()
+    }
+
+    /// Seeds the rows `run_finalization` reads before it reaches the guard.
+    ///
+    /// The task carries no `agent_session_id`, so both the pre-signal and the
+    /// post-signal plan resolve to "nothing here" — which is what makes the
+    /// recorded observation the only thing that can refuse.
+    fn seed_finalization(db: &crate::db::Db, work_id: &str, observed_before_signal: Option<&str>) {
+        db.insert_test_repo("repo-finalize", "Finalize Repo")
+            .expect("repo");
+        db.insert_test_pipeline_item(
+            "task-finalize",
+            "repo-finalize",
+            "finalize me",
+            None,
+            "in progress",
+            "2026-08-07 00:00:00",
+        )
+        .expect("task");
+        db.insert_task_transfer(&crate::db::NewTaskTransfer {
+            id: "transfer-finalize".into(),
+            direction: "outgoing".into(),
+            status: "pending".into(),
+            source_peer_id: Some("peer-source".into()),
+            target_peer_id: Some("peer-destination".into()),
+            source_desktop_id: None,
+            target_desktop_id: None,
+            source_task_id: Some("task-finalize".into()),
+            local_task_id: Some("task-finalize".into()),
+            error: None,
+            payload_json: Some(finalize_payload_json()),
+        })
+        .expect("transfer");
+        db.enqueue_transfer_work(work_id, "finalize", Some("transfer-finalize"), "{}")
+            .expect("queue the work item");
+        if let Some(session_id) = observed_before_signal {
+            db.record_transfer_work_observation(
+                work_id,
+                SESSION_BEFORE_SIGNAL_PHASE,
+                Some(session_id),
+            )
+            .expect("attempt 1's observation");
+        }
+    }
+
+    /// The retry seam migration 050 exists for, on the source side.
+    ///
+    /// Finalization signals the agent, so by attempt 2 the session it was
+    /// looking at is gone. A fresh pre-signal look then finds nothing, the
+    /// downgrade guard compares nothing against nothing, and it passes
+    /// vacuously — shipping exactly the empty payload it exists to refuse. Only
+    /// the first attempt's observation was taken against a live agent, so every
+    /// attempt has to compare against *that*.
+    ///
+    /// The DB primitive and `refuse_session_downgrade` are pinned separately;
+    /// this covers `run_finalization` being wired to them.
+    #[tokio::test]
+    async fn finalization_compares_against_the_session_the_first_attempt_saw() {
+        let seen_before_signal = "ses_02645d9aaffeeOgwt2rbXIcTdp";
+        let state =
+            crate::http_api::test_state_with_seed("desktop-finalize-memo", "Finalize Memo", |db| {
+                seed_finalization(db, "finalize:transfer-finalize", Some(seen_before_signal))
+            });
+
+        let error = run_finalization(
+            &state,
+            &finalize_work_item("finalize:transfer-finalize"),
+            "transfer-finalize",
+        )
+        .await
+        .expect_err("the retry shipped an empty payload the first attempt would have refused");
+        assert!(
+            error.contains(seen_before_signal),
+            "the guard did not compare against the recorded observation: {error}",
+        );
+    }
+
+    /// The same run with nothing recorded is the first attempt against a task
+    /// whose agent never got a turn: nothing was there before the signal and
+    /// nothing is there after, which is not a downgrade and must not refuse.
+    /// Without this the test above would pass on a guard that simply always
+    /// refuses.
+    #[tokio::test]
+    async fn finalization_does_not_refuse_a_task_that_never_had_a_session() {
+        let state = crate::http_api::test_state_with_seed(
+            "desktop-finalize-fresh",
+            "Finalize Fresh",
+            |db| seed_finalization(db, "finalize:transfer-fresh", None),
+        );
+
+        let outcome = run_finalization(
+            &state,
+            &finalize_work_item("finalize:transfer-fresh"),
+            "transfer-finalize",
+        )
+        .await;
+        assert!(
+            !matches!(&outcome, Err(error) if error.contains("empty transfer")),
+            "a task with no session to lose was refused as a downgrade: {outcome:?}",
+        );
+    }
+
     fn work_item(id: &str) -> crate::db::TransferWorkItem {
         crate::db::TransferWorkItem {
             id: id.to_string(),

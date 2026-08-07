@@ -157,6 +157,7 @@ pub async fn import_transfer(
     }
 }
 
+#[derive(Debug)]
 enum ImportFailure {
     Retry(String),
     Terminal(String),
@@ -594,11 +595,24 @@ async fn materialize_resume_state(
                 resume_session_id.clone(),
                 destination_worktree.to_path_buf(),
             );
+            // Read now rather than earlier: the guard is about what this
+            // operator is using at the moment of the import, and an import that
+            // retries minutes later must see the tasks that are open then.
+            let live_worktrees = super::git::LiveLocalWorktrees::new(
+                state
+                    .transfer_work()
+                    .open_db()?
+                    .list_open_task_worktree_paths()
+                    .map_err(|error| format!("db error: {error}"))?
+                    .into_iter()
+                    .map(|(_, path)| PathBuf::from(path)),
+            );
             let imported = super::run_blocking("transfer opencode import", move || {
                 Ok(super::git::import_opencode_session(
                     &source_path,
                     &session_id,
                     &worktree,
+                    &live_worktrees,
                 ))
             })
             .await?;
@@ -758,4 +772,135 @@ async fn resolve_source_machine_name(state: &Arc<AppState>, peer_id: &str) -> Op
             .map(str::to_string)
     });
     Some(name.unwrap_or_else(|| peer_id.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn work_item(id: &str) -> TransferWorkItem {
+        TransferWorkItem {
+            id: id.to_string(),
+            kind: super::super::queue::KIND_IMPORT.to_string(),
+            transfer_id: Some("transfer-1".to_string()),
+            payload_json: "{}".to_string(),
+            attempts: 2,
+        }
+    }
+
+    /// A payload whose recompute path would answer `None`, so the only way a
+    /// recorded answer can come back is if the memo is actually consulted.
+    fn payload_promising(session_id: Option<&str>) -> OutgoingTransferPayload {
+        payload::parse_outgoing_transfer_payload(&serde_json::json!({
+            "target_peer_id": "peer-destination",
+            "task": {
+                "source_peer_id": "peer-source",
+                "source_task_id": "task-source",
+                "resume_session_id": session_id,
+                "stage": "in progress",
+                "pipeline": "single-reviewer",
+                "agent_type": "pty",
+                "agent_provider": "claude",
+            },
+            // No artifacts, so a second look at this payload resolves to "no
+            // resume" — which is exactly what must *not* be returned once an
+            // earlier attempt has already materialized one.
+            "repo": { "mode": "reuse-local", "path": "/repo" },
+            "artifacts": [],
+        }))
+        .expect("a valid payload")
+    }
+
+    /// The retry seam migration 050 exists for.
+    ///
+    /// Attempt 1 fetches the artifacts and writes them to disk; by attempt 2
+    /// those destinations are occupied *by attempt 1*, so a fresh look reads
+    /// its own output as somebody else's and abandons the resume. The recorded
+    /// answer is the only one taken against the machine as it was, so attempt 2
+    /// has to return it rather than recompute.
+    ///
+    /// The DB primitive and the pure predicate are pinned elsewhere; what this
+    /// covers is that `materialize_resume_state` is wired to them.
+    #[tokio::test]
+    async fn a_retried_import_returns_the_session_the_first_attempt_materialized() {
+        let work = work_item("import:transfer-1");
+        let recorded = "364643cc-5e6d-48fc-86ca-ca7764380900";
+        let state =
+            crate::http_api::test_state_with_seed("desktop-import-memo", "Import Memo", |db| {
+                db.enqueue_transfer_work(&work_item("import:transfer-1").id, "import", None, "{}")
+                    .expect("queue the work item");
+                db.record_transfer_work_observation(
+                    "import:transfer-1",
+                    MATERIALIZE_PHASE,
+                    Some(recorded),
+                )
+                .expect("attempt 1's answer");
+            });
+
+        // The payload names a *different* session and would recompute to
+        // `None`, so neither value can be reached by accident.
+        let resolved = materialize_resume_state(
+            &state,
+            &work,
+            "transfer-1",
+            &payload_promising(Some("11111111-2222-3333-4444-555555555555")),
+            Path::new("/tmp/kanna-import-memo-destination"),
+        )
+        .await
+        .expect("the retry failed instead of reusing attempt 1's answer");
+        assert_eq!(resolved.as_deref(), Some(recorded));
+
+        // Reading is not writing: the recorded answer is still attempt 1's, so
+        // a third attempt sees the same thing.
+        assert_eq!(
+            state
+                .transfer_work()
+                .open_db()
+                .expect("db")
+                .read_transfer_work_observation("import:transfer-1", MATERIALIZE_PHASE)
+                .expect("read"),
+            Some(Some(recorded.to_string())),
+        );
+    }
+
+    /// The other half of the recorded value: its encoding.
+    ///
+    /// `None` in the observation column already means "never observed", so an
+    /// attempt that decided the resume had to be abandoned records the empty
+    /// marker instead. Reading that back as a session id would spawn the
+    /// destination agent with `--resume ""`. Unlike the test above this one does
+    /// not distinguish the memo from a recompute — both answer `None` for this
+    /// payload — it pins the decoding the memo needs to be usable at all.
+    #[tokio::test]
+    async fn the_abandoned_marker_reads_back_as_no_resume_rather_than_a_session_id() {
+        let work = work_item("import:transfer-abandoned");
+        let state = crate::http_api::test_state_with_seed(
+            "desktop-import-abandoned",
+            "Import Abandoned",
+            |db| {
+                db.enqueue_transfer_work("import:transfer-abandoned", "import", None, "{}")
+                    .expect("queue the work item");
+                db.record_transfer_work_observation(
+                    "import:transfer-abandoned",
+                    MATERIALIZE_PHASE,
+                    Some(RESUME_ABANDONED),
+                )
+                .expect("attempt 1's answer");
+            },
+        );
+
+        let resolved = materialize_resume_state(
+            &state,
+            &work,
+            "transfer-abandoned",
+            &payload_promising(Some("364643cc-5e6d-48fc-86ca-ca7764380900")),
+            Path::new("/tmp/kanna-import-abandoned-destination"),
+        )
+        .await
+        .expect("the retry failed instead of reusing attempt 1's answer");
+        assert_eq!(
+            resolved, None,
+            "the abandoned marker leaked out as a session id",
+        );
+    }
 }
