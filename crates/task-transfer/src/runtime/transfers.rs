@@ -434,16 +434,12 @@ impl TransferRuntime {
             let artifact_dir =
                 managed_artifact_dir(&self.config.registry_dir, &self.config.peer_id, transfer_id);
             tokio::fs::create_dir_all(&artifact_dir).await?;
-            let safe_artifact_id = super::utils::sanitize_artifact_filename(artifact_id);
-            let managed_path = artifact_dir.join(format!(
-                "{}-{}",
-                safe_artifact_id,
-                super::utils::sanitize_artifact_filename(
-                    path.file_name()
-                        .and_then(|filename| filename.to_str())
-                        .unwrap_or("artifact"),
-                ),
-            ));
+            // Named from the artifact id alone: the source basename is
+            // unbounded, and the name is purely local storage — the payload
+            // carries the user-visible file name. See
+            // `utils::managed_artifact_filename`.
+            let managed_path =
+                artifact_dir.join(super::utils::managed_artifact_filename(artifact_id));
             if path != managed_path {
                 match tokio::fs::rename(&path, &managed_path).await {
                     Ok(()) => {}

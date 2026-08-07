@@ -777,3 +777,102 @@ async fn guarded_artifact_part_cleans_failed_atomic_rename() {
     assert!(!part_path.exists(), "failed rename retained partial file");
     assert!(destination.is_dir(), "failed rename damaged destination");
 }
+
+/// The artifact id a real Claude session-archive transfer uses: a 64-hex
+/// transfer id plus the kind suffix the desktop appends.
+fn claude_session_archive_artifact_id() -> String {
+    format!("{}-claude-session", "b3".repeat(32))
+}
+
+/// The path that artifact is staged from — `/tmp/kanna-transfer-<id>-claude-session.tar.gz`.
+fn claude_session_archive_source_name(artifact_id: &str) -> String {
+    let transfer_id = artifact_id
+        .strip_suffix("-claude-session")
+        .expect("fixture artifact id carries the archive suffix");
+    format!("kanna-transfer-{transfer_id}-claude-session.tar.gz")
+}
+
+#[test]
+fn managed_artifact_filenames_stay_inside_name_max() {
+    let cases = [
+        claude_session_archive_artifact_id(),
+        String::new(),
+        "a".repeat(4096),
+        format!("{}/{}", "nested".repeat(64), "б".repeat(200)),
+    ];
+    for artifact_id in cases {
+        let filename = utils::managed_artifact_filename(&artifact_id);
+        assert!(
+            filename.len() <= utils::MANAGED_ARTIFACT_FILENAME_BYTES,
+            "managed name for a {}-byte artifact id exceeded its budget: {} bytes",
+            artifact_id.len(),
+            filename.len(),
+        );
+        // A receiver still on the pre-fix scheme composes
+        // `<artifact-id>-<the name we staged>`; that must fit too.
+        assert!(
+            artifact_id.len() + 1 + filename.len() <= utils::NAME_MAX_BYTES
+                || artifact_id.len() > utils::NAME_MAX_BYTES,
+            "a legacy receiver's doubled name would overflow NAME_MAX",
+        );
+        assert!(
+            !filename.contains('/')
+                && !filename.contains('\\')
+                && filename != ".."
+                && filename != ".",
+            "managed name escaped its directory: {filename}",
+        );
+    }
+}
+
+#[test]
+fn managed_artifact_filenames_separate_ids_sharing_a_truncated_prefix() {
+    // Every artifact of one transfer starts with the same 64-hex transfer id,
+    // so truncation alone would collide them.
+    let transfer_id = "b3".repeat(32);
+    let long_tail = "-".to_owned() + &"session".repeat(40);
+    let names = [
+        format!("{transfer_id}-claude-session"),
+        format!("{transfer_id}-claude-transcript"),
+        format!("{transfer_id}{long_tail}-one"),
+        format!("{transfer_id}{long_tail}-two"),
+    ]
+    .map(|artifact_id| utils::managed_artifact_filename(&artifact_id));
+
+    let unique = names.iter().collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        unique.len(),
+        names.len(),
+        "artifact ids sharing a prefix collided on disk: {names:?}",
+    );
+}
+
+#[test]
+fn managed_artifact_filename_is_stable_for_one_artifact_id() {
+    let artifact_id = claude_session_archive_artifact_id();
+    assert_eq!(
+        utils::managed_artifact_filename(&artifact_id),
+        utils::managed_artifact_filename(&artifact_id),
+        "the staged name must be reproducible from the artifact id alone",
+    );
+}
+
+/// The exact composition that killed a live transfer: the pre-fix scheme spent
+/// the artifact id twice, so a real Claude session archive landed past
+/// `NAME_MAX` on the receiver and the fetch died with `ENAMETOOLONG`.
+#[test]
+fn the_pre_fix_claude_session_archive_name_overflowed_name_max() {
+    let artifact_id = claude_session_archive_artifact_id();
+    let source_name = claude_session_archive_source_name(&artifact_id);
+    let legacy_staged = format!("{artifact_id}-{source_name}");
+    let legacy_fetched = format!("{artifact_id}-{legacy_staged}");
+    assert!(
+        legacy_fetched.len() > utils::NAME_MAX_BYTES,
+        "fixture no longer models the overflow that was observed live: {} bytes",
+        legacy_fetched.len(),
+    );
+    assert!(
+        utils::managed_artifact_filename(&artifact_id).len() <= utils::NAME_MAX_BYTES,
+        "the replacement scheme still overflows NAME_MAX",
+    );
+}

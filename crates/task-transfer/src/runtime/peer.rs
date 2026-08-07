@@ -5,9 +5,9 @@ use super::external_peers::{
 };
 use super::state::{TransferArtifactRecord, TransferRuntime};
 use super::utils::{
-    ensure_peer_is_trusted_for, managed_artifact_dir, parse_peer_response_line, peer_store,
-    prune_transfer_artifacts, sanitize_artifact_filename, supports_authenticated_task_requests,
-    write_json_line, ArtifactFraming,
+    ensure_peer_is_trusted_for, managed_artifact_dir, managed_artifact_filename,
+    parse_peer_response_line, peer_store, prune_transfer_artifacts,
+    supports_authenticated_task_requests, write_json_line, ArtifactFraming,
 };
 use crate::crypto::{
     artifact_stream_context, open_json_bytes, open_json_bytes_bounded, SealedStreamHeader,
@@ -29,7 +29,9 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufR
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 
-const MAX_ARTIFACT_FILENAME_BYTES: usize = 255;
+/// The wire `filename` is only ever a file name, so `NAME_MAX` is its natural
+/// ceiling even though the local name is no longer composed from it.
+const MAX_ARTIFACT_FILENAME_BYTES: usize = super::utils::NAME_MAX_BYTES;
 const MAX_ARTIFACT_ERROR_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_STREAM_HEADER_FIELD_BYTES: usize = 64;
 
@@ -916,6 +918,11 @@ impl TransferRuntime {
                     )));
                 }
             }
+            // The authenticated `filename` is the source's own on-disk name. It
+            // is advisory — the local name below is derived from the artifact
+            // id alone, because composing it from a peer-supplied basename is
+            // what used to push the receiver's name past `NAME_MAX` — but it
+            // still has to stay a sane size on the wire.
             if filename.len() > MAX_ARTIFACT_FILENAME_BYTES {
                 return Err(RuntimeError::Protocol(
                     "artifact filename exceeds maximum size".into(),
@@ -927,12 +934,7 @@ impl TransferRuntime {
                 transfer_id,
             );
             tokio::fs::create_dir_all(&artifact_dir).await?;
-            let safe_artifact_id = sanitize_artifact_filename(artifact_id);
-            let destination_path = artifact_dir.join(format!(
-                "{}-{}",
-                safe_artifact_id,
-                sanitize_artifact_filename(filename.as_ref()),
-            ));
+            let destination_path = artifact_dir.join(managed_artifact_filename(artifact_id));
 
             if !artifact_framing.is_streamed() {
                 if stream_header.is_some() {

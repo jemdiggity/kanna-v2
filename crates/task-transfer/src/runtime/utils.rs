@@ -716,3 +716,66 @@ pub(super) fn sanitize_artifact_filename(filename: &str) -> String {
         sanitized
     }
 }
+
+/// POSIX `NAME_MAX`: no single path component may exceed 255 bytes on macOS or
+/// Linux. Exceeding it fails the open with `ENAMETOOLONG`, which for an
+/// artifact means the transfer dies mid-flight with "File name too long".
+pub(super) const NAME_MAX_BYTES: usize = 255;
+
+/// Byte budget for a managed artifact's own file name.
+///
+/// It sits far below [`NAME_MAX_BYTES`] on purpose. Each side names its local
+/// copy independently, but a *receiver running an older build* still composes
+/// `<artifact-id>-<the name the source sent>`; keeping the name we stage small
+/// keeps that older receiver's doubled name inside `NAME_MAX` too — with a
+/// 64-byte artifact id it lands near 160 bytes instead of overflowing.
+pub(super) const MANAGED_ARTIFACT_FILENAME_BYTES: usize = 96;
+
+/// Digest bytes retained in a managed artifact name. Base64 of 12 bytes is 16
+/// characters drawn from the URL-safe alphabet, so the name stays path-safe.
+const MANAGED_ARTIFACT_DIGEST_BYTES: usize = 12;
+
+/// The name a managed artifact takes on disk, derived from its artifact id
+/// alone.
+///
+/// That name is a *local storage detail on each side*: the source records the
+/// staged path in memory, the receiver hands the fetched path back to its
+/// caller, and materialization takes the user-visible file name from the
+/// transfer payload (`TransferArtifactPayload.filename`) — never from either
+/// on-disk name. The naming scheme itself never crosses the wire, so the two
+/// peers need not agree on it and no cross-version compatibility rides on it.
+///
+/// Deriving from the artifact id, and never from the source basename, is what
+/// bounds the name. Basenames are unbounded — a staged Claude session archive
+/// is already `kanna-transfer-<transfer-id>-claude-session.tar.gz` — and the
+/// previous scheme spent the artifact id twice in the receiver's name
+/// (`<artifact-id>-<artifact-id>-<basename>`), overflowing `NAME_MAX` for real
+/// Claude and Copilot transfers. The truncated-id prefix keeps the name legible
+/// on disk; the digest keeps ids that share a long prefix — every artifact of
+/// one transfer starts with the same transfer id — from colliding once the
+/// prefix is truncated.
+pub(super) fn managed_artifact_filename(artifact_id: &str) -> String {
+    let digest = Sha256::digest(artifact_id.as_bytes());
+    let suffix = URL_SAFE_NO_PAD.encode(&digest[..MANAGED_ARTIFACT_DIGEST_BYTES]);
+    let prefix_budget = MANAGED_ARTIFACT_FILENAME_BYTES
+        .saturating_sub(suffix.len())
+        .saturating_sub(1);
+    let sanitized = sanitize_artifact_filename(artifact_id);
+    format!(
+        "{}-{}",
+        truncate_on_char_boundary(&sanitized, prefix_budget),
+        suffix,
+    )
+}
+
+/// Truncate to at most `budget` bytes without splitting a UTF-8 character.
+fn truncate_on_char_boundary(value: &str, budget: usize) -> &str {
+    if value.len() <= budget {
+        return value;
+    }
+    let mut end = budget;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
