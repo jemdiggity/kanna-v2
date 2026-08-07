@@ -192,10 +192,19 @@ impl TransferEventLog {
     /// Read everything after `cursor` and prune through it. `None` starts from
     /// whatever is still retained.
     ///
-    /// The cursor is honoured only when `stream_id` names *this* log. A cursor
-    /// from an earlier server process addresses a sequence space that no longer
-    /// exists, so it is discarded rather than applied to positions it never
-    /// referred to, and the batch says events were missed.
+    /// A cursor is discarded only when `stream_id` names a *different* log: that
+    /// is positive proof it came from an earlier server process and addresses a
+    /// sequence space that no longer exists, so applying it would prune
+    /// positions it never referred to. The batch then says events were missed.
+    ///
+    /// An *absent* `stream_id` is not that proof, and must not be treated as it.
+    /// A desktop from before the stream id existed sends `cursor` alone, and
+    /// refusing every such poll would mean never pruning — the caller would be
+    /// redelivered the same retained events forever while durable entries piled
+    /// up to the cap, at which point appends backpressure the sidecar's stdout
+    /// reader and the whole control plane wedges. That is a worse failure than
+    /// the stale-cursor one, so a bare cursor keeps the original sequence
+    /// semantics.
     pub fn read(
         &self,
         cursor: Option<u64>,
@@ -203,11 +212,10 @@ impl TransferEventLog {
         limit: usize,
     ) -> TransferEventBatch {
         let mut inner = self.lock();
-        let resumes_this_stream = stream_id.is_some_and(|id| id == self.stream_id);
-        let stale_cursor = cursor.is_some() && !resumes_this_stream;
+        let stale_cursor = cursor.is_some() && stream_id.is_some_and(|id| id != self.stream_id);
         let after_seq = if stale_cursor { 0 } else { cursor.unwrap_or(0) };
-        let missed_events = stale_cursor
-            || cursor.is_some_and(|seq| resumes_this_stream && seq < inner.evicted_through_seq);
+        let missed_events =
+            stale_cursor || cursor.is_some_and(|seq| seq < inner.evicted_through_seq);
         while inner
             .entries
             .front()
@@ -759,14 +767,56 @@ mod tests {
         assert!(!resumed.missed_events);
     }
 
+    /// Mixed-version contract: a desktop from before the stream id existed
+    /// polls with `cursor` alone, forever. That has to keep acknowledging and
+    /// pruning. If a bare cursor were treated as a stale-server cursor instead,
+    /// every poll would redeliver the same retained events and prune nothing,
+    /// so durable entries would climb to `MAX_TRANSFER_EVENT_ENTRIES` and then
+    /// backpressure the sidecar's stdout reader — wedging control for everyone.
     #[test]
-    fn a_cursor_without_a_stream_id_starts_from_what_is_retained() {
+    fn a_pre_stream_id_client_polling_with_a_bare_cursor_still_acknowledges() {
         let log = TransferEventLog::default();
-        assert!(log.try_append(event("task_pull_requested"), true));
+        let mut cursor = None;
+        let mut delivered = Vec::new();
 
-        let batch = log.read(Some(5), None, 10);
-        assert_eq!(batch.events.len(), 1);
-        assert!(batch.missed_events);
+        for round in 0..(MAX_TRANSFER_EVENT_ENTRIES + 8) as u64 {
+            assert!(
+                log.try_append(
+                    json!({ "type": "task_pull_requested", "round": round }),
+                    true
+                ),
+                "round {round} must not hit the durable cap: a legacy cursor has to prune",
+            );
+            let batch = log.read(cursor, None, 10);
+            assert!(!batch.missed_events, "round {round} reported a false gap");
+            for entry in &batch.events {
+                delivered.push(entry["event"]["round"].as_u64().expect("round"));
+            }
+            cursor = Some(batch.cursor);
+        }
+
+        // Every event exactly once, in order, with no redelivery.
+        assert_eq!(
+            delivered,
+            (0..(MAX_TRANSFER_EVENT_ENTRIES + 8) as u64).collect::<Vec<_>>(),
+        );
+        // One more poll drains the final acknowledged entry, leaving nothing
+        // retained — the log is not growing behind a legacy consumer.
+        let drained = log.read(cursor, None, 10);
+        assert!(drained.events.is_empty());
+        assert!(!drained.missed_events);
+        assert_eq!(log.lock().entries.len(), 0);
+    }
+
+    /// A bare cursor is honoured, but an eviction it sat below is still
+    /// reported — the legacy `missedEvents` semantics are unchanged.
+    #[test]
+    fn a_bare_cursor_below_an_eviction_still_reports_missed_events() {
+        let log = TransferEventLog::default();
+        for _ in 0..MAX_TRANSFER_EVENT_ENTRIES + 2 {
+            log.try_append(event("pairing_started"), false);
+        }
+        assert!(log.read(Some(1), None, 10).missed_events);
     }
 
     #[test]

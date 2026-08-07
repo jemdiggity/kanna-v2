@@ -61,9 +61,15 @@ reachable only by whoever held a private stdio pipe.
   missed. Unlike `/v1/task-events`, whose cursor is a durable `task_event.seq`,
   this log is in memory and its sequence restarts at zero with every server
   process — while the desktop that holds the cursor outlives those restarts. So
-  a cursor is only accepted alongside the `streamId` it was issued with; a
-  cursor from an earlier incarnation is discarded and answered with
-  `missedEvents` rather than applied to sequence numbers it never referred to.
+  a cursor should be sent back with the `streamId` it was issued with: a cursor
+  presented alongside a `streamId` naming a *different* stream is discarded and
+  answered with `missedEvents`, rather than applied to sequence numbers it never
+  referred to. A cursor sent with no `streamId` at all — what a desktop from
+  before this field existed sends — is honoured under the original sequence
+  semantics instead, because refusing it would mean never pruning: the caller
+  would be redelivered the same retained events indefinitely while durable
+  entries climbed to the cap and backpressured the sidecar reader, wedging
+  control. Absence of the field is not evidence of a stale cursor.
   Single-consumer: a read prunes through the cursor it is given, so exactly one
   desktop process subscribes. The four state-mutating events
   (`incoming_transfer_request`, `task_pull_requested`,

@@ -75,8 +75,11 @@ risk — is covered at the layer that owns it, in
   event log the desktop polls.
 - The event-log tests cover the cursor contract the desktop depends on:
   durable-versus-advisory eviction, backpressure when only durable events
-  remain, `missedEvents` reporting, and a cursor issued by a previous server
-  process being refused rather than applied.
+  remain, `missedEvents` reporting, a cursor presented with a `streamId` naming
+  a previous server process being refused rather than applied, and the
+  mixed-version case — a pre-`streamId` desktop polling with a bare cursor keeps
+  acknowledging and pruning past the durable cap instead of being redelivered
+  the same events until the log backpressures the sidecar.
 - `sidecar_env_takes_the_listen_port_from_the_server_config` asserts the
   staging/production port parity the multi-instance rule requires, and
   `transfer_identity_env_*` in `apps/desktop/src-tauri/src/commands/mobile/mod.rs`
