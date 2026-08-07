@@ -213,6 +213,21 @@ fn write_remote_definitions(repo: &Path) {
         .to_string(),
     )
     .unwrap();
+    // A repo file named after an internal built-in customizes that pipeline's
+    // definition; it must not promote the name to a selectable choice.
+    std::fs::write(
+        repo.join(".kanna/pipelines/specialty-review.json"),
+        json!({
+            "name": "specialty-review",
+            "stages": [{
+                "name": "review",
+                "prompt": "REMOTE_SPECIALTY_REVIEW",
+                "policy": {"transition": "manual"}
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
     std::fs::write(repo.join(".kanna/pipelines/invalid\\name.json"), "{}").unwrap();
     std::fs::write(repo.join(".kanna/pipelines/schema.json"), "{}").unwrap();
     std::fs::write(
@@ -568,6 +583,9 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
     );
     assert!(manifest["config"].get("stageOrder").is_none());
     assert_eq!(manifest["defaultPipeline"], "remote-qa");
+    // `specialty-review` is absent even though this repo ships a file of that
+    // name: an internal built-in is Kanna's to bind, and a repo file only
+    // customizes its definition (asserted below).
     assert_eq!(
         manifest["pipelines"],
         json!([
@@ -577,7 +595,6 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
             "remote-qa",
             "single-reviewer",
             "specialized-reviewers",
-            "specialty-review",
             "zeta"
         ])
     );
@@ -630,6 +647,19 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
     assert_eq!(
         dotted_pipeline["definition"]["stages"][0]["prompt"],
         "REMOTE_DOTTED_PIPELINE"
+    );
+
+    // Unlisted, but still resolvable — and the repo's override still wins over
+    // the bundled definition, exactly as it does for a selectable pipeline.
+    let (status, internal_pipeline) = json_response(
+        &app,
+        "/v1/repos/repo-1/kanna-definitions/pipelines/specialty-review",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        internal_pipeline["definition"]["stages"][0]["prompt"],
+        "REMOTE_SPECIALTY_REVIEW"
     );
 
     let (status, agent) = json_response(
@@ -699,14 +729,11 @@ async fn repo_definition_routes_use_bundled_only_values_without_a_remote_ref() {
     assert_eq!(manifest["refName"], "origin/main");
     assert_eq!(manifest["config"], json!({}));
     assert_eq!(manifest["defaultPipeline"], "no-review");
+    // The bundled built-ins, minus `specialty-review`: the dispatcher binds
+    // that one for its child tasks, so it is never a choice the caller makes.
     assert_eq!(
         manifest["pipelines"],
-        json!([
-            "no-review",
-            "single-reviewer",
-            "specialized-reviewers",
-            "specialty-review"
-        ])
+        json!(["no-review", "single-reviewer", "specialized-reviewers"])
     );
 
     let (status, pipeline) = json_response(
@@ -717,6 +744,16 @@ async fn repo_definition_routes_use_bundled_only_values_without_a_remote_ref() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(pipeline["revision"], Value::Null);
     assert_eq!(pipeline["definition"]["name"], "no-review");
+
+    // Unlisted is not unresolvable: the dispatcher still names it on create,
+    // so the definition must serve exactly as before.
+    let (status, pipeline) = json_response(
+        &app,
+        "/v1/repos/repo-1/kanna-definitions/pipelines/specialty-review",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pipeline["definition"]["name"], "specialty-review");
 }
 
 #[tokio::test]

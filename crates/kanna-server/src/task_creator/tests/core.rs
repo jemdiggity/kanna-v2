@@ -1705,16 +1705,76 @@ fn legacy_builtin_pipeline_names_still_resolve_for_committed_repo_config() {
         );
         assert_eq!(
             names,
-            vec![
-                "no-review",
-                "single-reviewer",
-                "specialized-reviewers",
-                "specialty-review"
-            ]
+            vec!["no-review", "single-reviewer", "specialized-reviewers"]
         );
 
         let _ = std::fs::remove_dir_all(repo_root);
     }
+}
+
+#[test]
+fn internal_builtin_pipelines_resolve_without_being_offered_as_a_choice() {
+    // `specialty-review` is the single-stage pipeline `qa-dispatcher` binds for
+    // every child task it fans out. It is one character away from the
+    // `specialized-reviewers` pipeline an operator picks, so offering both in
+    // the picker is an invitation to pick the wrong one — but the name must
+    // still resolve, or dispatch breaks.
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-internal-pipeline");
+    std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
+    publish_origin_main(&repo_root, "publish repo without pipelines");
+
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+    let names = definitions.pipeline_names().unwrap();
+    assert!(
+        !names.contains(&"specialty-review".to_string()),
+        "internal built-in must not be offered as a choice; got {names:?}"
+    );
+    let resolved = definitions
+        .pipeline("specialty-review")
+        .expect("internal built-in must still resolve by name");
+    assert_eq!(resolved.name.as_deref(), Some("specialty-review"));
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+#[test]
+fn an_internal_builtin_pipeline_stays_unlisted_when_the_repo_ships_its_own_file() {
+    // Unlike a retired alias — where the repo file is the only definition, so
+    // the name becomes a real choice — an internal built-in has a definition
+    // and a role of its own. A repo file at that path customizes what the
+    // dispatcher's children run; it does not promote the name to a choice.
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-internal-repo-authored");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/specialty-review.json"),
+        serde_json::json!({
+            "name": "specialty-review",
+            "stages": [{
+                "name": "review",
+                "prompt": "REPO_SPECIALTY_REVIEW",
+                "policy": {"transition": "manual"}
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish repo-authored specialty review");
+
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+
+    assert_eq!(
+        definitions.pipeline_names().unwrap(),
+        vec!["no-review", "single-reviewer", "specialized-reviewers"]
+    );
+    let resolved = definitions.pipeline("specialty-review").unwrap();
+    assert_eq!(
+        resolved.stages[0].prompt.as_deref(),
+        Some("REPO_SPECIALTY_REVIEW"),
+        "the repo's own definition must still win over the bundled one"
+    );
+
+    let _ = std::fs::remove_dir_all(repo_root);
 }
 
 #[test]
@@ -2069,7 +2129,6 @@ fn pipeline_names_are_sorted_deduped_remote_and_compiled_union() {
             "qa",
             "single-reviewer",
             "specialized-reviewers",
-            "specialty-review",
             "zeta"
         ]
     );

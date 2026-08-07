@@ -79,7 +79,13 @@ Built-in pipelines, by review depth: `no-review` (no review stage — the
 fallback when a repo names none), `single-reviewer` (one `review` agent), and
 `specialized-reviewers` (a dispatched specialty panel). `specialty-review` is
 not a choice: it is the single-stage pipeline the dispatcher gives its child
-tasks. The `specialized-reviewers` review stage fans specialty reviews out as child tasks and
+tasks, and `BUILTIN_PIPELINES` in
+`crates/kanna-server/src/task_creator/definitions.rs` marks it
+`selectable: false` so it resolves by name but never reaches the repo
+manifest, the new-task picker, or the tool catalog's advertised lineup — even
+in a repo that ships its own `.kanna/pipelines/specialty-review.json`, which
+customizes the definition without promoting the name to a choice.
+The `specialized-reviewers` review stage fans specialty reviews out as child tasks and
 aggregates their verdicts against a scope bar — see
 `docs/specs/qa-dispatch-review.md`.
 
