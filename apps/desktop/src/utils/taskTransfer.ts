@@ -52,12 +52,15 @@ export interface TransferArtifactPayload {
 /**
  * How the source session ended before its state was staged.
  *
- * The SIGINT that finalizes a PTY source is refused outright for *adopted*
- * sessions — every session older than the running daemon, i.e. every task that
- * predates an app upgrade (`crates/daemon/src/pty.rs`, fails closed by design).
- * That is common enough that a hard failure would block all post-upgrade
- * transfers, so a refused signal or a session that never exits is recorded as a
- * degradation and carried to the receiver instead of being swallowed.
+ * A PTY source is asked to wrap up and then to quit, by injected input
+ * (`crates/kanna-server/src/transfer_engine/finalize.rs`). Everything about
+ * that is the agent's to cooperate with: it may never finish its turn, it may
+ * be parked on a permission prompt the sequence deliberately will not answer,
+ * or it may not exit on the quit command. None of those is rare enough to fail
+ * a transfer over and none is quiet enough to swallow, so each is recorded here
+ * as a degradation and carried to the receiver, which imports the task anyway
+ * and surfaces the reason to the destination operator: the conversation still
+ * crosses, and whoever now owns the task is told the handoff was not clean.
  */
 export interface TransferFinalizationState {
   cleanly_finalized: boolean;
