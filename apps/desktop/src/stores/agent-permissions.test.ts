@@ -39,7 +39,7 @@ describe("getAgentPermissionFlags", () => {
     expect(getAgentPermissionFlags("codex")).toEqual(["--yolo"]);
     expect(getAgentPermissionFlags("codex", "default")).toEqual(["--yolo"]);
     expect(getAgentPermissionFlags("codex", "dontAsk")).toEqual(["--yolo"]);
-    expect(getAgentPermissionFlags("codex", "acceptEdits")).toEqual(["--full-auto"]);
+    expect(getAgentPermissionFlags("codex", "acceptEdits")).toEqual(["--sandbox workspace-write"]);
   });
 
   it("maps OpenCode default-like permissions to its skip-permissions flag", () => {

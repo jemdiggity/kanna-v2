@@ -15,6 +15,7 @@ const expectedLiveCliContractTests = [
   "claude-transcript-append.test.ts",
   "claude-transcript-location.test.ts",
   "codex-exec-json.test.ts",
+  "codex-flags.test.ts",
   "codex-model-ids.test.ts",
   "codex-rollout-timing.test.ts",
   "codex-tui-quit.test.ts",
@@ -35,6 +36,7 @@ const expectedOfflineCliContractTests = [
   "agent-flavor-contracts.test.ts",
   "claude-helper.test.ts",
   "claude-project-slug.test.ts",
+  "codex-helper.test.ts",
   "task-effort-spawn-contract.test.ts",
   "task-model-spawn-contract.test.ts",
 ];

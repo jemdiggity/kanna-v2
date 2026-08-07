@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { assertLiveAgentCliContractsEnabled } from "./live-contract-guard";
 
+export { codexUnavailableReason, type CodexJsonResult } from "./codex-availability";
+
 export interface CodexResult {
   stdout: string;
   stderr: string;
@@ -61,6 +63,10 @@ export async function runCodexExec(opts: {
       cwd: opts.cwd ?? "/tmp",
       env: process.env,
       // codex exec reads piped stdin to EOF before starting — keep it closed.
+      // "ignore" is /dev/null, which is EOF immediately; codex still announces
+      // the read on stderr ("Reading additional input from stdin..."), so a
+      // non-empty stderr is not evidence of a failure. Pinned by
+      // tests/live/codex-exec-json.test.ts.
       stdio: ["ignore", "pipe", "pipe"],
     });
 

@@ -17,12 +17,25 @@ export class BackgroundProcess {
   private code: number | null = null;
   readonly startedAt = Date.now();
 
-  constructor(command: string, args: string[], opts: { cwd: string; env?: Record<string, string> }) {
+  constructor(
+    command: string,
+    args: string[],
+    opts: {
+      cwd: string;
+      env?: Record<string, string>;
+      /**
+       * "ignore" (the default) hands the child /dev/null, i.e. stdin at EOF.
+       * "pipe" leaves a writable pipe open and never closes it — only useful
+       * for pinning what a CLI does while stdin stays open.
+       */
+      stdin?: "ignore" | "pipe";
+    },
+  ) {
     this.child = spawn(command, args, {
       cwd: opts.cwd,
       env: { ...process.env, ...opts.env },
       // Agent CLIs read piped stdin to EOF before starting — keep it closed.
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [opts.stdin ?? "ignore", "pipe", "pipe"],
     });
     this.child.stdout?.setEncoding("utf8");
     this.child.stderr?.setEncoding("utf8");
