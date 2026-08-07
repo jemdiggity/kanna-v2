@@ -1,9 +1,21 @@
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const PREVIOUS_TAG: &str = "v0.1.0-staging.1";
+
+/// Test-only: makes the fixture behave as if no ghostty checkout could be
+/// resolved, so `fixture_isolation` can observe what the skip notice does to a
+/// real libtest run.
+///
+/// It short-circuits the whole of [`binary`] rather than just
+/// [`ghostty_source_dir`], because a cached fixture binary returns before the
+/// resolver is ever consulted — hooking the resolver alone would make the
+/// observing test pass or fail on whether `.build/daemon-cross-version`
+/// happened to be warm.
+const FORCE_MISSING_ENV: &str = "KANNA_PREVIOUS_DAEMON_FORCE_MISSING";
 
 /// The previous-release daemon binary, or `None` when it cannot be produced
 /// without network access.
@@ -13,6 +25,9 @@ const PREVIOUS_TAG: &str = "v0.1.0-staging.1";
 /// against is the one the current build already materialized. `None` means the
 /// caller must skip — see [`binary_or_skip`], which is what the tests use.
 pub fn binary() -> Option<PathBuf> {
+    if std::env::var_os(FORCE_MISSING_ENV).is_some() {
+        return None;
+    }
     if let Some(path) = std::env::var_os("KANNA_PREVIOUS_DAEMON_BIN") {
         return Some(PathBuf::from(path));
     }
@@ -63,15 +78,28 @@ pub fn binary() -> Option<PathBuf> {
 
 /// [`binary`], announcing the skip on the way out so a lane that quietly loses
 /// its cross-version coverage says so in the log.
+///
+/// The notice goes to fd 2 through [`std::io::Stderr`] rather than through
+/// `eprintln!`. libtest's capture is installed by `set_output_capture`, which
+/// only diverts the `print!`/`eprintln!` macro path, and it keeps a passing
+/// test's captured output out of the report entirely — a skip announced with
+/// `eprintln!` is visible only under `--nocapture`, which no lane passes. These
+/// tests are the only cover for the cross-version handoff invariants in
+/// `crates/daemon/SPEC.md`, so their absence has to be legible in the ordinary
+/// run. `crates/daemon/tests/fixture_isolation.rs` holds that to be true.
 pub fn binary_or_skip(test: &str) -> Option<PathBuf> {
     let binary = binary();
     if binary.is_none() {
-        eprintln!(
+        let notice = format!(
             "SKIP {test}: no local ghostty checkout for the previous-daemon fixture. \
-             Build this workspace first (`cargo build -p kanna-daemon`), or point \
-             GHOSTTY_SOURCE_DIR at a ghostty checkout, or set \
-             KANNA_PREVIOUS_DAEMON_BIN to a prebuilt {PREVIOUS_TAG} daemon."
+             The cross-version handoff invariants in crates/daemon/SPEC.md were NOT \
+             exercised. Build this workspace first (`cargo build -p kanna-daemon`), or \
+             point GHOSTTY_SOURCE_DIR at a ghostty checkout, or set \
+             KANNA_PREVIOUS_DAEMON_BIN to a prebuilt {PREVIOUS_TAG} daemon.\n"
         );
+        let mut stderr = std::io::stderr();
+        let _ = stderr.write_all(notice.as_bytes());
+        let _ = stderr.flush();
     }
     binary
 }
