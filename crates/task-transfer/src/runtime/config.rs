@@ -35,6 +35,26 @@ const DEFAULT_MAX_ARTIFACT_RESPONSE_BYTES: usize = super::MAX_LEGACY_ARTIFACT_RE
 // (WRAP_UP_TIMEOUT + QUIT_EXIT_TIMEOUT = 360 s) with room for staging the
 // session archive, and is still a bound rather than an open wait.
 const DEFAULT_FINALIZATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+// How long an in-flight transfer keeps its source-side resources: the outgoing
+// reservation, and the artifacts staged against it.
+//
+// The reservation clock starts at *push*, and pruning it is what makes a later
+// `finalize_from_source` fail with "missing target peer" — so it has to outlive
+// the whole window the destination is allowed to wait in. A reservation that
+// expires early breaks a transfer that was working; one that expires late only
+// holds a little memory for longer. Held at 300 s it was shorter than
+// `DEFAULT_FINALIZATION_REQUEST_TIMEOUT`, which no wrap-up was slow enough to
+// reach until finalization stopped being a 1500 ms `SIGINT`.
+// `reservations_outlive_the_finalization_window` pins the relationship.
+const DEFAULT_PENDING_TRANSFER_TTL: Duration = Duration::from_secs(900);
+// How old a sealed peer request may be before it is refused as a replay.
+//
+// Deliberately *not* the TTL above, though it used to be the same number. That
+// one is a resource lifetime and grows with the finalization budget; this one
+// is a security bound and must not. Widening it to match would have handed an
+// attacker a 15-minute replay window as a side effect of letting a busy agent
+// wrap up.
+const DEFAULT_AUTHENTICATED_REQUEST_FRESHNESS: Duration = Duration::from_secs(300);
 const DEFAULT_MAX_PEER_REQUESTS: usize = 32;
 const DEFAULT_MAX_MARK_READ_PEER_REQUESTS: usize = 4;
 const DEFAULT_MAX_AUTHENTICATED_REQUEST_REPLAYS: usize = 8_192;
@@ -58,6 +78,7 @@ pub struct RuntimeConfig {
     pub(super) kanna_server_port: Option<u16>,
     pub(super) discovery_mode: DiscoveryMode,
     pub(super) pending_transfer_ttl: Duration,
+    pub(super) authenticated_request_freshness: Duration,
     pub(super) peer_request_timeout: Duration,
     /// How long the source is given to answer a finalization request.
     ///
@@ -104,7 +125,8 @@ impl RuntimeConfig {
             db_path: None,
             kanna_server_port: None,
             discovery_mode: DiscoveryMode::Registry,
-            pending_transfer_ttl: Duration::from_secs(300),
+            pending_transfer_ttl: DEFAULT_PENDING_TRANSFER_TTL,
+            authenticated_request_freshness: DEFAULT_AUTHENTICATED_REQUEST_FRESHNESS,
             peer_request_timeout: Duration::from_secs(15),
             finalization_request_timeout: DEFAULT_FINALIZATION_REQUEST_TIMEOUT,
             receipt_retry_interval: DEFAULT_RECEIPT_RETRY_INTERVAL,
@@ -136,6 +158,11 @@ impl RuntimeConfig {
 
     pub fn with_pending_transfer_ttl(mut self, pending_transfer_ttl: Duration) -> Self {
         self.pending_transfer_ttl = pending_transfer_ttl;
+        self
+    }
+
+    pub fn with_authenticated_request_freshness(mut self, freshness: Duration) -> Self {
+        self.authenticated_request_freshness = freshness;
         self
     }
 
@@ -327,7 +354,8 @@ impl RuntimeConfig {
                 .transpose()
                 .map_err(|error| RuntimeError::InvalidConfig(error.to_string()))?,
             discovery_mode,
-            pending_transfer_ttl: Duration::from_secs(300),
+            pending_transfer_ttl: DEFAULT_PENDING_TRANSFER_TTL,
+            authenticated_request_freshness: DEFAULT_AUTHENTICATED_REQUEST_FRESHNESS,
             peer_request_timeout: Duration::from_secs(15),
             finalization_request_timeout: DEFAULT_FINALIZATION_REQUEST_TIMEOUT,
             receipt_retry_interval: DEFAULT_RECEIPT_RETRY_INTERVAL,
@@ -361,5 +389,52 @@ impl RuntimeConfig {
             DiscoveryMode::Registry => "127.0.0.1",
             DiscoveryMode::Mdns => "0.0.0.0",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reservation must outlive the finalization the destination is allowed
+    /// to wait for.
+    ///
+    /// The two clocks measure from different moments — the reservation from the
+    /// push, the request window from the finalization request — so the
+    /// reservation needs the request window *plus* the ordinary request budget
+    /// the surrounding round trips spend. When it did not have that, a source
+    /// whose agent used its full wrap-up budget had its reservation pruned out
+    /// from under the answer, and the destination's import failed with
+    /// "missing target peer for outgoing transfer finalization" until it ran
+    /// out of attempts. Nothing was slow enough to reach that while
+    /// finalization was a 1500 ms `SIGINT`.
+    #[test]
+    fn reservations_outlive_the_finalization_window() {
+        assert!(
+            DEFAULT_PENDING_TRANSFER_TTL
+                >= DEFAULT_FINALIZATION_REQUEST_TIMEOUT + Duration::from_secs(15),
+            "a pending-transfer TTL of {:?} prunes the reservation a finalization of up to {:?} \
+             still needs; raise DEFAULT_PENDING_TRANSFER_TTL before lowering it, or lower the \
+             source's budget in crates/kanna-server/src/transfer_engine/finalize.rs",
+            DEFAULT_PENDING_TRANSFER_TTL,
+            DEFAULT_FINALIZATION_REQUEST_TIMEOUT,
+        );
+    }
+
+    /// …and the replay bound must not follow it up.
+    ///
+    /// The two were one constant, so the first attempt at the fix above raised
+    /// the replay window to 15 minutes as a side effect of letting a busy agent
+    /// wrap up. `task_pull_rejects_stale_and_captured_requests_before_renderer_work`
+    /// caught it; this states the rule where the constants are.
+    #[test]
+    fn the_replay_bound_does_not_grow_with_the_resource_ttl() {
+        assert!(
+            DEFAULT_AUTHENTICATED_REQUEST_FRESHNESS < DEFAULT_PENDING_TRANSFER_TTL,
+            "the replay window ({:?}) has been widened to the in-flight resource TTL ({:?}); \
+             a sealed request stays replayable for that long",
+            DEFAULT_AUTHENTICATED_REQUEST_FRESHNESS,
+            DEFAULT_PENDING_TRANSFER_TTL,
+        );
     }
 }

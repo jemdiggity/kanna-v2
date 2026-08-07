@@ -143,6 +143,7 @@ pub(super) struct ListenerContext {
     pub(super) discovery: PeerDiscovery,
     pub(super) external_peers: ExternalPeerRegistry,
     pub(super) pending_transfer_ttl: Duration,
+    pub(super) authenticated_request_freshness: Duration,
     pub(super) peer_request_timeout: Duration,
     pub(super) finalization_request_timeout: Duration,
     pub(super) incoming_connection_permits: Arc<Semaphore>,

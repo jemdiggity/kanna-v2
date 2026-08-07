@@ -1535,7 +1535,10 @@ async fn authenticate_peer_request(
             ))
         })?;
     let now_ms = unix_ms();
-    let freshness_ms = u64::try_from(context.pending_transfer_ttl.as_millis()).unwrap_or(u64::MAX);
+    // The replay bound, not the in-flight resource TTL: those were one constant
+    // until the finalization budget forced the second one to grow.
+    let freshness_ms =
+        u64::try_from(context.authenticated_request_freshness.as_millis()).unwrap_or(u64::MAX);
     if now_ms.saturating_sub(issued_at_unix_ms) > freshness_ms {
         return Err(RuntimeError::Protocol(format!(
             "stale authenticated {expected_action} request"

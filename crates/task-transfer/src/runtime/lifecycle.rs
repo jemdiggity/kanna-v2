@@ -172,6 +172,7 @@ impl TransferRuntime {
             discovery: discovery.clone(),
             external_peers: Arc::clone(&external_peers),
             pending_transfer_ttl: config.pending_transfer_ttl,
+            authenticated_request_freshness: config.authenticated_request_freshness,
             peer_request_timeout: config.peer_request_timeout,
             finalization_request_timeout: config.finalization_request_timeout,
             incoming_connection_permits,
