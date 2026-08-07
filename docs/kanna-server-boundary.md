@@ -119,10 +119,13 @@ that observes the sidecar event, and drained by one in-process loop:
   `finalize:<transfer-id>`), so a redelivery collapses onto the work already
   queued. At-least-once delivery to a window became exactly-once execution in
   one process.
-- A step that must happen at most once — signalling the source agent, closing
+- A step that must happen at most once — typing into the source agent, closing
   the source task, acknowledging an import — claims a row in
   `transfer_work_phase`. That is the durable form of the sidecar's in-memory
-  `claimed_phases`, so a resumed item continues rather than repeating.
+  `claimed_phases`, so a resumed item continues rather than repeating. A step
+  whose *answer* cannot be recomputed on a retry — what the source session
+  looked like before it was shut down, and whether the shutdown was clean —
+  records that answer in the same table, first writer wins.
 - Work left `running` by a dead process returns to `pending` at engine start,
   and incoming transfers recorded but not imported are re-enqueued. Before this,
   only `transfer-request` had any restart recovery at all.
@@ -144,6 +147,38 @@ intents:
 Progress reaches the UI through the snapshot's `transfer_status`, which the
 sidebar already renders. There is no bespoke event protocol between the engine
 and a window, and no window is required for a transfer to complete.
+
+### Source finalization
+
+A push cannot ship a conversation the source agent is still writing to, so the
+engine shuts that agent down first — by **typing at it**, not by signalling it
+(`transfer_engine/finalize.rs`):
+
+1. inject a wrap-up message through the same two-step input helper every other
+   Kanna input path uses (`task_input.rs`: the text as one write, 150 ms, then a
+   lone CR so it registers as a discrete Enter);
+2. wait for the daemon to report the session `Idle` — `Waiting` is a permission
+   prompt, not idleness, and the sequence never types into one, because the
+   prompt would consume the quit command as an answer;
+3. inject the provider's quit command (`AgentProvider::quit_command`);
+4. wait for the daemon `Exit`, and only then stage artifacts.
+
+The old mechanism was a `SIGINT` and a 1500 ms wait, and it could not work on
+any session the daemon had **adopted** through a handoff: the daemon refuses
+signals for a child it never forked, because the pid cannot be pinned across
+`kill(2)`. Every session older than the running daemon is adopted, so after
+every app upgrade no pre-existing task could be finalized. `Command::Input` has
+no such ownership check, which is what makes injection the mechanism that works
+where signalling cannot (pinned in `crates/daemon/tests/handoff.rs`).
+
+Each step appends `task.transfer_finalizing` to the task event feed with a
+`payload.phase`, because a wrap-up is legitimately minutes of latency and has to
+read as a transfer rather than as a hung task. Injection failure or a session
+that never goes idle degrades the finalization — artifacts are staged as they
+stand and the payload carries `cleanlyFinalized: false` with the reason —
+rather than failing the transfer. Destructive teardown stays last and stays
+*after* staging: it is the source task's own close, once the destination has
+acknowledged the import.
 
 A payload arrives from another machine, so everything derived from it is fenced
 before it is used: the artifact contract
@@ -220,6 +255,10 @@ polling each child. It is cursor-based, not snapshot-diffed:
   is a positive match on a prompt the agent CLI rendered. It is deliberately
   never inferred from a session going quiet; see
   [2026-07-29-awaiting-input-detection-e2e-gap.md](2026-07-29-awaiting-input-detection-e2e-gap.md).
+- `task.transfer_finalizing` reports each step of a cross-machine transfer
+  shutting the task's agent down (`payload.phase`: `wrap-up-sent`, `idle`,
+  `quit-sent`, `exited`, `already-exited`, `degraded`). See
+  [Source finalization](#source-finalization).
 
 Three scopes, in precedence order: `taskIds`, then `parentTaskId`, then
 `repoId`. `parentTaskId` exists because the other two do not cover a fan-out

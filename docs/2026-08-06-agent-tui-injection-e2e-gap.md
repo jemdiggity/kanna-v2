@@ -18,8 +18,18 @@ assuming them:
    sequence waits for `Idle` first — quitting early truncates the wrap-up).
 
 Both are now pinned by live tests **against OpenCode**; the quit command itself
-is additionally pinned against **Codex** (execution, not preemption). Neither is
-pinned against **Claude**.
+is additionally pinned against **Codex** and **Copilot** (execution, not
+preemption). Neither is pinned against **Claude**.
+
+**Update 2026-08-07** (Phase 4 landed, `transfer_engine/finalize.rs`): the quit
+command is now read off the provider registry (`AgentProvider::quit_command`),
+so it needed an answer for every provider Kanna can spawn, not just the two the
+plan named. Copilot's `/exit` was verified against the installed CLI and is
+pinned by `copilot-tui-quit.test.ts`. Antigravity's `/exit` was verified the same
+way but is **not** pinned by a test: `agy` has no transferable session state
+(`payload.rs::required_session_artifact_kind`), so a transfer of an Antigravity
+task ships no conversation and a wrong quit command would cost a clean shutdown
+rather than a conversation.
 
 ## The gap
 
@@ -55,16 +65,24 @@ the injection half for Claude.
   the daemon `Exit` event and a transcript containing the wrap-up. That exercises
   the same bytes without a test harness impersonating a user at a TUI, and it is
   the E2E Phase 4 already owes (`docs/…-plan.md`, Phase 4 E2E expectation).
+  **That E2E now exists** —
+  `apps/desktop/tests/e2e/real/local-transfer-busy-agent-wrapup.test.ts` — but it
+  runs against OpenCode, because the real-E2E runner forces that provider
+  (`apps/desktop/tests/e2e/runEnv.ts`). Pointing the same suite at Claude closes
+  this gap without any new harness; what stops it is the runner's provider, not
+  the test.
 
 Codex mid-turn preemption is unpinned for a smaller reason: proving a Codex turn
 is in flight means letting it write a file, which means answering its approval
 prompts, and the marginal evidence did not justify that machinery. OpenCode
 covers the behavior; Codex covers that the quit command works at all.
 
-Until one of those exists, treat Claude `/exit` preemption as unverified by CI.
-Decision 3's sequence is safe either way: it waits for `Idle` before quitting, so
-it does not *depend* on preemption — preemption only decides whether the
-degradation ladder's forced quit truncates work or blocks.
+Until Claude itself is driven, treat Claude `/exit` preemption as unverified by
+CI. Decision 3's sequence is safe either way: it waits for `Idle` before
+quitting, so it does not *depend* on preemption. As landed it does not even have
+a forced quit — a session that will not go idle degrades and is left for the
+source task's own close to tear down — so preemption decides nothing about
+correctness, only about how a hypothetical future forced quit would behave.
 
 ## What the tests settled about the quit command
 
