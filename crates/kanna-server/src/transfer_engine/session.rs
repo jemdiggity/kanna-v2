@@ -226,16 +226,28 @@ fn plan_opencode_export(
     worktree_path: Option<&Path>,
 ) -> Result<Option<SessionArtifactPlan>, MissingSessionArtifact> {
     if agent_type != Some("pty") {
+        log::debug!("opencode transfer plan: agent_type is {agent_type:?}, not a PTY session");
         return Ok(None);
     }
     let Some(worktree_path) = worktree_path.filter(|path| path.is_dir()) else {
+        log::warn!(
+            "opencode transfer plan: no worktree directory to look a session up in ({worktree_path:?})"
+        );
         return Ok(None);
     };
     let Some(session_id) = super::git::latest_opencode_session_for_worktree(worktree_path)
         .map_err(MissingSessionArtifact)?
     else {
+        log::info!(
+            "opencode transfer plan: no session recorded for {}",
+            worktree_path.display()
+        );
         return Ok(None);
     };
+    log::info!(
+        "opencode transfer plan: shipping session {session_id} from {}",
+        worktree_path.display()
+    );
     Ok(Some(SessionArtifactPlan {
         session_id,
         provider: "opencode".to_string(),

@@ -472,17 +472,20 @@ fn opencode(cwd: &Path, args: &[&str]) -> Result<String, String> {
 
 /// The OpenCode session this worktree has been talking to, newest first.
 ///
-/// OpenCode records each session's working directory, and a task's worktree is
-/// unique to that task, so the directory is the key. The comparison is against
-/// the kernel-resolved path — `opencode` stores the realpath, and a worktree
-/// can sit under a symlinked root, which is the case for every E2E fixture.
+/// Two different paths are load-bearing here and they are not interchangeable.
+/// The CLI runs in `worktree_path` **as given**, because `session list` is
+/// scoped to the project of the directory it runs in and handing it a different
+/// spelling of that directory can scope it somewhere else. The comparison is
+/// against the kernel-resolved path, because that is what OpenCode *records* —
+/// and a worktree can sit under a symlinked root, which is the case for every
+/// E2E fixture.
 pub fn latest_opencode_session_for_worktree(
     worktree_path: &Path,
 ) -> Result<Option<String>, String> {
     let resolved = worktree_path
         .canonicalize()
         .unwrap_or_else(|_| worktree_path.to_path_buf());
-    let listing = opencode(&resolved, &["session", "list", "--format", "json"])?;
+    let listing = opencode(worktree_path, &["session", "list", "--format", "json"])?;
     let sessions: serde_json::Value = serde_json::from_str(listing.trim())
         .map_err(|error| format!("opencode session listing is not valid JSON: {error}"))?;
     let Some(sessions) = sessions.as_array() else {

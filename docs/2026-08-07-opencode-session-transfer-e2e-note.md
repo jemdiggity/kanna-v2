@@ -50,7 +50,15 @@ directory holding only a lock file.
   cannot carry it.
 - **`opencode session list` and `export` are project-scoped.** A session opened
   in a task worktree is invisible from any other project's directory, so every
-  lookup runs with the worktree as its working directory.
+  lookup runs with the worktree as its working directory — and with the path
+  *as the caller holds it*, not a canonicalized spelling of it. Those are two
+  different directories to OpenCode's project scoping: canonicalizing the cwd
+  scopes the listing elsewhere and returns a `projectId: "global"` page of
+  unrelated sessions, so the task's own session is simply absent. The
+  comparison, by contrast, is against the kernel-resolved path, because that is
+  what OpenCode *records*. Getting those two the wrong way round reports "no
+  conversation" for a task that has one — caught by this suite, on the engine,
+  as `expected null to be 'ses_…'`.
 - **Resume is directory-keyed.** OpenCode matches a session's recorded
   `directory` against the current working directory;
   `opencode run --session <id>` from anywhere else is a **silent no-op** — no
@@ -81,8 +89,10 @@ real two-instance LAN transfer of a **live** OpenCode PTY task and asserts:
   re-sends the same prompt on the destination, so the user half of the exchange
   reappears whether or not any history crossed.
 
-Verified non-vacuous: with the OpenCode arm disabled, the suite fails with
-`expected null to be 'ses_…'` — the payload ships no resume id, which is exactly
+Verified non-vacuous on the engine, not just inherited from the renderer
+version: with `plan_opencode_export` stubbed to `Ok(None)` the suite fails, and
+with it restored it passes — three consecutive runs. The failure it produces is
+`expected null to be 'ses_…'`: the payload ships no resume id, which is exactly
 the silent-loss shape.
 
 The Rust fence (`crates/kanna-server/src/transfer_artifact.rs`) has unit
