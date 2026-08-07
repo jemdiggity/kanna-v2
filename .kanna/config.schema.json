@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.kanna.build/config.schema.json",
   "title": "Kanna Repo Config",
-  "description": "Schema for .kanna/config.json used by Kanna agents and editors.",
+  "description": "Schema for .kanna/config.json used by Kanna agents and editors. The same schema describes the optional machine-local companion file .kanna/config.local.json, which is read from the checkout's working tree (never from origin), is gitignored, and is deep-merged over this file with local winning. That file may set only: agentProviders, pipeline, ports, setup, teardown, test. Any other key in it is an error, not an ignored line. agentProviders and ports merge entry by entry with the local entry replacing the committed one of the same name; everything else replaces outright, and arrays never concatenate.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -46,7 +46,7 @@
     },
     "agentProviders": {
       "type": "object",
-      "description": "Repo-level provider, model, and effort preferences by agent name or * glob. Exact names win; otherwise the matching glob with the most non-* characters wins, with lexical order breaking ties. Provider/model/effort resolution is explicit task or stage override, then this map, then layered AGENT.md/EXTEND.md frontmatter, then the global default.",
+      "description": "Repo-level provider, model, and effort preferences by agent name or * glob. Exact names win; otherwise the matching glob with the most non-* characters wins, with lexical order breaking ties. Provider/model/effort resolution is explicit task or stage override, then this map, then layered AGENT.md/EXTEND.md frontmatter, then the global default. A machine-local .kanna/config.local.json replaces individual entries of this map for that checkout only, which is how one machine reorders providers around an outage without a commit.",
       "propertyNames": {
         "type": "string",
         "minLength": 1

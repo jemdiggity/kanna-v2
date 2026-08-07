@@ -272,6 +272,7 @@ pub(super) fn run_workspace_setup_commands(
         "true",
         setup_cmds,
         None,
+        None,
         env.get("KANNA_CLI_PATH").map(String::as_str),
         env.get("PATH").map(String::as_str),
     );
@@ -293,6 +294,7 @@ pub(super) fn run_workspace_setup_commands_with_timeout(
     let command = build_task_shell_command(
         "true",
         setup_cmds,
+        None,
         None,
         env.get("KANNA_CLI_PATH").map(String::as_str),
         env.get("PATH").map(String::as_str),
