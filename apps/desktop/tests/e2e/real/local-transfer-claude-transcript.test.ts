@@ -159,9 +159,9 @@ describe("local transfer Claude conversation continuity", () => {
     ).catch(() => [])) as RepoRow[];
     await cleanupWorktrees(primary, testRepoPath).catch(() => undefined);
     await cleanupWorktrees(secondary, testRepoPath).catch(() => undefined);
-    await cleanupFixtureRepos([testRepoPath, ...acquired.map((repo) => repo.path)]).catch(
-      () => undefined,
-    );
+    await cleanupFixtureRepos(
+      [testRepoPath, ...acquired.map((repo) => repo.path)].filter(Boolean),
+    ).catch(() => undefined);
     await primary.deleteSession().catch(() => undefined);
     await secondary.deleteSession().catch(() => undefined);
   });
