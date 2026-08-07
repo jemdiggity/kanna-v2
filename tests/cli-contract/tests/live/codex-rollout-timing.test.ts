@@ -2,7 +2,7 @@ import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { findCodexBinary } from "../../helpers/codex";
+import { findCodexBinary, codexUnavailableReason } from "../../helpers/codex";
 import { codexBinaryOrNull } from "../../helpers/availability";
 import { BackgroundProcess, makeRealTempDir, removeDir, sleep } from "../../helpers/background";
 
@@ -97,7 +97,20 @@ describe("codex rollout file timing", () => {
         ctx.skip(`codex emitted no thread.started (exit ${exitCode}): ${child.stderr.slice(0, 200)}`);
         return;
       }
-      expect(exitCode, `codex failed: ${child.stderr}`).toBe(0);
+      // An out-of-credits or unauthenticated account fails the turn in under a
+      // second, which says nothing about rollout timing. Read the JSONL, not
+      // stderr: codex prints "Reading additional input from stdin..." there on
+      // every run, so a stderr-only diagnosis mistakes a spent account for a
+      // change in how codex is invoked.
+      const unavailable = codexUnavailableReason({
+        exitCode: exitCode ?? -1,
+        lines: child.jsonLines(),
+      });
+      if (unavailable) {
+        ctx.skip(unavailable);
+        return;
+      }
+      expect(exitCode, `codex failed: ${child.stdout}\n${child.stderr}`).toBe(0);
 
       expect(
         firstSighting,

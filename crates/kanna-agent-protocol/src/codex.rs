@@ -7,7 +7,10 @@
 //!
 //! Daemon note (phase 2): `codex exec` reads stdin to EOF when it is piped —
 //! spawned agent sessions must close the child's stdin immediately or the
-//! process waits forever before starting.
+//! process waits forever before starting. Codex announces that read on stderr
+//! ("Reading additional input from stdin..."), so its stderr carries a line on
+//! every run and is not on its own evidence of a failed invocation. Both halves
+//! are pinned by `tests/cli-contract/tests/live/codex-exec-json.test.ts`.
 
 use std::collections::HashSet;
 use std::time::Instant;
