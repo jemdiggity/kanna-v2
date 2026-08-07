@@ -13,7 +13,7 @@ interface AgentMessageViewProps {
   onResolvePermission(requestId: string, decision: PermissionDecision): void;
 }
 
-export function AgentMessageView({
+export function AgentMessageViewComponent({
   events,
   status,
   errorMessage,
@@ -69,6 +69,15 @@ export function AgentMessageView({
     </View>
   );
 }
+
+// The task screen owns the agent transcript and the reply composer, so it
+// re-renders on state this view has no stake in — every keystroke of a draft,
+// every keyboard frame, every chrome measurement. Each of those renders walks
+// the whole event list three times and rebuilds every bubble, tool card, and
+// permission prompt, on a list that only grows while an agent streams. Re-render
+// only when the transcript's own inputs change. This mirrors TerminalWebView,
+// the sibling view on the pty path.
+export const AgentMessageView = React.memo(AgentMessageViewComponent);
 
 function renderEvent(
   event: AgentEvent,

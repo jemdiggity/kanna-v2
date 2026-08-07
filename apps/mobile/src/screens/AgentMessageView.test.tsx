@@ -16,10 +16,14 @@ vi.mock("../components/LoadingText", () => ({
   LoadingText: "LoadingText"
 }));
 
-let AgentMessageView: typeof import("./AgentMessageView").AgentMessageView | null = null;
+// The exported AgentMessageView is memoized; this harness drives the component
+// implementation directly.
+let AgentMessageView:
+  | typeof import("./AgentMessageView").AgentMessageViewComponent
+  | null = null;
 
 beforeAll(async () => {
-  AgentMessageView = (await import("./AgentMessageView")).AgentMessageView;
+  AgentMessageView = (await import("./AgentMessageView")).AgentMessageViewComponent;
 });
 
 interface ElementNode {
