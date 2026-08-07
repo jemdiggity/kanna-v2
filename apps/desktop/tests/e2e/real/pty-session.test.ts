@@ -644,9 +644,7 @@ describe("pty session (real CLI)", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
     testRepoPath = await createFixtureRepo("claude-real-test");
     repoId = await importTestRepo(client, testRepoPath, "claude-real-test");
   });

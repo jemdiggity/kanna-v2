@@ -870,6 +870,12 @@ export function useAppLifecycle({
       shortcutsStartFull.value = true;
       showShortcutsModal.value = true;
     }
+    // `ready` is raised well before this point, so it cannot tell an E2E driver
+    // whether the startup shortcuts modal is still on its way. This marks the
+    // decision itself as made, either way.
+    if (import.meta.env.DEV && window.__KANNA_E2E__) {
+      window.__KANNA_E2E__.startupOverlaysSettled = true;
+    }
     const raw = await getDesktopSetting("commandPaletteUsage");
     if (raw) {
       try { commandUsageCounts.value = JSON.parse(raw) as Record<string, number>; }

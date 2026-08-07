@@ -26,7 +26,7 @@ function createFakeClient(): FakeClient {
       this.waitCalls.push({ css, timeoutMs });
       if (css === ".modal-overlay") return "modal";
       if (css === ".modal-overlay textarea") return "textarea";
-      if (css === ".modal-overlay .btn-primary") return "submit";
+      if (css === ".modal-overlay .btn-primary:not(:disabled)") return "submit";
       throw new Error(`unexpected selector ${css}`);
     },
     async waitForNoElement(css: string, timeoutMs = 5000): Promise<void> {
@@ -58,7 +58,12 @@ describe("submitTaskFromUi", () => {
     expect(client.executeCalls[0]).toContain("shiftKey: true");
     expect(client.waitCalls).toContainEqual({ css: ".modal-overlay", timeoutMs: 2000 });
     expect(client.waitCalls).toContainEqual({ css: ".modal-overlay textarea", timeoutMs: 2000 });
-    expect(client.waitCalls).toContainEqual({ css: ".modal-overlay .btn-primary", timeoutMs: 2000 });
+    // The Create button exists while it is still disabled; clicking it then is
+    // a silent no-op, so the flow must wait for the enabled button.
+    expect(client.waitCalls).toContainEqual({
+      css: ".modal-overlay .btn-primary:not(:disabled)",
+      timeoutMs: 10_000,
+    });
     expect(client.sendKeyCalls).toEqual([{ elementId: "textarea", text: "Write a real e2e task" }]);
     expect(client.clickCalls).toEqual(["submit"]);
     expect(client.waitCalls).toContainEqual({ css: ".modal-overlay", timeoutMs: 5000 });

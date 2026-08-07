@@ -4,7 +4,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
-import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { pressShiftEnterInActiveTerminal } from "../helpers/terminalInput";
 import { callVueMethod, getVueState, queryDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
@@ -88,9 +87,7 @@ describe("opencode soft newline (real CLI)", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
     testRepoPath = await createFixtureRepo("opencode-soft-newline-real-test");
     repoId = await importTestRepo(client, testRepoPath, "opencode-soft-newline-real-test");
   });
@@ -134,9 +131,7 @@ describe("opencode soft newline (real CLI)", () => {
     await waitForDaemonSession(client, taskId);
     await client.waitForElement(".terminal-container", 15_000);
 
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
     await callVueMethod(client, "store.selectRepo", repoId);
     await callVueMethod(client, "store.selectItem", taskId);
     await waitForCurrentItemId(client, taskId);

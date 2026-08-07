@@ -6,7 +6,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
-import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { nudgeTerminalTrustPrompt } from "../helpers/terminalInput";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
@@ -88,9 +87,7 @@ describe("real blocked task resume agent submission", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
 
     testRepoPath = await createFixtureRepo("blocked-resume-real-agent-test");
     const kannaDir = join(testRepoPath, ".kanna");

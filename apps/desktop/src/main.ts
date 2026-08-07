@@ -217,6 +217,7 @@ try {
     const appWithSetupState = app as typeof app & AppWithSetupState;
     window.__KANNA_E2E__ = {
       ready: false,
+      startupOverlaysSettled: false,
       get setupState() {
         const setupState = appWithSetupState._instance?.setupState;
         if (!setupState) return null;

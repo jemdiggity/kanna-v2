@@ -7,7 +7,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { buildGlobalKeydownScript } from "../helpers/keyboard";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
-import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { callVueMethod, queryDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 import { waitForFile } from "../helpers/worktreeFs";
@@ -147,9 +146,7 @@ describe("task shell modal", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
 
     testRepoPath = await createFixtureRepo("shell-modal-prewarmed-session-real-test");
     await importTestRepo(client, testRepoPath, "shell-modal-prewarmed-session-real-test");

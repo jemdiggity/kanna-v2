@@ -7,7 +7,6 @@ import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo"
 import { buildGlobalKeydownScript } from "../helpers/keyboard";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { dragSortableTaskToTarget } from "../helpers/sidebarDrag";
-import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { pairWithPeerThroughUi } from "../helpers/transferFlow";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
@@ -839,9 +838,7 @@ describe("local transfer task sync", () => {
 
     // The pin survives a full viewer reload: the setting is read back from
     // the settings table and reapplied to the freshly synced LAN task.
-    await secondary.executeSync("location.reload()");
-    await secondary.waitForAppReady();
-    await dismissStartupShortcutsModal(secondary);
+    await secondary.reload();
     await waitForSidebarTask("LAN pin persistence task");
     await waitForPinnedZoneMembership(secondaryRepoId, remoteItemId, true, 30_000);
     expect((await remoteTaskPinsSetting(secondary))[ownerTaskId]).toBe(remoteOrder);
