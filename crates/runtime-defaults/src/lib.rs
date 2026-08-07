@@ -1,9 +1,26 @@
 pub mod session_id;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Version of the server/daemon contract that fences protected terminal input.
 pub const PROTECTED_INPUT_PROTOCOL_VERSION: u32 = 1;
+
+/// How long a transfer's destination may wait for the source to answer the
+/// finalization request — the one peer request whose answer waits on a person's
+/// agent being asked to stop rather than on local work.
+///
+/// Shared because the two halves of that request are enforced in crates that do
+/// not depend on each other: the transfer sidecar
+/// (`crates/task-transfer/src/runtime/config.rs`) bounds the wait, and
+/// `kanna-server`'s shutdown sequence
+/// (`crates/kanna-server/src/transfer_engine/finalize.rs`) has to finish inside
+/// it, reaching the sidecar over stdio rather than by linking it. While each side
+/// restated the number, only one direction was guarded: the server's fit test
+/// caught its own budget growing past the copy, and nothing caught the sidecar's
+/// window shrinking under a budget that still fit that copy. One constant makes
+/// either change fail the same test.
+pub const TRANSFER_FINALIZATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub const DESKTOP_BUNDLE_IDENTIFIER: &str = "build.kanna";
 pub const STAGING_DESKTOP_BUNDLE_IDENTIFIER: &str = "build.kanna.staging";

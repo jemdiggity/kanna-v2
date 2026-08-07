@@ -16,8 +16,9 @@
 //! takes. So finalization *asks* the agent to stop instead of signalling it:
 //!
 //! 1. inject a wrap-up message through the ordinary two-step input helper;
-//! 2. wait for the session to reach `Idle` — the composer-free state — off the
-//!    daemon `StatusChanged` stream the server already consumes;
+//! 2. wait for the session to reach `Idle` — the composer-free state — and to
+//!    stay there, off the daemon `StatusChanged` stream the server already
+//!    consumes;
 //! 3. inject the provider's quit command (`/exit`, `/quit` for Codex);
 //! 4. wait for the daemon `Exit`.
 //!
@@ -30,7 +31,11 @@
 //! Step 2 is load-bearing rather than decorative: the quit command preempts an
 //! agent that is mid-turn (pinned against OpenCode in
 //! `opencode-injected-input.test.ts`), so quitting before the agent is idle
-//! truncates the very wrap-up the transfer is trying to capture.
+//! truncates the very wrap-up the transfer is trying to capture. And *reaching*
+//! `Idle` is not the same as being finished — the daemon can publish it inside
+//! the injection's own gap between message and CR, or between two turns of a
+//! 500 ms-throttled detector — so the status has to hold for a settle window
+//! before the quit goes out ([`IDLE_SETTLE`], [`IDLE_EDGE_SETTLE`]).
 //!
 //! **`Waiting` is not `Idle`, and nothing may be typed while it holds.** It
 //! means the agent is parked on a permission prompt, which consumes the next
@@ -105,7 +110,8 @@ const WRAP_UP_MESSAGE: &str = "This task is being transferred to another machine
 ///
 /// This is not a free number. The destination is blocked on this finalization
 /// over a peer request the whole time, so it has to be bounded by what that
-/// request allows — see [`PEER_FINALIZATION_WINDOW`].
+/// request allows — `kanna_runtime_defaults::TRANSFER_FINALIZATION_REQUEST_TIMEOUT`,
+/// held by [`the_shutdown_budget_fits_inside_the_peer_finalization_window`].
 const WRAP_UP_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long a session that is *already* `Idle` may stay silent before the
@@ -119,32 +125,33 @@ const WRAP_UP_TIMEOUT: Duration = Duration::from_secs(300);
 /// to start is not mistaken for one that has finished.
 const IDLE_SETTLE: Duration = Duration::from_secs(20);
 
+/// How long a session that was *seen going* `Idle` may stay silent before the
+/// wrap-up is treated as finished.
+///
+/// Shorter than [`IDLE_SETTLE`] because an observed transition is real evidence
+/// where silence is only the absence of it — but not zero, which is what taking
+/// the edge as the answer amounted to. Two `Idle` edges mean nothing about the
+/// wrap-up:
+///
+/// - the injection is two writes with a pause between them
+///   (`SUBMIT_ENTER_DELAY_MS`, 150 ms), and the daemon can publish `Idle` inside
+///   that gap — the session is idle because the message has not been submitted
+///   yet;
+/// - busy detection is 500 ms-throttled, so an agent that pauses between turns
+///   can be published as `Idle` mid-work.
+///
+/// Either one let `/exit` preempt the very wrap-up the transfer exists to
+/// capture, while the finalization still reported `cleanlyFinalized: true`. A
+/// window of four detection intervals is long enough for a turn that has really
+/// started to be published as `Busy` and reset it, and costs under 1% of
+/// [`WRAP_UP_TIMEOUT`] when the agent genuinely was done.
+const IDLE_EDGE_SETTLE: Duration = Duration::from_secs(2);
+
 /// How long the agent gets to exit after the quit command.
 ///
 /// This is a process teardown, not a turn: a provider that has not exited by
 /// now is not going to.
 const QUIT_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// The window the transfer sidecar allows the source to answer a finalization
-/// request in — `DEFAULT_FINALIZATION_REQUEST_TIMEOUT` in
-/// `crates/task-transfer/src/runtime/config.rs`, restated here because this is
-/// the side that has to fit inside it.
-///
-/// The destination does not merely wait while this sequence runs; it waits *on
-/// a peer request*. Until that request had a window of its own, it shared the
-/// ordinary 15 s one, and every wrap-up longer than a few seconds surfaced on
-/// the destination as `PeerRequestTimeout` — a retriable import failure that
-/// spent one of `MAX_TRANSFER_WORK_ATTEMPTS` on a finalization that was
-/// proceeding normally. The transfer still completed, off the cached result a
-/// later attempt collected, which is why nothing failed loudly; what it cost
-/// was the retry budget reserved for the genuinely transient failures
-/// (`import.rs`, `git.rs` — a locked OpenCode store, a dropped artifact fetch).
-///
-/// So this sequence's own budget has to stay inside that window with room for
-/// staging the session archive afterwards, which
-/// [`the_shutdown_budget_fits_inside_the_peer_finalization_window`] holds.
-/// Raising `WRAP_UP_TIMEOUT` past it means raising the sidecar's window first.
-const PEER_FINALIZATION_WINDOW: Duration = Duration::from_secs(600);
 
 /// Claimed before the wrap-up is injected, so a work item resumed after a crash
 /// does not type the message into the agent a second time.
@@ -294,7 +301,10 @@ async fn run_sequence(
     }
 
     // 2. Idle.
-    match observer.wait_for_idle(WRAP_UP_TIMEOUT, IDLE_SETTLE).await {
+    match observer
+        .wait_for_idle(WRAP_UP_TIMEOUT, IDLE_SETTLE, IDLE_EDGE_SETTLE)
+        .await
+    {
         IdleOutcome::Idle => record_phase(state, task_id, "idle", None),
         IdleOutcome::Exited => {
             // The agent ended its own session while wrapping up. That is the
@@ -576,7 +586,23 @@ impl SessionObserver {
         }
     }
 
-    async fn wait_for_idle(&mut self, budget: Duration, settle: Duration) -> IdleOutcome {
+    /// Waits for the session to be idle *and stay* idle.
+    ///
+    /// Two windows, because the two ways of learning that a turn is over carry
+    /// different weight. A session that was already idle when the observer
+    /// attached has only silence to go on and waits `settle` for it; a session
+    /// seen transitioning to `Idle` has evidence and waits the shorter
+    /// `edge_settle` — but it does wait, because an `Idle` published during the
+    /// wrap-up's own injection, or between two turns of a throttled detector,
+    /// says nothing about the wrap-up being finished. Either window is restarted
+    /// by any further event about this session, so an agent that goes back to
+    /// work is not reported idle.
+    async fn wait_for_idle(
+        &mut self,
+        budget: Duration,
+        settle: Duration,
+        edge_settle: Duration,
+    ) -> IdleOutcome {
         let start = tokio::time::Instant::now();
         let deadline = start + budget;
         // Silence is measured from the last event *about this session*, not
@@ -587,12 +613,17 @@ impl SessionObserver {
         // post-wrap-up turn was too short to be seen as busy would wait out the
         // whole budget and degrade a shutdown that was fine.
         let mut silent_since = start;
+        // Set once this session has been *seen* going idle, which is what buys
+        // the shorter window. Never unset: an agent that goes busy and idle
+        // again has been seen twice over, and the window is measured from the
+        // last event either way.
+        let mut idle_edge_seen = false;
         loop {
             let now = tokio::time::Instant::now();
             if now >= deadline {
                 return IdleOutcome::TimedOut(self.status);
             }
-            let settled_at = silent_since + settle;
+            let settled_at = silent_since + if idle_edge_seen { edge_settle } else { settle };
             // Silence only means "finished" for a session that is already idle;
             // anything else is the agent still at it, and waits out the budget.
             let idle = self.status == SessionStatus::Idle;
@@ -610,11 +641,16 @@ impl SessionObserver {
                         silent_since = tokio::time::Instant::now();
                     }
                     match event {
+                        // An idle edge is not the answer on its own; it starts
+                        // the shorter settle window, which the loop head reads.
                         DaemonEvent::StatusChanged {
                             ref session_id,
                             status: SessionStatus::Idle,
                             ..
-                        } if *session_id == self.session_id => return IdleOutcome::Idle,
+                        } if *session_id == self.session_id => {
+                            idle_edge_seen = true;
+                            continue;
+                        }
                         DaemonEvent::Exit { ref session_id, .. }
                             if *session_id == self.session_id =>
                         {
@@ -988,6 +1024,70 @@ mod tests {
         );
     }
 
+    /// The `Idle` the daemon publishes *while the wrap-up is being typed* is not
+    /// the end of the wrap-up.
+    ///
+    /// The two-step input helper writes the message, pauses so the newline
+    /// registers as a discrete Enter, and only then writes the CR. The session is
+    /// legitimately idle across that gap — nothing has been submitted yet — and
+    /// the daemon publishes status changes as they happen, so an `Idle` edge
+    /// lands inside it. Returned on, it let `/exit` follow the wrap-up straight
+    /// into the composer: the agent was asked to wrap up, killed before it could
+    /// answer, and the payload still shipped `cleanlyFinalized: true` with the
+    /// truncated conversation. The quit waits for the status to *hold*.
+    #[tokio::test]
+    async fn an_idle_published_while_the_wrap_up_is_typed_does_not_release_the_quit() {
+        let daemon = FakeDaemon::start("idle-mid-injection", Some(SessionStatus::Busy));
+        let state = state_for(&daemon, "desktop-finalize-mid-injection");
+
+        let sequence = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("claude"))
+                    .await
+            }
+        });
+
+        // The message is out and the CR is not: exactly the gap the helper
+        // leaves, and the session is idle inside it.
+        daemon.wait_for_inputs(1).await;
+        daemon.status(SessionStatus::Idle);
+
+        // The CR lands, the agent takes the message and starts the wrap-up.
+        daemon.wait_for_inputs(2).await;
+        daemon.status(SessionStatus::Busy);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            daemon.inputs().len(),
+            2,
+            "the quit was released by an idle published mid-injection: {:?}",
+            daemon.inputs(),
+        );
+        assert_eq!(
+            daemon.inputs_at_idle(),
+            Some(1),
+            "the idle under test was not the one inside the injection",
+        );
+
+        // The real end of the turn.
+        daemon.status(SessionStatus::Idle);
+        daemon.wait_for_inputs(4).await;
+        daemon.exit();
+
+        let outcome = sequence.await.expect("sequence");
+        assert!(
+            outcome.cleanly_finalized(),
+            "a sequence that ran to completion reported degraded: {:?}",
+            outcome.degraded_reason,
+        );
+        assert_eq!(
+            daemon.inputs()[2],
+            "/exit",
+            "the quit command was not what followed the wrap-up: {:?}",
+            daemon.inputs(),
+        );
+    }
+
     /// Codex names its quit command differently, and finalization reads it off
     /// the provider registry rather than hard-coding one command.
     #[tokio::test]
@@ -1087,7 +1187,11 @@ mod tests {
         daemon.status(SessionStatus::Waiting);
 
         let outcome = observer
-            .wait_for_idle(Duration::from_millis(400), Duration::from_millis(50))
+            .wait_for_idle(
+                Duration::from_millis(400),
+                Duration::from_millis(50),
+                Duration::from_millis(20),
+            )
             .await;
 
         assert!(
@@ -1141,7 +1245,11 @@ mod tests {
         let mut observer = observer_for(&daemon).await;
 
         let outcome = observer
-            .wait_for_idle(Duration::from_secs(5), Duration::from_millis(50))
+            .wait_for_idle(
+                Duration::from_secs(5),
+                Duration::from_millis(50),
+                Duration::from_millis(20),
+            )
             .await;
 
         assert!(
@@ -1179,7 +1287,11 @@ mod tests {
         });
 
         let outcome = observer
-            .wait_for_idle(Duration::from_secs(3), Duration::from_millis(400))
+            .wait_for_idle(
+                Duration::from_secs(3),
+                Duration::from_millis(400),
+                Duration::from_millis(400),
+            )
             .await;
         ticker.abort();
 
@@ -1187,6 +1299,37 @@ mod tests {
             matches!(outcome, IdleOutcome::Idle),
             "another session's events kept the settle window open, so this one \
              never read as idle",
+        );
+    }
+
+    /// An `Idle` *edge* is evidence, not a verdict.
+    ///
+    /// Busy detection is 500 ms-throttled, so an agent that pauses between two
+    /// stretches of its own work can be published as `Idle` mid-turn. Returning
+    /// on the first edge typed `/exit` at an agent that was still going —
+    /// truncating the very wrap-up the sequence exists to capture, and reporting
+    /// the finalization clean. The edge starts the shorter settle window
+    /// instead, and the return to `Busy` cancels it.
+    #[tokio::test]
+    async fn an_idle_edge_that_goes_back_to_busy_is_not_a_finished_turn() {
+        let daemon = FakeDaemon::start("idle-blip", Some(SessionStatus::Busy));
+        let mut observer = observer_for(&daemon).await;
+        daemon.status(SessionStatus::Idle);
+        daemon.status(SessionStatus::Busy);
+
+        let outcome = observer
+            .wait_for_idle(
+                Duration::from_millis(400),
+                // Long enough that only the edge window could end this wait, so
+                // a pass cannot come from the already-idle fallback.
+                Duration::from_secs(30),
+                Duration::from_millis(100),
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, IdleOutcome::TimedOut(SessionStatus::Busy)),
+            "an idle blip inside a turn was read as a finished turn",
         );
     }
 
@@ -1198,7 +1341,11 @@ mod tests {
         let mut observer = observer_for(&daemon).await;
 
         let outcome = observer
-            .wait_for_idle(Duration::from_millis(250), Duration::from_millis(50))
+            .wait_for_idle(
+                Duration::from_millis(250),
+                Duration::from_millis(50),
+                Duration::from_millis(20),
+            )
             .await;
 
         assert!(matches!(
@@ -1217,29 +1364,32 @@ mod tests {
     /// not for waiting. The transfer still completed off the cached
     /// finalization result, so nothing failed loudly; the cost was invisible.
     ///
-    /// The two numbers live in different crates that do not depend on each
-    /// other (`kanna-server` reaches the sidecar over stdio), so this is what
-    /// keeps them in step: raising the budget past the window fails here,
-    /// naming the file to raise first. The behaviour itself is pinned where
-    /// both ends of the request exist, in
-    /// `crates/task-transfer/tests/runtime.rs`.
+    /// The two ends of the request are enforced in crates that do not depend on
+    /// each other (`kanna-server` reaches the sidecar over stdio), so the window
+    /// is read from `kanna-runtime-defaults`, which both already depend on,
+    /// rather than restated here. That makes this one assertion guard both
+    /// directions: raising the budget past the window fails it, and so does
+    /// shrinking the window under the budget — which a hand-copied window could
+    /// not catch. The behaviour itself is pinned where both ends of the request
+    /// exist, in `crates/task-transfer/tests/runtime.rs`.
     #[test]
     fn the_shutdown_budget_fits_inside_the_peer_finalization_window() {
+        let window = kanna_runtime_defaults::TRANSFER_FINALIZATION_REQUEST_TIMEOUT;
         let shutdown = WRAP_UP_TIMEOUT + QUIT_EXIT_TIMEOUT;
         assert!(
-            shutdown < PEER_FINALIZATION_WINDOW,
+            shutdown < window,
             "the shutdown budget ({}s) no longer fits inside the sidecar's finalization window \
-             ({}s); raise DEFAULT_FINALIZATION_REQUEST_TIMEOUT in \
-             crates/task-transfer/src/runtime/config.rs first, or the destination will time out \
+             ({}s); raise TRANSFER_FINALIZATION_REQUEST_TIMEOUT in \
+             crates/runtime-defaults/src/lib.rs first, or the destination will time out \
              mid-wrap-up and spend an import attempt on it",
             shutdown.as_secs(),
-            PEER_FINALIZATION_WINDOW.as_secs(),
+            window.as_secs(),
         );
         // Staging runs after the sequence and inside the same request: gzipping
         // a session archive and reading a rollout are not instant on a large
         // conversation, so the fit has to leave room rather than merely hold.
         assert!(
-            PEER_FINALIZATION_WINDOW - shutdown >= Duration::from_secs(120),
+            window - shutdown >= Duration::from_secs(120),
             "no room left in the finalization window for staging the session artifacts",
         );
     }

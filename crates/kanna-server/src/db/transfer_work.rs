@@ -34,6 +34,17 @@ pub struct TransferWorkItem {
     pub attempts: i64,
 }
 
+/// The `AND` clause that hides a transfer's rows while the caller is running one
+/// of them. Empty for an empty list, so the ordinary statement carries no
+/// parameters at all.
+fn busy_transfer_exclusion(busy_transfer_ids: &[String]) -> String {
+    if busy_transfer_ids.is_empty() {
+        return String::new();
+    }
+    let placeholders = vec!["?"; busy_transfer_ids.len()].join(", ");
+    format!(" AND (transfer_id IS NULL OR transfer_id NOT IN ({placeholders}))")
+}
+
 fn read_work_item(row: &rusqlite::Row<'_>) -> Result<TransferWorkItem, rusqlite::Error> {
     Ok(TransferWorkItem {
         id: row.get(0)?,
@@ -68,20 +79,41 @@ impl Db {
     /// Takes the next runnable item, marking it `running` in the same statement
     /// so two drains cannot claim it. Ordering is by `run_after` then insertion
     /// order, which preserves lifecycle order among items that are all ready.
-    pub fn claim_next_transfer_work(&self) -> Result<Option<TransferWorkItem>, rusqlite::Error> {
+    ///
+    /// `busy_transfer_ids` are transfers the caller already has work in flight
+    /// for, and their rows are passed over rather than claimed. The engine runs
+    /// items concurrently, and one transfer's items are a *sequence* — its
+    /// finalization must answer the peer before the commit receipt closes the
+    /// source task — so concurrency is only ever across transfers. Skipping in
+    /// the claim rather than after it is what keeps a deferral from spending an
+    /// attempt: a row this call passes over is untouched, still `pending`, with
+    /// its `attempts` and `run_after` intact.
+    pub fn claim_next_transfer_work(
+        &self,
+        busy_transfer_ids: &[String],
+    ) -> Result<Option<TransferWorkItem>, rusqlite::Error> {
+        // Work with no transfer id — a push, before anything has reserved one —
+        // has no sequence to preserve and is never excluded. Two pushes of one
+        // task are not held apart here either: they are already held apart
+        // transactionally, by the eligibility read in `push::run_push` over
+        // `idx_task_transfer_active_outgoing_source`, which is what a renderer
+        // snapshot could not do.
         let claimed = self
             .conn
             .query_row(
-                "UPDATE transfer_work
-                 SET status = 'running', attempts = attempts + 1, updated_at = datetime('now')
-                 WHERE id = (
-                     SELECT id FROM transfer_work
-                     WHERE status = 'pending' AND run_after <= datetime('now')
-                     ORDER BY run_after, created_at, id
-                     LIMIT 1
-                 )
-                 RETURNING id, kind, transfer_id, payload_json, attempts",
-                [],
+                &format!(
+                    "UPDATE transfer_work
+                     SET status = 'running', attempts = attempts + 1, updated_at = datetime('now')
+                     WHERE id = (
+                         SELECT id FROM transfer_work
+                         WHERE status = 'pending' AND run_after <= datetime('now'){}
+                         ORDER BY run_after, created_at, id
+                         LIMIT 1
+                     )
+                     RETURNING id, kind, transfer_id, payload_json, attempts",
+                    busy_transfer_exclusion(busy_transfer_ids),
+                ),
+                rusqlite::params_from_iter(busy_transfer_ids.iter()),
                 read_work_item,
             )
             .optional()?;
@@ -90,14 +122,25 @@ impl Db {
 
     /// The soonest a parked item becomes runnable, so a drain loop can sleep
     /// until then instead of polling.
-    pub fn next_transfer_work_delay_seconds(&self) -> Result<Option<i64>, rusqlite::Error> {
+    ///
+    /// Takes the same exclusion as [`Self::claim_next_transfer_work`], and for
+    /// the same reason read the other way round: a caller that slept on a delay
+    /// computed over rows it cannot claim would wake immediately and spin until
+    /// the transfer holding them finished.
+    pub fn next_transfer_work_delay_seconds(
+        &self,
+        busy_transfer_ids: &[String],
+    ) -> Result<Option<i64>, rusqlite::Error> {
         self.conn
             .query_row(
-                "SELECT MAX(0, CAST(strftime('%s', MIN(run_after)) AS INTEGER)
-                               - CAST(strftime('%s', 'now') AS INTEGER))
-                 FROM transfer_work
-                 WHERE status = 'pending'",
-                [],
+                &format!(
+                    "SELECT MAX(0, CAST(strftime('%s', MIN(run_after)) AS INTEGER)
+                                   - CAST(strftime('%s', 'now') AS INTEGER))
+                     FROM transfer_work
+                     WHERE status = 'pending'{}",
+                    busy_transfer_exclusion(busy_transfer_ids),
+                ),
+                rusqlite::params_from_iter(busy_transfer_ids.iter()),
                 |row| row.get::<_, Option<i64>>(0),
             )
             .optional()
@@ -275,11 +318,14 @@ mod tests {
             .enqueue_transfer_work("finalize:t-1", "finalize", Some("t-1"), "{}")
             .expect("enqueue"));
 
-        let claimed = db.claim_next_transfer_work().expect("claim").expect("work");
+        let claimed = db
+            .claim_next_transfer_work(&[])
+            .expect("claim")
+            .expect("work");
         assert_eq!(claimed.id, "finalize:t-1");
         assert_eq!(claimed.attempts, 1);
         assert!(
-            db.claim_next_transfer_work()
+            db.claim_next_transfer_work(&[])
                 .expect("second claim")
                 .is_none(),
             "a claimed item must not be handed to a second drain",
@@ -295,14 +341,86 @@ mod tests {
             1,
             "a restart must return in-flight work to the queue",
         );
-        let resumed = db.claim_next_transfer_work().expect("claim").expect("work");
+        let resumed = db
+            .claim_next_transfer_work(&[])
+            .expect("claim")
+            .expect("work");
         assert_eq!(resumed.id, "finalize:t-1");
         assert_eq!(resumed.attempts, 2);
 
         db.complete_transfer_work("finalize:t-1").expect("complete");
         assert!(
-            db.claim_next_transfer_work().expect("drained").is_none(),
+            db.claim_next_transfer_work(&[]).expect("drained").is_none(),
             "completed work must not be handed out again",
+        );
+    }
+
+    /// A transfer whose work is in flight is skipped over, not claimed — and
+    /// skipping costs it nothing.
+    ///
+    /// The engine runs items concurrently, so this is what keeps one transfer's
+    /// items in order while another transfer's proceed. Returning the row and
+    /// deferring it would be worse than useless: the claim increments `attempts`,
+    /// so a transfer whose finalization ran long would burn its retry budget on
+    /// deferrals of the item waiting behind it.
+    #[test]
+    fn a_transfer_already_in_flight_is_passed_over_without_spending_an_attempt() {
+        let db = open("transfer-work-busy");
+        db.enqueue_transfer_work("finalize:t-1", "finalize", Some("t-1"), "{}")
+            .expect("enqueue");
+        db.enqueue_transfer_work("committed:t-1", "outgoing-committed", Some("t-1"), "{}")
+            .expect("enqueue");
+        db.enqueue_transfer_work("import:t-2", "import", Some("t-2"), "{}")
+            .expect("enqueue");
+        db.enqueue_transfer_work("pull:sidecar-a:1", "push", None, "{}")
+            .expect("enqueue");
+
+        let first = db
+            .claim_next_transfer_work(&[])
+            .expect("claim")
+            .expect("work");
+        assert_eq!(
+            first.transfer_id.as_deref(),
+            Some("t-1"),
+            "both of t-1's rows sort ahead of the others",
+        );
+
+        // t-1 is in flight: its second item is invisible, while the unrelated
+        // transfer and the transfer-less push are handed out immediately.
+        let busy = vec!["t-1".to_string()];
+        let next = db
+            .claim_next_transfer_work(&busy)
+            .expect("claim")
+            .expect("an unrelated transfer was blocked behind t-1");
+        assert_eq!(next.id, "import:t-2");
+        let pushed = db
+            .claim_next_transfer_work(&busy)
+            .expect("claim")
+            .expect("a transfer-less push was blocked behind t-1");
+        assert_eq!(pushed.id, "pull:sidecar-a:1");
+        assert!(
+            db.claim_next_transfer_work(&busy).expect("claim").is_none(),
+            "a second item of an in-flight transfer was claimed",
+        );
+        // …and nothing runnable is left to sleep on, so the drain parks on the
+        // worker instead of spinning against a row it cannot take.
+        assert_eq!(
+            db.next_transfer_work_delay_seconds(&busy).expect("delay"),
+            None,
+        );
+
+        // Once t-1's item is settled its next one is claimable, still on its
+        // first attempt.
+        db.complete_transfer_work(&first.id).expect("complete");
+        let resumed = db
+            .claim_next_transfer_work(&[])
+            .expect("claim")
+            .expect("t-1's second item never became claimable");
+        assert_eq!(resumed.transfer_id.as_deref(), Some("t-1"));
+        assert_ne!(resumed.id, first.id);
+        assert_eq!(
+            resumed.attempts, 1,
+            "being passed over spent an attempt from the retry budget",
         );
     }
 
@@ -320,8 +438,11 @@ mod tests {
                 .expect("redelivery"),
             "a redelivered event scheduled a second execution",
         );
-        assert!(db.claim_next_transfer_work().expect("claim").is_some());
-        assert!(db.claim_next_transfer_work().expect("only one").is_none());
+        assert!(db.claim_next_transfer_work(&[]).expect("claim").is_some());
+        assert!(db
+            .claim_next_transfer_work(&[])
+            .expect("only one")
+            .is_none());
 
         // Even after the work has run, the same event must not re-run it.
         db.complete_transfer_work("committed:t-1")
@@ -330,7 +451,7 @@ mod tests {
             .enqueue_transfer_work("committed:t-1", "outgoing-committed", Some("t-1"), "{}")
             .expect("post-completion redelivery"),);
         assert!(db
-            .claim_next_transfer_work()
+            .claim_next_transfer_work(&[])
             .expect("still drained")
             .is_none());
     }
@@ -526,9 +647,9 @@ mod tests {
             );
             // The backoff is what stops a broken item spinning; it also means
             // the item is not immediately claimable again.
-            assert!(db.claim_next_transfer_work().expect("claim").is_none());
+            assert!(db.claim_next_transfer_work(&[]).expect("claim").is_none());
             assert!(db
-                .next_transfer_work_delay_seconds()
+                .next_transfer_work_delay_seconds(&[])
                 .expect("delay")
                 .is_some_and(|delay| delay > 0));
         }

@@ -42,6 +42,13 @@ impl RepoAcquisitionMode {
     }
 }
 
+// The shared `Session` prefix is the wire vocabulary, not redundancy: these
+// variant names are what `rename_all` turns into the `session-*` strings a peer
+// sends and `as_str`/`parse` round-trip, so dropping it would rename the
+// protocol. The prefix also distinguishes them from the one artifact that is not
+// session state — the repo bundle, which travels under `repo.bundle` rather than
+// as a kind here.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TransferArtifactKind {
