@@ -342,7 +342,7 @@ a pull that completes with the source renderer navigated away (app process and
 mid-transfer once per direction with the transfer resuming to completion after
 the restart.
 
-### Phase 4 — Finalization redesign (in its new home)
+### Phase 4 — Finalization redesign (in its new home) — **landed**
 
 Implement Decision 3's notify→idle→quit→exit→stage sequence as a server-side
 state machine keyed off the daemon events, replacing the SIGINT path entirely
@@ -354,6 +354,35 @@ E2E: transfer of a *busy* agent — wrap-up completes, transcript contains the
 wrap-up, destination resumes; plus an adopted-session finalization (daemon
 handoff simulated, as in `crates/daemon/tests/`) that the old path could never
 pass.
+
+Landed as `crates/kanna-server/src/transfer_engine/finalize.rs`, with three
+things the plan did not spell out.
+
+The quit command became a property of the provider registry
+(`AgentProvider::quit_command`) rather than a two-case match, and every provider
+Kanna can spawn answers it: `/quit` for Codex, `/exit` for the rest. Copilot and
+Antigravity were verified against the installed CLIs while building this;
+Copilot's is now pinned by `tests/cli-contract/tests/live/copilot-tui-quit.test.ts`.
+
+`Waiting` does not merely fail to count as idle — the sequence must *never* type
+into it. A permission prompt consumes the next input as its answer, so a quit
+command injected there would answer an approval prompt on the operator's behalf.
+A session parked that way times out into the degraded rung instead.
+
+The terminal recovery snapshot moved into the sequence, taken after idle and
+before the quit. Under the old `SIGINT` the source agent usually survived
+finalization, so the snapshot could be taken afterwards; now it cannot — there
+is nothing left to photograph once the process has exited, and the destination
+replays that picture.
+
+Coverage: `crates/daemon/tests/handoff.rs::test_adopted_session_refuses_signals_but_quits_on_injected_input`
+is the incident as a test (the refusal stays, and injection works through it);
+`transfer_engine/finalize.rs`'s own tests script a daemon over a real socket and
+pin that nothing is typed at a busy agent, that `Waiting` never reads as idle,
+and that a retry reports the verdict the live attempt reached; and
+`apps/desktop/tests/e2e/real/local-transfer-busy-agent-wrapup.test.ts` transfers
+a busy OpenCode agent and asserts the wrap-up — and the agent's answer to it —
+are in the conversation the destination resumes.
 
 ## Implementation tasks
 

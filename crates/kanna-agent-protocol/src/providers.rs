@@ -109,6 +109,32 @@ impl AgentProvider {
             Self::Antigravity => Some(&["low", "medium", "high"]),
         }
     }
+
+    /// The composer command that ends an interactive session cleanly.
+    ///
+    /// Transfer finalization types this into the live TUI instead of signalling
+    /// the process: the daemon refuses signals for adopted sessions by design
+    /// (it holds the master fd but never forked the child, so the pid cannot be
+    /// pinned across `kill(2)`), which made every session older than the
+    /// running daemon unfinalizable. Injected bytes have no such constraint.
+    ///
+    /// A clean quit is what makes the shipped conversation complete: Claude
+    /// flushes its transcript, and Codex stops appending to the rollout the
+    /// transfer is about to stage.
+    ///
+    /// Verified against the installed CLIs rather than assumed: Codex is pinned
+    /// by `tests/cli-contract/tests/live/codex-tui-quit.test.ts`, OpenCode by
+    /// `opencode-injected-input.test.ts`, Copilot by `copilot-tui-quit.test.ts`.
+    /// Claude and Antigravity are manually verified — see
+    /// `docs/2026-08-06-agent-tui-injection-e2e-gap.md`.
+    pub const fn quit_command(self) -> &'static str {
+        match self {
+            // Codex is the odd one out: its composer popup names the command
+            // `/quit  exit Codex`, and `/exit` is not offered.
+            Self::Codex => "/quit",
+            Self::Claude | Self::Copilot | Self::Opencode | Self::Antigravity => "/exit",
+        }
+    }
 }
 
 impl AgentSessionType {
@@ -187,5 +213,22 @@ export function getAgentProviderSpec(provider: AgentProvider): Readonly<AgentPro
             source,
         )
         .unwrap();
+    }
+
+    /// Transfer finalization types this command into a live TUI and then waits
+    /// for the process to exit. A provider whose command is wrong (or missing)
+    /// leaves finalization waiting out its whole quit budget before degrading,
+    /// so every provider Kanna can spawn has to answer.
+    #[test]
+    fn every_provider_names_a_quit_command() {
+        for provider in AgentProvider::ALL {
+            let command = provider.quit_command();
+            assert!(
+                command.starts_with('/'),
+                "{provider} quit command is not a composer command: {command}",
+            );
+        }
+        assert_eq!(AgentProvider::Codex.quit_command(), "/quit");
+        assert_eq!(AgentProvider::Claude.quit_command(), "/exit");
     }
 }

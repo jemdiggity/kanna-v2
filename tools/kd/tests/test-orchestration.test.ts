@@ -20,6 +20,7 @@ const expectedLiveCliContractTests = [
   "codex-tui-quit.test.ts",
   "copilot-flags.test.ts",
   "copilot-prompt.test.ts",
+  "copilot-tui-quit.test.ts",
   "flags.test.ts",
   "kanna-mcp-flags.test.ts",
   "opencode-exec-json.test.ts",

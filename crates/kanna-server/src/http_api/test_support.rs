@@ -119,6 +119,42 @@ pub(crate) fn test_state_with_seed(
     Arc::new(AppState::new(config))
 }
 
+/// A state whose daemon socket is test-local, for tests that script a fake
+/// daemon and need the code under test to dial *that* one.
+pub(crate) fn test_state_with_daemon_dir(
+    desktop_id: &str,
+    desktop_name: &str,
+    daemon_dir: &str,
+    seed: impl FnOnce(&Db),
+) -> Arc<AppState> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(9_000);
+    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string(),
+        db_path: Db::test_db_path(&format!("daemon-dir-{desktop_id}-{test_db_id}")),
+        kanna_cli_path: None,
+        desktop_id: desktop_id.to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: desktop_name.to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "0.0.0.0".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        pairing_store_path: format!("/tmp/kanna-pairings-daemon-{desktop_id}-{test_db_id}.json"),
+    };
+    let db = Db::open_for_tests(&config.db_path).expect("open test db");
+    seed(&db);
+    Arc::new(AppState::new(config))
+}
+
 pub(super) fn test_state_with_task_input_sender(
     desktop_id: &str,
     desktop_name: &str,

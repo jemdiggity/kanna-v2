@@ -732,11 +732,16 @@ async fn handle_connection(
 
                 let result = match cached {
                     Some(result) => result,
-                    None => tokio::time::timeout(context.peer_request_timeout, rx)
+                    // Not `peer_request_timeout`: the answer waits on the source
+                    // agent being asked to wrap up and quit, which is minutes
+                    // for a busy one. Under the ordinary window this timed out
+                    // long before the desktop had anything to say, and the
+                    // destination spent an import attempt on it.
+                    None => tokio::time::timeout(context.finalization_request_timeout, rx)
                         .await
                         .map_err(|_| RuntimeError::PeerRequestTimeout {
                             peer_id: requester_peer_id.clone(),
-                            timeout_ms: context.peer_request_timeout.as_millis(),
+                            timeout_ms: context.finalization_request_timeout.as_millis(),
                         })?
                         .map_err(|_| {
                             RuntimeError::Protocol(format!(
@@ -1530,7 +1535,10 @@ async fn authenticate_peer_request(
             ))
         })?;
     let now_ms = unix_ms();
-    let freshness_ms = u64::try_from(context.pending_transfer_ttl.as_millis()).unwrap_or(u64::MAX);
+    // The replay bound, not the in-flight resource TTL: those were one constant
+    // until the finalization budget forced the second one to grow.
+    let freshness_ms =
+        u64::try_from(context.authenticated_request_freshness.as_millis()).unwrap_or(u64::MAX);
     if now_ms.saturating_sub(issued_at_unix_ms) > freshness_ms {
         return Err(RuntimeError::Protocol(format!(
             "stale authenticated {expected_action} request"

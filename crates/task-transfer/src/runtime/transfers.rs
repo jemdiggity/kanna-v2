@@ -290,7 +290,7 @@ impl TransferRuntime {
             )
             .await?;
         let response = self
-            .send_peer_request(
+            .send_peer_request_with_timeout(
                 &source_peer,
                 PeerRequest::FinalizeTransfer {
                     request_id: request_id.clone(),
@@ -298,6 +298,15 @@ impl TransferRuntime {
                     requester_peer_id: self.config.peer_id.clone(),
                     sealed_payload,
                 },
+                // The source's own budget for shutting its agent down, plus one
+                // ordinary request window to deliver the answer. Outlasting the
+                // source by that margin is what makes the source's reply
+                // authoritative: a destination that gave up first would report
+                // `PeerRequestTimeout` for a finalization that had in fact
+                // concluded, and spend an import attempt on it.
+                self.config
+                    .finalization_request_timeout
+                    .saturating_add(self.config.peer_request_timeout),
             )
             .await?;
 

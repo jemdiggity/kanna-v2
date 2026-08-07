@@ -66,6 +66,13 @@ pub enum TaskEventKind {
     /// to hand off and Kanna refused to close the task. A watcher must treat
     /// this as a failed approval, not a completed pipeline.
     MergeHandoffMissing,
+    /// A cross-machine transfer is shutting the task's agent down so its
+    /// conversation can be shipped. `payload.phase` names the step —
+    /// `wrap-up-sent`, `idle`, `quit-sent`, `exited`, `already-exited`, or
+    /// `degraded` (with `payload.detail` carrying the reason). The wrap-up can
+    /// legitimately take minutes, and this is what makes that latency legible
+    /// as a transfer rather than as a hung task.
+    TransferFinalizing,
 }
 
 impl TaskEventKind {
@@ -82,6 +89,7 @@ impl TaskEventKind {
             Self::AwaitingInput => "task.awaiting_input",
             Self::MergeSignaled => "task.merge_signaled",
             Self::MergeHandoffMissing => "task.merge_handoff_missing",
+            Self::TransferFinalizing => "task.transfer_finalizing",
         }
     }
 
@@ -98,6 +106,7 @@ impl TaskEventKind {
         Self::AwaitingInput,
         Self::MergeSignaled,
         Self::MergeHandoffMissing,
+        Self::TransferFinalizing,
     ];
 }
 

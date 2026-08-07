@@ -636,7 +636,7 @@ async fn materialize_resume_state(
                 // SQLite file that many agents write, and `import` exits
                 // non-zero while another holds the write lock. Retrying is what
                 // keeps a lock that clears in seconds from permanently losing a
-                // conversation the source has already been signalled to give up.
+                // conversation the source has already been shut down to hand over.
                 Err(unavailable @ super::git::OpencodeImportError::Unavailable(_)) => {
                     return Err(ImportFailure::Retry(unavailable.to_string()));
                 }

@@ -6654,9 +6654,27 @@ async fn destination_can_finalize_outgoing_transfer_after_approval() {
     assert!(finalized.finalized_cleanly);
 }
 
+/// Finalizing is the one peer request that waits on a *person's agent*.
+///
+/// `kanna-server` asks the source agent to wrap up, waits for it to go idle,
+/// tells it to quit and waits for the exit — minutes for a busy agent, which is
+/// the case the whole redesign exists for. While that shared the ordinary 15 s
+/// peer-request window, the destination gave up on every wrap-up longer than a
+/// few seconds, and its import work item spent one of eight attempts on a
+/// finalization that was proceeding normally. Those attempts are the budget
+/// reserved for genuinely transient failures — a locked OpenCode store, an
+/// artifact fetch that dropped — so waiting must not come out of it.
+///
+/// The transfer still *completed* before this was fixed, off the cached
+/// finalization result a later retry picked up, which is exactly why only a
+/// test that watches the first request can catch it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn slow_outgoing_finalization_retry_joins_one_desktop_operation() {
+async fn a_finalization_slower_than_the_peer_request_window_answers_the_first_request() {
     let temp = tempfile::tempdir().unwrap();
+
+    // Both ends run with an ordinary peer-request window far shorter than the
+    // finalization takes. Only the separate finalization window keeps this
+    // request alive.
     let secondary = std::sync::Arc::new(
         TransferRuntime::spawn(
             RuntimeConfig::for_tests("peer-secondary", "Secondary", temp.path(), 0)
@@ -6666,12 +6684,101 @@ async fn slow_outgoing_finalization_retry_joins_one_desktop_operation() {
         .unwrap(),
     );
     let primary = std::sync::Arc::new(
+        TransferRuntime::spawn(
+            RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
+                .with_peer_request_timeout(Duration::from_millis(250)),
+        )
+        .await
+        .unwrap(),
+    );
+
+    pair_peers(&primary, &secondary, "peer-secondary").await;
+
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary", "task-source")
+        .await
+        .unwrap();
+    primary
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-secondary",
+                "task": { "source_task_id": "task-source" }
+            }),
+        )
+        .await
+        .unwrap();
+    let _incoming = next_incoming_transfer_request(&secondary).await;
+
+    let primary_for_completion = std::sync::Arc::clone(&primary);
+    let transfer_id = preflight.transfer_id.clone();
+    let completion = tokio::spawn(async move {
+        let event = primary_for_completion.next_event().await.unwrap();
+        let RuntimeEvent::OutgoingTransferFinalizationRequested(event) = event else {
+            panic!("expected outgoing transfer finalization request");
+        };
+        assert_eq!(event.transfer_id, transfer_id);
+
+        // The wrap-up: longer than the peer-request window by an order of
+        // magnitude, the same shape a busy agent has at full scale.
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+
+        primary_for_completion
+            .complete_outgoing_transfer_finalization(
+                &event.transfer_id,
+                Ok(kanna_task_transfer::runtime::FinalizedOutgoingTransfer {
+                    payload: json!({
+                        "task": {
+                            "source_task_id": "task-source",
+                            "resume_session_id": "019d-slow-wrap-up",
+                        }
+                    }),
+                    finalized_cleanly: true,
+                }),
+            )
+            .await
+            .unwrap();
+    });
+
+    let finalized = secondary
+        .finalize_outgoing_transfer(&preflight.transfer_id)
+        .await
+        .expect(
+            "the first finalization request must survive a wrap-up longer than the ordinary \
+             peer-request window; erroring here spends an import attempt on waiting",
+        );
+
+    completion.await.unwrap();
+    assert_eq!(
+        finalized.payload["task"]["resume_session_id"],
+        json!("019d-slow-wrap-up"),
+    );
+    assert!(finalized.finalized_cleanly);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_outgoing_finalization_retry_joins_one_desktop_operation() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = std::sync::Arc::new(
         TransferRuntime::spawn(RuntimeConfig::for_tests(
-            "peer-primary",
-            "Primary",
+            "peer-secondary",
+            "Secondary",
             temp.path(),
             0,
         ))
+        .await
+        .unwrap(),
+    );
+    // The finalization window, not the peer-request one, is what bounds this
+    // wait now — and it is the *source* that owns it, because the source is
+    // where the budget is being spent. A wrap-up that outlives even that budget
+    // is still a case the source has to answer, and a retry still has to join
+    // the desktop operation already running rather than starting a second one.
+    let primary = std::sync::Arc::new(
+        TransferRuntime::spawn(
+            RuntimeConfig::for_tests("peer-primary", "Primary", temp.path(), 0)
+                .with_finalization_request_timeout(Duration::from_millis(250)),
+        )
         .await
         .unwrap(),
     );
