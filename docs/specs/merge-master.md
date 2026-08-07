@@ -51,6 +51,14 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   repository and uses the ordinary singleton signal path to send the supplied
   task, PR, head, base, and summary. It does not interpret stage results,
   compare branch names with saved metadata, or attest approval eligibility.
+- **Close-time backstop**: a delivered handoff is stamped on the task
+  (`merge_signaled_at`), and a task whose pinned final stage declares the
+  `approve` post cannot close still owing one — the engine sends the same
+  ordinary request from the recorded `pr_url`, or refuses the close when there
+  is no PR to send. The post runs inside whichever agent session the pr stage
+  left alive, so it cannot be the only thing standing between a finished PR and
+  the merge master. See
+  [kanna-server-boundary.md](../kanna-server-boundary.md#merge-handoff).
 - Later: a verdict UI on tasks parked at `pr` (request-changes composer →
   request-revision; approve button → advance). Forge-blind — it fires
   stage actions. Line-anchored diff feedback is a follow-up (needs an

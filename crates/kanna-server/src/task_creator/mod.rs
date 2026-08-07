@@ -73,11 +73,11 @@ pub(crate) use prompt::RevisionRound;
 pub(crate) use stages::{
     prepare_advance_stage_for_api, prepare_resume_task_for_api, prepare_revision_task_for_api,
     prepare_stage_completion_for_api, resolve_revision_budget, resolve_revision_limit,
-    resolve_stage_transition, RevisionBudget,
+    resolve_stage_transition, stage_declares_merge_approve_post, RevisionBudget,
 };
 pub(crate) use worktree::resolve_current_source_worktree_branch;
 
-const FALLBACK_PIPELINE_NAME: &str = "no-review";
+pub(crate) const FALLBACK_PIPELINE_NAME: &str = "no-review";
 
 #[derive(Clone, Debug)]
 pub(crate) enum DefinitionLookupError {

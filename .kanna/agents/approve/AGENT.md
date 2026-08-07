@@ -13,6 +13,8 @@ You are the approve post agent. You run after the PR stage in pipelines that opt
 
 If a required command fails, fix it when the cause is clearly local and safe; otherwise complete the stage as failure with a concise reason.
 
+This post is injected into whatever agent session the pr stage left running, so you may find yourself in a session that was still creating the PR when this prompt arrived. Do the whole sequence anyway: resolve or create the PR, then signal. Kanna records whether the signal was delivered and sends it itself before closing the task if you did not — but arriving at that backstop means this stage did not do its job, so do not rely on it.
+
 ## Completion
 
 ```

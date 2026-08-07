@@ -718,6 +718,11 @@ async fn close_task_after_final_stage(
     task_id: String,
     workspace_teardown: Option<crate::task_creator::PreparedWorkspaceTeardown>,
 ) -> Result<Json<crate::mobile_api::TaskActionResponse>, (axum::http::StatusCode, String)> {
+    // Before anything is torn down: a pipeline whose final stage declares the
+    // merge-signaling approve post must not close leaving an open PR the merge
+    // master never heard about. An error here deliberately abandons the close
+    // — the task parks at its final stage instead.
+    super::signal_agent::ensure_merge_handoff_before_close(state, &task_id).await?;
     let has_workspace_teardown = workspace_teardown.is_some();
     let blocker_close_instructions = {
         let db = Db::open(&state.config.db_path).map_err(|e| {

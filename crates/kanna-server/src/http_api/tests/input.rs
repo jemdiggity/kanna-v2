@@ -1034,6 +1034,517 @@ async fn terminal_state_notification_sends_once_to_notify_target() {
     let _ = std::fs::remove_dir_all(daemon_dir);
 }
 
+/// Closing a task past the final stage of a pipeline that declares the
+/// merge-signaling `approve` post.
+///
+/// The post is injected into whatever agent session the pr stage left running,
+/// so whether the merge master hears about the PR cannot depend on that agent
+/// having read and obeyed the post prompt — in the incident this covers, four
+/// review-bearing tasks in a row had their pr-stage main run cut short, the
+/// post landed in a pr agent that had not created the PR yet, and each task
+/// closed with an open PR nobody was told about. These drive the real
+/// complete-stage route, the real close path, and a real daemon socket, so
+/// they fail if the engine ever goes back to trusting the prompt.
+mod merge_handoff_on_close {
+    use super::*;
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use std::sync::Mutex;
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    /// Pipeline whose final `pr` stage promises the merge handoff, preceded by
+    /// a review stage — the shape every failing task in the incident ran.
+    fn review_bearing_pipeline_def() -> String {
+        serde_json::json!({
+            "name": "single-reviewer",
+            "stages": [
+                {
+                    "name": "review",
+                    "agent": "review",
+                    "prompt": "Review $BRANCH",
+                    "policy": { "transition": "auto" }
+                },
+                {
+                    "name": "pr",
+                    "agent": "pr",
+                    "prompt": "Create a PR for $BRANCH",
+                    "policy": { "transition": "manual" },
+                    "post": {
+                        "name": "approve",
+                        "agent": "approve",
+                        "prompt": "Approve the PR for $BRANCH and signal the merge master."
+                    }
+                }
+            ]
+        })
+        .to_string()
+    }
+
+    /// The control: same final stage, same approve post, no review stage. This
+    /// is the path that kept working during the incident, and it must keep
+    /// producing exactly one handoff.
+    fn no_review_pipeline_def() -> String {
+        serde_json::json!({
+            "name": "no-review",
+            "stages": [
+                {
+                    "name": "pr",
+                    "agent": "pr",
+                    "prompt": "Create a PR for $BRANCH",
+                    "policy": { "transition": "manual" },
+                    "post": {
+                        "name": "approve",
+                        "agent": "approve",
+                        "prompt": "Approve the PR for $BRANCH and signal the merge master."
+                    }
+                }
+            ]
+        })
+        .to_string()
+    }
+
+    /// A pipeline that never promised a handoff: closing must stay silent.
+    fn plain_pipeline_def() -> String {
+        serde_json::json!({
+            "name": "plain",
+            "stages": [
+                {
+                    "name": "pr",
+                    "agent": "pr",
+                    "prompt": "Create a PR for $BRANCH",
+                    "policy": { "transition": "manual" }
+                }
+            ]
+        })
+        .to_string()
+    }
+
+    struct Harness {
+        config: Config,
+        repo_root: std::path::PathBuf,
+        daemon_dir: std::path::PathBuf,
+        socket_path: PathBuf,
+        inputs: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+    }
+
+    impl Harness {
+        /// Seed a repo, a resident merge master on `merge-session`, and a
+        /// source task parked at `pr` with a running approve post — the state
+        /// a `complete-stage` verdict from that post arrives into.
+        fn new(label: &str, pipeline_def: &str, pr_url: Option<&str>) -> Self {
+            let unique = format!("merge-close-{label}-{}", unique_test_suffix());
+            let repo_root = std::env::temp_dir().join(format!("{unique}-repo"));
+            init_test_git_repo(&repo_root);
+            let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+            std::fs::create_dir_all(&daemon_dir).unwrap();
+            let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+            let _ = std::fs::remove_file(&socket_path);
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            let inputs = spawn_recording_daemon(listener);
+
+            let config = merge_test_config(&unique, &daemon_dir);
+            let db = Db::open_for_tests(&config.db_path).unwrap();
+            db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+                .unwrap();
+            db.insert_test_pipeline_item(
+                "task-source",
+                "repo-1",
+                "Source prompt",
+                Some("Ship the thing"),
+                "pr",
+                "2026-08-07T00:00:00Z",
+            )
+            .unwrap();
+            db.update_test_pipeline_item_stage_context(
+                "task-source",
+                "task-source",
+                "single-reviewer",
+                None,
+                "claude",
+            )
+            .unwrap();
+            db.update_test_pipeline_item_pipeline_def("task-source", pipeline_def)
+                .unwrap();
+            if let Some(pr_url) = pr_url {
+                db.update_pipeline_item_pr("task-source", Some(91), pr_url)
+                    .unwrap();
+            }
+            db.insert_stage_run(crate::db::NewStageRun {
+                id: "run-approve",
+                task_id: "task-source",
+                stage: "approve",
+                kind: "post",
+                agent: Some("pr"),
+                agent_provider: Some("claude"),
+                model: None,
+                effort: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some("task-source"),
+                provider_session_id: None,
+                cwd: None,
+                resumed_from_run_id: None,
+            })
+            .unwrap();
+            db.insert_test_pipeline_item(
+                "task-merge",
+                "repo-1",
+                "Merge master",
+                Some("Merge Master"),
+                "in progress",
+                "2026-08-07T00:00:01Z",
+            )
+            .unwrap();
+            db.insert_stage_run(crate::db::NewStageRun {
+                id: "run-merge",
+                task_id: "task-merge",
+                stage: "in progress",
+                kind: "main",
+                agent: Some("merge"),
+                agent_provider: Some("claude"),
+                model: None,
+                effort: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some("merge-session"),
+                provider_session_id: None,
+                cwd: None,
+                resumed_from_run_id: None,
+            })
+            .unwrap();
+            drop(db);
+
+            Self {
+                config,
+                repo_root,
+                daemon_dir,
+                socket_path,
+                inputs,
+            }
+        }
+
+        /// The approve post's verdict, exactly as the failing tasks reported
+        /// it: a success naming the PR it created, with no approval and no
+        /// merge signal.
+        async fn complete_approve_post(&self, summary: &str) -> StatusCode {
+            super::router(Arc::new(super::AppState::new(self.config.clone())))
+                .oneshot(
+                    Request::post("/v1/tasks/task-source/actions/complete-stage")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "runId": "run-approve",
+                                "status": "success",
+                                "summary": summary,
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }
+
+        fn merge_messages(&self) -> Vec<String> {
+            self.inputs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(session_id, data)| session_id == "merge-session" && data != b"\r")
+                .map(|(_, data)| String::from_utf8_lossy(data).to_string())
+                .collect()
+        }
+
+        async fn wait_for_merge_messages(&self, expected: usize) -> Vec<String> {
+            for _ in 0..200 {
+                let messages = self.merge_messages();
+                if messages.len() >= expected {
+                    return messages;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            panic!(
+                "merge master never received {expected} message(s); got {:?}",
+                self.merge_messages()
+            );
+        }
+
+        fn db(&self) -> Db {
+            Db::open(&self.config.db_path).unwrap()
+        }
+
+        fn cleanup(self) {
+            let _ = std::fs::remove_file(&self.socket_path);
+            let _ = std::fs::remove_dir_all(&self.daemon_dir);
+            let _ = std::fs::remove_dir_all(&self.repo_root);
+            let _ = std::fs::remove_file(&self.config.db_path);
+        }
+    }
+
+    /// A daemon that answers every command and records the session input it
+    /// was handed. The close path and the merge signal each open their own
+    /// connection, so this accepts as many as the server makes.
+    fn spawn_recording_daemon(listener: UnixListener) -> Arc<Mutex<Vec<(String, Vec<u8>)>>> {
+        let inputs: Arc<Mutex<Vec<(String, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&inputs);
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let recorded = Arc::clone(&recorded);
+                tokio::spawn(async move {
+                    let (read_half, mut write_half) = stream.into_split();
+                    let mut reader = BufReader::new(read_half);
+                    while let Some(command) =
+                        read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                    {
+                        let response = match command {
+                            DaemonCommand::Input { session_id, data } => {
+                                recorded.lock().unwrap().push((session_id, data));
+                                DaemonEvent::Ok
+                            }
+                            DaemonCommand::Spawn { session_id, .. }
+                            | DaemonCommand::SpawnAgent { session_id, .. } => {
+                                DaemonEvent::SessionCreated { session_id }
+                            }
+                            _ => DaemonEvent::Ok,
+                        };
+                        if write_half
+                            .write_all(
+                                format!("{}\n", serde_json::to_string(&response).unwrap())
+                                    .as_bytes(),
+                            )
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        inputs
+    }
+
+    async fn wait_for_closed(db: &Db, task_id: &str) {
+        for _ in 0..200 {
+            if db
+                .get_pipeline_item(task_id)
+                .unwrap()
+                .unwrap()
+                .closed_at
+                .is_some()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("task {task_id} never closed");
+    }
+
+    fn task_events_of_type(db: &Db, task_id: &str, event_type: &str) -> Vec<serde_json::Value> {
+        let head = db.latest_task_event_seq().unwrap();
+        db.list_task_events(
+            &crate::db::TaskEventScope::Tasks(vec![task_id.to_string()]),
+            0,
+            head,
+            200,
+        )
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.event_type == event_type)
+        .map(|event| event.payload)
+        .collect()
+    }
+
+    fn merge_event_sources(db: &Db, task_id: &str) -> Vec<String> {
+        task_events_of_type(db, task_id, "task.merge_signaled")
+            .into_iter()
+            .map(|payload| payload["source"].as_str().unwrap_or("").to_string())
+            .collect()
+    }
+
+    /// The incident, reproduced: a review-bearing pipeline whose approve post
+    /// reports "Created PR ..." and signals nothing. The task must not close
+    /// leaving that PR unannounced.
+    #[tokio::test]
+    async fn engine_signals_the_merge_master_when_the_approve_post_did_not() {
+        let harness = Harness::new(
+            "review-gap",
+            &review_bearing_pipeline_def(),
+            Some("https://github.com/acme/repo/pull/91"),
+        );
+
+        assert_eq!(
+            harness
+                .complete_approve_post("Created PR https://github.com/acme/repo/pull/91")
+                .await,
+            StatusCode::OK
+        );
+
+        let messages = harness.wait_for_merge_messages(1).await;
+        assert_eq!(messages.len(), 1, "expected exactly one merge request");
+        assert!(
+            messages[0].contains("[PR https://github.com/acme/repo/pull/91]")
+                && messages[0].contains("[TASK task-source]")
+                && messages[0].starts_with("MERGE "),
+            "merge master received {:?}",
+            messages[0]
+        );
+
+        let db = harness.db();
+        wait_for_closed(&db, "task-source").await;
+        assert!(db.task_merge_signaled_at("task-source").unwrap().is_some());
+        assert_eq!(merge_event_sources(&db, "task-source"), vec!["engine"]);
+        drop(db);
+        harness.cleanup();
+    }
+
+    /// The control: the no-review path, where the approve post signals for
+    /// itself. The engine must record that and send nothing of its own —
+    /// a second MERGE line would be a duplicate request, not a backstop.
+    #[tokio::test]
+    async fn a_post_that_signalled_for_itself_is_not_signalled_again() {
+        let harness = Harness::new(
+            "no-review-control",
+            &no_review_pipeline_def(),
+            Some("https://github.com/acme/repo/pull/91"),
+        );
+
+        let signal = super::router(Arc::new(super::AppState::new(harness.config.clone())))
+            .oneshot(
+                Request::post("/v1/tasks/task-source/actions/signal-merge-handoff")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "branch": "feature/head",
+                            "target": "main",
+                            "prUrl": "https://github.com/acme/repo/pull/91",
+                            "summary": "Ready for repository policy"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(signal.status(), StatusCode::OK);
+        let signalled = harness.wait_for_merge_messages(1).await;
+        assert_eq!(signalled[0], "MERGE feature/head -> main [TASK task-source] [PR https://github.com/acme/repo/pull/91]: Ready for repository policy");
+
+        assert_eq!(
+            harness
+                .complete_approve_post(
+                    "Approved PR and signaled merge master: https://github.com/acme/repo/pull/91"
+                )
+                .await,
+            StatusCode::OK
+        );
+
+        let db = harness.db();
+        wait_for_closed(&db, "task-source").await;
+        assert_eq!(
+            harness.merge_messages().len(),
+            1,
+            "the engine must not duplicate a handoff the post already delivered"
+        );
+        assert_eq!(merge_event_sources(&db, "task-source"), vec!["agent"]);
+        drop(db);
+        harness.cleanup();
+    }
+
+    /// A pipeline whose final stage declares no approve post promised no
+    /// merge side effect, so closing it must have none.
+    #[tokio::test]
+    async fn a_pipeline_without_the_approve_post_closes_without_signalling() {
+        let harness = Harness::new(
+            "no-post",
+            &plain_pipeline_def(),
+            Some("https://github.com/acme/repo/pull/91"),
+        );
+        let db = harness.db();
+        db.finish_stage_run("run-approve", "succeeded", None, None)
+            .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-pr-main",
+            task_id: "task-source",
+            stage: "pr",
+            kind: "main",
+            agent: Some("pr"),
+            agent_provider: Some("claude"),
+            model: None,
+            effort: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-source"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+        drop(db);
+
+        let advance = super::router(Arc::new(super::AppState::new(harness.config.clone())))
+            .oneshot(
+                Request::post("/v1/tasks/task-source/actions/advance-stage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(advance.status(), StatusCode::OK);
+
+        let db = harness.db();
+        wait_for_closed(&db, "task-source").await;
+        assert!(harness.merge_messages().is_empty());
+        assert!(db.task_merge_signaled_at("task-source").unwrap().is_none());
+        drop(db);
+        harness.cleanup();
+    }
+
+    /// The stage promised a handoff and there is nothing to hand off. That is
+    /// a failed approval, not a finished pipeline: the task stays open, unread,
+    /// with the gap on the event feed.
+    #[tokio::test]
+    async fn a_promised_handoff_with_no_pr_refuses_to_close_the_task() {
+        let harness = Harness::new("no-pr", &review_bearing_pipeline_def(), None);
+
+        assert_eq!(
+            harness
+                .complete_approve_post("Nothing to approve, but reporting success anyway")
+                .await,
+            StatusCode::OK
+        );
+
+        let db = harness.db();
+        let mut gap_events = Vec::new();
+        for _ in 0..200 {
+            gap_events = task_events_of_type(&db, "task-source", "task.merge_handoff_missing");
+            if !gap_events.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert_eq!(gap_events.len(), 1, "the skipped handoff must be reported");
+
+        let task = db.get_pipeline_item("task-source").unwrap().unwrap();
+        assert!(
+            task.closed_at.is_none(),
+            "a task that owes an unsent merge handoff must not close"
+        );
+        assert_eq!(task.stage.as_deref(), Some("pr"));
+        assert_eq!(task.activity.as_deref(), Some("unread"));
+        assert!(harness.merge_messages().is_empty());
+        drop(db);
+        harness.cleanup();
+    }
+}
+
 /// The three ways a task can end, as one contract.
 ///
 /// `TASK <id> DONE [<status>]` is acted on without re-reading task state, so

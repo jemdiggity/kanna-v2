@@ -29,6 +29,8 @@ pub use blockers::ReplaceTaskBlockersError;
 #[allow(unused_imports)]
 pub use operator_events::NewOperatorEvent;
 #[allow(unused_imports)]
+pub use pipeline_items::MergeSignalSource;
+#[allow(unused_imports)]
 pub use stage_runs::FinishedStageRun;
 #[allow(unused_imports)]
 pub use task_events::{appended as task_event_appended, TaskEvent, TaskEventKind, TaskEventScope};
@@ -91,6 +93,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "045_agent_signal_protocol",
     "046_completion_and_merge_delivery_binding",
     "047_remove_approval_gate",
+    "048_pipeline_item_merge_signaled",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1607,6 +1610,16 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             DROP TABLE IF EXISTS merge_handoff_delivery;
             "#,
         )
+    })?;
+
+    // One timestamp, not a delivery-binding table: the engine records *that*
+    // a task's merge request reached the repo's merge agent so closing the
+    // task can tell a delivered handoff from a skipped one. It attests
+    // nothing about the merge itself — approval eligibility stayed deleted
+    // with migration 047.
+    run_migration(conn, "048_pipeline_item_merge_signaled", |conn| {
+        add_column(conn, "pipeline_item", "merge_signaled_at", "TEXT")?;
+        Ok(())
     })?;
 
     Ok(())

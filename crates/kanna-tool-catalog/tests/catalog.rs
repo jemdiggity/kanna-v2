@@ -775,6 +775,8 @@ fn wait_events_documents_every_event_type_the_server_emits() {
         "task.revision_requested",
         "task.closed",
         "task.awaiting_input",
+        "task.merge_signaled",
+        "task.merge_handoff_missing",
     ] {
         assert!(
             description.contains(event_type),
