@@ -479,6 +479,18 @@ enum IdleOutcome {
 /// short-lived connections of its own.
 struct SessionObserver {
     reader: crate::daemon_client::DaemonClientReader,
+    /// Held for the observer's whole life, and never written to after the
+    /// handshake.
+    ///
+    /// Dropping it is not free: `OwnedWriteHalf::drop` shuts the socket's write
+    /// side down, the daemon's command loop reads EOF and breaks, and breaking
+    /// aborts the subscription task feeding this reader
+    /// (`crates/daemon/src/connection.rs`). The stream this observer exists to
+    /// read would end milliseconds after it was opened, and every PTY
+    /// finalization would degrade with "the agent did not finish its turn"
+    /// before the agent had a chance to. `terminal_watcher` holds its whole
+    /// `DaemonClient` for the life of its subscription for the same reason.
+    _writer: crate::daemon_client::DaemonClientWriter,
     session_id: String,
     status: SessionStatus,
     present: bool,
@@ -504,6 +516,7 @@ impl SessionObserver {
 
         let mut observer = Self {
             reader,
+            _writer: writer,
             session_id: session_id.to_string(),
             status: SessionStatus::Idle,
             present: false,
@@ -531,39 +544,71 @@ impl SessionObserver {
                 DaemonEvent::Error { message, .. } => {
                     return Err(format!("daemon list error: {message}"))
                 }
-                other => observer.absorb(&other),
+                other => {
+                    observer.absorb(&other);
+                }
             }
         }
         Ok(observer)
     }
 
-    /// Folds a pushed event into the observer's view of the session.
-    fn absorb(&mut self, event: &DaemonEvent) {
+    /// Folds a pushed event into the observer's view of the session, and
+    /// reports whether the event was about this session at all.
+    ///
+    /// The daemon's `Subscribe` stream is machine-wide — every session's status
+    /// changes and exits reach every subscriber — so "an event arrived" and
+    /// "this session did something" are different facts, and the settle window
+    /// below depends on the second one.
+    fn absorb(&mut self, event: &DaemonEvent) -> bool {
         match event {
             DaemonEvent::StatusChanged {
                 session_id, status, ..
             } if *session_id == self.session_id => {
                 self.status = *status;
                 self.present = true;
+                true
             }
             DaemonEvent::Exit { session_id, .. } if *session_id == self.session_id => {
                 self.present = false;
+                true
             }
-            _ => {}
+            _ => false,
         }
     }
 
     async fn wait_for_idle(&mut self, budget: Duration, settle: Duration) -> IdleOutcome {
-        let deadline = tokio::time::Instant::now() + budget;
+        let start = tokio::time::Instant::now();
+        let deadline = start + budget;
+        // Silence is measured from the last event *about this session*, not
+        // from the last event read. The subscription is machine-wide, so a
+        // second agent on the box emits status changes continuously; timing the
+        // window from reads would mean it never elapses there, and the "idle
+        // silence is its own answer" fallback would never fire — a source whose
+        // post-wrap-up turn was too short to be seen as busy would wait out the
+        // whole budget and degrade a shutdown that was fine.
+        let mut silent_since = start;
         loop {
             let now = tokio::time::Instant::now();
             if now >= deadline {
                 return IdleOutcome::TimedOut(self.status);
             }
-            let slice = settle.min(deadline - now);
-            match tokio::time::timeout(slice, self.reader.read_event()).await {
+            let settled_at = silent_since + settle;
+            // Silence only means "finished" for a session that is already idle;
+            // anything else is the agent still at it, and waits out the budget.
+            let idle = self.status == SessionStatus::Idle;
+            if idle && now >= settled_at {
+                return IdleOutcome::Idle;
+            }
+            let wake = if idle {
+                settled_at.min(deadline)
+            } else {
+                deadline
+            };
+            match tokio::time::timeout_at(wake, self.reader.read_event()).await {
                 Ok(Ok(event)) => {
-                    self.absorb(&event);
+                    if self.absorb(&event) {
+                        silent_since = tokio::time::Instant::now();
+                    }
                     match event {
                         DaemonEvent::StatusChanged {
                             ref session_id,
@@ -582,9 +627,7 @@ impl SessionObserver {
                 // observed, so report the last status seen rather than claiming
                 // an idleness nobody witnessed.
                 Ok(Err(_)) => return IdleOutcome::TimedOut(self.status),
-                // Silence. Idle silence means the turn ended without ever being
-                // observed as busy; any other silence is the agent still at it.
-                Err(_) if self.status == SessionStatus::Idle => return IdleOutcome::Idle,
+                // A window elapsed; the loop head decides which one it was.
                 Err(_) => continue,
             }
         }
@@ -682,20 +725,29 @@ mod tests {
 
         fn publish(&self, event: DaemonEvent) {
             if let DaemonEvent::StatusChanged {
+                ref session_id,
                 status: SessionStatus::Idle,
                 ..
             } = event
             {
-                let mut log = self.log.lock().expect("log");
-                let seen = log.inputs.len();
-                log.inputs_at_idle.get_or_insert(seen);
+                if session_id == SESSION {
+                    let mut log = self.log.lock().expect("log");
+                    let seen = log.inputs.len();
+                    log.inputs_at_idle.get_or_insert(seen);
+                }
             }
             let _ = self.events.send(event);
         }
 
         fn status(&self, status: SessionStatus) {
+            self.status_of(SESSION, status);
+        }
+
+        /// The daemon publishes every session on the machine to every
+        /// subscriber, so a test can put another task's traffic on the wire.
+        fn status_of(&self, session_id: &str, status: SessionStatus) {
             self.publish(DaemonEvent::StatusChanged {
-                session_id: SESSION.to_string(),
+                session_id: session_id.to_string(),
                 status,
                 waiting_prompt_snippet: None,
             });
@@ -809,6 +861,16 @@ mod tests {
             {
                 break;
             }
+        }
+
+        // Fidelity, not tidiness. The real daemon aborts its subscription task
+        // the moment the command loop ends (`crates/daemon/src/connection.rs`),
+        // so a client that lets its write half drop stops receiving events —
+        // which is exactly how a subscriber that fails to hold its writer open
+        // loses the stream. A fake that keeps publishing to a half-closed
+        // connection hides that bug, and did.
+        if let Some(task) = subscription {
+            task.abort();
         }
     }
 
@@ -1085,6 +1147,46 @@ mod tests {
         assert!(
             matches!(outcome, IdleOutcome::Idle),
             "idle silence was not read as idle"
+        );
+    }
+
+    /// …and it is silence *from this session* that counts.
+    ///
+    /// The daemon writes every session's status changes to every subscriber, so
+    /// a machine running a second agent puts a steady stream of unrelated
+    /// events on this observer's connection. Timing the settle window from the
+    /// last read rather than the last event about this session means it never
+    /// elapses there: the fallback above stops firing, and a source whose
+    /// post-wrap-up turn was too short to be seen as busy waits out the entire
+    /// budget before degrading a shutdown that was fine.
+    #[tokio::test]
+    async fn another_session_s_traffic_does_not_hold_the_settle_window_open() {
+        let daemon = FakeDaemon::start("idle-noise", Some(SessionStatus::Idle));
+        let mut observer = observer_for(&daemon).await;
+
+        // Faster than the settle window, so under the old rule every read reset
+        // it and only the budget could end the wait.
+        let noise = daemon.events.clone();
+        let ticker = tokio::spawn(async move {
+            loop {
+                let _ = noise.send(DaemonEvent::StatusChanged {
+                    session_id: "task-someone-else".to_string(),
+                    status: SessionStatus::Busy,
+                    waiting_prompt_snippet: None,
+                });
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+
+        let outcome = observer
+            .wait_for_idle(Duration::from_secs(3), Duration::from_millis(400))
+            .await;
+        ticker.abort();
+
+        assert!(
+            matches!(outcome, IdleOutcome::Idle),
+            "another session's events kept the settle window open, so this one \
+             never read as idle",
         );
     }
 
