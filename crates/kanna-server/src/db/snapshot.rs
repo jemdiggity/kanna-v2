@@ -91,7 +91,8 @@ impl Db {
                     task_transfer.source_peer_id,
                     task_transfer.target_peer_id,
                     task_transfer.source_desktop_id,
-                    task_transfer.target_desktop_id
+                    task_transfer.target_desktop_id,
+                    task_transfer.error
              FROM pipeline_item
              LEFT JOIN task_transfer ON task_transfer.id = (
                SELECT candidate.id
@@ -173,6 +174,7 @@ impl Db {
                 transfer_target_peer_id: row.get(41)?,
                 transfer_source_desktop_id: row.get(42)?,
                 transfer_target_desktop_id: row.get(43)?,
+                transfer_error: row.get(44)?,
             })
         })?;
         rows.collect()

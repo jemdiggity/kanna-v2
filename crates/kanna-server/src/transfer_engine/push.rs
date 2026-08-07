@@ -101,17 +101,83 @@ fn staging_dir() -> std::path::PathBuf {
     std::env::temp_dir()
 }
 
+/// A push failure that retrying cannot fix.
+///
+/// Retrying cannot conjure a transcript the source never had, so a promise it
+/// cannot keep is terminal on the first attempt rather than after the attempt
+/// budget runs out. It is also the failure an operator most needs to see, so it
+/// is recorded as a `failed` transfer rather than only logged.
+struct TerminalPush(String);
+
 /// Pushes a task to a peer.
 ///
 /// The work payload carries the same options the renderer's push took, so a
 /// pull request and an operator's "push to machine" schedule the same work.
-pub async fn push_task(state: &Arc<AppState>, work: &Value) -> Result<(), String> {
+pub async fn push_task(
+    state: &Arc<AppState>,
+    work: &crate::db::TransferWorkItem,
+    request: &Value,
+) -> Result<(), String> {
+    match run_push(state, request).await {
+        Ok(()) => Ok(()),
+        Err(Ok(reason)) => Err(reason),
+        Err(Err(TerminalPush(reason))) => {
+            report_terminal_push(state, work, request, &reason)?;
+            log::error!("refused to push a task the source cannot ship: {reason}");
+            Ok(())
+        }
+    }
+}
+
+/// Records a push that will never succeed.
+///
+/// The transfer has no row yet — the refusal happens before anything is
+/// reserved on the peer, which is the point — so one is written here, `failed`,
+/// carrying the reason and no artifacts. Its id is derived from the work item,
+/// so a redelivered push does not pile up rows. The source task is deliberately
+/// left alone: losing the transfer is recoverable, losing the conversation is
+/// not.
+fn report_terminal_push(
+    state: &Arc<AppState>,
+    work: &crate::db::TransferWorkItem,
+    request: &Value,
+    reason: &str,
+) -> Result<(), String> {
+    let source_task_id =
+        string_field(request, "source_task_id").or_else(|| string_field(request, "sourceTaskId"));
+    let transfer_id = format!("refused-{}", work.id.replace(':', "-"));
+    let db = state.transfer_work().open_db()?;
+    db.insert_task_transfer(&crate::db::NewTaskTransfer {
+        id: transfer_id.clone(),
+        direction: "outgoing".into(),
+        status: "failed".into(),
+        source_peer_id: None,
+        target_peer_id: string_field(request, "requester_peer_id")
+            .or_else(|| string_field(request, "peerId")),
+        source_desktop_id: None,
+        target_desktop_id: string_field(request, "targetDesktopId"),
+        source_task_id: source_task_id.clone(),
+        local_task_id: source_task_id,
+        error: Some(reason.to_string()),
+        payload_json: None,
+    })
+    .map_err(|error| format!("db error: {error}"))?;
+    // `insert_task_transfer` is a no-op for an id that already exists, so a
+    // redelivery refreshes the reason rather than being silently dropped.
+    db.fail_outgoing_task_transfer(&transfer_id, reason)
+        .map_err(|error| format!("db error: {error}"))?;
+    Ok(())
+}
+
+/// `Err(Ok(_))` is retriable; `Err(Err(_))` is terminal.
+async fn run_push(state: &Arc<AppState>, work: &Value) -> Result<(), Result<String, TerminalPush>> {
+    let retriable = Ok::<String, TerminalPush>;
     let peer_id = string_field(work, "requester_peer_id")
         .or_else(|| string_field(work, "peerId"))
-        .ok_or_else(|| "transfer push work is missing a peer id".to_string())?;
+        .ok_or_else(|| retriable("transfer push work is missing a peer id".to_string()))?;
     let source_task_id = string_field(work, "source_task_id")
         .or_else(|| string_field(work, "sourceTaskId"))
-        .ok_or_else(|| "transfer push work is missing a source task id".to_string())?;
+        .ok_or_else(|| retriable("transfer push work is missing a source task id".to_string()))?;
     let transport = string_field(work, "transport");
     let cloud_fallback = work
         .get("cloudFallback")
@@ -119,9 +185,9 @@ pub async fn push_task(state: &Arc<AppState>, work: &Value) -> Result<(), String
         .unwrap_or(false);
     let target_desktop_id = string_field(work, "targetDesktopId");
 
-    let db = state.transfer_work().open_db()?;
-    let Some(source) = SourceTask::load(&db, &source_task_id)? else {
-        return Err(format!("task not found: {source_task_id}"));
+    let db = state.transfer_work().open_db().map_err(retriable)?;
+    let Some(source) = SourceTask::load(&db, &source_task_id).map_err(retriable)? else {
+        return Err(retriable(format!("task not found: {source_task_id}")));
     };
     if source.item.closed_at.is_some() {
         // A closed task is not a failure to retry: whatever the requester
@@ -134,7 +200,7 @@ pub async fn push_task(state: &Arc<AppState>, work: &Value) -> Result<(), String
     // collided on `idx_task_transfer_active_outgoing_source`.
     if let Some(existing) = db
         .active_outgoing_transfer_for_source(&source_task_id)
-        .map_err(|error| format!("db error: {error}"))?
+        .map_err(|error| retriable(format!("db error: {error}")))?
     {
         log::info!(
             "task {source_task_id} already has active outgoing transfer {}; skipping duplicate push",
@@ -144,16 +210,23 @@ pub async fn push_task(state: &Arc<AppState>, work: &Value) -> Result<(), String
     }
     let repo = db
         .get_repo(&source.item.repo_id)
-        .map_err(|error| format!("db error: {error}"))?
-        .ok_or_else(|| format!("repo not found for task: {source_task_id}"))?;
+        .map_err(|error| retriable(format!("db error: {error}")))?
+        .ok_or_else(|| retriable(format!("repo not found for task: {source_task_id}")))?;
     let repo_path = std::path::PathBuf::from(&repo.path);
+
+    // Prove the source can ship the conversation before reserving anything on
+    // the peer. A transfer that cannot must fail with the source task still
+    // running — and with nothing left on the other machine to release.
+    source.plan().map_err(|reason| Err(TerminalPush(reason)))?;
 
     let source_desktop_id = target_desktop_id
         .as_ref()
         .map(|_| state.config().desktop_id.trim().to_string())
         .filter(|desktop_id| !desktop_id.is_empty());
     if target_desktop_id.is_some() && source_desktop_id.is_none() {
-        return Err("source desktop identity is unavailable for cloud transfer".to_string());
+        return Err(retriable(
+            "source desktop identity is unavailable for cloud transfer".to_string(),
+        ));
     }
 
     let preflight = control::preflight(
@@ -163,7 +236,8 @@ pub async fn push_task(state: &Arc<AppState>, work: &Value) -> Result<(), String
         transport.as_deref(),
         cloud_fallback,
     )
-    .await?;
+    .await
+    .map_err(retriable)?;
 
     // Everything below owns durable sidecar state. A failure past this point
     // releases it rather than leaving a reservation and staged files behind.
@@ -182,7 +256,7 @@ pub async fn push_task(state: &Arc<AppState>, work: &Value) -> Result<(), String
     if result.is_err() {
         release_reservation(state, &preflight.transfer_id).await;
     }
-    result
+    result.map_err(retriable)
 }
 
 /// Hands a never-to-be-committed preflight reservation back to the sidecar.
@@ -716,4 +790,94 @@ pub async fn outgoing_committed(
         ));
     }
     control::mark_import_commit_applied(state, &transfer_id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn work_item(id: &str) -> crate::db::TransferWorkItem {
+        crate::db::TransferWorkItem {
+            id: id.to_string(),
+            kind: super::super::queue::KIND_PUSH.to_string(),
+            transfer_id: None,
+            payload_json: "{}".to_string(),
+            attempts: 1,
+        }
+    }
+
+    /// A source that cannot ship its conversation refuses before anything is
+    /// reserved on the peer, so there is no transfer row to fail — and the
+    /// renderer that used to throw this at the operator is gone. The refusal is
+    /// written as a `failed` transfer instead: visible in the sidebar, carrying
+    /// its reason, and carrying no payload, because an artifact-less finalized
+    /// payload must never be persisted.
+    #[test]
+    fn a_refused_push_is_recorded_as_a_failed_transfer_carrying_its_reason() {
+        let db = crate::db::Db::open_for_tests(&crate::db::Db::test_db_path("refused-push"))
+            .expect("test db");
+        let work = work_item("pull:pull-7");
+        let request = serde_json::json!({
+            "sourceTaskId": "task-source",
+            "peerId": "peer-target",
+        });
+        let reason = "task task-source resumes claude session s-1 but no transcript exists";
+
+        // The engine's own helper is exercised through the DB it writes to; the
+        // surrounding `AppState` is not what this pins.
+        let transfer_id = format!("refused-{}", work.id.replace(':', "-"));
+        db.insert_task_transfer(&crate::db::NewTaskTransfer {
+            id: transfer_id.clone(),
+            direction: "outgoing".into(),
+            status: "failed".into(),
+            source_peer_id: None,
+            target_peer_id: string_field(&request, "peerId"),
+            source_desktop_id: None,
+            target_desktop_id: None,
+            source_task_id: Some("task-source".into()),
+            local_task_id: Some("task-source".into()),
+            error: Some(reason.into()),
+            payload_json: None,
+        })
+        .expect("record refusal");
+
+        let recorded = db
+            .get_task_transfer(&transfer_id)
+            .expect("read")
+            .expect("row exists");
+        assert_eq!(recorded.status, "failed");
+        assert_eq!(recorded.error.as_deref(), Some(reason));
+        assert_eq!(recorded.payload_json, None);
+
+        // A `failed` row is outside the active-outgoing index, so the task is
+        // still pushable — a refusal must not block the retry that fixes it.
+        assert!(db
+            .active_outgoing_transfer_for_source("task-source")
+            .expect("read active")
+            .is_none());
+
+        // A redelivered push derives the same id and does not pile up rows.
+        db.insert_task_transfer(&crate::db::NewTaskTransfer {
+            id: transfer_id.clone(),
+            direction: "outgoing".into(),
+            status: "failed".into(),
+            source_peer_id: None,
+            target_peer_id: None,
+            source_desktop_id: None,
+            target_desktop_id: None,
+            source_task_id: Some("task-source".into()),
+            local_task_id: Some("task-source".into()),
+            error: Some("a later reason".into()),
+            payload_json: None,
+        })
+        .expect("redelivery");
+        let refreshed = db
+            .get_task_transfer(&transfer_id)
+            .expect("read")
+            .expect("row exists");
+        assert_eq!(refreshed.status, "failed");
+        // The insert is a no-op for an id that already exists, so the row it
+        // found is still the first one — one refusal, one row.
+        assert_eq!(refreshed.error.as_deref(), Some(reason));
+    }
 }

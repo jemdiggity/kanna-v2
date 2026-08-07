@@ -1,4 +1,6 @@
+import { execFile } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
@@ -32,6 +34,8 @@ interface VueCallError {
   __error: string;
 }
 
+const execFileAsync = promisify(execFile);
+
 let testRepoPath = "";
 
 function isVueCallError(value: unknown): value is VueCallError {
@@ -63,11 +67,20 @@ async function waitForPeer(peerId: string, timeoutMs = 20_000): Promise<void> {
   throw new Error(`timed out waiting for peer ${peerId}`);
 }
 
-async function waitForSecondaryIncomingTransferPending(
+/**
+ * The incoming transfer exists on the destination and has not imported.
+ *
+ * The engine claims a row as soon as it starts working on it, so "not
+ * imported" is `local_task_id IS NULL` rather than a particular status —
+ * pinning `pending` would pin how the engine paces itself instead of the
+ * property under test.
+ */
+async function waitForSecondaryIncomingTransferUnimported(
   sourceTaskId: string,
-  timeoutMs = 20_000,
+  timeoutMs = 30_000,
 ): Promise<TransferRow> {
   const deadline = Date.now() + timeoutMs;
+  let last: TransferRow | undefined;
 
   while (Date.now() < deadline) {
     const rows = (await queryDb(
@@ -79,14 +92,16 @@ async function waitForSecondaryIncomingTransferPending(
         LIMIT 1`,
       [sourceTaskId],
     )) as TransferRow[];
-    const row = rows[0];
-    if (row?.status === "pending" && typeof row.id === "string" && row.id.length > 0) {
-      return row;
+    last = rows[0];
+    if (last?.id && last.local_task_id === null) {
+      return last;
     }
     await sleep(250);
   }
 
-  throw new Error(`timed out waiting for secondary transfer to remain pending for ${sourceTaskId}`);
+  throw new Error(
+    `timed out waiting for an unimported secondary transfer for ${sourceTaskId}: ${JSON.stringify(last)}`,
+  );
 }
 
 async function assertPrimaryTaskRemainsOpen(
@@ -132,20 +147,24 @@ async function deleteSessionIfRunning(client: { deleteSession(): Promise<void> }
   await client.deleteSession().catch(() => undefined);
 }
 
-async function failNextIncomingTransferAutoApproval(): Promise<void> {
-  const result = await secondary.executeAsync<string>(
-    `const cb = arguments[arguments.length - 1];
-     const ctx = window.__KANNA_E2E__.setupState;
-     const originalApprove = ctx.store.approveIncomingTransfer.bind(ctx.store);
-     ctx.store.approveIncomingTransfer = async () => {
-       ctx.store.approveIncomingTransfer = originalApprove;
-       throw new Error("simulated destination import failure before acknowledgment");
-     };
-     cb("ok");`,
-  );
-  if (result !== "ok") {
-    throw new Error(`failed to install incoming transfer failure hook: ${result}`);
-  }
+/**
+ * Makes the destination unable to acquire the repository.
+ *
+ * This used to be done by monkey-patching `store.approveIncomingTransfer` in
+ * the destination renderer. That seam is gone: the import runs in
+ * `kanna-server` now, precisely so it does not depend on a window. What is left
+ * is a product-level one — the payload advertises a remote the destination
+ * cannot clone, so acquisition fails where a real unreachable remote would.
+ */
+async function makeRepoUnreachableForTheDestination(): Promise<void> {
+  await execFileAsync("git", [
+    "-C",
+    testRepoPath,
+    "remote",
+    "set-url",
+    "origin",
+    `${testRepoPath}-does-not-exist.git`,
+  ]);
 }
 
 const { primary, secondary } = createPrimaryAndSecondaryClients();
@@ -198,29 +217,37 @@ describe("local transfer source handoff failure", () => {
     await callVueMethod(primary, "store.selectItem", sourceTaskId);
     await pauseForSlowMode("task created on primary");
 
-    await failNextIncomingTransferAutoApproval();
+    await makeRepoUnreachableForTheDestination();
     await pushSelectedTaskToPeerThroughUi(primary, "Secondary");
     await pauseForSlowMode("task pushed to secondary");
 
-    const pendingTransfer = await waitForSecondaryIncomingTransferPending(sourceTaskId);
-    await pauseForSlowMode("incoming transfer auto-import failed on secondary");
+    const unimported = await waitForSecondaryIncomingTransferUnimported(sourceTaskId);
+    await pauseForSlowMode("incoming import could not acquire the repository");
 
     const secondaryTransferRows = (await queryDb(
       secondary,
       `SELECT id, direction, status, source_peer_id, source_task_id, local_task_id
          FROM task_transfer
         WHERE id = ?`,
-      [pendingTransfer.id],
+      [unimported.id],
     )) as TransferRow[];
     expect(secondaryTransferRows[0]).toMatchObject({
-      id: pendingTransfer.id,
+      id: unimported.id,
       direction: "incoming",
-      status: "pending",
       source_peer_id: "peer-primary",
       source_task_id: sourceTaskId,
     });
+    // Nothing was imported, so nothing was acknowledged — which is the only
+    // reason the source is still allowed to be open below.
     expect(secondaryTransferRows[0]?.local_task_id).toBeNull();
+    expect(["pending", "claimed", "importing"]).toContain(secondaryTransferRows[0]?.status);
+
+    const destinationTasks = (await queryDb(
+      secondary,
+      "SELECT COUNT(*) AS count FROM pipeline_item",
+    )) as Array<{ count: number }>;
+    expect(Number(destinationTasks[0]?.count ?? 0)).toBe(0);
 
     await assertPrimaryTaskRemainsOpen(sourceTaskId);
-  });
+  }, 240_000);
 });

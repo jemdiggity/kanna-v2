@@ -169,6 +169,7 @@ pub struct SnapshotPipelineItem {
     pub transfer_target_peer_id: Option<String>,
     pub transfer_source_desktop_id: Option<String>,
     pub transfer_target_desktop_id: Option<String>,
+    pub transfer_error: Option<String>,
     pub repo_id: String,
     pub issue_number: Option<i64>,
     pub issue_title: Option<String>,

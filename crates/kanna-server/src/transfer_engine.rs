@@ -141,7 +141,7 @@ async fn execute(state: &Arc<AppState>, item: &crate::db::TransferWorkItem) -> R
         queue::KIND_INCOMING_REQUEST => import::record_incoming(state, &payload).await,
         queue::KIND_IMPORT => import::import_transfer(state, item, &payload).await,
         queue::KIND_REJECT => import::reject_transfer(state, &payload).await,
-        queue::KIND_PUSH => push::push_task(state, &payload).await,
+        queue::KIND_PUSH => push::push_task(state, item, &payload).await,
         queue::KIND_FINALIZE => push::finalize(state, item, &payload).await,
         queue::KIND_OUTGOING_COMMITTED => push::outgoing_committed(state, item, &payload).await,
         other => Err(format!("unknown transfer work kind {other}")),
