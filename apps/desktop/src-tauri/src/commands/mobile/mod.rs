@@ -74,6 +74,13 @@ pub struct MobilePairingSession {
 #[derive(Clone)]
 pub struct MobileServerManager {
     inner: Arc<Mutex<MobileServerState>>,
+    /// Serializes `start()`. `started` is published before the sidecar is spawned so
+    /// `snapshot()` and `stop()` can see the attempt, which means a caller arriving
+    /// mid-startup would otherwise be told "already started" while the server is not yet
+    /// listening. The frontend calls `ensure_mobile_server` and then immediately fetches
+    /// `/v1/snapshot`, so that early `Ok` failed app initialization outright whenever the
+    /// server took longer to come up than the frontend's fetch budget.
+    start_gate: Arc<Mutex<()>>,
     server_lock: Arc<Mutex<Option<File>>>,
     server_pid_tx: watch::Sender<Option<u32>>,
     client: reqwest::Client,
@@ -153,6 +160,7 @@ impl MobileServerManager {
                 started: false,
                 cloud_env,
             })),
+            start_gate: Arc::new(Mutex::new(())),
             server_lock: Arc::new(Mutex::new(None)),
             server_pid_tx,
             client: reqwest::Client::new(),
@@ -179,6 +187,10 @@ impl MobileServerManager {
     }
 
     pub async fn start(&self) -> Result<(), String> {
+        // Held for the whole attempt: callers that arrive while a start is in flight wait
+        // for it and observe the finished result, rather than being told the server is
+        // ready while it is still binding its port.
+        let _start_gate = self.start_gate.lock().await;
         let (config_path, desktop_name, api_base_url, cloud_env) = {
             let state = self.inner.lock().await;
             if state.started {
@@ -1424,6 +1436,79 @@ mod tests {
             current_server_version(),
             "production",
         ));
+    }
+
+    /// Installs a `kanna-server` sidecar that stalls before exec'ing the real one, so a
+    /// slow startup is reproducible instead of depending on machine load.
+    fn install_slow_kanna_server_sidecar(root: &std::path::Path, delay: Duration) -> PathBuf {
+        let real = test_kanna_server_binary().unwrap_or_else(|| {
+            panic!("kanna-server sidecar not found; run `./kd build sidecars` before this test")
+        });
+        let dir = root.join("slow-sidecar");
+        std::fs::create_dir_all(&dir).expect("slow sidecar dir should be created");
+        let script = dir.join("kanna-server");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nsleep {}\nexec {:?} \"$@\"\n",
+                delay.as_secs_f32(),
+                real
+            ),
+        )
+        .expect("slow sidecar script should be written");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("slow sidecar script should be executable");
+        dir
+    }
+
+    /// A start that is still in flight must not report success: the frontend calls
+    /// `ensure_mobile_server` and then fetches `/v1/snapshot` straight away, so an early
+    /// `Ok` failed app initialization with `[init] fatal: TypeError: Load failed`.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn start_reports_success_only_once_the_server_answers() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let root = unique_test_root("concurrent-start");
+        let port = free_loopback_port();
+        let app_data_dir = root.join("app-data");
+        let db_path = root.join("kanna-test.db");
+        let daemon_dir = root.join("daemon");
+        configure_process_test_env(port, &db_path, &daemon_dir);
+        let slow_sidecar_dir = install_slow_kanna_server_sidecar(&root, Duration::from_secs(3));
+        unsafe {
+            set_env_var(
+                "KANNA_TEST_SIDECAR_DIR",
+                &slow_sidecar_dir.to_string_lossy(),
+            );
+        }
+        create_test_database(&db_path);
+        let mut daemon = start_test_kanna_daemon(&daemon_dir).await;
+        let manager = MobileServerManager::new(app_data_dir.clone());
+
+        let first_starter = manager.clone();
+        let first_start = tokio::spawn(async move { first_starter.start().await });
+        // Long enough for the first attempt to publish `started` and spawn the sidecar,
+        // well short of the sidecar becoming reachable.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let concurrent_start = manager.start().await;
+        let status_after_start = reqwest::get(format!("{}/v1/status", server_base_url(port)))
+            .await
+            .map(|response| response.status().is_success())
+            .unwrap_or(false);
+
+        let first_result = first_start.await.expect("first start task should finish");
+        let _ = stop_server_on_port(port).await;
+        daemon.kill().await.expect("cleanup should stop daemon");
+        cleanup_process_test_env();
+        let _ = std::fs::remove_dir_all(&root);
+
+        first_result.expect("first start should succeed");
+        concurrent_start.expect("concurrent start should succeed");
+        assert!(
+            status_after_start,
+            "start() returned before kanna-server answered /v1/status"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

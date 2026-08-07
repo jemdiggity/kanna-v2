@@ -50,6 +50,30 @@ fn merge_updater_pubkey_into_tauri_config() {
     );
 }
 
+/// Makes the compiled crate depend on the effective `TAURI_CONFIG`.
+///
+/// `tauri::generate_context!()` expands the merged config at rustc time, but cargo has no
+/// way to know that: `tauri_build` only asks to rerun *this script* when `TAURI_CONFIG`
+/// changes, and a rerun whose output is identical leaves the compiled crate alone. A dev
+/// binary could therefore be relinked and still carry an earlier run's `build.devUrl` —
+/// which is both the URL the window loads and what the capability ACL treats as "local",
+/// so the app either sat at `about:blank` or was denied every ACL-scoped command.
+///
+/// Emitting the config's fingerprint changes this script's output whenever the config
+/// changes, which is what dirties the crate and re-expands the context.
+fn pin_tauri_config_fingerprint() {
+    use std::hash::{Hash, Hasher};
+
+    println!("cargo:rerun-if-env-changed=TAURI_CONFIG");
+    let config = std::env::var("TAURI_CONFIG").unwrap_or_default();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    config.hash(&mut hasher);
+    println!(
+        "cargo:rustc-env=KANNA_TAURI_CONFIG_FINGERPRINT={:016x}",
+        hasher.finish()
+    );
+}
+
 fn main() {
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         std::env::set_current_dir(&manifest_dir)
@@ -114,6 +138,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=KANNA_BUILD_WORKTREE");
 
     merge_updater_pubkey_into_tauri_config();
+    pin_tauri_config_fingerprint();
 
     if let Err(error) = tauri_build::try_build(Default::default()) {
         let cwd = std::env::current_dir().ok();

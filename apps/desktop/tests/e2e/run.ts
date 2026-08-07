@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, copyFile, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { dirname, basename, delimiter, join, posix, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -11,6 +10,13 @@ import { buildRealE2eAgentEnv } from "./runEnv";
 import { createInstanceConfig, type InstanceConfig } from "./runConfig";
 import { pauseBeforeTestTarget, pauseForAppReady } from "./helpers/runSlowMode";
 import { isRealTestTarget, shouldStartInitialInstances } from "./runPlan";
+import { createPortAllocator } from "./runPorts";
+import {
+  classifyAppStartup,
+  describeAppStartupFailure,
+  WRONG_URL_GRACE_MS,
+  type AppStartupProbe,
+} from "./runStartup";
 import { APP_READY_SCRIPT } from "./helpers/appReady";
 import {
   buildFirebaseCommandEnv,
@@ -126,29 +132,6 @@ async function setupIsolatedCodexHome(destination: string): Promise<string> {
   return destination;
 }
 
-async function findFreePort(): Promise<number> {
-  return await new Promise<number>((resolvePort, reject) => {
-    const server = createServer();
-    server.unref();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close();
-        reject(new Error("failed to resolve free port"));
-        return;
-      }
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolvePort(address.port);
-      });
-    });
-  });
-}
-
 async function runCommand(
   command: string[],
   options: CommandOptions,
@@ -238,9 +221,9 @@ function toDesktopRelativeTarget(path: string): string {
   return posix.join("tests", "e2e", path.replace(/\\/g, "/"));
 }
 
-async function canConnectToApp(baseUrl: string): Promise<boolean> {
+async function probeApp(baseUrl: string): Promise<AppStartupProbe> {
   const status = await fetch(`${baseUrl}/status`).catch(() => null);
-  if (!status?.ok) return false;
+  if (!status?.ok) return { webdriverReady: false, url: null, appReady: false };
 
   const session = await fetch(`${baseUrl}/session`, {
     method: "POST",
@@ -249,9 +232,12 @@ async function canConnectToApp(baseUrl: string): Promise<boolean> {
   }).then((response) => response.json()).catch(() => null);
 
   const sessionId = session?.value?.sessionId;
-  if (!sessionId) return false;
+  if (!sessionId) return { webdriverReady: true, url: null, appReady: false };
 
   try {
+    const location = await fetch(`${baseUrl}/session/${sessionId}/url`)
+      .then((response) => response.json())
+      .catch(() => null);
     const vueCheck = await fetch(`${baseUrl}/session/${sessionId}/execute/sync`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -260,19 +246,69 @@ async function canConnectToApp(baseUrl: string): Promise<boolean> {
         args: [],
       }),
     }).then((response) => response.json());
-    return Boolean(vueCheck?.value);
+    return {
+      webdriverReady: true,
+      url: typeof location?.value === "string" ? location.value : null,
+      appReady: Boolean(vueCheck?.value),
+    };
   } finally {
     await fetch(`${baseUrl}/session/${sessionId}`, { method: "DELETE" }).catch(() => undefined);
   }
 }
 
-async function waitForApp(baseUrl: string, timeoutMs: number): Promise<void> {
+async function captureDesktopPane(sessionName: string): Promise<string> {
+  return await new Promise<string>((resolveLog) => {
+    const proc = spawn(
+      "tmux",
+      ["-L", sessionName, "capture-pane", "-p", "-S", "-200", "-t", `${sessionName}:desktop`],
+      { stdio: ["ignore", "pipe", "ignore"] },
+    );
+    let output = "";
+    proc.stdout.on("data", (chunk: Buffer) => {
+      output += chunk.toString();
+    });
+    proc.once("error", () => resolveLog(""));
+    proc.once("exit", () => resolveLog(output));
+  });
+}
+
+async function waitForApp(instance: InstanceConfig, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
+  let probe: AppStartupProbe | null = null;
+  let wrongUrlSince: number | null = null;
+
   while (Date.now() < deadline) {
-    if (await canConnectToApp(baseUrl)) return;
+    probe = await probeApp(instance.baseUrl);
+    const state = classifyAppStartup(probe, instance.devUrl);
+    if (state === "ready") return;
+    if (state === "wrong-url") {
+      wrongUrlSince ??= Date.now();
+      if (Date.now() - wrongUrlSince >= WRONG_URL_GRACE_MS) {
+        throw new Error(
+          describeAppStartupFailure({
+            baseUrl: instance.baseUrl,
+            expectedUrl: instance.devUrl,
+            probe,
+            reason: "wrong-url",
+            paneLog: await captureDesktopPane(instance.sessionName),
+          }),
+        );
+      }
+    } else {
+      wrongUrlSince = null;
+    }
     await sleep(1000);
   }
-  throw new Error(`timed out waiting for app at ${baseUrl}`);
+
+  throw new Error(
+    describeAppStartupFailure({
+      baseUrl: instance.baseUrl,
+      expectedUrl: instance.devUrl,
+      probe,
+      reason: "timeout",
+      paneLog: await captureDesktopPane(instance.sessionName),
+    }),
+  );
 }
 
 function needsSecondaryInstance(testTargets: string[]): boolean {
@@ -415,15 +451,16 @@ async function main(): Promise<void> {
   const transferRegistryDir = join(repoRoot, ".kanna-transfer-registry-e2e", runSuffix);
   const primaryCloudTransferRegistryDir = join(transferRegistryDir, "primary");
   const secondaryCloudTransferRegistryDir = join(transferRegistryDir, "secondary");
-  const primaryDevPort = await findFreePort();
-  const primaryWebDriverPort = await findFreePort();
-  const primaryTransferPort = await findFreePort();
-  const primaryMobileServerPort = await findFreePort();
-  const relayPort = await findFreePort();
-  const firebaseAuthPort = await findFreePort();
-  const firebaseFirestorePort = await findFreePort();
-  const firebaseFunctionsPort = await findFreePort();
-  const firebaseUiPort = await findFreePort();
+  const ports = createPortAllocator();
+  const primaryDevPort = await ports.allocate("primary dev server");
+  const primaryWebDriverPort = await ports.allocate("primary webdriver");
+  const primaryTransferPort = await ports.allocate("primary transfer");
+  const primaryMobileServerPort = await ports.allocate("primary mobile server");
+  const relayPort = await ports.allocate("relay");
+  const firebaseAuthPort = await ports.allocate("firebase auth");
+  const firebaseFirestorePort = await ports.allocate("firebase firestore");
+  const firebaseFunctionsPort = await ports.allocate("firebase functions");
+  const firebaseUiPort = await ports.allocate("firebase ui");
   const firebaseEnv = {
     KANNA_FIREBASE_AUTH_PORT: String(firebaseAuthPort),
     KANNA_FIREBASE_FIRESTORE_PORT: String(firebaseFirestorePort),
@@ -475,10 +512,12 @@ async function main(): Promise<void> {
     webDriverPortEnvValue: primaryWebDriverPort,
   });
 
-  const secondaryDevPort = enableSecondary ? await findFreePort() : null;
-  const secondaryWebDriverPort = enableSecondary ? await findFreePort() : null;
-  const secondaryTransferPort = enableSecondary ? await findFreePort() : null;
-  const secondaryMobileServerPort = enableSecondary ? await findFreePort() : null;
+  const secondaryDevPort = enableSecondary ? await ports.allocate("secondary dev server") : null;
+  const secondaryWebDriverPort = enableSecondary ? await ports.allocate("secondary webdriver") : null;
+  const secondaryTransferPort = enableSecondary ? await ports.allocate("secondary transfer") : null;
+  const secondaryMobileServerPort = enableSecondary
+    ? await ports.allocate("secondary mobile server")
+    : null;
   const secondaryDbName = enableSecondary ? `test-${worktreeName}-${runSuffix}-secondary.db` : null;
   const secondaryDaemonDir = enableSecondary
     ? join(repoRoot, ".kanna-daemon-e2e", `${runSuffix}-secondary`)
@@ -579,7 +618,7 @@ async function main(): Promise<void> {
       env: { ...primary.env, ...runtimeEnv, ...fixtureEnv },
     });
     console.log(`[e2e] waiting for primary app at ${primary.baseUrl}`);
-    await waitForApp(primary.baseUrl, 10 * 60_000);
+    await waitForApp(primary, 10 * 60_000);
     console.log(`[e2e] primary app ready at ${primary.baseUrl}`);
     await pauseForAppReady("primary");
 
@@ -590,7 +629,7 @@ async function main(): Promise<void> {
         env: { ...secondaryInstance.env, ...secondaryRuntimeEnv, ...fixtureEnv },
       });
       console.log(`[e2e] waiting for secondary app at ${secondaryInstance.baseUrl}`);
-      await waitForApp(secondaryInstance.baseUrl, 10 * 60_000);
+      await waitForApp(secondaryInstance, 10 * 60_000);
       console.log(`[e2e] secondary app ready at ${secondaryInstance.baseUrl}`);
       await pauseForAppReady("secondary");
     }
@@ -794,6 +833,10 @@ async function main(): Promise<void> {
   const cleanupAppDataHooks: Array<() => Promise<void>> = [];
 
   try {
+    // Hand the reserved ports back to the OS only now that setup is done, so the
+    // processes that need them bind moments after the harness picked them.
+    await ports.releaseAll();
+
     if (shouldStartInitialInstances(testTargets[0])) {
       const isolateAgentProviders = targetNeedsIsolatedAgentProviders(testTargets[0] ?? "");
       runningInstances = await startInstances(false, true, realE2eRuntimeEnv, isolateAgentProviders);

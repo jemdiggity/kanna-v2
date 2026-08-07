@@ -1,6 +1,8 @@
 mod commands;
 mod daemon_client;
 mod daemon_lifecycle;
+#[cfg(debug_assertions)]
+mod dev_url;
 mod macos;
 mod menu;
 mod pipeline_listener;
@@ -33,6 +35,10 @@ pub(crate) const KANNA_BUILD_COMMIT: &str = env!("KANNA_BUILD_COMMIT");
 pub(crate) const KANNA_BUILD_TASK_ID: &str = env!("KANNA_BUILD_TASK_ID");
 pub(crate) const KANNA_BUILD_WORKTREE: &str = env!("KANNA_BUILD_WORKTREE");
 pub(crate) const KANNA_BUILD_INFO: &str = env!("KANNA_BUILD_INFO");
+/// Fingerprint of the `TAURI_CONFIG` this binary's context was expanded from — see
+/// `build.rs`, which pins it so cargo cannot hand back a crate built for another config.
+#[cfg(debug_assertions)]
+pub(crate) const TAURI_CONFIG_FINGERPRINT: &str = env!("KANNA_TAURI_CONFIG_FINGERPRINT");
 pub type TransferEventConsumerState = transfer_sidecar::TransferEventConsumerState;
 static RUNTIME_BUNDLE_IDENTIFIER: OnceLock<String> = OnceLock::new();
 
@@ -118,6 +124,8 @@ pub fn run() {
                 macos::fix_path_from_shell();
                 macos::setup_fn_f_fullscreen(app.handle().clone());
             }
+            #[cfg(debug_assertions)]
+            dev_url::warn_on_stale_dev_url(app.handle());
             // Build app menu with full version in About
             let about = AboutMetadataBuilder::new()
                 .short_version(Some(KANNA_VERSION))
