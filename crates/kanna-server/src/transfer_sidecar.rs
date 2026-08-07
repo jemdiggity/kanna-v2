@@ -25,26 +25,14 @@ use tokio::sync::{oneshot, Mutex, Notify};
 /// this is a runaway writer, not a message.
 const MAX_SIDECAR_STDOUT_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
-/// Retention for events the desktop has not yet picked up. Mirrors the bounds
-/// the desktop lifecycle queue applied before the move, for the same reason:
-/// an absent consumer must not let the sidecar grow memory without limit.
+/// Retention for advisory events the desktop has not yet picked up. An absent
+/// consumer must not let the sidecar grow memory without limit, and an advisory
+/// event — a pairing prompt, a remote terminal frame — is worth less than the
+/// memory it would cost to keep forever.
 const MAX_TRANSFER_EVENT_ENTRIES: usize = 256;
 const MAX_TRANSFER_EVENT_BYTES: usize = 8 * 1024 * 1024;
 
 type PendingRequests = Arc<StdMutex<HashMap<String, oneshot::Sender<Value>>>>;
-
-/// Sidecar events whose delivery changes state on the receiving side. These
-/// are never evicted to make room: losing one loses a transfer step. Broadcast
-/// events (pairing progress, terminal output) are advisory and evictable.
-fn is_durable_transfer_event(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        "incoming_transfer_request"
-            | "task_pull_requested"
-            | "outgoing_transfer_committed"
-            | "outgoing_transfer_finalization_requested"
-    )
-}
 
 fn transfer_event_type(value: &Value) -> Option<&str> {
     let event_type = value.get("type").and_then(Value::as_str)?;
@@ -64,7 +52,6 @@ fn transfer_event_type(value: &Value) -> Option<&str> {
 
 struct TransferEventEntry {
     seq: u64,
-    durable: bool,
     bytes: usize,
     event: Value,
 }
@@ -80,13 +67,16 @@ struct TransferEventLogInner {
     evicted_through_seq: u64,
 }
 
-/// Single-consumer log of sidecar events, read by the desktop process over
-/// `GET /v1/transfers/sidecar/events`.
+/// Single-consumer log of *advisory* sidecar events, read by the desktop
+/// process over `GET /v1/transfers/sidecar/events`.
 ///
-/// Single-consumer is the contract, not an accident: reading through a cursor
-/// prunes everything at or below it, which is what keeps durable events from
-/// accumulating forever when the sidecar is busy. One desktop process owns one
-/// server, so there is exactly one reader.
+/// The four state-mutating lifecycle events never reach this log: they go
+/// straight into the engine's durable work queue, in this process. What is left
+/// here is what a window is genuinely for — pairing prompts and remote terminal
+/// frames — so an absent or slow reader can no longer cost a transfer step.
+///
+/// Single-consumer is still the contract: reading through a cursor prunes
+/// everything at or below it, and one desktop process owns one server.
 pub struct TransferEventLog {
     /// Identifies this in-memory sequence space. Unlike `/v1/task-events`,
     /// whose cursor is a durable `task_event.seq`, these sequences restart at
@@ -98,7 +88,6 @@ pub struct TransferEventLog {
     stream_id: String,
     inner: StdMutex<TransferEventLogInner>,
     appended: Notify,
-    drained: Notify,
 }
 
 impl Default for TransferEventLog {
@@ -107,7 +96,6 @@ impl Default for TransferEventLog {
             stream_id: new_transfer_event_stream_id(),
             inner: StdMutex::new(TransferEventLogInner::default()),
             appended: Notify::new(),
-            drained: Notify::new(),
         }
     }
 }
@@ -144,20 +132,20 @@ impl TransferEventLog {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Append one event, evicting advisory entries when the log is full.
-    /// Returns `false` when only durable entries remain, so the caller applies
-    /// backpressure to the sidecar reader instead of dropping a transfer step.
-    fn try_append(&self, event: Value, durable: bool) -> bool {
+    /// Append one advisory event, evicting the oldest when the log is full.
+    ///
+    /// Eviction is unconditional now. It could not be while the four lifecycle
+    /// events shared this log — dropping one lost a transfer step — but those
+    /// go to the durable work queue instead, so an absent window costs at most
+    /// a pairing prompt it was never there to answer.
+    fn append(&self, event: Value) {
         let bytes = serde_json::to_vec(&event).map(|raw| raw.len()).unwrap_or(0);
         let mut inner = self.lock();
         while inner.entries.len() >= MAX_TRANSFER_EVENT_ENTRIES
             || inner.bytes.saturating_add(bytes) > MAX_TRANSFER_EVENT_BYTES
         {
-            let Some(index) = inner.entries.iter().position(|entry| !entry.durable) else {
-                return false;
-            };
-            let Some(evicted) = inner.entries.remove(index) else {
-                return false;
+            let Some(evicted) = inner.entries.pop_front() else {
+                break;
             };
             inner.bytes = inner.bytes.saturating_sub(evicted.bytes);
             inner.evicted_through_seq = inner.evicted_through_seq.max(evicted.seq);
@@ -165,28 +153,11 @@ impl TransferEventLog {
         inner.next_seq = inner.next_seq.saturating_add(1);
         let seq = inner.next_seq;
         inner.bytes = inner.bytes.saturating_add(bytes);
-        inner.entries.push_back(TransferEventEntry {
-            seq,
-            durable,
-            bytes,
-            event,
-        });
+        inner
+            .entries
+            .push_back(TransferEventEntry { seq, bytes, event });
         drop(inner);
         self.appended.notify_waiters();
-        true
-    }
-
-    async fn append(&self, event: Value, durable: bool) {
-        loop {
-            // Arm the wake-up before attempting the append: a drain landing
-            // between the failed try and the await must not be missed.
-            let mut drained = Box::pin(self.drained.notified());
-            drained.as_mut().enable();
-            if self.try_append(event.clone(), durable) {
-                return;
-            }
-            drained.await;
-        }
     }
 
     /// Read everything after `cursor` and prune through it. `None` starts from
@@ -236,15 +207,12 @@ impl TransferEventLog {
         for entry in inner.entries.iter().take(limit) {
             events.push(json!({
                 "seq": entry.seq,
-                "durable": entry.durable,
                 "event": entry.event,
             }));
             batch_cursor = entry.seq;
         }
         let has_more = inner.entries.len() > events.len();
         drop(inner);
-        // Pruning freed capacity; a reader parked on a full log may proceed.
-        self.drained.notify_waiters();
         TransferEventBatch {
             events,
             cursor: batch_cursor,
@@ -381,6 +349,7 @@ impl TransferSidecarClient {
         sidecar_path: &std::path::Path,
         env: Vec<(String, String)>,
         events: Arc<TransferEventLog>,
+        work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
     ) -> Result<Self, String> {
         let mut child = Command::new(sidecar_path)
             .envs(env)
@@ -404,7 +373,13 @@ impl TransferSidecarClient {
             .ok_or_else(|| "transfer sidecar stdout unavailable".to_string())?;
         let pending: PendingRequests = Arc::new(StdMutex::new(HashMap::new()));
         let dead = Arc::new(AtomicBool::new(false));
-        spawn_reader(stdout, Arc::clone(&pending), Arc::clone(&dead), events);
+        spawn_reader(
+            stdout,
+            Arc::clone(&pending),
+            Arc::clone(&dead),
+            events,
+            work,
+        );
 
         Ok(Self {
             _child: child,
@@ -509,11 +484,19 @@ impl Drop for PendingRequestRegistration {
     }
 }
 
+/// Reads the sidecar's stdout and routes each line to its one owner.
+///
+/// The split is the whole point of the move: the four state-mutating lifecycle
+/// events go into the engine's durable work queue in this process, and only the
+/// advisory ones — pairing progress, remote terminal frames — go to the log the
+/// desktop long-polls. Nothing a transfer depends on is routed to a window any
+/// more.
 fn spawn_reader(
     stdout: ChildStdout,
     pending: PendingRequests,
     dead: Arc<AtomicBool>,
     events: Arc<TransferEventLog>,
+    work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
 ) {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
@@ -557,8 +540,11 @@ fn spawn_reader(
             };
 
             if let Some(event_type) = transfer_event_type(&value) {
-                let durable = is_durable_transfer_event(event_type);
-                events.append(value, durable).await;
+                if crate::transfer_engine::queue::is_durable_transfer_event(event_type) {
+                    work.enqueue_durable_event(&value).await;
+                } else {
+                    events.append(value);
+                }
                 continue;
             }
 
@@ -595,6 +581,7 @@ pub struct TransferSidecarSupervisor {
     config: crate::config::Config,
     client: Mutex<Option<Arc<TransferSidecarClient>>>,
     events: Arc<TransferEventLog>,
+    work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
     /// Lets a router-level test stand a listener on the transfer port in place
     /// of a real sidecar without this supervisor trying to spawn one.
     #[cfg(test)]
@@ -607,11 +594,15 @@ pub struct TransferSidecarSupervisor {
 }
 
 impl TransferSidecarSupervisor {
-    pub fn new(config: crate::config::Config) -> Self {
+    pub fn new(
+        config: crate::config::Config,
+        work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
+    ) -> Self {
         Self {
             config,
             client: Mutex::new(None),
             events: Arc::new(TransferEventLog::default()),
+            work,
             #[cfg(test)]
             externally_owned: AtomicBool::new(false),
             #[cfg(test)]
@@ -620,10 +611,14 @@ impl TransferSidecarSupervisor {
     }
 
     #[cfg(test)]
-    fn with_binary_for_test(config: crate::config::Config, binary: PathBuf) -> Self {
+    fn with_binary_for_test(
+        config: crate::config::Config,
+        work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
+        binary: PathBuf,
+    ) -> Self {
         Self {
             binary_override: Some(binary),
-            ..Self::new(config)
+            ..Self::new(config, work)
         }
     }
 
@@ -665,6 +660,7 @@ impl TransferSidecarSupervisor {
                 &self.sidecar_binary()?,
                 build_transfer_sidecar_env(&self.config)?,
                 Arc::clone(&self.events),
+                Arc::clone(&self.work),
             )?));
         }
         guard
@@ -706,8 +702,12 @@ mod tests {
         json!({ "type": kind, "payload": "x" })
     }
 
+    /// The split the move introduced: the four state-mutating kinds leave this
+    /// log entirely for the engine's durable queue, and only what a window is
+    /// genuinely for stays behind.
     #[test]
-    fn durable_events_are_the_four_state_mutating_kinds() {
+    fn state_mutating_events_leave_this_log_for_the_durable_queue() {
+        use crate::transfer_engine::queue::is_durable_transfer_event;
         for kind in [
             "incoming_transfer_request",
             "task_pull_requested",
@@ -717,7 +717,12 @@ mod tests {
             assert!(is_durable_transfer_event(kind), "{kind} must be durable");
             assert_eq!(transfer_event_type(&event(kind)), Some(kind));
         }
-        for kind in ["pairing_started", "pairing_requested", "terminal_event"] {
+        for kind in [
+            "pairing_started",
+            "pairing_requested",
+            "pairing_completed",
+            "terminal_event",
+        ] {
             assert!(!is_durable_transfer_event(kind), "{kind} must be advisory");
             assert_eq!(transfer_event_type(&event(kind)), Some(kind));
         }
@@ -727,8 +732,8 @@ mod tests {
     #[test]
     fn reading_through_a_cursor_prunes_delivered_events() {
         let log = TransferEventLog::default();
-        assert!(log.try_append(event("pairing_started"), false));
-        assert!(log.try_append(event("task_pull_requested"), true));
+        log.append(event("pairing_started"));
+        log.append(event("pairing_requested"));
 
         let first = log.read(None, None, 10);
         assert_eq!(first.events.len(), 2);
@@ -743,13 +748,13 @@ mod tests {
 
     /// The desktop outlives any one `kanna-server`, and these sequences restart
     /// at zero with each. A cursor carried across that restart addresses events
-    /// it never saw, so honouring it would prune the new log's first entries —
-    /// durable lifecycle events included — and report nothing missed.
+    /// it never saw, so honouring it would prune the new log's first entries
+    /// and report nothing missed.
     #[test]
     fn a_cursor_from_a_previous_server_incarnation_is_refused_not_applied() {
         let restarted = TransferEventLog::default();
         for _ in 0..3 {
-            assert!(restarted.try_append(event("task_pull_requested"), true));
+            restarted.append(event("pairing_requested"));
         }
 
         let batch = restarted.read(Some(2), Some("some-earlier-server"), 10);
@@ -769,10 +774,7 @@ mod tests {
 
     /// Mixed-version contract: a desktop from before the stream id existed
     /// polls with `cursor` alone, forever. That has to keep acknowledging and
-    /// pruning. If a bare cursor were treated as a stale-server cursor instead,
-    /// every poll would redeliver the same retained events and prune nothing,
-    /// so durable entries would climb to `MAX_TRANSFER_EVENT_ENTRIES` and then
-    /// backpressure the sidecar's stdout reader — wedging control for everyone.
+    /// pruning rather than redelivering the same retained events every time.
     #[test]
     fn a_pre_stream_id_client_polling_with_a_bare_cursor_still_acknowledges() {
         let log = TransferEventLog::default();
@@ -780,13 +782,7 @@ mod tests {
         let mut delivered = Vec::new();
 
         for round in 0..(MAX_TRANSFER_EVENT_ENTRIES + 8) as u64 {
-            assert!(
-                log.try_append(
-                    json!({ "type": "task_pull_requested", "round": round }),
-                    true
-                ),
-                "round {round} must not hit the durable cap: a legacy cursor has to prune",
-            );
+            log.append(json!({ "type": "pairing_requested", "round": round }));
             let batch = log.read(cursor, None, 10);
             assert!(!batch.missed_events, "round {round} reported a false gap");
             for entry in &batch.events {
@@ -814,36 +810,30 @@ mod tests {
     fn a_bare_cursor_below_an_eviction_still_reports_missed_events() {
         let log = TransferEventLog::default();
         for _ in 0..MAX_TRANSFER_EVENT_ENTRIES + 2 {
-            log.try_append(event("pairing_started"), false);
+            log.append(event("pairing_started"));
         }
         assert!(log.read(Some(1), None, 10).missed_events);
     }
 
+    /// An absent window used to be able to wedge the whole control plane: the
+    /// log filled with lifecycle events it could not evict, and appends then
+    /// backpressured the sidecar's stdout reader. Nothing here is load-bearing
+    /// any more, so a full log evicts and the reader never blocks.
     #[test]
-    fn a_full_log_evicts_advisory_events_before_durable_ones() {
+    fn a_full_log_evicts_rather_than_backpressuring_the_sidecar_reader() {
         let log = TransferEventLog::default();
-        for _ in 0..MAX_TRANSFER_EVENT_ENTRIES {
-            assert!(log.try_append(event("pairing_started"), false));
+        for round in 0..(MAX_TRANSFER_EVENT_ENTRIES * 2) {
+            log.append(json!({ "type": "terminal_event", "round": round }));
         }
-        assert!(log.try_append(event("task_pull_requested"), true));
-
-        let stream_id = log.stream_id.clone();
-        let batch = log.read(Some(1), Some(&stream_id), MAX_TRANSFER_EVENT_ENTRIES + 1);
-        assert!(
-            batch.events.iter().any(|entry| entry["durable"] == true),
-            "the durable event must survive eviction"
-        );
-    }
-
-    #[test]
-    fn a_full_log_of_durable_events_refuses_the_append() {
-        let log = TransferEventLog::default();
-        for _ in 0..MAX_TRANSFER_EVENT_ENTRIES {
-            assert!(log.try_append(event("task_pull_requested"), true));
-        }
-        assert!(
-            !log.try_append(event("task_pull_requested"), true),
-            "durable events must apply backpressure instead of being dropped"
+        assert_eq!(log.lock().entries.len(), MAX_TRANSFER_EVENT_ENTRIES);
+        let batch = log.read(None, None, MAX_TRANSFER_EVENT_ENTRIES);
+        assert_eq!(
+            batch
+                .events
+                .first()
+                .map(|entry| entry["event"]["round"].clone()),
+            Some(json!(MAX_TRANSFER_EVENT_ENTRIES)),
+            "the oldest advisory events should be the ones dropped",
         );
     }
 
@@ -851,7 +841,7 @@ mod tests {
     fn a_cursor_below_an_eviction_reports_missed_events() {
         let log = TransferEventLog::default();
         for _ in 0..MAX_TRANSFER_EVENT_ENTRIES + 2 {
-            log.try_append(event("pairing_started"), false);
+            log.append(event("pairing_started"));
         }
         let stream_id = log.stream_id.clone();
         assert!(log.read(Some(1), Some(&stream_id), 10).missed_events);
@@ -1022,8 +1012,14 @@ done
         std::env::set_var("KANNA_TRANSFER_PEER_ID", "peer-test");
         std::env::set_var("KANNA_TRANSFER_DISPLAY_NAME", "Test Machine");
         let stub = write_stub_sidecar(&root);
-        let supervisor =
-            TransferSidecarSupervisor::with_binary_for_test(test_config(4455, 48120), stub.clone());
+        let work = crate::transfer_engine::queue::TransferWorkQueue::new(
+            root.join("transfer-work.db").to_string_lossy().into_owned(),
+        );
+        let supervisor = TransferSidecarSupervisor::with_binary_for_test(
+            test_config(4455, 48120),
+            work,
+            stub.clone(),
+        );
 
         supervisor
             .control("list-peers", json!({}))

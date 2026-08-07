@@ -210,7 +210,6 @@ const {
   getCurrentPreviewRecall,
 } = appModals;
 const appTaskTransfer = useAppTaskTransfer({
-  db,
   store,
   toast,
   showPeerPicker,
@@ -223,8 +222,6 @@ const {
   openPeerPicker,
   openPairPeerPicker,
   closePeerPicker,
-  importIncomingTransfer,
-  importPendingIncomingTransfers,
 } = appTaskTransfer;
 async function warmCloudTransferSidecar(): Promise<void> {
   await warmTransferSidecar();
@@ -349,14 +346,11 @@ const {
   disposeDesktopCloudWorkspace,
   getKeyboardActions: () => keyboardActions,
   homePath,
-  importIncomingTransfer,
-  importPendingIncomingTransfers,
   initializeDesktopCloudAuth,
   initializeDesktopLanTaskSync,
   openFilePreview,
   openImageUrlPreview,
   preferences,
-  refreshCloudTransferRoute,
   remoteTaskDiagnostics,
   restoreSidebarWidth,
   shortcutsStartFull,
@@ -366,7 +360,6 @@ const {
   stopSystemThemeListener,
   store,
   toast,
-  transferMachines,
   warmTransferSidecar: warmCloudTransferSidecar,
   windowWorkspace,
 });

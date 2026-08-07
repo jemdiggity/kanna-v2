@@ -7,7 +7,6 @@ mod macos;
 mod menu;
 mod pipeline_listener;
 mod subprocess_env;
-mod transfer_artifact;
 mod transfer_identity;
 mod transfer_sidecar;
 
@@ -39,7 +38,6 @@ pub(crate) const KANNA_BUILD_INFO: &str = env!("KANNA_BUILD_INFO");
 /// `build.rs`, which pins it so cargo cannot hand back a crate built for another config.
 #[cfg(debug_assertions)]
 pub(crate) const TAURI_CONFIG_FINGERPRINT: &str = env!("KANNA_TAURI_CONFIG_FINGERPRINT");
-pub type TransferEventConsumerState = transfer_sidecar::TransferEventConsumerState;
 static RUNTIME_BUNDLE_IDENTIFIER: OnceLock<String> = OnceLock::new();
 
 /// Process-wide lock serializing tests that read or mutate process env vars.
@@ -115,9 +113,6 @@ pub fn run() {
             std::collections::HashMap<String, (u16, u16)>,
         >::new())) as WindowSessionSizes)
         .manage(Arc::new(Mutex::new(None)) as PipelineSocketState)
-        .manage(Arc::new(std::sync::Mutex::new(
-            transfer_sidecar::TransferEventConsumer::default(),
-        )) as TransferEventConsumerState)
         .setup(|app| {
             #[cfg(target_os = "macos")]
             {
@@ -213,7 +208,6 @@ pub fn run() {
             // rather than a stdout pipe this process owns, so the reader runs
             // for the app's lifetime instead of per sidecar spawn.
             transfer_sidecar::spawn_transfer_event_poller(app.handle().clone());
-            transfer_sidecar::spawn_lifecycle_redelivery(app.handle().clone());
 
             // Restore webview focus when the window gains focus.
             // This catches fullscreen exit (green button, View menu) and app
@@ -336,26 +330,7 @@ pub fn run() {
             commands::transfer::start_peer_pairing,
             commands::transfer::accept_peer_pairing,
             commands::transfer::reject_peer_pairing,
-            commands::transfer::prepare_outgoing_transfer,
-            commands::transfer::abandon_outgoing_transfer,
             commands::transfer::request_task_pull,
-            commands::transfer::stage_transfer_artifact,
-            commands::transfer::fetch_transfer_artifact,
-            commands::transfer::materialize_transfer_artifact,
-            commands::transfer::locate_claude_transcript,
-            commands::transfer::claim_transfer_event_consumer,
-            commands::transfer::release_transfer_event_consumer,
-            commands::transfer::acknowledge_transfer_lifecycle_event,
-            commands::transfer::nack_transfer_lifecycle_event,
-            commands::transfer::renew_transfer_lifecycle_event,
-            commands::transfer::claim_transfer_lifecycle_phase,
-            commands::transfer::finalize_outgoing_transfer,
-            commands::transfer::complete_outgoing_transfer_finalization,
-            commands::transfer::acknowledge_incoming_transfer_commit,
-            commands::transfer::mark_incoming_transfer_event_recorded,
-            commands::transfer::mark_incoming_transfer_ack_completed,
-            commands::transfer::mark_outgoing_transfer_commit_applied,
-            commands::transfer::nack_outgoing_transfer_commit,
             commands::transfer::ensure_cloud_transfer_proxy,
             commands::transfer::remove_cloud_transfer_proxy,
             commands::transfer::clear_cloud_transfer_proxies,

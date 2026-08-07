@@ -247,6 +247,32 @@ pub(super) async fn put_task(
     create_task_with_requested_id(state, payload, Some(task_id)).await
 }
 
+/// Creates a task from inside the process, through the same creator the route
+/// serves.
+///
+/// The transfer engine's import path uses this so a transferred task gets the
+/// repo-config setup, worktree fork, `resumeSessionId` wiring, recovery
+/// snapshot and import banner every other task gets — the renderer used to
+/// reach the same code by calling `POST /v1/tasks` over loopback.
+pub(crate) async fn create_task_in_process(
+    state: Arc<AppState>,
+    payload: crate::mobile_api::CreateTaskRequest,
+    requested_task_id: String,
+) -> Result<crate::mobile_api::CreateTaskResponse, (axum::http::StatusCode, String)> {
+    validate_requested_task_id(&requested_task_id)?;
+    let _flight = state
+        .begin_requested_task_creation(&requested_task_id)
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::CONFLICT,
+                format!("task creation already in progress: {requested_task_id}"),
+            )
+        })?;
+    create_task_with_requested_id(state, payload, Some(requested_task_id))
+        .await
+        .map(|Json(response)| response)
+}
+
 pub(super) async fn create_task_with_requested_id(
     state: Arc<AppState>,
     payload: crate::mobile_api::CreateTaskRequest,

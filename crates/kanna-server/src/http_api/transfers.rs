@@ -87,6 +87,134 @@ pub(super) struct TransferResponse {
     transfer: Option<crate::db::TaskTransfer>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PushTaskRequest {
+    peer_id: String,
+    /// Distinguishes a deliberate re-push from a retried request. Two pushes
+    /// with the same key are one intent; the engine's own eligibility read is
+    /// what stops two *different* intents racing into one transfer.
+    #[serde(default)]
+    intent_key: Option<String>,
+    #[serde(default)]
+    transport: Option<String>,
+    #[serde(default)]
+    cloud_fallback: bool,
+    #[serde(default)]
+    target_desktop_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TransferIntentResponse {
+    /// `false` when the same intent was already queued — a retried request,
+    /// not a second transfer.
+    scheduled: bool,
+}
+
+/// Push a task to a paired machine.
+///
+/// The push itself is server work: the renderer states the intent and the
+/// engine performs the preflight, the git bundling, the artifact staging and
+/// the commit. It cannot be undone by the window closing halfway through.
+pub(super) async fn push_task_to_peer(
+    State(state): State<Arc<AppState>>,
+    Path(source_task_id): Path<String>,
+    Json(payload): Json<PushTaskRequest>,
+) -> Result<Json<TransferIntentResponse>, (axum::http::StatusCode, String)> {
+    if payload.peer_id.trim().is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "peerId must not be empty".to_string(),
+        ));
+    }
+    let intent_key = payload
+        .intent_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .unwrap_or(payload.peer_id.as_str());
+    let scheduled = state
+        .transfer_work()
+        .enqueue(
+            &format!("push:{source_task_id}:{intent_key}"),
+            crate::transfer_engine::queue::KIND_PUSH,
+            None,
+            &serde_json::json!({
+                "sourceTaskId": source_task_id,
+                "peerId": payload.peer_id,
+                "transport": payload.transport,
+                "cloudFallback": payload.cloud_fallback,
+                "targetDesktopId": payload.target_desktop_id,
+            }),
+        )
+        .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(Json(TransferIntentResponse { scheduled }))
+}
+
+/// Approve or reject an incoming transfer.
+///
+/// Both are intents rather than work the caller performs, so the desktop and
+/// (in principle) mobile express them the same way and the engine executes.
+/// Progress reaches the UI through the snapshot's `transfer_status`.
+pub(super) async fn approve_incoming_transfer(
+    State(state): State<Arc<AppState>>,
+    Path(transfer_id): Path<String>,
+) -> Result<Json<TransferIntentResponse>, (axum::http::StatusCode, String)> {
+    schedule_incoming_intent(
+        &state,
+        &transfer_id,
+        "import",
+        crate::transfer_engine::queue::KIND_IMPORT,
+    )
+}
+
+pub(super) async fn reject_incoming_transfer(
+    State(state): State<Arc<AppState>>,
+    Path(transfer_id): Path<String>,
+) -> Result<Json<TransferIntentResponse>, (axum::http::StatusCode, String)> {
+    schedule_incoming_intent(
+        &state,
+        &transfer_id,
+        "reject",
+        crate::transfer_engine::queue::KIND_REJECT,
+    )
+}
+
+fn schedule_incoming_intent(
+    state: &Arc<AppState>,
+    transfer_id: &str,
+    prefix: &str,
+    kind: &str,
+) -> Result<Json<TransferIntentResponse>, (axum::http::StatusCode, String)> {
+    let db = open_db(state)?;
+    let transfer = db
+        .get_task_transfer(transfer_id)
+        .map_err(db_error)?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("incoming transfer not found: {transfer_id}"),
+            )
+        })?;
+    if transfer.direction != "incoming" {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("transfer is not incoming: {transfer_id}"),
+        ));
+    }
+    let scheduled = state
+        .transfer_work()
+        .enqueue(
+            &format!("{prefix}:{transfer_id}"),
+            kind,
+            Some(transfer_id),
+            &serde_json::json!({ "transferId": transfer_id }),
+        )
+        .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(Json(TransferIntentResponse { scheduled }))
+}
+
 pub(super) async fn list_pending_incoming_transfers(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<PendingIncomingTransfersResponse>, (axum::http::StatusCode, String)> {

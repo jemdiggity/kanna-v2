@@ -2,7 +2,6 @@ import { isAgentProvider, type AgentProvider } from "@kanna/agent-protocol";
 import type { RepoConfig } from "@kanna/core";
 import type { AgentDefinition, PipelineDefinition } from "../../../../packages/core/src/pipeline/pipeline-types";
 import type { BlockerTaskStates, PipelineItem, Repo, TaskBlocker } from "../types/kanna";
-import type { TaskTransfer } from "../types/kanna";
 import type { SessionRecoveryState } from "../composables/sessionRecoveryState";
 import type { TransferImportSummary } from "../stores/transferImportSummary";
 import { invoke } from "../invoke";
@@ -71,21 +70,6 @@ export interface DesktopServerClientHandlersForTests {
   ) => MaybePromise<RunDesktopRepoCommandResponse>;
   findRepoByPath?: (path: string) => MaybePromise<DesktopRepoResponse | null>;
   reorderRepos?: (orderedIds: string[]) => MaybePromise<void>;
-  fetchIncomingTransferCleanupCandidates?: () => MaybePromise<string[]>;
-  markIncomingTransferSidecarCleanupCompleted?: (transferId: string) => MaybePromise<boolean>;
-  fetchPendingIncomingTransfers?: () => MaybePromise<PendingIncomingTransfer[]>;
-  claimPendingIncomingTransfer?: (
-    transferId: string,
-    ownerToken: string,
-    recovery: boolean,
-  ) => MaybePromise<boolean>;
-  renewIncomingTransferClaim?: (transferId: string, ownerToken: string) => MaybePromise<boolean>;
-  failPendingIncomingTransfer?: (
-    transferId: string,
-    reason: string,
-    ownerToken?: string,
-  ) => MaybePromise<boolean>;
-  failOutgoingTaskTransfer?: (transferId: string, reason: string) => MaybePromise<boolean>;
   fetchClosedTaskIdentities?: () => MaybePromise<ClosedTaskIdentity[]>;
   fetchTaskDetail?: (taskId: string) => MaybePromise<DesktopTaskDetail>;
   patchTask?: (taskId: string, input: PatchDesktopTaskInput) => MaybePromise<void>;
@@ -97,19 +81,18 @@ export interface DesktopServerClientHandlersForTests {
   pinTask?: (taskId: string, position: number) => MaybePromise<void>;
   unpinTask?: (taskId: string) => MaybePromise<void>;
   reorderPinnedTasks?: (repoId: string, orderedIds: string[]) => MaybePromise<void>;
-  insertTaskTransfer?: (transfer: NewTaskTransferInput) => MaybePromise<void>;
-  getTaskTransfer?: (transferId: string) => MaybePromise<TaskTransfer | null>;
-  fetchActiveOutgoingTaskTransfer?: (sourceTaskId: string) => MaybePromise<TaskTransfer | null>;
-  updateTaskTransferPayload?: (
-    transferId: string,
-    payloadJson: string,
-    ownerToken?: string,
+  pushTaskToPeer?: (
+    sourceTaskId: string,
+    peerId: string,
+    options: {
+      transport?: "lan" | "cloud";
+      cloudFallback?: boolean;
+      targetDesktopId?: string | null;
+      intentKey?: string;
+    },
   ) => MaybePromise<boolean>;
-  markTaskTransferImporting?: (transferId: string, localTaskId: string, ownerToken?: string) => MaybePromise<boolean>;
-  markTaskTransferAwaitingAcknowledgment?: (transferId: string, localTaskId: string, ownerToken?: string) => MaybePromise<boolean>;
-  completeTaskTransfer?: (transferId: string, localTaskId: string, ownerToken?: string) => MaybePromise<boolean>;
-  rejectTaskTransfer?: (transferId: string, reason: string) => MaybePromise<boolean>;
-  insertTaskTransferProvenance?: (provenance: NewTaskTransferProvenanceInput) => MaybePromise<void>;
+  approveIncomingTaskTransfer?: (transferId: string) => MaybePromise<boolean>;
+  rejectIncomingTaskTransfer?: (transferId: string) => MaybePromise<boolean>;
 }
 
 let clientHandlersForTests: DesktopServerClientHandlersForTests | null = null;
@@ -940,136 +923,6 @@ export async function reorderPinnedDesktopTasks(repoId: string, orderedIds: stri
   });
 }
 
-export interface PendingIncomingTransfer {
-  id: string;
-  status: TaskTransfer["status"];
-  source_peer_id: string | null;
-  source_task_id: string | null;
-  local_task_id: string | null;
-  payload_json: string | null;
-}
-
-interface PendingIncomingTransferResponse {
-  id: string;
-  status: TaskTransfer["status"];
-  sourcePeerId?: string | null;
-  sourceTaskId?: string | null;
-  payloadJson?: string | null;
-  source_peer_id?: string | null;
-  source_task_id?: string | null;
-  localTaskId?: string | null;
-  local_task_id?: string | null;
-  payload_json?: string | null;
-}
-
-function normalizePendingIncomingTransfer(row: PendingIncomingTransferResponse): PendingIncomingTransfer {
-  return {
-    id: row.id,
-    status: row.status,
-    source_peer_id: row.source_peer_id ?? row.sourcePeerId ?? null,
-    source_task_id: row.source_task_id ?? row.sourceTaskId ?? null,
-    local_task_id: row.local_task_id ?? row.localTaskId ?? null,
-    payload_json: row.payload_json ?? row.payloadJson ?? null,
-  };
-}
-
-export async function fetchPendingIncomingTransfers(): Promise<PendingIncomingTransfer[]> {
-  if (clientHandlersForTests?.fetchPendingIncomingTransfers) {
-    return await clientHandlersForTests.fetchPendingIncomingTransfers();
-  }
-  const response = await requestJson<{ transfers: PendingIncomingTransferResponse[] }>("/v1/transfers/incoming/pending");
-  return response.transfers.map(normalizePendingIncomingTransfer);
-}
-
-export async function fetchIncomingTransferCleanupCandidates(): Promise<string[]> {
-  if (clientHandlersForTests?.fetchIncomingTransferCleanupCandidates) {
-    return await clientHandlersForTests.fetchIncomingTransferCleanupCandidates();
-  }
-  const response = await requestJson<{ transferIds: string[] }>(
-    "/v1/transfers/incoming/cleanup-candidates",
-  );
-  return response.transferIds;
-}
-
-export async function markIncomingTransferSidecarCleanupCompleted(
-  transferId: string,
-): Promise<boolean> {
-  if (clientHandlersForTests?.markIncomingTransferSidecarCleanupCompleted) {
-    return await clientHandlersForTests.markIncomingTransferSidecarCleanupCompleted(transferId);
-  }
-  const response = await requestJson<{ updated: boolean }>(
-    `/v1/transfers/${encodeURIComponent(transferId)}/actions/sidecar-cleanup-complete`,
-    { method: "POST" },
-  );
-  return response.updated;
-}
-
-export async function claimPendingIncomingTransfer(
-  transferId: string,
-  ownerToken: string,
-  recovery: boolean,
-): Promise<boolean> {
-  if (clientHandlersForTests?.claimPendingIncomingTransfer) {
-    return await clientHandlersForTests.claimPendingIncomingTransfer(transferId, ownerToken, recovery);
-  }
-  const response = await requestJson<{ updated: boolean }>(
-    `/v1/transfers/${encodeURIComponent(transferId)}/actions/claim`,
-    { method: "POST", body: { ownerToken, recovery } },
-  );
-  return response.updated;
-}
-
-export async function renewIncomingTransferClaim(
-  transferId: string,
-  ownerToken: string,
-): Promise<boolean> {
-  if (clientHandlersForTests?.renewIncomingTransferClaim) {
-    return await clientHandlersForTests.renewIncomingTransferClaim(transferId, ownerToken);
-  }
-  const response = await requestJson<{ updated: boolean }>(
-    `/v1/transfers/${encodeURIComponent(transferId)}/actions/renew-claim`,
-    { method: "POST", body: { ownerToken, recovery: false } },
-  );
-  return response.updated;
-}
-
-export async function failPendingIncomingTransfer(
-  transferId: string,
-  reason: string,
-  ownerToken?: string,
-): Promise<boolean> {
-  if (clientHandlersForTests?.failPendingIncomingTransfer) {
-    return await clientHandlersForTests.failPendingIncomingTransfer(transferId, reason, ownerToken);
-  }
-  const response = await requestJson<{ updated: boolean }>(
-    `/v1/transfers/${encodeURIComponent(transferId)}/actions/fail`,
-    {
-      method: "POST",
-      body: { reason, claimOwnerToken: ownerToken },
-    },
-  );
-  return response.updated;
-}
-
-/**
- * Drives an outgoing transfer to its terminal failed state. The source needs
- * this whenever finalization cannot ship the agent's session state: without it
- * the row stays `pending`, invisible to the operator and blocking any retry.
- */
-export async function failOutgoingTaskTransfer(
-  transferId: string,
-  reason: string,
-): Promise<boolean> {
-  if (clientHandlersForTests?.failOutgoingTaskTransfer) {
-    return await clientHandlersForTests.failOutgoingTaskTransfer(transferId, reason);
-  }
-  const response = await requestJson<{ updated: boolean }>(
-    `/v1/transfers/${encodeURIComponent(transferId)}/actions/fail-outgoing`,
-    { method: "POST", body: { reason } },
-  );
-  return response.updated;
-}
-
 export interface ClosedTaskIdentity {
   id: string;
   repo_id: string;
@@ -1083,216 +936,61 @@ export async function fetchClosedTaskIdentities(): Promise<ClosedTaskIdentity[]>
   return response.tasks;
 }
 
-export type NewTaskTransferInput = Omit<TaskTransfer, "started_at" | "completed_at">;
-
-export interface NewTaskTransferProvenanceInput {
-  pipeline_item_id: string;
-  source_peer_id: string;
-  source_task_id: string;
-  source_machine_task_label: string | null;
-}
-
 /**
- * Server-side discriminator for "this source task already has an outgoing
- * transfer in flight". Kept in sync with `kanna-server`'s
- * `ACTIVE_OUTGOING_TRANSFER_CONFLICT`.
- */
-const ACTIVE_OUTGOING_TRANSFER_CONFLICT = "active_outgoing_transfer_exists";
-
-/**
- * The partial unique index `idx_task_transfer_active_outgoing_source` rejecting
- * the insert. Recognised alongside the 409 so a duplicate push stays idempotent
- * even against a server that predates the structured answer.
- */
-const ACTIVE_OUTGOING_TRANSFER_CONSTRAINT =
-  "UNIQUE constraint failed: task_transfer.source_task_id";
-
-/**
- * A second outgoing push for a task that already has one in flight. This is a
- * race between two deliveries, not a failure: the first push owns the transfer
- * and the second has nothing left to do.
- */
-export class ActiveOutgoingTransferConflictError extends Error {
-  constructor(
-    readonly sourceTaskId: string | null,
-    readonly existingTransferId: string | null,
-  ) {
-    super(`task already has an active outgoing transfer: ${sourceTaskId ?? "unknown task"}`);
-    this.name = "ActiveOutgoingTransferConflictError";
-  }
-}
-
-export function isActiveOutgoingTransferConflict(error: unknown): boolean {
-  return error instanceof ActiveOutgoingTransferConflictError
-    || (error instanceof Error && error.message.includes(ACTIVE_OUTGOING_TRANSFER_CONSTRAINT));
-}
-
-function activeOutgoingTransferConflict(
-  error: unknown,
-  transfer: NewTaskTransferInput,
-): ActiveOutgoingTransferConflictError | null {
-  if (error instanceof DesktopServerRequestError && error.status === 409) {
-    const body = error.parsedBody();
-    if (body?.error === ACTIVE_OUTGOING_TRANSFER_CONFLICT) {
-      const existing = body.transferId;
-      return new ActiveOutgoingTransferConflictError(
-        transfer.source_task_id,
-        typeof existing === "string" ? existing : null,
-      );
-    }
-  }
-  if (error instanceof Error && error.message.includes(ACTIVE_OUTGOING_TRANSFER_CONSTRAINT)) {
-    return new ActiveOutgoingTransferConflictError(transfer.source_task_id, null);
-  }
-  return null;
-}
-
-export async function insertDesktopTaskTransfer(transfer: NewTaskTransferInput): Promise<void> {
-  try {
-    if (clientHandlersForTests?.insertTaskTransfer) {
-      await clientHandlersForTests.insertTaskTransfer(transfer);
-      return;
-    }
-    await requestJson<{ id: string }>("/v1/transfers", {
-      method: "POST",
-      body: { transfer },
-    });
-  } catch (error: unknown) {
-    const conflict = activeOutgoingTransferConflict(error, transfer);
-    if (conflict) throw conflict;
-    throw error;
-  }
-}
-
-/**
- * The outgoing transfer this task already has in flight, read from the DB
- * rather than a renderer snapshot.
+ * Push a task to a paired machine.
  *
- * `store.items` lags the DB, so a second `task-pull-requested` delivery could
- * pass eligibility and race the first into the unique index. This read is the
- * authoritative pre-check, and unlike the renderer's in-memory push guards it
- * still holds after an app restart.
+ * An intent, not the work: the engine performs the preflight, the git bundling,
+ * the artifact staging and the commit, so the push survives this window
+ * closing. Returns `false` when the same intent was already queued — a retried
+ * request rather than a second transfer.
  */
-export async function fetchActiveOutgoingTaskTransfer(
+export async function pushTaskToPeer(
   sourceTaskId: string,
-): Promise<TaskTransfer | null> {
-  if (clientHandlersForTests?.fetchActiveOutgoingTaskTransfer) {
-    return await clientHandlersForTests.fetchActiveOutgoingTaskTransfer(sourceTaskId);
-  }
-  const response = await requestJson<{ transfer: TaskTransfer | null }>(
-    `/v1/transfers/outgoing/active/${encodeURIComponent(sourceTaskId)}`,
-  );
-  return response.transfer;
-}
-
-export async function getDesktopTaskTransfer(transferId: string): Promise<TaskTransfer | null> {
-  if (clientHandlersForTests?.getTaskTransfer) return await clientHandlersForTests.getTaskTransfer(transferId);
-  const response = await requestJson<{ transfer: TaskTransfer | null }>(
-    `/v1/transfers/${encodeURIComponent(transferId)}`,
-  );
-  return response.transfer;
-}
-
-export async function updateDesktopTaskTransferPayload(
-  transferId: string,
-  payloadJson: string,
-  ownerToken?: string,
+  peerId: string,
+  options: {
+    transport?: "lan" | "cloud";
+    cloudFallback?: boolean;
+    targetDesktopId?: string | null;
+    intentKey?: string;
+  } = {},
 ): Promise<boolean> {
-  if (clientHandlersForTests?.updateTaskTransferPayload) {
-    return await clientHandlersForTests.updateTaskTransferPayload(
-      transferId,
-      payloadJson,
-      ownerToken,
-    );
+  if (clientHandlersForTests?.pushTaskToPeer) {
+    return await clientHandlersForTests.pushTaskToPeer(sourceTaskId, peerId, options);
   }
-  const response = await requestJson<{ updated: boolean }>(
-    `/v1/transfers/${encodeURIComponent(transferId)}/payload`,
-    {
-      method: "PUT",
-      body: { payloadJson, claimOwnerToken: ownerToken },
-    },
-  );
-  return response.updated;
-}
-
-export async function completeDesktopTaskTransfer(
-  transferId: string,
-  localTaskId: string,
-  ownerToken?: string,
-): Promise<boolean> {
-  if (clientHandlersForTests?.completeTaskTransfer) {
-    return await clientHandlersForTests.completeTaskTransfer(transferId, localTaskId, ownerToken);
-  }
-  const response = await requestJson<{ updated: boolean }>(
-    `/v1/transfers/${encodeURIComponent(transferId)}/actions/complete`,
+  const response = await requestJson<{ scheduled: boolean }>(
+    `/v1/tasks/${encodeURIComponent(sourceTaskId)}/actions/push-to-peer`,
     {
       method: "POST",
-      body: { localTaskId, claimOwnerToken: ownerToken },
+      body: {
+        peerId,
+        transport: options.transport,
+        cloudFallback: options.cloudFallback ?? false,
+        targetDesktopId: options.targetDesktopId ?? null,
+        intentKey: options.intentKey,
+      },
     },
   );
-  return response.updated;
+  return response.scheduled;
 }
 
-export async function markDesktopTaskTransferImporting(
-  transferId: string,
-  localTaskId: string,
-  ownerToken?: string,
-): Promise<boolean> {
-  if (clientHandlersForTests?.markTaskTransferImporting) {
-    return await clientHandlersForTests.markTaskTransferImporting(transferId, localTaskId, ownerToken);
+export async function approveIncomingTaskTransfer(transferId: string): Promise<boolean> {
+  if (clientHandlersForTests?.approveIncomingTaskTransfer) {
+    return await clientHandlersForTests.approveIncomingTaskTransfer(transferId);
   }
-  const response = await requestJson<{ updated: boolean }>(
-    `/v1/transfers/${encodeURIComponent(transferId)}/actions/importing`,
-    { method: "POST", body: { localTaskId, claimOwnerToken: ownerToken } },
+  const response = await requestJson<{ scheduled: boolean }>(
+    `/v1/transfers/${encodeURIComponent(transferId)}/actions/approve`,
+    { method: "POST" },
   );
-  return response.updated;
+  return response.scheduled;
 }
 
-export async function markDesktopTaskTransferAwaitingAcknowledgment(
-  transferId: string,
-  localTaskId: string,
-  ownerToken?: string,
-): Promise<boolean> {
-  if (clientHandlersForTests?.markTaskTransferAwaitingAcknowledgment) {
-    return await clientHandlersForTests.markTaskTransferAwaitingAcknowledgment(
-      transferId,
-      localTaskId,
-      ownerToken,
-    );
+export async function rejectIncomingTaskTransfer(transferId: string): Promise<boolean> {
+  if (clientHandlersForTests?.rejectIncomingTaskTransfer) {
+    return await clientHandlersForTests.rejectIncomingTaskTransfer(transferId);
   }
-  const response = await requestJson<{ updated: boolean }>(
-    `/v1/transfers/${encodeURIComponent(transferId)}/actions/awaiting-acknowledgment`,
-    { method: "POST", body: { localTaskId, claimOwnerToken: ownerToken } },
+  const response = await requestJson<{ scheduled: boolean }>(
+    `/v1/transfers/${encodeURIComponent(transferId)}/actions/reject-incoming`,
+    { method: "POST" },
   );
-  return response.updated;
-}
-
-export async function rejectDesktopTaskTransfer(
-  transferId: string,
-  reason: string,
-): Promise<boolean> {
-  if (clientHandlersForTests?.rejectTaskTransfer) {
-    return await clientHandlersForTests.rejectTaskTransfer(transferId, reason);
-  }
-  const response = await requestJson<{ updated: boolean }>(
-    `/v1/transfers/${encodeURIComponent(transferId)}/actions/reject`,
-    {
-      method: "POST",
-      body: { reason },
-    },
-  );
-  return response.updated;
-}
-
-export async function insertDesktopTaskTransferProvenance(
-  provenance: NewTaskTransferProvenanceInput,
-): Promise<void> {
-  if (clientHandlersForTests?.insertTaskTransferProvenance) {
-    await clientHandlersForTests.insertTaskTransferProvenance(provenance);
-    return;
-  }
-  await requestJson<{ pipelineItemId: string }>("/v1/transfers/provenance", {
-    method: "POST",
-    body: { provenance },
-  });
+  return response.scheduled;
 }

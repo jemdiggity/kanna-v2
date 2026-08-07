@@ -1008,6 +1008,23 @@ impl Db {
     /// recovery resume handle) in step with server-side spawns: set it when a
     /// spawn assigns or resumes a provider session, clear it when the new
     /// session has none — a stale id would resume the wrong conversation.
+    /// The provider session a task would resume. `PipelineItem` does not carry
+    /// it (only the snapshot projection does), and the transfer engine needs it
+    /// to decide what session state a push must ship.
+    pub fn task_agent_session_id(
+        &self,
+        pipeline_item_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT agent_session_id FROM pipeline_item WHERE id = ?",
+                [pipeline_item_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+    }
+
     pub fn update_pipeline_item_agent_session_id(
         &self,
         id: &str,

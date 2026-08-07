@@ -1,10 +1,8 @@
 import { ref, type Ref } from "vue";
-import type { DbHandle } from "../types/kanna";
 
 import { isTauri } from "../tauri-mock";
 import { invoke } from "../invoke";
 import {
-  isMissingTransferSessionArtifactError,
   parsePairingResult,
   parseTransferPeers,
   type TransferPeerOption,
@@ -12,23 +10,12 @@ import {
 import type { useKannaStore } from "../stores/kanna";
 import type { useToast } from "./useToast";
 import {
-  claimPendingIncomingTransfer,
-  failPendingIncomingTransfer,
-  fetchIncomingTransferCleanupCandidates,
-  fetchPendingIncomingTransfers,
-  getDesktopTaskTransfer,
-  markIncomingTransferSidecarCleanupCompleted,
-  renewIncomingTransferClaim,
-  type PendingIncomingTransfer,
-} from "../services/desktopServerClient";
-import {
   filterPairableTransferPeerPayload,
   type TransferMachine,
 } from "../services/desktopTransferMachines";
 import type { WorkspaceTask } from "../workspace/types";
 
 interface UseAppTaskTransferOptions {
-  db: DbHandle;
   store: ReturnType<typeof useKannaStore>;
   toast: ReturnType<typeof useToast>;
   showPeerPicker: Ref<boolean>;
@@ -40,18 +27,7 @@ interface UseAppTaskTransferOptions {
 const TRANSFER_PEER_DISCOVERY_RETRY_MS = 250;
 const TRANSFER_PEER_DISCOVERY_TIMEOUT_MS = 2500;
 
-class ClaimedIncomingTransferError extends Error {
-  constructor(
-    message: string,
-    readonly claimOwnerToken: string,
-  ) {
-    super(message);
-    this.name = "ClaimedIncomingTransferError";
-  }
-}
-
 export function useAppTaskTransfer({
-  db,
   store,
   toast,
   showPeerPicker,
@@ -65,117 +41,6 @@ export function useAppTaskTransfer({
   const transferPeersLoading = ref(false);
   const transferPeerActionPending = ref(false);
   let transferPeerLoadRequestId = 0;
-  const incomingImportsInFlight = new Map<
-    string,
-    { promise: Promise<boolean>; ownershipConfirmed: boolean }
-  >();
-
-  async function cleanupTerminalIncomingTransfer(transferId: string): Promise<void> {
-    try {
-      await invoke("mark_incoming_transfer_ack_completed", { transferId });
-      if (!await markIncomingTransferSidecarCleanupCompleted(transferId)) {
-        throw new Error(`failed to mark sidecar cleanup completed: ${transferId}`);
-      }
-    } catch (error: unknown) {
-      console.warn("[App] failed to clean up terminal incoming transfer reservation:", {
-        transferId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  async function importIncomingTransfer(
-    transferId: string,
-    recovery: boolean,
-  ): Promise<boolean> {
-    const existingImport = incomingImportsInFlight.get(transferId);
-    if (existingImport?.ownershipConfirmed) {
-      // This authoritative renderer already owns a live import. The retained
-      // lifecycle delivery can be ACKed while that durable owner continues.
-      return true;
-    }
-    if (existingImport) {
-      return await existingImport.promise;
-    }
-    const entry = {
-      promise: Promise.resolve(false),
-      ownershipConfirmed: false,
-    };
-    entry.promise = (async (): Promise<boolean> => {
-      const ownerToken = crypto.randomUUID();
-      if (!await claimPendingIncomingTransfer(transferId, ownerToken, recovery)) {
-        const transfer = await getDesktopTaskTransfer(transferId);
-        return transfer?.direction === "incoming"
-          && ["completed", "rejected", "failed"].includes(transfer.status);
-      }
-      entry.ownershipConfirmed = true;
-
-      const ownership = new AbortController();
-      const assertOwnership = async (): Promise<boolean> => {
-        if (ownership.signal.aborted) return false;
-        let renewed: boolean;
-        try {
-          renewed = await renewIncomingTransferClaim(transferId, ownerToken);
-        } catch (error) {
-          entry.ownershipConfirmed = false;
-          ownership.abort();
-          throw error;
-        }
-        if (!renewed) {
-          entry.ownershipConfirmed = false;
-          ownership.abort();
-          console.warn("[App] incoming transfer claim lease was lost:", { transferId });
-        }
-        return renewed;
-      };
-      const renewal = window.setInterval(() => {
-        void assertOwnership().catch((error: unknown) => {
-          console.warn("[App] failed to renew incoming transfer claim lease:", {
-            transferId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        });
-      }, 10_000);
-      try {
-        try {
-          await store.approveIncomingTransfer(transferId, ownerToken, {
-            signal: ownership.signal,
-            assertOwnership,
-          });
-          return true;
-        } catch (error: unknown) {
-          const reason = error instanceof Error ? error.message : String(error);
-          if (reason.includes("incoming transfer ownership was lost")) {
-            throw error;
-          }
-          if (isMissingTransferSessionArtifactError(error)) {
-            // Retrying cannot conjure session state the payload never carried,
-            // so this transfer is terminal now rather than after the claim
-            // lease expires — both machines need a visible end state.
-            if (await failPendingIncomingTransfer(transferId, reason, ownerToken)) {
-              await cleanupTerminalIncomingTransfer(transferId);
-            }
-            console.error("[App] refused an incoming transfer with no resumable session:", {
-              transferId,
-              reason,
-            });
-          }
-          throw new ClaimedIncomingTransferError(reason, ownerToken);
-        }
-      } finally {
-        window.clearInterval(renewal);
-      }
-    })();
-    incomingImportsInFlight.set(transferId, entry);
-    try {
-      return await entry.promise;
-    } finally {
-      if (incomingImportsInFlight.get(transferId) === entry) {
-        incomingImportsInFlight.delete(transferId);
-      }
-    }
-  }
-
   function transferMachineOption(machine: TransferMachine): TransferPeerOption {
     const subtitle = machine.trustSource === "same-account-cloud"
       ? machine.preferredTransport === "lan"
@@ -189,24 +54,6 @@ export function useAppTaskTransfer({
       trusted: true,
       acceptingTransfers: true,
     };
-  }
-
-  function validatePendingIncomingTransferRow(row: PendingIncomingTransfer): string | null {
-    if (!row.source_peer_id) return "missing source_peer_id";
-    if (!row.source_task_id) return "missing source_task_id";
-    if (!row.payload_json) return "missing payload_json";
-
-    try {
-      const parsed = JSON.parse(row.payload_json) as unknown;
-      if (!parsed || typeof parsed !== "object") return "payload_json did not decode to an object";
-      const record = parsed as { task?: unknown; repo?: unknown };
-      if (!record.task || typeof record.task !== "object") return "payload_json missing task";
-      if (!record.repo || typeof record.repo !== "object") return "payload_json missing repo";
-    } catch (error: unknown) {
-      return `payload_json is invalid: ${error instanceof Error ? error.message : String(error)}`;
-    }
-
-    return null;
   }
 
   async function loadTransferPeers() {
@@ -372,68 +219,6 @@ export function useAppTaskTransfer({
     }
   }
 
-  async function importPendingIncomingTransfers() {
-    void db;
-    try {
-      const cleanupCandidates = await fetchIncomingTransferCleanupCandidates();
-      for (const transferId of cleanupCandidates) {
-        await cleanupTerminalIncomingTransfer(transferId);
-      }
-    } catch (error: unknown) {
-      console.warn(
-        "[App] failed to list incoming transfer cleanup candidates:",
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-
-    let rows: PendingIncomingTransfer[];
-    try {
-      rows = await fetchPendingIncomingTransfers();
-    } catch (error: unknown) {
-      console.warn(
-        "[App] failed to list pending incoming transfers:",
-        error instanceof Error ? error.message : String(error),
-      );
-      return;
-    }
-
-    for (const row of rows) {
-      const invalidReason = validatePendingIncomingTransferRow(row);
-      if (invalidReason) {
-        const reason = `pending incoming transfer is malformed: ${invalidReason}`;
-        if (await failPendingIncomingTransfer(row.id, reason)) {
-          await cleanupTerminalIncomingTransfer(row.id);
-          console.warn("[App] disabled malformed pending incoming transfer:", { transferId: row.id, reason });
-        }
-        continue;
-      }
-
-      try {
-        if (!await importIncomingTransfer(row.id, true)) {
-          continue;
-        }
-      } catch (error: unknown) {
-        const reason = error instanceof Error ? error.message : String(error);
-        if (reason.includes("incoming transfer ownership was lost")) {
-          console.warn("[App] stopped stale incoming transfer recovery after ownership loss:", {
-            transferId: row.id,
-          });
-          continue;
-        }
-        const ownerToken = error instanceof ClaimedIncomingTransferError
-          ? error.claimOwnerToken
-          : undefined;
-        if (await failPendingIncomingTransfer(row.id, reason, ownerToken)) {
-          await cleanupTerminalIncomingTransfer(row.id);
-          console.warn("[App] failed to auto-import pending incoming transfer; marked failed:", {
-            transferId: row.id,
-            reason,
-          });
-        }
-      }
-    }
-  }
-
   return {
     peerPickerMode,
     selectedTransferTaskId,
@@ -447,7 +232,5 @@ export function useAppTaskTransfer({
     handlePeerSelected,
     handlePairPeer,
     pullSelectedWorkspaceTask,
-    importIncomingTransfer,
-    importPendingIncomingTransfers,
   };
 }

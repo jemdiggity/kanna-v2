@@ -20,6 +20,7 @@ mod task_events;
 mod test_support;
 #[cfg(test)]
 mod tests;
+mod transfer_work;
 mod transfers;
 mod worktrees;
 
@@ -33,6 +34,7 @@ pub use stage_runs::FinishedStageRun;
 #[allow(unused_imports)]
 pub use task_events::{appended as task_event_appended, TaskEvent, TaskEventKind, TaskEventScope};
 #[allow(unused_imports)]
+pub use transfer_work::{TransferWorkItem, MAX_TRANSFER_WORK_ATTEMPTS};
 pub use transfers::{
     is_active_outgoing_transfer_conflict, NewTaskTransfer, NewTaskTransferProvenance,
     PendingIncomingTransfer, TaskTransfer,
@@ -91,6 +93,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "045_agent_signal_protocol",
     "046_completion_and_merge_delivery_binding",
     "047_remove_approval_gate",
+    "048_transfer_work_queue",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1605,6 +1608,44 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             DROP TABLE task_approval_override;
             DROP TABLE IF EXISTS agent_signal_protocol;
             DROP TABLE IF EXISTS merge_handoff_delivery;
+            "#,
+        )
+    })?;
+
+    run_migration(conn, "048_transfer_work_queue", |conn| {
+        // The four sidecar lifecycle events used to live in an in-memory Tauri
+        // queue that died with the app, so only `transfer-request` had any
+        // restart recovery at all. They are rows now, appended by the same
+        // reader that observes them, and `id` is derived from the event so a
+        // redelivered one collapses onto the work already queued.
+        //
+        // `transfer_work_phase` is the durable form of the in-memory
+        // `claimed_phases` set: a step that must happen at most once per work
+        // item (signalling the source agent, closing the source task) claims
+        // its phase here, so a resumed item cannot repeat it.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS transfer_work (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                transfer_id TEXT,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                run_after TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_transfer_work_runnable
+                ON transfer_work(status, run_after, created_at);
+
+            CREATE TABLE IF NOT EXISTS transfer_work_phase (
+                work_id TEXT NOT NULL REFERENCES transfer_work(id) ON DELETE CASCADE,
+                phase TEXT NOT NULL,
+                claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (work_id, phase)
+            );
             "#,
         )
     })?;

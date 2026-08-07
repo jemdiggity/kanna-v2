@@ -157,6 +157,9 @@ pub(crate) async fn run_server_services(
         wait_for_protected_input_generation(&config, ProtectedInputWait::Startup, None).await;
     let protected_input_maintenance =
         maintain_protected_input_generations(config.clone(), protected_input_pid);
+    // The transfer engine is a peer of the LAN API, not a child of it: a
+    // transfer must keep making progress whether or not anything is connected.
+    let transfer_engine = crate::transfer_engine::run(Arc::clone(&http_state));
     if config.relay_url.trim().is_empty() {
         tokio::select! {
             result = http_api::serve(Arc::clone(&http_state)) => match result {
@@ -165,6 +168,7 @@ pub(crate) async fn run_server_services(
             },
             _ = run_human_control_service(http_state) => {},
             _ = protected_input_maintenance => {},
+            _ = transfer_engine => {},
         }
         return;
     }
@@ -181,6 +185,7 @@ pub(crate) async fn run_server_services(
         },
         _ = run_human_control_service(human_control_state) => {},
         _ = protected_input_maintenance => {},
+        _ = transfer_engine => {},
     }
 }
 

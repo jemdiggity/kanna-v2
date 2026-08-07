@@ -27,6 +27,7 @@ pub struct AppState {
     pub(super) session_replacements: crate::session_replacements::SessionReplacements,
     pub(super) terminal_attachments: crate::terminal_attachments::TerminalAttachments,
     transfer_sidecar: Arc<crate::transfer_sidecar::TransferSidecarSupervisor>,
+    transfer_work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
     cloud_transfer_proxies: crate::cloud_transfer_proxy::CloudTransferProxyState,
     pub(super) repo_definitions: Arc<crate::task_creator::RepoDefinitionsCache>,
     requested_task_operations: Arc<RequestedTaskOperations>,
@@ -210,6 +211,13 @@ impl AppState {
         Arc::clone(&self.transfer_sidecar)
     }
 
+    /// The transfer engine's durable work queue. Held here so an HTTP intent
+    /// (push a task, approve or reject an incoming transfer) and the sidecar's
+    /// own event reader append to the same queue the drain loop consumes.
+    pub(crate) fn transfer_work(&self) -> Arc<crate::transfer_engine::queue::TransferWorkQueue> {
+        Arc::clone(&self.transfer_work)
+    }
+
     pub(super) fn cloud_transfer_proxies(
         &self,
     ) -> &crate::cloud_transfer_proxy::CloudTransferProxyState {
@@ -226,12 +234,16 @@ impl AppState {
         }
 
         let (mobile_notification_tx, mobile_notification_rx) = mpsc::channel(16);
+        let transfer_work =
+            crate::transfer_engine::queue::TransferWorkQueue::new(config.db_path.clone());
         let transfer_sidecar = Arc::new(crate::transfer_sidecar::TransferSidecarSupervisor::new(
             config.clone(),
+            Arc::clone(&transfer_work),
         ));
         Self {
             config,
             transfer_sidecar,
+            transfer_work,
             cloud_transfer_proxies: Arc::new(Mutex::new(HashMap::new())),
             pairing_session: Arc::new(Mutex::new(None)),
             #[cfg(debug_assertions)]

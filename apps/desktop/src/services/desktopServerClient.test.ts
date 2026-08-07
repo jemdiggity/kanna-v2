@@ -11,17 +11,15 @@ import {
   runDesktopRepoCommand,
   fetchDesktopSnapshot,
   fetchDesktopTaskDetail,
-  fetchIncomingTransferCleanupCandidates,
-  fetchPendingIncomingTransfers,
   getDesktopSetting,
-  insertDesktopTaskTransfer,
-  isActiveOutgoingTransferConflict,
   addDesktopRepo,
   mutateDesktopWindowWorkspace,
-  markIncomingTransferSidecarCleanupCompleted,
   putDesktopCloudTransferIdentity,
   setDesktopTaskCloudIdentity,
   setDesktopTaskPipeline,
+  approveIncomingTaskTransfer,
+  pushTaskToPeer,
+  rejectIncomingTaskTransfer,
   setDesktopServerClientHandlersForTests,
   setDesktopSnapshotFetcherForTests,
 } from "./desktopServerClient";
@@ -200,36 +198,67 @@ describe("desktopServerClient", () => {
 
   /**
    * The counterpart: a caller that wants a conflict answered rather than waited
-   * out asks for no retry budget. `POST /v1/transfers` is the one that does, so
-   * its duplicate 409 surfaces on the first attempt — without that being a
-   * decision imposed on every other route.
+   * out asks for no retry budget. A transfer intent is one of those — the
+   * engine's own eligibility read is what resolves a duplicate, so waiting out
+   * a conflict here would only delay the answer.
    */
   it("surfaces a conflict immediately for a request with no retry budget", async () => {
     const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          error: "active_outgoing_transfer_exists",
-          sourceTaskId: "task-source",
-          transferId: "transfer-first",
-        }),
-        { status: 409, headers: { "content-type": "application/json" } },
-      ));
+      new Response(JSON.stringify({ error: "task not found" }), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(insertDesktopTaskTransfer({
-      id: "transfer-second",
-      direction: "outgoing",
-      status: "pending",
-      source_peer_id: "peer-source",
-      target_peer_id: "peer-target",
-      source_desktop_id: null,
-      target_desktop_id: null,
-      source_task_id: "task-source",
-      local_task_id: "task-source",
-      error: null,
-      payload_json: "{}",
-    })).rejects.toSatisfy(isActiveOutgoingTransferConflict);
+    await expect(pushTaskToPeer("task-source", "peer-target")).rejects.toThrow();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * A transfer is server work now, so the renderer states an intent and reads
+   * whether it was newly scheduled. `false` is a retried request, not a second
+   * transfer.
+   */
+  it("states a push intent and reports whether it was newly scheduled", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ scheduled: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(pushTaskToPeer("task source/1", "peer-target", {
+      transport: "lan",
+      cloudFallback: true,
+      targetDesktopId: "desktop-target",
+      intentKey: "intent-1",
+    })).resolves.toBe(true);
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/v1/tasks/task%20source%2F1/actions/push-to-peer");
+    expect(JSON.parse(String(init.body))).toEqual({
+      peerId: "peer-target",
+      transport: "lan",
+      cloudFallback: true,
+      targetDesktopId: "desktop-target",
+      intentKey: "intent-1",
+    });
+  });
+
+  it("states approve and reject intents for an incoming transfer", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ scheduled: false }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(approveIncomingTaskTransfer("transfer-1")).resolves.toBe(false);
+    await expect(rejectIncomingTaskTransfer("transfer-1")).resolves.toBe(false);
+    expect(fetchMock.mock.calls.map(([url]) => String(url).split("/v1")[1])).toEqual([
+      "/transfers/transfer-1/actions/approve",
+      "/transfers/transfer-1/actions/reject-incoming",
+    ]);
   });
 
   it("passes the requested default branch when registering a transferred repo", async () => {
@@ -698,88 +727,4 @@ describe("desktopServerClient", () => {
     );
   });
 
-  it("normalizes pending incoming transfers returned by the server", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          transfers: [
-            {
-              id: "transfer-1",
-              status: "pending",
-              sourcePeerId: "peer-source",
-              sourceTaskId: "task-source",
-              localTaskId: null,
-              payloadJson: "{\"task\":{},\"repo\":{}}",
-            },
-          ],
-        }),
-        {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        },
-      ),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(fetchPendingIncomingTransfers()).resolves.toEqual([
-      {
-        id: "transfer-1",
-        status: "pending",
-        source_peer_id: "peer-source",
-        source_task_id: "task-source",
-        local_task_id: null,
-        payload_json: "{\"task\":{},\"repo\":{}}",
-      },
-    ]);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48121/v1/transfers/incoming/pending",
-      {
-        method: "GET",
-        headers: undefined,
-        body: undefined,
-      },
-    );
-  });
-
-  it("lists terminal incoming transfer cleanup candidates", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(JSON.stringify({ transferIds: ["transfer-completed"] }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(fetchIncomingTransferCleanupCandidates()).resolves.toEqual(["transfer-completed"]);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48121/v1/transfers/incoming/cleanup-candidates",
-      {
-        method: "GET",
-        headers: undefined,
-        body: undefined,
-      },
-    );
-  });
-
-  it("marks terminal incoming sidecar cleanup completed", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(JSON.stringify({ updated: true }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(
-      markIncomingTransferSidecarCleanupCompleted("transfer-completed"),
-    ).resolves.toBe(true);
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:48121/v1/transfers/transfer-completed/actions/sidecar-cleanup-complete",
-      {
-        method: "POST",
-        headers: undefined,
-        body: undefined,
-      },
-    );
-  });
 });

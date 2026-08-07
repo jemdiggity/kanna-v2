@@ -246,6 +246,28 @@ impl Db {
             WHERE direction = 'outgoing'
               AND source_task_id IS NOT NULL
               AND status IN ('pending', 'streaming');
+
+            CREATE TABLE transfer_work (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                transfer_id TEXT,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                run_after TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX idx_transfer_work_runnable
+                ON transfer_work(status, run_after, created_at);
+
+            CREATE TABLE transfer_work_phase (
+                work_id TEXT NOT NULL REFERENCES transfer_work(id) ON DELETE CASCADE,
+                phase TEXT NOT NULL,
+                claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (work_id, phase)
+            );
             "#,
         )?;
         create_blocker_revision_triggers(&self.conn)?;

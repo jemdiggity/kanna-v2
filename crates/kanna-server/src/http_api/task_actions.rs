@@ -463,6 +463,26 @@ fn collect_blocker_resolution_instructions(
     Ok(instructions)
 }
 
+/// Closes a task from inside the process, through the same action the route
+/// serves.
+///
+/// The transfer engine closes the source task once the destination has
+/// acknowledged the import. That has to be *this* close — WIP snapshotting,
+/// session teardown, blocker instructions, the `closed` completion notification
+/// — not a second implementation that drifts from it.
+pub(crate) async fn close_task_in_process(
+    state: Arc<AppState>,
+    task_id: String,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    close_task(
+        PrivilegedTaskAccess,
+        State(state),
+        axum::extract::Path(task_id),
+    )
+    .await
+    .map(|_| ())
+}
+
 pub(super) async fn close_task(
     _access: PrivilegedTaskAccess,
     State(state): State<Arc<AppState>>,

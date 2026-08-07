@@ -1,0 +1,593 @@
+//! The destination side of a transfer: record the request, acquire the
+//! repository, materialize the conversation, create the task, acknowledge.
+//!
+//! Port of `recordIncomingTransfer`, `approveIncomingTransfer`,
+//! `ensureIncomingTransferRepo` and `importTransferredResumeState`. The renderer
+//! guarded this with two overlapping leases — a Tauri delivery lease and a DB
+//! claim lease keyed on renderer-generated owner tokens — because two windows
+//! could otherwise import the same transfer. One process cannot race itself:
+//! the work queue's item id is the whole exclusion, and the DB claim columns
+//! stay only as the record of which import owns the row.
+
+use super::control;
+use super::payload::{self, OutgoingTransferPayload, RepoAcquisitionMode};
+use super::session;
+use crate::db::TransferWorkItem;
+use crate::http_api::AppState;
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// The claim token an engine import writes. The lease columns exist because the
+/// DB statements still key on them; the exclusion itself is the work queue.
+const ENGINE_CLAIM_TOKEN: &str = "kanna-server-transfer-engine";
+
+fn string_field(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn home_dir() -> Result<PathBuf, String> {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .map_err(|_| "HOME is unset; the transfer engine cannot import session state".to_string())
+}
+
+/// Records an incoming transfer request and schedules its import.
+///
+/// Recording and importing are separate work items so the row exists — and is
+/// visible in the sidebar — even if the import itself has to retry.
+pub async fn record_incoming(state: &Arc<AppState>, event: &Value) -> Result<(), String> {
+    let transfer_id = string_field(event, "transfer_id")
+        .ok_or_else(|| "incoming transfer event is missing a transfer id".to_string())?;
+    let source_peer_id = string_field(event, "source_peer_id");
+    let source_task_id = string_field(event, "source_task_id");
+    let raw_payload = event
+        .get("payload")
+        .ok_or_else(|| "incoming transfer event is missing a payload".to_string())?;
+    let parsed = payload::parse_outgoing_transfer_payload(raw_payload)?;
+
+    let queue = state.transfer_work();
+    let db = queue.open_db()?;
+    db.insert_task_transfer(&crate::db::NewTaskTransfer {
+        id: transfer_id.clone(),
+        direction: "incoming".into(),
+        status: "pending".into(),
+        source_peer_id,
+        target_peer_id: None,
+        source_desktop_id: parsed.task.source_desktop_id.clone(),
+        target_desktop_id: parsed.target_desktop_id.clone(),
+        source_task_id,
+        local_task_id: None,
+        error: None,
+        payload_json: Some(
+            serde_json::to_string(raw_payload).map_err(|error| format!("db error: {error}"))?,
+        ),
+    })
+    .map_err(|error| format!("db error: {error}"))?;
+    control::mark_incoming_event_recorded(state, &transfer_id).await?;
+    queue.enqueue(
+        &format!("import:{transfer_id}"),
+        super::queue::KIND_IMPORT,
+        Some(&transfer_id),
+        &serde_json::json!({ "transferId": transfer_id }),
+    )?;
+    Ok(())
+}
+
+/// Rejects an incoming transfer on the operator's behalf.
+pub async fn reject_transfer(state: &Arc<AppState>, work: &Value) -> Result<(), String> {
+    let transfer_id = string_field(work, "transferId")
+        .ok_or_else(|| "reject work is missing a transfer id".to_string())?;
+    let db = state.transfer_work().open_db()?;
+    let transfer = db
+        .get_task_transfer(&transfer_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .ok_or_else(|| format!("incoming transfer not found: {transfer_id}"))?;
+    if transfer.direction != "incoming" {
+        return Err(format!("transfer is not incoming: {transfer_id}"));
+    }
+    if !matches!(transfer.status.as_str(), "rejected") {
+        db.mark_task_transfer_rejected(&transfer_id, "Rejected locally")
+            .map_err(|error| format!("db error: {error}"))?;
+    }
+    release_incoming_reservation(state, &transfer_id).await
+}
+
+/// Releases the sidecar state a settled incoming transfer still owns.
+async fn release_incoming_reservation(
+    state: &Arc<AppState>,
+    transfer_id: &str,
+) -> Result<(), String> {
+    control::mark_import_ack_completed(state, transfer_id).await?;
+    state
+        .transfer_work()
+        .open_db()?
+        .mark_incoming_transfer_sidecar_cleanup_completed(transfer_id)
+        .map_err(|error| format!("db error: {error}"))?;
+    Ok(())
+}
+
+/// Imports an approved incoming transfer.
+///
+/// Runs the whole sequence the renderer did — finalize the source, acquire the
+/// repository, materialize the conversation, create the task, acknowledge the
+/// commit — but every step that must happen once claims a durable phase, so a
+/// resumed work item continues rather than repeating.
+pub async fn import_transfer(
+    state: &Arc<AppState>,
+    work: &TransferWorkItem,
+    request: &Value,
+) -> Result<(), String> {
+    let transfer_id = string_field(request, "transferId")
+        .ok_or_else(|| "import work is missing a transfer id".to_string())?;
+    match run_import(state, work, &transfer_id).await {
+        Ok(()) => Ok(()),
+        Err(ImportFailure::Retry(reason)) => Err(reason),
+        // Retrying cannot conjure session state the payload never carried, so
+        // this transfer is terminal now rather than after N attempts — both
+        // machines need a visible end state.
+        Err(ImportFailure::Terminal(reason)) => {
+            let db = state.transfer_work().open_db()?;
+            db.fail_pending_incoming_transfer(&transfer_id, &reason, Some(ENGINE_CLAIM_TOKEN))
+                .map_err(|error| format!("db error: {error}"))?;
+            log::error!("refused incoming transfer {transfer_id}: {reason}");
+            release_incoming_reservation(state, &transfer_id).await?;
+            Ok(())
+        }
+    }
+}
+
+enum ImportFailure {
+    Retry(String),
+    Terminal(String),
+}
+
+impl From<String> for ImportFailure {
+    fn from(reason: String) -> Self {
+        Self::Retry(reason)
+    }
+}
+
+async fn run_import(
+    state: &Arc<AppState>,
+    work: &TransferWorkItem,
+    transfer_id: &str,
+) -> Result<(), ImportFailure> {
+    let db = state.transfer_work().open_db()?;
+    let transfer = db
+        .get_task_transfer(transfer_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .ok_or_else(|| format!("incoming transfer not found: {transfer_id}"))?;
+    if transfer.direction != "incoming" {
+        return Err(format!("transfer is not incoming: {transfer_id}").into());
+    }
+    if matches!(
+        transfer.status.as_str(),
+        "completed" | "rejected" | "failed"
+    ) {
+        return Ok(());
+    }
+    db.claim_pending_incoming_transfer(transfer_id, ENGINE_CLAIM_TOKEN, true)
+        .map_err(|error| format!("db error: {error}"))?;
+
+    let mut local_task_id = transfer.local_task_id.clone();
+    let stored = payload::parse_outgoing_transfer_payload(
+        &serde_json::from_str::<Value>(transfer.payload_json.as_deref().unwrap_or("null"))
+            .map_err(|error| format!("persisted transfer payload is invalid: {error}"))?,
+    )
+    .map_err(ImportFailure::Terminal)?;
+
+    let payload = if local_task_id.is_some() {
+        stored
+    } else {
+        let finalized = control::finalize_from_source(state, transfer_id).await?;
+        let payload = payload::parse_outgoing_transfer_payload(&finalized.payload)
+            .map_err(ImportFailure::Terminal)?;
+        assert_payload_matches_reservation(&transfer, &payload)?;
+        if !finalized.finalized_cleanly {
+            // The source could not shut its agent down cleanly. The
+            // conversation still crosses, but this machine's operator has to
+            // know the handoff was degraded — it is their task now.
+            log::warn!(
+                "incoming transfer {transfer_id} was not cleanly finalized: {}",
+                payload
+                    .finalization
+                    .degraded_reason
+                    .as_deref()
+                    .unwrap_or("the source reported no reason"),
+            );
+        }
+        let payload_json = serde_json::to_string(&finalized.payload)
+            .map_err(|error| format!("db error: {error}"))?;
+        if !db
+            .update_task_transfer_payload(transfer_id, &payload_json, Some(ENGINE_CLAIM_TOKEN))
+            .map_err(|error| format!("db error: {error}"))?
+        {
+            return Err(format!(
+                "failed to persist finalized incoming transfer payload: {transfer_id}"
+            )
+            .into());
+        }
+        payload
+    };
+
+    if local_task_id.is_none() {
+        // A payload that promises a resumable session and ships no way to
+        // resume it must not be imported: minting a fresh session here is what
+        // silently left the conversation behind on the source machine.
+        session::assert_importable(
+            transfer_id,
+            payload.task.agent_type.as_deref(),
+            Some(payload.task.agent_provider.as_str()),
+            payload.task.resume_session_id.as_deref(),
+            &payload.artifacts,
+        )
+        .map_err(|missing| ImportFailure::Terminal(missing.0))?;
+
+        let (repo_id, repo_path) = acquire_repo(state, transfer_id, &payload).await?;
+        // The destination task id — and therefore its worktree — is
+        // deterministic before creation, which is what lets the transcript be
+        // re-keyed to the destination slug before the agent spawns `--resume`.
+        let destination_task_id = session::destination_task_id(transfer_id);
+        let destination_worktree =
+            session::destination_worktree_path(&repo_path, &destination_task_id);
+        let resume_session_id =
+            materialize_resume_state(state, transfer_id, &payload, &destination_worktree).await?;
+
+        let created = crate::http_api::create_task_in_process(
+            Arc::clone(state),
+            build_create_request(state, &repo_id, &payload, resume_session_id.clone()).await,
+            destination_task_id.clone(),
+        )
+        .await
+        .map_err(|(status, message)| {
+            format!("failed to create the transferred task ({status}): {message}")
+        })?;
+        local_task_id = Some(created.task_id);
+
+        if !db
+            .mark_incoming_transfer_importing(
+                transfer_id,
+                local_task_id.as_deref().unwrap_or_default(),
+                ENGINE_CLAIM_TOKEN,
+            )
+            .map_err(|error| format!("db error: {error}"))?
+        {
+            return Err(
+                format!("failed to claim imported task for transfer: {transfer_id}").into(),
+            );
+        }
+    }
+
+    let local_task_id = local_task_id
+        .ok_or_else(|| format!("incoming transfer has no local task: {transfer_id}"))?;
+
+    db.set_cloud_task_identity(&local_task_id, &payload.task.cloud_task_id)
+        .map_err(|error| format!("db error: {error}"))?;
+    db.insert_task_transfer_provenance(&crate::db::NewTaskTransferProvenance {
+        pipeline_item_id: local_task_id.clone(),
+        source_peer_id: payload.task.source_peer_id.clone(),
+        source_task_id: payload.task.source_task_id.clone(),
+        source_machine_task_label: payload.task.branch.clone(),
+    })
+    .map_err(|error| format!("db error: {error}"))?;
+    if !db
+        .mark_incoming_transfer_awaiting_acknowledgment(
+            transfer_id,
+            &local_task_id,
+            ENGINE_CLAIM_TOKEN,
+        )
+        .map_err(|error| format!("db error: {error}"))?
+    {
+        return Err(format!(
+            "failed to mark incoming transfer awaiting acknowledgment: {transfer_id}"
+        )
+        .into());
+    }
+    state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+
+    // Acknowledging is what closes the source task, so it happens at most once
+    // for this work item even across a restart that resumes it.
+    if db
+        .claim_transfer_work_phase(&work.id, "acknowledge-import")
+        .map_err(|error| format!("db error: {error}"))?
+    {
+        control::acknowledge_import_committed(
+            state,
+            transfer_id,
+            &payload.task.source_task_id,
+            &local_task_id,
+        )
+        .await?;
+    }
+    if !db
+        .mark_task_transfer_completed(transfer_id, &local_task_id, Some(ENGINE_CLAIM_TOKEN))
+        .map_err(|error| format!("db error: {error}"))?
+    {
+        return Err(
+            format!("failed to complete acknowledged incoming transfer: {transfer_id}").into(),
+        );
+    }
+    release_incoming_reservation(state, transfer_id).await?;
+    Ok(())
+}
+
+fn assert_payload_matches_reservation(
+    transfer: &crate::db::TaskTransfer,
+    payload: &OutgoingTransferPayload,
+) -> Result<(), ImportFailure> {
+    let matches = transfer.source_peer_id.as_deref() == Some(payload.task.source_peer_id.as_str())
+        && transfer.source_task_id.as_deref() == Some(payload.task.source_task_id.as_str());
+    if matches {
+        return Ok(());
+    }
+    // A payload whose identity does not match the reservation it arrived under
+    // is not a transient failure — it is a different transfer.
+    Err(ImportFailure::Terminal(format!(
+        "incoming transfer payload source identity does not match reservation: {}",
+        transfer.id
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// Repository acquisition
+// ---------------------------------------------------------------------------
+
+async fn acquire_repo(
+    state: &Arc<AppState>,
+    transfer_id: &str,
+    payload: &OutgoingTransferPayload,
+) -> Result<(String, PathBuf), ImportFailure> {
+    let db = state.transfer_work().open_db()?;
+    let repo_name = payload.repo.name.clone().unwrap_or_else(|| "repo".into());
+    let default_branch = payload
+        .repo
+        .default_branch
+        .clone()
+        .unwrap_or_else(|| "main".into());
+
+    if let Some(existing) = find_matching_repo(&db, payload)? {
+        return Ok((existing.0, PathBuf::from(existing.1)));
+    }
+
+    let repo_path = match payload.repo.mode {
+        RepoAcquisitionMode::ReuseLocal => {
+            let repo_path = payload
+                .repo
+                .path
+                .clone()
+                .ok_or_else(|| "incoming transfer payload is missing a local repo path".to_string())
+                .map_err(ImportFailure::Terminal)?;
+            if !Path::new(&repo_path).exists() {
+                return Err(ImportFailure::Terminal(format!(
+                    "incoming transfer repo path does not exist: {repo_path}"
+                )));
+            }
+            PathBuf::from(repo_path)
+        }
+        RepoAcquisitionMode::CloneRemote => {
+            let remote_url = payload
+                .repo
+                .remote_url
+                .clone()
+                .ok_or_else(|| "incoming transfer payload is missing a remote URL".to_string())
+                .map_err(ImportFailure::Terminal)?;
+            let repo_path = super::git::allocate_repo_path(&repos_home()?, &repo_name)?;
+            super::git::clone_remote(&remote_url, &repo_path)?;
+            repo_path
+        }
+        RepoAcquisitionMode::BundleRepo => {
+            let bundle = payload
+                .repo
+                .bundle
+                .as_ref()
+                .ok_or_else(|| "incoming transfer payload is missing bundle metadata".to_string())
+                .map_err(ImportFailure::Terminal)?;
+            let fetched = control::fetch_artifact(state, transfer_id, &bundle.artifact_id).await?;
+            let repo_path = super::git::allocate_repo_path(&repos_home()?, &repo_name)?;
+            let checkout_ref = bundle
+                .ref_name
+                .clone()
+                .or_else(|| payload.task.branch.clone())
+                .or_else(|| payload.task.base_ref.clone());
+            super::git::init_from_bundle(&repo_path, &fetched, checkout_ref.as_deref())?;
+            repo_path
+        }
+    };
+
+    let repo_id = register_repo(state, &repo_path, &repo_name, &default_branch)?;
+    Ok((repo_id, repo_path))
+}
+
+/// Matches the payload's repository against one this machine already has —
+/// first by remote URL, then by the source's own path in case both machines
+/// check the repo out to the same place.
+fn find_matching_repo(
+    db: &crate::db::Db,
+    payload: &OutgoingTransferPayload,
+) -> Result<Option<(String, String)>, String> {
+    let normalized_remote = payload
+        .repo
+        .remote_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty());
+    let repos = db
+        .list_repos_for_maintenance()
+        .map_err(|error| format!("db error: {error}"))?;
+    if let Some(remote) = normalized_remote {
+        for repo in &repos {
+            if super::git::remote_url(Path::new(&repo.path)).as_deref() == Some(remote) {
+                return Ok(Some((repo.id.clone(), repo.path.clone())));
+            }
+        }
+    }
+    if let Some(path) = payload.repo.path.as_deref() {
+        if let Some(repo) = repos.iter().find(|repo| repo.path == path) {
+            return Ok(Some((repo.id.clone(), repo.path.clone())));
+        }
+    }
+    Ok(None)
+}
+
+fn register_repo(
+    state: &Arc<AppState>,
+    repo_path: &Path,
+    repo_name: &str,
+    default_branch: &str,
+) -> Result<String, String> {
+    let db = state.transfer_work().open_db()?;
+    let path = repo_path.to_string_lossy().to_string();
+    let api = crate::mobile_api::MobileApi::new(state.config().clone(), db);
+    match api.add_repo(crate::mobile_api::AddRepoRequest {
+        path: path.clone(),
+        name: Some(repo_name.to_string()),
+        default_branch: Some(default_branch.to_string()),
+    }) {
+        Ok(repo) => Ok(repo.id),
+        Err(crate::mobile_api::AddRepoError::DuplicatePath) => {
+            let db = state.transfer_work().open_db()?;
+            db.get_snapshot_repo_by_path(&path)
+                .map_err(|error| format!("db error: {error}"))?
+                .map(|repo| repo.id)
+                .ok_or_else(|| format!("repo {path} is registered but could not be read back"))
+        }
+        Err(error) => Err(error.message()),
+    }
+}
+
+fn repos_home() -> Result<PathBuf, String> {
+    Ok(home_dir()?.join(".kanna").join("repos"))
+}
+
+// ---------------------------------------------------------------------------
+// Resume state
+// ---------------------------------------------------------------------------
+
+/// Materializes the session artifacts the payload carries, returning the
+/// session id the destination agent will resume — or `None` when the resume
+/// must be abandoned because the conversation state could not be established.
+async fn materialize_resume_state(
+    state: &Arc<AppState>,
+    transfer_id: &str,
+    payload: &OutgoingTransferPayload,
+    destination_worktree: &Path,
+) -> Result<Option<String>, ImportFailure> {
+    let Some(resume_session_id) = payload.task.resume_session_id.clone() else {
+        return Ok(None);
+    };
+    let provider = payload.task.agent_provider.as_str();
+    let artifacts: Vec<_> = payload
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.provider == provider)
+        .collect();
+    if artifacts.is_empty() {
+        return Ok(None);
+    }
+
+    let home = home_dir()?;
+    let mut materialized = Vec::with_capacity(artifacts.len());
+    for artifact in &artifacts {
+        let source_path =
+            control::fetch_artifact(state, transfer_id, &artifact.artifact_id).await?;
+        let wrote = crate::transfer_artifact::materialize_transfer_artifact_at_home(
+            &home,
+            &source_path,
+            crate::transfer_artifact::TransferArtifactContract {
+                provider,
+                resume_session_id: &resume_session_id,
+                filename: &artifact.filename,
+                kind: artifact.kind.as_str(),
+                materialization: artifact.materialization.as_str(),
+                // A Claude transcript is cwd-keyed, so only the receiver can
+                // name where it lands. The sender never supplies a destination.
+                destination_worktree_path: (artifact.kind
+                    == payload::TransferArtifactKind::SessionTranscript)
+                    .then_some(destination_worktree),
+            },
+        )
+        .map_err(ImportFailure::Terminal)?;
+        materialized.push((artifact.artifact_id.clone(), wrote));
+    }
+
+    let owned: Vec<_> = artifacts.into_iter().cloned().collect();
+    if session::resume_survives_existing_destination(&owned, &materialized) {
+        Ok(Some(resume_session_id))
+    } else {
+        log::warn!(
+            "skipping transferred session import for {provider} session {resume_session_id}: \
+             the provider destination already exists"
+        );
+        Ok(None)
+    }
+}
+
+async fn build_create_request(
+    state: &Arc<AppState>,
+    repo_id: &str,
+    payload: &OutgoingTransferPayload,
+    resume_session_id: Option<String>,
+) -> crate::mobile_api::CreateTaskRequest {
+    crate::mobile_api::CreateTaskRequest {
+        repo_id: repo_id.to_string(),
+        prompt: payload.task.prompt.clone().unwrap_or_default(),
+        display_name: payload.task.display_name.clone(),
+        pipeline_name: Some(payload.task.pipeline.clone()),
+        stage: Some(payload.task.stage.clone()),
+        base_ref: payload::resolve_incoming_base_branch(payload),
+        agent: None,
+        agent_provider: Some(payload.task.agent_provider.clone()),
+        agent_type: Some(
+            match payload.task.agent_type.as_deref() {
+                Some("agent") | Some("sdk") => "agent",
+                _ => "pty",
+            }
+            .to_string(),
+        ),
+        terminal_cols: None,
+        terminal_rows: None,
+        model: None,
+        effort: None,
+        permission_mode: None,
+        allowed_tools: None,
+        disallowed_tools: None,
+        max_turns: None,
+        max_budget_usd: None,
+        setup_cmds: None,
+        task_template: None,
+        transfer_import: Some(crate::mobile_api::TransferImportSummary {
+            source_machine: resolve_source_machine_name(state, &payload.task.source_peer_id).await,
+            repo_mode: Some(payload.repo.mode.as_str().to_string()),
+            session_restored: resume_session_id.is_some(),
+        }),
+        resume_session_id,
+        recovery_snapshot: payload.recovery.clone(),
+        blocker_task_ids: None,
+        notify_task_id: None,
+        parent_task_id: None,
+    }
+}
+
+/// Peer display names live in the sidecar's registry, not in the payload.
+/// Resolving one is best effort: an unreachable sidecar or an unknown peer
+/// falls back to the peer id, which still identifies the machine.
+async fn resolve_source_machine_name(state: &Arc<AppState>, peer_id: &str) -> Option<String> {
+    let peers = state
+        .transfer_sidecar()
+        .control("list-peers", serde_json::json!({}))
+        .await
+        .ok()?;
+    let name = peers.as_array()?.iter().find_map(|peer| {
+        let matches = peer.get("peer_id").and_then(Value::as_str) == Some(peer_id);
+        matches
+            .then(|| peer.get("display_name").and_then(Value::as_str))
+            .flatten()
+            .map(str::to_string)
+    });
+    Some(name.unwrap_or_else(|| peer_id.to_string()))
+}
