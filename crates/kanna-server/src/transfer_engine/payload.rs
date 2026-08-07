@@ -146,8 +146,12 @@ pub struct TransferArtifactPayload {
 /// sequence deliberately will not answer, or it may not exit on the quit
 /// command. None of those is rare enough to fail a transfer over and none is
 /// quiet enough to swallow, so each is recorded here as a degradation and
-/// carried to the receiver — which refuses the import rather than resuming a
-/// conversation nobody promised was whole.
+/// carried to the receiver, which imports the task anyway and surfaces the
+/// reason to the destination operator (`super::import`): the conversation
+/// still crosses, and whoever now owns the task is told the handoff was not
+/// clean. Refusing the import belongs to a *missing* artifact, below — a
+/// promise the payload cannot back at all — not to a conversation that is
+/// merely one turn short.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferFinalizationState {
     pub cleanly_finalized: bool,

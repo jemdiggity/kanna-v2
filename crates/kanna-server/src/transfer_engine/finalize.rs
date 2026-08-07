@@ -32,12 +32,26 @@
 //! `opencode-injected-input.test.ts`), so quitting before the agent is idle
 //! truncates the very wrap-up the transfer is trying to capture.
 //!
-//! **`Waiting` is not `Idle`.** It means the agent is parked on a permission
-//! prompt, and this sequence deliberately never types into one: the prompt
-//! would consume the quit command as an *answer*, and answering an approval
-//! prompt on the operator's behalf is not something a transfer may do. A
-//! session parked that way can wait forever, so it times out into the degraded
-//! rung of the ladder instead.
+//! **`Waiting` is not `Idle`, and nothing may be typed while it holds.** It
+//! means the agent is parked on a permission prompt, which consumes the next
+//! input as its *answer* — and the submission policy ends every message with a
+//! discrete CR, which is exactly the keystroke that accepts the prompt's
+//! highlighted option. Approving a pending tool call on the operator's behalf
+//! is not something a transfer may do, and it would be silent: the agent would
+//! resume, reach `Idle`, quit on cue, and ship `cleanlyFinalized: true` with
+//! nothing anywhere saying a tool call had been approved.
+//!
+//! The quit gets that guarantee from step 2, which only lets it through on
+//! `Idle`. The wrap-up has nothing in front of it, so it checks the status
+//! `attach` read off the daemon itself. A session already parked when
+//! finalization starts degrades on the spot rather than waiting: nobody is
+//! going to answer that prompt — the operator is in the
+//! middle of pushing the task away from this machine — so waiting out the
+//! wrap-up budget would buy minutes of user-visible latency and reach the same
+//! verdict. A session that parks *during* the wrap-up reaches the same rung
+//! through the idle timeout. Pushing a task that is parked on a prompt is a
+//! normal thing to do; it is often *why* someone pushes it, and the destination
+//! resumes with the prompt still to answer.
 //!
 //! The ladder, each rung loud and recorded on the transfer:
 //!
@@ -244,6 +258,21 @@ async fn run_sequence(
         // is the state this whole sequence exists to reach.
         record_phase(state, task_id, "already-exited", None);
         return SourceFinalization::default();
+    }
+
+    // Nothing may be typed at a session parked on a permission prompt — the
+    // wrap-up's trailing CR would accept the prompt's highlighted option and
+    // approve a pending tool call in the operator's name. `attach` read the
+    // live status off the daemon's session list, so this is known before a
+    // single byte goes out.
+    if observer.status == SessionStatus::Waiting {
+        return degraded(
+            state,
+            task_id,
+            "the source agent is parked on a permission prompt, so it was not asked to wrap up: \
+             answering that prompt is the operator's to do, and any input sent now would answer it"
+                .to_string(),
+        );
     }
 
     // 1. Wrap-up.
@@ -1003,6 +1032,41 @@ mod tests {
             matches!(outcome, IdleOutcome::TimedOut(SessionStatus::Waiting)),
             "a permission prompt was mistaken for a finished turn",
         );
+    }
+
+    /// …and reading it correctly is not enough on its own: a session already
+    /// parked when finalization starts must be left completely alone.
+    ///
+    /// The submission policy ends every message with a discrete CR, which is
+    /// the keystroke that accepts a permission prompt's highlighted option — so
+    /// typing the *wrap-up* at a parked session approves whatever tool call it
+    /// is holding, in the operator's name. Worse, it does so invisibly: the
+    /// agent resumes, goes idle, quits on cue, and the payload ships
+    /// `cleanlyFinalized: true` with nothing recording the approval. Pushing a
+    /// task that is parked on a prompt is a normal thing to do, so this is the
+    /// ordinary case, not an exotic one.
+    #[tokio::test]
+    async fn nothing_is_typed_at_a_session_already_parked_on_a_permission_prompt() {
+        let daemon = FakeDaemon::start("waiting-at-start", Some(SessionStatus::Waiting));
+        let state = state_for(&daemon, "desktop-finalize-waiting");
+
+        let outcome =
+            finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("claude"))
+                .await;
+
+        assert!(
+            daemon.inputs().is_empty(),
+            "the transfer typed at a permission prompt: {:?}",
+            daemon.inputs(),
+        );
+        let reason = outcome
+            .degraded_reason
+            .expect("a finalization that never asked the agent anything reported itself clean");
+        assert!(
+            reason.contains("permission prompt"),
+            "the degradation does not say the prompt is why: {reason}",
+        );
+        assert_eq!(phases(&state), vec!["degraded"]);
     }
 
     /// The daemon publishes status *changes*. An agent whose turn is over

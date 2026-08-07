@@ -158,10 +158,19 @@ engine shuts that agent down first — by **typing at it**, not by signalling it
    Kanna input path uses (`task_input.rs`: the text as one write, 150 ms, then a
    lone CR so it registers as a discrete Enter);
 2. wait for the daemon to report the session `Idle` — `Waiting` is a permission
-   prompt, not idleness, and the sequence never types into one, because the
-   prompt would consume the quit command as an answer;
+   prompt, not idleness;
 3. inject the provider's quit command (`AgentProvider::quit_command`);
 4. wait for the daemon `Exit`, and only then stage artifacts.
+
+Nothing is typed while the session is `Waiting`. Step 3 gets that from step 2 —
+it is only reached on `Idle` — but step 1 has nothing in front of it, so the
+status the daemon reported at attach is checked before the wrap-up goes out. The
+helper's trailing CR is the keystroke that accepts a permission prompt's
+highlighted option, so a wrap-up typed at a parked session approves whatever
+tool call it is holding, in the operator's name — and silently, because the
+agent then resumes, goes idle, quits on cue and ships `cleanlyFinalized: true`.
+A session already parked when finalization starts degrades immediately instead;
+one that parks mid-wrap-up reaches the same rung through the idle timeout.
 
 The old mechanism was a `SIGINT` and a 1500 ms wait, and it could not work on
 any session the daemon had **adopted** through a handoff: the daemon refuses
