@@ -169,10 +169,18 @@ export class DesktopServerRequestError extends Error {
 }
 
 /**
- * Statuses that describe the request rather than a transient server condition.
- * Retrying them only delays the caller's own handling.
+ * Statuses that describe the request rather than a transient server condition,
+ * so retrying them only delays the caller's own handling.
+ *
+ * 404 is the whole set, deliberately. A 409 means different things per route —
+ * `PUT /v1/tasks/{id}` returns one for a creation already in flight, which
+ * `createDesktopTask` waits out with a 15s `retryMs` — so a caller that wants a
+ * conflict answered rather than retried asks for no retry budget instead of
+ * making that choice for every other route. `POST /v1/transfers` does exactly
+ * that: with no `retryMs` its deadline has already passed, so its duplicate
+ * 409 surfaces on the first attempt without this set's help.
  */
-const TERMINAL_REQUEST_STATUSES = new Set([404, 409]);
+const TERMINAL_REQUEST_STATUSES = new Set([404]);
 
 function isTerminalRequestError(error: unknown): boolean {
   return error instanceof DesktopServerRequestError
