@@ -591,9 +591,23 @@ interface PlannedSessionArtifacts {
   opencodeExport: { worktreePath: string } | null;
 }
 
-/** The task identity a plan was located against; a change invalidates it. */
+/**
+ * The task identity a plan was located against; a change invalidates it.
+ *
+ * JSON-encoded rather than joined on a separator: the value is only ever
+ * compared, never parsed, and encoding is the one form no component's own
+ * content can forge a match through - `agent_type` carries a repo-supplied
+ * agent name, so no single character is provably absent from it. The string is
+ * in-memory only: it is compared within one finalization and never persisted
+ * or sent.
+ */
 function sessionPlanIdentity(item: PipelineItem): string {
-  return [item.agent_session_id, item.agent_provider, item.agent_type, item.branch].join(" ");
+  return JSON.stringify([
+    item.agent_session_id,
+    item.agent_provider,
+    item.agent_type,
+    item.branch,
+  ]);
 }
 
 async function planTransferredSessionArtifacts(
