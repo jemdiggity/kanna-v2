@@ -190,12 +190,31 @@ Machine-local repo config in effect
 ```
 
 **Granularity.** The file is per *checkout*, which is the right unit: several
-Kanna instances (production, staging, per-worktree dev) share one repo checkout
-and therefore share its local config, while a second clone of the same repo has
-its own. Task worktrees do not need a copy — the layer is always read from the
-repo root that Kanna has registered. Note that `kd` reads only `ports` from the
-committed `config.json` when deriving dev ports for a worktree; a local `ports`
-override changes what Kanna gives spawned tasks, not what `./kd dev up` derives.
+Kanna instances share one repo checkout and therefore share its local config,
+while a second clone of the same repo has its own. Tasks a registered repo runs
+need no copy in their worktrees — the layer is read from the repo root Kanna has
+registered. Note that `kd` reads only `ports` from the committed `config.json`
+when deriving dev ports for a worktree; a local `ports` override changes what
+Kanna gives spawned tasks, not what `./kd dev up` derives.
+
+**Worktrees inherit it via `./kd env sync`.** A per-worktree dev instance is its
+own Kanna, opening its *own* checkout, so "the open repo's working tree" is the
+worktree — and `git worktree add` does not copy ignored files. Every worktree's
+`setup` runs `./kd env sync`, which copies `.kanna/config.local.json` from the
+repository's **primary checkout** (resolved through the common Git directory,
+the same checkout `setup.local.sh` is read from) into the worktree, logging the
+source path:
+
+```
+Synced Kanna dev environment files.
+  machine-local repo config from /Users/you/code/kanna/.kanna/config.local.json
+```
+
+The primary checkout's copy is canonical and wins on every sync, so editing it
+there reaches every worktree at its next sync. The reverse is not a delete:
+if the primary checkout has no copy, a file placed directly in a worktree is
+left alone (env sync says so) — propagating nothing must not destroy the only
+copy of something an operator wrote deliberately.
 
 ### Machine-local workspace setup
 
