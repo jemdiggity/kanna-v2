@@ -6895,6 +6895,183 @@ async fn destination_fetches_staged_transfer_artifacts_from_the_source_peer() {
     );
 }
 
+/// POSIX `NAME_MAX`: one path component may not exceed 255 bytes.
+const NAME_MAX_BYTES: usize = 255;
+
+fn artifact_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .expect("artifact path has a UTF-8 file name")
+        .to_owned()
+}
+
+/// Staging and fetching must both keep the artifact's on-disk name inside
+/// `NAME_MAX`, however long the file it was staged from is named.
+///
+/// The pre-fix scheme spent the artifact id twice — the source stored
+/// `<artifact-id>-<basename>` and the receiver fetched that into
+/// `<artifact-id>-<that whole name>` — so a descriptive basename pushed the
+/// receiver past 255 bytes and killed the transfer mid-flight with
+/// `ENAMETOOLONG` ("File name too long").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn artifact_names_stay_inside_name_max_for_long_staged_basenames() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source-long-name",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination-long-name",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination-long-name").await;
+
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination-long-name", "task-source")
+        .await
+        .unwrap();
+    // An artifact id of the shape the desktop mints, and a basename right at
+    // the old overflow length.
+    let artifact_id = format!("{}-session-archive", preflight.transfer_id);
+    let staged_name = format!("{}.tar.gz", "a".repeat(NAME_MAX_BYTES - 7));
+    assert_eq!(staged_name.len(), NAME_MAX_BYTES);
+    let staged_path = temp.path().join(&staged_name);
+    let payload = b"long-basename artifact".to_vec();
+    std::fs::write(&staged_path, &payload).unwrap();
+
+    source
+        .stage_transfer_artifact(&preflight.transfer_id, &artifact_id, staged_path, true)
+        .await
+        .unwrap();
+    let managed = source
+        .fetch_transfer_artifact(&preflight.transfer_id, &artifact_id)
+        .await
+        .unwrap()
+        .path;
+    let managed_name = artifact_file_name(&managed);
+    assert!(
+        managed_name.len() <= NAME_MAX_BYTES,
+        "staged artifact name overflowed NAME_MAX: {} bytes",
+        managed_name.len(),
+    );
+
+    source
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-destination-long-name",
+                "task": {
+                    "source_task_id": "task-source"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    let event = next_incoming_transfer_request(&destination).await;
+    assert_eq!(event.transfer_id, preflight.transfer_id);
+
+    let fetched = destination
+        .fetch_transfer_artifact(&preflight.transfer_id, &artifact_id)
+        .await
+        .unwrap()
+        .path;
+    let fetched_name = artifact_file_name(&fetched);
+    assert!(
+        fetched_name.len() <= NAME_MAX_BYTES,
+        "fetched artifact name overflowed NAME_MAX: {} bytes",
+        fetched_name.len(),
+    );
+    assert_eq!(std::fs::read(&fetched).unwrap(), payload);
+}
+
+/// The exact shape that failed live on 2026-08-07: a Claude session archive,
+/// whose staged path is `kanna-transfer-<64-hex transfer id>-claude-session.tar.gz`
+/// under an artifact id of `<transfer id>-claude-session`. Doubling the id put
+/// the receiver's name at ~261 bytes, so every Claude (and Copilot) task that
+/// carried a session archive died on fetch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_session_archive_artifact_survives_the_name_max_boundary() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source-claude-archive",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination-claude-archive",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination-claude-archive").await;
+
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination-claude-archive", "task-source")
+        .await
+        .unwrap();
+    let transfer_id = preflight.transfer_id.clone();
+    assert_eq!(
+        transfer_id.len(),
+        64,
+        "transfer ids are 32 hex-encoded bytes"
+    );
+    let artifact_id = format!("{transfer_id}-claude-session");
+    let staged_name = format!("kanna-transfer-{transfer_id}-claude-session.tar.gz");
+    let legacy_staged_name = format!("{artifact_id}-{staged_name}");
+    let legacy_fetched_name = format!("{artifact_id}-{legacy_staged_name}");
+    assert!(
+        legacy_fetched_name.len() > NAME_MAX_BYTES,
+        "fixture no longer models the live failure: {} bytes",
+        legacy_fetched_name.len(),
+    );
+
+    let staged_path = temp.path().join(&staged_name);
+    let payload = b"claude session archive".to_vec();
+    std::fs::write(&staged_path, &payload).unwrap();
+    source
+        .stage_transfer_artifact(&transfer_id, &artifact_id, staged_path, true)
+        .await
+        .unwrap();
+    source
+        .prepare_transfer_commit(
+            &transfer_id,
+            json!({
+                "target_peer_id": "peer-destination-claude-archive",
+                "task": {
+                    "source_task_id": "task-source"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    let event = next_incoming_transfer_request(&destination).await;
+    assert_eq!(event.transfer_id, transfer_id);
+
+    let fetched = destination
+        .fetch_transfer_artifact(&transfer_id, &artifact_id)
+        .await
+        .unwrap()
+        .path;
+    assert!(
+        artifact_file_name(&fetched).len() <= NAME_MAX_BYTES,
+        "fetched Claude archive name overflowed NAME_MAX",
+    );
+    assert_eq!(std::fs::read(&fetched).unwrap(), payload);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn older_destination_fetches_a_legacy_sealed_artifact_from_a_new_source() {
     let temp = tempfile::tempdir().unwrap();

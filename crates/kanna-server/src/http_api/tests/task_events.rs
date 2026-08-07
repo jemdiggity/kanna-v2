@@ -1490,9 +1490,21 @@ async fn a_task_parked_on_a_prompt_emits_awaiting_input_once_per_block() {
 
 /// `notifyTaskId` used to be creation-time only, so an orchestrator could not
 /// subscribe to a task it had adopted rather than created.
+///
+/// Retargeting is pure pipeline-item state: the seeded tasks have no
+/// workspace, no terminal session, and no stage run, so this also pins that a
+/// task which has not started its first stage can still be retargeted.
 #[tokio::test]
 async fn notify_target_can_be_attached_and_cleared_after_creation() {
     let (router, db_path) = events_router();
+    {
+        let db = Db::open(&db_path).expect("open db");
+        assert!(db
+            .get_task_worktree_path("child-a")
+            .expect("worktree")
+            .is_none());
+        assert!(db.latest_stage_run("child-a").expect("stage run").is_none());
+    }
 
     let response = router
         .clone()
@@ -1545,6 +1557,38 @@ async fn notify_target_can_be_attached_and_cleared_after_creation() {
         .await
         .expect("request");
     assert_eq!(self_notify.status(), StatusCode::BAD_REQUEST);
+}
+
+/// A closed task will never fire another completion notification, so
+/// retargeting it is refused — but with a message that names the reason. The
+/// zero-row update behind this route used to surface as `db error: not
+/// found`, which reads as "no such task" and sent callers hunting for the
+/// wrong problem.
+#[tokio::test]
+async fn retargeting_a_closed_task_reports_that_it_is_closed() {
+    let (router, db_path) = events_router();
+    Db::open(&db_path)
+        .expect("open db")
+        .close_pipeline_item("child-a")
+        .expect("close task");
+
+    let response = router
+        .oneshot(
+            Request::post("/v1/tasks/child-a/actions/set-notify")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"notifyTaskId":"child-b"}"#))
+                .unwrap(),
+        )
+        .await
+        .expect("request");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    assert_eq!(
+        String::from_utf8_lossy(&body).as_ref(),
+        "task is closed: child-a"
+    );
 }
 
 /// A task that already notified one parent must notify a newly attached one:

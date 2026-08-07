@@ -68,19 +68,22 @@ pub struct SessionArtifactPlan {
 }
 
 /// The task identity a plan was located against; a change invalidates it.
+///
+/// JSON-encoded rather than joined on a separator. The value is only ever
+/// compared, never parsed, and encoding is the one form no component's own
+/// content can forge a match through: `agent_type` carries a repo-supplied
+/// agent name, so no single separator is provably absent from every component,
+/// and one that appears inside a component lets two different identities
+/// render identically. (The renderer's version of this joined on a literal NUL,
+/// which made the whole source file read as binary to `grep`; encoding avoids
+/// choosing a separator at all.)
 pub fn session_plan_identity(
     agent_session_id: Option<&str>,
     agent_provider: Option<&str>,
     agent_type: Option<&str>,
     branch: Option<&str>,
 ) -> String {
-    format!(
-        "{} {} {} {}",
-        agent_session_id.unwrap_or_default(),
-        agent_provider.unwrap_or_default(),
-        agent_type.unwrap_or_default(),
-        branch.unwrap_or_default(),
-    )
+    serde_json::json!([agent_session_id, agent_provider, agent_type, branch]).to_string()
 }
 
 /// Locates the session state this task's payload will promise.
@@ -305,6 +308,17 @@ pub fn staging_path(staging_dir: &Path, transfer_id: &str, suffix: &str) -> Path
 pub fn bundle_staging_path(staging_dir: &Path, transfer_id: &str) -> PathBuf {
     staging_dir.join(format!("kanna-transfer-{transfer_id}.bundle"))
 }
+
+/// The longest name any file this module puts on disk may have.
+///
+/// POSIX `NAME_MAX` is 255 bytes and a transfer id is 64 hex characters, so
+/// names built from one are close enough to the limit that a descriptive suffix
+/// can cross it. It has crossed it: a staged artifact used to be fetched into a
+/// name that spent the artifact id twice, and a real Claude session archive
+/// landed at 261 bytes and killed the transfer with `ENAMETOOLONG` mid-flight.
+/// The sidecar now derives its own on-disk names from the artifact id alone,
+/// which bounds that side; this bounds the names the engine hands it.
+const MAX_STAGED_NAME_BYTES: usize = 255;
 
 /// The artifact ids the payload declares. Derived from the transfer id so a
 /// re-staged artifact replaces its predecessor rather than accumulating.
@@ -731,6 +745,74 @@ mod tests {
         )
         .expect("an empty listing is an absence, not a failure");
         assert!(plan.is_none());
+    }
+
+    /// Every name this module puts on disk stays inside `NAME_MAX`.
+    ///
+    /// A staged artifact used to be fetched into a name that spent the artifact
+    /// id twice; with 64-hex transfer ids a real Claude session archive reached
+    /// 261 bytes and killed the transfer with `ENAMETOOLONG` mid-flight. The
+    /// sidecar bounds its own names now, and this bounds what it is handed —
+    /// including the artifact ids, which are what the sidecar derives from.
+    #[test]
+    fn staged_names_and_artifact_ids_stay_inside_name_max() {
+        let staging = Path::new("/tmp");
+        // A transfer id is 64 hex characters.
+        let transfer_id = "f".repeat(64);
+        let suffixes = [
+            "claude-session",
+            "copilot-session",
+            "claude-transcript",
+            "codex-rollout",
+            "opencode-session",
+            "repo-bundle",
+        ];
+
+        for suffix in suffixes {
+            let id = artifact_id(&transfer_id, suffix);
+            assert!(
+                id.len() <= MAX_STAGED_NAME_BYTES,
+                "artifact id {id} is {} bytes",
+                id.len(),
+            );
+            let staged = staging_path(staging, &transfer_id, suffix);
+            let name = staged.file_name().expect("a file name");
+            assert!(
+                name.len() <= MAX_STAGED_NAME_BYTES,
+                "staged name {name:?} is {} bytes",
+                name.len(),
+            );
+        }
+
+        let bundle = bundle_staging_path(staging, &transfer_id);
+        assert!(bundle.file_name().expect("a file name").len() <= MAX_STAGED_NAME_BYTES,);
+    }
+
+    /// The identity is compared, never parsed, so no component's own content
+    /// may make two different identities render the same. A separator can be
+    /// forged — `agent_type` carries a repo-supplied agent name — and encoding
+    /// is what removes the question.
+    #[test]
+    fn a_component_cannot_forge_a_matching_plan_identity() {
+        // Shifting a separator across the boundary used to collide these.
+        assert_ne!(
+            session_plan_identity(Some("a"), Some("b c"), Some("d"), Some("e")),
+            session_plan_identity(Some("a"), Some("b"), Some("c d"), Some("e")),
+        );
+        assert_ne!(
+            session_plan_identity(Some("a"), None, Some("b"), None),
+            session_plan_identity(Some("a"), Some(""), Some("b"), Some("")),
+            "an absent component must not read as an empty one",
+        );
+        // The same task still matches itself, which is what the caller relies
+        // on to decide whether to re-plan after the agent shut down.
+        assert_eq!(
+            session_plan_identity(Some("s"), Some("claude"), Some("pty"), Some("task-1")),
+            session_plan_identity(Some("s"), Some("claude"), Some("pty"), Some("task-1")),
+        );
+        // And it stays a text file: no control characters in the value.
+        let identity = session_plan_identity(Some("s"), Some("claude"), Some("pty"), Some("t"));
+        assert!(!identity.chars().any(char::is_control), "{identity}");
     }
 
     /// A Codex rollout is content-addressed, so an occupied destination is this

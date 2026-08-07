@@ -152,6 +152,13 @@ pub(super) struct SetTaskNotifyRequest {
 /// Attach or clear a task's completion-notification target after creation.
 /// `notifyTaskId` was creation-time only, so an orchestrator that adopted an
 /// already-running task had no way to be told when it finished.
+///
+/// Retargeting is pure pipeline-item state: it needs neither a workspace nor
+/// an agent session, so it works on a task that has not started its first
+/// stage yet. The one thing it cannot do is retarget a task that already
+/// closed — that task will never fire a completion notification again — and
+/// that case gets its own message rather than the bare `not found` the
+/// zero-row update used to produce.
 pub(super) async fn set_task_notify(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
@@ -186,7 +193,13 @@ pub(super) async fn set_task_notify(
         ));
     }
     db.update_pipeline_item_notify_task(&task_id, notify_task_id.as_deref())
-        .map_err(|e| db_write_error("db error", e))?;
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => (
+                axum::http::StatusCode::CONFLICT,
+                format!("task is closed: {task_id}"),
+            ),
+            error => db_write_error("db error", error),
+        })?;
     state.publish_state_changed(StateChangeScope::Tasks);
     Ok(Json(crate::mobile_api::TaskActionResponse {
         task_id,

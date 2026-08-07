@@ -2460,6 +2460,334 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
     }
 }
 
+/// Config for a blocked-dependent scenario that shares one temp root.
+fn dependent_scenario_config(label: &str, unique: &str, daemon_dir: &Path) -> Config {
+    Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-{label}-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        pairing_store_path: format!("/tmp/kanna-pairings-{label}-{unique}.json"),
+    }
+}
+
+/// Fake daemon for the dependent-start scenarios: acknowledges kills, refuses
+/// every `Input` as a dead session (the notify target's session is gone), and
+/// answers the dependent's spawn. Serves connections until dropped — a close
+/// opens one connection for its kills and completion notification opens
+/// another — and reports each spawned session id on the returned channel.
+fn spawn_dependent_start_daemon(
+    listener: tokio::net::UnixListener,
+    expected_task_id: String,
+) -> (
+    tokio::task::JoinHandle<()>,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+) {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncWriteExt, BufReader};
+
+    let (spawned_tx, spawned_rx) = tokio::sync::mpsc::unbounded_channel();
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let expected_task_id = expected_task_id.clone();
+            let spawned_tx = spawned_tx.clone();
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                while let Some(command) =
+                    read_test_daemon_command_optional(&mut reader, &mut write_half).await
+                {
+                    let response = match command {
+                        DaemonCommand::Kill { .. } => DaemonEvent::Ok,
+                        DaemonCommand::Input { .. } => DaemonEvent::Error {
+                            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                            message: "session not found".to_string(),
+                        },
+                        DaemonCommand::Spawn {
+                            session_id, cwd, ..
+                        } => {
+                            assert_eq!(session_id, expected_task_id);
+                            assert!(cwd.contains(".kanna-worktrees/task-"));
+                            let _ = spawned_tx.send(session_id.clone());
+                            DaemonEvent::SessionCreated { session_id }
+                        }
+                        DaemonCommand::SpawnAgent { session_id, params } => {
+                            assert_eq!(session_id, expected_task_id);
+                            assert!(params.cwd.contains(".kanna-worktrees/task-"));
+                            let _ = spawned_tx.send(session_id.clone());
+                            DaemonEvent::SessionCreated { session_id }
+                        }
+                        other => panic!("unexpected daemon command: {:?}", other),
+                    };
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
+            });
+        }
+    });
+    (handle, spawned_rx)
+}
+
+/// The one session id the fake daemon was asked to spawn.
+async fn expect_one_spawn(
+    spawned: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    context: &str,
+) -> String {
+    let session_id = tokio::time::timeout(std::time::Duration::from_secs(10), spawned.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{context}: no dependent spawn arrived"))
+        .unwrap_or_else(|| panic!("{context}: fake daemon closed before spawning the dependent"));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), spawned.recv())
+            .await
+            .is_err(),
+        "{context}: the dependent was started more than once"
+    );
+    session_id
+}
+
+/// Closing a blocker starts its dormant dependent even when the blocker's own
+/// completion notification cannot be delivered.
+///
+/// Notify delivery used to propagate: a notify target whose agent session had
+/// already died turned the close into a 500 *after* `closed_at` was written,
+/// and — because the error short-circuited the handler — the unblock sweep
+/// that follows it never ran. The task was closed, the caller was told it had
+/// failed, and every dependent stayed dormant with no run at all.
+#[tokio::test]
+async fn close_with_a_dead_notify_target_still_starts_dependents() {
+    let unique = unique_test_suffix();
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-close-notify-dead-{unique}"));
+    init_test_git_repo(&repo_root);
+    let daemon_dir =
+        std::env::temp_dir().join(format!("kanna-http-close-notify-dead-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let config = dependent_scenario_config("close-notify-dead", &unique, &daemon_dir);
+
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    for (task_id, prompt) in [("task-a", "Build prerequisite"), ("watcher", "Orchestrate")] {
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-1",
+            prompt,
+            Some(prompt),
+            "in progress",
+            "2026-08-07 00:00:00",
+        )
+        .unwrap();
+    }
+    db.update_test_pipeline_item_stage_context("task-a", "task-a-stage", "default", None, "claude")
+        .unwrap();
+    // The orchestrator that asked to be told when task-a finishes is itself
+    // gone: the fake daemon refuses input for every session.
+    db.update_pipeline_item_notify_task("task-a", Some("watcher"))
+        .unwrap();
+    drop(db);
+    commit_branch_change(&repo_root, "task-a-stage", "blocker-output.txt", "blocker");
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "repoId": "repo-1",
+                        "prompt": "Build on task A",
+                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "agentProvider": "claude",
+                        "blockerTaskIds": ["task-a"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dependent: CreateTaskResponse = from_slice(&body).unwrap();
+    assert_eq!(dependent.worktree_path, None);
+
+    let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    let (daemon_server, mut spawned) =
+        spawn_dependent_start_daemon(listener, dependent.task_id.clone());
+
+    let close_response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-a/actions/close")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        close_response.status(),
+        StatusCode::NO_CONTENT,
+        "an undeliverable notification must not fail a close that landed"
+    );
+    expect_one_spawn(&mut spawned, "close with a dead notify target").await;
+    daemon_server.abort();
+
+    let db = Db::open(&config.db_path).unwrap();
+    assert!(db
+        .get_pipeline_item("task-a")
+        .unwrap()
+        .unwrap()
+        .closed_at
+        .is_some());
+    let dependent_item = db.get_pipeline_item(&dependent.task_id).unwrap().unwrap();
+    assert_eq!(dependent_item.activity.as_deref(), Some("working"));
+    assert!(db
+        .get_task_worktree_path(&dependent.task_id)
+        .unwrap()
+        .is_some());
+    assert!(
+        db.latest_stage_run(&dependent.task_id).unwrap().is_some(),
+        "the dependent's first stage run should exist without manual intervention"
+    );
+
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// Unblocking past a blocker that never started must work.
+///
+/// A task carries a `pipeline_item.branch` from the moment it is created, but
+/// the branch itself only exists once its first workspace is forked. Handing
+/// that name to git failed the whole unblock — "merge: task-… - not something
+/// we can merge" — so a dependent could not be released from a blocker that
+/// had itself never run. There is nothing to inherit, so the dependent forks
+/// from its normal base instead.
+#[tokio::test]
+async fn unblock_starts_a_dependent_whose_blocker_never_created_its_branch() {
+    let unique = unique_test_suffix();
+    let repo_root = std::env::temp_dir().join(format!("kanna-http-unblock-no-branch-{unique}"));
+    init_test_git_repo(&repo_root);
+    let daemon_dir =
+        std::env::temp_dir().join(format!("kanna-http-unblock-no-branch-daemon-{unique}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+    let config = dependent_scenario_config("unblock-no-branch", &unique, &daemon_dir);
+
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-a",
+        "repo-1",
+        "Never started",
+        Some("Never started"),
+        "in progress",
+        "2026-08-07 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-a", "task-task-a", "default", None, "claude")
+        .unwrap();
+    drop(db);
+    assert!(
+        !git_branch_exists(&repo_root, "task-task-a"),
+        "the blocker must have no branch for this scenario"
+    );
+
+    let app = super::router(Arc::new(super::AppState::new(config.clone())));
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "repoId": "repo-1",
+                        "prompt": "Build on task A",
+                        "pipelineName": TEST_PROVIDER_NEUTRAL_PIPELINE,
+                        "agentProvider": "claude",
+                        "blockerTaskIds": ["task-a"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dependent: CreateTaskResponse = from_slice(&body).unwrap();
+    assert_eq!(dependent.worktree_path, None);
+
+    let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    let (daemon_server, mut spawned) =
+        spawn_dependent_start_daemon(listener, dependent.task_id.clone());
+
+    let unblock_response = app
+        .oneshot(
+            Request::post(format!("/v1/tasks/{}/actions/unblock", dependent.task_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = unblock_response.status();
+    let body = axum::body::to_bytes(unblock_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unblock failed: {}",
+        String::from_utf8_lossy(&body)
+    );
+    expect_one_spawn(&mut spawned, "unblock past a branchless blocker").await;
+    daemon_server.abort();
+
+    let db = Db::open(&config.db_path).unwrap();
+    let dependent_item = db.get_pipeline_item(&dependent.task_id).unwrap().unwrap();
+    assert_eq!(dependent_item.activity.as_deref(), Some("working"));
+    assert_ne!(
+        dependent_item.base_ref.as_deref(),
+        Some("task-task-a"),
+        "a branch git does not have must never become the dependent's base ref"
+    );
+    assert!(db
+        .get_task_worktree_path(&dependent.task_id)
+        .unwrap()
+        .is_some());
+
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
 fn commit_branch_change(repo_root: &Path, branch: &str, file: &str, content: &str) -> PathBuf {
     let worktree_path = repo_root.join(".kanna-worktrees").join(branch);
     std::fs::create_dir_all(repo_root.join(".kanna-worktrees")).unwrap();

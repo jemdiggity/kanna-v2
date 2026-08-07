@@ -133,6 +133,36 @@ impl Db {
         }
     }
 
+    /// The most recently started run of one stage and kind. A rerun uses this
+    /// to reproduce the run it is replacing (its provider, model, and effort)
+    /// instead of re-deriving the stage's defaults.
+    pub fn latest_stage_run_for_stage(
+        &self,
+        task_id: &str,
+        stage: &str,
+        kind: &str,
+    ) -> Result<Option<StageRun>, rusqlite::Error> {
+        let run = self
+            .conn
+            .query_row(
+                "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
+                        feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
+                        resume_fallback_reason, completion_transition, started_at, finished_at
+                 FROM stage_run
+                 WHERE task_id = ? AND stage = ? AND kind = ?
+                 ORDER BY rowid DESC
+                 LIMIT 1",
+                [task_id, stage, kind],
+                stage_run_from_row,
+            )
+            .optional();
+        match run {
+            Ok(run) => Ok(run),
+            Err(err) if is_missing_stage_run_table(&err) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     pub fn stage_run(&self, run_id: &str) -> Result<Option<StageRun>, rusqlite::Error> {
         self.conn
             .query_row(

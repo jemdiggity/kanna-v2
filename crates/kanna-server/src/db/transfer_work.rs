@@ -502,10 +502,9 @@ mod tests {
         // taken" — they are the same at-most-once slot by design.
         db.record_transfer_work_observation("finalize:t-1", "session-before-signal", Some("x"))
             .expect("observe");
-        assert!(
-            !db.claim_transfer_work_phase("finalize:t-1", "session-before-signal")
-                .expect("claim over observation"),
-        );
+        assert!(!db
+            .claim_transfer_work_phase("finalize:t-1", "session-before-signal")
+            .expect("claim over observation"),);
     }
 
     /// Retries are bounded. A transfer that can make no further progress has to

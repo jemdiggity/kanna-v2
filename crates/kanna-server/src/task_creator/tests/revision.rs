@@ -494,6 +494,16 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
     let impl_worktree = repo_root.join(".kanna-worktrees/task-impl");
     let claude_config_dir = repo_root.join("claude-config");
     write_resume_transcript(&claude_config_dir, &impl_worktree);
+    // A resumed revision reopens the implement run's conversation, so it must
+    // reopen it with the model and effort that conversation was held with
+    // rather than re-resolving them from the stage definition.
+    Connection::open(&config.db_path)
+        .unwrap()
+        .execute(
+            "UPDATE stage_run SET model = 'recorded-run-model', effort = 'high' WHERE id = ?",
+            ["run-impl"],
+        )
+        .unwrap();
 
     // The env guard is scoped to the prepare call: CLAUDE_CONFIG_DIR only
     // matters while the transcript precondition runs, and the guard must not
@@ -521,6 +531,9 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
     assert_eq!(resumed.worktree_path, impl_worktree.to_string_lossy());
     assert!(prepared.forked_workspace().is_none());
     assert_eq!(prepared.cwd, impl_worktree.to_string_lossy());
+    assert_eq!(prepared.agent_provider, "claude");
+    assert_eq!(prepared.model.as_deref(), Some("recorded-run-model"));
+    assert_eq!(prepared.effort.as_deref(), Some("high"));
     assert_eq!(prepared.run_kind, "main");
     assert_eq!(prepared.next_stage, "in progress");
     assert_eq!(
@@ -585,6 +598,8 @@ async fn request_revision_resumes_previous_stage_run_session_in_its_worktree() {
         revision_run.resumed_from_run_id.as_deref(),
         Some("run-impl")
     );
+    assert_eq!(revision_run.model.as_deref(), Some("recorded-run-model"));
+    assert_eq!(revision_run.effort.as_deref(), Some("high"));
     assert_eq!(
         revision_run.cwd.as_deref(),
         Some(impl_worktree.to_string_lossy().as_ref())
@@ -759,6 +774,124 @@ fn request_revision_keeps_the_task_provider_over_agent_def_priority() {
     .unwrap();
 
     assert_eq!(prepared.agent_provider, "opencode");
+
+    if let Some(fork) = prepared.forked_workspace() {
+        let _ = crate::task_creator::worktree::remove_prepared_worktree(
+            &fork.worktree_path,
+            &fork.branch,
+        );
+    }
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// A revision continues the same stage's work, so it keeps that stage's last
+/// run's model and effort — not the agent definition's. The provider was
+/// already pinned here; model and effort were re-resolved from the definition
+/// and could quietly move a revision onto a different binding than the work
+/// it is revising.
+#[test]
+fn request_revision_keeps_the_last_runs_model_and_effort_over_the_agent_def() {
+    let repo_root = init_git_repo("revision-binding-inherit");
+    std::fs::create_dir_all(repo_root.join(".kanna/pipelines")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/pipelines/qa.json"),
+        r#"{
+  "stages": [
+    { "name": "in progress", "transition": "manual", "agent": "implement", "prompt": "$TASK_PROMPT" },
+    { "name": "review", "transition": "manual" }
+  ]
+}"#,
+    )
+    .unwrap();
+    // What the definition would resolve to if the recorded run were ignored.
+    std::fs::write(
+        repo_root.join(".kanna/agents/implement/AGENT.md"),
+        "---\nname: implement\ndescription: Implements binding inheritance revisions\nagent_provider: claude\nmodel: agent-def-model\neffort: low\n---\nImplement:\n$TASK_PROMPT",
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish binding inheritance definitions");
+    run_git_fixture(&repo_root, &["branch", "task-reviewed"]);
+    let worktree = repo_root.join(".kanna-worktrees/task-reviewed");
+    assert!(Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            worktree.to_string_lossy().as_ref(),
+            "task-reviewed",
+        ])
+        .current_dir(&repo_root)
+        .status()
+        .unwrap()
+        .success());
+
+    let config = test_config("revision-binding-inherit");
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "review-task",
+        "repo-1",
+        "Create hello.txt",
+        Some("Binding inherit"),
+        "review",
+        "2026-08-07 07:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context(
+        "review-task",
+        "task-reviewed",
+        "qa",
+        None,
+        "claude",
+    )
+    .unwrap();
+    // The implement run this revision is revising. No provider session and no
+    // cwd, so the resume precondition fails and the revision forks fresh —
+    // the binding must survive that fork anyway.
+    db.insert_stage_run(NewStageRun {
+        id: "run-impl",
+        task_id: "review-task",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("claude"),
+        model: Some("recorded-run-model"),
+        effort: Some("high"),
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("review-task"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    db.finish_stage_run(
+        "run-impl",
+        "succeeded",
+        Some("{\"status\":\"success\"}"),
+        None,
+    )
+    .unwrap();
+
+    let prepared = prepare_revision_task_for_api(
+        &db,
+        &config,
+        "review-task",
+        "in progress",
+        "Also create goodbye.txt.",
+        None,
+    )
+    .unwrap();
+
+    assert!(
+        prepared.forked_workspace().is_some(),
+        "no resumable session was recorded, so this must be a fresh fork"
+    );
+    assert_eq!(prepared.agent_provider, "claude");
+    assert_eq!(prepared.model.as_deref(), Some("recorded-run-model"));
+    assert_eq!(prepared.effort.as_deref(), Some("high"));
 
     if let Some(fork) = prepared.forked_workspace() {
         let _ = crate::task_creator::worktree::remove_prepared_worktree(
