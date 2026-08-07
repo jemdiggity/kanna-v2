@@ -1101,4 +1101,90 @@ impl Db {
         }
         Ok(())
     }
+
+    /// When this task's merge request reached the repo's merge agent, or
+    /// `None` while it still owes one. Closing a task whose final stage
+    /// promised the handoff reads this to tell a delivered handoff from a
+    /// skipped one.
+    pub fn task_merge_signaled_at(&self, id: &str) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT merge_signaled_at FROM pipeline_item WHERE id = ?",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
+    }
+
+    /// Record a delivered merge handoff. The first delivery wins: a task owes
+    /// the merge agent one request, so a later duplicate keeps the original
+    /// timestamp and logs no second event. Returns whether this call was the
+    /// one that recorded it.
+    pub fn record_task_merge_signal(
+        &self,
+        id: &str,
+        source: MergeSignalSource,
+        branch: &str,
+        target: &str,
+        pr_url: Option<&str>,
+    ) -> Result<bool, rusqlite::Error> {
+        self.with_immediate_transaction(|db| {
+            let rows_affected = db.conn.execute(
+                "UPDATE pipeline_item
+                 SET merge_signaled_at = datetime('now'), updated_at = datetime('now')
+                 WHERE id = ? AND merge_signaled_at IS NULL",
+                [id],
+            )?;
+            if rows_affected == 0 {
+                return Ok(false);
+            }
+            db.append_task_event(
+                id,
+                TaskEventKind::MergeSignaled,
+                json!({
+                    "source": source.as_str(),
+                    "branch": branch,
+                    "target": target,
+                    "prUrl": pr_url,
+                }),
+            )?;
+            Ok(true)
+        })
+    }
+
+    /// Record that a task reached the end of a pipeline whose final stage
+    /// declares the merge-signaling `approve` post without any PR to hand
+    /// off. The engine refuses to close such a task; this is what a watcher
+    /// (and the operator) sees instead of a silent completion.
+    pub fn record_task_merge_handoff_missing(
+        &self,
+        id: &str,
+        reason: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.append_task_event(
+            id,
+            TaskEventKind::MergeHandoffMissing,
+            json!({ "reason": reason }),
+        )
+    }
+}
+
+/// Who delivered a task's merge request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeSignalSource {
+    /// The approve post called `kanna_signal_merge_handoff` itself.
+    Agent,
+    /// Kanna delivered it while closing the task, because the approve post
+    /// finished without one.
+    Engine,
+}
+
+impl MergeSignalSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Engine => "engine",
+        }
+    }
 }

@@ -337,6 +337,35 @@ ordinary request through the same singleton signal path:
 MERGE <head> -> <base> [TASK <task-id>] [PR <url>]: <summary>
 ```
 
+**The handoff is the engine's obligation, not the post agent's memory.** A post
+is injected into whatever agent session its stage left running, so a pr agent
+that was still mid-work when the approve post arrived reads the post prompt as
+its next instruction — it creates the PR, reports that, and never signals. That
+happened to four consecutive review-bearing tasks on 2026-08-07, each of which
+then closed leaving an open PR the merge master had never heard of.
+
+So delivery is recorded, not assumed. `signal-merge-handoff` stamps
+`pipeline_item.merge_signaled_at` *after* the request reaches the merge agent
+and appends `task.merge_signaled` (`payload.source`: `agent`). Before closing a
+task past a final stage whose pinned pipeline declares the merge-signaling
+`approve` post, the engine checks that stamp and, if the task still owes a
+request, composes and delivers the identical line itself from the recorded
+`pr_url` (`payload.source`: `engine`). The head branch comes from the
+workspace's live branch, since the pr agent renames what it pushes; the target
+is the repo's default branch. Both are hints — the merge agent resolves the
+live PR and applies the repository's policy, exactly as for an agent-sent
+request. Kanna still attests nothing.
+
+If such a stage finishes with no `pr_url` at all there is nothing to hand off,
+which means the approve post reported success without producing the PR it
+exists to approve. The engine refuses the close: the task stays open at its
+final stage, goes `unread`, and emits `task.merge_handoff_missing`. A watcher
+must read that as a failed approval, never as a finished pipeline.
+
+A pipeline whose final stage declares no `approve` post promised no merge side
+effect, and nothing is enforced on its behalf — the same rule the desktop's
+approval UI uses (`pinnedApproveMergePost`).
+
 New merge sessions accept ordinary terminal input. On startup and after daemon
 replacement, kanna-server clears the retired native-terminal-only
 classification from inherited PTYs so older merge singletons also use the

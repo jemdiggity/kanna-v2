@@ -15,3 +15,10 @@ MERGE <head> -> <base> [TASK <task-id>] [PR <url>]: <summary>
 ```
 
 - It must finish with `kanna_complete_stage` status `success` after signaling merge, or `failure` when the PR cannot be resolved or delivered.
+
+The engine does not depend on this contract being honoured. A task whose pinned
+final stage declares this post cannot close while it still owes the merge agent
+a request: Kanna sends the same ordinary line itself from the recorded `pr_url`,
+and refuses the close when no PR was ever recorded. That is a backstop for a
+post that ran in a session already busy with the pr stage's own work — not a
+licence for this role to skip step 3.
