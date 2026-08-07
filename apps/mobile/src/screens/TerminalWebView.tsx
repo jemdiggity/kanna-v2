@@ -98,7 +98,7 @@ const WebView = NativeWebView as unknown as React.ForwardRefExoticComponent<
   WebViewProps & React.RefAttributes<TerminalWebViewHandle>
 >;
 
-export function TerminalWebView({
+export function TerminalWebViewComponent({
   taskId,
   output,
   outputEpoch,
@@ -171,6 +171,10 @@ export function TerminalWebView({
       }),
     [fullscreen]
   );
+  // The document embeds the whole xterm bundle. Hand the native view the same
+  // source object across renders so a re-render never walks it as a prop diff
+  // candidate, let alone reloads it.
+  const source = useMemo(() => ({ html: document }), [document]);
   const bottomInsetScript = useMemo(
     () => buildTerminalBottomInsetScript(resolvedBottomInset),
     [resolvedBottomInset]
@@ -656,13 +660,22 @@ export function TerminalWebView({
         }}
         onMessage={handleMessage}
         scrollEnabled
-        source={{ html: document }}
+        source={source}
         style={fullscreen ? styles.webviewFullscreen : styles.webview}
         webviewDebuggingEnabled={ENABLE_E2E_TERMINAL_INSPECTION}
       />
     </View>
   );
 }
+
+// The task screen owns the terminal and the reply composer, so it re-renders on
+// state the terminal has no stake in — every keystroke of a draft, every
+// keyboard frame, every chrome measurement. The terminal drives a live xterm
+// document through refs and effects, so those renders are not free: they re-run
+// the output-sync effect and can re-drive the terminal from render-time props
+// that trail the dedicated output source. Re-render only when the terminal's
+// own inputs change.
+export const TerminalWebView = React.memo(TerminalWebViewComponent);
 
 const styles = StyleSheet.create({
   contentLoading: {
