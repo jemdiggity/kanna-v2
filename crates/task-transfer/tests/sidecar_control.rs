@@ -304,6 +304,120 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
     peer_server.await.unwrap();
 }
 
+/// The renderer only learns that a duplicate push left state on disk if the
+/// failure survives the control boundary. Anything the runtime swallows becomes
+/// a success on stdout, and the operator warning can never fire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoning_a_transfer_reports_cleanup_failure_over_the_control_channel() {
+    let temp = tempfile::tempdir().unwrap();
+    let registry_dir = temp.path().join("registry");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kanna-task-transfer"))
+        .env("KANNA_TRANSFER_ROOT", temp.path())
+        .env("KANNA_TRANSFER_REGISTRY_DIR", &registry_dir)
+        .env("KANNA_TRANSFER_PEER_ID", "peer-primary")
+        .env("KANNA_TRANSFER_DISPLAY_NAME", "Primary")
+        .env("KANNA_TRANSFER_DISCOVERY", "registry")
+        .env("KANNA_TRANSFER_PORT", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (response_tx, response_rx) = std_mpsc::channel();
+    std::thread::spawn(move || {
+        for line in StdBufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if let Ok(response) = serde_json::from_str::<ControlResponse>(&line) {
+                let _ = response_tx.send(response);
+            }
+        }
+    });
+    let mut sidecar = SidecarProcess { child, stdin };
+    let next_response = |request_id: &str| {
+        let response = response_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|error| panic!("no control response for {request_id}: {error}"));
+        assert_eq!(control_response_id(&response), request_id);
+        response
+    };
+
+    let staged = temp.path().join("session.tar.gz");
+    std::fs::write(&staged, b"session").unwrap();
+    write_control(
+        &mut sidecar.stdin,
+        &ControlRequest::StageTransferArtifact {
+            request_id: "stage".into(),
+            transfer_id: "transfer-abandon".into(),
+            artifact_id: "claude-session".into(),
+            path: staged.to_string_lossy().into_owned(),
+            owned: true,
+        },
+    );
+    next_response("stage");
+    write_control(
+        &mut sidecar.stdin,
+        &ControlRequest::FetchTransferArtifact {
+            request_id: "fetch".into(),
+            transfer_id: "transfer-abandon".into(),
+            artifact_id: "claude-session".into(),
+        },
+    );
+    let ControlResponse::FetchTransferArtifact { path, .. } = next_response("fetch") else {
+        panic!("expected the staged artifact's managed path");
+    };
+
+    // Unlinking a directory is refused, so swapping the owned artifact for one
+    // makes exactly this deletion fail and nothing else.
+    let owned_artifact = std::path::PathBuf::from(path);
+    std::fs::remove_file(&owned_artifact).unwrap();
+    std::fs::create_dir(&owned_artifact).unwrap();
+
+    write_control(
+        &mut sidecar.stdin,
+        &ControlRequest::AbandonOutgoingTransfer {
+            request_id: "abandon-blocked".into(),
+            transfer_id: "transfer-abandon".into(),
+        },
+    );
+    let blocked = next_response("abandon-blocked");
+    assert!(
+        matches!(blocked, ControlResponse::Error { .. }),
+        "abandon reported success over state it could not delete: {blocked:?}",
+    );
+
+    std::fs::remove_dir(&owned_artifact).unwrap();
+    write_control(
+        &mut sidecar.stdin,
+        &ControlRequest::AbandonOutgoingTransfer {
+            request_id: "abandon-retry".into(),
+            transfer_id: "transfer-abandon".into(),
+        },
+    );
+    let retried = next_response("abandon-retry");
+    assert!(
+        matches!(retried, ControlResponse::AbandonOutgoingTransfer { .. }),
+        "the undeleted artifact was forgotten instead of retried: {retried:?}",
+    );
+    assert!(!owned_artifact.exists());
+
+    // A transfer this sidecar never reserved is still a no-op, not an error the
+    // renderer would have to tell the operator about.
+    write_control(
+        &mut sidecar.stdin,
+        &ControlRequest::AbandonOutgoingTransfer {
+            request_id: "abandon-unknown".into(),
+            transfer_id: "transfer-never-reserved".into(),
+        },
+    );
+    let unknown = next_response("abandon-unknown");
+    assert!(
+        matches!(unknown, ControlResponse::AbandonOutgoingTransfer { .. }),
+        "abandoning an unknown transfer was not a no-op: {unknown:?}",
+    );
+}
+
 fn write_control(stdin: &mut ChildStdin, request: &ControlRequest) {
     writeln!(stdin, "{}", serde_json::to_string(request).unwrap()).unwrap();
     stdin.flush().unwrap();

@@ -262,6 +262,16 @@ impl TransferReplayStore {
         self.remove_record(&self.reservation_path(transfer_id));
     }
 
+    /// Deletes a reservation and says whether the disk agreed.
+    ///
+    /// Sweeps and prunes can afford [`remove_reservation`]'s best effort — they
+    /// run again. A caller that has told its user "nothing is left" cannot: a
+    /// reservation whose file survives is exactly the silent leak the
+    /// duplicate-push race left behind.
+    pub(super) fn remove_reservation_checked(&self, transfer_id: &str) -> std::io::Result<()> {
+        self.remove_record_checked(&self.reservation_path(transfer_id))
+    }
+
     pub(super) fn save_incoming_reservation(
         &self,
         transfer_id: &str,
@@ -434,11 +444,21 @@ impl TransferReplayStore {
     }
 
     fn remove_record(&self, path: &Path) {
-        if fs::remove_file(path).is_ok() {
-            if let Some(parent) = path.parent() {
-                let _ = fs::File::open(parent).and_then(|directory| directory.sync_all());
-            }
+        let _ = self.remove_record_checked(path);
+    }
+
+    /// A record that was already gone is success: the contract is that nothing
+    /// is left, not that something was.
+    fn remove_record_checked(&self, path: &Path) -> std::io::Result<()> {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
         }
+        if let Some(parent) = path.parent() {
+            let _ = fs::File::open(parent).and_then(|directory| directory.sync_all());
+        }
+        Ok(())
     }
 
     fn is_expired(&self, created_at_ms: u64, now_ms: u64) -> bool {

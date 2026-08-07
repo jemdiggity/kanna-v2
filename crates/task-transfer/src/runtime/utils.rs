@@ -680,11 +680,26 @@ pub(super) fn take_transfer_artifacts(
 
 pub(super) async fn remove_owned_artifact_paths(paths: Vec<std::path::PathBuf>) {
     for path in paths {
-        let _ = tokio::fs::remove_file(&path).await;
-        if let Some(parent) = path.parent() {
-            let _ = tokio::fs::remove_dir(parent).await;
-        }
+        let _ = remove_owned_artifact_path(&path).await;
     }
+}
+
+/// Deletes one owned artifact and says whether the disk agreed.
+///
+/// A file that was already gone is success — the contract is that nothing is
+/// left, not that something was. Pruning the now-empty parent stays best
+/// effort: it legitimately fails while sibling artifacts of the same transfer
+/// are still staged, which is not a leak.
+pub(super) async fn remove_owned_artifact_path(path: &std::path::Path) -> std::io::Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::remove_dir(parent).await;
+    }
+    Ok(())
 }
 
 pub(super) fn sanitize_artifact_filename(filename: &str) -> String {
