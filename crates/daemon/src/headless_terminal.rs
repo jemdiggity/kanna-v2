@@ -25,6 +25,48 @@ const ANTIGRAVITY_BUSY_MARKER: &str = "esc to cancel";
 const CLAUDE_IDLE_PROMPT: char = '\u{276F}';
 const CODEX_IDLE_PROMPT: char = '\u{203A}';
 
+// OpenCode's TUI, pinned against CLI 1.18.15. Every constant below was read off
+// real captured frames — `crates/daemon/tests/fixtures/opencode/*.ansi`, which
+// the tests at the bottom of this file replay — rather than written from the
+// shape the matcher happened to expect. OpenCode draws none of the markers the
+// other providers use: before this was measured, `opencode_status_from_lines`
+// matched nothing at all and every live session sat at its initial `Busy`
+// forever (docs/2026-08-08-opencode-live-idle-detection-e2e-gap.md).
+
+/// The left border OpenCode draws down its composer box, and down every dialog
+/// it renders inside that box.
+const OPENCODE_BOX_BORDER: char = '\u{2503}';
+/// The working footer, drawn only while a turn is in flight.
+///
+/// Three spellings, because OpenCode used two of them inside a single day:
+/// 1.16.2 rendered "escape interrupt" and 1.18.15 renders "esc interrupt".
+/// Pinning every spelling seen — including the one the other providers use — is
+/// what keeps a CLI upgrade from silently costing `Busy` detection.
+const OPENCODE_INTERRUPT_MARKERS: &[&str] =
+    &["escape interrupt", "esc interrupt", INTERRUPT_MARKER];
+/// The permission dialog's action row, which is what makes the dialog
+/// *detectable*: its "△ Permission required" header sits several rows above the
+/// bottom — outside the status window on a tall terminal — while this row is
+/// always the second-to-last line on screen.
+const OPENCODE_PERMISSION_ACTIONS: &[&str] = &["allow once", "allow always"];
+/// The turn-summary glyph that replaces the working footer once a turn ends
+/// ("▣ Build · Big Pickle · 3.0s").
+const OPENCODE_TURN_SUMMARY_GLYPH: char = '\u{25A3}';
+/// The progress cells the working footer is drawn from ("⬝⬝⬝⬝⬝⬝⬝⬝", "⬝⬝⬝⬝⬝⬝■■").
+const OPENCODE_PROGRESS_GLYPHS: &[char] = &['\u{2B1D}', '\u{25A0}'];
+/// The half-block glyphs OpenCode's splash banner, composer rule and scrollbar
+/// gutter are drawn from. Text-free, so none of it belongs in a snippet.
+const OPENCODE_BLOCK_GLYPHS: &[char] = &[
+    '\u{2579}', '\u{2580}', '\u{2584}', '\u{2588}', '\u{258C}', '\u{2590}',
+];
+/// The bottom hint bar. Dropped on a narrow terminal and wrapped on a narrower
+/// one still, so it is usable as chrome to skip but useless as a state marker.
+const OPENCODE_HINT_BAR_MARKER: &str = "ctrl+p commands";
+/// OpenCode's permission dialog is taller than the status window: reading *what*
+/// it is asking needs the rows above the action row, while deciding *that* it is
+/// asking does not.
+const OPENCODE_WAITING_PROMPT_ROWS: usize = 24;
+
 pub fn initial_session_status(provider: Option<AgentProvider>) -> SessionStatus {
     if provider.is_some() {
         SessionStatus::Busy
@@ -276,7 +318,11 @@ impl HeadlessTerminal {
         let Some(provider) = provider else {
             return Ok(None);
         };
-        let footer_lines = self.visible_footer_lines_with_blank_boundaries(STATUS_ROWS)?;
+        let rows = match provider {
+            AgentProvider::Opencode => OPENCODE_WAITING_PROMPT_ROWS,
+            _ => STATUS_ROWS,
+        };
+        let footer_lines = self.visible_footer_lines_with_blank_boundaries(rows)?;
         Ok(waiting_prompt_from_lines(&footer_lines, provider))
     }
 
@@ -463,6 +509,27 @@ fn line_contains_worktree_path(line: &str) -> bool {
     line.contains(".kanna-worktrees/") || line.contains("[⎇ ")
 }
 
+/// OpenCode's block art: the rule under the composer ("╹▀▀▀▀…") and the splash
+/// banner. Text-free, so nothing in it belongs in a prompt snippet.
+fn opencode_line_is_block_art(trimmed: &str) -> bool {
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|character| character == ' ' || OPENCODE_BLOCK_GLYPHS.contains(&character))
+}
+
+/// Everything OpenCode paints that is frame rather than content: the composer
+/// box and its dialogs, the rule under it, and the bottom bar in each of its
+/// three forms (bare hint bar, working footer, turn summary).
+fn opencode_line_is_chrome(trimmed: &str) -> bool {
+    line_starts_with_prompt(trimmed, &[OPENCODE_BOX_BORDER])
+        || opencode_line_is_block_art(trimmed)
+        || contains_ascii_case_insensitive(trimmed, OPENCODE_HINT_BAR_MARKER)
+        || opencode_line_has_interrupt_marker(trimmed)
+        || line_starts_with_prompt(trimmed, &[OPENCODE_TURN_SUMMARY_GLYPH])
+        || line_starts_with_prompt(trimmed, OPENCODE_PROGRESS_GLYPHS)
+}
+
 fn line_is_visual_divider(line: &str) -> bool {
     let trimmed = line.trim();
     !trimmed.is_empty()
@@ -513,7 +580,7 @@ fn line_is_provider_chrome(line: &str, provider: AgentProvider) -> bool {
                         || trimmed.starts_with("o3")
                         || trimmed.starts_with("o4")))
         }
-        AgentProvider::Opencode => trimmed == "OpenCode",
+        AgentProvider::Opencode => trimmed == "OpenCode" || opencode_line_is_chrome(trimmed),
         AgentProvider::Antigravity => trimmed == "Antigravity",
         AgentProvider::Copilot => trimmed == "GitHub Copilot",
     }
@@ -611,12 +678,90 @@ fn waiting_question_above_menu(lines: &[String]) -> Option<String> {
     bound_waiting_prompt(&question.join(" "))
 }
 
+/// What OpenCode's permission dialog is asking, read from inside the composer
+/// box: the "△ Permission required" header and the command underneath it. The
+/// generic scans cannot find it — every line carries the box border, so the
+/// dialog looks like chrome — and the border is stripped here so the snippet
+/// reads as a question rather than as box drawing.
+fn opencode_permission_question(lines: &[String]) -> Option<String> {
+    let action_index = lines
+        .iter()
+        .rposition(|line| opencode_line_is_permission_action(line))?;
+
+    // The dialog is the contiguous run of bordered rows ending at the action
+    // row. Walking up to its first row matters on a narrow terminal, where the
+    // window also reaches the echoed user message — itself drawn in a bordered
+    // block, and the wrong answer to "what is being decided".
+    let mut start = action_index;
+    while start > 0 && line_starts_with_prompt(&lines[start - 1], &[OPENCODE_BOX_BORDER]) {
+        start -= 1;
+    }
+
+    let mut question = Vec::new();
+    for line in &lines[start..action_index] {
+        let Some(body) = prompt_remainder(line, &[OPENCODE_BOX_BORDER]) else {
+            continue;
+        };
+        if body.is_empty() {
+            continue;
+        }
+        question.push(body);
+        if question.len() == WAITING_PROMPT_MAX_LINES {
+            break;
+        }
+    }
+    bound_waiting_prompt(&question.join(" "))
+}
+
+/// The agent's last words, read from above the composer box.
+///
+/// This is the snippet that ships with every `StatusChanged(Idle)`. OpenCode's
+/// bottom bar is the project path plus token counters and it *wraps* on a
+/// narrow terminal, so recognising it line by line is a losing game; the
+/// composer box is the reliable landmark instead. Everything from its first
+/// bordered row down is frame, and everything above it is transcript.
+fn opencode_transcript_tail(lines: &[String]) -> Option<String> {
+    let composer_index = lines
+        .iter()
+        .position(|line| line_starts_with_prompt(line, &[OPENCODE_BOX_BORDER]))?;
+
+    let mut content = Vec::new();
+    for line in lines[..composer_index].iter().rev() {
+        // OpenCode paints a scrollbar in the right-hand gutter, so a transcript
+        // row can end in a stray block glyph that is not part of what was said.
+        let trimmed = line
+            .trim()
+            .trim_end_matches(OPENCODE_BLOCK_GLYPHS)
+            .trim_end();
+        if trimmed.is_empty() || opencode_line_is_chrome(trimmed) {
+            if content.is_empty() {
+                continue;
+            }
+            break;
+        }
+        content.push(trimmed);
+        if content.len() == WAITING_PROMPT_MAX_LINES {
+            break;
+        }
+    }
+    content.reverse();
+    bound_waiting_prompt(&content.join(" "))
+}
+
 fn waiting_prompt_from_lines(lines: &[String], provider: AgentProvider) -> Option<String> {
     if let Some(question) = waiting_question_from_lines(lines) {
         return Some(question);
     }
     if let Some(question) = waiting_question_above_menu(lines) {
         return Some(question);
+    }
+    if provider == AgentProvider::Opencode {
+        if let Some(question) = opencode_permission_question(lines) {
+            return Some(question);
+        }
+        if let Some(tail) = opencode_transcript_tail(lines) {
+            return Some(tail);
+        }
     }
 
     let mut content = Vec::new();
@@ -695,14 +840,55 @@ fn codex_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
     None
 }
 
+fn opencode_line_has_interrupt_marker(line: &str) -> bool {
+    OPENCODE_INTERRUPT_MARKERS
+        .iter()
+        .any(|marker| contains_ascii_case_insensitive(line, marker))
+}
+
+/// OpenCode's permission dialog, matched on its action row:
+/// "Allow once  Allow always  Reject   ⇆ select  enter confirm  esc reject".
+fn opencode_line_is_permission_action(line: &str) -> bool {
+    OPENCODE_PERMISSION_ACTIONS
+        .iter()
+        .all(|action| contains_ascii_case_insensitive(line, action))
+}
+
+/// The composer's status line — "┃ Build · Big Pickle OpenCode Zen": mode and
+/// model, inside the input box. 1.16.2 appended the variant as a third field;
+/// one separator is all this needs.
+///
+/// This is the idle marker because it is the only composer chrome that survived
+/// every width measured (80, 100, 120 and 160 columns) *and* both CLI versions
+/// seen: the hint bar below it is not drawn on a narrow terminal, and the
+/// working footer's wording changed under us mid-investigation. It stays a
+/// positive match on rendered chrome, never an inference from silence: a
+/// session that has not drawn its composer yet, or that has replaced it with
+/// the permission dialog, matches nothing and leaves the previous status in
+/// place.
+fn opencode_line_is_composer_status(line: &str) -> bool {
+    prompt_remainder(line, &[OPENCODE_BOX_BORDER])
+        .is_some_and(|remainder| remainder.contains(" \u{B7} "))
+}
+
 fn opencode_status_from_lines(lines: &[String]) -> Option<SessionStatus> {
-    if any_line_contains_ascii_case_insensitive(lines, WAITING_MARKER) {
+    if any_line_contains_ascii_case_insensitive(lines, WAITING_MARKER)
+        || lines
+            .iter()
+            .any(|line| opencode_line_is_permission_action(line))
+    {
         return Some(SessionStatus::Waiting);
     }
-    if any_line_contains_ascii_case_insensitive(lines, INTERRUPT_MARKER) {
+    if lines
+        .iter()
+        .any(|line| opencode_line_has_interrupt_marker(line))
+    {
         return Some(SessionStatus::Busy);
     }
-    if line_starts_with_prompt(last_non_empty_line(lines), &[CODEX_IDLE_PROMPT]) {
+    if lines
+        .iter()
+        .any(|line| opencode_line_is_composer_status(line))
+    {
         return Some(SessionStatus::Idle);
     }
 
@@ -769,6 +955,84 @@ mod tests {
     use crate::protocol::{AgentProvider, SessionStatus};
 
     use super::{bound_waiting_prompt, initial_session_status, HeadlessTerminal, TerminalSnapshot};
+
+    /// A frame of the OpenCode TUI as it was actually drawn.
+    ///
+    /// `stream` is the raw PTY output of a real `opencode` process from launch
+    /// up to the moment it reached `status`, captured by
+    /// `crates/daemon/tests/fixtures/opencode/capture-tui-fixtures.py` and
+    /// replayed here through the same headless terminal the daemon runs. Nothing
+    /// about these frames is transcribed or reconstructed: the previous fixtures
+    /// were hand-written from an assumed TUI and pinned a composer glyph the CLI
+    /// had stopped drawing, which is how live sessions came to sit at `Busy`
+    /// forever (docs/2026-08-08-opencode-live-idle-detection-e2e-gap.md).
+    ///
+    /// Both geometries are pinned on purpose: OpenCode drops or wraps its
+    /// "ctrl+p commands" hint bar on a narrow terminal, so a marker chosen from
+    /// a wide terminal alone would have failed silently on a narrow one.
+    struct OpencodeFixture {
+        name: &'static str,
+        cols: u16,
+        rows: u16,
+        stream: &'static [u8],
+        status: SessionStatus,
+    }
+
+    impl OpencodeFixture {
+        fn replay(&self) -> HeadlessTerminal {
+            let mut headless_terminal =
+                HeadlessTerminal::new(self.cols, self.rows, 10_000).unwrap();
+            headless_terminal.write(self.stream);
+            headless_terminal
+        }
+    }
+
+    /// Captured from OpenCode CLI **1.18.15** (`opencode/big-pickle`).
+    /// Re-capture with the script beside the fixtures when the TUI moves.
+    const OPENCODE_FIXTURES: &[OpencodeFixture] = &[
+        OpencodeFixture {
+            name: "busy 120x40",
+            cols: 120,
+            rows: 40,
+            stream: include_bytes!("../tests/fixtures/opencode/busy-120x40.ansi"),
+            status: SessionStatus::Busy,
+        },
+        OpencodeFixture {
+            name: "idle 120x40",
+            cols: 120,
+            rows: 40,
+            stream: include_bytes!("../tests/fixtures/opencode/idle-120x40.ansi"),
+            status: SessionStatus::Idle,
+        },
+        OpencodeFixture {
+            name: "permission 120x40",
+            cols: 120,
+            rows: 40,
+            stream: include_bytes!("../tests/fixtures/opencode/permission-120x40.ansi"),
+            status: SessionStatus::Waiting,
+        },
+        OpencodeFixture {
+            name: "busy 80x24",
+            cols: 80,
+            rows: 24,
+            stream: include_bytes!("../tests/fixtures/opencode/busy-80x24.ansi"),
+            status: SessionStatus::Busy,
+        },
+        OpencodeFixture {
+            name: "idle 80x24",
+            cols: 80,
+            rows: 24,
+            stream: include_bytes!("../tests/fixtures/opencode/idle-80x24.ansi"),
+            status: SessionStatus::Idle,
+        },
+        OpencodeFixture {
+            name: "permission 80x24",
+            cols: 80,
+            rows: 24,
+            stream: include_bytes!("../tests/fixtures/opencode/permission-80x24.ansi"),
+            status: SessionStatus::Waiting,
+        },
+    ];
 
     #[test]
     fn ascii_case_insensitive_contains_matches_status_markers() {
@@ -1333,44 +1597,172 @@ mod tests {
     }
 
     #[test]
-    fn opencode_status_comes_from_visible_footer_content() {
+    fn opencode_status_is_read_from_real_captured_frames() {
+        for fixture in OPENCODE_FIXTURES {
+            let mut headless_terminal = fixture.replay();
+
+            assert_eq!(
+                headless_terminal
+                    .visible_status(Some(AgentProvider::Opencode))
+                    .unwrap(),
+                Some(fixture.status),
+                "{} reported the wrong status. Rendered footer:\n{}",
+                fixture.name,
+                headless_terminal
+                    .visible_footer_text(super::STATUS_ROWS)
+                    .unwrap(),
+            );
+        }
+    }
+
+    /// The pre-2026-08-08 matcher keyed `Idle` on a `›` composer glyph that
+    /// OpenCode does not draw, so a live session sat at its initial `Busy` for
+    /// the rest of its life — no idle, no clean transfer finalization, no
+    /// sidebar state change. The captured post-turn frame is the pin.
+    #[test]
+    fn opencode_reports_idle_once_a_real_turn_has_finished() {
+        for fixture in OPENCODE_FIXTURES
+            .iter()
+            .filter(|fixture| fixture.status == SessionStatus::Idle)
+        {
+            let mut headless_terminal = fixture.replay();
+
+            assert_eq!(
+                headless_terminal
+                    .visible_status(Some(AgentProvider::Opencode))
+                    .unwrap(),
+                Some(SessionStatus::Idle),
+                "{} never left Busy",
+                fixture.name
+            );
+        }
+    }
+
+    /// OpenCode prefixes the *user's* own message with `›`, which is why the old
+    /// idle glyph was not merely stale but wrong: an echoed instruction is not a
+    /// composer, and a session that has drawn nothing else is not idle.
+    #[test]
+    fn opencode_echoed_user_message_is_not_an_idle_composer() {
         let mut headless_terminal = HeadlessTerminal::new(80, 4, 10_000).unwrap();
-        headless_terminal.write(
-            "Header\r\nBody\r\n• Working(0s • esc to interrupt)\r\n› Review the implementation"
-                .as_bytes(),
-        );
+        headless_terminal.write("Header\r\nBody\r\n› Review the implementation".as_bytes());
 
         assert_eq!(
             headless_terminal
                 .visible_status(Some(AgentProvider::Opencode))
                 .unwrap(),
-            Some(SessionStatus::Busy)
-        );
-
-        headless_terminal.write("\x1b[2J\x1b[HHeader\r\nBody\r\nAll done\r\n›".as_bytes());
-
-        assert_eq!(
-            headless_terminal
-                .visible_status(Some(AgentProvider::Opencode))
-                .unwrap(),
-            Some(SessionStatus::Idle)
+            None
         );
     }
 
+    /// 1.18.15 renders "esc interrupt" and 1.16.2 rendered "escape interrupt".
+    /// Every spelling seen is pinned, so a CLI that moves again still reports
+    /// Busy rather than silently losing the state.
     #[test]
-    fn opencode_prompt_does_not_force_idle_while_interrupt_marker_is_visible() {
-        let mut headless_terminal = HeadlessTerminal::new(80, 4, 10_000).unwrap();
-        headless_terminal.write(
-            "Header\r\nBody\r\n• Working(0s • esc to interrupt)\r\n› The tests are failing"
-                .as_bytes(),
-        );
+    fn opencode_accepts_every_pinned_spelling_of_the_working_footer() {
+        for footer in ["escape interrupt", "esc interrupt", "esc to interrupt"] {
+            let mut headless_terminal = HeadlessTerminal::new(80, 4, 10_000).unwrap();
+            headless_terminal.write(
+                format!("Body\r\n┃ Build · Big Pickle OpenCode Zen · default\r\n⬝⬝⬝⬝⬝⬝⬝⬝ {footer}")
+                    .as_bytes(),
+            );
 
-        assert_eq!(
-            headless_terminal
-                .visible_status(Some(AgentProvider::Opencode))
-                .unwrap(),
-            Some(SessionStatus::Busy)
-        );
+            assert_eq!(
+                headless_terminal
+                    .visible_status(Some(AgentProvider::Opencode))
+                    .unwrap(),
+                Some(SessionStatus::Busy),
+                "{footer:?} did not read as busy"
+            );
+        }
+    }
+
+    /// The composer's status line names the model, and OpenCode has drawn it
+    /// three ways in the versions seen: "Build · Big Pickle OpenCode Zen"
+    /// (1.18.15), the same with a trailing "· default" variant (1.16.2), and
+    /// "Build · Model default" when no model is configured and the CLI resolves
+    /// none. All three were read off a live composer; keying idle on the
+    /// richest one alone would have missed the others.
+    #[test]
+    fn opencode_composer_status_covers_both_model_spellings() {
+        for composer in [
+            "\u{2503}  Build \u{B7} Big Pickle OpenCode Zen",
+            "\u{2503}  Build \u{B7} Big Pickle OpenCode Zen \u{B7} default",
+            "\u{2503}  Build \u{B7} Model default",
+        ] {
+            let mut headless_terminal = HeadlessTerminal::new(120, 4, 10_000).unwrap();
+            headless_terminal.write(format!("Body\r\n{composer}\r\nctrl+p commands").as_bytes());
+
+            assert_eq!(
+                headless_terminal
+                    .visible_status(Some(AgentProvider::Opencode))
+                    .unwrap(),
+                Some(SessionStatus::Idle),
+                "{composer:?} did not read as an idle composer"
+            );
+        }
+    }
+
+    /// The permission dialog's header sits far above the status window, so the
+    /// snippet has to be read from a taller slice than the status is.
+    #[test]
+    fn opencode_waiting_prompt_reads_the_permission_dialog() {
+        for fixture in OPENCODE_FIXTURES
+            .iter()
+            .filter(|fixture| fixture.status == SessionStatus::Waiting)
+        {
+            let snippet = fixture
+                .replay()
+                .waiting_prompt_snippet(Some(AgentProvider::Opencode))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{} produced no waiting prompt", fixture.name));
+
+            assert!(
+                snippet.contains("Permission required"),
+                "{} snippet lost the question: {snippet:?}",
+                fixture.name
+            );
+            assert!(
+                snippet.contains("echo hello > greeting.txt"),
+                "{} snippet lost the command being decided: {snippet:?}",
+                fixture.name
+            );
+            assert!(
+                !snippet.contains(super::OPENCODE_BOX_BORDER),
+                "{} snippet still carries the composer border: {snippet:?}",
+                fixture.name
+            );
+        }
+    }
+
+    /// The idle snippet ships with every `StatusChanged(Idle)`, so OpenCode's
+    /// composer, rule and bottom bar have to read as chrome rather than as the
+    /// agent's last words.
+    #[test]
+    fn opencode_idle_prompt_skips_composer_chrome() {
+        for fixture in OPENCODE_FIXTURES
+            .iter()
+            .filter(|fixture| fixture.status == SessionStatus::Idle)
+        {
+            let snippet = fixture
+                .replay()
+                .waiting_prompt_snippet(Some(AgentProvider::Opencode))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{} produced no idle prompt", fixture.name));
+
+            assert!(
+                !snippet.contains(super::OPENCODE_BOX_BORDER)
+                    && !snippet.contains('\u{2580}')
+                    && !snippet.contains(super::OPENCODE_HINT_BAR_MARKER),
+                "{} snippet is chrome, not content: {snippet:?}",
+                fixture.name
+            );
+            // The captured turn's reply ends "…58 / 59 / 60".
+            assert!(
+                snippet.contains("60"),
+                "{} snippet lost the agent's reply: {snippet:?}",
+                fixture.name
+            );
+        }
     }
 
     #[test]

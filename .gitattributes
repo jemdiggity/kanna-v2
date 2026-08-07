@@ -1,1 +1,2 @@
 tests/tui-fidelity/fixtures/*.ansi -text -diff
+crates/daemon/tests/fixtures/opencode/*.ansi -text -diff
