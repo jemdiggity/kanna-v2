@@ -15,6 +15,7 @@ const expectedLiveCliContractTests = [
   "claude-transcript-append.test.ts",
   "claude-transcript-location.test.ts",
   "codex-exec-json.test.ts",
+  "codex-flags.test.ts",
   "codex-model-ids.test.ts",
   "codex-rollout-timing.test.ts",
   "codex-tui-quit.test.ts",

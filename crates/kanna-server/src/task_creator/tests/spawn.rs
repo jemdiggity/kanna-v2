@@ -918,3 +918,64 @@ async fn prepared_antigravity_pty_task_spawn_sets_up_worktree_alias() {
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
+
+/// `--full-auto` was removed from the interactive codex CLI, which now rejects
+/// it as an unexpected argument and exits before the agent starts. The
+/// replacement is the CLI's own advice from the `codex exec` deprecation trap.
+/// Live-pinned against the installed CLI by
+/// `tests/cli-contract/tests/live/codex-flags.test.ts`, and mirrored in
+/// `apps/desktop/src/stores/agent-permissions.ts`.
+#[test]
+fn codex_accept_edits_uses_the_sandbox_flag_not_removed_full_auto() {
+    let command = super::super::commands::build_agent_command(
+        &AgentProvider::Codex,
+        "codex",
+        "do the thing",
+        None,
+        None,
+        Some("acceptEdits"),
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    assert!(
+        command.contains("--sandbox workspace-write"),
+        "codex acceptEdits must ask for the workspace-write sandbox: {command}"
+    );
+    assert!(
+        !command.contains("--full-auto"),
+        "the interactive codex CLI rejects --full-auto: {command}"
+    );
+}
+
+#[test]
+fn codex_default_modes_keep_the_yolo_flag() {
+    for mode in [None, Some("default"), Some("dontAsk")] {
+        let command = super::super::commands::build_agent_command(
+            &AgentProvider::Codex,
+            "codex",
+            "do the thing",
+            None,
+            None,
+            mode,
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            command.contains("--yolo"),
+            "mode {mode:?} should stay yolo: {command}"
+        );
+    }
+}

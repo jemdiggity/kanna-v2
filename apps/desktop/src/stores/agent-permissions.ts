@@ -34,9 +34,12 @@ export function getAgentPermissionFlags(
       // so every mode currently collapses to its yolo flag.
       return ["--yolo"];
     case "codex":
+      // `--full-auto` was removed from the interactive codex CLI, which now
+      // rejects it as an unexpected argument. Keep this in step with the Rust
+      // source of truth in crates/kanna-server/src/task_creator/commands.rs.
       return shouldUseYoloPermissionDefaults(permissionMode)
         ? ["--yolo"]
-        : ["--full-auto"];
+        : ["--sandbox workspace-write"];
     case "opencode":
     case "antigravity":
       return shouldUseYoloPermissionDefaults(permissionMode)

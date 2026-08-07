@@ -254,7 +254,13 @@ fn get_agent_permission_flags(
         AgentProvider::Copilot => vec!["--yolo".to_string()],
         AgentProvider::Codex => match normalized {
             None | Some("dontAsk") => vec!["--yolo".to_string()],
-            Some(_) => vec!["--full-auto".to_string()],
+            // `--full-auto` was REMOVED from the interactive `codex` CLI: the
+            // TUI rejects it outright ("unexpected argument '--full-auto'"),
+            // so an `acceptEdits` codex task used to die on its usage error
+            // before the agent ever started. `codex exec` keeps a deprecation
+            // trap for it whose own advice is the replacement below. Pinned by
+            // `tests/cli-contract/tests/live/codex-flags.test.ts`.
+            Some(_) => vec!["--sandbox workspace-write".to_string()],
         },
         AgentProvider::Opencode => match normalized {
             None | Some("dontAsk") => vec!["--dangerously-skip-permissions".to_string()],
