@@ -369,6 +369,64 @@ impl std::fmt::Display for DormantStartError {
     }
 }
 
+/// Provider, model, and effort a spawn must use instead of re-deriving the
+/// stage's defaults.
+///
+/// Kanna's precedence puts an explicit task or stage override above the
+/// repo's `agentProviders` entry, the agent definition's frontmatter, and the
+/// global default (AGENTS.md, "Provider/model precedence"). Respawning an
+/// existing task — rerun, resume, revision — therefore has to feed the pinned
+/// values back in; resolving from scratch silently re-runs the chain and
+/// lands on whatever the repo's default happens to be.
+#[derive(Debug, Default, Clone)]
+pub(in crate::task_creator) struct SpawnAgentOverrides {
+    pub(in crate::task_creator) provider: Option<String>,
+    pub(in crate::task_creator) model: Option<String>,
+    pub(in crate::task_creator) effort: Option<String>,
+}
+
+impl SpawnAgentOverrides {
+    /// What a finished (or interrupted) run actually spawned with. Continuing
+    /// or replacing that run means reproducing it, not re-resolving it.
+    pub(in crate::task_creator) fn from_stage_run(run: &crate::db::StageRun) -> Self {
+        Self {
+            provider: run.agent_provider.clone(),
+            model: run.model.clone(),
+            effort: run.effort.clone(),
+        }
+    }
+}
+
+/// The provider/model/effort the caller explicitly asked for when the task
+/// was created, as retained in `create_task_intent`.
+///
+/// This is the fallback for a stage that has no run to reproduce — most often
+/// a task whose first stage never spawned at all. The creation request is
+/// exactly what its first spawn would have used. A row that cannot be parsed
+/// is treated as "no override": the caller then falls through to the normal
+/// resolution chain, which is what happened before this existed.
+fn create_intent_agent_overrides(db: &Db, task_id: &str) -> SpawnAgentOverrides {
+    let stored = match db.get_create_task_intent(task_id) {
+        Ok(Some(stored)) => stored,
+        Ok(None) => return SpawnAgentOverrides::default(),
+        Err(error) => {
+            log::warn!("failed to read the create-task intent for {task_id}: {error}");
+            return SpawnAgentOverrides::default();
+        }
+    };
+    match serde_json::from_str::<crate::mobile_api::CreateTaskRequest>(&stored) {
+        Ok(request) => SpawnAgentOverrides {
+            provider: request.agent_provider,
+            model: request.model,
+            effort: request.effort,
+        },
+        Err(error) => {
+            log::warn!("failed to parse the create-task intent for {task_id}: {error}");
+            SpawnAgentOverrides::default()
+        }
+    }
+}
+
 pub(crate) fn prepare_rerun_stage_for_api(
     db: &Db,
     config: &Config,
@@ -453,8 +511,23 @@ pub(crate) fn prepare_rerun_stage_for_api(
     };
     let provider_search_path = build_workspace_search_path(provider_workspace_root, repo_config);
     let repo_preference = repo_config.agent_provider_preference(current_stage.agent.as_deref());
+    // A rerun re-runs *this stage's run*, so it reproduces that run's
+    // provider, model, and effort. Re-resolving from the stage definition
+    // walks the precedence chain again and lands on the repo's
+    // `agentProviders` default, which silently moved a task pinned to
+    // `claude` onto another provider. A stage that never produced a run —
+    // the blocked-at-creation task a rerun is being used to kick — falls
+    // back to the creation request, which is what its first spawn would
+    // have used.
+    let overrides = match db
+        .latest_stage_run_for_stage(task_id, &stage_name, run_kind)
+        .map_err(|e| format!("db error: {}", e))?
+    {
+        Some(run) => SpawnAgentOverrides::from_stage_run(&run),
+        None => create_intent_agent_overrides(db, task_id),
+    };
     let provider = resolve_agent_provider(
-        None,
+        overrides.provider.as_deref(),
         current_stage.agent_provider.as_deref(),
         repo_preference.map(|preference| preference.providers.as_slice()),
         agent.as_ref(),
@@ -462,8 +535,24 @@ pub(crate) fn prepare_rerun_stage_for_api(
         provider_search_path.as_deref(),
         provider_workspace_root,
     )?;
-    let model = resolve_agent_model(None, repo_preference, agent.as_ref());
-    let effort = resolve_agent_effort(None, repo_preference, agent.as_ref());
+    let model = resolve_agent_model(overrides.model, repo_preference, agent.as_ref());
+    let effort = resolve_agent_effort(overrides.effort, repo_preference, agent.as_ref());
+    // A pinned model the resolved provider cannot take would make the spawn
+    // silently wrong; drop it rather than fail the rerun.
+    let model = match validate_provider_model(provider, model.as_deref()) {
+        Ok(()) => model,
+        Err(error) => {
+            log::warn!("ignoring the recorded model override for {task_id}: {error}");
+            None
+        }
+    };
+    let effort = match validate_provider_effort(provider, effort.as_deref()) {
+        Ok(()) => effort,
+        Err(error) => {
+            log::warn!("ignoring the recorded effort override for {task_id}: {error}");
+            None
+        }
+    };
     let permission_mode = agent
         .as_ref()
         .and_then(|agent| agent.permission_mode.clone());
@@ -846,7 +935,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
     branch: &str,
     feedback: Option<String>,
     source_agent_type: Option<&str>,
-    explicit_provider: Option<String>,
+    overrides: SpawnAgentOverrides,
     fallback_provider: Option<&str>,
 ) -> Result<PreparedStageRunSpawn, String> {
     let agent = match target_stage.agent.as_deref() {
@@ -857,7 +946,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         .config()
         .agent_provider_preference(target_stage.agent.as_deref());
     let provider_candidates = resolve_agent_provider_candidates(
-        explicit_provider.as_deref(),
+        overrides.provider.as_deref(),
         target_stage.agent_provider.as_deref(),
         repo_preference.map(|preference| preference.providers.as_slice()),
         agent.as_ref(),
@@ -941,8 +1030,9 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
                     .unwrap_or_default(),
             );
         }
-        let model = resolve_agent_model(None, repo_preference, agent.as_ref());
-        let effort = resolve_agent_effort(None, repo_preference, agent.as_ref());
+        let model = resolve_agent_model(overrides.model.clone(), repo_preference, agent.as_ref());
+        let effort =
+            resolve_agent_effort(overrides.effort.clone(), repo_preference, agent.as_ref());
         let permission_mode = agent
             .as_ref()
             .and_then(|agent| agent.permission_mode.clone());

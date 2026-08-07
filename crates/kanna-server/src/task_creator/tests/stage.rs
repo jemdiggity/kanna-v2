@@ -173,7 +173,7 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
         branch,
         None,
         Some("agent"),
-        None,
+        super::super::SpawnAgentOverrides::default(),
         Some("claude"),
     )
     .unwrap();
@@ -620,6 +620,116 @@ fn prepare_rerun_stage_recreates_missing_initial_worktree() {
 
     let _ = super::super::worktree::remove_prepared_worktree(
         worktree.to_string_lossy().as_ref(),
+        "task-task-1",
+    );
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// Seed a repo whose `agentProviders` default is `codex` plus a task whose
+/// creation request pinned `claude` and a model, and return the rerun the
+/// engine prepares for it.
+fn rerun_of_task_pinned_to_claude(
+    label: &str,
+    seed_stage_run: bool,
+) -> (std::path::PathBuf, Config, super::super::PreparedStageRerun) {
+    let repo_root = init_git_repo(label);
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        serde_json::json!({
+            "workspace": { "path": { "prepend": [".kanna/test-provider-bin"] } },
+            "agentProviders": { "*": { "provider": ["codex", "claude"] } }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish repo provider default");
+
+    let config = test_config(label);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "Pinned provider work",
+        Some("Pinned provider work"),
+        "in progress",
+        "2026-08-07 00:00:00",
+    )
+    .unwrap();
+    db.update_test_pipeline_item_stage_context("task-1", "task-task-1", "default", None, "claude")
+        .unwrap();
+    db.insert_create_task_intent(
+        "task-1",
+        &serde_json::json!({
+            "repoId": "repo-1",
+            "prompt": "Pinned provider work",
+            "agentProvider": "claude",
+            "model": "claude-opus-5"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    if seed_stage_run {
+        db.insert_stage_run(NewStageRun {
+            id: "run-existing",
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("implement"),
+            agent_provider: Some("opencode"),
+            model: Some("recorded-model"),
+            effort: None,
+            status: "cancelled",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    }
+
+    let prepared = prepare_rerun_stage_for_api(&db, &config, "task-1").unwrap();
+    (repo_root, config, prepared)
+}
+
+/// A rerun of a stage that never produced a run reproduces the creation
+/// request. Re-deriving from the stage definition walked the precedence chain
+/// again and handed a task pinned to `claude` to the repo's default provider.
+#[test]
+fn rerun_of_a_never_started_stage_keeps_the_tasks_pinned_provider_and_model() {
+    let (repo_root, _config, prepared) =
+        rerun_of_task_pinned_to_claude("rerun-pinned-provider", false);
+
+    assert_eq!(prepared.agent_provider, "claude");
+    assert_eq!(prepared.model.as_deref(), Some("claude-opus-5"));
+
+    let _ = super::super::worktree::remove_prepared_worktree(
+        repo_root
+            .join(".kanna-worktrees/task-task-1")
+            .to_string_lossy()
+            .as_ref(),
+        "task-task-1",
+    );
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// Once the stage has a run, that run is what a rerun reproduces — it is the
+/// thing being re-run, and it already resolved every override.
+#[test]
+fn rerun_reproduces_the_recorded_run_of_the_stage() {
+    let (repo_root, _config, prepared) = rerun_of_task_pinned_to_claude("rerun-recorded-run", true);
+
+    assert_eq!(prepared.agent_provider, "opencode");
+    assert_eq!(prepared.model.as_deref(), Some("recorded-model"));
+
+    let _ = super::super::worktree::remove_prepared_worktree(
+        repo_root
+            .join(".kanna-worktrees/task-task-1")
+            .to_string_lossy()
+            .as_ref(),
         "task-task-1",
     );
     let _ = std::fs::remove_dir_all(&repo_root);

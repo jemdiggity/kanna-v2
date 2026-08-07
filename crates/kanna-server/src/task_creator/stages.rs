@@ -17,6 +17,7 @@ use super::types::{
 };
 use super::worktree::next_fork_branch;
 use super::worktree::resolve_current_source_worktree_branch;
+use super::SpawnAgentOverrides;
 use super::FALLBACK_PIPELINE_NAME;
 use crate::db::Repo;
 
@@ -291,7 +292,7 @@ fn prepare_post_dispatch(
         post_stage.policy.transition,
         None,
         None,
-        None,
+        SpawnAgentOverrides::default(),
         Some(&completion_instruction),
     )?;
 
@@ -327,7 +328,7 @@ fn prepare_stage_run_for_target(
         target_stage.policy.transition,
         prompt_override,
         feedback,
-        None,
+        SpawnAgentOverrides::default(),
     )
 }
 
@@ -342,7 +343,7 @@ fn prepare_stage_run_for_target_with_provider(
     completion_transition: PipelineStageTransition,
     prompt_override: Option<&str>,
     feedback: Option<String>,
-    provider_override: Option<String>,
+    agent_overrides: SpawnAgentOverrides,
 ) -> Result<PreparedStageRunSpawn, String> {
     prepare_stage_run_for_target_returning_prompt(
         db,
@@ -354,7 +355,7 @@ fn prepare_stage_run_for_target_with_provider(
         completion_transition,
         prompt_override,
         feedback,
-        provider_override,
+        agent_overrides,
         None,
     )
     .map(|(run, _)| run)
@@ -371,7 +372,7 @@ fn prepare_stage_run_for_target_returning_prompt(
     completion_transition: PipelineStageTransition,
     prompt_override: Option<&str>,
     feedback: Option<String>,
-    provider_override: Option<String>,
+    agent_overrides: SpawnAgentOverrides,
     additional_agent_instructions: Option<&str>,
 ) -> Result<(PreparedStageRunSpawn, String), String> {
     let source_task = context.source_task;
@@ -425,9 +426,9 @@ fn prepare_stage_run_for_target_returning_prompt(
         None => final_prompt.clone(),
     };
     // Stage transitions let the target stage and agent definition own the
-    // provider. Only a real override (for example a revision pin) is
-    // explicit; the task's stored provider remains the final fallback.
-    let explicit_provider = provider_override;
+    // provider, model, and effort. Only a real override (for example a
+    // revision or recovery pin) is explicit; the task's stored provider
+    // remains the final fallback.
     let branch = source_task
         .branch
         .as_deref()
@@ -450,7 +451,7 @@ fn prepare_stage_run_for_target_returning_prompt(
         branch,
         feedback,
         source_task.agent_type.as_deref(),
-        explicit_provider,
+        agent_overrides,
         source_task.agent_provider.as_deref(),
     )?;
     if matches!(run.workspace, PreparedRunWorkspace::Forked(_)) {
@@ -554,11 +555,22 @@ pub(crate) fn prepare_revision_task_for_api(
     // prompt_override would clobber $TASK_PROMPT entirely. The run keeps the
     // task's provider: a revision continues the same stage's work, so the
     // agent def's provider priority list must not switch providers on it.
+    // The model and effort come from the stage's own last run for the same
+    // reason — a revision that quietly downgrades the model is not the same
+    // work.
     let composed_prompt = build_revision_task_prompt(
         loaded.source_task.prompt.as_deref().unwrap_or(""),
         revision_prompt,
         round,
     );
+    let last_run = db
+        .latest_stage_run_for_stage(source_task_id, &target_stage.name, run_kind)
+        .map_err(|error| format!("db error: {error}"))?;
+    let agent_overrides = SpawnAgentOverrides {
+        provider: loaded.source_task.agent_provider.clone(),
+        model: last_run.as_ref().and_then(|run| run.model.clone()),
+        effort: last_run.as_ref().and_then(|run| run.effort.clone()),
+    };
     let mut prepared = prepare_stage_run_for_target_with_provider(
         db,
         config,
@@ -569,7 +581,7 @@ pub(crate) fn prepare_revision_task_for_api(
         target_stage.policy.revision_transition(),
         Some(&composed_prompt),
         Some(revision_prompt.to_string()),
-        loaded.source_task.agent_provider.clone(),
+        agent_overrides,
     )?;
     prepared.resume_fallback_reason = resume_fallback_reason;
     Ok(prepared)
@@ -698,7 +710,10 @@ pub(crate) fn prepare_resume_task_for_api(
         branch,
         None,
         source_task.agent_type.as_deref(),
-        run.agent_provider.clone(),
+        // Recovery continues the interrupted run: it must respawn with what
+        // that run was actually using, not with what the stage would resolve
+        // to today.
+        SpawnAgentOverrides::from_stage_run(&run),
         source_task.agent_provider.as_deref(),
     )?;
     prepared.resume_fallback_reason = resume_fallback_reason;
@@ -763,8 +778,12 @@ fn prepare_revision_resume(
         round,
     );
     // A resumed run continues the recorded run's conversation, so it must
-    // resolve to that run's provider — never the agent def's priority list.
-    let explicit_provider = Some(provider.as_str().to_string());
+    // resolve to that run's provider — never the agent def's priority list —
+    // and keep the model and effort that conversation was held with.
+    let agent_overrides = SpawnAgentOverrides {
+        provider: Some(provider.as_str().to_string()),
+        ..SpawnAgentOverrides::from_stage_run(&run)
+    };
     let prepared = prepare_stage_run_spawn(
         db,
         config,
@@ -782,7 +801,7 @@ fn prepare_revision_resume(
         current_branch_name,
         Some(revision_prompt.to_string()),
         source_task.agent_type.as_deref(),
-        explicit_provider,
+        agent_overrides,
         source_task.agent_provider.as_deref(),
     )?;
     // A definition that changed provider or session type since the source run
