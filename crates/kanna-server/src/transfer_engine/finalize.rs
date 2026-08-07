@@ -88,6 +88,10 @@ const WRAP_UP_MESSAGE: &str = "This task is being transferred to another machine
 /// busy agent legitimately takes minutes to close out a turn, and the cost of
 /// waiting is user-visible latency on a transfer, while the cost of not waiting
 /// is a truncated conversation.
+///
+/// This is not a free number. The destination is blocked on this finalization
+/// over a peer request the whole time, so it has to be bounded by what that
+/// request allows — see [`PEER_FINALIZATION_WINDOW`].
 const WRAP_UP_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long a session that is *already* `Idle` may stay silent before the
@@ -106,6 +110,27 @@ const IDLE_SETTLE: Duration = Duration::from_secs(20);
 /// This is a process teardown, not a turn: a provider that has not exited by
 /// now is not going to.
 const QUIT_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The window the transfer sidecar allows the source to answer a finalization
+/// request in — `DEFAULT_FINALIZATION_REQUEST_TIMEOUT` in
+/// `crates/task-transfer/src/runtime/config.rs`, restated here because this is
+/// the side that has to fit inside it.
+///
+/// The destination does not merely wait while this sequence runs; it waits *on
+/// a peer request*. Until that request had a window of its own, it shared the
+/// ordinary 15 s one, and every wrap-up longer than a few seconds surfaced on
+/// the destination as `PeerRequestTimeout` — a retriable import failure that
+/// spent one of `MAX_TRANSFER_WORK_ATTEMPTS` on a finalization that was
+/// proceeding normally. The transfer still completed, off the cached result a
+/// later attempt collected, which is why nothing failed loudly; what it cost
+/// was the retry budget reserved for the genuinely transient failures
+/// (`import.rs`, `git.rs` — a locked OpenCode store, a dropped artifact fetch).
+///
+/// So this sequence's own budget has to stay inside that window with room for
+/// staging the session archive afterwards, which
+/// [`the_shutdown_budget_fits_inside_the_peer_finalization_window`] holds.
+/// Raising `WRAP_UP_TIMEOUT` past it means raising the sidecar's window first.
+const PEER_FINALIZATION_WINDOW: Duration = Duration::from_secs(600);
 
 /// Claimed before the wrap-up is injected, so a work item resumed after a crash
 /// does not type the message into the agent a second time.
@@ -1014,5 +1039,42 @@ mod tests {
             outcome,
             IdleOutcome::TimedOut(SessionStatus::Busy)
         ));
+    }
+
+    /// The destination waits out this whole sequence over a single peer
+    /// request, so the sequence has to fit inside what that request allows.
+    ///
+    /// When it did not, a wrap-up longer than the sidecar's ordinary 15 s
+    /// window surfaced on the destination as `PeerRequestTimeout` and spent one
+    /// of `MAX_TRANSFER_WORK_ATTEMPTS` on an import that was going fine — the
+    /// budget reserved for a locked OpenCode store or a dropped artifact fetch,
+    /// not for waiting. The transfer still completed off the cached
+    /// finalization result, so nothing failed loudly; the cost was invisible.
+    ///
+    /// The two numbers live in different crates that do not depend on each
+    /// other (`kanna-server` reaches the sidecar over stdio), so this is what
+    /// keeps them in step: raising the budget past the window fails here,
+    /// naming the file to raise first. The behaviour itself is pinned where
+    /// both ends of the request exist, in
+    /// `crates/task-transfer/tests/runtime.rs`.
+    #[test]
+    fn the_shutdown_budget_fits_inside_the_peer_finalization_window() {
+        let shutdown = WRAP_UP_TIMEOUT + QUIT_EXIT_TIMEOUT;
+        assert!(
+            shutdown < PEER_FINALIZATION_WINDOW,
+            "the shutdown budget ({}s) no longer fits inside the sidecar's finalization window \
+             ({}s); raise DEFAULT_FINALIZATION_REQUEST_TIMEOUT in \
+             crates/task-transfer/src/runtime/config.rs first, or the destination will time out \
+             mid-wrap-up and spend an import attempt on it",
+            shutdown.as_secs(),
+            PEER_FINALIZATION_WINDOW.as_secs(),
+        );
+        // Staging runs after the sequence and inside the same request: gzipping
+        // a session archive and reading a rollout are not instant on a large
+        // conversation, so the fit has to leave room rather than merely hold.
+        assert!(
+            PEER_FINALIZATION_WINDOW - shutdown >= Duration::from_secs(120),
+            "no room left in the finalization window for staging the session artifacts",
+        );
     }
 }

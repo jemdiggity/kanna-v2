@@ -173,7 +173,27 @@ where signalling cannot (pinned in `crates/daemon/tests/handoff.rs`).
 
 Each step appends `task.transfer_finalizing` to the task event feed with a
 `payload.phase`, because a wrap-up is legitimately minutes of latency and has to
-read as a transfer rather than as a hung task. Injection failure or a session
+read as a transfer rather than as a hung task.
+
+That latency is also why `PeerRequest::FinalizeTransfer` has a request window of
+its own. Every other peer request is a machine doing its own local work and
+fits the ordinary 15 s window; this one is the destination waiting on somebody
+else's *agent* being asked to stop. While the two shared a window, any wrap-up
+longer than a few seconds surfaced on the destination as `PeerRequestTimeout`,
+which is a retriable import failure — so a normal finalization silently spent
+attempts from `MAX_TRANSFER_WORK_ATTEMPTS`, the budget held for a locked
+OpenCode store or a dropped artifact fetch. The transfer still completed, off
+the finalization result the source caches for the retry that collects it, so
+nothing failed loudly; only the retry budget was gone.
+
+`finalization_request_timeout` (10 minutes,
+`crates/task-transfer/src/runtime/config.rs`) is what the source is given to
+answer. The server's own budget must fit inside it — `WRAP_UP_TIMEOUT` plus
+`QUIT_EXIT_TIMEOUT` is 6 minutes, leaving the rest for staging the session
+artifacts, and a unit test in `finalize.rs` fails if that stops holding. The
+destination allows the same window plus one ordinary request window, so the
+source's answer — including its own timeout report — always arrives while the
+destination is still listening. Injection failure or a session
 that never goes idle degrades the finalization — artifacts are staged as they
 stand and the payload carries `cleanlyFinalized: false` with the reason —
 rather than failing the transfer. Destructive teardown stays last and stays

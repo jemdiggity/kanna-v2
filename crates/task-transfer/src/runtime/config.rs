@@ -24,6 +24,17 @@ const DEFAULT_MAX_FINALIZATION_WAITERS: usize = 8;
 const DEFAULT_MAX_PEER_REQUEST_BYTES: usize = 64 * 1024;
 const DEFAULT_MAX_PEER_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_MAX_ARTIFACT_RESPONSE_BYTES: usize = super::MAX_LEGACY_ARTIFACT_RESPONSE_BYTES;
+// Finalizing an outgoing transfer is the one peer request whose answer waits on
+// a *person's agent* rather than on this machine. `kanna-server` asks the source
+// agent to wrap up, waits for it to go idle, tells it to quit, waits for the
+// exit, and only then stages artifacts — minutes, legitimately, for a busy
+// agent (`transfer_engine/finalize.rs`). Under the ordinary 15 s window the
+// destination gave up on every wrap-up longer than a few seconds and burned an
+// import attempt from the retry budget reserved for genuinely transient
+// failures. Ten minutes covers the source's own bounded budget
+// (WRAP_UP_TIMEOUT + QUIT_EXIT_TIMEOUT = 360 s) with room for staging the
+// session archive, and is still a bound rather than an open wait.
+const DEFAULT_FINALIZATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_MAX_PEER_REQUESTS: usize = 32;
 const DEFAULT_MAX_MARK_READ_PEER_REQUESTS: usize = 4;
 const DEFAULT_MAX_AUTHENTICATED_REQUEST_REPLAYS: usize = 8_192;
@@ -48,6 +59,14 @@ pub struct RuntimeConfig {
     pub(super) discovery_mode: DiscoveryMode,
     pub(super) pending_transfer_ttl: Duration,
     pub(super) peer_request_timeout: Duration,
+    /// How long the source is given to answer a finalization request.
+    ///
+    /// Separate from `peer_request_timeout` because it bounds something else:
+    /// every other peer request is this machine doing local work, while this one
+    /// waits on an agent being asked to stop. The destination allows this plus
+    /// one ordinary request window, so the source's answer — including its own
+    /// timeout report — always arrives while the destination is still listening.
+    pub(super) finalization_request_timeout: Duration,
     pub(super) receipt_retry_interval: Duration,
     pub(super) applied_receipt_ttl: Duration,
     pub(super) max_unapplied_receipts: usize,
@@ -87,6 +106,7 @@ impl RuntimeConfig {
             discovery_mode: DiscoveryMode::Registry,
             pending_transfer_ttl: Duration::from_secs(300),
             peer_request_timeout: Duration::from_secs(15),
+            finalization_request_timeout: DEFAULT_FINALIZATION_REQUEST_TIMEOUT,
             receipt_retry_interval: DEFAULT_RECEIPT_RETRY_INTERVAL,
             applied_receipt_ttl: DEFAULT_APPLIED_RECEIPT_TTL,
             max_unapplied_receipts: DEFAULT_MAX_UNAPPLIED_RECEIPTS,
@@ -121,6 +141,14 @@ impl RuntimeConfig {
 
     pub fn with_peer_request_timeout(mut self, peer_request_timeout: Duration) -> Self {
         self.peer_request_timeout = peer_request_timeout;
+        self
+    }
+
+    pub fn with_finalization_request_timeout(
+        mut self,
+        finalization_request_timeout: Duration,
+    ) -> Self {
+        self.finalization_request_timeout = finalization_request_timeout;
         self
     }
 
@@ -301,6 +329,7 @@ impl RuntimeConfig {
             discovery_mode,
             pending_transfer_ttl: Duration::from_secs(300),
             peer_request_timeout: Duration::from_secs(15),
+            finalization_request_timeout: DEFAULT_FINALIZATION_REQUEST_TIMEOUT,
             receipt_retry_interval: DEFAULT_RECEIPT_RETRY_INTERVAL,
             applied_receipt_ttl: DEFAULT_APPLIED_RECEIPT_TTL,
             max_unapplied_receipts: DEFAULT_MAX_UNAPPLIED_RECEIPTS,

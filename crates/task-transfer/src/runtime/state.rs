@@ -144,6 +144,7 @@ pub(super) struct ListenerContext {
     pub(super) external_peers: ExternalPeerRegistry,
     pub(super) pending_transfer_ttl: Duration,
     pub(super) peer_request_timeout: Duration,
+    pub(super) finalization_request_timeout: Duration,
     pub(super) incoming_connection_permits: Arc<Semaphore>,
     pub(super) legacy_artifact_memory_permits: Arc<Semaphore>,
     pub(super) max_peer_request_bytes: usize,

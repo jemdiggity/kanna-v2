@@ -732,11 +732,16 @@ async fn handle_connection(
 
                 let result = match cached {
                     Some(result) => result,
-                    None => tokio::time::timeout(context.peer_request_timeout, rx)
+                    // Not `peer_request_timeout`: the answer waits on the source
+                    // agent being asked to wrap up and quit, which is minutes
+                    // for a busy one. Under the ordinary window this timed out
+                    // long before the desktop had anything to say, and the
+                    // destination spent an import attempt on it.
+                    None => tokio::time::timeout(context.finalization_request_timeout, rx)
                         .await
                         .map_err(|_| RuntimeError::PeerRequestTimeout {
                             peer_id: requester_peer_id.clone(),
-                            timeout_ms: context.peer_request_timeout.as_millis(),
+                            timeout_ms: context.finalization_request_timeout.as_millis(),
                         })?
                         .map_err(|_| {
                             RuntimeError::Protocol(format!(
