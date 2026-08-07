@@ -979,7 +979,11 @@ fn assert_daemon_log_contains(dir: &Path, needle: &str) {
 
 #[test]
 fn previous_daemon_fixture_is_the_shipped_v2_binary() {
-    let binary = support::previous_daemon::binary();
+    let Some(binary) = support::previous_daemon::binary_or_skip(
+        "previous_daemon_fixture_is_the_shipped_v2_binary",
+    ) else {
+        return;
+    };
     let output = Command::new(binary)
         .arg("--version")
         .output()
@@ -990,11 +994,15 @@ fn previous_daemon_fixture_is_the_shipped_v2_binary() {
 
 #[test]
 fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
+    let Some(previous) = support::previous_daemon::binary_or_skip(
+        "shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn",
+    ) else {
+        return;
+    };
     let dir = test_dir("v2-v3-race");
     cleanup(&dir);
     std::fs::create_dir_all(&dir).expect("create cross-version daemon directory");
     let script = write_steerable_agent(&dir);
-    let previous = support::previous_daemon::binary();
     let mut old = DaemonHandle::start_binary_in(&previous, &dir);
 
     spawn_echo(&mut old.connect(), "stable-pty");
@@ -1141,6 +1149,11 @@ fn shipped_v2_hands_stable_pty_and_agent_to_v3_during_lifecycle_churn() {
 
 #[test]
 fn current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter() {
+    let Some(previous) = support::previous_daemon::binary_or_skip(
+        "current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter",
+    ) else {
+        return;
+    };
     let dir = test_dir("v3-v2-adopter");
     cleanup(&dir);
     std::fs::create_dir_all(&dir).expect("create cross-version daemon directory");
@@ -1165,7 +1178,6 @@ fn current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter() {
     wait_for_agent_turn(&mut current.connect(), "stable-agent");
 
     drop(current_pty);
-    let previous = support::previous_daemon::binary();
     install_test_daemon_at(&previous, &stable_daemon);
     let old_adopter = DaemonHandle::start_binary_in(&stable_daemon, &dir);
     assert!(
@@ -1186,6 +1198,11 @@ fn current_v3_stable_path_hands_pty_and_agent_to_shipped_v2_adopter() {
 
 #[test]
 fn protected_v3_session_refuses_transfer_to_a_shipped_v2_adopter() {
+    let Some(previous) = support::previous_daemon::binary_or_skip(
+        "protected_v3_session_refuses_transfer_to_a_shipped_v2_adopter",
+    ) else {
+        return;
+    };
     let dir = test_dir("protected-v3-v2-refusal");
     cleanup(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -1209,7 +1226,6 @@ fn protected_v3_session_refuses_transfer_to_a_shipped_v2_adopter() {
     });
     assert!(matches!(connection.recv(), Evt::SessionCreated { .. }));
 
-    let previous = support::previous_daemon::binary();
     install_test_daemon_at(&previous, &stable_daemon);
     let mut legacy = Command::new(&stable_daemon)
         .env("KANNA_DAEMON_DIR", dir.to_str().unwrap())
