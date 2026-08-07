@@ -34,7 +34,14 @@ const DEFAULT_MAX_ARTIFACT_RESPONSE_BYTES: usize = super::MAX_LEGACY_ARTIFACT_RE
 // failures. Ten minutes covers the source's own bounded budget
 // (WRAP_UP_TIMEOUT + QUIT_EXIT_TIMEOUT = 360 s) with room for staging the
 // session archive, and is still a bound rather than an open wait.
-const DEFAULT_FINALIZATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+//
+// The number itself lives in `kanna-runtime-defaults`, which both this crate and
+// `kanna-server` already depend on, so the source's shutdown budget is checked
+// against *this* window rather than against a hand-copied restatement of it:
+// shrinking this fails `the_shutdown_budget_fits_inside_the_peer_finalization_window`
+// in `transfer_engine/finalize.rs`.
+const DEFAULT_FINALIZATION_REQUEST_TIMEOUT: Duration =
+    kanna_runtime_defaults::TRANSFER_FINALIZATION_REQUEST_TIMEOUT;
 // How long an in-flight transfer keeps its source-side resources: the outgoing
 // reservation, and the artifacts staged against it.
 //
@@ -158,11 +165,6 @@ impl RuntimeConfig {
 
     pub fn with_pending_transfer_ttl(mut self, pending_transfer_ttl: Duration) -> Self {
         self.pending_transfer_ttl = pending_transfer_ttl;
-        self
-    }
-
-    pub fn with_authenticated_request_freshness(mut self, freshness: Duration) -> Self {
-        self.authenticated_request_freshness = freshness;
         self
     }
 
