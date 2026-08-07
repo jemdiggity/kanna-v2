@@ -140,12 +140,14 @@ pub struct TransferArtifactPayload {
 
 /// How the source session ended before its state was staged.
 ///
-/// The SIGINT that finalizes a PTY source is refused outright for *adopted*
-/// sessions — every session older than the running daemon, so every task that
-/// predates an app upgrade. That is common enough that a hard failure would
-/// block all post-upgrade transfers, so a refused signal or a session that
-/// never exits is recorded as a degradation and carried to the receiver rather
-/// than swallowed.
+/// A PTY source is asked to wrap up and then to quit, by injected input
+/// (`super::finalize`). Everything about that is the agent's to cooperate with:
+/// it may never finish its turn, it may be parked on a permission prompt this
+/// sequence deliberately will not answer, or it may not exit on the quit
+/// command. None of those is rare enough to fail a transfer over and none is
+/// quiet enough to swallow, so each is recorded here as a degradation and
+/// carried to the receiver — which refuses the import rather than resuming a
+/// conversation nobody promised was whole.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferFinalizationState {
     pub cleanly_finalized: bool,

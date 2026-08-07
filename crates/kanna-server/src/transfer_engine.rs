@@ -20,6 +20,7 @@ pub mod payload;
 pub mod queue;
 pub mod session;
 
+mod finalize;
 mod import;
 mod push;
 

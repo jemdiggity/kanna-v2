@@ -746,7 +746,7 @@ fn canonical_or_self(path: PathBuf) -> PathBuf {
 /// `Unavailable` is the CLI or the machine, and OpenCode's store is one shared
 /// SQLite file that many agents write — `opencode import` exits non-zero when
 /// another process holds the write lock. Failing a transfer permanently for
-/// that, after finalization has already signalled the source agent, throws away
+/// that, after finalization has already shut the source agent down, throws away
 /// a conversation over a lock that clears in seconds.
 #[derive(Debug)]
 pub enum OpencodeImportError {
@@ -1130,7 +1130,7 @@ esac"#,
     /// The inconclusive answer has to reach the *import* as a retry, not as a
     /// silent skip. A locked store clears in seconds; treating it as absence
     /// re-keys a live session, and treating it as a refusal throws away a
-    /// conversation the source has already been signalled to give up.
+    /// conversation the source has already been shut down to hand over.
     #[test]
     fn an_unanswerable_store_makes_the_import_retry_rather_than_guess() {
         let _stub = StubOpencode::responding(
@@ -1359,7 +1359,7 @@ esac"#,
 
     /// OpenCode's store is one shared SQLite file that many agents write, and
     /// `import` exits non-zero while another holds the write lock. Failing the
-    /// transfer permanently for that — after finalization has already signalled
+    /// transfer permanently for that — after finalization has already shut down
     /// the source agent — throws a conversation away over a lock that clears in
     /// seconds, so it is `Unavailable` and stays inside the retry budget.
     #[test]

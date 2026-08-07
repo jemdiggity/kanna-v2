@@ -5,11 +5,14 @@
 //! `handleOutgoingTransferCommitted`. Two things change with the move. The
 //! duplicate-push guard is now transactional rather than a renderer snapshot
 //! racing the DB — the row this process is about to write is the row it just
-//! read. And the phase that must happen at most once (signalling the source
-//! agent) claims a durable phase rather than an in-memory set, so a resumed
-//! work item cannot signal a second time.
+//! read. And the phases that must happen at most once (typing into the source
+//! agent) claim durable phases rather than an in-memory set, so a resumed work
+//! item cannot type the same thing twice.
+//!
+//! Shutting the source agent down is [`super::finalize`]'s job.
 
 use super::control;
+use super::finalize;
 use super::payload::{
     self, OutgoingTransferPayload, RepoAcquisitionMode, TransferBundlePayload,
     TransferFinalizationState, TransferRepoPayload, TransferTaskPayload,
@@ -20,14 +23,6 @@ use crate::http_api::AppState;
 use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
-
-/// How long the source waits for its agent session to exit after the SIGINT.
-///
-/// Ported unchanged from the renderer. The finalization redesign (T7) replaces
-/// this whole sequence with notify → idle → quit → exit driven off the daemon
-/// status events the server already consumes; until then a session that does
-/// not exit inside the window degrades the transfer rather than failing it.
-const SOURCE_FINALIZATION_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// The source task as the engine needs it: the pipeline row plus the two
 /// fields that live beside it — the provider session a push must ship, and the
@@ -361,6 +356,9 @@ async fn stage_and_commit(
         bundle,
         staged,
         TransferFinalizationState::clean(),
+        // The push's payload is a placeholder the finalization rewrites; the
+        // agent is still live and unfinalized, so the snapshot is taken here.
+        None,
     )
     .await?;
     let encoded = payload::encode_outgoing_transfer_payload(&payload)?;
@@ -460,6 +458,7 @@ async fn build_payload(
     bundle: Option<TransferBundlePayload>,
     staged: StagedSessionArtifacts,
     finalization: TransferFinalizationState,
+    recovery: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
 ) -> Result<OutgoingTransferPayload, String> {
     let mode = payload::choose_repo_acquisition_mode(remote_url, preflight.target_has_repo);
     Ok(OutgoingTransferPayload {
@@ -513,7 +512,14 @@ async fn build_payload(
                 .then_some(bundle)
                 .flatten(),
         },
-        recovery: session_recovery_snapshot(state, &source.item.id).await,
+        // Finalization photographs the terminal before it types the quit
+        // command; there is nothing left to photograph afterwards. Only a path
+        // that never ran the sequence — a headless session, or a push that has
+        // not finalized yet — falls back to taking it here.
+        recovery: match recovery {
+            Some(snapshot) => Some(snapshot),
+            None => session_recovery_snapshot(state, &source.item.id).await,
+        },
         artifacts: staged.artifacts,
         finalization,
     })
@@ -524,7 +530,7 @@ async fn build_payload(
 /// Best effort by design: a session that has already exited, or a daemon that
 /// is between generations, means the destination starts with a blank terminal
 /// rather than the transfer failing.
-async fn session_recovery_snapshot(
+pub(super) async fn session_recovery_snapshot(
     state: &Arc<AppState>,
     session_id: &str,
 ) -> Option<crate::mobile_api::CreateTaskRecoverySnapshot> {
@@ -600,28 +606,32 @@ pub async fn finalize(
     }
 }
 
-/// Refuses a payload that lost its session between the pre-signal plan and the
-/// post-signal one.
+/// The phase under which finalization records the session it saw before the
+/// source agent was asked to stop.
+///
+/// The stored value keeps the word "signal" from when the agent was stopped
+/// with `SIGINT`: it is durable data, and a work item mid-finalization across
+/// an upgrade must still find its own observation.
+const SESSION_BEFORE_FINALIZATION_PHASE: &str = "session-before-signal";
+
+/// Refuses a payload that lost its session between the pre-shutdown plan and
+/// the post-shutdown one.
 ///
 /// Discovery runs twice on purpose: a conversation is only complete once the
-/// agent has stopped writing to it, so the artifact is staged after the signal.
-/// What the second pass may not do is come back with *nothing*. A payload whose
-/// `resume_session_id` is null passes the receiver's `assert_importable`
-/// untouched — that check short-circuits on a null id — so a downgrade here
-/// ships an empty transfer that no provider fails loudly on. Only OpenCode can
-/// reach it, because only its session id is discovered rather than read off the
-/// task row, and it is the same silent-loss shape the discovery side already
-/// refuses.
-/// The phase under which finalization records the session it saw before the
-/// source agent was signalled.
-const SESSION_BEFORE_SIGNAL_PHASE: &str = "session-before-signal";
-
+/// agent has stopped writing to it, so the artifact is staged after the agent
+/// has quit. What the second pass may not do is come back with *nothing*. A
+/// payload whose `resume_session_id` is null passes the receiver's
+/// `assert_importable` untouched — that check short-circuits on a null id — so
+/// a downgrade here ships an empty transfer that no provider fails loudly on.
+/// Only OpenCode can reach it, because only its session id is discovered rather
+/// than read off the task row, and it is the same silent-loss shape the
+/// discovery side already refuses.
 fn refuse_session_downgrade(
-    before_signal: Option<&str>,
-    after_signal: Option<&str>,
+    before_finalization: Option<&str>,
+    after_finalization: Option<&str>,
     provider: Option<&str>,
 ) -> Result<(), String> {
-    match (before_signal, after_signal) {
+    match (before_finalization, after_finalization) {
         (Some(session_id), None) => Err(format!(
             "refusing to ship an empty transfer: {} session {session_id} was present before \
              finalization and could not be found after it",
@@ -659,56 +669,39 @@ async fn run_finalization(
         .map_err(|error| format!("db error: {error}"))?
         .ok_or_else(|| format!("repo not found for outgoing transfer: {transfer_id}"))?;
 
-    // Locate the session state this payload will promise *before* signalling
-    // the agent: a transfer that cannot ship the conversation must fail with
-    // the source task still alive and running, not after it has been shut down.
+    // Locate the session state this payload will promise *before* the agent is
+    // asked to stop: a transfer that cannot ship the conversation must fail
+    // with the source task still alive and running, not after it has been shut
+    // down.
     let planned_identity = source.plan_identity();
-    // Recorded, not just computed. The agent is dead by attempt 2, so a fresh
-    // pre-signal look finds nothing and the downgrade guard below would pass
+    // Recorded, not just computed. The agent is gone by attempt 2, so a fresh
+    // pre-shutdown look finds nothing and the downgrade guard below would pass
     // vacuously — shipping exactly the empty payload it exists to refuse. The
     // first attempt's observation is the only one taken against a live agent,
     // so it is the one every attempt compares against.
     let observed_now = source.plan().await?.map(|plan| plan.session_id.clone());
-    let session_seen_before_signal = db
+    let session_seen_before_finalization = db
         .record_transfer_work_observation(
             &work.id,
-            SESSION_BEFORE_SIGNAL_PHASE,
+            SESSION_BEFORE_FINALIZATION_PHASE,
             observed_now.as_deref(),
         )
         .map_err(|error| format!("db error: {error}"))?;
 
-    let mut finalized_cleanly = source.item.agent_type.as_deref() != Some("pty");
-    let mut degraded_reason = None;
-    if source.item.agent_type.as_deref() == Some("pty") {
-        // Signalling is single-flight for the life of this work item, durably:
-        // a retry after a partial failure must not interrupt the agent twice.
-        let should_signal = db
-            .claim_transfer_work_phase(&work.id, "pty-finalization-signal")
-            .map_err(|error| format!("db error: {error}"))?;
-        let signal_failure = if should_signal {
-            signal_source_session(state, &source.item.id).await.err()
-        } else {
-            None
-        };
-        let exited = wait_for_session_exit(state, &source.item.id, SOURCE_FINALIZATION_WAIT).await;
-        finalized_cleanly = exited && signal_failure.is_none();
-        degraded_reason = match (&signal_failure, exited) {
-            // The daemon refuses signals for adopted sessions by design — every
-            // session older than the running daemon, so every task predating an
-            // app upgrade. Too common to fail the transfer over, too important
-            // to swallow: it degrades the transfer instead.
-            (Some(failure), _) => Some(format!(
-                "the source agent session could not be signalled to finish: {failure}"
-            )),
-            (None, false) => Some(format!(
-                "the source agent session did not exit within {}ms",
-                SOURCE_FINALIZATION_WAIT.as_millis()
-            )),
-            (None, true) => None,
-        };
-    }
+    // notify → idle → quit → exit. Artifacts are staged only after this
+    // returns, so the transcript includes the wrap-up and the Codex rollout is
+    // final rather than mid-write.
+    let finalization_outcome = finalize::finalize_source_session(
+        state,
+        work,
+        &source.item.id,
+        source.item.agent_type.as_deref(),
+        source.item.agent_provider.as_deref(),
+    )
+    .await;
+    let finalized_cleanly = finalization_outcome.cleanly_finalized();
 
-    // The plan was located against the pre-signal task; re-plan only if the
+    // The plan was located against the pre-shutdown task; re-plan only if the
     // session identity moved under us while the agent was shutting down.
     let refreshed = SourceTask::load(&db, &local_task_id)?.unwrap_or(source);
     if refreshed.plan_identity() != planned_identity {
@@ -717,7 +710,7 @@ async fn run_finalization(
 
     let staged = stage_session_artifacts(state, &refreshed, transfer_id).await?;
     refuse_session_downgrade(
-        session_seen_before_signal.as_deref(),
+        session_seen_before_finalization.as_deref(),
         staged.session_id.as_deref(),
         refreshed.item.agent_provider.as_deref(),
     )?;
@@ -731,7 +724,7 @@ async fn run_finalization(
         .await?
         .or(existing.repo.remote_url.clone())
     };
-    let finalization = match degraded_reason {
+    let finalization = match finalization_outcome.degraded_reason {
         Some(reason) => TransferFinalizationState::degraded(reason),
         None => TransferFinalizationState::clean(),
     };
@@ -763,6 +756,7 @@ async fn run_finalization(
         existing.repo.bundle.clone(),
         staged,
         finalization,
+        finalization_outcome.recovery_snapshot,
     )
     .await?;
     let encoded = payload::encode_outgoing_transfer_payload(&payload)?;
@@ -777,68 +771,6 @@ async fn run_finalization(
         ));
     }
     Ok((encoded, finalized_cleanly))
-}
-
-async fn signal_source_session(state: &Arc<AppState>, session_id: &str) -> Result<(), String> {
-    let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config().daemon_dir)
-        .await
-        .map_err(|error| format!("daemon error: {error}"))?;
-    match daemon
-        .send_command(&kanna_daemon::protocol::Command::Signal {
-            session_id: session_id.to_string(),
-            signal: "SIGINT".to_string(),
-        })
-        .await
-        .map_err(|error| format!("daemon error: {error}"))?
-    {
-        kanna_daemon::protocol::Event::Ok => Ok(()),
-        kanna_daemon::protocol::Event::Error { message, .. } => Err(message),
-        other => Err(format!("unexpected daemon signal response: {other:?}")),
-    }
-}
-
-/// Waits for the source agent session to end, bounded.
-///
-/// Subscribed rather than polled: the daemon already publishes `Exit`, and a
-/// session that has already gone is answered by the `List` this opens with.
-async fn wait_for_session_exit(
-    state: &Arc<AppState>,
-    session_id: &str,
-    timeout: std::time::Duration,
-) -> bool {
-    let observe = async {
-        let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config().daemon_dir)
-            .await
-            .ok()?;
-        daemon
-            .send_command(&kanna_daemon::protocol::Command::Subscribe)
-            .await
-            .ok()?;
-        match daemon
-            .send_command(&kanna_daemon::protocol::Command::List)
-            .await
-            .ok()?
-        {
-            kanna_daemon::protocol::Event::SessionList { sessions } => {
-                if !sessions
-                    .iter()
-                    .any(|session| session.session_id == session_id)
-                {
-                    return Some(true);
-                }
-            }
-            _ => return None,
-        }
-        loop {
-            match daemon.read_event().await.ok()? {
-                kanna_daemon::protocol::Event::Exit {
-                    session_id: exited, ..
-                } if exited == session_id => return Some(true),
-                _ => continue,
-            }
-        }
-    };
-    matches!(tokio::time::timeout(timeout, observe).await, Ok(Some(true)))
 }
 
 // ---------------------------------------------------------------------------
@@ -931,9 +863,9 @@ pub async fn outgoing_committed(
 mod tests {
     use super::*;
 
-    /// Discovery runs twice — before the signal, so a transfer that cannot ship
-    /// fails with the agent still alive, and after it, so the conversation is
-    /// complete. The second pass may not silently come back empty: only
+    /// Discovery runs twice — before the shutdown, so a transfer that cannot
+    /// ship fails with the agent still alive, and after it, so the conversation
+    /// is complete. The second pass may not silently come back empty: only
     /// OpenCode discovers its id rather than reading it off the task row, and a
     /// null `resume_session_id` sails past the receiver's `assert_importable`.
     #[test]
@@ -960,7 +892,7 @@ mod tests {
         // A task the agent never got a turn in has nothing to lose, and every
         // provider but OpenCode reaches here with both sides `None`.
         assert!(refuse_session_downgrade(None, None, Some("claude")).is_ok());
-        // A session that appeared only after the signal is still a session.
+        // A session that appeared only after the shutdown is still a session.
         assert!(refuse_session_downgrade(None, Some("ses_x"), Some("opencode")).is_ok());
     }
 
@@ -994,10 +926,16 @@ mod tests {
 
     /// Seeds the rows `run_finalization` reads before it reaches the guard.
     ///
-    /// The task carries no `agent_session_id`, so both the pre-signal and the
-    /// post-signal plan resolve to "nothing here" — which is what makes the
-    /// recorded observation the only thing that can refuse.
-    fn seed_finalization(db: &crate::db::Db, work_id: &str, observed_before_signal: Option<&str>) {
+    /// The task carries no `agent_session_id`, so both the pre-shutdown and the
+    /// post-shutdown plan resolve to "nothing here" — which is what makes the
+    /// recorded observation the only thing that can refuse. It also carries no
+    /// `agent_type`, so the shutdown sequence itself is a no-op: what these
+    /// pin is the guard around it, not the daemon conversation.
+    fn seed_finalization(
+        db: &crate::db::Db,
+        work_id: &str,
+        observed_before_finalization: Option<&str>,
+    ) {
         db.insert_test_repo("repo-finalize", "Finalize Repo")
             .expect("repo");
         db.insert_test_pipeline_item(
@@ -1025,10 +963,10 @@ mod tests {
         .expect("transfer");
         db.enqueue_transfer_work(work_id, "finalize", Some("transfer-finalize"), "{}")
             .expect("queue the work item");
-        if let Some(session_id) = observed_before_signal {
+        if let Some(session_id) = observed_before_finalization {
             db.record_transfer_work_observation(
                 work_id,
-                SESSION_BEFORE_SIGNAL_PHASE,
+                SESSION_BEFORE_FINALIZATION_PHASE,
                 Some(session_id),
             )
             .expect("attempt 1's observation");
@@ -1037,8 +975,8 @@ mod tests {
 
     /// The retry seam migration 050 exists for, on the source side.
     ///
-    /// Finalization signals the agent, so by attempt 2 the session it was
-    /// looking at is gone. A fresh pre-signal look then finds nothing, the
+    /// Finalization shuts the agent down, so by attempt 2 the session it was
+    /// looking at is gone. A fresh pre-shutdown look then finds nothing, the
     /// downgrade guard compares nothing against nothing, and it passes
     /// vacuously — shipping exactly the empty payload it exists to refuse. Only
     /// the first attempt's observation was taken against a live agent, so every
@@ -1048,10 +986,14 @@ mod tests {
     /// this covers `run_finalization` being wired to them.
     #[tokio::test]
     async fn finalization_compares_against_the_session_the_first_attempt_saw() {
-        let seen_before_signal = "ses_02645d9aaffeeOgwt2rbXIcTdp";
+        let seen_before_finalization = "ses_02645d9aaffeeOgwt2rbXIcTdp";
         let state =
             crate::http_api::test_state_with_seed("desktop-finalize-memo", "Finalize Memo", |db| {
-                seed_finalization(db, "finalize:transfer-finalize", Some(seen_before_signal))
+                seed_finalization(
+                    db,
+                    "finalize:transfer-finalize",
+                    Some(seen_before_finalization),
+                )
             });
 
         let error = run_finalization(
@@ -1062,13 +1004,13 @@ mod tests {
         .await
         .expect_err("the retry shipped an empty payload the first attempt would have refused");
         assert!(
-            error.contains(seen_before_signal),
+            error.contains(seen_before_finalization),
             "the guard did not compare against the recorded observation: {error}",
         );
     }
 
     /// The same run with nothing recorded is the first attempt against a task
-    /// whose agent never got a turn: nothing was there before the signal and
+    /// whose agent never got a turn: nothing was there before the shutdown and
     /// nothing is there after, which is not a downgrade and must not refuse.
     /// Without this the test above would pass on a guard that simply always
     /// refuses.
