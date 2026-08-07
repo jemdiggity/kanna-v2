@@ -1603,6 +1603,154 @@ describe("pushTaskToPeer", () => {
     });
   });
 
+  it("discovers the opencode session for the worktree and ships its export", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const fakeDb = createTransferDb({});
+
+    await store.init(fakeDb);
+    store.repos = [buildRepo()];
+    store.items = [buildItem()];
+    store.items[0]!.agent_provider = "opencode";
+    store.items[0]!.agent_type = "pty";
+    // OpenCode ids are never assigned at spawn, so a task with a perfectly good
+    // conversation still has a null session id on its row.
+    store.items[0]!.agent_session_id = null;
+
+    loadSessionRecoveryStateMock.mockResolvedValue(null);
+
+    const worktreePath = "/tmp/repo-1/.kanna-worktrees/task-task-source";
+    invokeMock.mockImplementation(async (cmd, args) => {
+      if (cmd === "prepare_outgoing_transfer") {
+        const payload = args?.payload as Record<string, unknown> | undefined;
+        if (payload?.phase === "preflight") {
+          return {
+            transferId: "transfer-123",
+            sourcePeerId: "peer-real-source",
+            targetHasRepo: true,
+          };
+        }
+        return { ok: true };
+      }
+      if (cmd === "read_env_var") return "/Users/tester";
+      if (cmd === "file_exists") return (args?.path as string) === worktreePath;
+      if (cmd === "run_script") {
+        const script = args?.script as string;
+        if (script.includes("opencode session list")) {
+          // A login shell may greet before the script runs, and OpenCode
+          // records the kernel-resolved cwd — both are reproduced here.
+          return [
+            "welcome to your shell",
+            `/private${worktreePath}`,
+            "__kanna_opencode_session_list__",
+            JSON.stringify([
+              { id: "ses_other", directory: "/somewhere/else", updated: 30 },
+              { id: "ses_stale", directory: `/private${worktreePath}`, updated: 10 },
+              { id: "ses_02645d9aaffeeOgwt2rbXIcTdp", directory: `/private${worktreePath}`, updated: 20 },
+            ]),
+          ].join("\n");
+        }
+        return "";
+      }
+      if (cmd === "stage_transfer_artifact") {
+        return { transferId: "transfer-123", artifactId: args?.artifactId };
+      }
+      return null;
+    });
+
+    await expect(store.pushTaskToPeer("task-source", "peer-target")).resolves.toBeUndefined();
+
+    expect(invokeMock).toHaveBeenCalledWith("run_script", expect.objectContaining({
+      script: expect.stringMatching(
+        /^opencode export 'ses_02645d9aaffeeOgwt2rbXIcTdp' > '\/tmp\/kanna-oc-session-[0-9a-f]{12}\.json'$/,
+      ),
+      cwd: worktreePath,
+    }));
+    expect(invokeMock).toHaveBeenCalledWith("stage_transfer_artifact", {
+      transferId: "transfer-123",
+      artifactId: "transfer-123-opencode-session",
+      path: expect.stringMatching(/^\/tmp\/kanna-oc-session-[0-9a-f]{12}\.json$/),
+      owned: true,
+    });
+
+    const prepareCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer");
+    expect(prepareCalls[1]?.[1]).toMatchObject({
+      payload: {
+        phase: "commit",
+        payload: {
+          task: {
+            // The discovered id is what makes the destination resume rather
+            // than mint: nothing else on the task row carries it.
+            resume_session_id: "ses_02645d9aaffeeOgwt2rbXIcTdp",
+          },
+          artifacts: [{
+            artifact_id: "transfer-123-opencode-session",
+            filename: "opencode-session.json",
+            provider: "opencode",
+            kind: "session-export",
+            materialization: "opencode-import",
+            home_rel_path: ".local/share/opencode",
+          }],
+        },
+      },
+    });
+  });
+
+  it("ships no opencode artifact when the worktree has no session yet", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const fakeDb = createTransferDb({});
+
+    await store.init(fakeDb);
+    store.repos = [buildRepo()];
+    store.items = [buildItem()];
+    store.items[0]!.agent_provider = "opencode";
+    store.items[0]!.agent_type = "pty";
+    store.items[0]!.agent_session_id = null;
+
+    loadSessionRecoveryStateMock.mockResolvedValue(null);
+
+    const worktreePath = "/tmp/repo-1/.kanna-worktrees/task-task-source";
+    invokeMock.mockImplementation(async (cmd, args) => {
+      if (cmd === "prepare_outgoing_transfer") {
+        const payload = args?.payload as Record<string, unknown> | undefined;
+        if (payload?.phase === "preflight") {
+          return {
+            transferId: "transfer-123",
+            sourcePeerId: "peer-real-source",
+            targetHasRepo: true,
+          };
+        }
+        return { ok: true };
+      }
+      if (cmd === "read_env_var") return "/Users/tester";
+      if (cmd === "file_exists") return (args?.path as string) === worktreePath;
+      if (cmd === "run_script") {
+        return [
+          `/private${worktreePath}`,
+          "__kanna_opencode_session_list__",
+          JSON.stringify([{ id: "ses_elsewhere", directory: "/somewhere/else", updated: 30 }]),
+        ].join("\n");
+      }
+      return null;
+    });
+
+    await expect(store.pushTaskToPeer("task-source", "peer-target")).resolves.toBeUndefined();
+
+    // An agent that never got a turn in has no conversation to lose, so an
+    // empty artifact list is the truth rather than a silent drop.
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "stage_transfer_artifact",
+      expect.objectContaining({ artifactId: "transfer-123-opencode-session" }),
+    );
+    const prepareCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === "prepare_outgoing_transfer");
+    expect(prepareCalls[1]?.[1]).toMatchObject({
+      payload: { payload: { task: { resume_session_id: null }, artifacts: [] } },
+    });
+  });
+
   it("stages the local copilot session-state directory and includes it in the outgoing payload", async () => {
     setActivePinia(createPinia());
     const { useKannaStore } = await import("./kanna");
@@ -3280,6 +3428,159 @@ describe("incoming transfer approval", () => {
         ]),
       }),
     );
+  });
+
+  it("replays a transferred opencode session into the destination worktree before resuming", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const sessionId = "ses_02645d9aaffeeOgwt2rbXIcTdp";
+    const payload = buildIncomingTransferPayload() as ReturnType<typeof buildIncomingTransferPayload> & {
+      artifacts?: Array<Record<string, unknown>>;
+    };
+    payload.task.agent_provider = "opencode";
+    payload.task.agent_type = "pty";
+    payload.task.resume_session_id = sessionId;
+    payload.artifacts = [{
+      artifact_id: "artifact-opencode-session",
+      filename: "opencode-session.json",
+      provider: "opencode",
+      kind: "session-export",
+      materialization: "opencode-import",
+      home_rel_path: ".local/share/opencode",
+    }];
+    const fakeDb = createTransferDb({
+      transfers: [{
+        id: "transfer-1",
+        direction: "incoming",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: null,
+        source_task_id: "task-source",
+        local_task_id: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(payload),
+      }],
+    });
+
+    await store.init(fakeDb);
+
+    mockIncomingTransferApprovalInvoke(payload, async (cmd, args) => {
+      if (cmd === "file_exists") return (args?.path as string) === "/tmp/repo-1";
+      if (cmd === "read_text_file") return "";
+      if (cmd === "read_builtin_resource") throw new Error("missing builtin resource");
+      if (cmd === "git_default_branch") return "main";
+      if (cmd === "which_binary") return args?.name === "opencode" ? "/usr/bin/opencode" : null;
+      if (cmd === "get_app_data_dir") return "/tmp/kanna-mock-data";
+      if (cmd === "get_pipeline_socket_path") return "/tmp/kanna.sock";
+      if (cmd === "read_env_var") return "/Users/tester";
+      if (cmd === "fetch_transfer_artifact") {
+        return {
+          transferId: "transfer-1",
+          artifactId: args?.artifactId,
+          path: "/tmp/fetched-opencode-session.json",
+        };
+      }
+      if (cmd === "ensure_directory" || cmd === "run_script") return null;
+      if (cmd === "git_worktree_add" || cmd === "acknowledge_incoming_transfer_commit") return null;
+      if (cmd === "spawn_session") return null;
+      throw new Error(`unexpected invoke: ${cmd}`);
+    });
+
+    const localTaskId = await store.approveIncomingTransfer("transfer-1");
+    await flushBackgroundSetup();
+
+    const destinationTaskId = await destinationTaskIdForTransfer("transfer-1");
+    const destinationWorktree = `/tmp/repo-1/.kanna-worktrees/task-${destinationTaskId}`;
+    // OpenCode matches a session's recorded directory against the working
+    // directory, so importing anywhere but the destination worktree leaves
+    // `--session` a silent no-op.
+    expect(invokeMock).toHaveBeenCalledWith("ensure_directory", { path: destinationWorktree });
+    expect(invokeMock).toHaveBeenCalledWith("run_script", expect.objectContaining({
+      script: "opencode import '/tmp/fetched-opencode-session.json'",
+      cwd: destinationWorktree,
+    }));
+    // The store's own SQLite fence never sees this artifact: only the CLI may
+    // write OpenCode's session store.
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "materialize_transfer_artifact",
+      expect.anything(),
+    );
+    expect(invokeMock).toHaveBeenCalledWith(
+      "spawn_session",
+      expect.objectContaining({
+        sessionId: localTaskId,
+        agentProvider: "opencode",
+        args: expect.arrayContaining([expect.stringContaining(`--resume ${sessionId}`)]),
+      }),
+    );
+  });
+
+  it("refuses an opencode import whose resume id is not a session id", async () => {
+    setActivePinia(createPinia());
+    const { useKannaStore } = await import("./kanna");
+    const store = useKannaStore();
+    const payload = buildIncomingTransferPayload() as ReturnType<typeof buildIncomingTransferPayload> & {
+      artifacts?: Array<Record<string, unknown>>;
+    };
+    payload.task.agent_provider = "opencode";
+    payload.task.agent_type = "pty";
+    payload.task.resume_session_id = "../../etc/passwd";
+    payload.artifacts = [{
+      artifact_id: "artifact-opencode-session",
+      filename: "opencode-session.json",
+      provider: "opencode",
+      kind: "session-export",
+      materialization: "opencode-import",
+      home_rel_path: ".local/share/opencode",
+    }];
+    const fakeDb = createTransferDb({
+      transfers: [{
+        id: "transfer-1",
+        direction: "incoming",
+        status: "pending",
+        source_peer_id: "peer-source",
+        target_peer_id: null,
+        source_task_id: "task-source",
+        local_task_id: null,
+        started_at: new Date().toISOString(),
+        completed_at: null,
+        error: null,
+        payload_json: JSON.stringify(payload),
+      }],
+    });
+
+    await store.init(fakeDb);
+
+    mockIncomingTransferApprovalInvoke(payload, async (cmd, args) => {
+      if (cmd === "file_exists") return (args?.path as string) === "/tmp/repo-1";
+      if (cmd === "read_text_file") return "";
+      if (cmd === "read_builtin_resource") throw new Error("missing builtin resource");
+      if (cmd === "git_default_branch") return "main";
+      if (cmd === "which_binary") return args?.name === "opencode" ? "/usr/bin/opencode" : null;
+      if (cmd === "get_app_data_dir") return "/tmp/kanna-mock-data";
+      if (cmd === "get_pipeline_socket_path") return "/tmp/kanna.sock";
+      if (cmd === "read_env_var") return "/Users/tester";
+      if (cmd === "fetch_transfer_artifact") {
+        return {
+          transferId: "transfer-1",
+          artifactId: args?.artifactId,
+          path: "/tmp/fetched-opencode-session.json",
+        };
+      }
+      if (cmd === "ensure_directory" || cmd === "run_script") return null;
+      if (cmd === "git_worktree_add" || cmd === "acknowledge_incoming_transfer_commit") return null;
+      if (cmd === "spawn_session") return null;
+      throw new Error(`unexpected invoke: ${cmd}`);
+    });
+
+    await expect(store.approveIncomingTransfer("transfer-1")).rejects.toThrow();
+    expect(invokeMock).not.toHaveBeenCalledWith("run_script", expect.objectContaining({
+      script: expect.stringContaining("opencode import"),
+    }));
+    expect(fakeDb.tables.pipeline_item).toHaveLength(0);
   });
 
   it("tells the receiving operator when the source could not be shut down cleanly", async () => {

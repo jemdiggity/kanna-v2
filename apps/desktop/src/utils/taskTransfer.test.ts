@@ -4,6 +4,7 @@ import {
   buildOutgoingTransferPayload,
   parseIncomingTransferRequest,
   parseTaskPullRequestedEvent,
+  requiredSessionArtifactKind,
   resolveIncomingTransferBaseBranch,
 } from "./taskTransfer";
 
@@ -369,6 +370,121 @@ describe("parseIncomingTransferRequest artifact validation", () => {
       CLAUDE_TRANSCRIPT,
       { ...CLAUDE_ARCHIVE, artifact_id: "artifact-3" },
     ]))).toThrow(/at most two/i);
+  });
+});
+
+describe("opencode session export artifacts", () => {
+  const OPENCODE_SESSION = "ses_02645d9aaffeeOgwt2rbXIcTdp";
+  const OPENCODE_EXPORT = {
+    artifact_id: "artifact-1",
+    filename: "opencode-session.json",
+    provider: "opencode",
+    kind: "session-export",
+    materialization: "opencode-import",
+    home_rel_path: ".local/share/opencode",
+  };
+
+  function opencodeRequest(
+    artifacts: Record<string, unknown>[],
+    resumeSessionId: string = OPENCODE_SESSION,
+  ) {
+    return {
+      type: "incoming_transfer_request",
+      transfer_id: "transfer-1",
+      source_peer_id: "peer-source",
+      source_task_id: "task-source",
+      payload: {
+        target_peer_id: "peer-target",
+        target_desktop_id: null,
+        task: {
+          cloud_task_id: "task-source",
+          source_peer_id: "peer-source",
+          source_desktop_id: null,
+          source_task_id: "task-source",
+          resume_session_id: resumeSessionId,
+          prompt: "Fix handoff",
+          stage: "in progress",
+          branch: "task-source",
+          pipeline: "default",
+          display_name: null,
+          base_ref: "origin/main",
+          agent_type: "pty",
+          agent_provider: "opencode",
+        },
+        repo: {
+          mode: "reuse-local",
+          remote_url: null,
+          path: "/tmp/repo-1",
+          name: "repo-1",
+          default_branch: "main",
+          bundle: null,
+        },
+        recovery: null,
+        artifacts,
+      },
+    };
+  }
+
+  it("requires an opencode PTY task with a session to ship its conversation", () => {
+    expect(requiredSessionArtifactKind({
+      agentType: "pty",
+      agentProvider: "opencode",
+      resumeSessionId: OPENCODE_SESSION,
+    })).toBe("session-export");
+    // An agent that never got a turn has no session id, and no conversation to
+    // lose with it.
+    expect(requiredSessionArtifactKind({
+      agentType: "pty",
+      agentProvider: "opencode",
+      resumeSessionId: null,
+    })).toBeNull();
+  });
+
+  it("accepts the canonical opencode session export", () => {
+    const request = parseIncomingTransferRequest(opencodeRequest([OPENCODE_EXPORT]));
+    expect(request.payload.artifacts).toEqual([OPENCODE_EXPORT]);
+  });
+
+  it.each([
+    { filename: "session.json" },
+    { filename: `${OPENCODE_SESSION}.json` },
+    { kind: "session-transcript" },
+    { materialization: "copy-file" },
+    { home_rel_path: ".local/share/opencode/opencode.db" },
+    { home_rel_path: "../.ssh/authorized_keys" },
+    { home_rel_path: "/tmp/owned" },
+  ])("rejects an opencode export that departs from the contract: %o", (override) => {
+    expect(() => parseIncomingTransferRequest(
+      opencodeRequest([{ ...OPENCODE_EXPORT, ...override }]),
+    )).toThrow(/contract|path|artifact/i);
+  });
+
+  it.each([
+    "364643cc-5e6d-48fc-86ca-ca7764380900",
+    "ses_",
+    "ses_../../etc",
+    "opencode",
+  ])("rejects an opencode export whose resume id is not a session id: %s", (sessionId) => {
+    expect(() => parseIncomingTransferRequest(
+      opencodeRequest([OPENCODE_EXPORT], sessionId),
+    )).toThrow(/session id|component|contract/i);
+  });
+
+  it("refuses the opencode-import materialization for a file-placing provider", () => {
+    // `opencode-import` is the one materialization that never places a file, so
+    // it must not become a way for another provider's artifact to skip the fence.
+    const claudeRequest = opencodeRequest([{
+      artifact_id: "artifact-1",
+      filename: "364643cc-5e6d-48fc-86ca-ca7764380900.jsonl",
+      provider: "claude",
+      kind: "session-export",
+      materialization: "opencode-import",
+      home_rel_path: ".local/share/opencode",
+    }], "364643cc-5e6d-48fc-86ca-ca7764380900");
+    claudeRequest.payload.task.agent_provider = "claude";
+
+    expect(() => parseIncomingTransferRequest(claudeRequest))
+      .toThrow(/contract|kind|materialization/i);
   });
 });
 
