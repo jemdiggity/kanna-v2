@@ -86,6 +86,27 @@ pub(crate) fn resolve_current_source_worktree_branch(
     }
 }
 
+/// Whether `branch` exists as a local ref in `repo_path`.
+///
+/// A task's `pipeline_item.branch` is written at creation, but the branch
+/// itself only comes into being when the task's first workspace is forked —
+/// so a task that never started names a branch that git has never heard of.
+/// Anything that hands such a name to git (a worktree start point, a merge)
+/// has to check first.
+pub(crate) fn local_branch_exists(repo_path: &str, branch: &str) -> bool {
+    Command::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{}", branch),
+        ])
+        .current_dir(repo_path)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 /// Branch/worktree name for a stage fork: the task's durable id plus a
 /// workspace counter (`task-<id>-2`, `task-<id>-3`, ...). The creation
 /// workspace `task-<id>` is workspace 1, so forks count from 2. Each
@@ -95,17 +116,7 @@ pub(crate) fn resolve_current_source_worktree_branch(
 pub(super) fn next_fork_branch(repo_path: &str, task_id: &str) -> Result<String, String> {
     for n in 2u32..10_000 {
         let candidate = format!("task-{}-{}", task_id, n);
-        let branch_exists = Command::new("git")
-            .args([
-                "show-ref",
-                "--verify",
-                "--quiet",
-                &format!("refs/heads/{}", candidate),
-            ])
-            .current_dir(repo_path)
-            .status()
-            .map_err(|e| format!("failed to run git show-ref: {}", e))?
-            .success();
+        let branch_exists = local_branch_exists(repo_path, &candidate);
         let worktree_exists = Path::new(repo_path)
             .join(".kanna-worktrees")
             .join(&candidate)
@@ -179,17 +190,7 @@ pub(super) fn create_worktree(
     worktree_path: &str,
     start_point: Option<&str>,
 ) -> Result<(), String> {
-    let branch_exists = Command::new("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{}", branch),
-        ])
-        .current_dir(repo_path)
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
+    let branch_exists = local_branch_exists(repo_path, branch);
 
     let mut args = vec!["worktree", "add"];
     if branch_exists {

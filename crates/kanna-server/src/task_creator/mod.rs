@@ -77,7 +77,7 @@ pub(crate) use stages::{
     prepare_stage_completion_for_api, resolve_revision_budget, resolve_revision_limit,
     resolve_stage_transition, stage_declares_merge_approve_post, RevisionBudget,
 };
-pub(crate) use worktree::resolve_current_source_worktree_branch;
+pub(crate) use worktree::{local_branch_exists, resolve_current_source_worktree_branch};
 
 pub(crate) const FALLBACK_PIPELINE_NAME: &str = "no-review";
 
