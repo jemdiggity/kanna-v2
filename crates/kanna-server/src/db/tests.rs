@@ -626,6 +626,60 @@ fn snapshot_reports_a_failed_transfer_but_prefers_one_still_in_flight() {
 }
 
 #[test]
+fn an_incoming_transfer_can_be_failed_from_every_stage_an_import_dies_at() {
+    let path = Db::test_db_path("incoming-transfer-terminalize");
+    let db = Db::open_for_tests(&path).expect("open test db");
+
+    // The ownership-fenced route only reaches `pending`/`claimed`, which is
+    // right for one renderer among several. The engine is the only importer in
+    // its process, and an import that dies at `importing` — after the repo is
+    // acquired, before the acknowledgment — still has to end visibly, or the
+    // row stays non-terminal forever and holds its sidecar reservation with it.
+    for stage in ["pending", "claimed", "importing", "awaiting_acknowledgment"] {
+        let transfer_id = format!("transfer-{stage}");
+        db.insert_test_task_transfer(&transfer_id, "incoming", stage, Some("{}"))
+            .expect("insert transfer");
+        assert!(
+            db.fail_incoming_task_transfer(&transfer_id, "the import gave up")
+                .expect("fail incoming"),
+            "an import that died at {stage} could not be terminalized",
+        );
+        let failed = db
+            .get_task_transfer(&transfer_id)
+            .expect("read transfer")
+            .expect("transfer exists");
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.error.as_deref(), Some("the import gave up"));
+        assert!(failed.completed_at.is_some());
+    }
+
+    // A transfer that already reached a terminal state keeps the one it has: a
+    // completed import must not be rewritten as failed by a late retry.
+    for terminal in ["completed", "rejected", "failed"] {
+        let transfer_id = format!("transfer-settled-{terminal}");
+        db.insert_test_task_transfer(&transfer_id, "incoming", terminal, Some("{}"))
+            .expect("insert transfer");
+        assert!(!db
+            .fail_incoming_task_transfer(&transfer_id, "too late")
+            .expect("fail incoming"));
+        assert_eq!(
+            db.get_task_transfer(&transfer_id)
+                .expect("read transfer")
+                .expect("transfer exists")
+                .status,
+            terminal,
+        );
+    }
+
+    // Direction is part of the fence: an outgoing row has its own terminalizer.
+    db.insert_test_task_transfer("transfer-outgoing", "outgoing", "pending", Some("{}"))
+        .expect("insert transfer");
+    assert!(!db
+        .fail_incoming_task_transfer("transfer-outgoing", "wrong direction")
+        .expect("fail incoming"));
+}
+
+#[test]
 fn incoming_transfer_state_machine_is_durable_and_provenance_is_idempotent() {
     let path = Db::test_db_path("incoming-transfer-state-machine");
     let db = Db::open_for_tests(&path).expect("open test db");

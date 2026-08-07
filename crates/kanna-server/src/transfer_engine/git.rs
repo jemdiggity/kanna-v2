@@ -71,11 +71,17 @@ fn normalize_ref(reference: Option<&str>) -> Option<String> {
 
 /// Whether a peer-supplied clone URL is one this machine will hand to git.
 ///
-/// `git clone` parses options before its positional arguments, so a URL like
-/// `--upload-pack=/bin/sh` is a command, not an address; git's own `ext::`
-/// transport is remote code execution by design. The `--` separator below stops
-/// the first, and this allowlist stops the second — a payload arrives from
-/// another machine, and a paired peer is not the same thing as a trusted one.
+/// Two things are being refused, and neither is "an address I do not
+/// recognise". `git clone` parses options before its positional arguments, so
+/// `--upload-pack=/bin/sh` is a command rather than an address; and git's
+/// `ext::` transport runs a command by design. The `--` separator below stops
+/// the first and the `::` refusal stops the second.
+///
+/// Everything else git accepts stays accepted, including a plain absolute path
+/// — cloning from a local repository is an ordinary thing to do, and it is what
+/// a fixture repo, a mounted volume, or a peer that shares a filesystem looks
+/// like. A relative path is refused only because it would resolve against the
+/// server's cwd, which means nothing to the peer that sent it.
 fn is_safe_clone_url(url: &str) -> bool {
     const SCHEMES: &[&str] = &[
         "https://",
@@ -100,6 +106,9 @@ fn is_safe_clone_url(url: &str) -> bool {
         return false;
     }
     if SCHEMES.iter().any(|scheme| trimmed.starts_with(scheme)) {
+        return true;
+    }
+    if trimmed.starts_with('/') {
         return true;
     }
     // scp-style `[user@]host:path`, git's other documented form. The host must
@@ -327,19 +336,26 @@ mod tests {
             "-u/bin/sh",
             "ext::sh -c whoami",
             "ext::sh",
+            // Relative paths resolve against the server's cwd, which means
+            // nothing to the peer that sent them.
             "../../etc/passwd",
-            "/etc/passwd",
+            "repo.git",
             "https://example.com/repo.git ; rm -rf /",
             "",
             "   ",
         ] {
             assert!(!is_safe_clone_url(hostile), "{hostile}");
         }
+        // Refusing an address git accepts is its own failure mode: a local
+        // clone source is ordinary, and rejecting it silently strands every
+        // transfer of a repo with no network remote.
         for legitimate in [
             "https://github.com/anthropics/kanna.git",
             "ssh://git@github.com/anthropics/kanna.git",
             "git@github.com:anthropics/kanna.git",
             "file:///Users/x/repos/kanna",
+            "/Users/x/repos/kanna-origin.git",
+            "/private/var/folders/5k/tmp/fixture/repo-origin.git",
         ] {
             assert!(is_safe_clone_url(legitimate), "{legitimate}");
         }

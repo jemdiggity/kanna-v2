@@ -238,12 +238,18 @@ pub fn choose_repo_acquisition_mode(
 
 /// The base branch a destination task forks from.
 ///
-/// A transferred task carries its own branch, which the destination does not
-/// have; the repo's default branch is the only ref both machines can be
-/// expected to share.
+/// A bundle carries the task's own branch, so the destination can fork from it
+/// directly. Every other acquisition mode gives the destination a repository
+/// that has never seen that branch, leaving the task's base ref as the only ref
+/// both machines can be expected to share — and `None` rather than a guess when
+/// there is not one, so the destination falls back to its own repo default
+/// instead of forking from a ref that means something different here.
 pub fn resolve_incoming_base_branch(payload: &OutgoingTransferPayload) -> Option<String> {
+    if payload.repo.mode == RepoAcquisitionMode::BundleRepo {
+        return normalize_optional(payload.task.branch.as_deref())
+            .or_else(|| normalize_optional(payload.task.base_ref.as_deref()));
+    }
     normalize_optional(payload.task.base_ref.as_deref())
-        .or_else(|| normalize_optional(payload.repo.default_branch.as_deref()))
 }
 
 fn normalize_optional(value: Option<&str>) -> Option<String> {
@@ -967,20 +973,38 @@ mod tests {
         assert!(error.contains("bundle metadata"), "{error}");
     }
 
+    /// Only a bundle carries the task's own branch, so only a bundle may fork
+    /// from it. Every other mode hands the destination a repository that has
+    /// never seen that branch.
     #[test]
-    fn the_base_branch_falls_back_to_the_ref_both_machines_share() {
+    fn only_a_bundled_repo_forks_from_the_task_branch() {
         let mut payload = parse_outgoing_transfer_payload(&payload_with(json!([])))
             .expect("a valid starting payload");
+        payload.task.branch = Some("task-1".into());
+        payload.task.base_ref = Some("origin/main".into());
+
+        assert_eq!(
+            resolve_incoming_base_branch(&payload).as_deref(),
+            Some("origin/main"),
+            "a reused or cloned repo has no task-1 to fork from",
+        );
+
+        payload.repo.mode = RepoAcquisitionMode::BundleRepo;
+        assert_eq!(
+            resolve_incoming_base_branch(&payload).as_deref(),
+            Some("task-1")
+        );
+        payload.task.branch = None;
+        assert_eq!(
+            resolve_incoming_base_branch(&payload).as_deref(),
+            Some("origin/main"),
+        );
+
+        // No base ref and no branch means no answer, not the repo default: the
+        // destination's own default is a better guess than a ref this payload
+        // never named.
         payload.task.base_ref = None;
         payload.repo.default_branch = Some("main".into());
-        assert_eq!(
-            resolve_incoming_base_branch(&payload).as_deref(),
-            Some("main")
-        );
-        payload.task.base_ref = Some("release".into());
-        assert_eq!(
-            resolve_incoming_base_branch(&payload).as_deref(),
-            Some("release")
-        );
+        assert_eq!(resolve_incoming_base_branch(&payload), None);
     }
 }

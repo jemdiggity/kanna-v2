@@ -132,7 +132,7 @@ pub async fn import_transfer(
         // machines need a visible end state.
         Err(ImportFailure::Terminal(reason)) => {
             let db = state.transfer_work().open_db()?;
-            db.fail_pending_incoming_transfer(&transfer_id, &reason, Some(ENGINE_CLAIM_TOKEN))
+            db.fail_incoming_task_transfer(&transfer_id, &reason)
                 .map_err(|error| format!("db error: {error}"))?;
             log::error!("refused incoming transfer {transfer_id}: {reason}");
             release_incoming_reservation(state, &transfer_id).await?;

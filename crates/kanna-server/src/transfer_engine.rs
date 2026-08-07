@@ -172,7 +172,7 @@ async fn report_exhausted_work(
         .map(|transfer| transfer.direction.as_str())
     {
         Some("outgoing") => db.fail_outgoing_task_transfer(transfer_id, &reason),
-        Some("incoming") => db.fail_pending_incoming_transfer(transfer_id, &reason, None),
+        Some("incoming") => db.fail_incoming_task_transfer(transfer_id, &reason),
         _ => Ok(false),
     };
     if let Err(error) = failed {
