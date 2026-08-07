@@ -41,6 +41,10 @@ use super::tasks::{
     create_task, get_task, list_closed_task_identities, list_recent_tasks, put_task, search_tasks,
     set_task_notify, update_task,
 };
+use super::transfer_sidecar::{
+    clear_cloud_transfer_proxies, ensure_cloud_transfer_proxy, remove_cloud_transfer_proxy,
+    run_transfer_control, wait_transfer_events,
+};
 use super::transfers::{
     claim_pending_incoming_transfer, complete_task_transfer, fail_outgoing_transfer,
     fail_pending_incoming_transfer, get_task_transfer, insert_task_transfer,
@@ -272,6 +276,19 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/transfers/{transfer_id}/actions/sidecar-cleanup-complete",
             post(mark_incoming_transfer_sidecar_cleanup_completed),
+        )
+        .route("/v1/transfers/sidecar/events", get(wait_transfer_events))
+        .route(
+            "/v1/transfers/sidecar/control/{operation}",
+            post(run_transfer_control),
+        )
+        .route(
+            "/v1/transfers/cloud-proxies",
+            post(ensure_cloud_transfer_proxy).delete(clear_cloud_transfer_proxies),
+        )
+        .route(
+            "/v1/transfers/cloud-proxies/{peer_id}",
+            axum::routing::delete(remove_cloud_transfer_proxy),
         )
         .route("/v1/pairing/sessions", post(create_pairing_session))
         .route("/v1/pairing/sessions/claim", post(claim_pairing_session));

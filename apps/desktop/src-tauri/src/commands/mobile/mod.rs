@@ -163,6 +163,21 @@ impl MobileServerManager {
         self.server_pid_tx.subscribe()
     }
 
+    /// Base URL of this instance's `kanna-server`, starting it if it is not
+    /// already running. Unlike `start`, a live server short-circuits without
+    /// re-probing status, so a caller on a request path (the transfer control
+    /// proxies, the transfer event poller) pays only one HTTP hop.
+    pub(crate) async fn ensure_started_base_url(&self) -> Result<String, String> {
+        {
+            let state = self.inner.lock().await;
+            if state.started {
+                return Ok(state.api_base_url.clone());
+            }
+        }
+        self.start().await?;
+        Ok(self.inner.lock().await.api_base_url.clone())
+    }
+
     pub async fn start(&self) -> Result<(), String> {
         let (config_path, desktop_name, api_base_url, cloud_env) = {
             let state = self.inner.lock().await;
@@ -223,9 +238,20 @@ impl MobileServerManager {
 
         let desktop_executable = std::env::current_exe()
             .map_err(|error| format!("failed to resolve desktop executable: {error}"))?;
+        let transfer_identity_env = match resolve_transfer_identity_env(&config_path) {
+            Ok(env) => env,
+            Err(error) => {
+                let mut state = self.inner.lock().await;
+                state.started = false;
+                state.status = "error".to_string();
+                *self.server_lock.lock().await = None;
+                return Err(error);
+            }
+        };
         let mut child = match Command::new(server_bin)
             .env("KANNA_SERVER_CONFIG", &config_path)
             .env("KANNA_DESKTOP_EXECUTABLE", desktop_executable)
+            .envs(transfer_identity_env)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(server_stderr_log(&config_path))
@@ -405,6 +431,31 @@ pub async fn ensure_mobile_server(app: tauri::AppHandle) -> Result<(), String> {
     manager.start().await
 }
 
+pub(crate) async fn ensure_server_base_url(app: &tauri::AppHandle) -> Result<String, String> {
+    app.state::<MobileServerManager>()
+        .ensure_started_base_url()
+        .await
+}
+
+/// Block until this instance's `kanna-server` is running. App startup already
+/// starts it; a background consumer that starts its own would only contend for
+/// the server lock and log a spurious failure on every boot.
+pub(crate) async fn wait_for_server_started(app: &tauri::AppHandle) {
+    let mut server_pid = app.state::<MobileServerManager>().server_pid_receiver();
+    loop {
+        // `borrow_and_update`, never `borrow`: plain `borrow` leaves the value
+        // marked unseen, so `changed()` returns instantly on every iteration
+        // and this becomes a spin that starves the whole Tauri async runtime —
+        // the app never finishes starting.
+        if server_pid.borrow_and_update().is_some() {
+            return;
+        }
+        if server_pid.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn mobile_server_status(app: tauri::AppHandle) -> Result<MobileServerStatus, String> {
     let manager = app.state::<MobileServerManager>();
@@ -514,6 +565,57 @@ fn resolved_db_path(state: &MobileServerState) -> Result<PathBuf, String> {
     }
 
     Ok(app_data_dir.join("kanna-v2.db"))
+}
+
+/// Peer identity for the transfer sidecar, resolved once here and handed to
+/// `kanna-server` at spawn.
+///
+/// The desktop keeps this derivation because it owns the two inputs: the Tauri
+/// app data directory that holds `transfer/identity.json`, and the machine
+/// name. `kanna-server` spawns the sidecar but never re-derives any of it.
+/// Explicit environment overrides still win, which is how the E2E harness and
+/// `kd` give each parallel instance its own peer id and registry.
+fn resolve_transfer_identity_env(config_path: &Path) -> Result<Vec<(String, String)>, String> {
+    let app_data_dir = app_data_dir_for_server_config(config_path)?;
+    let transfer_root = crate::transfer_identity::resolve_transfer_root(&app_data_dir);
+    let resolved = crate::transfer_identity::resolve_transfer_identity_for_root(
+        &transfer_root,
+        crate::transfer_identity::current_machine_name().as_deref(),
+    )?;
+    let mut env = vec![
+        (
+            "KANNA_TRANSFER_ROOT".to_string(),
+            transfer_root.to_string_lossy().into_owned(),
+        ),
+        (
+            "KANNA_TRANSFER_REGISTRY_DIR".to_string(),
+            env_override("KANNA_TRANSFER_REGISTRY_DIR").unwrap_or_else(|| {
+                transfer_root
+                    .join("registry")
+                    .to_string_lossy()
+                    .into_owned()
+            }),
+        ),
+        (
+            "KANNA_TRANSFER_PEER_ID".to_string(),
+            env_override("KANNA_TRANSFER_PEER_ID").unwrap_or(resolved.peer_id),
+        ),
+        (
+            "KANNA_TRANSFER_DISPLAY_NAME".to_string(),
+            env_override("KANNA_TRANSFER_DISPLAY_NAME").unwrap_or(resolved.display_name),
+        ),
+    ];
+    if let Some(discovery) = env_override("KANNA_TRANSFER_DISCOVERY") {
+        env.push(("KANNA_TRANSFER_DISCOVERY".to_string(), discovery));
+    }
+    Ok(env)
+}
+
+fn env_override(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn app_data_dir_for_server_config(config_path: &Path) -> Result<PathBuf, String> {
@@ -993,6 +1095,7 @@ mod tests {
         MobileServerManager, MobileServerState, MobileServerStatus, WritePathHealth,
     };
     use crate::daemon_client::DaemonClient;
+    use std::collections::HashMap;
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::fs::PermissionsExt;
@@ -1020,6 +1123,111 @@ mod tests {
     pub(super) unsafe fn unset_env_var(key: &str) {
         let key = CString::new(key).expect("env key should be valid");
         assert_eq!(libc::unsetenv(key.as_ptr()), 0);
+    }
+
+    /// The desktop is the single owner of transfer identity: it resolves the
+    /// peer id from `identity.json`, the display name from the machine name,
+    /// and passes both to `kanna-server`, which forwards them to the sidecar
+    /// without re-deriving anything.
+    #[test]
+    fn transfer_identity_env_resolves_peer_identity_for_the_server() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let root = unique_test_root("transfer-identity-env");
+        let config_path = root.join("Kanna").join("server.toml");
+        unsafe {
+            unset_env_var("KANNA_TRANSFER_ROOT");
+            unset_env_var("KANNA_TRANSFER_REGISTRY_DIR");
+            unset_env_var("KANNA_TRANSFER_PEER_ID");
+            unset_env_var("KANNA_TRANSFER_DISPLAY_NAME");
+        }
+
+        let env: HashMap<String, String> = super::resolve_transfer_identity_env(&config_path)
+            .expect("transfer identity env should resolve")
+            .into_iter()
+            .collect();
+        let transfer_root = root.join("transfer");
+        assert_eq!(
+            env.get("KANNA_TRANSFER_ROOT").map(String::as_str),
+            Some(transfer_root.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            env.get("KANNA_TRANSFER_REGISTRY_DIR").map(String::as_str),
+            Some(transfer_root.join("registry").to_string_lossy().as_ref())
+        );
+        assert!(
+            transfer_root.join("identity.json").exists(),
+            "resolving must create the identity the sidecar advertises"
+        );
+        let peer_id = env
+            .get("KANNA_TRANSFER_PEER_ID")
+            .expect("peer id")
+            .to_string();
+        assert!(!peer_id.is_empty());
+        assert!(env
+            .get("KANNA_TRANSFER_DISPLAY_NAME")
+            .is_some_and(|name| !name.is_empty()));
+
+        // Resolving twice is stable: the sidecar must not change peer identity
+        // across server restarts.
+        let again: HashMap<String, String> = super::resolve_transfer_identity_env(&config_path)
+            .expect("transfer identity env should resolve")
+            .into_iter()
+            .collect();
+        assert_eq!(again.get("KANNA_TRANSFER_PEER_ID"), Some(&peer_id));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Parallel instances (the E2E two-instance harness, `kd` worktrees) give
+    /// each desktop its own peer id and registry through the environment; that
+    /// override has to survive the hop through kanna-server.
+    #[test]
+    fn transfer_identity_env_lets_explicit_overrides_win() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let root = unique_test_root("transfer-identity-override");
+        let config_path = root.join("Kanna").join("server.toml");
+        let registry = root.join("shared-registry");
+        unsafe {
+            set_env_var(
+                "KANNA_TRANSFER_ROOT",
+                root.join("custom").to_string_lossy().as_ref(),
+            );
+            set_env_var(
+                "KANNA_TRANSFER_REGISTRY_DIR",
+                registry.to_string_lossy().as_ref(),
+            );
+            set_env_var("KANNA_TRANSFER_PEER_ID", "peer-secondary");
+            set_env_var("KANNA_TRANSFER_DISPLAY_NAME", "Secondary");
+        }
+
+        let env: HashMap<String, String> = super::resolve_transfer_identity_env(&config_path)
+            .expect("transfer identity env should resolve")
+            .into_iter()
+            .collect();
+        assert_eq!(
+            env.get("KANNA_TRANSFER_ROOT").map(String::as_str),
+            Some(root.join("custom").to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            env.get("KANNA_TRANSFER_REGISTRY_DIR").map(String::as_str),
+            Some(registry.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            env.get("KANNA_TRANSFER_PEER_ID").map(String::as_str),
+            Some("peer-secondary")
+        );
+        assert_eq!(
+            env.get("KANNA_TRANSFER_DISPLAY_NAME").map(String::as_str),
+            Some("Secondary")
+        );
+
+        unsafe {
+            unset_env_var("KANNA_TRANSFER_ROOT");
+            unset_env_var("KANNA_TRANSFER_REGISTRY_DIR");
+            unset_env_var("KANNA_TRANSFER_PEER_ID");
+            unset_env_var("KANNA_TRANSFER_DISPLAY_NAME");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

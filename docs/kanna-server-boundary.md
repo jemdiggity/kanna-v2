@@ -36,6 +36,67 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - `POST /v1/tasks/{task_id}/actions/set-notify`
 - `POST /v1/pairing/sessions`
 
+## Task Transfer Transport
+
+`kanna-server` owns the `kanna-task-transfer` sidecar: it spawns the process,
+holds its stdin/stdout control plane, and terminates both directions of the
+relay. It spawns lazily — on the first control request or on an inbound
+task-transfer tunnel — and respawns transparently once the previous child is
+observed dead. Before this, the desktop process held the pipe, which made every
+transfer depend on an open, signed-in window.
+
+These routes are **not** part of the LAN surface. Unlike the rest of
+`/v1/transfers/*`, which a paired LAN device may reach, each one requires a
+direct desktop loopback connection (`DesktopLocalAccess`): they initiate
+pairing and move tasks between machines, and their pre-move equivalent was
+reachable only by whoever held a private stdio pipe.
+
+- `POST /v1/transfers/sidecar/control/{operation}` — one control operation from
+  a fixed allowlist (`crates/kanna-server/src/transfer_control.rs`), taking and
+  returning camelCase JSON. The route cannot hand the sidecar an arbitrary
+  message.
+- `GET /v1/transfers/sidecar/events?cursor=...&streamId=...&timeoutSecs=...&limit=...`
+  — long-poll of sidecar events, following the `/v1/task-events` cursor
+  contract: pass the returned cursor back and nothing fired between two calls is
+  missed. Unlike `/v1/task-events`, whose cursor is a durable `task_event.seq`,
+  this log is in memory and its sequence restarts at zero with every server
+  process — while the desktop that holds the cursor outlives those restarts. So
+  a cursor should be sent back with the `streamId` it was issued with: a cursor
+  presented alongside a `streamId` naming a *different* stream is discarded and
+  answered with `missedEvents`, rather than applied to sequence numbers it never
+  referred to. A cursor sent with no `streamId` at all — what a desktop from
+  before this field existed sends — is honoured under the original sequence
+  semantics instead, because refusing it would mean never pruning: the caller
+  would be redelivered the same retained events indefinitely while durable
+  entries climbed to the cap and backpressured the sidecar reader, wedging
+  control. Absence of the field is not evidence of a stale cursor.
+  Single-consumer: a read prunes through the cursor it is given, so exactly one
+  desktop process subscribes. The four state-mutating events
+  (`incoming_transfer_request`, `task_pull_requested`,
+  `outgoing_transfer_committed`,
+  `outgoing_transfer_finalization_requested`) are marked `durable` and are never
+  evicted to make room — a full log applies backpressure to the sidecar reader
+  instead. Advisory events may be evicted, and the response says so via
+  `missedEvents`.
+- `POST /v1/transfers/cloud-proxies`, `DELETE /v1/transfers/cloud-proxies`,
+  `DELETE /v1/transfers/cloud-proxies/{peer_id}` — outbound cloud transfer
+  tunnels. This cannot ride the server's own relay connection: the relay honours
+  `tunnel_request` only from a socket authenticated with a Firebase user
+  `id_token`, and the server authenticates as a *desktop* with its device token
+  or desktop secret. The signed-in renderer holds the only Firebase credential,
+  so it pushes and rotates the ID token through the first route.
+
+Identity and port have one owner each, and it is the desktop: it derives
+`transfer_port` into `server.toml` (the same value the inbound tunnel bridge
+dials), and resolves `transfer/identity.json`, the peer id, the display name and
+the registry directory into the server's environment at spawn. `kanna-server`
+forwards all of it to the sidecar and re-derives none of it, so staging and
+production keep the distinct ports and per-worktree registries they need to run
+side by side.
+
+Transfer *orchestration* is still renderer-side; only the transport moved. See
+[2026-08-06-task-transfer-rearchitecture-plan.md](2026-08-06-task-transfer-rearchitecture-plan.md).
+
 ## Agent Runtime Identity
 
 `kanna_info` is a catalog-declared, parameterless client tool backed by

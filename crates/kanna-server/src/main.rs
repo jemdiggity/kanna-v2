@@ -1,5 +1,6 @@
 mod bonjour;
 mod cloud_task_publisher;
+mod cloud_transfer_proxy;
 mod commands;
 mod config;
 mod daemon_client;
@@ -22,6 +23,8 @@ mod task_files;
 mod task_transfer_tunnel;
 mod terminal_attachments;
 mod terminal_watcher;
+mod transfer_control;
+mod transfer_sidecar;
 mod visual_companion;
 mod workspace_commands;
 mod worktree_cleanup;

@@ -32,6 +32,7 @@ mod task_input;
 mod task_logs;
 mod task_ports;
 mod tasks;
+mod transfer_sidecar;
 mod transfers;
 mod window_workspace;
 
