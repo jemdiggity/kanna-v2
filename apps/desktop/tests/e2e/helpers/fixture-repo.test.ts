@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -99,20 +99,31 @@ describe("fixture repo helpers", () => {
 
 describe("fixture removal guard", () => {
   const createdRepoPaths: string[] = [];
+  const lookalikeDirs: string[] = [];
 
   afterEach(async () => {
-    if (createdRepoPaths.length === 0) return;
-
-    const { cleanupFixtureRepos } = await import("./fixture-repo");
-    await cleanupFixtureRepos(createdRepoPaths.splice(0));
+    if (createdRepoPaths.length > 0) {
+      const { cleanupFixtureRepos } = await import("./fixture-repo");
+      await cleanupFixtureRepos(createdRepoPaths.splice(0));
+    }
+    // Lookalikes are not the helper's to remove — that is the point of the
+    // test — so this suite takes them out itself.
+    await Promise.all(
+      lookalikeDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
+    );
   });
 
-  async function materializeFixtureShapedDir(): Promise<string> {
+  /**
+   * A `fixture-XXXX` directory in the shared temp base that this process did
+   * not create — what an abandoned run or a concurrent one leaves behind.
+   */
+  async function materializeLookalikeFixtureDir(): Promise<string> {
     await mkdir(FIXTURE_TEMP_ROOT, { recursive: true });
     const tempDir = await mkdtemp(join(FIXTURE_TEMP_ROOT, "fixture-"));
-    const repoPath = join(tempDir, "removal-guard-fixture");
+    lookalikeDirs.push(tempDir);
+    const repoPath = join(tempDir, "removal-guard-lookalike");
     await mkdir(repoPath, { recursive: true });
-    await writeFile(join(repoPath, "tracked.txt"), "fixture\n", "utf8");
+    await writeFile(join(repoPath, "tracked.txt"), "not ours\n", "utf8");
     return repoPath;
   }
 
@@ -143,21 +154,43 @@ describe("fixture removal guard", () => {
     }
   });
 
-  it("permits and removes a fixture path under the fixture temp root", async () => {
-    const { assertRemovableFixturePath, cleanupFixtureRepos } = await import("./fixture-repo");
-    const repoPath = await materializeFixtureShapedDir();
+  it("permits and removes a repo this helper created", async () => {
+    const { assertRemovableFixturePath, cleanupFixtureRepos, createFixtureRepo } =
+      await import("./fixture-repo");
+    const repoPath = await createFixtureRepo("removal-guard-owned");
 
     expect(() => assertRemovableFixturePath(repoPath)).not.toThrow();
     await cleanupFixtureRepos([repoPath]);
 
     await expect(access(repoPath)).rejects.toThrow();
-    // The mkdtemp parent goes with it, as it only ever holds this fixture.
+    // The mkdtemp owner goes with it: it holds the repo and its bare origin.
     await expect(access(dirname(repoPath))).rejects.toThrow();
   });
 
+  it("refuses a fixture-shaped directory this process did not create", async () => {
+    const { assertRemovableFixturePath, cleanupFixtureRepos, createFixtureRepo } =
+      await import("./fixture-repo");
+    // Own a fixture first, so the refusal cannot be an empty-registry artifact.
+    createdRepoPaths.push(await createFixtureRepo("removal-guard-owner"));
+    const lookalikeRepoPath = await materializeLookalikeFixtureDir();
+
+    expect(() => assertRemovableFixturePath(lookalikeRepoPath)).toThrow(
+      /refusing to remove/,
+    );
+    expect(() => assertRemovableFixturePath(dirname(lookalikeRepoPath))).toThrow(
+      /refusing to remove/,
+    );
+    await expect(cleanupFixtureRepos([lookalikeRepoPath])).rejects.toThrow(
+      /refused 1 unsafe path/,
+    );
+
+    await expect(access(lookalikeRepoPath)).resolves.toBeUndefined();
+    await expect(access(dirname(lookalikeRepoPath))).resolves.toBeUndefined();
+  });
+
   it("still cleans valid fixtures when handed the incident's unassigned path", async () => {
-    const { cleanupFixtureRepos } = await import("./fixture-repo");
-    const repoPath = await materializeFixtureShapedDir();
+    const { cleanupFixtureRepos, createFixtureRepo } = await import("./fixture-repo");
+    const repoPath = await createFixtureRepo("removal-guard-incident");
 
     await expect(cleanupFixtureRepos(["", repoPath])).rejects.toThrow(
       /refused 1 unsafe path/,
