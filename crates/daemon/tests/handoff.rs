@@ -64,6 +64,10 @@ enum Cmd {
     Kill {
         session_id: String,
     },
+    Signal {
+        session_id: String,
+        signal: String,
+    },
     SpawnAgent {
         session_id: String,
         params: AgentSpawnParams,
@@ -2075,6 +2079,100 @@ fn test_handoff_preserves_output_emitted_after_final_snapshot_before_ack() {
             }
         }
     }
+
+    drop(daemon_b);
+    cleanup(&dir);
+}
+
+/// The 2026-08-06 transfer incident, as a test.
+///
+/// Task transfer used to end the source agent with `SIGINT`. The daemon refuses
+/// signals for adopted sessions by design — it holds the master fd but never
+/// forked the child, so the pid cannot be pinned across `kill(2)` — and every
+/// session older than the running daemon is adopted. After an app upgrade, no
+/// pre-existing task could be finalized at all: `[handoff] adopted session …`
+/// at 10:43, the signal refused at 13:43, the conversation lost.
+///
+/// Injected input has no such constraint: `Command::Input` writes to the master
+/// fd with no ownership check. This pins both halves — the refusal stays (it is
+/// a safety property, not a bug) and the replacement works through it — so the
+/// finalization sequence in `crates/kanna-server/src/transfer_engine/finalize.rs`
+/// cannot regress to signalling.
+#[test]
+fn test_adopted_session_refuses_signals_but_quits_on_injected_input() {
+    let dir = test_dir("adopted-quit-by-input");
+    let session_id = "sess-adopted-quit";
+
+    let daemon_a = DaemonHandle::start_in(&dir);
+    let mut conn_a = daemon_a.connect();
+    conn_a.send(&Cmd::Spawn {
+        session_id: session_id.to_string(),
+        executable: "/bin/sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            // Stands in for an agent TUI: it survives SIGINT (so a delivered
+            // signal would not have ended it either) and quits on the composer
+            // command typed at it.
+            "trap '' INT; while read line; do case \"$line\" in */exit*) exit 0;; esac; done"
+                .to_string(),
+        ],
+        cwd: "/tmp".to_string(),
+        env: HashMap::new(),
+        cols: 80,
+        rows: 24,
+        agent_provider: None,
+        operator_input_only: false,
+    });
+    match conn_a.recv() {
+        Evt::SessionCreated { .. } => {}
+        other => panic!("expected SessionCreated, got: {other:?}"),
+    }
+
+    // The upgrade. Everything the successor holds from here on is adopted.
+    drop(conn_a);
+    let daemon_b = DaemonHandle::start_in(&dir);
+    daemon_b.wait_for_log("adopted session");
+
+    let mut events = daemon_b.connect();
+    events.send(&Cmd::Subscribe);
+    assert!(matches!(events.recv(), Evt::Ok));
+
+    let mut conn_b = daemon_b.connect();
+    conn_b.send(&Cmd::Signal {
+        session_id: session_id.to_string(),
+        signal: "SIGINT".to_string(),
+    });
+    match conn_b.recv() {
+        Evt::Error { message, .. } => assert!(
+            message.contains("adopted"),
+            "the refusal must say why, so the transfer log is diagnosable: {message}",
+        ),
+        other => panic!(
+            "the daemon accepted a signal for an adopted session; it must fail closed: {other:?}",
+        ),
+    }
+
+    // The replacement: kanna-server's submission policy — the text as one
+    // write, then a lone CR as a discrete keystroke.
+    send_input(&mut conn_b, session_id, b"/exit");
+    std::thread::sleep(Duration::from_millis(150));
+    send_input(&mut conn_b, session_id, b"\r");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut exited = false;
+    while Instant::now() < deadline && !exited {
+        if let Ok(Evt::Exit {
+            session_id: gone, ..
+        }) = events.recv_with_timeout(Duration::from_millis(200))
+        {
+            exited = gone == session_id;
+        }
+    }
+    assert!(
+        exited,
+        "the adopted session did not quit on injected input, which is the only way \
+         transfer finalization can end it",
+    );
 
     drop(daemon_b);
     cleanup(&dir);

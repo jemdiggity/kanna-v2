@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import { findClaudeBinary } from "./claude";
 import { findCodexBinary } from "./codex";
+import { findCopilotBinary } from "./copilot";
 import { findOpenCodeBinary } from "./opencode";
 
 /**
@@ -34,6 +35,10 @@ export function codexBinaryOrNull(): Promise<string | null> {
 
 export function openCodeBinaryOrNull(): Promise<string | null> {
   return resolve(findOpenCodeBinary);
+}
+
+export function copilotBinaryOrNull(): Promise<string | null> {
+  return resolve(findCopilotBinary);
 }
 
 /** The PTY tests need system python3 to host the terminal (see helpers/pty.ts). */
