@@ -185,6 +185,23 @@ acknowledging transferred descriptors.
   frontmatter, then the global default provider setting. Exact map keys beat
   globs; among globs, the most non-`*` characters wins and lexical order breaks
   ties.
+- `config.json` has a machine-local companion, `.kanna/config.local.json`:
+  gitignored, read from the **open repo's working tree** rather than the origin
+  snapshot, and deep-merged over the committed config with local winning — so a
+  wedged provider is reordered on one machine in seconds instead of through a
+  merge to `origin/main`. It occupies the `agentProviders` slot in the
+  precedence chain above, so an explicit task or stage override still wins.
+  Only `agentProviders`, `pipeline`, `ports`, `setup`, `teardown`, and `test`
+  may be set; `vars`, `flavors`, `workspace`, `stage_order`, and the
+  `reserved_port*` keys are deliberately excluded, because they change what a
+  task *means* rather than how one machine runs it. `agentProviders` and
+  `ports` merge entry by entry (local replaces the entry of that name, others
+  survive); every other key replaces outright, and arrays never concatenate.
+  Anything else in the file — an unknown key, a bad value, invalid JSON — fails
+  definition resolution with an error naming the file. Provenance is always
+  reported: the server logs the file and its keys at resolution, the repo
+  manifest carries them as `config.localOverride`, and every PTY spawn prints
+  them before setup runs. See `docs/dev/dev-workflow.md`.
 - Built-in agent/pipeline definitions must ship as Tauri bundled resources,
   **not** as TypeScript string constants.
 

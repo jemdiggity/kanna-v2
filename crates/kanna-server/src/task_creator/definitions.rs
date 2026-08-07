@@ -1,10 +1,12 @@
 use super::definition_source::RepoDefinitionSnapshot;
+use super::local_config::{apply_local_config_override, LocalConfigOverride};
 use crate::db::Repo;
 use kanna_agent_protocol::AgentProvider;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::Path;
 use std::str::FromStr;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -38,6 +40,17 @@ pub(super) struct RepoConfig {
     pub(super) stage_order: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) workspace: Option<RepoWorkspaceConfig>,
+    /// Provenance of the machine-local `.kanna/config.local.json` layer merged
+    /// over the committed config, or `None` when no local file applies. It is
+    /// recorded during resolution rather than read from either file, so it
+    /// always describes the configuration actually in force.
+    #[serde(
+        rename = "localOverride",
+        default,
+        skip_deserializing,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(super) local_override: Option<LocalConfigOverride>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -432,11 +445,26 @@ impl RepoDefinitions {
     fn resolve_path(repo_path: &str, default_branch: Option<&str>) -> Result<Self, String> {
         let snapshot = RepoDefinitionSnapshot::resolve(repo_path, default_branch)?;
         let config_path = ".kanna/config.json";
-        let config = match read_snapshot_utf8(&snapshot, config_path)? {
-            Some(content) => parse_repo_config(&content)
+        let mut raw_config = match read_snapshot_utf8(&snapshot, config_path)? {
+            Some(content) => parse_config_object(&content)
                 .map_err(|error| definition_error(&snapshot, config_path, error))?,
-            None => RepoConfig::default(),
+            None => serde_json::Map::new(),
         };
+        // Agents, pipelines, and the committed config come from the origin
+        // snapshot; only this one file comes from the working tree, because a
+        // per-machine override that needed a commit would not be one.
+        let local_override = apply_local_config_override(Path::new(repo_path), &mut raw_config)?;
+        if let Some(local) = &local_override {
+            log::info!(
+                "repo config for `{repo_path}` layers `{}` over `{config_path}` from `{}` at revision `{}` (keys: {})",
+                local.path(),
+                snapshot.ref_name(),
+                snapshot.revision().unwrap_or("<none>"),
+                local.keys().join(", "),
+            );
+        }
+        let mut config = repo_config_from_object(&raw_config);
+        config.local_override = local_override;
         Ok(Self { snapshot, config })
     }
 
@@ -592,13 +620,19 @@ impl RepoDefinitions {
     }
 }
 
-fn parse_repo_config(content: &str) -> Result<RepoConfig, String> {
+/// The committed config as a raw JSON object, so the machine-local layer can
+/// merge into it before either side is interpreted. A document that is not an
+/// object yields no keys, matching the tolerance the typed parser has always
+/// had for repos Kanna does not control.
+fn parse_config_object(
+    content: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let value: serde_json::Value =
         serde_json::from_str(content).map_err(|error| format!("invalid repo config: {error}"))?;
-    let Some(raw) = value.as_object() else {
-        return Ok(RepoConfig::default());
-    };
+    Ok(value.as_object().cloned().unwrap_or_default())
+}
 
+fn repo_config_from_object(raw: &serde_json::Map<String, serde_json::Value>) -> RepoConfig {
     let string_array = |name: &str| {
         raw.get(name).and_then(|value| {
             let values = value.as_array()?;
@@ -689,7 +723,7 @@ fn parse_repo_config(content: &str) -> Result<RepoConfig, String> {
             (env.is_some() || path.is_some()).then_some(RepoWorkspaceConfig { env, path })
         });
 
-    Ok(RepoConfig {
+    RepoConfig {
         pipeline: raw
             .get("pipeline")
             .and_then(serde_json::Value::as_str)
@@ -705,7 +739,8 @@ fn parse_repo_config(content: &str) -> Result<RepoConfig, String> {
         reserved_ports: integer_array("reserved_ports", |value| (1..=65535).contains(&value)),
         stage_order: string_array("stage_order"),
         workspace,
-    })
+        local_override: None,
+    }
 }
 
 fn deserialize_optional_agent_provider_preferences<'de, D>(
@@ -730,7 +765,9 @@ where
     Ok((!preferences.is_empty()).then_some(preferences))
 }
 
-fn parse_agent_provider_preference(value: &serde_json::Value) -> Option<AgentProviderPreference> {
+pub(super) fn parse_agent_provider_preference(
+    value: &serde_json::Value,
+) -> Option<AgentProviderPreference> {
     let (provider, model, effort) = match value {
         serde_json::Value::String(_) => (value, None, None),
         serde_json::Value::Object(raw) => (

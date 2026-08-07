@@ -108,6 +108,7 @@ fn pty_setup_keeps_sidecar_provider_directory_as_path_fallback() {
         false,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -323,6 +324,7 @@ fn pty_setup_failure_keeps_output_and_prevents_provider_launch() {
     let command = super::super::build_task_shell_command(
         "touch provider-ran",
         &["printf 'SETUP_FAILURE_OUTPUT\\n' && exit 23".to_string()],
+        None,
         None,
         None,
         Some("/usr/bin:/bin"),

@@ -34,6 +34,7 @@ use tokio::net::UnixListener;
 static CLAUDE_CONFIG_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 mod core;
+mod local_config;
 mod recovery;
 mod revision;
 mod setup;

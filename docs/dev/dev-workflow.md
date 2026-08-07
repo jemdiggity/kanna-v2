@@ -112,12 +112,90 @@ repo (and dogfooded by this repo on itself):
   repo-local extensions.
 - `pipelines/{name}.json` — pipeline definitions.
 - `tasks/{slug}/agent.md` — custom task templates.
+- `config.local.json` — optional, gitignored, machine-local overrides for
+  `config.json` (see below).
 - `config.schema.json` — the public JSON Schema for `config.json`, served at
   `https://schemas.kanna.build/config.schema.json`. This checked-in file is the
   single maintained copy.
 
 Built-in agents/pipelines ship as Tauri bundled resources; per-repo files
 override them by name.
+
+### Machine-local config: `.kanna/config.local.json`
+
+Agents, pipelines, and `config.json` are resolved from `origin/<default_branch>`
+at every spawn (`RepoDefinitionSnapshot::resolve`), which is why a task runs the
+same way on every machine — and why, when one provider CLI hit its account usage
+limit, the only way to unwedge this repo's review lane was to land a one-line
+`agentProviders` reorder on `origin/main` through a merge.
+
+`.kanna/config.local.json` is the escape hatch. It is read from the **open
+repo's working tree**, not the origin snapshot, so it never needs a commit, and
+it is gitignored so it never accidentally gets one. Its values are deep-merged
+over the resolved `config.json`, with local winning:
+
+```json
+{
+  "$schema": "https://schemas.kanna.build/config.schema.json",
+  "agentProviders": {
+    "*": { "provider": ["claude", "codex", "copilot", "opencode", "antigravity"] }
+  }
+}
+```
+
+(Strict JSON — no comments, and never committed.)
+
+**What it may set.** Only `agentProviders`, `pipeline`, `ports`, `setup`,
+`teardown`, and `test` — this machine's plumbing. `vars` and `flavors` are
+excluded because they feed stage prompts and agent selection: a task created
+under a local value for either has a prompt no other machine can reproduce, and
+nothing durable records why. That also breaks task transfer, where the
+destination re-resolves definitions from its own checkout and a resumed or
+re-forked stage would silently render a different prompt than the task ran with.
+`workspace`, `stage_order`, `reserved_ports`, and `reserved_port_offsets` are
+excluded because they are committed so every machine runs agents in the same
+environment, and nothing about an outage needs them changed.
+
+**Merge semantics**, per key, deliberately boring:
+
+| Key | Merge |
+|---|---|
+| `agentProviders`, `ports` | entry by entry: a local entry replaces the committed entry of the same name; unnamed committed entries survive. One level deep — a named entry is replaced whole, not field by field. |
+| `pipeline` | replaces. |
+| `setup`, `teardown`, `test` | replace. Arrays never concatenate: a local `setup` is the whole setup list. |
+
+There is no delete: to drop a committed `agentProviders` entry, replace it with
+the value you want instead.
+
+**Nothing is ignored quietly.** An unknown key, a malformed value, invalid JSON,
+or an unreadable file fails definition resolution with an error naming the file,
+so task creation stops rather than silently running the committed config. Only
+`$schema` is accepted and ignored, for editor completion.
+
+**When it takes effect.** Task creation and stage transitions resolve
+definitions fresh, so an edit reaches the next spawn; the read-only definition
+lookups behind the desktop's pickers are cached per repo for 30 seconds.
+Already-running agent sessions keep the configuration they started with.
+
+**Provenance.** When the layer is active, `kanna-server` logs the file and the
+overridden keys at resolution, the repo's definition manifest carries them as
+`config.localOverride`, and every PTY spawn it touched prints them before setup
+runs (headless SDK sessions have no terminal, so there the log and the manifest
+are the record):
+
+```
+Machine-local repo config in effect
+  /Users/you/code/kanna/.kanna/config.local.json
+  overrides: agentProviders
+```
+
+**Granularity.** The file is per *checkout*, which is the right unit: several
+Kanna instances (production, staging, per-worktree dev) share one repo checkout
+and therefore share its local config, while a second clone of the same repo has
+its own. Task worktrees do not need a copy — the layer is always read from the
+repo root that Kanna has registered. Note that `kd` reads only `ports` from the
+committed `config.json` when deriving dev ports for a worktree; a local `ports`
+override changes what Kanna gives spawned tasks, not what `./kd dev up` derives.
 
 ### Machine-local workspace setup
 

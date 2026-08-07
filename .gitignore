@@ -22,6 +22,7 @@ apps/mobile/.expo/
 apps/mobile/ios/
 .claude/settings.local.json
 /.kanna/setup.local.sh
+/.kanna/config.local.json
 .superpowers/
 bazel-*
 .firebase-*.kanna.json

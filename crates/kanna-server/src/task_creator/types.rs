@@ -295,6 +295,7 @@ pub(super) struct DeferredStageSetup {
     pub(super) allowed_tools: Vec<String>,
     pub(super) mcp_config_path: Option<String>,
     pub(super) resume_session_id: Option<String>,
+    pub(super) local_config_override: Option<super::local_config::LocalConfigOverride>,
 }
 
 /// Detached best-effort cleanup for a workspace that the task is leaving.
