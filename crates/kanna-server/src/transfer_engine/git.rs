@@ -475,10 +475,31 @@ fn opencode(cwd: &Path, args: &[&str]) -> Result<String, String> {
         return Err(format!(
             "opencode {} failed: {}",
             args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
+            bounded_stderr(&output.stderr),
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// How much of a failed CLI's stderr is worth keeping.
+///
+/// These messages are not only logged: they become a work item's `error` and a
+/// transfer's `error`, both of which the operator reads and the snapshot
+/// carries. An agent CLI that fails while printing a stack trace or a progress
+/// spinner would otherwise put an unbounded blob in a DB column, so the head —
+/// where the actual reason is — is kept and the rest is marked as dropped.
+fn bounded_stderr(stderr: &[u8]) -> String {
+    const BUDGET: usize = 2048;
+    let text = String::from_utf8_lossy(stderr);
+    let text = text.trim();
+    if text.len() <= BUDGET {
+        return text.to_string();
+    }
+    let mut end = BUDGET;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… ({} more bytes)", &text[..end], text.len() - end)
 }
 
 /// The OpenCode session this worktree has been talking to, newest first.
@@ -593,8 +614,8 @@ pub fn import_opencode_session(
     // which is the silent-conversation-loss shape the artifact contract exists
     // to stop. Every other provider gets this binding structurally from the
     // filename; OpenCode's filename is a constant, so it is checked here.
-    let exported_id =
-        read_opencode_export_session_id(export_path).map_err(OpencodeImportError::Refused)?;
+    let (exported_id, exported_directory) =
+        read_opencode_export_identity(export_path).map_err(OpencodeImportError::Refused)?;
     if exported_id != session_id {
         return Err(OpencodeImportError::Refused(format!(
             "OpenCode export carries session {exported_id} but the transfer promised {session_id}"
@@ -627,6 +648,21 @@ pub fn import_opencode_session(
     match local_opencode_session(destination_worktree, session_id) {
         LocalOpencodeSession::Present { directory } if directory == resolved_destination => {
             return Ok(());
+        }
+        // The conversation being shipped, still sitting where the source left
+        // it. Both peers run on one machine in development and share a single
+        // OpenCode store, so the destination legitimately finds the very
+        // session it is importing — and re-keying *that* one to the new
+        // worktree is what the transfer means. The export names the directory
+        // the source had it at, so this is the shipped conversation rather than
+        // a stranger's.
+        LocalOpencodeSession::Present { directory }
+            if exported_directory.as_deref() == Some(directory.as_path()) =>
+        {
+            log::info!(
+                "re-keying OpenCode session {session_id} from {} to the destination worktree",
+                directory.display(),
+            );
         }
         LocalOpencodeSession::Present { .. } => {
             return Err(OpencodeImportError::DestinationExists(
@@ -681,6 +717,13 @@ impl std::fmt::Display for OpencodeImportError {
 
 /// The session id inside an export, which is the one `opencode import` will use.
 pub fn read_opencode_export_session_id(export_path: &Path) -> Result<String, String> {
+    read_opencode_export_identity(export_path).map(|(session_id, _)| session_id)
+}
+
+/// The session id an export carries, and the directory it was keyed to when it
+/// was taken. The directory is what tells the shipped conversation apart from
+/// an unrelated local session that happens to share its id.
+fn read_opencode_export_identity(export_path: &Path) -> Result<(String, Option<PathBuf>), String> {
     let raw = std::fs::read(export_path)
         .map_err(|error| format!("failed to read the OpenCode session export: {error}"))?;
     let export: serde_json::Value = serde_json::from_slice(&raw)
@@ -695,7 +738,13 @@ pub fn read_opencode_export_session_id(export_path: &Path) -> Result<String, Str
             "OpenCode session export carries an unrecognized session id: {session_id}"
         ));
     }
-    Ok(session_id.to_string())
+    let directory = export
+        .get("info")
+        .and_then(|info| info.get("directory"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|directory| !directory.is_empty())
+        .map(PathBuf::from);
+    Ok((session_id.to_string(), directory))
 }
 
 /// What this machine's OpenCode store says about a session id.
@@ -899,6 +948,24 @@ esac"#,
         );
     }
 
+    /// A failing CLI's stderr becomes a DB column the operator reads, so it is
+    /// bounded — head kept, remainder counted — rather than stored whole.
+    #[test]
+    fn a_failing_cli_cannot_put_an_unbounded_blob_in_the_error_column() {
+        assert_eq!(
+            bounded_stderr(b"  Session not found  "),
+            "Session not found"
+        );
+        let huge = "x".repeat(64 * 1024);
+        let bounded = bounded_stderr(huge.as_bytes());
+        assert!(bounded.len() < 2200, "{} bytes", bounded.len());
+        assert!(bounded.starts_with("xxx"));
+        assert!(bounded.contains("more bytes"), "{bounded}");
+        // Multi-byte characters at the cut are not split.
+        let multibyte = "é".repeat(64 * 1024);
+        assert!(std::str::from_utf8(bounded_stderr(multibyte.as_bytes()).as_bytes()).is_ok());
+    }
+
     /// A project with no sessions writes *nothing*, not `[]`.
     ///
     /// Verified against the installed CLI (1.16.2): `opencode session list
@@ -1016,6 +1083,87 @@ esac"#,
         assert!(
             matches!(error, OpencodeImportError::Unavailable(_)),
             "{error:?}",
+        );
+    }
+
+    /// The shipped conversation, found where the source left it, is re-keyed
+    /// rather than refused.
+    ///
+    /// Both peers run on one machine in development and share a single OpenCode
+    /// store, so the destination finds the very session it is importing — still
+    /// keyed to the source worktree. Re-keying *that* one to the destination is
+    /// what a transfer means; refusing it drops the conversation the whole
+    /// artifact exists to carry. The export names the directory it was taken
+    /// from, which is what tells it apart from a stranger's session.
+    #[test]
+    fn the_shipped_conversation_is_rekeyed_rather_than_refused() {
+        let temp = tempfile::tempdir().expect("temp");
+        let source_worktree = temp.path().join("source");
+        std::fs::create_dir_all(&source_worktree).expect("source worktree");
+        let resolved_source = source_worktree.canonicalize().expect("resolved source");
+
+        let stub = StubOpencode::responding(&format!(
+            r#"printf '%s\n' "$*" >> "$(dirname "$0")/calls"
+case "$1" in
+  export) printf '{{"info":{{"id":"%s","directory":"{}"}}}}' "$2" ;;
+esac"#,
+            resolved_source.display(),
+        ));
+        // The export carries the same directory the local store reports, which
+        // is what makes them the same conversation.
+        let export = temp.path().join("export.json");
+        std::fs::write(
+            &export,
+            serde_json::json!({
+                "info": { "id": SESSION_ID, "directory": resolved_source.to_string_lossy() },
+                "messages": [],
+            })
+            .to_string(),
+        )
+        .expect("write export");
+
+        import_opencode_session(&export, SESSION_ID, &temp.path().join("destination"))
+            .expect("the shipped conversation was refused as a collision");
+        assert!(
+            stub.calls().iter().any(|call| call.starts_with("import")),
+            "the re-key never ran: {:?}",
+            stub.calls(),
+        );
+    }
+
+    /// The same shape with a *different* directory is the collision the guard
+    /// exists for: an unrelated local conversation that happens to share an id
+    /// must not be yanked out of its worktree.
+    #[test]
+    fn a_session_at_an_unrelated_directory_is_still_refused() {
+        let temp = tempfile::tempdir().expect("temp");
+        let stub = StubOpencode::responding(
+            r#"printf '%s\n' "$*" >> "$(dirname "$0")/calls"
+case "$1" in
+  export) printf '{"info":{"id":"%s","directory":"/somebody/elses/worktree"}}' "$2" ;;
+esac"#,
+        );
+        let export = temp.path().join("export.json");
+        std::fs::write(
+            &export,
+            serde_json::json!({
+                "info": { "id": SESSION_ID, "directory": "/where/the/source/had/it" },
+                "messages": [],
+            })
+            .to_string(),
+        )
+        .expect("write export");
+
+        let error = import_opencode_session(&export, SESSION_ID, &temp.path().join("destination"))
+            .expect_err("an unrelated conversation was re-keyed");
+        assert!(
+            matches!(error, OpencodeImportError::DestinationExists(_)),
+            "{error:?}",
+        );
+        assert!(
+            stub.calls().iter().all(|call| !call.starts_with("import")),
+            "the import ran over an unrelated session: {:?}",
+            stub.calls(),
         );
     }
 
