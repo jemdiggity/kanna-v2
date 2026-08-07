@@ -60,6 +60,29 @@ export class WebDriverClient {
     return this.sessionId;
   }
 
+  /**
+   * Reload the webview and wait for the fresh page to finish starting up.
+   *
+   * Clearing the readiness flags first is the whole point: `location.reload()`
+   * returns before the navigation happens, so a bare `waitForAppReady()` can
+   * observe the *outgoing* page's flags and return while the old DOM is still
+   * up. Startup work of the new page then lands mid-test — which is how the
+   * startup shortcuts modal reappeared after it had "already been dismissed".
+   */
+  async reload(options: CreateSessionOptions = {}): Promise<void> {
+    await this.executeSync(
+      `if (window.__KANNA_E2E__) {
+         window.__KANNA_E2E__.ready = false;
+         window.__KANNA_E2E__.startupOverlaysSettled = false;
+       }
+       location.reload();`,
+    );
+    await this.waitForAppReady();
+    if (options.dismissStartupShortcuts ?? true) {
+      await dismissStartupShortcutsModal(this);
+    }
+  }
+
   async deleteSession(): Promise<void> {
     if (!this.sessionId) return;
     await this.delete(`/session/${this.sessionId}`);

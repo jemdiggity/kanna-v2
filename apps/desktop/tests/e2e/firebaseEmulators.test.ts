@@ -7,6 +7,8 @@ import {
 
 describe("firebase emulator runner helpers", () => {
   it("builds a direct Firebase command from the generated config path", () => {
+    // The seed import is not optional: cloud real suites sign in against the
+    // emulator accounts exported to services/firebase/emulator-seed.
     expect(buildFirebaseEmulatorCommand("/repo/.firebase-18080.kanna.json")).toEqual({
       command: "pnpm",
       args: [
@@ -17,6 +19,8 @@ describe("firebase emulator runner helpers", () => {
         "kanna-local",
         "--config",
         "/repo/.firebase-18080.kanna.json",
+        "--import",
+        "/repo/services/firebase/emulator-seed",
       ],
     });
   });

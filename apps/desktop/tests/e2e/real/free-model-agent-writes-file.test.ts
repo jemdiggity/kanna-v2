@@ -5,7 +5,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
-import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { waitForTaskCreated } from "../helpers/taskCreation";
 import { submitTaskFromUi } from "../helpers/newTaskFlow";
 import { nudgeTerminalTrustPrompt } from "../helpers/terminalInput";
@@ -74,9 +73,7 @@ describe("opencode agent writes file (real CLI)", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
     testRepoPath = await createFixtureRepo("opencode-agent-writes-file-real-test");
     await importTestRepo(client, testRepoPath, "opencode-agent-writes-file-real-test");
   });
@@ -90,9 +87,12 @@ describe("opencode agent writes file (real CLI)", () => {
   });
 
   it("creates a task with OpenCode pickle that writes the expected file", async () => {
+    // The expected content goes last and carries no trailing punctuation: with
+    // "…exactly: OpenCode E2E content." the free model cannot tell the sentence
+    // period from the content, and drops it about half the time.
     const prompt = [
-      "Create a file called opencode-e2e-test-output.txt containing exactly: OpenCode E2E content.",
-      "Do not ask questions. Stop after writing the file.",
+      "Do not ask questions and stop after writing the file.",
+      "Create a file called opencode-e2e-test-output.txt containing exactly: OpenCode E2E content",
     ].join(" ");
     const worktreeBaseline = new Set(await readTaskWorktreeNames(testRepoPath));
 
@@ -117,6 +117,6 @@ describe("opencode agent writes file (real CLI)", () => {
         `diagnostics=${JSON.stringify(diagnostics)}`,
       );
     }
-    expect((await readFile(filePath, "utf8")).trimEnd()).toBe("OpenCode E2E content.");
+    expect((await readFile(filePath, "utf8")).trimEnd()).toBe("OpenCode E2E content");
   }, 240_000);
 });

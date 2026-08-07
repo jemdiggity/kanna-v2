@@ -107,20 +107,35 @@ async function waitForPeer(
   throw new Error(`timed out waiting for peer ${peerId}`);
 }
 
+// The picker's mode, loading flag and peer list live inside useAppTaskTransfer,
+// not on App.vue's setup state, so reading them by name off `setupState` only
+// ever yields undefined. Observe the rendered picker instead: its title carries
+// the mode, and it swaps the loading/empty `.state-text` for `.peer-row`s once
+// discovery settles.
 async function waitForPairPickerReady(timeoutMs = 20_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let observed = "never sampled";
 
   while (Date.now() < deadline) {
-    const mode = await getVueState(primary, "peerPickerMode");
-    const visible = await getVueState(primary, "showPeerPicker");
-    const loading = await getVueState(primary, "transferPeersLoading");
-    if (mode === "pair" && visible === true && loading === false) {
+    const picker = await primary.executeSync<{
+      open: boolean;
+      stateText: string | null;
+      peerCount: number;
+    }>(
+      `const card = Array.from(document.querySelectorAll(".modal-overlay .modal-card"))
+         .find((node) => node.querySelector(".title")?.textContent?.trim() === "Pair Machine");
+       return {
+         open: Boolean(card),
+         stateText: card?.querySelector(".state-text")?.textContent?.trim() ?? null,
+         peerCount: card ? card.querySelectorAll(".peer-row").length : 0,
+       };`,
+    );
+    if (picker.open && picker.stateText === null && picker.peerCount > 0) {
       return;
     }
     // Three separate conditions fail this wait; without the last sample the
     // failure cannot be told apart from a picker that never opened.
-    observed = `mode=${String(mode)} visible=${String(visible)} loading=${String(loading)}`;
+    observed = `open=${String(picker.open)} stateText=${String(picker.stateText)} peers=${picker.peerCount}`;
     await sleep(250);
   }
 

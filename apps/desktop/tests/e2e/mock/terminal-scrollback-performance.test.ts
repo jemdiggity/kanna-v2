@@ -2,7 +2,6 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo, cleanupWorktrees } from "../helpers/reset";
-import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { appendE2ePerfSummaryLine } from "../helpers/perfOutput";
 import { tauriInvoke } from "../helpers/vue";
@@ -27,9 +26,7 @@ describe("terminal scrollback performance (real PTY)", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
     testRepoPath = await createFixtureRepo("scrollback-perf-test");
     repoId = await importTestRepo(client, testRepoPath, "scrollback-perf-test");
   });

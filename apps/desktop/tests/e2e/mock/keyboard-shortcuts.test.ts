@@ -3,7 +3,6 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { buildGlobalKeydownScript } from "../helpers/keyboard";
 import { WebDriverClient } from "../helpers/webdriver";
 import { resetDatabase, importTestRepo } from "../helpers/reset";
-import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { execDb, getVueState } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 const CTX_SCRIPT = 'window.__KANNA_E2E__.setupState';
@@ -34,9 +33,7 @@ describe("keyboard shortcuts", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
     fixtureRepoRoot = await createFixtureRepo("keyboard-test");
     testRepoPath = fixtureRepoRoot;
     secondFixtureRepoRoot = await createFixtureRepo("keyboard-test-secondary");
@@ -243,9 +240,7 @@ describe("keyboard shortcuts", () => {
 
   it("uses shortcuts to navigate tasks and repos while preserving back-forward history", async () => {
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
 
     const repoOneId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-history-one");
     const repoTwoId = await importRepoWithoutSetupTask(secondTestRepoPath, "keyboard-history-two");
@@ -361,9 +356,7 @@ describe("keyboard shortcuts", () => {
 
   it("uses native task-navigation events to navigate tasks", async () => {
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
 
     const repoId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-actions");
     repoImported = true;
@@ -416,9 +409,7 @@ describe("keyboard shortcuts", () => {
 
   it("uses the rendered sidebar order for task navigation", async () => {
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
 
     const repoId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-visual-order");
     repoImported = true;
@@ -476,9 +467,7 @@ describe("keyboard shortcuts", () => {
 
   it("task shortcuts traverse local repo boundaries in sidebar order", async () => {
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
 
     const repoOneId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-cross-repo-one");
     const repoTwoId = await importRepoWithoutSetupTask(secondTestRepoPath, "keyboard-cross-repo-two");
@@ -519,9 +508,7 @@ describe("keyboard shortcuts", () => {
 
   it("scrolls the real sidebar scroller when keyboard navigation selects an offscreen task", async () => {
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
 
     const repoId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-sidebar-scroll");
     repoImported = true;
@@ -585,9 +572,7 @@ describe("keyboard shortcuts", () => {
 
   it("routes Cmd+S for a reachable remote task through the owning peer action", async () => {
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
 
     const remoteRepoId = "cloud:keyboard-remote-repo";
     const remoteTaskId = "cloud:lan:peer-owner:keyboard-remote-repo:task-remote";
@@ -672,9 +657,7 @@ describe("keyboard shortcuts", () => {
 
   it("keeps a cloud-only main-panel selection through a local snapshot refresh", async () => {
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
 
     const localRepoId = await importRepoWithoutSetupTask(testRepoPath, "cloud-refresh-local-fallback");
     repoImported = true;
@@ -823,9 +806,7 @@ describe("keyboard shortcuts", () => {
 
   it("uses native repo-navigation events to navigate repos", async () => {
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
 
     const repoOneId = await importRepoWithoutSetupTask(testRepoPath, "native-repo-actions-one");
     const repoTwoId = await importRepoWithoutSetupTask(secondTestRepoPath, "native-repo-actions-two");
@@ -880,9 +861,7 @@ describe("keyboard shortcuts", () => {
     await waitForSelection({ repoId: repoTwoId, itemId: repoTwoTaskId });
 
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
     repoImported = false;
   });
 
@@ -992,9 +971,7 @@ describe("keyboard shortcuts", () => {
 
   it("keeps unshifted activity shortcuts local and searches all visible local repos when shifted", async () => {
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
 
     const repoOneId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-activity-local-one");
     const repoTwoId = await importRepoWithoutSetupTask(secondTestRepoPath, "keyboard-activity-local-two");
@@ -1048,9 +1025,7 @@ describe("keyboard shortcuts", () => {
 
   it("keeps unshifted activity shortcuts in the selected cloud repo and searches all visible repos when shifted", async () => {
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
 
     const localRepoId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-activity-remote-local");
     repoImported = true;
@@ -1212,9 +1187,7 @@ describe("keyboard shortcuts", () => {
 
   it("unread shortcuts fall back to the oldest read task in their scope when no unread tasks exist", async () => {
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
 
     const repoOneId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-read-fallback-one");
     const repoTwoId = await importRepoWithoutSetupTask(secondTestRepoPath, "keyboard-read-fallback-two");

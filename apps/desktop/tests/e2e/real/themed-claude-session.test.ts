@@ -2,7 +2,6 @@ import { mkdir } from "node:fs/promises";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
-import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { waitForTaskCreated } from "../helpers/taskCreation";
 import { callVueMethod } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
@@ -14,9 +13,7 @@ describe("themed Claude session (real CLI)", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
     testRepoPath = await createFixtureRepo("themed-claude-session-real-test");
     await mkdir(`${testRepoPath}/.kanna`, { recursive: true });
     await importTestRepo(client, testRepoPath, "themed-claude-session-real-test");

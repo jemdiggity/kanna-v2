@@ -117,9 +117,7 @@ describe("PTY runtime status over KSP", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
 
     repoPath = await createFixtureRepo("pty-runtime-status");
     repoId = await importTestRepo(client, repoPath, "pty-runtime-status");

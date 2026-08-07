@@ -235,9 +235,7 @@ describe("new window", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
     fixtureRepoRoot = await createFixtureRepo("new-window-test");
     testRepoPath = fixtureRepoRoot;
   });
@@ -504,9 +502,7 @@ describe("new window", () => {
 
     expect(await readWorkspaceWindowIds(client)).toEqual([]);
 
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
   });
 
   it("closes the source window while keeping the secondary window alive", async () => {
