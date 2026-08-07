@@ -93,16 +93,12 @@ describe("local transfer refuses to ship a session it cannot carry", () => {
   }, 240_000);
 
   afterAll(async () => {
-    const acquired = (await queryDb(
-      secondary,
-      "SELECT path FROM repo WHERE path LIKE ?",
-      [`${homedir()}/.kanna/repos/local-transfer-missing-session-state%`],
-    ).catch(() => [])) as Array<{ path: string }>;
     await cleanupWorktrees(primary, testRepoPath).catch(() => undefined);
     await cleanupWorktrees(secondary, testRepoPath).catch(() => undefined);
-    await cleanupFixtureRepos([testRepoPath, ...acquired.map((repo) => repo.path)]).catch(
-      () => undefined,
-    );
+    // Only the fixture repo is removed here. The clone the destination acquires
+    // lands in the operator's real `~/.kanna/repos`, outside every E2E-owned
+    // fixture base, so `cleanupFixtureRepos` refuses it by design.
+    await cleanupFixtureRepos([testRepoPath].filter(Boolean)).catch(() => undefined);
     await primary.deleteSession().catch(() => undefined);
     await secondary.deleteSession().catch(() => undefined);
   });

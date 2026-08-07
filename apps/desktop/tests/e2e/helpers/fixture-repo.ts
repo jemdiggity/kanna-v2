@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { cp, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -37,6 +37,18 @@ const DEFAULT_SEED_FIXTURE_ROOT = resolve(
 );
 
 const DEFAULT_FIXTURE_NAME = "generic-kanna-like";
+
+const FIXTURE_TEMP_DIR_PREFIX = "fixture-";
+const DEFAULT_FIXTURE_TEMP_ROOT = join(tmpdir(), "kanna-e2e-fixtures");
+
+/**
+ * The exact `fixture-XXXX` directories this process created with `mkdtemp`,
+ * recorded only once that call succeeded. Ownership is the directory itself —
+ * not the base it sits in and not its name — because a temp base is shared:
+ * another process (or an abandoned run) can leave a `fixture-XXXX` lookalike
+ * there, and nothing about its path distinguishes it from ours.
+ */
+const ownedFixtureDirs = new Set<string>();
 
 function sanitizeRepoName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_-]/g, "-");
@@ -103,6 +115,74 @@ export function assertSafeE2eRepoPath(
   );
 }
 
+function owningFixtureDir(resolvedPath: string): string | null {
+  for (const ownedFixtureDir of ownedFixtureDirs) {
+    if (isWithinPath(resolvedPath, ownedFixtureDir)) return ownedFixtureDir;
+  }
+
+  return null;
+}
+
+/**
+ * Guards the only destructive operation in the E2E fixture helpers, and names
+ * what gets removed: the `mkdtemp` directory that owns the fixture, which holds
+ * the fixture repo and its bare origin and nothing else.
+ *
+ * A bare `vitest run` from `apps/desktop` collects `tests/e2e/real/**` (the
+ * package's `test` script scopes to `src`, a bare invocation does not). Those
+ * suites cannot reach an app, so their `beforeAll` fails before assigning a
+ * fixture path — and the cleanup hook still ran with `""`. `resolve("")` is the
+ * cwd, so the recursive remove deleted the whole `apps/desktop` tree
+ * (2026-08-06). Removal is now confined to directories this process created and
+ * recorded; anything else — a `fixture-XXXX` lookalike another run left in the
+ * shared temp base included — throws instead of falling through to `rm`.
+ */
+function ownedFixtureRemovalTarget(candidatePath: string): string {
+  if (typeof candidatePath !== "string" || candidatePath.trim().length === 0) {
+    throw new Error(
+      "refusing to remove an empty fixture path — the fixture was never created (its setup most likely failed before assigning a path)",
+    );
+  }
+
+  if (!isAbsolute(candidatePath)) {
+    throw new Error(`refusing to remove a relative fixture path: ${candidatePath}`);
+  }
+
+  const resolvedPath = resolve(candidatePath);
+  assertSafeE2eRepoPath(resolvedPath);
+
+  const containedPaths: Array<[string, string]> = [
+    ["the working directory", process.cwd()],
+    ["the live Kanna checkout", getLiveRepoRoot()],
+  ];
+  for (const [label, containedPath] of containedPaths) {
+    if (isWithinPath(containedPath, resolvedPath)) {
+      throw new Error(
+        `refusing to remove ${resolvedPath}: it contains ${label} (${containedPath})`,
+      );
+    }
+  }
+
+  const ownedFixtureDir = owningFixtureDir(resolvedPath);
+  if (ownedFixtureDir) return ownedFixtureDir;
+
+  throw new Error(
+    `refusing to remove ${resolvedPath}: it is not inside a fixture directory this process created (${ownedFixtureDirs.size} recorded)`,
+  );
+}
+
+export function assertRemovableFixturePath(candidatePath: string): void {
+  ownedFixtureRemovalTarget(candidatePath);
+}
+
+async function registerOwnedFixtureDir(tempDir: string): Promise<void> {
+  const resolvedTempDir = resolve(tempDir);
+  ownedFixtureDirs.add(resolvedTempDir);
+  // The macOS temp dir is a symlink (/var/folders → /private/var/folders), so a
+  // caller handing back a canonicalized path must still match what we created.
+  ownedFixtureDirs.add(await realpath(resolvedTempDir).catch(() => resolvedTempDir));
+}
+
 async function materializeSeedFixtureRepo(input: {
   destinationName: string;
   fixtureName: string;
@@ -113,9 +193,11 @@ async function materializeSeedFixtureRepo(input: {
   const sourceFixturePath = join(fixtureRoot, input.fixtureName);
   const tempRoot = input.tempRoot;
   await mkdir(tempRoot, { recursive: true });
-  const tempDir = await mkdtemp(join(tempRoot, "fixture-"));
-  const fixtureRepoPath = join(tempDir, sanitizeRepoName(input.destinationName));
-  const originPath = join(tempDir, `${sanitizeRepoName(input.destinationName)}-origin.git`);
+  const tempDir = await mkdtemp(join(tempRoot, FIXTURE_TEMP_DIR_PREFIX));
+  await registerOwnedFixtureDir(tempDir);
+  const repoName = sanitizeRepoName(input.destinationName);
+  const fixtureRepoPath = join(tempDir, repoName);
+  const originPath = join(tempDir, `${repoName}-origin.git`);
 
   await cp(sourceFixturePath, fixtureRepoPath, { recursive: true });
 
@@ -141,7 +223,7 @@ export async function createFixtureRepo(
     destinationName: name,
     fixtureName: options.fixtureName ?? DEFAULT_FIXTURE_NAME,
     fixtureRoot: DEFAULT_SEED_FIXTURE_ROOT,
-    tempRoot: options.tempRoot ?? join(tmpdir(), "kanna-e2e-fixtures"),
+    tempRoot: options.tempRoot ?? DEFAULT_FIXTURE_TEMP_ROOT,
   });
 }
 
@@ -153,19 +235,33 @@ export async function createSeedFixtureRepo(
     destinationName: fixtureName,
     fixtureName,
     fixtureRoot: options.fixtureRoot ?? DEFAULT_SEED_FIXTURE_ROOT,
-    tempRoot: options.tempRoot ?? join(tmpdir(), "kanna-e2e-fixtures"),
+    tempRoot: options.tempRoot ?? DEFAULT_FIXTURE_TEMP_ROOT,
   });
 }
 
 export async function cleanupFixtureRepos(repoPaths: string[]): Promise<void> {
+  const targets: string[] = [];
+  const refusals: string[] = [];
   for (const repoPath of repoPaths) {
-    const resolvedRepoPath = resolve(repoPath);
-    const parentDir = dirname(resolvedRepoPath);
-    if (basename(parentDir).startsWith("fixture-")) {
-      await rm(parentDir, RM_RETRY_OPTIONS);
-      continue;
+    try {
+      // Removing the owning directory takes the fixture repo and its bare
+      // origin together, which is what every caller means by cleanup.
+      targets.push(ownedFixtureRemovalTarget(repoPath));
+    } catch (error) {
+      refusals.push(error instanceof Error ? error.message : String(error));
     }
+  }
 
-    await rm(resolvedRepoPath, RM_RETRY_OPTIONS);
+  // Removals happen only after every path has cleared the guard, so one bad
+  // entry cannot take a directory with it — but the good entries still get
+  // cleaned before the refusal surfaces.
+  for (const target of targets) {
+    await rm(target, RM_RETRY_OPTIONS);
+  }
+
+  if (refusals.length > 0) {
+    throw new Error(
+      `cleanupFixtureRepos refused ${refusals.length} unsafe path(s):\n${refusals.join("\n")}`,
+    );
   }
 }

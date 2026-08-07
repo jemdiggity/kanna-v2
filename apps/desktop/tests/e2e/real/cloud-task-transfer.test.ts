@@ -51,7 +51,6 @@ let testRepoPath = "";
 let primaryRepoId = "";
 let secondaryRepoId = "";
 const fixtureRepoPaths = new Set<string>();
-const acquiredRepoPaths = new Set<string>();
 
 async function setSetupState(client: typeof primary, key: string, value: unknown): Promise<void> {
   await client.executeSync(`
@@ -464,17 +463,14 @@ describe("cloud task ownership transfer", () => {
   }, 240_000);
 
   afterAll(async () => {
-    const acquiredRows = await queryDb(
-      secondary,
-      "SELECT path FROM repo WHERE path LIKE ?",
-      [`${homedir()}/.kanna/repos/cloud-task-transfer-%`],
-    ).catch(() => []) as Array<{ path: string }>;
-    for (const row of acquiredRows) acquiredRepoPaths.add(row.path);
     await resetDatabase(primary).catch(() => undefined);
     await resetDatabase(secondary).catch(() => undefined);
     await cleanupWorktrees(primary, testRepoPath).catch(() => undefined);
     await cleanupWorktrees(secondary, testRepoPath).catch(() => undefined);
-    await cleanupFixtureRepos([...fixtureRepoPaths, ...acquiredRepoPaths]).catch(() => undefined);
+    // Only fixture repos are removed here. The clones the destination acquires
+    // land in the operator's real `~/.kanna/repos`, outside every E2E-owned
+    // fixture base, so `cleanupFixtureRepos` refuses them by design.
+    await cleanupFixtureRepos([...fixtureRepoPaths]).catch(() => undefined);
     await primary.deleteSession().catch(() => undefined);
     await secondary.deleteSession().catch(() => undefined);
   });
@@ -581,7 +577,6 @@ describe("cloud task ownership transfer", () => {
 
     const { destinationTask, outgoing } = await pushAndAssertCloudOwnershipTransfer(source, prompt);
     const importedRepo = await waitForRepoForTask(secondary, destinationTask.id);
-    acquiredRepoPaths.add(importedRepo.path);
     expect(importedRepo.path).not.toBe(repoPath);
     expect(importedRepo.path).toContain(`${homedir()}/.kanna/repos/${repoName}`);
 
@@ -610,7 +605,6 @@ describe("cloud task ownership transfer", () => {
 
     const { destinationTask, outgoing } = await pushAndAssertCloudOwnershipTransfer(source, prompt);
     const importedRepo = await waitForRepoForTask(secondary, destinationTask.id);
-    acquiredRepoPaths.add(importedRepo.path);
     expect(importedRepo.path).not.toBe(repoPath);
     expect(importedRepo.path).toContain(`${homedir()}/.kanna/repos/${repoName}`);
 
