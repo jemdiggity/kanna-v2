@@ -464,7 +464,16 @@ pub fn resume_survives_existing_destination(
     let Some(decisive) = decisive else {
         return false;
     };
-    if decisive.kind != TransferArtifactKind::SessionArchive {
+    // A transcript is a file this machine did not have; the receiver derives
+    // its own destination for it, so an occupied one says nothing about whether
+    // the conversation crossed.
+    //
+    // A session *archive* and an OpenCode *export* both land somewhere the
+    // receiver may already own — `~/.claude/tasks/<id>`, and an id in OpenCode's
+    // shared store — and an untouched destination there means the conversation
+    // did not cross. Resuming anyway would attach this task to whatever was
+    // already there.
+    if decisive.kind == TransferArtifactKind::SessionTranscript {
         return true;
     }
     materialized
@@ -596,46 +605,121 @@ mod tests {
         }
     }
 
+    /// Points the provider-executable lookup at a stub `opencode`, so a test
+    /// asserts what the plan does rather than whatever CLI the host happens to
+    /// have. Serialized on the crate's env guard, because the lookup path is
+    /// process-global.
+    struct StubOpencode {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl StubOpencode {
+        fn responding(script_body: &str) -> Self {
+            let guard = crate::test_sidecar_guard();
+            let dir = tempfile::tempdir().expect("stub dir");
+            let stub = dir.path().join("opencode");
+            std::fs::write(&stub, format!("#!/bin/sh\n{script_body}\n")).expect("write stub");
+            std::fs::set_permissions(
+                &stub,
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+            )
+            .expect("chmod stub");
+            unsafe {
+                std::env::set_var("KANNA_TEST_PROVIDER_LOOKUP_PATH", dir.path());
+            }
+            Self {
+                _guard: guard,
+                _dir: dir,
+            }
+        }
+    }
+
+    impl Drop for StubOpencode {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("KANNA_TEST_PROVIDER_LOOKUP_PATH");
+            }
+        }
+    }
+
     /// OpenCode is the one provider whose session id the task row cannot carry:
     /// `opencode run` never assigns or reports one, so `agent_session_id` is
     /// null for a task with a perfectly good conversation to ship. The plan has
     /// to reach the CLI rather than the row — and it must not short-circuit on
     /// the null id the way every other provider does.
+    ///
+    /// Asserted against a stub rather than the host's CLI. The previous version
+    /// of this test accepted both its `Ok` and `Err` arms, so a discovery that
+    /// stopped reaching the CLI at all would still have passed it.
     #[test]
     fn an_opencode_plan_is_reached_without_a_session_id_on_the_task_row() {
         let home = tempfile::tempdir().expect("home");
         let worktree = home.path().join("worktree");
         std::fs::create_dir_all(&worktree).expect("worktree");
+        let resolved = worktree.canonicalize().expect("resolved worktree");
+        let session_id = "ses_02645d9aaffeeOgwt2rbXIcTdp";
+        let _stub = StubOpencode::responding(&format!(
+            r#"printf '[{{"id":"{session_id}","directory":"{}","updated":2}}]'"#,
+            resolved.display(),
+        ));
 
-        // With no `opencode` on PATH the lookup fails loudly rather than
-        // reporting "no conversation" — a broken CLI is not an absent session,
-        // which is the distinction the transcript loss turned on.
-        let outcome = plan_session_artifacts(
+        let plan = plan_session_artifacts(
             home.path(),
             None,
             Some("opencode"),
             Some("pty"),
             Some(&worktree),
             "task-1",
-        );
-        match outcome {
-            // Either the CLI is absent (this machine) or it answered; both
-            // prove the null id did not stop the plan from being attempted.
-            Err(missing) => assert!(
-                missing.0.contains("opencode"),
-                "expected the failure to name the CLI: {}",
-                missing.0
-            ),
-            Ok(plan) => {
-                if let Some(plan) = plan {
-                    assert_eq!(plan.provider, "opencode");
-                    assert!(plan.opencode_export.is_some());
-                    assert!(super::super::payload::is_opencode_session_id(
-                        &plan.session_id
-                    ));
-                }
-            }
-        }
+        )
+        .expect("the null task-row id must not stop the lookup")
+        .expect("the stub reported a session for this worktree");
+        assert_eq!(plan.provider, "opencode");
+        assert_eq!(plan.session_id, session_id);
+        assert_eq!(plan.opencode_export.as_deref(), Some(worktree.as_path()));
+    }
+
+    /// A CLI that cannot be reached is not a conversation that does not exist.
+    /// Reporting "nothing to ship" here is the shape that lost 2.1 MB of Claude
+    /// transcript, so a failing lookup fails the plan.
+    #[test]
+    fn a_failing_opencode_lookup_fails_the_plan_rather_than_reporting_no_session() {
+        let home = tempfile::tempdir().expect("home");
+        let worktree = home.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let _stub = StubOpencode::responding("echo 'store is locked' >&2; exit 1");
+
+        let error = plan_session_artifacts(
+            home.path(),
+            None,
+            Some("opencode"),
+            Some("pty"),
+            Some(&worktree),
+            "task-1",
+        )
+        .expect_err("a broken CLI was reported as an absent session");
+        assert!(error.0.contains("opencode"), "{}", error.0);
+    }
+
+    /// A worktree OpenCode has never seen genuinely has nothing to ship — the
+    /// agent never got a turn in — and that is not a failure.
+    #[test]
+    fn an_opencode_worktree_with_no_session_plans_nothing() {
+        let home = tempfile::tempdir().expect("home");
+        let worktree = home.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let _stub = StubOpencode::responding("printf '[]'");
+
+        let plan = plan_session_artifacts(
+            home.path(),
+            None,
+            Some("opencode"),
+            Some("pty"),
+            Some(&worktree),
+            "task-1",
+        )
+        .expect("an empty listing is an absence, not a failure");
+        assert!(plan.is_none());
     }
 
     /// The export is the whole artifact list — there is no file to copy and no
@@ -693,9 +777,23 @@ mod tests {
         assert!(resume_survives_existing_destination(
             &[
                 artifact(TransferArtifactKind::SessionArchive, "archive"),
-                export,
+                export.clone(),
             ],
             &[("archive".to_string(), false), ("export".to_string(), true)],
+        ));
+
+        // An export that did not land is a destination this machine already
+        // owns. `opencode import` does not replace a session id it holds — it
+        // re-keys the existing one — so resuming anyway would attach this task
+        // to an unrelated local conversation and drop the shipped one.
+        assert!(!resume_survives_existing_destination(
+            std::slice::from_ref(&export),
+            &[("export".to_string(), false)],
+        ));
+        // And an export nobody reported on is not evidence that it landed.
+        assert!(!resume_survives_existing_destination(
+            std::slice::from_ref(&export),
+            &[],
         ));
     }
 

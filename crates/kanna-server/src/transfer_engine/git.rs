@@ -447,8 +447,19 @@ mod tests {
 /// peer's payload on the import side, and the same discipline the git helpers
 /// use applies here. `session list` and `export` are project-scoped, so `cwd`
 /// is load-bearing rather than incidental.
+///
+/// The binary is resolved to an absolute path rather than execed by bare name.
+/// Upstream this ran through the Tauri `run_script` command, which execs
+/// `$SHELL -l -c` and so sees the user's profile PATH; `kanna-server` is spawned
+/// with no PATH injected at all, and `opencode` lives in `~/.opencode/bin`,
+/// `~/.bun/bin` or Homebrew — none of them on the launchd default PATH. Without
+/// this, every OpenCode transfer fails on a packaged, Finder-launched Kanna and
+/// works on the terminal-launched one the tests run in.
 fn opencode(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("opencode")
+    let executable = crate::task_creator::resolve_agent_executable(
+        kanna_agent_protocol::AgentProvider::Opencode,
+    )?;
+    let output = Command::new(&executable)
         .args(args)
         .current_dir(cwd)
         // The server inherits the spawning instance's worktree-scoped
@@ -559,17 +570,363 @@ pub fn import_opencode_session(
     export_path: &Path,
     session_id: &str,
     destination_worktree: &Path,
-) -> Result<(), String> {
+) -> Result<(), OpencodeImportError> {
     if !super::payload::is_opencode_session_id(session_id) {
-        return Err(format!(
+        return Err(OpencodeImportError::Refused(format!(
             "incoming transfer resume id is not an OpenCode session id: {session_id}"
+        )));
+    }
+
+    // The id Kanna will resume with has to be the id this export actually
+    // carries. `opencode import` ignores the id it is asked about and takes the
+    // session id from `info.id` inside the peer-supplied bytes, so without this
+    // a payload can promise one session and install another — the destination
+    // then spawns `--session <promised>` against a session that does not exist,
+    // which is the silent-conversation-loss shape the artifact contract exists
+    // to stop. Every other provider gets this binding structurally from the
+    // filename; OpenCode's filename is a constant, so it is checked here.
+    let exported_id =
+        read_opencode_export_session_id(export_path).map_err(OpencodeImportError::Refused)?;
+    if exported_id != session_id {
+        return Err(OpencodeImportError::Refused(format!(
+            "OpenCode export carries session {exported_id} but the transfer promised {session_id}"
+        )));
+    }
+
+    // The directory has to exist before either CLI call: both run *in* it.
+    std::fs::create_dir_all(destination_worktree).map_err(|error| {
+        OpencodeImportError::Unavailable(format!(
+            "failed to create the destination worktree for an OpenCode import: {error}"
+        ))
+    })?;
+
+    // `opencode import` does not replace a session id it already holds — it
+    // re-keys the *existing* session's directory to the import cwd. On a
+    // collision that would yank one of this operator's own conversations out of
+    // its worktree, breaking that task's resume, and splice this task onto an
+    // unrelated conversation while the shipped one is dropped. Every other
+    // artifact leaves a pre-existing destination untouched; so does this one.
+    if local_opencode_session_exists(destination_worktree, session_id)? {
+        return Err(OpencodeImportError::DestinationExists(
+            session_id.to_string(),
         ));
     }
-    std::fs::create_dir_all(destination_worktree).map_err(|error| {
-        format!("failed to create the destination worktree for an OpenCode import: {error}")
+
+    let export_path = export_path.to_str().ok_or_else(|| {
+        OpencodeImportError::Refused("OpenCode export path is not valid unicode".to_string())
     })?;
-    let export_path = export_path
-        .to_str()
-        .ok_or_else(|| "OpenCode export path is not valid unicode".to_string())?;
-    opencode(destination_worktree, &["import", export_path]).map(|_| ())
+    opencode(destination_worktree, &["import", export_path])
+        .map(|_| ())
+        .map_err(OpencodeImportError::Unavailable)
+}
+
+/// Why an OpenCode import did not happen.
+///
+/// The split is what the transfer's failure handling keys on. A refusal is a
+/// statement about the payload and will say the same thing on every retry; an
+/// `Unavailable` is the CLI or the machine, and OpenCode's store is one shared
+/// SQLite file that many agents write — `opencode import` exits non-zero when
+/// another process holds the write lock. Failing a transfer permanently for
+/// that, after finalization has already signalled the source agent, throws away
+/// a conversation over a lock that clears in seconds.
+#[derive(Debug)]
+pub enum OpencodeImportError {
+    /// The payload is wrong and will still be wrong next time.
+    Refused(String),
+    /// This machine already owns a session with that id.
+    DestinationExists(String),
+    /// The CLI could not run, or could not finish. Worth another attempt.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for OpencodeImportError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(message) | Self::Unavailable(message) => formatter.write_str(message),
+            Self::DestinationExists(session_id) => write!(
+                formatter,
+                "OpenCode session {session_id} already exists on this machine"
+            ),
+        }
+    }
+}
+
+/// The session id inside an export, which is the one `opencode import` will use.
+pub fn read_opencode_export_session_id(export_path: &Path) -> Result<String, String> {
+    let raw = std::fs::read(export_path)
+        .map_err(|error| format!("failed to read the OpenCode session export: {error}"))?;
+    let export: serde_json::Value = serde_json::from_slice(&raw)
+        .map_err(|error| format!("OpenCode session export is not valid JSON: {error}"))?;
+    let session_id = export
+        .get("info")
+        .and_then(|info| info.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "OpenCode session export has no info.id".to_string())?;
+    if !super::payload::is_opencode_session_id(session_id) {
+        return Err(format!(
+            "OpenCode session export carries an unrecognized session id: {session_id}"
+        ));
+    }
+    Ok(session_id.to_string())
+}
+
+/// Whether this machine's OpenCode store already holds a session.
+///
+/// `opencode export` resolves an id across every project — unlike `session
+/// list`, which only reports the project of the directory it runs in — so it is
+/// the probe that matches how `import` finds an id. "Session not found" is the
+/// answer this is asking for; any other failure is the CLI being unavailable,
+/// and is reported rather than mistaken for an absent session.
+fn local_opencode_session_exists(
+    cwd: &Path,
+    session_id: &str,
+) -> Result<bool, OpencodeImportError> {
+    match opencode(cwd, &["export", session_id]) {
+        Ok(_) => Ok(true),
+        Err(message) if message.to_lowercase().contains("not found") => Ok(false),
+        Err(message) => Err(OpencodeImportError::Unavailable(message)),
+    }
+}
+
+#[cfg(test)]
+mod opencode_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const SESSION_ID: &str = "ses_02645d9aaffeeOgwt2rbXIcTdp";
+
+    /// Points the provider-executable lookup at a stub `opencode`. The lookup
+    /// path is process-global, so this holds the crate's env guard.
+    struct StubOpencode {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        dir: tempfile::TempDir,
+    }
+
+    impl StubOpencode {
+        fn responding(script_body: &str) -> Self {
+            let guard = crate::test_sidecar_guard();
+            let dir = tempfile::tempdir().expect("stub dir");
+            let stub = dir.path().join("opencode");
+            std::fs::write(&stub, format!("#!/bin/sh\n{script_body}\n")).expect("write stub");
+            std::fs::set_permissions(
+                &stub,
+                <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+            )
+            .expect("chmod stub");
+            unsafe {
+                std::env::set_var("KANNA_TEST_PROVIDER_LOOKUP_PATH", dir.path());
+            }
+            Self { _guard: guard, dir }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            std::fs::read_to_string(self.dir.path().join("calls"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    impl Drop for StubOpencode {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("KANNA_TEST_PROVIDER_LOOKUP_PATH");
+            }
+        }
+    }
+
+    fn write_export(dir: &Path, session_id: &str) -> PathBuf {
+        let path = dir.join("export.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({ "info": { "id": session_id }, "messages": [] }).to_string(),
+        )
+        .expect("write export");
+        path
+    }
+
+    /// The CLI is resolved to an absolute path, not execed by bare name.
+    ///
+    /// Upstream these commands ran through the Tauri `run_script` command,
+    /// which execs `$SHELL -l -c` and so sees the user's profile PATH.
+    /// `kanna-server` is spawned with no PATH injected, and `opencode` lives in
+    /// `~/.opencode/bin`, `~/.bun/bin` or Homebrew — none of them on the
+    /// launchd default PATH a Finder-launched Kanna inherits. The stub below is
+    /// reachable *only* through the provider resolver: its directory is not on
+    /// this process's PATH, so a bare-name exec would miss it (and silently run
+    /// the host's own CLI instead).
+    #[test]
+    fn the_opencode_binary_is_resolved_rather_than_execed_by_bare_name() {
+        let stub = StubOpencode::responding(r#"printf '%s\n' "$*" >> "$(dirname "$0")/calls""#);
+        assert!(
+            !std::env::var("PATH")
+                .unwrap_or_default()
+                .split(':')
+                .any(|entry| Path::new(entry) == stub.dir.path()),
+            "the stub must not be reachable without the resolver",
+        );
+        let temp = tempfile::tempdir().expect("temp");
+
+        opencode(temp.path(), &["session", "list"]).expect("the resolver found the stub");
+
+        assert_eq!(stub.calls(), vec!["session list".to_string()]);
+    }
+
+    /// The id Kanna resumes with has to be the id the export actually carries.
+    /// `opencode import` ignores the id it is asked about and takes `info.id`
+    /// from the peer-supplied bytes, so a payload could otherwise promise one
+    /// session and install another — leaving the destination spawned with
+    /// `--session <promised>` against a session that does not exist.
+    #[test]
+    fn an_export_whose_session_id_is_not_the_promised_one_is_refused() {
+        let stub = StubOpencode::responding(r#"printf '%s\n' "$*" >> "$(dirname "$0")/calls""#);
+        let temp = tempfile::tempdir().expect("temp");
+        let export = write_export(temp.path(), "ses_0299051920000tGF3K0qC5s5G9a");
+
+        let error = import_opencode_session(&export, SESSION_ID, &temp.path().join("worktree"))
+            .expect_err("a mismatched export was imported");
+        assert!(
+            matches!(error, OpencodeImportError::Refused(_)),
+            "{error:?}",
+        );
+        assert!(error.to_string().contains("promised"), "{error}");
+        assert!(
+            stub.calls().iter().all(|call| !call.starts_with("import")),
+            "the import ran anyway: {:?}",
+            stub.calls(),
+        );
+    }
+
+    /// A session id this machine already holds is a destination it owns. Every
+    /// other artifact leaves an occupied destination untouched; so does this
+    /// one, because `opencode import` would re-key the *existing* session out
+    /// of its own worktree rather than replace it.
+    #[test]
+    fn an_id_this_machine_already_holds_is_never_imported_over() {
+        let stub = StubOpencode::responding(
+            r#"printf '%s\n' "$*" >> "$(dirname "$0")/calls"
+case "$1" in
+  export) printf '{"info":{"id":"%s"}}' "$2" ;;
+esac"#,
+        );
+        let temp = tempfile::tempdir().expect("temp");
+        let export = write_export(temp.path(), SESSION_ID);
+
+        let error = import_opencode_session(&export, SESSION_ID, &temp.path().join("worktree"))
+            .expect_err("an occupied destination was overwritten");
+        assert!(
+            matches!(error, OpencodeImportError::DestinationExists(_)),
+            "{error:?}",
+        );
+        assert!(
+            stub.calls().iter().all(|call| !call.starts_with("import")),
+            "the import ran over an existing session: {:?}",
+            stub.calls(),
+        );
+    }
+
+    /// The probe is `export`, which resolves an id across every project — the
+    /// way `import` finds one. "Session not found" is an absent session; any
+    /// other failure is the CLI being unavailable and must not be mistaken for
+    /// one, or a transient outage would silently skip the import.
+    #[test]
+    fn an_absent_session_is_told_apart_from_a_cli_that_could_not_answer() {
+        let temp = tempfile::tempdir().expect("temp");
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+
+        {
+            let _stub = StubOpencode::responding(
+                r#"case "$1" in
+  export) echo "Error: Session not found: $2" >&2; exit 1 ;;
+  import) exit 0 ;;
+esac"#,
+            );
+            assert!(
+                !local_opencode_session_exists(&worktree, SESSION_ID).expect("probe answered"),
+                "a not-found session was reported as present",
+            );
+        }
+
+        let _stub =
+            StubOpencode::responding(r#"echo "SqliteError: database is locked" >&2; exit 1"#);
+        let error = local_opencode_session_exists(&worktree, SESSION_ID)
+            .expect_err("a locked store was reported as an absent session");
+        assert!(
+            matches!(error, OpencodeImportError::Unavailable(_)),
+            "{error:?}"
+        );
+    }
+
+    /// OpenCode's store is one shared SQLite file that many agents write, and
+    /// `import` exits non-zero while another holds the write lock. Failing the
+    /// transfer permanently for that — after finalization has already signalled
+    /// the source agent — throws a conversation away over a lock that clears in
+    /// seconds, so it is `Unavailable` and stays inside the retry budget.
+    #[test]
+    fn a_locked_store_is_unavailable_rather_than_a_refusal() {
+        let _stub = StubOpencode::responding(
+            r#"case "$1" in
+  export) echo "Error: Session not found: $2" >&2; exit 1 ;;
+  import) echo "SqliteError: database is locked" >&2; exit 1 ;;
+esac"#,
+        );
+        let temp = tempfile::tempdir().expect("temp");
+        let export = write_export(temp.path(), SESSION_ID);
+
+        let error = import_opencode_session(&export, SESSION_ID, &temp.path().join("worktree"))
+            .expect_err("a locked store reported success");
+        assert!(
+            matches!(error, OpencodeImportError::Unavailable(_)),
+            "{error:?}",
+        );
+    }
+
+    #[test]
+    fn a_clean_import_runs_in_the_destination_worktree() {
+        let stub = StubOpencode::responding(
+            r#"printf '%s\n' "$PWD|$*" >> "$(dirname "$0")/calls"
+case "$1" in
+  export) echo "Error: Session not found: $2" >&2; exit 1 ;;
+esac"#,
+        );
+        let temp = tempfile::tempdir().expect("temp");
+        let export = write_export(temp.path(), SESSION_ID);
+        let worktree = temp.path().join("worktree");
+
+        import_opencode_session(&export, SESSION_ID, &worktree).expect("import");
+
+        let resolved = worktree.canonicalize().expect("resolved worktree");
+        let import_call = stub
+            .calls()
+            .into_iter()
+            .find(|call| call.contains("|import "))
+            .expect("the import ran");
+        // Running anywhere else makes `opencode run --session <id>` a silent
+        // no-op, because OpenCode resumes by matching the recorded directory.
+        assert!(
+            import_call.starts_with(&format!("{}|", resolved.display())),
+            "{import_call}",
+        );
+    }
+
+    /// A shape check the payload validator already applies, repeated here
+    /// because this function is also reachable from a persisted payload.
+    #[test]
+    fn an_export_without_a_usable_session_id_is_refused() {
+        let temp = tempfile::tempdir().expect("temp");
+        for body in [
+            serde_json::json!({ "messages": [] }),
+            serde_json::json!({ "info": {} }),
+            serde_json::json!({ "info": { "id": "not-a-session-id" } }),
+        ] {
+            let path = temp.path().join("export.json");
+            std::fs::write(&path, body.to_string()).expect("write export");
+            assert!(
+                read_opencode_export_session_id(&path).is_err(),
+                "{body} was accepted",
+            );
+        }
+    }
 }

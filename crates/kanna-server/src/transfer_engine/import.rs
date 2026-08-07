@@ -564,12 +564,39 @@ async fn materialize_resume_state(
                 resume_session_id.clone(),
                 destination_worktree.to_path_buf(),
             );
-            super::run_blocking("transfer opencode import", move || {
-                super::git::import_opencode_session(&source_path, &session_id, &worktree)
+            let imported = super::run_blocking("transfer opencode import", move || {
+                Ok(super::git::import_opencode_session(
+                    &source_path,
+                    &session_id,
+                    &worktree,
+                ))
             })
-            .await
-            .map_err(ImportFailure::Terminal)?;
-            materialized.push((artifact.artifact_id.clone(), true));
+            .await?;
+            match imported {
+                Ok(()) => materialized.push((artifact.artifact_id.clone(), true)),
+                // The receiver already owns this id. Reported like every other
+                // occupied destination — `wrote = false`, which abandons the
+                // resume rather than overwriting a conversation of the
+                // operator's own.
+                Err(super::git::OpencodeImportError::DestinationExists(session_id)) => {
+                    log::warn!(
+                        "skipping the transferred OpenCode session: {session_id} already exists here"
+                    );
+                    materialized.push((artifact.artifact_id.clone(), false));
+                }
+                // A payload this machine will refuse every time it looks.
+                Err(refused @ super::git::OpencodeImportError::Refused(_)) => {
+                    return Err(ImportFailure::Terminal(refused.to_string()));
+                }
+                // The CLI, not the payload — OpenCode's store is one shared
+                // SQLite file that many agents write, and `import` exits
+                // non-zero while another holds the write lock. Retrying is what
+                // keeps a lock that clears in seconds from permanently losing a
+                // conversation the source has already been signalled to give up.
+                Err(unavailable @ super::git::OpencodeImportError::Unavailable(_)) => {
+                    return Err(ImportFailure::Retry(unavailable.to_string()));
+                }
+            }
             continue;
         }
         // Extracting a gzipped session archive is unbounded blocking work, and

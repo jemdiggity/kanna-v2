@@ -600,6 +600,33 @@ pub async fn finalize(
     }
 }
 
+/// Refuses a payload that lost its session between the pre-signal plan and the
+/// post-signal one.
+///
+/// Discovery runs twice on purpose: a conversation is only complete once the
+/// agent has stopped writing to it, so the artifact is staged after the signal.
+/// What the second pass may not do is come back with *nothing*. A payload whose
+/// `resume_session_id` is null passes the receiver's `assert_importable`
+/// untouched — that check short-circuits on a null id — so a downgrade here
+/// ships an empty transfer that no provider fails loudly on. Only OpenCode can
+/// reach it, because only its session id is discovered rather than read off the
+/// task row, and it is the same silent-loss shape the discovery side already
+/// refuses.
+fn refuse_session_downgrade(
+    before_signal: Option<&str>,
+    after_signal: Option<&str>,
+    provider: Option<&str>,
+) -> Result<(), String> {
+    match (before_signal, after_signal) {
+        (Some(session_id), None) => Err(format!(
+            "refusing to ship an empty transfer: {} session {session_id} was present before \
+             finalization and could not be found after it",
+            provider.unwrap_or("the source"),
+        )),
+        _ => Ok(()),
+    }
+}
+
 async fn run_finalization(
     state: &Arc<AppState>,
     work: &TransferWorkItem,
@@ -632,7 +659,7 @@ async fn run_finalization(
     // the agent: a transfer that cannot ship the conversation must fail with
     // the source task still alive and running, not after it has been shut down.
     let planned_identity = source.plan_identity();
-    source.plan().await?;
+    let session_seen_before_signal = source.plan().await?.map(|plan| plan.session_id.clone());
 
     let mut finalized_cleanly = source.item.agent_type.as_deref() != Some("pty");
     let mut degraded_reason = None;
@@ -673,6 +700,11 @@ async fn run_finalization(
     }
 
     let staged = stage_session_artifacts(state, &refreshed, transfer_id).await?;
+    refuse_session_downgrade(
+        session_seen_before_signal.as_deref(),
+        staged.session_id.as_deref(),
+        refreshed.item.agent_provider.as_deref(),
+    )?;
     let remote_url = if existing.repo.mode == RepoAcquisitionMode::ReuseLocal {
         None
     } else {
@@ -882,6 +914,39 @@ pub async fn outgoing_committed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Discovery runs twice — before the signal, so a transfer that cannot ship
+    /// fails with the agent still alive, and after it, so the conversation is
+    /// complete. The second pass may not silently come back empty: only
+    /// OpenCode discovers its id rather than reading it off the task row, and a
+    /// null `resume_session_id` sails past the receiver's `assert_importable`.
+    #[test]
+    fn a_session_that_disappears_across_finalization_refuses_the_transfer() {
+        let error = refuse_session_downgrade(
+            Some("ses_02645d9aaffeeOgwt2rbXIcTdp"),
+            None,
+            Some("opencode"),
+        )
+        .expect_err("an empty transfer was shipped");
+        assert!(error.contains("ses_02645d9aaffeeOgwt2rbXIcTdp"), "{error}");
+        assert!(error.contains("opencode"), "{error}");
+    }
+
+    #[test]
+    fn a_session_that_survives_or_never_existed_ships_as_it_is() {
+        // The ordinary case: the same session, staged after the agent stopped.
+        assert!(refuse_session_downgrade(
+            Some("ses_02645d9aaffeeOgwt2rbXIcTdp"),
+            Some("ses_02645d9aaffeeOgwt2rbXIcTdp"),
+            Some("opencode"),
+        )
+        .is_ok());
+        // A task the agent never got a turn in has nothing to lose, and every
+        // provider but OpenCode reaches here with both sides `None`.
+        assert!(refuse_session_downgrade(None, None, Some("claude")).is_ok());
+        // A session that appeared only after the signal is still a session.
+        assert!(refuse_session_downgrade(None, Some("ses_x"), Some("opencode")).is_ok());
+    }
 
     fn work_item(id: &str) -> crate::db::TransferWorkItem {
         crate::db::TransferWorkItem {
