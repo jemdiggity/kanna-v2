@@ -26,6 +26,7 @@ const expectedLiveCliContractTests = [
   "opencode-exec-json.test.ts",
   "opencode-flags.test.ts",
   "opencode-injected-input.test.ts",
+  "opencode-tui-status-markers.test.ts",
   "output.test.ts",
   "settings.test.ts",
 ];
