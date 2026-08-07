@@ -267,6 +267,7 @@ impl Db {
                 work_id TEXT NOT NULL REFERENCES transfer_work(id) ON DELETE CASCADE,
                 phase TEXT NOT NULL,
                 claimed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                value TEXT,
                 PRIMARY KEY (work_id, phase)
             );
             "#,

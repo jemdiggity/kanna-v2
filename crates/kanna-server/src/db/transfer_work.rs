@@ -200,6 +200,52 @@ impl Db {
         Ok(())
     }
 
+    /// Records what a step observed, once, and returns what the winner
+    /// recorded.
+    ///
+    /// [`Self::claim_transfer_work_phase`] answers "has this run?"; this
+    /// answers "what did it decide?" — and the difference matters wherever a
+    /// retry would otherwise recompute an answer against a machine the first
+    /// attempt already changed. The source's session *before* its agent was
+    /// signalled cannot be re-observed once the agent is dead, and an import's
+    /// materialization cannot be re-observed once the session is installed.
+    /// Both would silently answer "nothing there" on attempt 2.
+    ///
+    /// First writer wins and every later caller reads that value, so the
+    /// observation a transfer acts on is the same one on every attempt.
+    /// `None` records "observed, and the answer was nothing", which is
+    /// deliberately distinct from never having observed.
+    pub fn record_transfer_work_observation(
+        &self,
+        work_id: &str,
+        phase: &str,
+        value: Option<&str>,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO transfer_work_phase (work_id, phase, value) VALUES (?, ?, ?)
+             ON CONFLICT(work_id, phase) DO NOTHING",
+            (work_id, phase, value),
+        )?;
+        self.read_transfer_work_observation(work_id, phase)
+            .map(|observed| observed.flatten())
+    }
+
+    /// What a step recorded, or `None` if it has never run. The outer option
+    /// distinguishes "never observed" from "observed nothing".
+    pub fn read_transfer_work_observation(
+        &self,
+        work_id: &str,
+        phase: &str,
+    ) -> Result<Option<Option<String>>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT value FROM transfer_work_phase WHERE work_id = ? AND phase = ?",
+                (work_id, phase),
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+    }
+
     #[cfg(test)]
     pub fn transfer_work_status(&self, id: &str) -> Result<Option<String>, rusqlite::Error> {
         self.conn
@@ -357,6 +403,109 @@ mod tests {
         assert!(!db
             .claim_transfer_work_phase("import:t-1", "acknowledge-import")
             .expect("unrelated release must not free this one"));
+    }
+
+    /// An observation is taken once and read back by every retry.
+    ///
+    /// Two steps cannot be re-observed: the source's session *before* its agent
+    /// was signalled (attempt 2 looks at a dead agent) and an import's
+    /// materialization (attempt 2 looks at destinations attempt 1 wrote). Both
+    /// would quietly answer "nothing there".
+    #[test]
+    fn an_observation_is_taken_once_and_every_retry_reads_the_winner() {
+        let db = open("transfer-work-observation");
+        db.enqueue_transfer_work("finalize:t-1", "finalize", Some("t-1"), "{}")
+            .expect("enqueue");
+
+        assert_eq!(
+            db.read_transfer_work_observation("finalize:t-1", "session-before-signal")
+                .expect("read"),
+            None,
+            "an unobserved phase must be distinguishable from one that saw nothing",
+        );
+
+        assert_eq!(
+            db.record_transfer_work_observation(
+                "finalize:t-1",
+                "session-before-signal",
+                Some("ses_live"),
+            )
+            .expect("first observation"),
+            Some("ses_live".to_string()),
+        );
+        // The retry looks at a dead agent and sees nothing — and is told what
+        // the live observation found.
+        assert_eq!(
+            db.record_transfer_work_observation("finalize:t-1", "session-before-signal", None)
+                .expect("retry observation"),
+            Some("ses_live".to_string()),
+            "a retry overwrote the only observation taken against a live agent",
+        );
+        assert_eq!(
+            db.read_transfer_work_observation("finalize:t-1", "session-before-signal")
+                .expect("read back"),
+            Some(Some("ses_live".to_string())),
+        );
+    }
+
+    /// "Observed, and the answer was nothing" is a real answer, and has to be
+    /// told apart from "never observed" — otherwise an import that deliberately
+    /// abandoned its resume re-runs the whole materialization on every retry.
+    #[test]
+    fn observing_nothing_is_recorded_as_an_answer_rather_than_as_silence() {
+        let db = open("transfer-work-observation-none");
+        db.enqueue_transfer_work("import:t-1", "import", Some("t-1"), "{}")
+            .expect("enqueue");
+
+        assert_eq!(
+            db.record_transfer_work_observation("import:t-1", "materialize-resume-state", None)
+                .expect("observe nothing"),
+            None,
+        );
+        assert_eq!(
+            db.read_transfer_work_observation("import:t-1", "materialize-resume-state")
+                .expect("read"),
+            Some(None),
+            "an observed absence must not read as never-observed",
+        );
+        // And a later attempt cannot talk the transfer back into a resume.
+        assert_eq!(
+            db.record_transfer_work_observation(
+                "import:t-1",
+                "materialize-resume-state",
+                Some("ses_late"),
+            )
+            .expect("retry"),
+            None,
+        );
+    }
+
+    /// The value primitive shares its table with the boolean claim, so neither
+    /// may quietly answer for the other.
+    #[test]
+    fn observations_and_claims_do_not_answer_for_each_other() {
+        let db = open("transfer-work-observation-claim");
+        db.enqueue_transfer_work("finalize:t-1", "finalize", Some("t-1"), "{}")
+            .expect("enqueue");
+
+        // A claim taken first leaves no value, and the observation that follows
+        // reads that absence rather than inventing one.
+        assert!(db
+            .claim_transfer_work_phase("finalize:t-1", "pty-finalization-signal")
+            .expect("claim"));
+        assert_eq!(
+            db.read_transfer_work_observation("finalize:t-1", "pty-finalization-signal")
+                .expect("read"),
+            Some(None),
+        );
+        // An observation occupies the phase, so a claim on it reports "already
+        // taken" — they are the same at-most-once slot by design.
+        db.record_transfer_work_observation("finalize:t-1", "session-before-signal", Some("x"))
+            .expect("observe");
+        assert!(
+            !db.claim_transfer_work_phase("finalize:t-1", "session-before-signal")
+                .expect("claim over observation"),
+        );
     }
 
     /// Retries are bounded. A transfer that can make no further progress has to

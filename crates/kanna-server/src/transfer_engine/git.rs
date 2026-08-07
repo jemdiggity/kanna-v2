@@ -6,7 +6,7 @@
 //! every call site. The server already forks worktrees for every task; these
 //! follow the same shape, as argument vectors with no shell in the path at all.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Runs one git invocation, returning its stderr on failure.
@@ -497,7 +497,15 @@ pub fn latest_opencode_session_for_worktree(
         .canonicalize()
         .unwrap_or_else(|_| worktree_path.to_path_buf());
     let listing = opencode(worktree_path, &["session", "list", "--format", "json"])?;
-    let sessions: serde_json::Value = serde_json::from_str(listing.trim())
+    // A project with no sessions writes *nothing* — zero bytes, exit 0 — not
+    // `[]` (verified against the installed CLI). Parsing that as JSON fails, so
+    // reading it as an error would make legitimate absence unreachable and turn
+    // every first transfer out of a fresh worktree into a failure.
+    let listing = listing.trim();
+    if listing.is_empty() {
+        return Ok(None);
+    }
+    let sessions: serde_json::Value = serde_json::from_str(listing)
         .map_err(|error| format!("opencode session listing is not valid JSON: {error}"))?;
     let Some(sessions) = sessions.as_array() else {
         return Err("opencode session listing is not an array".to_string());
@@ -601,15 +609,35 @@ pub fn import_opencode_session(
     })?;
 
     // `opencode import` does not replace a session id it already holds — it
-    // re-keys the *existing* session's directory to the import cwd. On a
-    // collision that would yank one of this operator's own conversations out of
-    // its worktree, breaking that task's resume, and splice this task onto an
-    // unrelated conversation while the shipped one is dropped. Every other
-    // artifact leaves a pre-existing destination untouched; so does this one.
-    if local_opencode_session_exists(destination_worktree, session_id)? {
-        return Err(OpencodeImportError::DestinationExists(
-            session_id.to_string(),
-        ));
+    // re-keys the *existing* session's directory to the import cwd, keeping the
+    // id and the messages (verified against the installed CLI: exit 0, no
+    // warning). On a collision that would yank one of this operator's own
+    // conversations out of its worktree, breaking that task's resume, and
+    // splice this task onto an unrelated conversation while the shipped one is
+    // dropped. Every other artifact leaves a pre-existing destination
+    // untouched; so does this one.
+    //
+    // The exception is a session already keyed to *this* destination, which is
+    // this transfer's own earlier attempt. Re-keying it to where it already
+    // points changes nothing, so that is a completed import rather than a
+    // collision — the distinction the directory exists to make.
+    let resolved_destination = destination_worktree
+        .canonicalize()
+        .unwrap_or_else(|_| destination_worktree.to_path_buf());
+    match local_opencode_session(destination_worktree, session_id) {
+        LocalOpencodeSession::Present { directory } if directory == resolved_destination => {
+            return Ok(());
+        }
+        LocalOpencodeSession::Present { .. } => {
+            return Err(OpencodeImportError::DestinationExists(
+                session_id.to_string(),
+            ));
+        }
+        // Never proof of absence: importing here could re-key a live session.
+        LocalOpencodeSession::Inconclusive(message) => {
+            return Err(OpencodeImportError::Unavailable(message));
+        }
+        LocalOpencodeSession::Absent => {}
     }
 
     let export_path = export_path.to_str().ok_or_else(|| {
@@ -670,22 +698,67 @@ pub fn read_opencode_export_session_id(export_path: &Path) -> Result<String, Str
     Ok(session_id.to_string())
 }
 
-/// Whether this machine's OpenCode store already holds a session.
+/// What this machine's OpenCode store says about a session id.
+#[derive(Debug, PartialEq, Eq)]
+enum LocalOpencodeSession {
+    /// The store answered with the session, and this is where it points.
+    Present { directory: PathBuf },
+    /// The store answered a listing, so it is readable, and it does not hold
+    /// this id.
+    Absent,
+    /// The store could not answer. Never treated as absence.
+    Inconclusive(String),
+}
+
+/// Asks this machine's OpenCode store about a session id.
 ///
-/// `opencode export` resolves an id across every project — unlike `session
-/// list`, which only reports the project of the directory it runs in — so it is
-/// the probe that matches how `import` finds an id. "Session not found" is the
-/// answer this is asking for; any other failure is the CLI being unavailable,
-/// and is reported rather than mistaken for an absent session.
-fn local_opencode_session_exists(
-    cwd: &Path,
-    session_id: &str,
-) -> Result<bool, OpencodeImportError> {
-    match opencode(cwd, &["export", session_id]) {
-        Ok(_) => Ok(true),
-        Err(message) if message.to_lowercase().contains("not found") => Ok(false),
-        Err(message) => Err(OpencodeImportError::Unavailable(message)),
+/// `opencode export` is the right *lookup*: it resolves an id across every
+/// project, the way `import` finds one, while `session list` only reports the
+/// project of the directory it runs in. What it is not is a reliable *absence*
+/// signal. Its whole body is wrapped in `catchCause(() => fail("Session not
+/// found: <id>"))`, so a locked store — the common case this artifact's retry
+/// handling exists for — reports in exactly the words an absent session does.
+/// Reading that message as absence is what would let an import re-key one of
+/// the operator's own conversations out of its worktree.
+///
+/// So absence is established by a *different* question. `session list` proves
+/// the store is readable right now; an export that fails against a store that
+/// just answered is genuine absence, and an export that fails against a store
+/// that could not answer either is inconclusive and retried. An empty project
+/// lists as zero bytes rather than `[]`, which is why the caller below accepts
+/// an empty listing as an answer.
+fn local_opencode_session(cwd: &Path, session_id: &str) -> LocalOpencodeSession {
+    let export_failure = match opencode(cwd, &["export", session_id]) {
+        Ok(exported) => {
+            return match opencode_export_directory(&exported) {
+                // A session with no recorded directory cannot be told apart
+                // from one belonging to another worktree, so it is treated as
+                // occupied rather than assumed to be ours.
+                Some(directory) => LocalOpencodeSession::Present { directory },
+                None => LocalOpencodeSession::Present {
+                    directory: PathBuf::new(),
+                },
+            };
+        }
+        Err(message) => message,
+    };
+    match opencode(cwd, &["session", "list", "--format", "json"]) {
+        Ok(_) => LocalOpencodeSession::Absent,
+        Err(listing_failure) => LocalOpencodeSession::Inconclusive(format!(
+            "OpenCode could not say whether session {session_id} exists here \
+             (export: {export_failure}; session list: {listing_failure})"
+        )),
     }
+}
+
+/// The directory an exported session is currently keyed to.
+fn opencode_export_directory(exported: &str) -> Option<PathBuf> {
+    serde_json::from_str::<serde_json::Value>(exported)
+        .ok()?
+        .get("info")?
+        .get("directory")?
+        .as_str()
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -807,7 +880,7 @@ mod opencode_tests {
         let stub = StubOpencode::responding(
             r#"printf '%s\n' "$*" >> "$(dirname "$0")/calls"
 case "$1" in
-  export) printf '{"info":{"id":"%s"}}' "$2" ;;
+  export) printf '{"info":{"id":"%s","directory":"/some/other/worktree"}}' "$2" ;;
 esac"#,
         );
         let temp = tempfile::tempdir().expect("temp");
@@ -826,36 +899,151 @@ esac"#,
         );
     }
 
-    /// The probe is `export`, which resolves an id across every project — the
-    /// way `import` finds one. "Session not found" is an absent session; any
-    /// other failure is the CLI being unavailable and must not be mistaken for
-    /// one, or a transient outage would silently skip the import.
+    /// A project with no sessions writes *nothing*, not `[]`.
+    ///
+    /// Verified against the installed CLI (1.16.2): `opencode session list
+    /// --format json` in a fresh git project exits 0 with zero bytes on stdout
+    /// and an empty stderr. Parsing that as JSON fails, so reading a parse
+    /// error as a hard failure makes legitimate absence unreachable — every
+    /// first OpenCode transfer out of a fresh worktree would fail instead of
+    /// reporting that there is no session yet.
     #[test]
-    fn an_absent_session_is_told_apart_from_a_cli_that_could_not_answer() {
+    fn an_empty_project_lists_as_no_sessions_rather_than_as_a_parse_error() {
         let temp = tempfile::tempdir().expect("temp");
         let worktree = temp.path().join("worktree");
         std::fs::create_dir_all(&worktree).expect("worktree");
 
         {
-            let _stub = StubOpencode::responding(
-                r#"case "$1" in
-  export) echo "Error: Session not found: $2" >&2; exit 1 ;;
-  import) exit 0 ;;
-esac"#,
-            );
-            assert!(
-                !local_opencode_session_exists(&worktree, SESSION_ID).expect("probe answered"),
-                "a not-found session was reported as present",
+            // The real shape: exit 0, nothing at all on stdout.
+            let _stub = StubOpencode::responding("exit 0");
+            assert_eq!(
+                latest_opencode_session_for_worktree(&worktree).expect("an empty project answers"),
+                None,
             );
         }
 
-        let _stub =
-            StubOpencode::responding(r#"echo "SqliteError: database is locked" >&2; exit 1"#);
-        let error = local_opencode_session_exists(&worktree, SESSION_ID)
-            .expect_err("a locked store was reported as an absent session");
+        // A listing that is genuinely malformed is still an error — the empty
+        // case is not a licence to swallow every unparseable answer.
+        let _stub = StubOpencode::responding(r#"printf 'not json'"#);
+        assert!(latest_opencode_session_for_worktree(&worktree).is_err());
+    }
+
+    /// `export` cannot prove absence, so absence is not read off its message.
+    ///
+    /// Every stub here reproduces the installed CLI (1.16.2) rather than a
+    /// plausible-looking invention. `opencode export <unknown>` exits 1 with an
+    /// ANSI-coloured `Error: Session not found: <id>` on stderr — and its whole
+    /// body is wrapped in `catchCause(() => fail("Session not found: <id>"))`,
+    /// so a store that is merely *locked* says the same words. That is why the
+    /// locked case below prints the identical message: a probe that reads it as
+    /// absence would import over a live session, which is the defect this guard
+    /// exists to prevent.
+    #[test]
+    fn an_export_failure_is_never_read_as_an_absent_session() {
+        let temp = tempfile::tempdir().expect("temp");
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        // The real message, ANSI escapes included.
+        let not_found = r#"printf 'Exporting session: %s\n' "$2" >&2
+printf '\033[91m\033[1mError: \033[0mSession not found: %s\n' "$2" >&2
+exit 1"#;
+
+        // Absent: export fails, and `session list` answers — an empty project
+        // answers with zero bytes, which is the shape the CLI actually emits.
+        {
+            let _stub = StubOpencode::responding(&format!(
+                r#"case "$1" in
+  export) {not_found} ;;
+  session) exit 0 ;;
+esac"#
+            ));
+            assert_eq!(
+                local_opencode_session(&worktree, SESSION_ID),
+                LocalOpencodeSession::Absent,
+            );
+        }
+
+        // Locked: export fails with the *same* words, and the listing cannot
+        // answer either. Absence is unprovable, so it is not claimed.
+        {
+            let _stub = StubOpencode::responding(&format!(
+                r#"case "$1" in
+  export) {not_found} ;;
+  session) echo "SqliteError: database is locked" >&2; exit 1 ;;
+esac"#
+            ));
+            assert!(
+                matches!(
+                    local_opencode_session(&worktree, SESSION_ID),
+                    LocalOpencodeSession::Inconclusive(_),
+                ),
+                "a store that could not answer was reported as an absent session",
+            );
+        }
+
+        // Present: export succeeds and says where the session points.
+        let _stub = StubOpencode::responding(
+            r#"case "$1" in
+  export) printf '{"info":{"id":"%s","directory":"/elsewhere"}}' "$2" ;;
+esac"#,
+        );
+        assert_eq!(
+            local_opencode_session(&worktree, SESSION_ID),
+            LocalOpencodeSession::Present {
+                directory: PathBuf::from("/elsewhere"),
+            },
+        );
+    }
+
+    /// The inconclusive answer has to reach the *import* as a retry, not as a
+    /// silent skip. A locked store clears in seconds; treating it as absence
+    /// re-keys a live session, and treating it as a refusal throws away a
+    /// conversation the source has already been signalled to give up.
+    #[test]
+    fn an_unanswerable_store_makes_the_import_retry_rather_than_guess() {
+        let _stub = StubOpencode::responding(
+            r#"case "$1" in
+  export) printf '\033[91m\033[1mError: \033[0mSession not found: %s\n' "$2" >&2; exit 1 ;;
+  session) echo "SqliteError: database is locked" >&2; exit 1 ;;
+  import) echo "imported" ;;
+esac"#,
+        );
+        let temp = tempfile::tempdir().expect("temp");
+        let export = write_export(temp.path(), SESSION_ID);
+
+        let error = import_opencode_session(&export, SESSION_ID, &temp.path().join("worktree"))
+            .expect_err("an unprovable absence was imported over");
         assert!(
             matches!(error, OpencodeImportError::Unavailable(_)),
-            "{error:?}"
+            "{error:?}",
+        );
+    }
+
+    /// A session already keyed to *this* destination is this transfer's own
+    /// earlier attempt, not a collision. Re-keying it where it already points
+    /// changes nothing, so the import reports success and the retry keeps the
+    /// conversation it already imported.
+    #[test]
+    fn a_session_already_at_this_destination_is_our_own_completed_import() {
+        let temp = tempfile::tempdir().expect("temp");
+        let worktree = temp.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let resolved = worktree.canonicalize().expect("resolved");
+        let stub = StubOpencode::responding(&format!(
+            r#"printf '%s\n' "$*" >> "$(dirname "$0")/calls"
+case "$1" in
+  export) printf '{{"info":{{"id":"%s","directory":"{}"}}}}' "$2" ;;
+esac"#,
+            resolved.display(),
+        ));
+        let export = write_export(temp.path(), SESSION_ID);
+
+        import_opencode_session(&export, SESSION_ID, &worktree)
+            .expect("our own prior import was reported as a collision");
+        assert!(
+            stub.calls().iter().all(|call| !call.starts_with("import")),
+            "an already-imported session was imported again: {:?}",
+            stub.calls(),
         );
     }
 
@@ -868,7 +1056,8 @@ esac"#,
     fn a_locked_store_is_unavailable_rather_than_a_refusal() {
         let _stub = StubOpencode::responding(
             r#"case "$1" in
-  export) echo "Error: Session not found: $2" >&2; exit 1 ;;
+  export) printf '\033[91m\033[1mError: \033[0mSession not found: %s\n' "$2" >&2; exit 1 ;;
+  session) exit 0 ;;
   import) echo "SqliteError: database is locked" >&2; exit 1 ;;
 esac"#,
         );
@@ -888,7 +1077,8 @@ esac"#,
         let stub = StubOpencode::responding(
             r#"printf '%s\n' "$PWD|$*" >> "$(dirname "$0")/calls"
 case "$1" in
-  export) echo "Error: Session not found: $2" >&2; exit 1 ;;
+  export) printf '\033[91m\033[1mError: \033[0mSession not found: %s\n' "$2" >&2; exit 1 ;;
+  session) exit 0 ;;
 esac"#,
         );
         let temp = tempfile::tempdir().expect("temp");

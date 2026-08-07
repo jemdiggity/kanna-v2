@@ -97,6 +97,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "047_remove_approval_gate",
     "048_pipeline_item_merge_signaled",
     "049_transfer_work_queue",
+    "050_transfer_work_phase_value",
 ];
 
 #[derive(Debug, Serialize)]
@@ -1662,6 +1663,16 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             );
             "#,
         )
+    })?;
+
+    run_migration(conn, "050_transfer_work_phase_value", |conn| {
+        // A boolean claim answers "has this step run?" but not "what did it
+        // decide?", and two steps need the answer to survive a retry rather
+        // than be recomputed against a machine the first attempt already
+        // changed: the session a source had *before* its agent was signalled,
+        // and the session id an import materialized. Recomputing either on
+        // attempt 2 reads a world the first attempt already moved.
+        add_column(conn, "transfer_work_phase", "value", "TEXT")
     })?;
 
     Ok(())

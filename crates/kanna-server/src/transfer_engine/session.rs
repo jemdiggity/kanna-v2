@@ -464,23 +464,34 @@ pub fn resume_survives_existing_destination(
     let Some(decisive) = decisive else {
         return false;
     };
-    // A transcript is a file this machine did not have; the receiver derives
-    // its own destination for it, so an occupied one says nothing about whether
-    // the conversation crossed.
+    // The question an occupied destination answers is not "did we write?" but
+    // "could what is already there be a *different* conversation?".
     //
-    // A session *archive* and an OpenCode *export* both land somewhere the
-    // receiver may already own — `~/.claude/tasks/<id>`, and an id in OpenCode's
-    // shared store — and an untouched destination there means the conversation
-    // did not cross. Resuming anyway would attach this task to whatever was
-    // already there.
-    if decisive.kind == TransferArtifactKind::SessionTranscript {
-        return true;
+    // A transcript and a Codex rollout are content-addressed: the receiver
+    // derives `~/.claude/projects/<slug>/<session-id>.jsonl` itself, and a
+    // rollout's filename carries both the session id and the timestamp it was
+    // opened at. Nothing else can occupy either path, so an occupied one is
+    // this transfer's own earlier attempt and the conversation is present.
+    // Requiring a write there would abandon the resume on every retry —
+    // exactly the regression the materialization phase claim exists to stop,
+    // and Codex would hit it silently because nothing else distinguishes it.
+    //
+    // A session *archive* and an OpenCode *export* land in namespaces the
+    // receiver may already own with different content: `~/.claude/tasks/<id>`
+    // holds lock and highwatermark state that can exist without any
+    // conversation (which is why the transcript had to be shipped at all), and
+    // an OpenCode id resolves in a shared store this machine writes from every
+    // other task. There, an untouched destination really can mean the
+    // conversation did not cross, and resuming anyway would attach this task to
+    // whatever was already there.
+    match decisive.kind {
+        TransferArtifactKind::SessionTranscript | TransferArtifactKind::SessionRollout => true,
+        TransferArtifactKind::SessionArchive | TransferArtifactKind::SessionExport => materialized
+            .iter()
+            .find(|(artifact_id, _)| artifact_id == &decisive.artifact_id)
+            .map(|(_, wrote)| *wrote)
+            .unwrap_or(false),
     }
-    materialized
-        .iter()
-        .find(|(artifact_id, _)| artifact_id == &decisive.artifact_id)
-        .map(|(_, wrote)| *wrote)
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -720,6 +731,71 @@ mod tests {
         )
         .expect("an empty listing is an absence, not a failure");
         assert!(plan.is_none());
+    }
+
+    /// A Codex rollout is content-addressed, so an occupied destination is this
+    /// transfer's own earlier write rather than a stranger's session.
+    ///
+    /// `~/.codex/sessions/<Y>/<M>/<D>/rollout-<timestamp>-<session-id>.jsonl`
+    /// carries both the session id and the moment it was opened, and the
+    /// receiver derives the whole path from the artifact contract — nothing
+    /// else can land there. Requiring a write would abandon the conversation on
+    /// every retry, because `materialize_transfer_artifact_at_home` reports
+    /// `false` for a destination that already exists, which is precisely what
+    /// attempt 1 leaves behind.
+    #[test]
+    fn a_codex_rollout_keeps_its_resume_when_the_destination_is_already_written() {
+        let rollout = TransferArtifactPayload {
+            artifact_id: "rollout".to_string(),
+            filename: "rollout-2026-08-07T10-11-12-364643cc-5e6d-48fc-86ca-ca7764380900.jsonl"
+                .to_string(),
+            provider: "codex".to_string(),
+            kind: TransferArtifactKind::SessionRollout,
+            home_rel_path: ".codex/sessions/2026/08/07/rollout.jsonl".to_string(),
+            materialization: TransferArtifactMaterialization::CopyFile,
+        };
+
+        // Attempt 1 wrote it.
+        assert!(resume_survives_existing_destination(
+            std::slice::from_ref(&rollout),
+            &[("rollout".to_string(), true)],
+        ));
+        // Attempt 2 finds it already there. That is the same conversation, and
+        // abandoning the resume here is the retry regression.
+        assert!(resume_survives_existing_destination(
+            std::slice::from_ref(&rollout),
+            &[("rollout".to_string(), false)],
+        ));
+        // Even with nothing reported, the path is one only this transfer's
+        // artifact can occupy.
+        assert!(resume_survives_existing_destination(
+            std::slice::from_ref(&rollout),
+            &[],
+        ));
+    }
+
+    /// The counterpart, stated as the rule rather than per provider: only the
+    /// kinds landing in a namespace the receiver may already own with
+    /// *different* content require a write.
+    #[test]
+    fn only_shared_namespace_destinations_require_a_write() {
+        for (kind, survives_without_a_write) in [
+            (TransferArtifactKind::SessionTranscript, true),
+            (TransferArtifactKind::SessionRollout, true),
+            (TransferArtifactKind::SessionArchive, false),
+            (TransferArtifactKind::SessionExport, false),
+        ] {
+            let only = [artifact(kind, "only")];
+            assert_eq!(
+                resume_survives_existing_destination(&only, &[("only".to_string(), false)]),
+                survives_without_a_write,
+                "{kind:?} disagreed about an occupied destination",
+            );
+            assert!(
+                resume_survives_existing_destination(&only, &[("only".to_string(), true)]),
+                "{kind:?} abandoned a resume it had just written",
+            );
+        }
     }
 
     /// The export is the whole artifact list — there is no file to copy and no

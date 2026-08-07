@@ -612,6 +612,10 @@ pub async fn finalize(
 /// reach it, because only its session id is discovered rather than read off the
 /// task row, and it is the same silent-loss shape the discovery side already
 /// refuses.
+/// The phase under which finalization records the session it saw before the
+/// source agent was signalled.
+const SESSION_BEFORE_SIGNAL_PHASE: &str = "session-before-signal";
+
 fn refuse_session_downgrade(
     before_signal: Option<&str>,
     after_signal: Option<&str>,
@@ -659,7 +663,19 @@ async fn run_finalization(
     // the agent: a transfer that cannot ship the conversation must fail with
     // the source task still alive and running, not after it has been shut down.
     let planned_identity = source.plan_identity();
-    let session_seen_before_signal = source.plan().await?.map(|plan| plan.session_id.clone());
+    // Recorded, not just computed. The agent is dead by attempt 2, so a fresh
+    // pre-signal look finds nothing and the downgrade guard below would pass
+    // vacuously — shipping exactly the empty payload it exists to refuse. The
+    // first attempt's observation is the only one taken against a live agent,
+    // so it is the one every attempt compares against.
+    let observed_now = source.plan().await?.map(|plan| plan.session_id.clone());
+    let session_seen_before_signal = db
+        .record_transfer_work_observation(
+            &work.id,
+            SESSION_BEFORE_SIGNAL_PHASE,
+            observed_now.as_deref(),
+        )
+        .map_err(|error| format!("db error: {error}"))?;
 
     let mut finalized_cleanly = source.item.agent_type.as_deref() != Some("pty");
     let mut degraded_reason = None;

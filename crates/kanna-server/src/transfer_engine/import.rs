@@ -252,7 +252,8 @@ async fn run_import(
         let destination_worktree =
             session::destination_worktree_path(&repo_path, &destination_task_id);
         let resume_session_id =
-            materialize_resume_state(state, transfer_id, &payload, &destination_worktree).await?;
+            materialize_resume_state(state, work, transfer_id, &payload, &destination_worktree)
+                .await?;
 
         let created = crate::http_api::create_task_in_process(
             Arc::clone(state),
@@ -530,12 +531,41 @@ fn repos_home() -> Result<PathBuf, String> {
 /// Materializes the session artifacts the payload carries, returning the
 /// session id the destination agent will resume — or `None` when the resume
 /// must be abandoned because the conversation state could not be established.
+/// The phase under which an import records what it materialized.
+///
+/// Materialization is not re-observable: once a transcript is on disk or an
+/// OpenCode session is installed, attempt 2 sees an occupied destination and
+/// would read it as "someone else was here" — abandoning the conversation this
+/// transfer already imported, and acking the source anyway. Recording the
+/// answer once is what makes a retry recognise its own success.
+const MATERIALIZE_PHASE: &str = "materialize-resume-state";
+
+/// A recorded materialization that resolved to "no resume".
+///
+/// The observation column stores `Option<String>`, and `None` there already
+/// means "never observed" — so the abandoned-resume decision needs a value of
+/// its own rather than an absent one.
+const RESUME_ABANDONED: &str = "";
+
 async fn materialize_resume_state(
     state: &Arc<AppState>,
+    work: &TransferWorkItem,
     transfer_id: &str,
     payload: &OutgoingTransferPayload,
     destination_worktree: &Path,
 ) -> Result<Option<String>, ImportFailure> {
+    // What an earlier attempt already decided. Reusing it is the whole point:
+    // the destinations it wrote are exactly what a fresh look would now
+    // misread.
+    if let Some(recorded) = state
+        .transfer_work()
+        .open_db()?
+        .read_transfer_work_observation(&work.id, MATERIALIZE_PHASE)
+        .map_err(|error| format!("db error: {error}"))?
+    {
+        return Ok(recorded.filter(|session_id| session_id != RESUME_ABANDONED));
+    }
+
     let Some(resume_session_id) = payload.task.resume_session_id.clone() else {
         return Ok(None);
     };
@@ -640,15 +670,29 @@ async fn materialize_resume_state(
     }
 
     let owned: Vec<_> = artifacts.into_iter().cloned().collect();
-    if session::resume_survives_existing_destination(&owned, &materialized) {
-        Ok(Some(resume_session_id))
+    let resolved = if session::resume_survives_existing_destination(&owned, &materialized) {
+        Some(resume_session_id)
     } else {
         log::warn!(
             "skipping transferred session import for {provider} session {resume_session_id}: \
              the provider destination already exists"
         );
-        Ok(None)
-    }
+        None
+    };
+
+    // Recorded before the task is created, so the answer a retry reads is the
+    // one this attempt acted on. A crash between the two leaves the record and
+    // the materialized state agreeing, which is what the retry needs.
+    let recorded = state
+        .transfer_work()
+        .open_db()?
+        .record_transfer_work_observation(
+            &work.id,
+            MATERIALIZE_PHASE,
+            Some(resolved.as_deref().unwrap_or(RESUME_ABANDONED)),
+        )
+        .map_err(|error| format!("db error: {error}"))?;
+    Ok(recorded.filter(|session_id| session_id != RESUME_ABANDONED))
 }
 
 async fn build_create_request(
