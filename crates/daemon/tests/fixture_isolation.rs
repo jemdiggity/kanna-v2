@@ -6,11 +6,16 @@
 //!
 //! These tests drive a real nested `cargo build` through the same helper the
 //! fixture uses, against a synthetic archive small enough to compile in seconds.
+//!
+//! The last pair covers the other way the fixture can go wrong quietly: when it
+//! cannot resolve a ghostty checkout it skips the cross-version tests, and that
+//! skip has to be legible in a run that captures test output.
 
 mod support;
 
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use support::previous_daemon::{isolated_cargo_build, CARGO_DIRECTORY_ENV};
 
 fn write_crate(source: &Path, module: Option<&str>) {
@@ -152,4 +157,68 @@ fn an_older_archive_cannot_poison_a_later_current_source_build() {
     );
 
     let _ = fs::remove_dir_all(&scratch);
+}
+
+/// Re-executed as a child process by
+/// [`the_skip_notice_survives_a_run_that_captures_test_output`], which is the
+/// only context that sets `KANNA_PREVIOUS_DAEMON_FORCE_MISSING`.
+///
+/// Ignored by default because without that variable it would build the whole
+/// previous-release fixture for an assertion that is not about the fixture.
+#[test]
+#[ignore = "re-executed as a child process by the skip-notice test"]
+fn emits_the_skip_notice_for_an_unresolvable_checkout() {
+    assert!(
+        support::previous_daemon::binary_or_skip(
+            "emits_the_skip_notice_for_an_unresolvable_checkout"
+        )
+        .is_none(),
+        "the child must run with KANNA_PREVIOUS_DAEMON_FORCE_MISSING set"
+    );
+}
+
+/// The skip notice has to reach the output of a run nobody passed
+/// `--nocapture` to, because that is the only run the lane actually performs.
+///
+/// libtest captures a passing test's `eprintln!` and then discards it, so a
+/// skip announced that way is indistinguishable from four cross-version tests
+/// genuinely exercising `crates/daemon/SPEC.md` — including on a future ghostty
+/// bump, where the stamp check rejects the checkout and the whole set goes
+/// quiet. The property lives in a child libtest process's output stream, which
+/// is why this is an integration test spawning a real one rather than a unit
+/// test on the notice. No network is involved.
+#[test]
+fn the_skip_notice_survives_a_run_that_captures_test_output() {
+    let child = Command::new(std::env::current_exe().expect("locate this test binary"))
+        .args([
+            "emits_the_skip_notice_for_an_unresolvable_checkout",
+            "--exact",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env("KANNA_PREVIOUS_DAEMON_FORCE_MISSING", "1")
+        // Whatever asked for this run must not be what makes the child loud.
+        .env_remove("RUST_TEST_NOCAPTURE")
+        .output()
+        .expect("re-run this test binary");
+
+    let stdout = String::from_utf8_lossy(&child.stdout);
+    let stderr = String::from_utf8_lossy(&child.stderr);
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        child.status.success(),
+        "the child run should pass, not fail:\n{combined}"
+    );
+    assert!(
+        combined.contains("1 passed"),
+        "the child should have run the skipping test:\n{combined}"
+    );
+    assert!(
+        combined.contains("SKIP emits_the_skip_notice_for_an_unresolvable_checkout"),
+        "the skip notice never reached a capturing run's output:\n{combined}"
+    );
+    assert!(
+        combined.contains("crates/daemon/SPEC.md"),
+        "the notice should say which invariants went unexercised:\n{combined}"
+    );
 }
