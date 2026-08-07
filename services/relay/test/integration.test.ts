@@ -2006,6 +2006,53 @@ describe("Relay integration", () => {
     await closeAndWait(secondDesktop);
   });
 
+  it("keeps the account's other desktops online when one disconnects with no phone attached", async () => {
+    // The everyday shape: several desktops idle on the relay while the phone
+    // is asleep. Dropping one must not evict the account's other desktops —
+    // their sockets stay open, so nothing would ever make them reconnect.
+    const stayingIds = ["desktop-idle-stay-a", "desktop-idle-stay-b"];
+    const leavingId = "desktop-idle-leave";
+    const staying: WebSocket[] = [];
+    for (const desktop_id of stayingIds) {
+      staying.push(
+        (await connectAndAuth({ device_token: TEST_DEVICE_TOKEN, desktop_id })).ws,
+      );
+    }
+    const { ws: leaving } = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: leavingId,
+    });
+
+    await closeAndWait(leaving);
+
+    const { ws: phone } = await connectAndAuth({ id_token: idToken });
+    const active = await requestActiveDesktopIds(phone, "active-after-peer-drop");
+    expect(active).toEqual(expect.arrayContaining(stayingIds));
+    expect(active).not.toContain(leavingId);
+
+    const survivorInvoke = waitForMessage(
+      staying[0],
+      (msg) => msg.type === "invoke" && msg.id === "invoke-after-peer-drop",
+    );
+    phone.send(
+      JSON.stringify({
+        type: "invoke",
+        id: "invoke-after-peer-drop",
+        desktopId: stayingIds[0],
+        method: "GET",
+        path: "/v1/status",
+        body: null,
+      }),
+    );
+    await expect(survivorInvoke).resolves.toMatchObject({
+      desktopId: stayingIds[0],
+      path: "/v1/status",
+    });
+
+    await closeAndWait(phone);
+    for (const desktop of staying) await closeAndWait(desktop);
+  });
+
   it("should reject connections that do not send auth within timeout", async () => {
     const startedAt = Date.now();
     const ws = new WebSocket(relayUrl());
