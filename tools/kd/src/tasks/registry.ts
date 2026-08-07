@@ -22,7 +22,7 @@ import { resolveKdEnvironment } from "../runtime/environment";
 import { assertNotProductionDb, resetSqliteDb, seedSqliteDb, type DevDbTarget } from "../runtime/db";
 import { killWorkspaceDaemons, killWorkspaceDesktopDevProcesses, killWorkspaceServers } from "../runtime/daemon";
 import { checkRequiredCommands } from "../runtime/doctor";
-import { writeCargoConfig } from "../runtime/env-sync";
+import { syncMachineLocalConfig, writeCargoConfig } from "../runtime/env-sync";
 import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs, formatMissingFirebaseEmulators, resolveFirebaseEnvFromReference, writeFirebaseEmulatorConfig, type FirebasePortInput } from "../runtime/firebase";
 import { resolveMobileServerUrl } from "../runtime/mobile";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../runtime/mobile-commands";
@@ -1976,10 +1976,17 @@ export const taskDefinitions = [
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
       const cargoConfig = writeCargoConfig(context.repoRoot);
+      const machineLocalConfig = syncMachineLocalConfig(context.repoRoot);
+      const lines = ["Synced Kanna dev environment files."];
+      if (machineLocalConfig.status === "copied") {
+        lines.push(`  machine-local repo config from ${machineLocalConfig.source}`);
+      } else if (machineLocalConfig.status === "kept-local") {
+        lines.push(`  kept this worktree's ${machineLocalConfig.destination} (none in the primary checkout)`);
+      }
       return {
         ok: true,
-        message: `Synced Kanna dev environment files.`,
-        data: { cargoConfig }
+        message: lines.join("\n"),
+        data: { cargoConfig, machineLocalConfig }
       };
     }
   },
