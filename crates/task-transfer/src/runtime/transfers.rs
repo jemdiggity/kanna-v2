@@ -3,12 +3,14 @@ use super::state::StagedTransferArtifact;
 use super::state::{OutgoingTransferReservation, TransferArtifactRecord, TransferRuntime};
 use super::utils::{
     managed_artifact_dir, prune_outgoing_transfers, prune_transfer_artifacts,
-    remove_owned_artifact_paths, take_transfer_artifacts, ArtifactFraming,
+    remove_owned_artifact_path, remove_owned_artifact_paths, take_transfer_artifacts,
+    ArtifactFraming,
 };
 use super::TransferTransport;
 use crate::crypto::{open_json, parse_public_key, seal_json};
 use crate::protocol::{PeerRequest, PeerResponse};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -642,6 +644,31 @@ impl TransferRuntime {
         }
     }
 
+    /// Releases an outgoing reservation whose transfer will never be committed.
+    ///
+    /// A preflight writes a durable reservation to the registry dir and may be
+    /// followed by staged artifacts (repo bundle, session archives) before the
+    /// caller discovers the push is a duplicate. Without this the reservation
+    /// and its temp files sit on disk until the TTL sweeper notices — the leak
+    /// the duplicate-push race left behind on 2026-08-06. Abandoning an unknown
+    /// transfer id is deliberately not an error: the caller's job is to make
+    /// sure nothing is left, not to prove something was.
+    ///
+    /// Unlike the sweeps, this path reports what it could not delete. Its
+    /// caller tells the operator the reservation is released, so returning
+    /// success over a file that survived would recreate the silent leak in a
+    /// quieter form. Both halves are attempted before the first failure is
+    /// returned, and anything left undeleted stays retriable.
+    pub async fn abandon_outgoing_transfer(&self, transfer_id: &str) -> Result<(), RuntimeError> {
+        self.outgoing_transfers.lock().await.remove(transfer_id);
+        let reservation = self
+            .replay_store
+            .remove_reservation_checked(transfer_id)
+            .map_err(RuntimeError::from);
+        let artifacts = self.cleanup_transfer_artifacts_checked(transfer_id).await;
+        reservation.and(artifacts)
+    }
+
     pub async fn mark_import_ack_completed(&self, transfer_id: &str) -> Result<(), RuntimeError> {
         self.incoming_reservations.lock().await.remove(transfer_id);
         self.replay_store.remove_incoming_reservation(transfer_id);
@@ -655,6 +682,49 @@ impl TransferRuntime {
             take_transfer_artifacts(&mut artifacts, transfer_id)
         };
         remove_owned_artifact_paths(paths).await;
+    }
+
+    /// Like [`Self::cleanup_transfer_artifacts`], but reports what it could not
+    /// delete and keeps that work retriable.
+    ///
+    /// Taking the records out of the map is what makes a failed deletion
+    /// unrecoverable: the path is the only handle anyone has on the file. Any
+    /// record whose file survived therefore goes back, so a retried abandon
+    /// still knows what it owes the disk. Everything actually deleted stays
+    /// deleted, so the retry does not redo work.
+    async fn cleanup_transfer_artifacts_checked(
+        &self,
+        transfer_id: &str,
+    ) -> Result<(), RuntimeError> {
+        let records = {
+            let mut artifacts = self.transfer_artifacts.lock().await;
+            artifacts.remove(transfer_id).unwrap_or_default()
+        };
+
+        let mut undeleted = HashMap::new();
+        let mut failure: Option<std::io::Error> = None;
+        for (artifact_id, record) in records {
+            if !record.owned {
+                continue;
+            }
+            if let Err(error) = remove_owned_artifact_path(&record.path).await {
+                undeleted.insert(artifact_id, record);
+                failure.get_or_insert(error);
+            }
+        }
+
+        if !undeleted.is_empty() {
+            let mut artifacts = self.transfer_artifacts.lock().await;
+            artifacts
+                .entry(transfer_id.to_owned())
+                .or_default()
+                .extend(undeleted);
+        }
+
+        match failure {
+            Some(error) => Err(RuntimeError::from(error)),
+            None => Ok(()),
+        }
     }
 
     pub async fn mark_incoming_event_recorded(

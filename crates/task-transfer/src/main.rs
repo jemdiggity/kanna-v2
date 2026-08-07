@@ -458,6 +458,16 @@ async fn handle_request(runtime: &TransferRuntime, request: ControlRequest) -> C
             },
             Err(error) => control_error(request_id, error),
         },
+        ControlRequest::AbandonOutgoingTransfer {
+            request_id,
+            transfer_id,
+        } => match runtime.abandon_outgoing_transfer(&transfer_id).await {
+            Ok(()) => ControlResponse::AbandonOutgoingTransfer {
+                request_id,
+                transfer_id,
+            },
+            Err(error) => control_error(request_id, error),
+        },
         ControlRequest::FinalizeOutgoingTransfer {
             request_id,
             transfer_id,

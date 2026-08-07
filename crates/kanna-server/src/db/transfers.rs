@@ -1,6 +1,56 @@
 use super::Db;
 use serde::{Deserialize, Serialize};
 
+const TASK_TRANSFER_COLUMNS: &str = "SELECT id, direction, status, source_peer_id, target_peer_id,
+            source_desktop_id, target_desktop_id, source_task_id,
+            local_task_id, started_at, completed_at, error, payload_json,
+            claim_owner_token, claim_expires_at
+     FROM task_transfer";
+
+/// Mirrors `idx_task_transfer_active_outgoing_source` (migration
+/// `036_task_transfer_ownership_leases`) exactly. The index is what rejects a
+/// duplicate push, so anything that predicts the rejection has to agree with it
+/// literally rather than approximately.
+const ACTIVE_OUTGOING_TRANSFER_STATUSES: &str = "('pending', 'streaming')";
+
+/// The rusqlite message SQLite raises when that index rejects an insert.
+pub const ACTIVE_OUTGOING_TRANSFER_CONSTRAINT: &str =
+    "UNIQUE constraint failed: task_transfer.source_task_id";
+
+fn read_task_transfer(row: &rusqlite::Row<'_>) -> Result<TaskTransfer, rusqlite::Error> {
+    Ok(TaskTransfer {
+        id: row.get(0)?,
+        direction: row.get(1)?,
+        status: row.get(2)?,
+        source_peer_id: row.get(3)?,
+        target_peer_id: row.get(4)?,
+        source_desktop_id: row.get(5)?,
+        target_desktop_id: row.get(6)?,
+        source_task_id: row.get(7)?,
+        local_task_id: row.get(8)?,
+        started_at: row.get(9)?,
+        completed_at: row.get(10)?,
+        error: row.get(11)?,
+        payload_json: row.get(12)?,
+        claim_owner_token: row.get(13)?,
+        claim_expires_at: row.get(14)?,
+    })
+}
+
+/// True when `error` is the active-outgoing index rejecting a duplicate push,
+/// rather than any other constraint the insert could trip.
+pub fn is_active_outgoing_transfer_conflict(error: &rusqlite::Error) -> bool {
+    match error {
+        rusqlite::Error::SqliteFailure(failure, message) => {
+            failure.code == rusqlite::ErrorCode::ConstraintViolation
+                && message
+                    .as_deref()
+                    .is_some_and(|message| message.contains(ACTIVE_OUTGOING_TRANSFER_CONSTRAINT))
+        }
+        _ => false,
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingIncomingTransfer {
@@ -82,32 +132,37 @@ impl Db {
         &self,
         transfer_id: &str,
     ) -> Result<Option<TaskTransfer>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, direction, status, source_peer_id, target_peer_id,
-                    source_desktop_id, target_desktop_id, source_task_id,
-                    local_task_id, started_at, completed_at, error, payload_json,
-                    claim_owner_token, claim_expires_at
-             FROM task_transfer WHERE id = ?",
-        )?;
-        let mut rows = stmt.query_map([transfer_id], |row| {
-            Ok(TaskTransfer {
-                id: row.get(0)?,
-                direction: row.get(1)?,
-                status: row.get(2)?,
-                source_peer_id: row.get(3)?,
-                target_peer_id: row.get(4)?,
-                source_desktop_id: row.get(5)?,
-                target_desktop_id: row.get(6)?,
-                source_task_id: row.get(7)?,
-                local_task_id: row.get(8)?,
-                started_at: row.get(9)?,
-                completed_at: row.get(10)?,
-                error: row.get(11)?,
-                payload_json: row.get(12)?,
-                claim_owner_token: row.get(13)?,
-                claim_expires_at: row.get(14)?,
-            })
-        })?;
+        let mut stmt = self
+            .conn
+            .prepare(&format!("{TASK_TRANSFER_COLUMNS} WHERE id = ?"))?;
+        let mut rows = stmt.query_map([transfer_id], read_task_transfer)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The one outgoing transfer a source task is allowed to have in flight, as
+    /// the DB sees it.
+    ///
+    /// Renderer snapshots lag the DB, so a second `task-pull-requested` delivery
+    /// could pass an eligibility check that only read `store.items` and then
+    /// collide with `idx_task_transfer_active_outgoing_source`. This is the
+    /// authoritative read that check needs, and it survives an app restart in a
+    /// way the renderer's in-memory push guards never could.
+    pub fn active_outgoing_transfer_for_source(
+        &self,
+        source_task_id: &str,
+    ) -> Result<Option<TaskTransfer>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(&format!(
+            "{TASK_TRANSFER_COLUMNS}
+             WHERE direction = 'outgoing'
+               AND source_task_id = ?
+               AND status IN {ACTIVE_OUTGOING_TRANSFER_STATUSES}
+             ORDER BY started_at, id
+             LIMIT 1"
+        ))?;
+        let mut rows = stmt.query_map([source_task_id], read_task_transfer)?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),

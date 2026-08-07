@@ -14,6 +14,8 @@ import {
   fetchIncomingTransferCleanupCandidates,
   fetchPendingIncomingTransfers,
   getDesktopSetting,
+  insertDesktopTaskTransfer,
+  isActiveOutgoingTransferConflict,
   addDesktopRepo,
   mutateDesktopWindowWorkspace,
   markIncomingTransferSidecarCleanupCompleted,
@@ -156,6 +158,78 @@ describe("desktopServerClient", () => {
         body: JSON.stringify(ordinaryRequest),
       },
     );
+  });
+
+  /**
+   * `PUT /v1/tasks/{id}` answers 409 while a creation for that id is already in
+   * flight, and `createDesktopTask` carries a 15s retry budget precisely to wait
+   * that out — the concurrent creation finishes and the route then returns the
+   * existing task. Treating 409 as terminal in the shared request path (as the
+   * duplicate-transfer work briefly did) turns that transient conflict into an
+   * immediate throw and loses the task.
+   */
+  it("retries a requested task creation that is already in flight instead of failing on its 409", async () => {
+    const response = {
+      taskId: "task-requested",
+      repoId: "repo-1",
+      title: "Ship it",
+      stage: "in progress",
+      agentType: "pty",
+      worktreePath: "/tmp/task-requested",
+    };
+    let attempts = 0;
+    const fetchMock = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return new Response("task creation already in progress: task-requested", { status: 409 });
+      }
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createDesktopTask({
+      repoId: "repo-1",
+      prompt: "Ship it",
+      requestedTaskId: "0123456789abcdef".repeat(4),
+    })).resolves.toEqual(response);
+    expect(attempts).toBe(2);
+  });
+
+  /**
+   * The counterpart: a caller that wants a conflict answered rather than waited
+   * out asks for no retry budget. `POST /v1/transfers` is the one that does, so
+   * its duplicate 409 surfaces on the first attempt — without that being a
+   * decision imposed on every other route.
+   */
+  it("surfaces a conflict immediately for a request with no retry budget", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          error: "active_outgoing_transfer_exists",
+          sourceTaskId: "task-source",
+          transferId: "transfer-first",
+        }),
+        { status: 409, headers: { "content-type": "application/json" } },
+      ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(insertDesktopTaskTransfer({
+      id: "transfer-second",
+      direction: "outgoing",
+      status: "pending",
+      source_peer_id: "peer-source",
+      target_peer_id: "peer-target",
+      source_desktop_id: null,
+      target_desktop_id: null,
+      source_task_id: "task-source",
+      local_task_id: "task-source",
+      error: null,
+      payload_json: "{}",
+    })).rejects.toSatisfy(isActiveOutgoingTransferConflict);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("passes the requested default branch when registering a transferred repo", async () => {

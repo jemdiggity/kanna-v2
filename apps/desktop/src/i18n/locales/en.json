@@ -179,7 +179,8 @@
     "noTerminalFileLink": "No file link found in this terminal.",
     "transferFinalizationFailed": "Task transfer failed",
     "transferFinalizationDegraded": "Task transfer handed off without a clean shutdown",
-    "transferFinalizationUnclean": "the source agent session did not end cleanly"
+    "transferFinalizationUnclean": "the source agent session did not end cleanly",
+    "transferReservationOrphaned": "A duplicate transfer reservation could not be released and may be left on disk"
   },
   "tags": {
     "inProgress": "In Progress",

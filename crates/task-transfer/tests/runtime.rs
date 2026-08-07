@@ -597,6 +597,193 @@ async fn prepare_transfer_rejects_forged_stale_and_replayed_envelopes_before_res
     );
 }
 
+/// A duplicate push discovers it lost the race only after its preflight has
+/// already written a durable reservation and staged artifacts for it. On
+/// 2026-08-06 that state was simply left behind. Abandoning has to clear both,
+/// and has to survive the caller not knowing whether the reservation existed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoning_an_outgoing_transfer_clears_its_reservation_and_staged_artifacts() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-source", "Source", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_millis(500)),
+    )
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination").await;
+
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination", "task-source")
+        .await
+        .unwrap();
+    let staged = temp.path().join("session.tar.gz");
+    std::fs::write(&staged, b"session").unwrap();
+    source
+        .stage_transfer_artifact(
+            &preflight.transfer_id,
+            "claude-session",
+            staged.clone(),
+            true,
+        )
+        .await
+        .unwrap();
+    let owned_artifact = source
+        .fetch_transfer_artifact(&preflight.transfer_id, "claude-session")
+        .await
+        .unwrap()
+        .path;
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-source", "reservations"),
+        1,
+    );
+    assert!(owned_artifact.exists());
+
+    source
+        .abandon_outgoing_transfer(&preflight.transfer_id)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-source", "reservations"),
+        0,
+        "abandoned reservation stayed on disk",
+    );
+    assert!(
+        !owned_artifact.exists(),
+        "abandoned artifact stayed on disk"
+    );
+    assert!(source
+        .fetch_transfer_artifact(&preflight.transfer_id, "claude-session")
+        .await
+        .is_err());
+
+    // The caller's job is to leave nothing behind, not to prove something was
+    // there — a second release, or one for a transfer this process never
+    // reserved, is a no-op rather than an error it would have to swallow.
+    source
+        .abandon_outgoing_transfer(&preflight.transfer_id)
+        .await
+        .unwrap();
+    source
+        .abandon_outgoing_transfer("transfer-never-reserved")
+        .await
+        .unwrap();
+}
+
+/// Claiming success over a reservation whose file survived is the same silent
+/// leak in a quieter form: the caller tells the operator the reservation is
+/// released, and nobody ever looks again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoning_an_outgoing_transfer_reports_a_reservation_it_could_not_delete() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-source", "Source", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_millis(500)),
+    )
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination").await;
+
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination", "task-source")
+        .await
+        .unwrap();
+    // Swapping the reservation file for a directory of the same name is the
+    // portable way to make exactly one `remove_file` fail: unlinking a
+    // directory is refused, and nothing else about the store changes.
+    let reservation_path = only_replay_json(temp.path(), "peer-source", "reservations");
+    std::fs::remove_file(&reservation_path).unwrap();
+    std::fs::create_dir(&reservation_path).unwrap();
+
+    let error = source
+        .abandon_outgoing_transfer(&preflight.transfer_id)
+        .await
+        .expect_err("abandon claimed success over a reservation it could not delete");
+    assert!(
+        matches!(error, RuntimeError::Io(_)),
+        "unexpected abandon failure: {error:?}",
+    );
+
+    // Once the obstruction is gone the same call succeeds, and the record that
+    // is already absent is not mistaken for a failure.
+    std::fs::remove_dir(&reservation_path).unwrap();
+    source
+        .abandon_outgoing_transfer(&preflight.transfer_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-source", "reservations"),
+        0,
+    );
+}
+
+/// Taking the artifact records out of the map is what would make a failed
+/// deletion unrecoverable — the path is the only handle anyone has on the file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoning_an_outgoing_transfer_reports_and_retries_an_artifact_it_could_not_delete() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    let staged = temp.path().join("session.tar.gz");
+    std::fs::write(&staged, b"session").unwrap();
+    source
+        .stage_transfer_artifact("transfer-blocked-artifact", "claude-session", staged, true)
+        .await
+        .unwrap();
+    let owned_artifact = source
+        .fetch_transfer_artifact("transfer-blocked-artifact", "claude-session")
+        .await
+        .unwrap()
+        .path;
+    std::fs::remove_file(&owned_artifact).unwrap();
+    std::fs::create_dir(&owned_artifact).unwrap();
+
+    // No preflight ran, so the reservation half is a clean no-op and the
+    // failure can only be the artifact.
+    let error = source
+        .abandon_outgoing_transfer("transfer-blocked-artifact")
+        .await
+        .expect_err("abandon claimed success over an artifact it could not delete");
+    assert!(
+        matches!(error, RuntimeError::Io(_)),
+        "unexpected abandon failure: {error:?}",
+    );
+
+    std::fs::remove_dir(&owned_artifact).unwrap();
+    source
+        .abandon_outgoing_transfer("transfer-blocked-artifact")
+        .await
+        .expect("the undeleted artifact was forgotten instead of retried");
+    assert!(!owned_artifact.exists(), "retried artifact stayed on disk");
+    assert!(source
+        .fetch_transfer_artifact("transfer-blocked-artifact", "claude-session")
+        .await
+        .is_err());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finalize_transfer_authenticates_reserved_target_and_rejects_replay_before_events() {
     let temp = tempfile::tempdir().unwrap();
@@ -8655,6 +8842,29 @@ fn replay_json_count(registry_root: &Path, peer_id: &str, kind: &str) -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+/// The single replay record of `kind`, for tests that need to reach the file
+/// itself rather than count it. Panics unless there is exactly one, so a test
+/// cannot quietly obstruct the wrong record.
+fn only_replay_json(registry_root: &Path, peer_id: &str, kind: &str) -> std::path::PathBuf {
+    let directory = registry_root
+        .join("transfer-replay")
+        .join(URL_SAFE_NO_PAD.encode(peer_id))
+        .join(kind);
+    let mut paths = std::fs::read_dir(&directory)
+        .unwrap_or_else(|error| panic!("read {}: {error}", directory.display()))
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths.len(),
+        1,
+        "expected exactly one {kind} record in {}",
+        directory.display(),
+    );
+    paths.remove(0)
 }
 
 fn age_incoming_reservation(path: &Path) {
