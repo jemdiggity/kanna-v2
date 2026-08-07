@@ -27,7 +27,6 @@ pub struct SessionArchiveConfig {
     artifact_suffix: &'static str,
 }
 
-
 const SESSION_ARCHIVES: &[SessionArchiveConfig] = &[
     SessionArchiveConfig {
         provider: "claude",

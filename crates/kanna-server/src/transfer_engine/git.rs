@@ -42,16 +42,72 @@ pub fn remote_url(repo_path: &Path) -> Option<String> {
         .filter(|url| !url.is_empty())
 }
 
+/// Normalizes a ref name and refuses anything git would not read as one.
+///
+/// The destination's checkout ref comes from a *peer's* payload, so this is a
+/// fence, not a formatter: a value that reaches git's argv beginning with `-`
+/// is an option, and one containing `..` addresses a ref this transfer has no
+/// business naming. Everything that survives is `refs/`-prefixed, which also
+/// makes a leading dash unrepresentable.
 fn normalize_ref(reference: Option<&str>) -> Option<String> {
     let reference = reference?.trim();
     if reference.is_empty() {
         return None;
     }
-    Some(if reference.starts_with("refs/") {
+    let normalized = if reference.starts_with("refs/") {
         reference.to_string()
     } else {
         format!("refs/heads/{reference}")
-    })
+    };
+    let safe = normalized.len() <= 512
+        && !normalized.contains("..")
+        && !normalized.contains("//")
+        && !normalized.ends_with('/')
+        && normalized.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/' | b'+')
+        });
+    safe.then_some(normalized)
+}
+
+/// Whether a peer-supplied clone URL is one this machine will hand to git.
+///
+/// `git clone` parses options before its positional arguments, so a URL like
+/// `--upload-pack=/bin/sh` is a command, not an address; git's own `ext::`
+/// transport is remote code execution by design. The `--` separator below stops
+/// the first, and this allowlist stops the second — a payload arrives from
+/// another machine, and a paired peer is not the same thing as a trusted one.
+fn is_safe_clone_url(url: &str) -> bool {
+    const SCHEMES: &[&str] = &[
+        "https://",
+        "http://",
+        "ssh://",
+        "git://",
+        "file://",
+        "git+ssh://",
+    ];
+    let trimmed = url.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 2048
+        || trimmed.starts_with('-')
+        // `ext::<command>` is the transport that runs a command; `::` appears
+        // in no legitimate remote address, so refusing it outright is cheaper
+        // than reasoning about every helper git might resolve.
+        || trimmed.contains("::")
+        || trimmed
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return false;
+    }
+    if SCHEMES.iter().any(|scheme| trimmed.starts_with(scheme)) {
+        return true;
+    }
+    // scp-style `[user@]host:path`, git's other documented form. The host must
+    // not contain a slash, which is what distinguishes it from a local path.
+    match trimmed.split_once(':') {
+        Some((host, path)) => !host.is_empty() && !host.contains('/') && !path.is_empty(),
+        None => false,
+    }
 }
 
 /// Bundles the refs a transferred task needs when the destination has neither
@@ -109,10 +165,16 @@ pub fn init_from_bundle(
 }
 
 pub fn clone_remote(url: &str, destination: &Path) -> Result<(), String> {
+    if !is_safe_clone_url(url) {
+        return Err(format!(
+            "refusing to clone a transferred repository from an unsupported URL: {url}"
+        ));
+    }
     let destination = destination
         .to_str()
         .ok_or_else(|| "clone destination is not valid unicode".to_string())?;
-    git(Path::new("."), &["clone", url, destination]).map(|_| ())
+    // `--` ends option parsing, so a URL is a URL even if it begins with a dash.
+    git(Path::new("."), &["clone", "--", url, destination]).map(|_| ())
 }
 
 /// Packs one session-state directory into a gzip tar the receiver extracts.
@@ -230,6 +292,66 @@ mod tests {
         );
         assert_eq!(normalize_ref(Some("  ")), None);
         assert_eq!(normalize_ref(None), None);
+    }
+
+    /// The checkout ref comes from a peer's payload. A value that reaches git's
+    /// argv as an option, or that walks out of the ref namespace, is refused
+    /// rather than prefixed into something that only looks safe.
+    #[test]
+    fn a_hostile_ref_is_refused_rather_than_handed_to_git() {
+        for hostile in [
+            "refs/--upload-pack=/bin/sh",
+            "refs/heads/../../etc",
+            "refs/heads/a b",
+            "refs/heads/x\nrm -rf /",
+            "refs/heads/",
+            "refs//heads/x",
+        ] {
+            assert_eq!(normalize_ref(Some(hostile)), None, "{hostile}");
+        }
+        // A dash-leading branch name is still usable — it just cannot become an
+        // option once the `refs/heads/` prefix is in front of it.
+        assert_eq!(
+            normalize_ref(Some("--upload-pack")).as_deref(),
+            Some("refs/heads/--upload-pack"),
+        );
+    }
+
+    /// `git clone` parses options before positionals, and its `ext::` transport
+    /// runs commands by design. A repository URL arrives from another machine,
+    /// so both are refused before git sees them.
+    #[test]
+    fn a_hostile_clone_url_never_reaches_git() {
+        for hostile in [
+            "--upload-pack=/bin/sh",
+            "-u/bin/sh",
+            "ext::sh -c whoami",
+            "ext::sh",
+            "../../etc/passwd",
+            "/etc/passwd",
+            "https://example.com/repo.git ; rm -rf /",
+            "",
+            "   ",
+        ] {
+            assert!(!is_safe_clone_url(hostile), "{hostile}");
+        }
+        for legitimate in [
+            "https://github.com/anthropics/kanna.git",
+            "ssh://git@github.com/anthropics/kanna.git",
+            "git@github.com:anthropics/kanna.git",
+            "file:///Users/x/repos/kanna",
+        ] {
+            assert!(is_safe_clone_url(legitimate), "{legitimate}");
+        }
+    }
+
+    #[test]
+    fn cloning_refuses_an_unsupported_url_without_running_git() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let error = clone_remote("--upload-pack=/bin/sh", &temp.path().join("repo"))
+            .expect_err("an option-shaped URL was handed to git");
+        assert!(error.contains("unsupported URL"), "{error}");
+        assert!(!temp.path().join("repo").exists());
     }
 
     /// A bundle round trip through a real git, so the fetch refspec and the

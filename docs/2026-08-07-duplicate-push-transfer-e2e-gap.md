@@ -56,17 +56,17 @@ a failed remote leg keeps it for the retry.
   peer that did not reserve the transfer is refused, a committed reservation is
   refused, and a refused remote leg leaves the source reservation in place so
   the retry can still resolve the peer.
-- `apps/desktop/src/stores/kannaTransfer.test.ts` — two concurrent pushes that
-  both clear the snapshot and in-flight guards produce **one** `task_transfer`
-  row, no throw, and exactly one released reservation (the loser's); a fresh
-  store with the row already present skips the push entirely without a preflight
-  (the app-restart case the in-memory guards can never cover); and a release
-  that fails reaches the user.
-- `apps/desktop/src/composables/useAppLifecycle.test.ts` — a second delivery the
-  stale snapshot could not filter out still settles `delivered`, with no
-  operational error reported.
+- `crates/kanna-server/src/http_api/tests/transfers.rs` — two push intents for
+  one task schedule exactly one push, and a deliberate re-push (a distinct
+  `intentKey`) is not swallowed by the first.
+- `crates/kanna-server/src/db/transfer_work.rs` — a redelivered event collapses
+  onto the work already queued, including after that work has completed.
 
-## What is not covered, and why
+The two renderer-level tests this section used to name
+(`stores/kannaTransfer.test.ts`, `composables/useAppLifecycle.test.ts`) were
+deleted with the code they covered; see the T6 section below.
+
+## What was not covered when T3 shipped (both since closed — see below)
 
 **Two real `task-pull-requested` deliveries racing across two live instances.**
 The race is between a renderer snapshot reload and a DB write, both of which the
@@ -88,10 +88,19 @@ calls `rm(resolve(repoPath), { recursive: true })` with no guard that
 working directory. That is a separate defect from this task and is left for its
 own task, but it is why no real-E2E run was attempted here.
 
-## What would close it
+## What closed it
 
-Phase 3 of the plan, where transfer orchestration moves into `kanna-server`:
-once the push is a server-side operation, two concurrent pushes for one source
-task are two concurrent requests, and the race becomes directly expressible in
-an integration test against a real DB — no renderer, no live peer, and no
-dependence on snapshot timing.
+Phase 3 (T6) moved transfer orchestration into `kanna-server`, and both gaps
+above went with it.
+
+The **renderer-side race no longer exists**. Eligibility was a renderer snapshot
+lagging the DB; it is now a read the same process makes immediately before the
+write, against one durable work queue, and a redelivered `task-pull-requested`
+derives the same work id as the first. The property is an ordinary integration
+test now — no renderer, no live peer, no dependence on snapshot timing.
+
+The **real-E2E harness is safe to run again**: the `cleanupFixtureRepos` defect
+was fixed under its own task (PR #1016), and `apps/desktop/tests/e2e/real/` now
+runs on this machine. The transfer suites were exercised as part of T6,
+including `local-transfer-headless-engine.test.ts`, which completes a pull with
+the source renderer navigated away.

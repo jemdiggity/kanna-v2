@@ -71,13 +71,14 @@ reachable only by whoever held a private stdio pipe.
   entries climbed to the cap and backpressured the sidecar reader, wedging
   control. Absence of the field is not evidence of a stale cursor.
   Single-consumer: a read prunes through the cursor it is given, so exactly one
-  desktop process subscribes. The four state-mutating events
+  desktop process subscribes. This feed carries only *advisory* events —
+  pairing progress and remote terminal frames. The four state-mutating events
   (`incoming_transfer_request`, `task_pull_requested`,
-  `outgoing_transfer_committed`,
-  `outgoing_transfer_finalization_requested`) are marked `durable` and are never
-  evicted to make room — a full log applies backpressure to the sidecar reader
-  instead. Advisory events may be evicted, and the response says so via
-  `missedEvents`.
+  `outgoing_transfer_committed`, `outgoing_transfer_finalization_requested`)
+  never reach it: the sidecar's stdout reader appends them straight to the
+  transfer engine's durable work queue in this process. A full advisory log
+  evicts its oldest entries and says so via `missedEvents`, which it could not
+  do while a lifecycle event might be among them.
 - `POST /v1/transfers/cloud-proxies`, `DELETE /v1/transfers/cloud-proxies`,
   `DELETE /v1/transfers/cloud-proxies/{peer_id}` — outbound cloud transfer
   tunnels. This cannot ride the server's own relay connection: the relay honours
@@ -94,8 +95,63 @@ forwards all of it to the sidecar and re-derives none of it, so staging and
 production keep the distinct ports and per-worktree registries they need to run
 side by side.
 
-Transfer *orchestration* is still renderer-side; only the transport moved. See
+## Task Transfer Orchestration
+
+`kanna-server` performs the transfer, not just its transport. Push (preflight →
+git bundle → artifact staging → insert → commit), incoming record and import
+(repository acquisition, artifact materialization, task creation through the
+server's own creator, provenance, acknowledgment), approve/reject execution,
+outgoing-committed handling (closing the source task through the server's own
+close action) and failure reporting all run here.
+
+This is what makes a transfer independent of an open window. Orchestration used
+to live in the renderer, elected among windows by a lease/incarnation/phase-claim
+protocol whose whole job was surviving that window disappearing — and on
+2026-08-06 it did not: ownership was lost before the PTY finalization signal,
+the failure report could not be sent, and the commit acknowledgment failed. See
 [2026-08-06-task-transfer-rearchitecture-plan.md](2026-08-06-task-transfer-rearchitecture-plan.md).
+
+The engine's steps are rows in `transfer_work`, appended by the same reader
+that observes the sidecar event, and drained by one in-process loop:
+
+- A work id is **derived from the event** (`pull:<pull-request-id>`,
+  `incoming:<transfer-id>`, `committed:<transfer-id>`,
+  `finalize:<transfer-id>`), so a redelivery collapses onto the work already
+  queued. At-least-once delivery to a window became exactly-once execution in
+  one process.
+- A step that must happen at most once — signalling the source agent, closing
+  the source task, acknowledging an import — claims a row in
+  `transfer_work_phase`. That is the durable form of the sidecar's in-memory
+  `claimed_phases`, so a resumed item continues rather than repeating.
+- Work left `running` by a dead process returns to `pending` at engine start,
+  and incoming transfers recorded but not imported are re-enqueued. Before this,
+  only `transfer-request` had any restart recovery at all.
+- Attempts are bounded and backed off. A transfer that can make no further
+  progress is driven to `failed` and its sidecar reservation released, rather
+  than retried silently forever.
+
+Clients express **intent**; the engine executes. These routes are ordinary
+`/v1/` surface (not `DesktopLocalAccess`-only), so mobile can express the same
+intents:
+
+- `POST /v1/tasks/{source_task_id}/actions/push-to-peer` —
+  `{peerId, transport?, cloudFallback?, targetDesktopId?, intentKey?}`.
+  `intentKey` distinguishes a deliberate re-push from a retried request; the
+  response's `scheduled: false` means the intent was already queued.
+- `POST /v1/transfers/{transfer_id}/actions/approve`
+- `POST /v1/transfers/{transfer_id}/actions/reject-incoming`
+
+Progress reaches the UI through the snapshot's `transfer_status`, which the
+sidebar already renders. There is no bespoke event protocol between the engine
+and a window, and no window is required for a transfer to complete.
+
+A payload arrives from another machine, so everything derived from it is fenced
+before it is used: the artifact contract
+(`transfer_engine/payload.rs`), the openat/`O_NOFOLLOW`/renameat-no-replace
+materialization boundary (`transfer_artifact.rs`), and the git argv fence
+(`transfer_engine/git.rs`) — a clone URL is checked against a scheme allowlist
+and passed after `--`, because `git clone --upload-pack=…` and git's `ext::`
+transport are both remote code execution.
 
 ## Agent Runtime Identity
 
