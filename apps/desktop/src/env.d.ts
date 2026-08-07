@@ -83,6 +83,8 @@ interface KannaTerminalStreamsE2EApi {
 
 interface KannaE2EHook {
   ready: boolean;
+  /** Set once App.vue has decided whether to show the startup shortcuts modal. */
+  startupOverlaysSettled: boolean;
   setupState: object | null;
   dbName: string;
   taskSwitchPerf: KannaTaskSwitchPerfE2EApi;

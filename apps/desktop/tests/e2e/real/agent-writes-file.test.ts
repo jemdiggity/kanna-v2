@@ -6,7 +6,6 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { submitTaskFromUi } from "../helpers/newTaskFlow";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
-import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { waitForTaskCreated } from "../helpers/taskCreation";
 import { nudgeTerminalTrustPrompt } from "../helpers/terminalInput";
 import { WebDriverClient } from "../helpers/webdriver";
@@ -83,9 +82,7 @@ describe("agent writes file (real CLI)", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
     testRepoPath = await createFixtureRepo("agent-writes-file-real-test");
     await importTestRepo(client, testRepoPath, "agent-writes-file-real-test");
   });

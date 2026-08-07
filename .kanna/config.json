@@ -11,7 +11,7 @@
   "test": ["pnpm test"],
   "agentProviders": {
     "*": {
-      "provider": ["codex", "claude", "copilot", "opencode", "antigravity"]
+      "provider": ["claude", "codex", "copilot", "opencode", "antigravity"]
     }
   },
   "workspace": {

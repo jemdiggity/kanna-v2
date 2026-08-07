@@ -52,6 +52,43 @@ describe("WebDriverClient.createSession", () => {
     expect(dismissStartupShortcutsModal).not.toHaveBeenCalled();
   });
 
+  it("clears the readiness flags in the same script that reloads", async () => {
+    const requests: Array<{ url: string; method: string; body: unknown }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      requests.push({
+        url,
+        method,
+        body: init?.body ? JSON.parse(String(init.body)) as unknown : undefined,
+      });
+      if (url.endsWith("/session") && method === "POST") {
+        return { json: async () => ({ value: { sessionId: "session-4" } }) } as Response;
+      }
+      if (url.endsWith("/execute/sync") && method === "POST") {
+        return { json: async () => ({ value: null }) } as Response;
+      }
+      throw new Error(`Unexpected fetch: ${url} ${method}`);
+    }));
+
+    const client = new WebDriverClient();
+    const waitForAppReady = vi.spyOn(client, "waitForAppReady").mockResolvedValue();
+    await client.createSession({ dismissStartupShortcuts: false });
+
+    await client.reload();
+
+    // Clearing has to ride along with the reload call itself: otherwise
+    // waitForAppReady can observe the outgoing page and return too early.
+    const script = (requests
+      .find((request) => request.url.endsWith("/execute/sync"))
+      ?.body as { script?: string } | undefined)?.script ?? "";
+    expect(script).toContain("window.__KANNA_E2E__.ready = false");
+    expect(script).toContain("window.__KANNA_E2E__.startupOverlaysSettled = false");
+    expect(script).toContain("location.reload()");
+    expect(waitForAppReady).toHaveBeenCalledTimes(2);
+    expect(dismissStartupShortcutsModal).toHaveBeenCalledWith(client);
+  });
+
   it("drags one element to the upper half of another element with active mouse movement", async () => {
     const requests: Array<{ url: string; method: string; body: unknown }> = [];
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {

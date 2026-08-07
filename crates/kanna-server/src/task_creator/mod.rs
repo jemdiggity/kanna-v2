@@ -4,6 +4,7 @@ mod definition_source;
 mod definitions;
 mod environment;
 mod lifecycle;
+mod local_config;
 mod merge;
 mod prompt;
 mod provider;
@@ -31,6 +32,7 @@ use environment::{
     claim_task_ports, kanna_server_base_url, resolve_headless_agent_executable,
     resolve_provider_executable, run_workspace_setup_commands, write_kanna_mcp_config,
 };
+use local_config::LocalConfigOverride;
 use prompt::{build_stage_prompt, PromptContext};
 use provider::{
     normalize_agent_type, resolve_agent_provider, resolve_agent_provider_candidates,
@@ -73,11 +75,11 @@ pub(crate) use prompt::RevisionRound;
 pub(crate) use stages::{
     prepare_advance_stage_for_api, prepare_resume_task_for_api, prepare_revision_task_for_api,
     prepare_stage_completion_for_api, resolve_revision_budget, resolve_revision_limit,
-    resolve_stage_transition, RevisionBudget,
+    resolve_stage_transition, stage_declares_merge_approve_post, RevisionBudget,
 };
 pub(crate) use worktree::resolve_current_source_worktree_branch;
 
-const FALLBACK_PIPELINE_NAME: &str = "no-review";
+pub(crate) const FALLBACK_PIPELINE_NAME: &str = "no-review";
 
 #[derive(Clone, Debug)]
 pub(crate) enum DefinitionLookupError {
@@ -526,6 +528,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
         defer_headless_setup,
         None,
         None,
+        repo_config.local_override.as_ref(),
     )?;
     let session_id = db
         .resolve_task_terminal_session_id(task_id)
@@ -662,6 +665,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
             defer_headless_setup,
             resolved.resume_session_id.as_deref(),
             resolved.transfer_import.as_ref(),
+            repo_config.local_override.as_ref(),
         )?;
         if let Some((initial_cols, initial_rows)) = resolved.initial_terminal_geometry {
             if let PreparedSessionSpawn::Pty { cols, rows, .. } = &mut session {
@@ -777,6 +781,7 @@ pub(crate) fn prepare_create_task_repair_for_api(
         defer_headless_setup,
         resolved.resume_session_id.as_deref(),
         resolved.transfer_import.as_ref(),
+        repo_config.local_override.as_ref(),
     )?;
     if let Some((initial_cols, initial_rows)) = resolved.initial_terminal_geometry {
         if let PreparedSessionSpawn::Pty { cols, rows, .. } = &mut session {
@@ -992,6 +997,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             !setup.is_empty(),
             resume_session_id.as_deref(),
             None,
+            repo_config.local_override.as_ref(),
         )?;
         let deferred_setup = (!setup.is_empty()).then(|| DeferredStageSetup {
             commands: setup,
@@ -1005,6 +1011,9 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
             allowed_tools,
             mcp_config_path,
             resume_session_id: resume_session_id.clone(),
+            // The session built above is provisional; the deferred worker
+            // rebuilds it after setup, so the notice has to survive with it.
+            local_config_override: repo_config.local_override.clone(),
         });
         let session_id = db
             .resolve_task_terminal_session_id(task_id)
@@ -1143,6 +1152,7 @@ pub(crate) fn finish_deferred_stage_setup(
         false,
         deferred.resume_session_id.as_deref(),
         None,
+        deferred.local_config_override.as_ref(),
     )?;
     prepared.agent_provider = provider.as_str().to_string();
     prepared.provider_session_id = provider_session_id;
@@ -1401,6 +1411,7 @@ fn build_prepared_session(
     defer_headless_setup: bool,
     resume_session_id: Option<&str>,
     transfer_import: Option<&crate::mobile_api::TransferImportSummary>,
+    local_config_override: Option<&LocalConfigOverride>,
 ) -> Result<(PreparedSessionSpawn, Option<String>), String> {
     validate_provider_model(provider, model.as_deref())?;
     validate_provider_effort(provider, effort.as_deref())?;
@@ -1480,6 +1491,7 @@ fn build_prepared_session(
                 &agent_cmd,
                 setup,
                 transfer_import,
+                local_config_override,
                 spawn_env.get("KANNA_CLI_PATH").map(String::as_str),
                 shell_path.as_deref(),
             );
@@ -2258,6 +2270,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
         false,
         None,
         None,
+        repo_config.local_override.as_ref(),
     ) {
         Ok(prepared) => prepared,
         Err(error) => return Err(rollback_start(error.into())),
@@ -3121,6 +3134,7 @@ fn prepare_new_task_session(
         false,
         resolved.resume_session_id.as_deref(),
         resolved.transfer_import.as_ref(),
+        repo_config.local_override.as_ref(),
     )?;
     if let Some((initial_cols, initial_rows)) = resolved.initial_terminal_geometry {
         if let PreparedSessionSpawn::Pty { cols, rows, .. } = &mut session {

@@ -121,6 +121,7 @@ impl Db {
                 agent_spawn_options TEXT,
                 teardown_started_at TEXT,
                 revision_rounds INTEGER NOT NULL DEFAULT 0,
+                merge_signaled_at TEXT,
                 runtime_status TEXT
             );
             CREATE UNIQUE INDEX idx_pipeline_item_open_cloud_task_id

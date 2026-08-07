@@ -738,6 +738,122 @@ async fn durable_pipeline_provider_lists_fall_back_for_reloaded_stages_and_posts
     cleanup.stop_daemon().await;
 }
 
+/// The incident this layer exists for: one machine's provider CLI is wedged
+/// and the only lever used to be a commit to `origin/main`, because definitions
+/// are resolved from there. A `.kanna/config.local.json` that never reaches git
+/// must reach the spawn.
+#[tokio::test(flavor = "current_thread")]
+async fn a_machine_local_agent_provider_reorder_reaches_a_spawn_without_any_commit() {
+    let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
+    let root = unique_test_root("local-config-override");
+    std::fs::create_dir_all(&root).expect("test root should be created");
+    // The committed config prefers claude with `repo-model` for `implement`.
+    let repo = init_provider_repo(&root);
+    std::fs::write(
+        repo.join(".kanna/config.local.json"),
+        json!({
+            "agentProviders": {
+                // codex leads and is not installed here, so the ordered
+                // fallback lands on claude — the reorder an operator reaches
+                // for when the leading provider is the wedged one.
+                "implement": {"provider": ["codex", "claude"], "model": "local-model"}
+            }
+        })
+        .to_string(),
+    )
+    .expect("machine-local repo config should be written");
+    let status = StdCommand::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(&repo)
+        .output()
+        .expect("git status should run");
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains("?? .kanna/config.local.json"),
+        "the override must apply while it is still uncommitted"
+    );
+
+    let ports = ServerPortReservations::new();
+    let port = ports.lan_port();
+    let (config_path, daemon_dir, _) = write_server_config(&root, port, ports.transfer_port());
+    let ServerPortReservations { lan, transfer } = ports;
+    let daemon = tokio::spawn(fake_daemon_until_spawn(daemon_dir));
+    let mut server = start_server(&config_path, &root, port, lan, transfer).await;
+    let client = Client::new();
+    let repo_id = register_repo(&client, port, &repo).await;
+
+    let manifest = client
+        .get(format!(
+            "http://127.0.0.1:{port}/v1/repos/{repo_id}/kanna-definitions"
+        ))
+        .send()
+        .await
+        .expect("definition manifest should reach kanna-server")
+        .error_for_status()
+        .expect("definition manifest should succeed")
+        .json::<Value>()
+        .await
+        .expect("definition manifest should be JSON");
+    assert_eq!(
+        manifest["config"]["localOverride"]["keys"],
+        json!(["agentProviders"])
+    );
+    assert!(
+        manifest["config"]["localOverride"]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("/.kanna/config.local.json")),
+        "manifest should name the local file: {manifest}"
+    );
+
+    let created = client
+        .post(format!("http://127.0.0.1:{port}/v1/tasks"))
+        .json(&json!({
+            "repoId": repo_id,
+            "prompt": "Use the machine-local preference",
+            "agent": "implement",
+            "agentType": "agent"
+        }))
+        .send()
+        .await
+        .expect("task creation should reach kanna-server")
+        .error_for_status()
+        .expect("machine-local preference should resolve to an available provider")
+        .json::<Value>()
+        .await
+        .expect("task response should be JSON");
+    let task_id = created["taskId"]
+        .as_str()
+        .expect("task response should include an id");
+
+    match daemon.await.expect("fake daemon should finish") {
+        DaemonCommand::SpawnAgent {
+            session_id, params, ..
+        } => {
+            assert_eq!(session_id, task_id);
+            assert_eq!(params.agent_provider, DaemonAgentProvider::Claude);
+            // The committed config says `repo-model`; only the uncommitted
+            // file says this.
+            assert_eq!(params.model.as_deref(), Some("local-model"));
+        }
+        other => panic!("expected machine-local headless spawn, got {other:?}"),
+    }
+
+    let task = client
+        .get(format!("http://127.0.0.1:{port}/v1/tasks/{task_id}"))
+        .send()
+        .await
+        .expect("task detail should reach kanna-server")
+        .error_for_status()
+        .expect("task detail should succeed")
+        .json::<Value>()
+        .await
+        .expect("task detail should be JSON");
+    assert_eq!(task["agentProvider"], "claude");
+    assert_eq!(task["model"], "local-model");
+
+    stop_server(&mut server).await;
+    std::fs::remove_dir_all(root).expect("test root should be removed");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn unsupported_headless_provider_is_rejected_before_durable_state_through_http() {
     let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;

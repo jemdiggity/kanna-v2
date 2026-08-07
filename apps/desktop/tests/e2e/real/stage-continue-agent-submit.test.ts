@@ -6,7 +6,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
-import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { pressAdvanceStageShortcut } from "../helpers/stageAdvance";
 import { nudgeTerminalTrustPrompt } from "../helpers/terminalInput";
 import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
@@ -80,9 +79,7 @@ describe("real post injection into a live agent session", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
 
     testRepoPath = await createFixtureRepo("stage-continue-real-agent-test");
     const kannaDir = join(testRepoPath, ".kanna");

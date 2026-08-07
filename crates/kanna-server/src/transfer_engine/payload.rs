@@ -48,6 +48,10 @@ pub enum TransferArtifactKind {
     SessionRollout,
     SessionArchive,
     SessionTranscript,
+    /// One conversation, exported by the provider's own CLI. OpenCode keeps
+    /// every session in a shared SQLite store rather than a per-session file,
+    /// so neither copying a file nor archiving a directory describes it.
+    SessionExport,
 }
 
 impl TransferArtifactKind {
@@ -56,6 +60,7 @@ impl TransferArtifactKind {
             Self::SessionRollout => "session-rollout",
             Self::SessionArchive => "session-archive",
             Self::SessionTranscript => "session-transcript",
+            Self::SessionExport => "session-export",
         }
     }
 
@@ -64,6 +69,7 @@ impl TransferArtifactKind {
             "session-rollout" => Ok(Self::SessionRollout),
             "session-archive" => Ok(Self::SessionArchive),
             "session-transcript" => Ok(Self::SessionTranscript),
+            "session-export" => Ok(Self::SessionExport),
             other => Err(format!("unsupported transfer artifact kind {other}")),
         }
     }
@@ -74,6 +80,13 @@ impl TransferArtifactKind {
 pub enum TransferArtifactMaterialization {
     CopyFile,
     ExtractTarGz,
+    /// Replayed through `opencode import` rather than placed under `$HOME`.
+    ///
+    /// The other two materializations write bytes through the
+    /// `transfer_artifact` fence. This one writes nothing there: OpenCode owns
+    /// its store and only its own CLI may write it, so an artifact carrying
+    /// this materialization must never reach the filesystem fence at all.
+    OpencodeImport,
 }
 
 impl TransferArtifactMaterialization {
@@ -81,6 +94,7 @@ impl TransferArtifactMaterialization {
         match self {
             Self::CopyFile => "copy-file",
             Self::ExtractTarGz => "extract-tar-gz",
+            Self::OpencodeImport => "opencode-import",
         }
     }
 
@@ -88,11 +102,30 @@ impl TransferArtifactMaterialization {
         match value {
             "copy-file" => Ok(Self::CopyFile),
             "extract-tar-gz" => Ok(Self::ExtractTarGz),
+            "opencode-import" => Ok(Self::OpencodeImport),
             other => Err(format!(
                 "unsupported transfer artifact materialization {other}"
             )),
         }
     }
+}
+
+/// The one filename an OpenCode session export may travel under.
+pub const OPENCODE_SESSION_EXPORT_FILENAME: &str = "opencode-session.json";
+
+/// The CLI-owned data directory `opencode import` writes into, recorded so the
+/// payload still describes where session state lands. It is a description, not
+/// an instruction: no code derives a destination from it, and `XDG_DATA_HOME`
+/// can move the real directory elsewhere.
+pub const OPENCODE_SESSION_DATA_DIR_HOME_REL_PATH: &str = ".local/share/opencode";
+
+/// OpenCode session ids are `ses_` followed by base62 — not a uuid, unlike
+/// every other provider Kanna resumes.
+pub fn is_opencode_session_id(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("ses_") else {
+        return false;
+    };
+    !rest.is_empty() && rest.len() <= 64 && rest.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,8 +223,10 @@ pub struct OutgoingTransferPayload {
 ///
 /// Claude's conversation is the cwd-keyed transcript, not the
 /// `~/.claude/tasks/<id>` lock directory, so the transcript is the load-bearing
-/// one. Providers absent from this table keep no transferable session state, so
-/// for them an empty artifact list is not a defect.
+/// one. OpenCode keeps no per-session file at all — its conversations live in a
+/// shared SQLite store — so its conversation ships as an `opencode export`.
+/// Providers absent from this table keep no transferable session state, so for
+/// them an empty artifact list is not a defect.
 pub fn required_session_artifact_kind(
     agent_type: Option<&str>,
     agent_provider: Option<&str>,
@@ -205,6 +240,7 @@ pub fn required_session_artifact_kind(
         "claude" => Some(TransferArtifactKind::SessionTranscript),
         "codex" => Some(TransferArtifactKind::SessionRollout),
         "copilot" => Some(TransferArtifactKind::SessionArchive),
+        "opencode" => Some(TransferArtifactKind::SessionExport),
         _ => None,
     }
 }
@@ -425,6 +461,26 @@ fn canonical_artifact_contract(
                 kind: TransferArtifactKind::SessionArchive,
                 materialization: TransferArtifactMaterialization::ExtractTarGz,
                 exact_home_rel_path: Some(format!(".claude/tasks/{session_id}")),
+            })
+        }
+        "opencode" => {
+            if !is_opencode_session_id(&session_id) {
+                return Err("transfer resume session id is not an OpenCode session id".into());
+            }
+            if filename != OPENCODE_SESSION_EXPORT_FILENAME {
+                return Err(
+                    "transfer artifact filename does not match the OpenCode session contract"
+                        .into(),
+                );
+            }
+            Ok(ArtifactContract {
+                kind: TransferArtifactKind::SessionExport,
+                materialization: TransferArtifactMaterialization::OpencodeImport,
+                // Nothing is written to this path: `opencode import` owns its
+                // store and the receiver never derives a destination from the
+                // payload. The value is pinned anyway so a peer cannot smuggle
+                // a path through the field.
+                exact_home_rel_path: Some(OPENCODE_SESSION_DATA_DIR_HOME_REL_PATH.to_string()),
             })
         }
         "copilot" => {
@@ -778,6 +834,7 @@ mod tests {
     use serde_json::json;
 
     const SESSION_ID: &str = "364643cc-5e6d-48fc-86ca-ca7764380900";
+    const OPENCODE_SESSION: &str = "ses_02645d9aaffeeOgwt2rbXIcTdp";
 
     fn payload_with(artifacts: Value) -> Value {
         json!({
@@ -932,10 +989,93 @@ mod tests {
             required_session_artifact_kind(Some("agent"), Some("claude"), Some(SESSION_ID)),
             None
         );
+        // OpenCode's conversation lives in a shared SQLite store, so it ships
+        // as an export rather than a file or a directory — but it does ship,
+        // and a promise of one that arrives empty is the same defect.
         assert_eq!(
-            required_session_artifact_kind(Some("pty"), Some("opencode"), Some(SESSION_ID)),
+            required_session_artifact_kind(Some("pty"), Some("opencode"), Some(OPENCODE_SESSION)),
+            Some(TransferArtifactKind::SessionExport)
+        );
+        assert_eq!(
+            required_session_artifact_kind(Some("agent"), Some("opencode"), Some(OPENCODE_SESSION)),
             None
         );
+        // A provider with genuinely nothing transferable is still an absence,
+        // not a defect.
+        assert_eq!(
+            required_session_artifact_kind(Some("pty"), Some("antigravity"), Some(SESSION_ID)),
+            None
+        );
+    }
+
+    /// OpenCode ids are `ses_` plus base62 — not uuids, which every other
+    /// provider Kanna resumes uses. A uuid here would mean the wrong provider's
+    /// id reached an OpenCode contract.
+    #[test]
+    fn opencode_session_ids_are_recognized_by_their_own_shape() {
+        for valid in [
+            "ses_02645d9aaffeeOgwt2rbXIcTdp",
+            "ses_a",
+            &format!("ses_{}", "a".repeat(64)),
+        ] {
+            assert!(is_opencode_session_id(valid), "{valid}");
+        }
+        for invalid in [
+            SESSION_ID,
+            "ses_",
+            "ses-02645d9",
+            "02645d9aaffeeOgwt2rbXIcTdp",
+            "ses_has-a-dash",
+            &format!("ses_{}", "a".repeat(65)),
+        ] {
+            assert!(!is_opencode_session_id(invalid), "{invalid}");
+        }
+    }
+
+    /// The one filename, the one pinned path, and a materialization that never
+    /// reaches the filesystem fence.
+    #[test]
+    fn an_opencode_export_is_pinned_to_its_contract_and_refuses_anything_else() {
+        let mut payload = payload_with(json!([{
+            "artifact_id": "t-1-opencode-session",
+            "filename": OPENCODE_SESSION_EXPORT_FILENAME,
+            "provider": "opencode",
+            "kind": "session-export",
+            "materialization": "opencode-import",
+            "home_rel_path": OPENCODE_SESSION_DATA_DIR_HOME_REL_PATH,
+        }]));
+        payload["task"]["agent_provider"] = json!("opencode");
+        payload["task"]["resume_session_id"] = json!(OPENCODE_SESSION);
+        let parsed = parse_outgoing_transfer_payload(&payload).expect("a valid export artifact");
+        assert_eq!(
+            parsed.artifacts[0].kind,
+            TransferArtifactKind::SessionExport
+        );
+        assert_eq!(
+            parsed.artifacts[0].materialization,
+            TransferArtifactMaterialization::OpencodeImport
+        );
+
+        // A peer cannot smuggle a path through the field that only describes
+        // where OpenCode's own store lives.
+        payload["artifacts"][0]["home_rel_path"] = json!(".ssh/authorized_keys");
+        let error = parse_outgoing_transfer_payload(&payload)
+            .expect_err("a forged export destination was accepted");
+        assert!(error.contains("provider session contract"), "{error}");
+
+        // And the export travels under exactly one name.
+        payload["artifacts"][0]["home_rel_path"] = json!(OPENCODE_SESSION_DATA_DIR_HOME_REL_PATH);
+        payload["artifacts"][0]["filename"] = json!("something-else.json");
+        let error = parse_outgoing_transfer_payload(&payload)
+            .expect_err("an off-contract export filename was accepted");
+        assert!(error.contains("OpenCode session contract"), "{error}");
+
+        // A uuid is not an OpenCode session id, so it cannot open this arm.
+        payload["artifacts"][0]["filename"] = json!(OPENCODE_SESSION_EXPORT_FILENAME);
+        payload["task"]["resume_session_id"] = json!(SESSION_ID);
+        let error = parse_outgoing_transfer_payload(&payload)
+            .expect_err("a non-OpenCode session id was accepted");
+        assert!(error.contains("OpenCode session id"), "{error}");
     }
 
     #[test]

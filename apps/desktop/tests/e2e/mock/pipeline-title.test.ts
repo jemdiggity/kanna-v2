@@ -6,7 +6,6 @@ import { resetDatabase } from "../helpers/reset";
 import { callVueMethod, queryDb, tauriInvoke } from "../helpers/vue";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { advanceStageWithShortcut } from "../helpers/stageAdvance";
-import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 
 function isVueCallError(value: unknown): value is { __error: string } {
   return Boolean(
@@ -39,9 +38,7 @@ describe("pipeline title preservation", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
     fixtureRepoRoot = await createFixtureRepo("pipeline-title-test");
     testRepoPath = join(fixtureRepoRoot, "apps");
 

@@ -348,7 +348,7 @@ async fn stage_and_commit(
         });
     }
 
-    let artifacts = stage_session_artifacts(state, source, transfer_id).await?;
+    let staged = stage_session_artifacts(state, source, transfer_id).await?;
     let payload = build_payload(
         state,
         source,
@@ -359,7 +359,7 @@ async fn stage_and_commit(
         target_desktop_id,
         remote_url.as_deref(),
         bundle,
-        artifacts,
+        staged,
         TransferFinalizationState::clean(),
     )
     .await?;
@@ -396,14 +396,30 @@ async fn stage_and_commit(
     control::commit(state, transfer_id, &encoded).await
 }
 
+/// What a push will ship, plus the session it promises.
+///
+/// The session id is returned rather than read off the task row because
+/// OpenCode's is discovered at transfer time: `opencode run` has no flag that
+/// assigns one and the id never reaches the terminal, so
+/// `pipeline_item.agent_session_id` is null for a task with a perfectly good
+/// conversation to ship.
+struct StagedSessionArtifacts {
+    artifacts: Vec<payload::TransferArtifactPayload>,
+    session_id: Option<String>,
+}
+
 async fn stage_session_artifacts(
     state: &Arc<AppState>,
     source: &SourceTask,
     transfer_id: &str,
-) -> Result<Vec<payload::TransferArtifactPayload>, String> {
+) -> Result<StagedSessionArtifacts, String> {
     let Some(plan) = source.plan().await? else {
-        return Ok(Vec::new());
+        return Ok(StagedSessionArtifacts {
+            artifacts: Vec::new(),
+            session_id: None,
+        });
     };
+    let session_id = plan.session_id.clone();
     // `stage_plan` gzips a session directory, which is the other unbounded
     // blocking step on this path.
     let staged = {
@@ -425,7 +441,10 @@ async fn stage_session_artifacts(
         .await?;
         artifacts.push(artifact.payload);
     }
-    Ok(artifacts)
+    Ok(StagedSessionArtifacts {
+        artifacts,
+        session_id: Some(session_id),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -439,7 +458,7 @@ async fn build_payload(
     target_desktop_id: Option<&str>,
     remote_url: Option<&str>,
     bundle: Option<TransferBundlePayload>,
-    artifacts: Vec<payload::TransferArtifactPayload>,
+    staged: StagedSessionArtifacts,
     finalization: TransferFinalizationState,
 ) -> Result<OutgoingTransferPayload, String> {
     let mode = payload::choose_repo_acquisition_mode(remote_url, preflight.target_has_repo);
@@ -456,7 +475,13 @@ async fn build_payload(
             source_desktop_id: source_desktop_id.map(str::to_string),
             source_task_id: source.item.id.clone(),
             local_task_id: Some(source.item.id.clone()),
-            resume_session_id: source.agent_session_id.clone(),
+            // The staged plan wins: it is the only thing that knows an
+            // OpenCode session id, and for every other provider it is the same
+            // id the task row carries.
+            resume_session_id: staged
+                .session_id
+                .clone()
+                .or_else(|| source.agent_session_id.clone()),
             prompt: source.item.prompt.clone(),
             stage: source
                 .item
@@ -489,7 +514,7 @@ async fn build_payload(
                 .flatten(),
         },
         recovery: session_recovery_snapshot(state, &source.item.id).await,
-        artifacts,
+        artifacts: staged.artifacts,
         finalization,
     })
 }
@@ -647,7 +672,7 @@ async fn run_finalization(
         refreshed.plan().await?;
     }
 
-    let artifacts = stage_session_artifacts(state, &refreshed, transfer_id).await?;
+    let staged = stage_session_artifacts(state, &refreshed, transfer_id).await?;
     let remote_url = if existing.repo.mode == RepoAcquisitionMode::ReuseLocal {
         None
     } else {
@@ -688,7 +713,7 @@ async fn run_finalization(
             .or(existing.target_desktop_id.as_deref()),
         remote_url.as_deref(),
         existing.repo.bundle.clone(),
-        artifacts,
+        staged,
         finalization,
     )
     .await?;

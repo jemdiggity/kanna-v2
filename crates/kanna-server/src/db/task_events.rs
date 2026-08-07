@@ -56,6 +56,16 @@ pub enum TaskEventKind {
     /// rendered — never inferred from a session merely going quiet, so a long
     /// build is never mislabelled as blocked.
     AwaitingInput,
+    /// The task's merge request reached the repo's merge agent. `payload.source`
+    /// says who delivered it: `agent` for the approve post's own
+    /// `kanna_signal_merge_handoff`, `engine` for the backstop Kanna runs
+    /// before closing a task whose final stage promised the handoff.
+    MergeSignaled,
+    /// The task finished a final stage that declares the merge-signaling
+    /// `approve` post, but no PR URL was ever recorded — so there was nothing
+    /// to hand off and Kanna refused to close the task. A watcher must treat
+    /// this as a failed approval, not a completed pipeline.
+    MergeHandoffMissing,
 }
 
 impl TaskEventKind {
@@ -70,6 +80,8 @@ impl TaskEventKind {
             Self::PrCreated => "task.pr_created",
             Self::RevisionRequested => "task.revision_requested",
             Self::AwaitingInput => "task.awaiting_input",
+            Self::MergeSignaled => "task.merge_signaled",
+            Self::MergeHandoffMissing => "task.merge_handoff_missing",
         }
     }
 
@@ -84,6 +96,8 @@ impl TaskEventKind {
         Self::PrCreated,
         Self::RevisionRequested,
         Self::AwaitingInput,
+        Self::MergeSignaled,
+        Self::MergeHandoffMissing,
     ];
 }
 

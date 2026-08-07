@@ -1,3 +1,4 @@
+use super::local_config::LocalConfigOverride;
 use super::provider::AgentProvider;
 use crate::mobile_api::TransferImportSummary;
 use kanna_agent_protocol::mcp::{
@@ -320,10 +321,33 @@ fn build_transfer_import_banner(summary: &TransferImportSummary) -> String {
     lines.join(" && ")
 }
 
+/// Notice that this machine's `.kanna/config.local.json` changed the config the
+/// spawn ran with. Printed for every spawn the local layer touched, not only
+/// the first: "works on my machine" drift is only diagnosable if the terminal
+/// the operator is looking at says which file is in force.
+fn build_local_config_override_banner(local_config_override: &LocalConfigOverride) -> String {
+    let mut lines =
+        vec!["printf '\\033[33mMachine-local repo config in effect\\033[0m\\n'".to_string()];
+    let mut detail = |text: String| {
+        lines.push(format!(
+            "printf '\\033[2m  %s\\033[0m\\n' '{}'",
+            shell_single_quote(&text)
+        ));
+    };
+    detail(local_config_override.path().to_string());
+    detail(format!(
+        "overrides: {}",
+        local_config_override.keys().join(", ")
+    ));
+    lines.push("printf '\\n'".to_string());
+    lines.join(" && ")
+}
+
 pub(super) fn build_task_shell_command(
     agent_cmd: &str,
     setup_cmds: &[String],
     transfer_import: Option<&TransferImportSummary>,
+    local_config_override: Option<&LocalConfigOverride>,
     kanna_cli_path: Option<&str>,
     spawn_path: Option<&str>,
 ) -> String {
@@ -346,6 +370,12 @@ pub(super) fn build_task_shell_command(
     // the setup commands are about to run in came from.
     if let Some(transfer_import) = transfer_import {
         command_parts.push(build_transfer_import_banner(transfer_import));
+    }
+
+    // Likewise before setup: the setup commands themselves are one of the
+    // things the local layer can have replaced.
+    if let Some(local_config_override) = local_config_override {
+        command_parts.push(build_local_config_override_banner(local_config_override));
     }
 
     if !setup_cmds.is_empty() {

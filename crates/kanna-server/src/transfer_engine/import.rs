@@ -554,6 +554,24 @@ async fn materialize_resume_state(
     for artifact in &artifacts {
         let source_path =
             control::fetch_artifact(state, transfer_id, &artifact.artifact_id).await?;
+        // OpenCode keeps its conversations in a shared SQLite store that only
+        // its own CLI may write, so this artifact never reaches the filesystem
+        // fence. The import runs in the destination worktree because that is
+        // what re-keys the session to this machine's path — without it
+        // `opencode run --session <id>` is a silent no-op.
+        if artifact.materialization == payload::TransferArtifactMaterialization::OpencodeImport {
+            let (session_id, worktree) = (
+                resume_session_id.clone(),
+                destination_worktree.to_path_buf(),
+            );
+            super::run_blocking("transfer opencode import", move || {
+                super::git::import_opencode_session(&source_path, &session_id, &worktree)
+            })
+            .await
+            .map_err(ImportFailure::Terminal)?;
+            materialized.push((artifact.artifact_id.clone(), true));
+            continue;
+        }
         // Extracting a gzipped session archive is unbounded blocking work, and
         // it runs against the operator's home directory — the one place the
         // engine must never stall the runtime that is also serving terminals.

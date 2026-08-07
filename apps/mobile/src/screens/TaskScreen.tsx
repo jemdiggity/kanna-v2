@@ -245,6 +245,33 @@ export function TaskScreen({
     };
   }
   const previewRevision = previewScopeRef.current.revision;
+  // The terminal is memoized: a fresh closure here would re-render it on every
+  // composer keystroke. Both handlers read the live preview scope off the ref
+  // instead of closing over this render's revision.
+  const handleTerminalMentionedFilesChange = useRef(
+    (history: TerminalFileMentionHistory) => {
+      setMentionedFiles({
+        history,
+        previewRevision: previewScopeRef.current.revision
+      });
+    }
+  ).current;
+  const handleTerminalOpenFile = useRef((path: string, line?: number) => {
+    setMentionedFilesRequest({
+      autoSelectUnique: true,
+      history: {
+        mentions: [
+          {
+            path,
+            raw: line === undefined ? path : `${path}:${line}`,
+            ...(line === undefined ? {} : { line })
+          }
+        ],
+        overflow: false
+      },
+      previewRevision: previewScopeRef.current.revision
+    });
+  }).current;
   const activeSelectedFile =
     !isAgentTask && selectedFile?.previewRevision === previewRevision
       ? selectedFile
@@ -545,25 +572,8 @@ export function TaskScreen({
             bottomInset={terminalBottomInset}
             selectionToolbarTop={terminalSelectionToolbarTop}
             onConsolePress={Keyboard.dismiss}
-            onMentionedFilesChange={(history) => {
-              setMentionedFiles({ history, previewRevision });
-            }}
-            onOpenFile={(path, line) => {
-              setMentionedFilesRequest({
-                autoSelectUnique: true,
-                history: {
-                  mentions: [
-                    {
-                      path,
-                      raw: line === undefined ? path : `${path}:${line}`,
-                      ...(line === undefined ? {} : { line })
-                    }
-                  ],
-                  overflow: false
-                },
-                previewRevision
-              });
-            }}
+            onMentionedFilesChange={handleTerminalMentionedFilesChange}
+            onOpenFile={handleTerminalOpenFile}
             onTerminalInput={onSendTerminalInput}
           />
         ) : (

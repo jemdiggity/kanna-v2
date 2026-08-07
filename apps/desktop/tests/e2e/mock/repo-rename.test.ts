@@ -4,7 +4,6 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { buildSelectorKeydownScript } from "../helpers/keyboard";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { importTestRepo, resetDatabase } from "../helpers/reset";
-import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { queryDb } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 
@@ -83,9 +82,7 @@ describe("repo rename", () => {
     ) as RepoRow[];
     expect(rows).toEqual([{ id: repoId, name: RENAMED_NAME, path: await realpath(repoRoot) }]);
 
-    await client.executeSync("location.reload()");
-    await client.waitForAppReady();
-    await dismissStartupShortcutsModal(client);
+    await client.reload();
     await waitForSidebarRepoName(client, RENAMED_NAME);
   });
 });

@@ -854,6 +854,37 @@ pub(crate) fn resolve_revision_budget(
     Ok(RevisionBudget { rounds, limit })
 }
 
+/// The built-in post whose whole job is handing the finished PR to the repo's
+/// merge master. A pipeline that declares it on a stage is promising the
+/// handoff, which is what lets the engine notice when the post finished
+/// without delivering one.
+const MERGE_APPROVE_POST: &str = "approve";
+
+/// True when the task's pinned stage declares the merge-signaling `approve`
+/// post. Mirrors `pinnedApproveMergePost` in the desktop
+/// (`apps/desktop/src/utils/pinnedStage.ts`): pre-change snapshots and custom
+/// pipelines without that post promise no merge side effect, so nothing may
+/// be enforced on their behalf.
+pub(crate) fn stage_declares_merge_approve_post(
+    repo: &Repo,
+    pipeline_name: &str,
+    pipeline_def: Option<&str>,
+    stage_name: &str,
+) -> Result<bool, String> {
+    let pipeline = match pipeline_def.filter(|value| !value.trim().is_empty()) {
+        Some(stored) => parse_stored_pipeline_definition(stored)?,
+        None => RepoDefinitions::resolve(repo)?.pipeline(pipeline_name)?,
+    };
+    let owner = match resolve_stage_position(&pipeline, stage_name) {
+        Some(StagePosition::Stage(index)) => index,
+        Some(StagePosition::Post { owner }) => owner,
+        None => return Ok(false),
+    };
+    Ok(pipeline.stages[owner].post.as_ref().is_some_and(|post| {
+        post.name == MERGE_APPROVE_POST || post.agent.as_deref() == Some(MERGE_APPROVE_POST)
+    }))
+}
+
 pub(crate) fn resolve_stage_transition(
     repo: &Repo,
     pipeline_name: &str,

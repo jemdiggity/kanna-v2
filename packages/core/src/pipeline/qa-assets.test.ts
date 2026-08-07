@@ -55,17 +55,24 @@ describe("built-in agent completion protocol", () => {
 });
 
 describe("QA pipeline assets", () => {
-  it("prefers Codex for every Kanna role without changing other repos' built-in order", () => {
+  // TEMPORARY, paired with the wildcard flip in `.kanna/config.json`: the codex
+  // CLI ran out of account credits on 2026-08-07, and because agent definitions
+  // resolve from origin/main at every spawn, a codex-first wildcard sent every
+  // review, qa-dispatcher, pr, and approve agent to a CLI that could not run.
+  // Restore condition: when codex credits reset (2026-08-08 12:34 PM) and the
+  // config is reordered back, flip this expectation with it — the assertion and
+  // the config are one decision recorded in two files, so they move together.
+  it("prefers Claude for every Kanna role without changing other repos' built-in order", () => {
     const config = JSON.parse(readRepoFile(".kanna/config.json")) as {
       agentProviders?: Record<string, { provider?: unknown } | string>;
     };
-    const codexFirst = ["codex", "claude", "copilot", "opencode", "antigravity"];
+    const claudeFirst = ["claude", "codex", "copilot", "opencode", "antigravity"];
 
-    expect(config.agentProviders?.["*"]).toEqual({ provider: codexFirst });
+    expect(config.agentProviders?.["*"]).toEqual({ provider: claudeFirst });
     for (const [pattern, preference] of Object.entries(config.agentProviders ?? {})) {
       const provider = typeof preference === "string" ? preference : preference.provider;
       const firstProvider = Array.isArray(provider) ? provider[0] : provider;
-      expect(firstProvider, pattern).toBe("codex");
+      expect(firstProvider, pattern).toBe("claude");
     }
 
     for (const name of [
@@ -83,8 +90,11 @@ describe("QA pipeline assets", () => {
       expect(agent.agent_provider?.[0], name).toBe("claude");
     }
 
-    // The repo wildcard is the flip. Keeping the shipped definitions unchanged
-    // is what preserves current behavior for repositories without the key.
+    // The repo wildcard is the only lever; the shipped definitions stay as they
+    // are, which is what preserves behavior for repositories without the key.
+    // These assertions are unchanged by the temporary flip above — they pinned
+    // claude before it and still do — so they keep proving the wildcard is what
+    // moves, not the built-ins.
     for (const name of [
       "review",
       "qa-dispatcher",

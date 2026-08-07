@@ -176,8 +176,10 @@ async function renderTerminalWebView(input: {
   terminalOutputSource?: TaskTerminalOutputSource;
 }): Promise<ElementNode> {
   resetRenderState();
-  const { TerminalWebView } = await import("./TerminalWebView");
-  const tree = TerminalWebView({
+  // The exported TerminalWebView is memoized; this harness drives the component
+  // implementation directly against its own hook mocks.
+  const { TerminalWebViewComponent } = await import("./TerminalWebView");
+  const tree = TerminalWebViewComponent({
     taskId: input.taskId ?? "task-1",
     output: input.output ?? `${Buffer.from("large snapshot").toString("base64")}\n`,
     outputEpoch: input.outputEpoch ?? 1,

@@ -436,3 +436,137 @@ mod tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// OpenCode session state
+// ---------------------------------------------------------------------------
+
+/// Runs one `opencode` invocation in a task's worktree.
+///
+/// Argument vector, no shell — a session id reaching this command comes from a
+/// peer's payload on the import side, and the same discipline the git helpers
+/// use applies here. `session list` and `export` are project-scoped, so `cwd`
+/// is load-bearing rather than incidental.
+fn opencode(cwd: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("opencode")
+        .args(args)
+        .current_dir(cwd)
+        // The server inherits the spawning instance's worktree-scoped
+        // environment; an agent CLI must not adopt it.
+        .env_remove("KANNA_TMUX_SESSION")
+        .env_remove("KANNA_DB_NAME")
+        .env_remove("KANNA_DB_PATH")
+        .env_remove("KANNA_DAEMON_DIR")
+        .env("KANNA_WORKTREE", "1")
+        .output()
+        .map_err(|error| format!("failed to run opencode {}: {error}", args.join(" ")))?;
+    if !output.status.success() {
+        return Err(format!(
+            "opencode {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The OpenCode session this worktree has been talking to, newest first.
+///
+/// OpenCode records each session's working directory, and a task's worktree is
+/// unique to that task, so the directory is the key. The comparison is against
+/// the kernel-resolved path — `opencode` stores the realpath, and a worktree
+/// can sit under a symlinked root, which is the case for every E2E fixture.
+pub fn latest_opencode_session_for_worktree(
+    worktree_path: &Path,
+) -> Result<Option<String>, String> {
+    let resolved = worktree_path
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_path.to_path_buf());
+    let listing = opencode(&resolved, &["session", "list", "--format", "json"])?;
+    let sessions: serde_json::Value = serde_json::from_str(listing.trim())
+        .map_err(|error| format!("opencode session listing is not valid JSON: {error}"))?;
+    let Some(sessions) = sessions.as_array() else {
+        return Err("opencode session listing is not an array".to_string());
+    };
+
+    let mut matches: Vec<(i64, String)> = sessions
+        .iter()
+        .filter_map(|session| {
+            let id = session.get("id")?.as_str()?;
+            let directory = session.get("directory")?.as_str()?;
+            (Path::new(directory) == resolved).then(|| {
+                (
+                    session
+                        .get("updated")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0),
+                    id.to_string(),
+                )
+            })
+        })
+        .collect();
+    matches.sort_by(|left, right| right.0.cmp(&left.0));
+
+    let Some((_, session_id)) = matches.into_iter().next() else {
+        return Ok(None);
+    };
+    if !super::payload::is_opencode_session_id(&session_id) {
+        return Err(format!(
+            "opencode reported an unrecognized session id: {session_id}"
+        ));
+    }
+    Ok(Some(session_id))
+}
+
+/// Asks OpenCode for a self-contained JSON copy of one conversation.
+///
+/// `opencode export` writes the session to stdout (its progress line goes to
+/// stderr), and the receiver feeds the file straight back to `opencode import`.
+pub fn export_opencode_session(
+    worktree_path: &Path,
+    session_id: &str,
+    destination: &Path,
+) -> Result<(), String> {
+    if !super::payload::is_opencode_session_id(session_id) {
+        return Err(format!(
+            "refusing to export an unrecognized OpenCode session id: {session_id}"
+        ));
+    }
+    let exported = opencode(worktree_path, &["export", session_id])?;
+    std::fs::write(destination, exported)
+        .map_err(|error| format!("failed to write the OpenCode session export: {error}"))
+}
+
+/// Replays a shipped OpenCode conversation into this machine's session store.
+///
+/// `opencode import` keeps the session's id and re-keys it to the directory the
+/// import runs in, which is why it must run in the destination worktree:
+/// OpenCode resumes by matching the session's recorded directory against the
+/// current working directory, and `opencode run --session <id>` from anywhere
+/// else is a *silent* no-op — the same failure shape as the transcript loss this
+/// artifact contract exists to stop.
+///
+/// The worktree is created here rather than waited for: the destination task —
+/// and therefore its worktree path — is deterministic before creation, but the
+/// checkout only happens once the task is created, which is after the agent
+/// would need the session. `git worktree add` accepts an existing empty
+/// directory, so claiming the path early costs nothing and a failed import
+/// leaves only an empty directory behind.
+pub fn import_opencode_session(
+    export_path: &Path,
+    session_id: &str,
+    destination_worktree: &Path,
+) -> Result<(), String> {
+    if !super::payload::is_opencode_session_id(session_id) {
+        return Err(format!(
+            "incoming transfer resume id is not an OpenCode session id: {session_id}"
+        ));
+    }
+    std::fs::create_dir_all(destination_worktree).map_err(|error| {
+        format!("failed to create the destination worktree for an OpenCode import: {error}")
+    })?;
+    let export_path = export_path
+        .to_str()
+        .ok_or_else(|| "OpenCode export path is not valid unicode".to_string())?;
+    opencode(destination_worktree, &["import", export_path]).map(|_| ())
+}

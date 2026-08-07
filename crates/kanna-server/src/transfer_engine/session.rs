@@ -15,6 +15,7 @@
 use super::payload::{
     required_session_artifact_kind, MissingSessionArtifact, TransferArtifactKind,
     TransferArtifactMaterialization, TransferArtifactPayload,
+    OPENCODE_SESSION_DATA_DIR_HOME_REL_PATH, OPENCODE_SESSION_EXPORT_FILENAME,
 };
 use std::path::{Path, PathBuf};
 
@@ -59,6 +60,11 @@ pub struct SessionArtifactPlan {
     /// `Some` when the provider keeps a session directory *and* it exists.
     pub archive: Option<(&'static SessionArchiveConfig, PathBuf)>,
     pub files: Vec<LocatedFileArtifact>,
+    /// OpenCode's conversation is not a file on disk — it lives in a shared
+    /// SQLite store — so it is staged by asking the CLI to export it rather
+    /// than by locating a path. Carries the worktree the export runs in, which
+    /// matters because `opencode export` is project-scoped.
+    pub opencode_export: Option<PathBuf>,
 }
 
 /// The task identity a plan was located against; a change invalidates it.
@@ -92,7 +98,15 @@ pub fn plan_session_artifacts(
     worktree_path: Option<&Path>,
     task_id: &str,
 ) -> Result<Option<SessionArtifactPlan>, MissingSessionArtifact> {
-    let (Some(session_id), Some(provider)) = (agent_session_id, agent_provider) else {
+    let Some(provider) = agent_provider else {
+        return Ok(None);
+    };
+    // OpenCode is the one provider whose session id the task row cannot carry,
+    // so its plan discovers the id instead of being handed one.
+    if provider == "opencode" {
+        return plan_opencode_export(agent_type, worktree_path);
+    }
+    let Some(session_id) = agent_session_id else {
         return Ok(None);
     };
     let required = required_session_artifact_kind(agent_type, Some(provider), Some(session_id));
@@ -109,6 +123,7 @@ pub fn plan_session_artifacts(
                 provider: provider.to_string(),
                 archive: None,
                 files: vec![rollout],
+                opencode_export: None,
             })),
             None if required.is_some() => Err(missing(
                 "its rollout could not be found under ~/.codex/sessions".into(),
@@ -174,6 +189,7 @@ pub fn plan_session_artifacts(
             provider: provider.to_string(),
             archive: None,
             files,
+            opencode_export: None,
         }));
     }
 
@@ -182,6 +198,50 @@ pub fn plan_session_artifacts(
         provider: provider.to_string(),
         archive: Some((config, source_root)),
         files,
+        opencode_export: None,
+    }))
+}
+
+/// OpenCode's half of the plan: find the session this worktree has been talking
+/// to, and promise to export it.
+///
+/// Unlike every other provider Kanna resumes, OpenCode's id cannot be known
+/// before the agent runs: `opencode run` has no flag that *assigns* a session id
+/// (`--session` with an unknown id is "Session not found"), and the id never
+/// appears in the terminal, so nothing upstream of here has it to persist. What
+/// OpenCode does record is the session's working directory, and a task's
+/// worktree is unique to that task — so the session is looked up by worktree at
+/// transfer time, when it is guaranteed to exist.
+///
+/// The absence of a session is a legitimate absence — the agent never got a turn
+/// in — and is reported as "nothing to ship". Once a session *does* exist the
+/// export is required, because shipping a resume id with no conversation behind
+/// it is the exact shape that lost 2.1 MB of Claude transcript.
+///
+/// Scoped deliberately to the transfer path: making Kanna track OpenCode session
+/// ids for every task is a larger change than shipping the conversation, and
+/// this lookup does not stand in its way.
+fn plan_opencode_export(
+    agent_type: Option<&str>,
+    worktree_path: Option<&Path>,
+) -> Result<Option<SessionArtifactPlan>, MissingSessionArtifact> {
+    if agent_type != Some("pty") {
+        return Ok(None);
+    }
+    let Some(worktree_path) = worktree_path.filter(|path| path.is_dir()) else {
+        return Ok(None);
+    };
+    let Some(session_id) = super::git::latest_opencode_session_for_worktree(worktree_path)
+        .map_err(MissingSessionArtifact)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(SessionArtifactPlan {
+        session_id,
+        provider: "opencode".to_string(),
+        archive: None,
+        files: Vec::new(),
+        opencode_export: Some(worktree_path.to_path_buf()),
     }))
 }
 
@@ -255,6 +315,33 @@ pub fn stage_plan(
     staging_dir: &Path,
 ) -> Result<Vec<StagedArtifact>, String> {
     let mut staged = Vec::new();
+    if let Some(worktree_path) = &plan.opencode_export {
+        // Deliberately short, and unique by randomness rather than by naming
+        // the transfer: a staged `owned` artifact is stored under
+        // `<artifact-id>-<basename>` on the source and then fetched into
+        // `<artifact-id>-<that name>` on the receiver, so the artifact id is
+        // spent twice and a descriptive basename pushes the receiver's filename
+        // past the 255-byte limit — which surfaces only as `File name too long`
+        // mid-transfer.
+        let export_path = staging_dir.join(format!(
+            "kanna-oc-session-{}.json",
+            super::queue::unique_work_nonce()
+        ));
+        super::git::export_opencode_session(worktree_path, &plan.session_id, &export_path)?;
+        staged.push(StagedArtifact {
+            payload: TransferArtifactPayload {
+                artifact_id: artifact_id(transfer_id, "opencode-session"),
+                filename: OPENCODE_SESSION_EXPORT_FILENAME.to_string(),
+                provider: plan.provider.clone(),
+                kind: TransferArtifactKind::SessionExport,
+                home_rel_path: OPENCODE_SESSION_DATA_DIR_HOME_REL_PATH.to_string(),
+                materialization: TransferArtifactMaterialization::OpencodeImport,
+            },
+            source_path: export_path,
+            owned: true,
+        });
+        return Ok(staged);
+    }
     if let Some((config, source_root)) = &plan.archive {
         let archive_path = staging_path(staging_dir, transfer_id, config.artifact_suffix);
         super::git::create_session_archive(source_root, &plan.session_id, &archive_path)?;
@@ -351,6 +438,11 @@ pub fn resume_survives_existing_destination(
     let decisive = artifacts
         .iter()
         .find(|artifact| artifact.kind == TransferArtifactKind::SessionTranscript)
+        .or_else(|| {
+            artifacts
+                .iter()
+                .find(|artifact| artifact.kind == TransferArtifactKind::SessionExport)
+        })
         .or_else(|| {
             artifacts
                 .iter()
@@ -471,18 +563,128 @@ mod tests {
     #[test]
     fn a_task_with_no_transferable_session_state_plans_nothing() {
         let home = tempfile::tempdir().expect("home");
-        for (provider, agent_type) in [("claude", "agent"), ("opencode", "pty")] {
+        // An agent-mode task keeps nothing this contract can ship, and an
+        // OpenCode task with no worktree has nowhere to look for a session —
+        // OpenCode's plan is keyed by directory, not by a stored id.
+        for (provider, agent_type) in [
+            ("claude", "agent"),
+            ("opencode", "agent"),
+            ("opencode", "pty"),
+        ] {
             let plan = plan_session_artifacts(
                 home.path(),
                 Some("364643cc-5e6d-48fc-86ca-ca7764380900"),
                 Some(provider),
                 Some(agent_type),
-                Some(&home.path().join("worktree")),
+                Some(&home.path().join("worktree-that-does-not-exist")),
                 "task-1",
             )
             .expect("no promise means no failure");
             assert!(plan.is_none(), "{provider}/{agent_type}");
         }
+    }
+
+    /// OpenCode is the one provider whose session id the task row cannot carry:
+    /// `opencode run` never assigns or reports one, so `agent_session_id` is
+    /// null for a task with a perfectly good conversation to ship. The plan has
+    /// to reach the CLI rather than the row — and it must not short-circuit on
+    /// the null id the way every other provider does.
+    #[test]
+    fn an_opencode_plan_is_reached_without_a_session_id_on_the_task_row() {
+        let home = tempfile::tempdir().expect("home");
+        let worktree = home.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+
+        // With no `opencode` on PATH the lookup fails loudly rather than
+        // reporting "no conversation" — a broken CLI is not an absent session,
+        // which is the distinction the transcript loss turned on.
+        let outcome = plan_session_artifacts(
+            home.path(),
+            None,
+            Some("opencode"),
+            Some("pty"),
+            Some(&worktree),
+            "task-1",
+        );
+        match outcome {
+            // Either the CLI is absent (this machine) or it answered; both
+            // prove the null id did not stop the plan from being attempted.
+            Err(missing) => assert!(
+                missing.0.contains("opencode"),
+                "expected the failure to name the CLI: {}",
+                missing.0
+            ),
+            Ok(plan) => {
+                if let Some(plan) = plan {
+                    assert_eq!(plan.provider, "opencode");
+                    assert!(plan.opencode_export.is_some());
+                    assert!(super::super::payload::is_opencode_session_id(
+                        &plan.session_id
+                    ));
+                }
+            }
+        }
+    }
+
+    /// The export is the whole artifact list — there is no file to copy and no
+    /// directory to archive alongside it.
+    #[test]
+    fn an_opencode_plan_stages_one_export_artifact_under_its_contract() {
+        let plan = SessionArtifactPlan {
+            session_id: "ses_02645d9aaffeeOgwt2rbXIcTdp".to_string(),
+            provider: "opencode".to_string(),
+            archive: None,
+            files: Vec::new(),
+            opencode_export: Some(PathBuf::from("/does/not/matter")),
+        };
+        // Staging shells out to `opencode export`; without the CLI it fails,
+        // and with it the single artifact is fully determined. Either way the
+        // contract the payload validator enforces is what is asserted here.
+        let temp = tempfile::tempdir().expect("staging");
+        match stage_plan(&plan, "transfer-1", temp.path()) {
+            Ok(staged) => {
+                assert_eq!(staged.len(), 1);
+                assert_eq!(staged[0].payload.kind, TransferArtifactKind::SessionExport);
+                assert_eq!(
+                    staged[0].payload.materialization,
+                    TransferArtifactMaterialization::OpencodeImport
+                );
+                assert_eq!(staged[0].payload.filename, OPENCODE_SESSION_EXPORT_FILENAME);
+                assert_eq!(
+                    staged[0].payload.home_rel_path,
+                    OPENCODE_SESSION_DATA_DIR_HOME_REL_PATH
+                );
+                // Owned: the export is a temp file this transfer made, unlike a
+                // live transcript, so the sidecar deletes it with the transfer.
+                assert!(staged[0].owned);
+            }
+            Err(error) => assert!(error.contains("opencode"), "{error}"),
+        }
+    }
+
+    /// An export that shipped is a conversation that shipped, exactly as a
+    /// transcript is — it must not be vetoed by an archive that was not written.
+    #[test]
+    fn an_export_decides_the_resume_the_way_a_transcript_does() {
+        let export = TransferArtifactPayload {
+            artifact_id: "export".to_string(),
+            filename: OPENCODE_SESSION_EXPORT_FILENAME.to_string(),
+            provider: "opencode".to_string(),
+            kind: TransferArtifactKind::SessionExport,
+            home_rel_path: OPENCODE_SESSION_DATA_DIR_HOME_REL_PATH.to_string(),
+            materialization: TransferArtifactMaterialization::OpencodeImport,
+        };
+        assert!(resume_survives_existing_destination(
+            std::slice::from_ref(&export),
+            &[("export".to_string(), true)],
+        ));
+        assert!(resume_survives_existing_destination(
+            &[
+                artifact(TransferArtifactKind::SessionArchive, "archive"),
+                export,
+            ],
+            &[("archive".to_string(), false), ("export".to_string(), true)],
+        ));
     }
 
     #[test]
