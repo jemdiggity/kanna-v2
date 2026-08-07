@@ -770,11 +770,6 @@ impl std::fmt::Display for OpencodeImportError {
     }
 }
 
-/// The session id inside an export, which is the one `opencode import` will use.
-pub fn read_opencode_export_session_id(export_path: &Path) -> Result<String, String> {
-    read_opencode_export_identity(export_path).map(|(session_id, _)| session_id)
-}
-
 /// The session id an export carries, and the directory it was keyed to when it
 /// was taken. The directory is what tells the shipped conversation apart from
 /// an unrelated local session that happens to share its id.
@@ -1435,7 +1430,7 @@ esac"#,
             let path = temp.path().join("export.json");
             std::fs::write(&path, body.to_string()).expect("write export");
             assert!(
-                read_opencode_export_session_id(&path).is_err(),
+                read_opencode_export_identity(&path).is_err(),
                 "{body} was accepted",
             );
         }

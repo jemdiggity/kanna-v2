@@ -114,10 +114,6 @@ impl TransferWorkQueue {
         }
     }
 
-    pub fn wake(&self) {
-        self.appended.notify_waiters();
-    }
-
     /// Blocks until work is appended or `timeout` elapses.
     pub async fn wait_for_work(&self, timeout: Duration) {
         let notified = self.appended.notified();

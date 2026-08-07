@@ -309,17 +309,6 @@ pub fn bundle_staging_path(staging_dir: &Path, transfer_id: &str) -> PathBuf {
     staging_dir.join(format!("kanna-transfer-{transfer_id}.bundle"))
 }
 
-/// The longest name any file this module puts on disk may have.
-///
-/// POSIX `NAME_MAX` is 255 bytes and a transfer id is 64 hex characters, so
-/// names built from one are close enough to the limit that a descriptive suffix
-/// can cross it. It has crossed it: a staged artifact used to be fetched into a
-/// name that spent the artifact id twice, and a real Claude session archive
-/// landed at 261 bytes and killed the transfer with `ENAMETOOLONG` mid-flight.
-/// The sidecar now derives its own on-disk names from the artifact id alone,
-/// which bounds that side; this bounds the names the engine hands it.
-const MAX_STAGED_NAME_BYTES: usize = 255;
-
 /// The artifact ids the payload declares. Derived from the transfer id so a
 /// re-staged artifact replaces its predecessor rather than accumulating.
 pub fn artifact_id(transfer_id: &str, suffix: &str) -> String {
@@ -746,6 +735,15 @@ mod tests {
         .expect("an empty listing is an absence, not a failure");
         assert!(plan.is_none());
     }
+
+    /// The longest name any file this module puts on disk may have.
+    ///
+    /// POSIX `NAME_MAX` is 255 bytes and a transfer id is 64 hex characters, so
+    /// names built from one are close enough to the limit that a descriptive
+    /// suffix can cross it. Nothing in the module reads this — the names are
+    /// built from fixed suffixes rather than checked at runtime — so it lives
+    /// here, with the test that holds those suffixes to it.
+    const MAX_STAGED_NAME_BYTES: usize = 255;
 
     /// Every name this module puts on disk stays inside `NAME_MAX`.
     ///
