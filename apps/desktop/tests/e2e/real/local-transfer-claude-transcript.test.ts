@@ -5,6 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
+import { realE2eAgentProvider } from "../helpers/realAgentProvider";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { pairWithPeerThroughUi, pushSelectedTaskToPeerThroughUi } from "../helpers/transferFlow";
@@ -23,6 +24,17 @@ import { callVueMethod, execDb, queryDb } from "../helpers/vue";
  * See docs/2026-08-06-claude-transcript-transfer-e2e-gap.md for the part this
  * cannot reach: a live Claude agent on both ends proving the CLI renders the
  * history.
+ *
+ * Skipped unless the runner is actually running Claude, which today it never
+ * is: `runEnv.ts` forces every real suite onto OpenCode's free models, and the
+ * destination task is spawned with that forced provider, so the Claude
+ * assertions below cannot hold. The suite is kept — not deleted — because it is
+ * the only end-to-end check of the *Claude* transcript path, ready for a Claude
+ * lane. Until then Claude's transcript layout stays pinned by the live CLI
+ * contract tests (`tests/cli-contract/tests/live/`) and by the unit tests
+ * around `locate_claude_transcript` and the artifact contract, and
+ * `local-transfer-opencode-continuity.test.ts` covers conversation continuity
+ * on the provider the runner does launch.
  */
 
 interface PipelineRow {
@@ -136,7 +148,7 @@ const { primary, secondary } = createPrimaryAndSecondaryClients();
 let testRepoPath = "";
 const materializedTranscriptDirs = new Set<string>();
 
-describe("local transfer Claude conversation continuity", () => {
+describe.skipIf(realE2eAgentProvider() !== "claude")("local transfer Claude conversation continuity", () => {
   let repoId = "";
 
   beforeAll(async () => {
