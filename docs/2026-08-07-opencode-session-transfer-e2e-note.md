@@ -7,6 +7,13 @@ conversation-continuity E2E that runs under the real-E2E runner.
 Companion to [2026-08-06-claude-transcript-transfer-e2e-gap.md](2026-08-06-claude-transcript-transfer-e2e-gap.md),
 which covers the same contract for Claude.
 
+Originally written against the renderer-owned transfer. T6 moved orchestration
+into `kanna-server`'s transfer engine
+([2026-08-06-task-transfer-rearchitecture-plan.md](2026-08-06-task-transfer-rearchitecture-plan.md)),
+so every step described here now runs server-side; the OpenCode facts below are
+unchanged, and the file references have been updated to where the behaviour
+actually lives.
+
 ## Why this exists
 
 `local-transfer-claude-transcript.test.ts` asserts conversation continuity for
@@ -37,16 +44,28 @@ directory holding only a lock file.
   "Session not found". Nothing parses one out of the terminal either, so an
   OpenCode task's `pipeline_item.agent_session_id` is always `NULL`. The
   transfer therefore discovers it from `opencode session list --format json`,
-  matching the session's recorded `directory` against the task's worktree.
+  matching the session's recorded `directory` against the task's worktree
+  (`transfer_engine/git.rs::latest_opencode_session_for_worktree`), and plumbs
+  the discovered id into the payload's `resume_session_id` — the task row
+  cannot carry it.
 - **`opencode session list` and `export` are project-scoped.** A session opened
   in a task worktree is invisible from any other project's directory, so every
-  lookup runs with the worktree as its working directory.
+  lookup runs with the worktree as its working directory — and with the path
+  *as the caller holds it*, not a canonicalized spelling of it. Those are two
+  different directories to OpenCode's project scoping: canonicalizing the cwd
+  scopes the listing elsewhere and returns a `projectId: "global"` page of
+  unrelated sessions, so the task's own session is simply absent. The
+  comparison, by contrast, is against the kernel-resolved path, because that is
+  what OpenCode *records*. Getting those two the wrong way round reports "no
+  conversation" for a task that has one — caught by this suite, on the engine,
+  as `expected null to be 'ses_…'`.
 - **Resume is directory-keyed.** OpenCode matches a session's recorded
   `directory` against the current working directory;
   `opencode run --session <id>` from anywhere else is a **silent no-op** — no
   error, no history, no output. `opencode import` re-keys the session to the
   directory the import runs in, which is why the receiver runs it in the
-  destination worktree.
+  destination worktree (`transfer_engine/git.rs::import_opencode_session`,
+  reached from `transfer_engine/import.rs` instead of the filesystem fence).
 
 That last point is the incident's failure shape in OpenCode's terms: without
 the re-key, a transferred task would resume "successfully" against an empty
@@ -70,17 +89,25 @@ real two-instance LAN transfer of a **live** OpenCode PTY task and asserts:
   re-sends the same prompt on the destination, so the user half of the exchange
   reappears whether or not any history crossed.
 
-Verified non-vacuous: with the OpenCode arm disabled, the suite fails with
-`expected null to be 'ses_…'` — the payload ships no resume id, which is exactly
+Verified non-vacuous on the engine, not just inherited from the renderer
+version: with `plan_opencode_export` stubbed to `Ok(None)` the suite fails, and
+with it restored it passes — three consecutive runs. The failure it produces is
+`expected null to be 'ses_…'`: the payload ships no resume id, which is exactly
 the silent-loss shape.
 
-The Rust fence (`transfer_artifact.rs`) has unit coverage asserting that an
-OpenCode `session-export` is refused by the filesystem materializer under every
-kind/materialization combination and creates nothing under `$HOME`, and that
-`opencode-import` cannot be used to smuggle another provider's artifact past the
-arms that do place files. Contract parsing, the staging command, and the
-receiver's import are covered in `taskTransfer.test.ts` and
-`kannaTransfer.test.ts`.
+The Rust fence (`crates/kanna-server/src/transfer_artifact.rs`) has unit
+coverage asserting that an OpenCode `session-export` is refused by the
+filesystem materializer under every kind/materialization combination and creates
+nothing under `$HOME`, and that `opencode-import` cannot be used to smuggle
+another provider's artifact past the arms that do place files. That fence moved
+into `kanna-server` with the orchestration; both guards came with it.
+
+Contract parsing lives in `transfer_engine/payload.rs` — the one filename, the
+pinned `home_rel_path`, the `ses_`-shaped id, and the refusal of a uuid on the
+OpenCode arm. Planning and staging are covered in `transfer_engine/session.rs`,
+including the case that only OpenCode has: a plan reached with a **null**
+`agent_session_id`, because short-circuiting on the task row is what would make
+this provider ship nothing.
 
 ## What is not covered, and why
 
@@ -106,6 +133,12 @@ track OpenCode session ids for tasks generally, so resume-after-restart and
 revision resume remain Claude-only for OpenCode tasks. That is a larger change
 than shipping the conversation and is deliberately not attempted here; the
 lookup added for transfer does not stand in its way.
+
+**The discovery and export shell out to `opencode` from `kanna-server`.** Both
+run as argument vectors with no shell, in the task's worktree because the CLI is
+project-scoped. A machine without the CLI on the server's `PATH` fails the
+transfer loudly — the plan reports the CLI error rather than "no conversation",
+which is the distinction the transcript loss turned on.
 
 **Provider drift.** If OpenCode changes its export/import format, its
 directory-keyed resume, or the `session list --format json` shape, this suite

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, type Ref } from "vue";
+import { computed, inject, toRef, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { type BlockerDisplayItem, type DbHandle } from "./types/kanna";
 import type { TaskUiSlot } from "./types/taskUi";
@@ -17,6 +17,7 @@ import { useAppLifecycle } from "./composables/useAppLifecycle";
 import { useAppModals } from "./composables/useAppModals";
 import { useAppPreferences } from "./composables/useAppPreferences";
 import { useAppTaskTransfer } from "./composables/useAppTaskTransfer";
+import { useTransferFailureToasts } from "./composables/useTransferFailureToasts";
 import { useAppTaskNavigation } from "./composables/useAppTaskNavigation";
 import { useAppTaskCreation } from "./composables/useAppTaskCreation";
 import { useAppKeyboardActions } from "./composables/useAppKeyboardActions";
@@ -209,8 +210,14 @@ const {
   openImageUrlPreview,
   getCurrentPreviewRecall,
 } = appModals;
+// A transfer that fails is server-side news now, so the window learns about it
+// from the snapshot rather than from a call that threw.
+useTransferFailureToasts(
+  toRef(store, "items"),
+  toast.error,
+  () => t("toasts.transferFinalizationFailed"),
+);
 const appTaskTransfer = useAppTaskTransfer({
-  db,
   store,
   toast,
   showPeerPicker,
@@ -223,8 +230,6 @@ const {
   openPeerPicker,
   openPairPeerPicker,
   closePeerPicker,
-  importIncomingTransfer,
-  importPendingIncomingTransfers,
 } = appTaskTransfer;
 async function warmCloudTransferSidecar(): Promise<void> {
   await warmTransferSidecar();
@@ -349,14 +354,11 @@ const {
   disposeDesktopCloudWorkspace,
   getKeyboardActions: () => keyboardActions,
   homePath,
-  importIncomingTransfer,
-  importPendingIncomingTransfers,
   initializeDesktopCloudAuth,
   initializeDesktopLanTaskSync,
   openFilePreview,
   openImageUrlPreview,
   preferences,
-  refreshCloudTransferRoute,
   remoteTaskDiagnostics,
   restoreSidebarWidth,
   shortcutsStartFull,
@@ -366,7 +368,6 @@ const {
   stopSystemThemeListener,
   store,
   toast,
-  transferMachines,
   warmTransferSidecar: warmCloudTransferSidecar,
   windowWorkspace,
 });

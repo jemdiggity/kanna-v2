@@ -499,6 +499,7 @@ mod tests {
                     transfer_target_peer_id: None,
                     transfer_source_desktop_id: None,
                     transfer_target_desktop_id: None,
+                    transfer_error: None,
                     repo_id: "repo-1".into(),
                     issue_number: None,
                     issue_title: None,

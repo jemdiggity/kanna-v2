@@ -409,6 +409,19 @@ pub(crate) fn warm_login_shell_path() {
     let _ = login_shell_path();
 }
 
+/// Absolute path to an agent CLI, resolved the way a spawned task resolves it.
+///
+/// `kanna-server` is started with `subprocess_env::apply_child_env`, which
+/// injects no PATH, so a Finder- or Spotlight-launched Kanna gives it the
+/// launchd default — which contains none of the places these CLIs actually live
+/// (`~/.opencode/bin`, `~/.bun/bin`, Homebrew). Anything that execs an agent
+/// binary by bare name works from a terminal and fails in a packaged app, so it
+/// goes through the same process-PATH-then-cached-login-shell-PATH lookup every
+/// task spawn already uses.
+pub(crate) fn resolve_agent_executable(provider: AgentProvider) -> Result<String, String> {
+    resolve_provider_executable(provider, None, "")
+}
+
 /// Cheap binary availability check against the process PATH plus the cached
 /// login-shell PATH — never a per-call login shell.
 fn resolve_binary_from_candidates(

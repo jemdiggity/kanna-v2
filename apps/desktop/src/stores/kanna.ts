@@ -74,7 +74,7 @@ export const useKannaStore = defineStore("kanna", () => {
   services.blockTask = tasks.blockTask;
   services.editBlockedTask = tasks.editBlockedTask;
 
-  const transfer = createTransferApi(context, { tasks, queries, sessions });
+  const transfer = createTransferApi();
 
   async function makePR() {
     const item = selection.currentItem.value;
@@ -191,11 +191,8 @@ Use this branch as the default when the user does not specify a target branch. B
     makePR,
     mergeQueue,
     pushTaskToPeer: transfer.pushTaskToPeer,
-    recordIncomingTransfer: transfer.recordIncomingTransfer,
     approveIncomingTransfer: transfer.approveIncomingTransfer,
     rejectIncomingTransfer: transfer.rejectIncomingTransfer,
-    finalizeOutgoingTransfer: transfer.finalizeOutgoingTransfer,
-    handleOutgoingTransferCommitted: transfer.handleOutgoingTransferCommitted,
     blockTask: tasks.blockTask,
     editBlockedTask: tasks.editBlockedTask,
     listBlockersForItem: async (itemId: string) =>

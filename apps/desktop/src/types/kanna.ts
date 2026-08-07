@@ -24,6 +24,12 @@ export interface PipelineItem {
   transfer_target_peer_id?: string | null;
   transfer_source_desktop_id?: string | null;
   transfer_target_desktop_id?: string | null;
+  /**
+   * Why a transfer failed. The push is server work now, so a refusal — a source
+   * that cannot ship the conversation, an import that gave up — has no caller
+   * left to throw at. This is how it reaches the operator.
+   */
+  transfer_error?: string | null;
   repo_id: string;
   issue_number: number | null;
   issue_title: string | null;

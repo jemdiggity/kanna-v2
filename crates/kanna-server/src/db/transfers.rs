@@ -422,6 +422,30 @@ impl Db {
         Ok(rows_affected == 1)
     }
 
+    /// Drives an incoming transfer to its terminal failed state, wherever it
+    /// had got to.
+    ///
+    /// [`Self::fail_pending_incoming_transfer`] is ownership-fenced and only
+    /// reaches `pending`/`claimed`, which is right for a caller that holds one
+    /// renderer's claim among several. The transfer engine is the only importer
+    /// in the process, and an import that dies at `importing` or
+    /// `awaiting_acknowledgment` still has to end visibly — otherwise the row
+    /// sits non-terminal forever and the sidecar reservation with it.
+    pub fn fail_incoming_task_transfer(
+        &self,
+        transfer_id: &str,
+        reason: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE task_transfer
+             SET status = 'failed', completed_at = datetime('now'), error = ?
+             WHERE id = ? AND direction = 'incoming'
+               AND status NOT IN ('completed', 'rejected', 'failed')",
+            (reason, transfer_id),
+        )?;
+        Ok(rows_affected == 1)
+    }
+
     /// Drives an outgoing transfer to its terminal failed state.
     ///
     /// The incoming side has had a fail route since the beginning; the outgoing

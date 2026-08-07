@@ -733,6 +733,204 @@ async fn abandoning_an_outgoing_transfer_reports_a_reservation_it_could_not_dele
     );
 }
 
+/// A preflight reserves on *both* machines. Releasing only the source half
+/// leaves `incoming-reservations/<transfer_id>.json` on the destination, where
+/// nothing but the TTL sweeper ever looks at it, and where it counts against
+/// that machine's reservation admission cap in the meantime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abandoning_an_outgoing_transfer_releases_the_destination_reservation() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-source", "Source", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_millis(500)),
+    )
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination").await;
+
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination", "task-source")
+        .await
+        .unwrap();
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-destination", "incoming-reservations"),
+        1,
+    );
+
+    source
+        .abandon_outgoing_transfer(&preflight.transfer_id)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-destination", "incoming-reservations"),
+        0,
+        "the destination reservation outlived the transfer that made it",
+    );
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-source", "reservations"),
+        0,
+    );
+
+    // The destination answers an id it does not hold as settled, which is what
+    // makes a half-failed release retriable rather than permanently stuck.
+    let endpoint = runtime_endpoint(temp.path(), "peer-destination");
+    let owner_epoch = authenticated_request_epoch(&endpoint).await;
+    let source_identity = stored_runtime_identity(temp.path(), "peer-source");
+    let destination_public_key = destination.local_identity().public_key;
+    let unknown = send_raw_peer_value(
+        &endpoint,
+        &json!({
+            "type": "abandon_transfer",
+            "request_id": "abandon-unknown",
+            "transfer_id": "transfer-never-reserved",
+            "source_peer_id": "peer-source",
+            "sealed_payload": seal_authenticated_transfer_request(
+                &source_identity,
+                &destination_public_key,
+                "abandon_transfer",
+                "abandon-unknown",
+                &owner_epoch,
+                current_unix_ms(),
+                json!({
+                    "source_peer_id": "peer-source",
+                    "transfer_id": "transfer-never-reserved",
+                    "reserved_target_peer_id": "peer-destination",
+                }),
+            ),
+        }),
+    )
+    .await;
+    assert!(
+        matches!(unknown, PeerResponse::AbandonTransfer { .. }),
+        "an unknown transfer id must settle rather than fail: {unknown:?}",
+    );
+}
+
+/// The release is a narrow authority: it lets the one source that reserved a
+/// transfer drop it *before* it commits. A committed reservation is an incoming
+/// transfer this machine has already been told about, and a different peer has
+/// no claim on either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_destination_refuses_to_release_a_committed_or_foreign_reservation() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-source", "Source", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_millis(500)),
+    )
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let intruder = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-intruder",
+        "Intruder",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&source, &destination, "peer-destination").await;
+    pair_peers(&intruder, &destination, "peer-destination").await;
+
+    let preflight = source
+        .prepare_transfer_preflight("peer-destination", "task-source")
+        .await
+        .unwrap();
+
+    let endpoint = runtime_endpoint(temp.path(), "peer-destination");
+    let owner_epoch = authenticated_request_epoch(&endpoint).await;
+    let destination_public_key = destination.local_identity().public_key;
+    let abandon_as = |peer_id: &'static str, request_id: &'static str| {
+        let identity = stored_runtime_identity(temp.path(), peer_id);
+        let sealed_payload = seal_authenticated_transfer_request(
+            &identity,
+            &destination_public_key,
+            "abandon_transfer",
+            request_id,
+            &owner_epoch,
+            current_unix_ms(),
+            json!({
+                "source_peer_id": peer_id,
+                "transfer_id": preflight.transfer_id,
+                "reserved_target_peer_id": "peer-destination",
+            }),
+        );
+        json!({
+            "type": "abandon_transfer",
+            "request_id": request_id,
+            "transfer_id": preflight.transfer_id,
+            "source_peer_id": peer_id,
+            "sealed_payload": sealed_payload,
+        })
+    };
+
+    let foreign =
+        send_raw_peer_value(&endpoint, &abandon_as("peer-intruder", "abandon-foreign")).await;
+    assert!(
+        peer_error_message(foreign).contains("another source"),
+        "a peer that did not reserve the transfer released it",
+    );
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-destination", "incoming-reservations"),
+        1,
+    );
+
+    source
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-destination",
+                "task": { "source_task_id": "task-source" },
+            }),
+        )
+        .await
+        .unwrap();
+    let event = next_incoming_transfer_request(&destination).await;
+    assert_eq!(event.transfer_id, preflight.transfer_id);
+
+    let committed =
+        send_raw_peer_value(&endpoint, &abandon_as("peer-source", "abandon-committed")).await;
+    assert!(
+        peer_error_message(committed).contains("already committed"),
+        "a committed transfer was released out from under its destination",
+    );
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-destination", "incoming-reservations"),
+        1,
+    );
+
+    // The source keeps everything it needs to resolve the peer again, because
+    // the remote leg is attempted before any local state is dropped.
+    let refused = source
+        .abandon_outgoing_transfer(&preflight.transfer_id)
+        .await
+        .expect_err("a refused remote release must not report success");
+    assert!(
+        refused.to_string().contains("already committed"),
+        "unexpected refusal: {refused:?}",
+    );
+    assert_eq!(
+        replay_json_count(temp.path(), "peer-source", "reservations"),
+        1,
+        "the source dropped the reservation naming the peer it still has to release",
+    );
+}
+
 /// Taking the artifact records out of the map is what would make a failed
 /// deletion unrecoverable — the path is the only handle anyone has on the file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -121,6 +121,9 @@ impl TransferRuntime {
             PeerResponse::FinalizeTransfer { .. } => Err(RuntimeError::Protocol(
                 "unexpected finalize response during preflight".into(),
             )),
+            PeerResponse::AbandonTransfer { .. } => Err(RuntimeError::Protocol(
+                "unexpected abandon response during preflight".into(),
+            )),
             PeerResponse::TaskSnapshot { .. } => Err(RuntimeError::Protocol(
                 "unexpected task-snapshot response during preflight".into(),
             )),
@@ -228,6 +231,9 @@ impl TransferRuntime {
             )),
             PeerResponse::FinalizeTransfer { .. } => Err(RuntimeError::Protocol(
                 "unexpected finalize response during transfer commit".into(),
+            )),
+            PeerResponse::AbandonTransfer { .. } => Err(RuntimeError::Protocol(
+                "unexpected abandon response during transfer commit".into(),
             )),
             PeerResponse::TaskSnapshot { .. } => Err(RuntimeError::Protocol(
                 "unexpected task-snapshot response during transfer commit".into(),
@@ -343,6 +349,7 @@ impl TransferRuntime {
             | PeerResponse::CloseTask { .. }
             | PeerResponse::AdvanceTaskStage { .. }
             | PeerResponse::ReadTaskFile { .. }
+            | PeerResponse::AbandonTransfer { .. }
             | PeerResponse::MarkTaskRead { .. } => Err(RuntimeError::Protocol(
                 "unexpected response while finalizing outgoing transfer".into(),
             )),
@@ -630,6 +637,7 @@ impl TransferRuntime {
             | PeerResponse::CloseTask { .. }
             | PeerResponse::AdvanceTaskStage { .. }
             | PeerResponse::ReadTaskFile { .. }
+            | PeerResponse::AbandonTransfer { .. }
             | PeerResponse::MarkTaskRead { .. } => Err(RuntimeError::Protocol(
                 "unexpected response while acknowledging import commit".into(),
             )),
@@ -655,7 +663,22 @@ impl TransferRuntime {
     /// success over a file that survived would recreate the silent leak in a
     /// quieter form. Both halves are attempted before the first failure is
     /// returned, and anything left undeleted stays retriable.
+    /// The destination is released first, and a failure there returns before
+    /// any local state is dropped. The local reservation is the only record of
+    /// which peer holds the matching incoming one, so discarding it after a
+    /// failed remote leg would leave a reservation nobody can address; keeping
+    /// it makes the whole release retriable.
     pub async fn abandon_outgoing_transfer(&self, transfer_id: &str) -> Result<(), RuntimeError> {
+        let reservation = self
+            .outgoing_transfers
+            .lock()
+            .await
+            .get(transfer_id)
+            .cloned();
+        if let Some(reservation) = reservation {
+            self.release_peer_transfer_reservation(transfer_id, &reservation)
+                .await?;
+        }
         self.outgoing_transfers.lock().await.remove(transfer_id);
         let reservation = self
             .replay_store
@@ -663,6 +686,81 @@ impl TransferRuntime {
             .map_err(RuntimeError::from);
         let artifacts = self.cleanup_transfer_artifacts_checked(transfer_id).await;
         reservation.and(artifacts)
+    }
+
+    /// Tells the destination to drop the `incoming-reservations/<id>.json` its
+    /// preflight created. Modelled on the prepare/finalize handlers: sealed,
+    /// bound to this source and this transfer, and pinned to the peer that was
+    /// reserved rather than whoever answers the address now.
+    async fn release_peer_transfer_reservation(
+        &self,
+        transfer_id: &str,
+        reservation: &OutgoingTransferReservation,
+    ) -> Result<(), RuntimeError> {
+        let target_peer = match reservation.target_peer.clone() {
+            Some(peer) => peer,
+            None => self.find_peer(&reservation.target_peer_id).await?,
+        };
+        match reservation.transport {
+            Some(transport) => self.ensure_peer_is_trusted_for_transport(
+                &target_peer.peer_id,
+                &target_peer.public_key,
+                transport,
+            )?,
+            None => self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?,
+        }
+        let request_id = self.next_request_id("abandon");
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &target_peer,
+                "abandon_transfer",
+                &request_id,
+                serde_json::json!({
+                    "source_peer_id": self.config.peer_id,
+                    "transfer_id": transfer_id,
+                    "reserved_target_peer_id": target_peer.peer_id,
+                }),
+            )
+            .await?;
+        let response = self
+            .send_peer_request(
+                &target_peer,
+                PeerRequest::AbandonTransfer {
+                    request_id: request_id.clone(),
+                    transfer_id: transfer_id.to_owned(),
+                    source_peer_id: self.config.peer_id.clone(),
+                    sealed_payload,
+                },
+            )
+            .await?;
+
+        match response {
+            PeerResponse::AbandonTransfer {
+                request_id: response_request_id,
+                transfer_id: response_transfer_id,
+            } => {
+                if response_request_id != request_id {
+                    return Err(RuntimeError::Protocol(format!(
+                        "mismatched request id in abandon response: expected {}, got {}",
+                        request_id, response_request_id
+                    )));
+                }
+                if response_transfer_id != transfer_id {
+                    return Err(RuntimeError::Protocol(format!(
+                        "mismatched transfer id in abandon response: expected {}, got {}",
+                        transfer_id, response_transfer_id
+                    )));
+                }
+                Ok(())
+            }
+            PeerResponse::Error {
+                request_id: _,
+                message,
+            } => Err(RuntimeError::Protocol(message)),
+            _ => Err(RuntimeError::Protocol(
+                "unexpected response while abandoning an outgoing transfer".into(),
+            )),
+        }
     }
 
     pub async fn mark_import_ack_completed(&self, transfer_id: &str) -> Result<(), RuntimeError> {

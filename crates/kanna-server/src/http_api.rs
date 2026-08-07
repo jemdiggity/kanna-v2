@@ -79,10 +79,19 @@ pub(crate) async fn dispatch_authenticated_relay_http_invoke(
 pub async fn serve(state: std::sync::Arc<AppState>) -> Result<(), String> {
     routes::serve(state).await
 }
+/// In-process entry points the transfer engine calls.
+///
+/// The engine performs the same task lifecycle actions the LAN routes serve —
+/// creating the destination task, closing the source once its import is
+/// acknowledged — and must perform *those* actions rather than a second
+/// implementation of them.
+pub(crate) use task_actions::close_task_in_process;
+pub(crate) use tasks::create_task_in_process;
+
 pub(crate) use task_input::{
     handle_task_terminal_state, mark_task_session_interrupted, restore_task_run_for_live_session,
     try_submit_task_input, TaskInputError,
 };
 
 #[cfg(test)]
-pub(crate) use test_support::test_router;
+pub(crate) use test_support::{test_router, test_state_with_seed};

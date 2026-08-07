@@ -6,7 +6,6 @@ import i18n from "../i18n";
 import { invoke } from "../invoke";
 import { listen, listenCurrentWebviewWindow } from "../listen";
 import type { useKannaStore } from "../stores/kanna";
-import { isRetryableTaskPushError } from "../stores/transfer";
 import { isTauri } from "../tauri-mock";
 import {
   normalizeAppThemePreference,
@@ -15,13 +14,8 @@ import {
 import { normalizeAgentExecutionType } from "../stores/agentExecutionType";
 import { getDesktopSetting } from "../services/desktopServerClient";
 import {
-  parseIncomingTransferRequest,
-  parseOutgoingTransferCommittedEvent,
-  parseOutgoingTransferFinalizationRequestEvent,
   parsePairingCompletedEvent,
   parsePairingRequestedEvent,
-  parseTaskPullRequestedEvent,
-  type TaskPullRequestedEvent,
 } from "../utils/taskTransfer";
 import {
   WINDOW_WORKSPACE_NATIVE_CLOSE_WINDOW_EVENT,
@@ -41,7 +35,6 @@ import { parseRecentAgentChoices } from "../utils/agentChoiceUsage";
 import type { useAppUpdate } from "./useAppUpdate";
 import type { useToast } from "./useToast";
 import { showTerminalFileLinkHintOnce } from "./terminalFileLinkHint";
-import type { TransferMachine } from "../services/desktopTransferMachines";
 
 type AppPreferences = ReturnType<typeof useAppPreferences>["preferences"];
 type AppUpdateController = ReturnType<typeof useAppUpdate>;
@@ -63,8 +56,6 @@ interface UseAppLifecycleOptions {
   disposeDesktopCloudWorkspace: () => void;
   getKeyboardActions: () => NativeKeyboardActions;
   homePath: Ref<string>;
-  importIncomingTransfer: (transferId: string, recovery: boolean) => Promise<boolean>;
-  importPendingIncomingTransfers: () => Promise<void>;
   initializeDesktopCloudAuth: () => Promise<void>;
   initializeDesktopLanTaskSync: () => void;
   openFilePreview: (
@@ -76,7 +67,6 @@ interface UseAppLifecycleOptions {
   ) => void;
   openImageUrlPreview: (imageUrl: string) => void;
   preferences: AppPreferences;
-  refreshCloudTransferRoute: (peerId: string) => Promise<void>;
   remoteTaskDiagnostics: Ref<unknown>;
   restoreSidebarWidth: () => Promise<void>;
   shortcutsStartFull: Ref<boolean>;
@@ -86,240 +76,12 @@ interface UseAppLifecycleOptions {
   stopSystemThemeListener: () => void;
   store: ReturnType<typeof useKannaStore>;
   toast: ReturnType<typeof useToast>;
-  transferMachines: Readonly<Ref<TransferMachine[]>>;
   warmTransferSidecar: () => Promise<void>;
   windowWorkspace: WindowWorkspaceController;
 }
 
 function eventPayload(event: unknown): unknown {
   return (event as { payload?: unknown })?.payload ?? event;
-}
-
-function lifecycleDeliveryId(event: unknown): string | null {
-  const payload = eventPayload(event);
-  if (!payload || typeof payload !== "object") return null;
-  const deliveryId = (payload as Record<string, unknown>).__kannaLifecycleDeliveryId;
-  return typeof deliveryId === "string" && deliveryId.length > 0 ? deliveryId : null;
-}
-
-function lifecycleConsumerIncarnation(event: unknown): string | null {
-  const payload = eventPayload(event);
-  if (!payload || typeof payload !== "object") return null;
-  const incarnation =
-    (payload as Record<string, unknown>).__kannaLifecycleConsumerIncarnation;
-  return typeof incarnation === "string" && incarnation.length > 0 ? incarnation : null;
-}
-
-function lifecycleRecoveryRequired(event: unknown): boolean {
-  const payload = eventPayload(event);
-  return Boolean(
-    payload
-    && typeof payload === "object"
-    && (payload as Record<string, unknown>).__kannaLifecycleRecovery === true,
-  );
-}
-
-type LifecycleDeliverySettlement = "ack" | "nack";
-
-async function settleLifecycleDelivery(
-  event: unknown,
-  settlement: LifecycleDeliverySettlement,
-): Promise<void> {
-  const deliveryId = lifecycleDeliveryId(event);
-  if (!deliveryId) return;
-  const consumerIncarnation = lifecycleConsumerIncarnation(event);
-  if (!consumerIncarnation) {
-    throw new Error("transfer lifecycle event is missing its consumer incarnation");
-  }
-  await invoke(
-    settlement === "ack"
-      ? "acknowledge_transfer_lifecycle_event"
-      : "nack_transfer_lifecycle_event",
-    { deliveryId, consumerIncarnation },
-  );
-}
-
-function renewLifecycleDeliveryWhileHandling(event: unknown): () => void {
-  const deliveryId = lifecycleDeliveryId(event);
-  if (!deliveryId) return () => {};
-  const consumerIncarnation = lifecycleConsumerIncarnation(event);
-  if (!consumerIncarnation) return () => {};
-  const interval = window.setInterval(() => {
-    void invoke("renew_transfer_lifecycle_event", {
-      deliveryId,
-      consumerIncarnation,
-    }).catch((error: unknown) => {
-      console.error("[App] failed to renew transfer lifecycle delivery:", error);
-    });
-  }, 10_000);
-  return () => window.clearInterval(interval);
-}
-
-function lifecycleDeliveryOwnership(event: unknown): {
-  deliveryId: string;
-  consumerIncarnation: string;
-  assertOwnership: (phase: string) => Promise<void>;
-  claimPhase: (phase: string) => Promise<boolean>;
-  stop: () => void;
-} {
-  const deliveryId = lifecycleDeliveryId(event);
-  if (!deliveryId) {
-    throw new Error("transfer lifecycle event is missing its delivery ownership token");
-  }
-  const consumerIncarnation = lifecycleConsumerIncarnation(event);
-  if (!consumerIncarnation) {
-    throw new Error("transfer lifecycle event is missing its consumer incarnation");
-  }
-  let lost = false;
-  const renew = async (): Promise<boolean> => {
-    if (lost) return false;
-    const owned = await invoke<boolean>("renew_transfer_lifecycle_event", {
-      deliveryId,
-      consumerIncarnation,
-    });
-    if (!owned) lost = true;
-    return owned;
-  };
-  const interval = window.setInterval(() => {
-    void renew().catch((error: unknown) => {
-      lost = true;
-      console.error("[App] failed to renew transfer lifecycle delivery:", error);
-    });
-  }, 10_000);
-  return {
-    deliveryId,
-    consumerIncarnation,
-    async assertOwnership(phase: string) {
-      if (lost || !await renew()) {
-        throw new Error(`lifecycle delivery ownership was lost before ${phase}`);
-      }
-    },
-    async claimPhase(phase: string) {
-      if (lost) {
-        throw new Error(`lifecycle delivery ownership was lost before ${phase}`);
-      }
-      return await invoke<boolean>("claim_transfer_lifecycle_phase", {
-        deliveryId,
-        consumerIncarnation,
-        phase,
-      });
-    },
-    stop() {
-      window.clearInterval(interval);
-    },
-  };
-}
-
-export type TaskPullHandlingOutcome =
-  | "delivered"
-  | "terminal"
-  | "interrupted";
-
-export function handleTaskPullRequested(
-  request: TaskPullRequestedEvent,
-  store: Pick<ReturnType<typeof useKannaStore>, "items" | "pushTaskToPeer">,
-  inFlightSourceTasks: Map<string, Promise<TaskPullHandlingOutcome>>,
-  transferMachines: readonly TransferMachine[] | (() => readonly TransferMachine[]),
-  options: {
-    maxAttempts?: number;
-    retryDelayMs?: number;
-    signal?: AbortSignal;
-    refreshCloudTransferRoute?: (peerId: string) => Promise<void>;
-    waitForRetry?: (delayMs: number) => Promise<void>;
-    reportOperationalError?: (error: unknown) => void;
-  } = {},
-): Promise<TaskPullHandlingOutcome> {
-  const readMachines = typeof transferMachines === "function"
-    ? transferMachines
-    : () => transferMachines;
-  const maxAttempts = options.maxAttempts
-    ?? (typeof transferMachines === "function" ? 41 : 1);
-  const retryDelayMs = options.retryDelayMs ?? 250;
-  const waitForRetry = options.waitForRetry
-    ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
-  const sourceIsEligible = () => {
-    const source = store.items.find((item) => item.id === request.sourceTaskId);
-    if (
-      !source
-      || source.closed_at != null
-      || ["pending", "claimed", "streaming", "importing", "awaiting_acknowledgment"].includes(
-        source.transfer_status ?? "",
-      )
-    ) {
-      return null;
-    }
-    return source;
-  };
-  const inFlight = inFlightSourceTasks.get(request.sourceTaskId);
-  if (inFlight) return inFlight;
-
-  const initialSource = sourceIsEligible();
-  if (!initialSource) return Promise.resolve("terminal");
-
-  const handling = (async (): Promise<TaskPullHandlingOutcome> => {
-    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      if (options.signal?.aborted) return "interrupted";
-      const source = sourceIsEligible();
-      if (!source) return "terminal";
-      const requester = readMachines().find((machine) =>
-        machine.peerId === request.requesterPeerId);
-      if (requester) {
-        if (requester.relayDesktopId && options.refreshCloudTransferRoute) {
-          for (let refreshAttempt = 0; refreshAttempt < maxAttempts; refreshAttempt += 1) {
-            try {
-              await options.refreshCloudTransferRoute(request.requesterPeerId);
-              break;
-            } catch (error: unknown) {
-              if (options.signal?.aborted) return "interrupted";
-              if (refreshAttempt + 1 < maxAttempts) {
-                await waitForRetry(retryDelayMs);
-                if (options.signal?.aborted) return "interrupted";
-                continue;
-              }
-              options.reportOperationalError?.(error);
-              return "terminal";
-            }
-          }
-          if (options.signal?.aborted) return "interrupted";
-        }
-        for (let pushAttempt = 0; pushAttempt < maxAttempts; pushAttempt += 1) {
-          try {
-            await store.pushTaskToPeer(source.id, request.requesterPeerId, {
-              transport: requester.preferredTransport,
-              cloudFallback: requester.cloudFallback,
-              targetDesktopId: requester.desktopId,
-            });
-            return "delivered";
-          } catch (error: unknown) {
-            const retryable = isRetryableTaskPushError(error);
-            if (retryable && options.signal?.aborted) return "interrupted";
-            if (retryable && pushAttempt + 1 < maxAttempts) {
-              await waitForRetry(retryDelayMs);
-              if (options.signal?.aborted) return "interrupted";
-              continue;
-            }
-            // Transfer preflight and setup can already have reserved or staged
-            // state before rejecting. Replaying that work is not idempotent, so
-            // settle this lifecycle delivery instead of retrying it.
-            options.reportOperationalError?.(error);
-            return "terminal";
-          }
-        }
-      }
-      if (attempt + 1 < maxAttempts) {
-        await waitForRetry(retryDelayMs);
-      }
-    }
-    return "terminal";
-  })();
-  inFlightSourceTasks.set(initialSource.id, handling);
-  const clearInFlight = () => {
-    if (inFlightSourceTasks.get(initialSource.id) === handling) {
-      inFlightSourceTasks.delete(initialSource.id);
-    }
-  };
-  void handling.then(clearInFlight, clearInFlight);
-  return handling;
 }
 
 function focusAgentTerminal() {
@@ -337,14 +99,11 @@ export function useAppLifecycle({
   disposeDesktopCloudWorkspace,
   getKeyboardActions,
   homePath,
-  importIncomingTransfer,
-  importPendingIncomingTransfers,
   initializeDesktopCloudAuth,
   initializeDesktopLanTaskSync,
   openFilePreview,
   openImageUrlPreview,
   preferences,
-  refreshCloudTransferRoute,
   remoteTaskDiagnostics,
   restoreSidebarWidth,
   shortcutsStartFull,
@@ -354,17 +113,11 @@ export function useAppLifecycle({
   stopSystemThemeListener,
   store,
   toast,
-  transferMachines,
   warmTransferSidecar,
   windowWorkspace,
 }: UseAppLifecycleOptions) {
   const appUnlisteners: Array<() => void> = [];
   const fatalInitializationError = ref<string | null>(null);
-  const taskPullPushesInFlight = new Map<string, Promise<TaskPullHandlingOutcome>>();
-  const taskPullAbortController = new AbortController();
-  let transferEventConsumerRegistered = false;
-  let transferEventConsumerIncarnation: string | null = null;
-  const taskPullLifecycleDeliveriesInFlight = new Set<Promise<void>>();
   let currentWindowClosePhase: "open" | "preparing" | "recovering" | "destroying" = "open";
   let resolveWindowMembershipInitialization: (() => void) | null = null;
   const windowMembershipInitialization = new Promise<void>((resolve) => {
@@ -538,81 +291,6 @@ export function useAppLifecycle({
     if (windowWorkspace && windowWorkspace.bootstrap.windowId === "main") {
       scheduleStartupBackup(dbName);
     }
-    let transferLifecycleListenersReady = true;
-    try {
-      const unlistenTransferRequest = await listen("transfer-request", async (event: unknown) => {
-        let succeeded = false;
-        const stopRenewing = renewLifecycleDeliveryWhileHandling(event);
-        try {
-          const request = parseIncomingTransferRequest(eventPayload(event));
-          await store.recordIncomingTransfer(request);
-          await invoke("mark_incoming_transfer_event_recorded", {
-            transferId: request.transferId,
-          });
-          succeeded = await importIncomingTransfer(
-            request.transferId,
-            lifecycleRecoveryRequired(event),
-          );
-        } catch (e: unknown) {
-          console.error("[App] failed to import incoming transfer request:", e);
-          toast.error(e instanceof Error ? e.message : String(e));
-        } finally {
-          stopRenewing();
-          await settleLifecycleDelivery(event, succeeded ? "ack" : "nack").catch((error: unknown) => {
-            console.error("[App] failed to settle incoming transfer lifecycle delivery:", error);
-          });
-        }
-      });
-      appUnlisteners.push(unlistenTransferRequest);
-    } catch (e: unknown) {
-      transferLifecycleListenersReady = false;
-      console.error("[App] transfer-request listener registration failed:", e);
-    }
-    try {
-      const unlistenTaskPullRequested = await listen("task-pull-requested", async (event: unknown) => {
-        const handling = (async () => {
-          let outcome: TaskPullHandlingOutcome = "terminal";
-          const stopRenewing = renewLifecycleDeliveryWhileHandling(event);
-          try {
-            outcome = await handleTaskPullRequested(
-              parseTaskPullRequestedEvent(eventPayload(event)),
-              store,
-              taskPullPushesInFlight,
-              () => transferMachines.value,
-              {
-                refreshCloudTransferRoute,
-                signal: taskPullAbortController.signal,
-                reportOperationalError(error) {
-                  console.error("[App] failed to handle task pull request:", error);
-                  toast.error(error instanceof Error ? error.message : String(error));
-                },
-              },
-            );
-          } catch (e: unknown) {
-            console.error("[App] failed to handle task pull request:", e);
-            toast.error(e instanceof Error ? e.message : String(e));
-          } finally {
-            stopRenewing();
-            await settleLifecycleDelivery(
-              event,
-              outcome === "interrupted" ? "nack" : "ack",
-            ).catch((error: unknown) => {
-              console.error("[App] failed to settle task-pull lifecycle delivery:", error);
-            });
-          }
-        })();
-        taskPullLifecycleDeliveriesInFlight.add(handling);
-        try {
-          await handling;
-        } finally {
-          taskPullLifecycleDeliveriesInFlight.delete(handling);
-        }
-      });
-      appUnlisteners.push(unlistenTaskPullRequested);
-    } catch (e: unknown) {
-      transferLifecycleListenersReady = false;
-      console.error("[App] task-pull-requested listener registration failed:", e);
-    }
     void initializeDesktopCloudAuth().catch((error) =>
       console.warn("[cloud] failed to initialize desktop auth:", error),
     );
@@ -725,114 +403,16 @@ export function useAppLifecycle({
       console.error("[App] pairing-completed listener registration failed:", e);
     }
 
-    try {
-      const unlistenOutgoingTransferCommitted = await listen("outgoing-transfer-committed", async (event: unknown) => {
-        let transferId: string | null = null;
-        let succeeded = false;
-        const ownership = lifecycleDeliveryOwnership(event);
-        try {
-          const committed = parseOutgoingTransferCommittedEvent(eventPayload(event));
-          transferId = committed.transferId;
-          await store.handleOutgoingTransferCommitted(committed, ownership);
-          succeeded = true;
-        } catch (e: unknown) {
-          console.error("[App] failed to handle outgoing transfer commit acknowledgment:", e);
-          if (transferId) {
-            try {
-              await invoke("nack_outgoing_transfer_commit", {
-                transferId,
-                deliveryId: ownership.deliveryId,
-                consumerIncarnation: ownership.consumerIncarnation,
-              });
-            } catch (nackError: unknown) {
-              console.error("[App] failed to nack outgoing transfer commit acknowledgment:", nackError);
-            }
-          }
-        } finally {
-          ownership.stop();
-          await settleLifecycleDelivery(event, succeeded ? "ack" : "nack").catch((error: unknown) => {
-            console.error("[App] failed to settle outgoing commit lifecycle delivery:", error);
-          });
-        }
-      });
-      appUnlisteners.push(unlistenOutgoingTransferCommitted);
-    } catch (e: unknown) {
-      transferLifecycleListenersReady = false;
-      console.error("[App] outgoing-transfer-committed listener registration failed:", e);
-    }
-
-    try {
-      const unlistenOutgoingTransferFinalizationRequested = await listen("outgoing-transfer-finalization-requested", async (event: unknown) => {
-        const request = parseOutgoingTransferFinalizationRequestEvent(eventPayload(event));
-        let succeeded = false;
-        const ownership = lifecycleDeliveryOwnership(event);
-        try {
-          const finalized = await store.finalizeOutgoingTransfer(request.transferId, ownership);
-          await ownership.assertOwnership("finalization completion");
-          await invoke("complete_outgoing_transfer_finalization", {
-            transferId: request.transferId,
-            payload: finalized.payload,
-            finalizedCleanly: finalized.finalizedCleanly,
-            error: null,
-            deliveryId: ownership.deliveryId,
-            consumerIncarnation: ownership.consumerIncarnation,
-          });
-          succeeded = true;
-        } catch (error: unknown) {
-          console.error("[App] failed to finalize outgoing transfer:", error);
-          succeeded = await ownership.assertOwnership("finalization failure report")
-            .then(() => invoke("complete_outgoing_transfer_finalization", {
-            transferId: request.transferId,
-            payload: null,
-            finalizedCleanly: false,
-            error: error instanceof Error ? error.message : String(error),
-            deliveryId: ownership.deliveryId,
-            consumerIncarnation: ownership.consumerIncarnation,
-          }))
-            .then(() => true).catch((invokeError: unknown) => {
-            console.error("[App] failed to report outgoing transfer finalization error:", invokeError);
-            return false;
-          });
-        } finally {
-          ownership.stop();
-          await settleLifecycleDelivery(event, succeeded ? "ack" : "nack").catch((error: unknown) => {
-            console.error("[App] failed to settle finalization lifecycle delivery:", error);
-          });
-        }
-      });
-      appUnlisteners.push(unlistenOutgoingTransferFinalizationRequested);
-    } catch (e: unknown) {
-      transferLifecycleListenersReady = false;
-      console.error("[App] outgoing-transfer-finalization-requested listener registration failed:", e);
-    }
-
-    if (transferLifecycleListenersReady) {
-      try {
-        const claim = await invoke<{
-          authoritative: boolean;
-          consumerIncarnation: string;
-        }>("claim_transfer_event_consumer");
-        if (!claim.consumerIncarnation) {
-          throw new Error("transfer lifecycle consumer claim missing incarnation");
-        }
-        const isAuthoritativeConsumer = claim.authoritative;
-        transferEventConsumerRegistered = true;
-        transferEventConsumerIncarnation = claim.consumerIncarnation;
-        initializeDesktopLanTaskSync();
-        if (isAuthoritativeConsumer) {
-          await importPendingIncomingTransfers();
-        }
-      } catch (e: unknown) {
-        console.error("[App] transfer lifecycle consumer registration failed:", e);
-      }
-    }
+    // The desktop no longer elects a transfer consumer: the four lifecycle
+    // events never leave `kanna-server`, so there is nothing to claim and
+    // nothing to hand over when this window closes. LAN task sync is a window
+    // concern and still starts here.
+    initializeDesktopLanTaskSync();
     if (import.meta.env.DEV && window.__KANNA_E2E__) {
       void remoteTaskDiagnostics.value;
       window.__KANNA_E2E__.ready = true;
     }
-    if (transferEventConsumerRegistered) {
-      await warmTransferSidecar();
-    }
+    await warmTransferSidecar();
 
     // Cache $HOME for shell-at-home (no repo selected)
     invoke("read_env_var", { name: "HOME" }).then((val) => {
@@ -896,21 +476,6 @@ export function useAppLifecycle({
   });
 
   onBeforeUnmount(() => {
-    taskPullAbortController.abort();
-    if (transferEventConsumerRegistered) {
-      transferEventConsumerRegistered = false;
-      const consumerIncarnation = transferEventConsumerIncarnation;
-      transferEventConsumerIncarnation = null;
-      if (consumerIncarnation) {
-        void Promise.allSettled([...taskPullLifecycleDeliveriesInFlight])
-          .then(() => invoke("release_transfer_event_consumer", {
-            consumerIncarnation,
-          }))
-          .catch((e: unknown) => {
-            console.error("[App] transfer lifecycle consumer release failed:", e);
-          });
-      }
-    }
     disposeDesktopCloudWorkspace();
     stopSidebarResize();
     window.removeEventListener("dragenter", suppressFileDropNavigation);

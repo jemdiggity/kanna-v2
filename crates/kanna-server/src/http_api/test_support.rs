@@ -86,7 +86,7 @@ pub(super) fn test_router_with_seed(
     router(Arc::new(AppState::new(config)))
 }
 
-pub(super) fn test_state_with_seed(
+pub(crate) fn test_state_with_seed(
     desktop_id: &str,
     desktop_name: &str,
     seed: impl FnOnce(&Db),

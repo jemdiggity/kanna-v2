@@ -308,7 +308,7 @@ E2E: transfer completes end-to-end with the sidecar under server ownership;
 sidecar death mid-transfer re-spawns and recovers; staging/prod port parity
 asserted.
 
-### Phase 3 — Orchestration moves server-side; the window-election machinery dies
+### Phase 3 — Orchestration moves server-side; the window-election machinery dies — **landed**
 
 Push, import, approve/reject, and commit handling move from
 `stores/transfer.ts` into a `kanna-server` transfer engine (Rust), consuming
@@ -324,6 +324,23 @@ duplicate DB claim-lease driven from the renderer
 intent, progress display (via snapshot/`StateChanged`), pairing UI.
 E2E: a pull completes with **no authoritative renderer consumer** (window
 closed / never claimed); app restart mid-transfer resumes rather than orphans.
+
+Landed as described, plus two things the plan did not anticipate. The peer-side
+half of T3's reservation release came with it — a losing duplicate push left an
+`incoming-reservations/<id>.json` on the *destination*, which only the engine
+that owns the push lifecycle could address (see
+[2026-08-07-duplicate-push-transfer-e2e-gap.md](2026-08-07-duplicate-push-transfer-e2e-gap.md)).
+And moving `git clone` server-side made a peer-supplied remote URL an argv, so
+the engine gained a scheme allowlist and a `--` separator: `git clone
+--upload-pack=…` and git's `ext::` transport are both remote code execution, and
+the renderer's `run_script` path had never fenced either.
+
+E2E coverage is `apps/desktop/tests/e2e/real/local-transfer-headless-engine.test.ts`:
+a pull that completes with the source renderer navigated away (app process and
+`kanna-server` up, no window participating, every assertion read over
+`/v1/e2e/sql` rather than through a renderer), and a `kanna-server` SIGKILL
+mid-transfer once per direction with the transfer resuming to completion after
+the restart.
 
 ### Phase 4 — Finalization redesign (in its new home)
 

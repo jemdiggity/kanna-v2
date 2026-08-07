@@ -46,6 +46,11 @@ import { waitForFile } from "../helpers/worktreeFs";
  * `opencode import` re-keys the existing session rather than creating one. Both
  * are the same observable claim: after the transfer, the destination worktree is
  * the directory this conversation belongs to.
+ *
+ * Every step below — discovering the session, exporting it, importing it into
+ * the destination worktree — runs in `kanna-server`'s transfer engine. Nothing
+ * here reaches into a renderer to make the transfer happen, which is why the
+ * only window interaction left is the push the operator asks for.
  */
 
 interface PipelineRow {
@@ -123,13 +128,6 @@ async function waitForSourceOpencodeSession(
   );
 }
 
-async function readReceiverErrors(): Promise<string> {
-  const errors = await secondary.executeSync<string[]>(
-    "return (window.__KANNA_E2E_ERRORS__ ?? []).slice(-8);",
-  ).catch(() => ["<unavailable>"]);
-  return JSON.stringify(errors);
-}
-
 async function waitForIncomingTransferCompleted(
   sourceTaskId: string,
   timeoutMs = 240_000,
@@ -155,10 +153,13 @@ async function waitForIncomingTransferCompleted(
     }
     await sleep(250);
   }
+  // The reason lives on the row. The import runs in `kanna-server` now, so
+  // there is no renderer console to scrape — a failed import writes its reason
+  // to `task_transfer.error` and a retriable one leaves the row non-terminal,
+  // which is what the two branches above read.
   throw new Error(
     `timed out waiting for incoming transfer of ${sourceTaskId}: `
-    + `status=${last?.status ?? "none"} error=${last?.error ?? "none"} `
-    + `receiverErrors=${await readReceiverErrors()}`,
+    + `status=${last?.status ?? "none"} error=${last?.error ?? "none"}`,
   );
 }
 
@@ -214,20 +215,6 @@ describe.skipIf(realE2eAgentProvider() !== "opencode")(
       await secondary.createSession();
       await resetDatabase(primary);
       await resetDatabase(secondary);
-      // The receiver retries a failed import behind a claim lease and only
-      // reports the reason to its own console, so a stuck transfer is
-      // otherwise indistinguishable from a slow one.
-      await secondary.executeSync(
-        `if (!window.__KANNA_E2E_ERRORS_PATCHED__) {
-           window.__KANNA_E2E_ERRORS_PATCHED__ = true;
-           window.__KANNA_E2E_ERRORS__ = [];
-           const original = console.error;
-           console.error = (...args) => {
-             try { window.__KANNA_E2E_ERRORS__.push(args.map(String).join(" ")); } catch (e) {}
-             original.apply(console, args);
-           };
-         }`,
-      );
       testRepoPath = await createFixtureRepo("local-transfer-opencode-continuity");
       repoId = await importTestRepo(primary, testRepoPath, "local-transfer-opencode-continuity");
     }, 240_000);

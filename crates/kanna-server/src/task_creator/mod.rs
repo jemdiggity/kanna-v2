@@ -56,7 +56,7 @@ use worktree::{
 
 pub(crate) use definitions::ResolvedAgentDefinition;
 pub(crate) use definitions::DEFAULT_REVISION_LIMIT;
-pub(crate) use environment::warm_login_shell_path;
+pub(crate) use environment::{resolve_agent_executable, warm_login_shell_path};
 pub(crate) use lifecycle::{
     daemon_session_presence, dispatch_prepared_post_for_api, kill_session_replacing,
     prepared_task_id, prune_completion_contexts_on_startup, remove_completion_contexts,

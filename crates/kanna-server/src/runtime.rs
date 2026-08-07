@@ -10,8 +10,32 @@ async fn prepare_daemon_generation(
     Ok(connected_pid)
 }
 
+/// Which wait is reporting. Startup runs before `http_api::serve` binds, so a
+/// daemon it cannot reach really does leave LAN and relay unavailable. The
+/// steady-state maintenance loop runs behind a listener that is already
+/// serving; saying the same thing there names an outage that is not happening
+/// and sent the 2026-08-06 incident investigation after the wrong system.
+#[derive(Clone, Copy)]
+enum ProtectedInputWait {
+    Startup,
+    SteadyState,
+}
+
+impl ProtectedInputWait {
+    fn degraded(self) -> &'static str {
+        match self {
+            Self::Startup => "LAN/relay have not started yet",
+            Self::SteadyState => {
+                "the LAN/relay API keeps serving; only protected-input \
+                 classification of new daemon sessions is deferred"
+            }
+        }
+    }
+}
+
 async fn wait_for_protected_input_generation(
     config: &Config,
+    wait: ProtectedInputWait,
     mut previous_pid: Option<u32>,
 ) -> u32 {
     let mut retry_delay = std::time::Duration::from_millis(50);
@@ -24,7 +48,8 @@ async fn wait_for_protected_input_generation(
             Ok(daemon) => daemon,
             Err(error) => {
                 log::warn!(
-                    "protected-input daemon generation is not ready; LAN/relay remain unavailable: {error}"
+                    "protected-input daemon generation is not ready; {}: {error}",
+                    wait.degraded()
                 );
                 previous_pid = None;
                 tokio::time::sleep(retry_delay).await;
@@ -47,7 +72,12 @@ async fn wait_for_protected_input_generation(
 
 async fn maintain_protected_input_generations(config: Config, mut pid: u32) {
     loop {
-        pid = wait_for_protected_input_generation(&config, Some(pid)).await;
+        pid = wait_for_protected_input_generation(
+            &config,
+            ProtectedInputWait::SteadyState,
+            Some(pid),
+        )
+        .await;
         log::info!("protected-input policy established on successor daemon pid {pid}");
     }
 }
@@ -123,9 +153,21 @@ pub(crate) async fn run_server_services(
     http_state: Arc<http_api::AppState>,
 ) {
     crate::task_creator::prune_completion_contexts_on_startup(&config.daemon_dir, &db);
-    let protected_input_pid = wait_for_protected_input_generation(&config, None).await;
+    let protected_input_pid =
+        wait_for_protected_input_generation(&config, ProtectedInputWait::Startup, None).await;
     let protected_input_maintenance =
         maintain_protected_input_generations(config.clone(), protected_input_pid);
+    // The transfer engine is a peer of the LAN API, not a child of it: a
+    // transfer must keep making progress whether or not anything is connected.
+    //
+    // Its own task, not a `select!` branch beside the listener and the relay. A
+    // transfer acquires repositories, and even with every git and tar call on
+    // the blocking pool the engine holds `.await`s across whole clones; sharing
+    // a task with `http_api::serve` and `run_relay_loop` would mean a slow
+    // acquisition stops accepting LAN connections and stops answering relay
+    // pings — and `RELAY_PONG_TIMEOUT` is 75s, so a long enough clone would tear
+    // the relay down and take mobile offline.
+    tokio::spawn(crate::transfer_engine::run(Arc::clone(&http_state)));
     if config.relay_url.trim().is_empty() {
         tokio::select! {
             result = http_api::serve(Arc::clone(&http_state)) => match result {
