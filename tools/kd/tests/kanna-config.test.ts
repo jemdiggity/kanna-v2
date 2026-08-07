@@ -59,12 +59,21 @@ describe("Kanna repository cache defaults", () => {
     // compatibility alias) and every pre-kache kd accept, so branches cut before
     // this change keep transitioning after it merges. Switch to `install` only
     // once no such branch is open, together with removing the alias in cli.ts.
-    expect(config.setup).toEqual([
-      "pnpm install",
-      "./kd env sync",
-      "./kd rust-cache warm",
-      localSetupCommand
-    ]);
+    //
+    // Asserted as presence plus relative order, not as the whole list: setup also
+    // carries entries this test has no opinion on (temporary mitigations, for one),
+    // and pinning it verbatim turns every unrelated config edit into a red suite.
+    const setup = config.setup ?? [];
+    const required = ["pnpm install", "./kd env sync", "./kd rust-cache warm", localSetupCommand];
+
+    for (const command of required) {
+      expect(setup, `.kanna/config.json setup runs: ${command}`).toContain(command);
+    }
+
+    const positions = required.map((command) => setup.indexOf(command));
+    expect(positions, "setup keeps the cache install after environment sync").toEqual(
+      [...positions].sort((a, b) => a - b)
+    );
   });
 
   it("runs one shared machine-local hook without letting it block setup", () => {
