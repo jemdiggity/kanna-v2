@@ -22,6 +22,25 @@ Fixed by `apps/desktop/src-tauri/build.rs` (`pin_tauri_config_fingerprint`), whi
 the effective config's fingerprint as build-script output so the crate itself is dirtied
 and the context re-expands.
 
+### Second failure behind the same symptom
+
+With the URL correct, a consecutive run could still time out — this time with the window on
+the *right* URL and `/tmp/kanna-webview-*.log` recording `[init] fatal: TypeError: Load
+failed`, 15 s after `[db] using server-owned database`.
+
+`MobileServerManager::start()` publishes `started = true` before it spawns the sidecar, so
+that `snapshot()` and `stop()` can see the attempt. A caller arriving mid-startup therefore
+took the `if state.started { return Ok(()) }` path and was told the server was ready while
+it was not yet listening. The frontend calls `ensure_mobile_server` and then fetches
+`/v1/snapshot` immediately (`desktopServerClient.requestJson`, 15 s budget), so on any run
+where the server needed longer than that — a loaded machine, a cold page cache over the
+sidecar hashing — `main.ts`'s init threw and the app never became ready.
+
+Fixed by a `start_gate` mutex held for the whole of `start()`: a caller that arrives while a
+start is in flight now waits for it and observes the finished result. The Rust side already
+allows 60 s for the server to answer (`STATUS_POLL_ATTEMPTS`), so nothing needed lengthening
+and no retry was added.
+
 ## What is covered
 
 - `apps/desktop/tests/e2e/mock/app-launch.test.ts` — asserts the window's origin is this
@@ -32,6 +51,11 @@ and the context re-expands.
   classified and reported instead of silently timing out.
 - `apps/desktop/tests/e2e/runPorts.test.ts` — ports come from below the ephemeral range,
   are reserved until start, and are never adjacent (vite HMR is `devPort + 1`).
+- `commands::mobile::tests::start_reports_success_only_once_the_server_answers` — drives
+  `start()` against a deliberately slow `kanna-server` sidecar and asserts a concurrent
+  `start()` does not return before `/v1/status` answers. It fails on the pre-fix code with
+  `start() returned before kanna-server answered /v1/status`, so the load-dependent E2E
+  failure is reproducible without depending on machine load.
 
 ## What is not covered, and why
 
@@ -57,28 +81,34 @@ run only when invoked directly.
 - Fixing the two stale harness unit tests, then extending `apps/desktop`'s `test` script to
   cover `tests/e2e` (excluding `mock/` and `real/`) so the four suites above run in CI.
 
-## Manual verification recorded on 2026-08-06
+## Manual verification
 
-Run on this machine, in `.kanna-worktrees/task-27d0c5d7`, each line a separate
-`pnpm --dir apps/desktop test:e2e` invocation:
+Run on this machine, in `.kanna-worktrees/task-27d0c5d7`. The stale-`devUrl` rows are from
+2026-08-06; the rows below them are from 2026-08-07, after the `start_gate` fix, each a
+separate `pnpm --dir apps/desktop test:e2e -- <suite>` invocation.
 
 | # | Suite | Before the fix | After the fix |
 |---|---|---|---|
 | 1 | `mock/app-launch.test.ts` (cold build) | 6 passed | — |
 | 2 | `mock/app-launch.test.ts` (consecutive) | **timed out — about:blank** | — |
-| 3 | `mock/app-launch.test.ts` | — | 7 passed |
-| 4 | `mock/app-launch.test.ts` (consecutive) | — | 7 passed |
-| 5 | `real/local-transfer-accept-import.test.ts` (two instances) | — | 1 passed |
+| 3 | `mock/app-launch.test.ts` (consecutive, correct URL) | **timed out — `[init] fatal: TypeError: Load failed`** | — |
+| 4 | `mock/app-launch.test.ts` | — | 7 passed |
+| 5 | `mock/app-launch.test.ts` (consecutive invocation) | — | 7 passed |
+| 6 | `real/local-transfer-accept-import.test.ts` (control, two instances) | — | 1 passed |
+| 7 | `mock/transfer-visibility.test.ts` (from `task-8458932e`) | never executed | 2 passed |
 
-Before the fix, run 2's binary embedded run 1's port (`http://localhost:53068` against a
-config of `http://localhost:53957`) and the webview reported `about:blank`; navigating that
+Row 7 was cherry-picked onto a throwaway branch (`c3b79d8b 57b3b486 90d98bc9`) and run from
+this workspace; the source branch and worktrees were not modified.
+
+Before the devUrl fix, run 2's binary embedded run 1's port (`http://localhost:53068` against
+a config of `http://localhost:53957`) and the webview reported `about:blank`; navigating that
 webview to the live dev server by hand loaded the app, which is what identified the cause.
 Touching any file in `apps/desktop/src-tauri/src/` before a run has the same effect — the
-crate recompiles, so the context re-expands — which is the manual workaround this fix
+crate recompiles, so the context re-expands — which is the manual workaround that fix
 replaces.
 
 Also verified: `mock/task-lifecycle.test.ts` and `mock/action-bar.test.ts` fail on in-app
 assertions (`repository setup task to settle`, `waitForText(".task-header", "Say OK")`) both
-with this fix and on unmodified `9bd89b2d` with a forced rebuild. Those failures are
+with these fixes and on unmodified `9bd89b2d` with a forced rebuild. Those failures are
 reproducible, unrelated to startup, and out of scope here — the mock lane stops at the
 first failing suite, so `mock/` cannot run to completion until they are fixed.
