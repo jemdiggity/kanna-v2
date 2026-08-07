@@ -280,6 +280,29 @@ impl DaemonClient {
         Ok(event)
     }
 
+    /// Park until the daemon on the other end of this connection stops
+    /// serving it, and report why.
+    ///
+    /// This is how the server learns that a daemon generation ended without
+    /// asking anything of the daemon: a connection that never sent
+    /// `Subscribe` receives no unsolicited events, so the read completes only
+    /// when the daemon closes the socket or exits. Handoff publishes the
+    /// successor's pid and binds its socket strictly after the old daemon has
+    /// exited, so this fires no later than the successor becomes reachable.
+    pub(crate) async fn wait_until_disconnected(&mut self) -> String {
+        loop {
+            let mut line = String::new();
+            match self.reader.read_line(&mut line).await {
+                Ok(0) => return "daemon closed the connection".to_string(),
+                Ok(_) => log::debug!(
+                    "ignoring unsolicited daemon event on an unsubscribed connection: {}",
+                    line.trim()
+                ),
+                Err(error) => return format!("daemon connection failed: {error}"),
+            }
+        }
+    }
+
     pub fn into_split(self) -> (DaemonClientReader, DaemonClientWriter) {
         (
             DaemonClientReader {

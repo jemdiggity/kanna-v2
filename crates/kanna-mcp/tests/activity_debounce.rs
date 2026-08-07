@@ -329,10 +329,10 @@ fn spawn_fake_daemon(daemon_dir: &Path) -> FakeDaemon {
         // Production starts the terminal watcher before the protected-input
         // startup gate, so either connection can win the race. Accept both
         // lifecycles in their natural order while requiring every command.
-        let mut generation_ready = false;
+        let mut generation_ready = None;
         let mut watcher_listed = false;
         let mut subscription = None;
-        while !generation_ready || !watcher_listed || subscription.is_none() {
+        while generation_ready.is_none() || !watcher_listed || subscription.is_none() {
             let (mut connection, _) = listener.accept().expect("accept daemon connection");
             let mut reader =
                 BufReader::new(connection.try_clone().expect("clone daemon connection"));
@@ -340,7 +340,10 @@ fn spawn_fake_daemon(daemon_dir: &Path) -> FakeDaemon {
             reader.read_line(&mut line).expect("read daemon command");
 
             if line.contains("NegotiateProtectedInput") {
-                assert!(!generation_ready, "duplicate protected-input negotiation");
+                assert!(
+                    generation_ready.is_none(),
+                    "duplicate protected-input negotiation"
+                );
                 writeln!(
                     connection,
                     "{{\"type\":\"ProtectedInputReady\",\"version\":1}}"
@@ -353,7 +356,11 @@ fn spawn_fake_daemon(daemon_dir: &Path) -> FakeDaemon {
                 assert!(line.contains("List"), "expected List, got {line}");
                 writeln!(connection, "{{\"type\":\"SessionList\",\"sessions\":[]}}")
                     .expect("answer generation list");
-                generation_ready = true;
+                // Hold the connection for the rest of the fixture's life. A
+                // real daemon does not hang up after negotiating, and the
+                // server reads a closed generation connection as "this daemon
+                // has been replaced" and negotiates with its successor.
+                generation_ready = Some(connection);
             } else if line.contains("Subscribe") {
                 assert!(subscription.is_none(), "duplicate subscription");
                 writeln!(connection, "{{\"type\":\"Ok\"}}").expect("acknowledge subscribe");
@@ -367,6 +374,7 @@ fn spawn_fake_daemon(daemon_dir: &Path) -> FakeDaemon {
             }
         }
 
+        let _generation = generation_ready.expect("protected-input generation established");
         let mut subscription = subscription.expect("subscription established");
         if handshake_done.send(()).is_err() {
             return;
