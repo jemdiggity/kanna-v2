@@ -238,41 +238,6 @@ async function selectRemoteTask(client: typeof primary, prompt: string): Promise
   }
 }
 
-async function failNextDestinationImport(): Promise<void> {
-  await secondary.executeSync(`
-    const store = window.__KANNA_E2E__.setupState.store;
-    const original = store.approveIncomingTransfer.bind(store);
-    window.__KANNA_E2E__.destinationImportFailureCount = 0;
-    window.__KANNA_E2E__.restoreApproveIncomingTransfer = () => {
-      store.approveIncomingTransfer = original;
-      delete window.__KANNA_E2E__.destinationImportFailureCount;
-      delete window.__KANNA_E2E__.restoreApproveIncomingTransfer;
-    };
-    store.approveIncomingTransfer = async () => {
-      window.__KANNA_E2E__.destinationImportFailureCount += 1;
-      throw new Error("simulated cloud destination import failure");
-    };
-  `);
-}
-
-async function waitForDestinationImportFailure(timeoutMs = 15_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const failureCount = await secondary.executeSync<number>(
-      `return window.__KANNA_E2E__.destinationImportFailureCount || 0;`,
-    );
-    if (failureCount > 0) return;
-    await sleep(100);
-  }
-  throw new Error("timed out waiting for simulated destination import failure");
-}
-
-async function interruptNextDestinationAck(): Promise<void> {
-  await secondary.executeSync(`
-    window.__KANNA_E2E__.failNextInvoke = "acknowledge_incoming_transfer_commit";
-  `);
-}
-
 async function waitForTransferMachine(
   client: typeof primary,
   machineName: string,
@@ -480,7 +445,6 @@ describe("cloud task ownership transfer", () => {
       await client.executeSync(`
         if (window.__KANNA_E2E__) {
           window.__KANNA_E2E__.failNextInvoke = undefined;
-          window.__KANNA_E2E__.restoreApproveIncomingTransfer?.();
         }
         const ctx = window.__KANNA_E2E__?.setupState;
         if (ctx?.showPeerPicker?.__v_isRef) ctx.showPeerPicker.value = false;
@@ -645,21 +609,14 @@ describe("cloud task ownership transfer", () => {
         "SELECT id FROM task_transfer WHERE direction = 'outgoing' AND source_task_id = ?",
         [source.id],
       )).toHaveLength(0);
-      await primary.executeSync(`window.__KANNA_E2E__.invokes?.clear();`);
-
       await pushAndAssertCloudOwnershipTransfer(source, "Cloud fallback from unusable LAN");
 
-      const invokes = await primary.executeSync<Array<{
-        cmd: string;
-        args?: { payload?: { phase?: string; transport?: string } };
-      }>>(`return window.__KANNA_E2E__.invokes?.getAll() || [];`);
-      const preflights = invokes.filter(
-        (call) =>
-          call.cmd === "prepare_outgoing_transfer"
-          && call.args?.payload?.phase === "preflight",
-      );
-      expect(preflights).toHaveLength(2);
-      expect(preflights.map((call) => call.args?.payload?.transport)).toEqual(["lan", "cloud"]);
+      // The two preflights used to be visible as renderer invokes. Preflight is
+      // the engine's now, so what this asserts is the outcome the fallback
+      // exists for: one durable transfer, completed, over cloud after the LAN
+      // route was unusable. Which failures are eligible for the fallback at all
+      // is pinned by `transfer_engine::control`'s own test — retrying a refusal
+      // on another transport would be a second attempt at rejected work.
       expect(await queryDb(
         primary,
         "SELECT id, status FROM task_transfer WHERE direction = 'outgoing' AND source_task_id = ?",
@@ -670,63 +627,21 @@ describe("cloud task ownership transfer", () => {
     }
   }, 180_000);
 
-  it("retries an interrupted acknowledgment without duplicating the imported destination", async () => {
-    await waitForBidirectionalCloudReadiness();
-    const source = await createSourceTask("Cloud ack retry");
-    const cloudTaskId = source.cloud_task_id ?? source.id;
-    await secondary.executeSync(`window.__KANNA_E2E__.invokes?.clear();`);
-    await interruptNextDestinationAck();
-    await pushSelectedTaskToPeerThroughUi(primary, "Secondary", { waitForDismissal: false });
-    const awaiting = await waitForIncoming(secondary, source.id, "awaiting_acknowledgment");
-    await waitForInvoke(secondary, "acknowledge_incoming_transfer_commit");
-    const interruption = await secondary.executeSync<{
-      faultPending: boolean;
-      invokes: Array<{ cmd: string }>;
-    }>(`
-      return {
-        faultPending: window.__KANNA_E2E__.failNextInvoke === "acknowledge_incoming_transfer_commit",
-        invokes: window.__KANNA_E2E__.invokes?.getAll() || [],
-      };
-    `);
-    expect(interruption.faultPending).toBe(false);
-    expect(interruption.invokes).toContainEqual(expect.objectContaining({
-      cmd: "acknowledge_incoming_transfer_commit",
-    }));
-    expect(await queryDb(
-      primary,
-      "SELECT closed_at FROM pipeline_item WHERE id = ?",
-      [source.id],
-    )).toEqual([{ closed_at: null }]);
-    expect(await queryDb(
-      secondary,
-      "SELECT id FROM pipeline_item WHERE cloud_task_id = ?",
-      [cloudTaskId],
-    )).toHaveLength(1);
-
-    await callVueMethod(secondary, "importPendingIncomingTransfers");
-    await waitForIncoming(secondary, source.id, "completed");
-    expect(await queryDb(
-      secondary,
-      "SELECT id FROM pipeline_item WHERE cloud_task_id = ?",
-      [cloudTaskId],
-    )).toEqual([{ id: awaiting.local_task_id }]);
-    await waitForLocalTaskClosed(primary, source.id);
-  }, 120_000);
-
-  it("keeps the source open when destination import fails before acknowledgment", async () => {
-    await waitForBidirectionalCloudReadiness();
-    const source = await createSourceTask("Cloud import failure");
-    await failNextDestinationImport();
-    await pushSelectedTaskToPeerThroughUi(primary, "Secondary", { waitForDismissal: false });
-    await waitForDestinationImportFailure();
-    await waitForIncoming(secondary, source.id, "pending");
-    const rows = await queryDb(
-      primary,
-      "SELECT closed_at FROM pipeline_item WHERE id = ?",
-      [source.id],
-    ) as Array<{ closed_at: string | null }>;
-    expect(rows[0]?.closed_at).toBeNull();
-  }, 90_000);
+  // Two tests stood here: an interrupted destination acknowledgment retrying
+  // without duplicating the import, and the source staying open when the
+  // destination import fails before acknowledgment. Both fault-injected by
+  // replacing `store.approveIncomingTransfer` or failing the
+  // `acknowledge_incoming_transfer_commit` invoke in the destination renderer —
+  // seams that exist only while the renderer performs the import, which is
+  // exactly what this change removed.
+  //
+  // The properties are still covered. The acknowledgment is single-flight per
+  // work item through `transfer_work_phase`, and a *failed* one releases its
+  // claim so the retry re-attempts rather than skipping to `completed` — pinned
+  // by `a_released_phase_is_reclaimable_by_the_retry`. The source staying open
+  // through a failed destination import is asserted end to end against a real
+  // seam (a repository the destination cannot acquire) in
+  // `local-transfer-source-handoff-failure.test.ts`.
 
   it("revokes cloud push and pull eligibility on UI sign-out without clearing paired LAN trust", async () => {
     await waitForBidirectionalCloudReadiness();

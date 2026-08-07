@@ -137,16 +137,19 @@ async fn active_outgoing_route_reports_only_transfers_the_index_still_holds() {
     assert_eq!(status, StatusCode::OK);
 }
 
-/// The duplicate-push race, now expressible directly.
+/// Every push is its own intent, and only an explicit idempotency key collapses
+/// two into one.
 ///
-/// It used to be a renderer snapshot lagging the DB, which is why T3 could only
-/// reach it through a store-level test with the sidecar and the HTTP hop mocked
-/// (`docs/2026-08-07-duplicate-push-transfer-e2e-gap.md`). With the push a
-/// server-side operation, two deliveries for one task are two requests against
-/// one durable queue: the second is answered `scheduled: false` and schedules
-/// nothing, so only one push ever runs.
+/// `transfer_work.id` is a permanent primary key and no row is ever pruned, so
+/// keying a push on anything that repeats — the peer id was the first attempt —
+/// makes every push of a task to that peer after the first schedule nothing,
+/// forever. Pushing the same task to the same machine again is ordinary: the
+/// first one failed and the operator fixed it, or they simply want it there
+/// again. The duplicate-*delivery* race the T3 note describes is handled a
+/// layer down, by the engine's eligibility read against
+/// `idx_task_transfer_active_outgoing_source`, not by this key.
 #[tokio::test]
-async fn two_push_intents_for_one_task_schedule_exactly_one_push() {
+async fn each_push_is_its_own_intent_unless_the_caller_supplies_a_key() {
     let app = super::test_router("desktop-1", "Studio Mac");
 
     let push = |intent_key: Option<&'static str>| {
@@ -173,20 +176,22 @@ async fn two_push_intents_for_one_task_schedule_exactly_one_push() {
         }
     };
 
-    let (status, body) = push(None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["scheduled"], true);
+    // Every click schedules. Before this the second one silently did nothing,
+    // for the rest of the database's life.
+    for attempt in 0..3 {
+        let (status, body) = push(None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["scheduled"], true, "push {attempt} scheduled nothing");
+    }
 
-    // The redelivery. Same task, same peer, no new work — this is the case that
-    // raced into `idx_task_transfer_active_outgoing_source` on 2026-08-06.
-    let (status, body) = push(None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["scheduled"], false);
-
-    // A deliberate re-push says so, and is not swallowed by the first intent.
+    // A caller that retries its own request and does not want the retry to
+    // become a second push says so, and is answered `false` the second time.
     let (status, body) = push(Some("operator-retry")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["scheduled"], true);
+    let (status, body) = push(Some("operator-retry")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["scheduled"], false);
 }
 
 /// Approve and reject are intents against a transfer that must exist and must

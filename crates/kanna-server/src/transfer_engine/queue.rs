@@ -20,6 +20,29 @@ pub const KIND_REJECT: &str = "reject";
 pub const KIND_PUSH: &str = "push";
 pub const KIND_FINALIZE: &str = "finalize";
 pub const KIND_OUTGOING_COMMITTED: &str = "outgoing-committed";
+pub const KIND_SIDECAR_CLEANUP: &str = "sidecar-cleanup";
+
+/// A value no other work id will reuse.
+///
+/// `transfer_work.id` is a permanent primary key and rows are never pruned, so
+/// any id built from a value that repeats — a peer id, a counter that restarts
+/// with its process — silently drops work forever once it has been used. This
+/// is what callers reach for when the thing they are keying on is not itself
+/// permanently unique. The pid and start timestamp only have to distinguish one
+/// process from the next; the counter keeps two nonces minted inside one clock
+/// tick apart, which the timestamp alone does not guarantee.
+pub fn unique_work_nonce() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    format!(
+        "{}-{nanos}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+}
 
 /// How long a failed enqueue waits before trying again. An append that cannot
 /// land must not drop the event — the whole point of the durable queue — so the
@@ -69,8 +92,11 @@ impl TransferWorkQueue {
     /// a transfer step with no trace — the exact failure the in-memory queue
     /// had. Blocking here instead backpressures the reader, which is the
     /// behaviour the previous event log already chose for durable events.
-    pub async fn enqueue_durable_event(&self, event: &Value) {
-        let Some(work) = durable_event_work(event) else {
+    ///
+    /// `incarnation` identifies the sidecar process the event came from, for
+    /// the one event whose own id restarts with it.
+    pub async fn enqueue_durable_event(&self, event: &Value, incarnation: &str) {
+        let Some(work) = durable_event_work(event, incarnation) else {
             log::warn!("unrecognized durable transfer event: {event}");
             return;
         };
@@ -113,7 +139,11 @@ fn string_field(event: &Value, key: &str) -> Option<String> {
 
 /// Maps a durable sidecar event onto the work it schedules, and onto the id
 /// that makes a redelivery of it a no-op.
-pub fn durable_event_work(event: &Value) -> Option<DurableEventWork> {
+///
+/// Three of the four are keyed on `transfer_id`, which the destination mints
+/// randomly and never reuses, so those ids stay unique for the life of the
+/// database — which is what the primary key needs, since no row is ever pruned.
+pub fn durable_event_work(event: &Value, incarnation: &str) -> Option<DurableEventWork> {
     let event_type = event.get("type").and_then(Value::as_str)?;
     match event_type {
         "incoming_transfer_request" => {
@@ -124,13 +154,17 @@ pub fn durable_event_work(event: &Value) -> Option<DurableEventWork> {
                 transfer_id: Some(transfer_id),
             })
         }
-        // Keyed by the sidecar's own pull request id, which it already reuses
-        // for a repeated pull of the same task from the same peer — so two
-        // deliveries of one request schedule one push.
+        // The pull request id dedupes two deliveries of one request — the
+        // sidecar reuses it for a repeated pull of the same task from the same
+        // peer. It is *not* unique on its own: it counts up from
+        // `AtomicU64::new(1)` per sidecar process, so `pull-<peer>-1` recurs
+        // after every respawn, and without the incarnation the first pull
+        // served after a restart would collide with one from the last process
+        // and be dropped silently.
         "task_pull_requested" => {
             let request_id = string_field(event, "request_id")?;
             Some(DurableEventWork {
-                id: format!("pull:{request_id}"),
+                id: format!("pull:{incarnation}:{request_id}"),
                 kind: KIND_PUSH,
                 transfer_id: None,
             })
@@ -182,7 +216,7 @@ mod tests {
             ),
             (
                 json!({ "type": "task_pull_requested", "request_id": "pull-7" }),
-                "pull:pull-7",
+                "pull:sidecar-a:pull-7",
                 KIND_PUSH,
             ),
             (
@@ -199,12 +233,55 @@ mod tests {
         for (event, expected_id, expected_kind) in cases {
             let event_type = event["type"].as_str().expect("type");
             assert!(is_durable_transfer_event(event_type), "{event_type}");
-            let work = durable_event_work(&event).expect("durable event maps to work");
+            let work = durable_event_work(&event, "sidecar-a").expect("durable event maps to work");
             assert_eq!(work.id, expected_id);
             assert_eq!(work.kind, expected_kind);
         }
         assert!(!is_durable_transfer_event("pairing_started"));
-        assert!(durable_event_work(&json!({ "type": "pairing_started" })).is_none());
+        assert!(durable_event_work(&json!({ "type": "pairing_started" }), "sidecar-a").is_none());
+    }
+
+    /// The sidecar's pull request ids count up from 1 per process, so
+    /// `pull-<peer>-1` recurs after every respawn. `transfer_work.id` is a
+    /// permanent primary key and no row is ever pruned, so without the
+    /// incarnation the first pull served after a restart would collide with one
+    /// from the previous process and be dropped with no trace.
+    #[test]
+    fn a_pull_request_id_reused_by_a_new_sidecar_is_not_mistaken_for_a_redelivery() {
+        let event = json!({ "type": "task_pull_requested", "request_id": "pull-peer-a-1" });
+        let first = durable_event_work(&event, "sidecar-a").expect("first incarnation");
+        let restarted = durable_event_work(&event, "sidecar-b").expect("second incarnation");
+        assert_ne!(first.id, restarted.id);
+
+        // Within one incarnation the id still dedupes, which is what makes two
+        // deliveries of one request schedule one push.
+        let redelivered = durable_event_work(&event, "sidecar-a").expect("redelivery");
+        assert_eq!(first.id, redelivered.id);
+
+        // The other three are keyed on a transfer id the destination mints
+        // randomly and never reuses, so they must NOT be incarnation-scoped: a
+        // commit receipt replayed after a respawn has to collapse onto the work
+        // that already applied it rather than apply twice.
+        for event in [
+            json!({ "type": "outgoing_transfer_committed", "transfer_id": "t-1" }),
+            json!({ "type": "outgoing_transfer_finalization_requested", "transfer_id": "t-1" }),
+            json!({ "type": "incoming_transfer_request", "transfer_id": "t-1" }),
+        ] {
+            assert_eq!(
+                durable_event_work(&event, "sidecar-a").expect("work").id,
+                durable_event_work(&event, "sidecar-b").expect("work").id,
+                "{event}",
+            );
+        }
+    }
+
+    /// Every id this module builds ends up in a permanent primary key, so a
+    /// nonce that repeats would silently drop work forever.
+    #[test]
+    fn a_work_nonce_is_never_reused() {
+        let nonces: std::collections::HashSet<String> =
+            (0..1_000).map(|_| unique_work_nonce()).collect();
+        assert_eq!(nonces.len(), 1_000);
     }
 
     /// An event missing the field its work id is derived from must not be
@@ -212,7 +289,12 @@ mod tests {
     /// dedupe against each other.
     #[test]
     fn a_durable_event_without_its_key_schedules_nothing() {
-        assert!(durable_event_work(&json!({ "type": "incoming_transfer_request" })).is_none());
-        assert!(durable_event_work(&json!({ "type": "task_pull_requested" })).is_none());
+        assert!(
+            durable_event_work(&json!({ "type": "incoming_transfer_request" }), "sidecar-a")
+                .is_none()
+        );
+        assert!(
+            durable_event_work(&json!({ "type": "task_pull_requested" }), "sidecar-a").is_none()
+        );
     }
 }

@@ -68,16 +68,29 @@ impl SourceTask {
     }
 
     /// Locates the session state a transfer of this task would promise.
-    fn plan(&self) -> Result<Option<session::SessionArtifactPlan>, String> {
-        session::plan_session_artifacts(
-            &home_dir()?,
-            self.agent_session_id.as_deref(),
-            self.item.agent_provider.as_deref(),
-            self.item.agent_type.as_deref(),
-            self.worktree_path.as_deref(),
-            &self.item.id,
-        )
-        .map_err(|missing| missing.0)
+    ///
+    /// Walks `~/.codex/sessions` and stats the transcript, so it runs off the
+    /// runtime workers like the rest of the engine's filesystem work.
+    async fn plan(&self) -> Result<Option<session::SessionArtifactPlan>, String> {
+        let (session_id, provider, agent_type, worktree, task_id) = (
+            self.agent_session_id.clone(),
+            self.item.agent_provider.clone(),
+            self.item.agent_type.clone(),
+            self.worktree_path.clone(),
+            self.item.id.clone(),
+        );
+        super::run_blocking("transfer session plan", move || {
+            session::plan_session_artifacts(
+                &home_dir()?,
+                session_id.as_deref(),
+                provider.as_deref(),
+                agent_type.as_deref(),
+                worktree.as_deref(),
+                &task_id,
+            )
+            .map_err(|missing| missing.0)
+        })
+        .await
     }
 }
 
@@ -137,7 +150,7 @@ pub async fn push_task(
 /// so a redelivered push does not pile up rows. The source task is deliberately
 /// left alone: losing the transfer is recoverable, losing the conversation is
 /// not.
-fn report_terminal_push(
+pub(super) fn report_terminal_push(
     state: &Arc<AppState>,
     work: &crate::db::TransferWorkItem,
     request: &Value,
@@ -217,7 +230,10 @@ async fn run_push(state: &Arc<AppState>, work: &Value) -> Result<(), Result<Stri
     // Prove the source can ship the conversation before reserving anything on
     // the peer. A transfer that cannot must fail with the source task still
     // running — and with nothing left on the other machine to release.
-    source.plan().map_err(|reason| Err(TerminalPush(reason)))?;
+    source
+        .plan()
+        .await
+        .map_err(|reason| Err(TerminalPush(reason)))?;
 
     let source_desktop_id = target_desktop_id
         .as_ref()
@@ -241,9 +257,16 @@ async fn run_push(state: &Arc<AppState>, work: &Value) -> Result<(), Result<Stri
 
     // Everything below owns durable sidecar state. A failure past this point
     // releases it rather than leaving a reservation and staged files behind.
+    //
+    // The connection is closed first rather than handed down. Staging bundles a
+    // repository and gzips a session archive, and holding an open SQLite
+    // connection across that is holding it across the slowest thing the engine
+    // does. (A `&Db` could not cross those awaits at all: `rusqlite::Connection`
+    // is `Send` but not `Sync`, so a shared reference to one makes the whole
+    // future non-`Send` and unspawnable.)
+    drop(db);
     let result = stage_and_commit(
         state,
-        &db,
         &preflight,
         &source,
         &repo,
@@ -277,7 +300,6 @@ async fn release_reservation(state: &Arc<AppState>, transfer_id: &str) {
 #[allow(clippy::too_many_arguments)]
 async fn stage_and_commit(
     state: &Arc<AppState>,
-    db: &Db,
     preflight: &control::PreflightResult,
     source: &SourceTask,
     repo: &crate::db::Repo,
@@ -290,18 +312,33 @@ async fn stage_and_commit(
     let remote_url = if preflight.target_has_repo {
         None
     } else {
-        super::git::remote_url(repo_path)
+        let repo_path = repo_path.to_path_buf();
+        super::run_blocking("transfer remote url", move || {
+            Ok(super::git::remote_url(&repo_path))
+        })
+        .await?
     };
 
     let mut bundle = None;
     if !preflight.target_has_repo && remote_url.is_none() {
         let bundle_path = session::bundle_staging_path(&staging_dir(), transfer_id);
-        let ref_name = super::git::create_bundle(
-            repo_path,
-            &bundle_path,
-            source.item.branch.as_deref(),
-            source.item.base_ref.as_deref(),
-        )?;
+        let ref_name = {
+            let (repo_path, bundle_path, branch, base_ref) = (
+                repo_path.to_path_buf(),
+                bundle_path.clone(),
+                source.item.branch.clone(),
+                source.item.base_ref.clone(),
+            );
+            super::run_blocking("transfer bundle create", move || {
+                super::git::create_bundle(
+                    &repo_path,
+                    &bundle_path,
+                    branch.as_deref(),
+                    base_ref.as_deref(),
+                )
+            })
+            .await?
+        };
         let artifact_id = session::artifact_id(transfer_id, "repo-bundle");
         control::stage_artifact(state, transfer_id, &artifact_id, &bundle_path, true).await?;
         bundle = Some(TransferBundlePayload {
@@ -328,6 +365,7 @@ async fn stage_and_commit(
     .await?;
     let encoded = payload::encode_outgoing_transfer_payload(&payload)?;
 
+    let db = state.transfer_work().open_db()?;
     match db.insert_task_transfer(&crate::db::NewTaskTransfer {
         id: transfer_id.to_string(),
         direction: "outgoing".into(),
@@ -363,10 +401,18 @@ async fn stage_session_artifacts(
     source: &SourceTask,
     transfer_id: &str,
 ) -> Result<Vec<payload::TransferArtifactPayload>, String> {
-    let Some(plan) = source.plan()? else {
+    let Some(plan) = source.plan().await? else {
         return Ok(Vec::new());
     };
-    let staged = session::stage_plan(&plan, transfer_id, &staging_dir())?;
+    // `stage_plan` gzips a session directory, which is the other unbounded
+    // blocking step on this path.
+    let staged = {
+        let transfer_id = transfer_id.to_string();
+        super::run_blocking("transfer artifact staging", move || {
+            session::stage_plan(&plan, &transfer_id, &staging_dir())
+        })
+        .await?
+    };
     let mut artifacts = Vec::with_capacity(staged.len());
     for artifact in staged {
         control::stage_artifact(
@@ -561,7 +607,7 @@ async fn run_finalization(
     // the agent: a transfer that cannot ship the conversation must fail with
     // the source task still alive and running, not after it has been shut down.
     let planned_identity = source.plan_identity();
-    source.plan()?;
+    source.plan().await?;
 
     let mut finalized_cleanly = source.item.agent_type.as_deref() != Some("pty");
     let mut degraded_reason = None;
@@ -598,14 +644,19 @@ async fn run_finalization(
     // session identity moved under us while the agent was shutting down.
     let refreshed = SourceTask::load(&db, &local_task_id)?.unwrap_or(source);
     if refreshed.plan_identity() != planned_identity {
-        refreshed.plan()?;
+        refreshed.plan().await?;
     }
 
     let artifacts = stage_session_artifacts(state, &refreshed, transfer_id).await?;
     let remote_url = if existing.repo.mode == RepoAcquisitionMode::ReuseLocal {
         None
     } else {
-        super::git::remote_url(Path::new(&repo.path)).or(existing.repo.remote_url.clone())
+        let repo_path = std::path::PathBuf::from(&repo.path);
+        super::run_blocking("transfer remote url", move || {
+            Ok(super::git::remote_url(&repo_path))
+        })
+        .await?
+        .or(existing.repo.remote_url.clone())
     };
     let finalization = match degraded_reason {
         Some(reason) => TransferFinalizationState::degraded(reason),
@@ -758,6 +809,13 @@ pub async fn outgoing_committed(
 
     // Closing is single-flight for this work item: a retry after a partial
     // failure must not run a second close over a task that is already gone.
+    //
+    // A close that *failed* gives the claim back. `close_task_in_process`
+    // answers 500 when the daemon is not connectable and 409 while the task has
+    // open subtasks, and keeping the claim through either would make the retry
+    // skip the close and go on to mark the transfer completed — the task would
+    // stay open on the source forever, which is the state this whole
+    // acknowledgment exists to end.
     if db
         .claim_transfer_work_phase(&work.id, "source-task-close")
         .map_err(|error| format!("db error: {error}"))?
@@ -770,6 +828,10 @@ pub async fn outgoing_committed(
                 .map_err(|error| format!("db error: {error}"))?
                 .is_some_and(|item| item.closed_at.is_some());
             if !already_closed {
+                db.release_transfer_work_phase(&work.id, "source-task-close")
+                    .map_err(|release| {
+                        format!("db error releasing the source-task-close claim: {release}")
+                    })?;
                 return Err(format!(
                     "failed to close source task for outgoing transfer {transfer_id}: {status} {message}"
                 ));

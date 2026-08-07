@@ -102,19 +102,9 @@ impl Default for TransferEventLog {
 
 /// Only has to distinguish one server process's log from the next one's, so
 /// the pid plus a start timestamp is enough — this is not a secret and is
-/// never used for authorization. The counter keeps two logs constructed inside
-/// one clock tick distinct, which the timestamp alone does not guarantee.
+/// never used for authorization.
 fn new_transfer_event_stream_id() -> String {
-    static NEXT_STREAM: AtomicU64 = AtomicU64::new(1);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    format!(
-        "{}-{nanos}-{}",
-        std::process::id(),
-        NEXT_STREAM.fetch_add(1, Ordering::Relaxed)
-    )
+    crate::transfer_engine::queue::unique_work_nonce()
 }
 
 pub struct TransferEventBatch {
@@ -373,12 +363,17 @@ impl TransferSidecarClient {
             .ok_or_else(|| "transfer sidecar stdout unavailable".to_string())?;
         let pending: PendingRequests = Arc::new(StdMutex::new(HashMap::new()));
         let dead = Arc::new(AtomicBool::new(false));
+        // Identifies this sidecar process. The pull request ids it mints count
+        // up from 1 and restart with it, so the work queue needs something that
+        // does not, or the first pull after a respawn collides with one from
+        // the previous process and is dropped.
         spawn_reader(
             stdout,
             Arc::clone(&pending),
             Arc::clone(&dead),
             events,
             work,
+            crate::transfer_engine::queue::unique_work_nonce(),
         );
 
         Ok(Self {
@@ -497,6 +492,7 @@ fn spawn_reader(
     dead: Arc<AtomicBool>,
     events: Arc<TransferEventLog>,
     work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
+    incarnation: String,
 ) {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
@@ -541,7 +537,7 @@ fn spawn_reader(
 
             if let Some(event_type) = transfer_event_type(&value) {
                 if crate::transfer_engine::queue::is_durable_transfer_event(event_type) {
-                    work.enqueue_durable_event(&value).await;
+                    work.enqueue_durable_event(&value, &incarnation).await;
                 } else {
                     events.append(value);
                 }

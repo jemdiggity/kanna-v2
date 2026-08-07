@@ -91,9 +91,17 @@ pub(super) struct TransferResponse {
 #[serde(rename_all = "camelCase")]
 pub(super) struct PushTaskRequest {
     peer_id: String,
-    /// Distinguishes a deliberate re-push from a retried request. Two pushes
-    /// with the same key are one intent; the engine's own eligibility read is
-    /// what stops two *different* intents racing into one transfer.
+    /// Opt-in idempotency key, for a client that retries this request and does
+    /// not want the retry to become a second push.
+    ///
+    /// Absent — which is every production caller — each request is its own
+    /// intent. It has to be: `transfer_work.id` is a permanent primary key and
+    /// no row is ever pruned, so keying on anything that repeats (the peer id,
+    /// say) would make every push of a task to that peer after the first return
+    /// `scheduled: false` and enqueue nothing, forever. Pushing the same task to
+    /// the same machine again — after a failure the operator fixed, or simply
+    /// later — is ordinary, and the engine's own eligibility read is what stops
+    /// two live intents racing into one transfer.
     #[serde(default)]
     intent_key: Option<String>,
     #[serde(default)]
@@ -133,7 +141,8 @@ pub(super) async fn push_task_to_peer(
         .as_deref()
         .map(str::trim)
         .filter(|key| !key.is_empty())
-        .unwrap_or(payload.peer_id.as_str());
+        .map(str::to_string)
+        .unwrap_or_else(crate::transfer_engine::queue::unique_work_nonce);
     let scheduled = state
         .transfer_work()
         .enqueue(

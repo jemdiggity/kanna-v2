@@ -1,11 +1,39 @@
-# LAN task sync and Pair Machine real-E2Es — failing, cause not established
+# Transfer E2E suites after the orchestration move
 
 Date: 2026-08-07
 Scope: observed while landing T6 of the task-transfer repair plan (transfer
 orchestration moves into `kanna-server`).
 Related: [2026-08-06-task-transfer-rearchitecture-plan.md](2026-08-06-task-transfer-rearchitecture-plan.md)
 
-## What fails
+## Suites this change removed or rewrote
+
+The window-election machinery T6 deletes had E2E coverage of its own, and the
+suites that drove it through renderer seams could not survive it:
+
+- `apps/desktop/tests/e2e/mock/transfer-lifecycle-consumer.test.ts` — **deleted**.
+  It exercised `claim_transfer_event_consumer`, the delivery lease, ack/nack,
+  lease renewal and phase claims. Every one of those Tauri commands is gone, and
+  there is nothing to rewrite it into: the point of the change is that no window
+  is elected. `pnpm --dir apps/desktop test:e2e` enumerates all of `mock/`, so
+  leaving it would have failed the default suite deterministically.
+- `apps/desktop/tests/e2e/real/cloud-task-transfer.test.ts` — **rewritten in
+  part**. Its LAN-to-cloud fallback test asserted two `prepare_outgoing_transfer`
+  renderer invokes; preflight is the engine's now, so it asserts the outcome the
+  fallback exists for (one durable transfer, completed) and leaves *which*
+  failures are eligible for a fallback to `transfer_engine::control`'s own test.
+  Two tests were removed with their fault seams — an interrupted destination
+  acknowledgment, and the source staying open through a failed destination
+  import — because both injected faults by replacing
+  `store.approveIncomingTransfer` or failing the
+  `acknowledge_incoming_transfer_commit` invoke in the destination *renderer*.
+  Those properties are still covered: the acknowledgment is single-flight per
+  work item and a failed one releases its claim so the retry re-attempts
+  (`a_released_phase_is_reclaimable_by_the_retry`), and the source staying open
+  through a failed destination import is asserted end to end against a real seam
+  — a repository the destination cannot acquire — in
+  `local-transfer-source-handoff-failure.test.ts`.
+
+## Suites that fail for reasons this change does not explain
 
 Two real-E2E suites fail on this machine, reproducibly (three consecutive runs,
 each from a fresh instance restart):
@@ -61,3 +89,6 @@ conversation continuity across a machine transfer, a pull that completes with
 **no renderer participating on the source**, a `kanna-server` restart mid-transfer
 in each direction, repo acquisition in all three modes, a refused transfer that
 stays visible, and a destination import failure that leaves the source open.
+
+`cloud-task-transfer.test.ts` needs cloud credentials and does not run on this
+machine, so its rewrite is compile- and parse-checked but not executed here.

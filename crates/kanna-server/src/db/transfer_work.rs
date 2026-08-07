@@ -163,6 +163,12 @@ impl Db {
     /// a restart that resumes it. Returns `true` for the claimer and `false`
     /// for everyone after — the durable form of the sidecar's in-memory
     /// `claimed_phases`.
+    ///
+    /// The claim is taken *before* the effect, so a crash between the two
+    /// leaves it held and the resumed item skips the effect. That is the
+    /// at-most-once guarantee this exists for. A caller whose effect *failed*
+    /// must release it with [`Self::release_transfer_work_phase`], or the retry
+    /// will skip a step that never happened.
     pub fn claim_transfer_work_phase(
         &self,
         work_id: &str,
@@ -174,6 +180,24 @@ impl Db {
             (work_id, phase),
         )?;
         Ok(inserted == 1)
+    }
+
+    /// Gives a claim back after the effect it guarded failed.
+    ///
+    /// Without this, a transient failure — a daemon that was not connectable,
+    /// a peer that did not answer — is indistinguishable from a completed step
+    /// on the retry: the claim returns `false`, the effect is skipped, and the
+    /// work item goes on to report success for something it never did.
+    pub fn release_transfer_work_phase(
+        &self,
+        work_id: &str,
+        phase: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "DELETE FROM transfer_work_phase WHERE work_id = ? AND phase = ?",
+            (work_id, phase),
+        )?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -290,6 +314,49 @@ mod tests {
         assert!(db
             .claim_transfer_work_phase("finalize:t-2", "pty-finalization-signal")
             .expect("other work"));
+    }
+
+    /// A claim taken for an effect that then failed has to come back, or the
+    /// retry skips a step that never happened and the work item goes on to
+    /// report success for it.
+    #[test]
+    fn a_released_phase_is_reclaimable_by_the_retry() {
+        let db = open("transfer-work-phase-release");
+        db.enqueue_transfer_work("import:t-1", "import", Some("t-1"), "{}")
+            .expect("enqueue");
+
+        assert!(db
+            .claim_transfer_work_phase("import:t-1", "acknowledge-import")
+            .expect("first claim"));
+        // The effect failed, so the attempt is given back.
+        db.release_transfer_work_phase("import:t-1", "acknowledge-import")
+            .expect("release");
+        assert!(
+            db.claim_transfer_work_phase("import:t-1", "acknowledge-import")
+                .expect("retry claim"),
+            "the retry could not re-attempt an effect that never happened",
+        );
+
+        // Once it succeeds and the claim is kept, it stays taken.
+        assert!(!db
+            .claim_transfer_work_phase("import:t-1", "acknowledge-import")
+            .expect("third claim"));
+
+        // Releasing a phase that was never claimed is not an error — a caller
+        // unwinding a failure should not have to know which claims it holds.
+        db.release_transfer_work_phase("import:t-1", "never-claimed")
+            .expect("release unclaimed");
+        db.release_transfer_work_phase("import:unknown", "acknowledge-import")
+            .expect("release for unknown work");
+        // And releasing one phase leaves the others alone.
+        assert!(db
+            .claim_transfer_work_phase("import:t-1", "other-phase")
+            .expect("other phase"));
+        db.release_transfer_work_phase("import:t-1", "other-phase")
+            .expect("release other");
+        assert!(!db
+            .claim_transfer_work_phase("import:t-1", "acknowledge-import")
+            .expect("unrelated release must not free this one"));
     }
 
     /// Retries are bounded. A transfer that can make no further progress has to

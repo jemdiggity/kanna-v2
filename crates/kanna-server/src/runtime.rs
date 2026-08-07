@@ -159,7 +159,15 @@ pub(crate) async fn run_server_services(
         maintain_protected_input_generations(config.clone(), protected_input_pid);
     // The transfer engine is a peer of the LAN API, not a child of it: a
     // transfer must keep making progress whether or not anything is connected.
-    let transfer_engine = crate::transfer_engine::run(Arc::clone(&http_state));
+    //
+    // Its own task, not a `select!` branch beside the listener and the relay. A
+    // transfer acquires repositories, and even with every git and tar call on
+    // the blocking pool the engine holds `.await`s across whole clones; sharing
+    // a task with `http_api::serve` and `run_relay_loop` would mean a slow
+    // acquisition stops accepting LAN connections and stops answering relay
+    // pings — and `RELAY_PONG_TIMEOUT` is 75s, so a long enough clone would tear
+    // the relay down and take mobile offline.
+    tokio::spawn(crate::transfer_engine::run(Arc::clone(&http_state)));
     if config.relay_url.trim().is_empty() {
         tokio::select! {
             result = http_api::serve(Arc::clone(&http_state)) => match result {
@@ -168,7 +176,6 @@ pub(crate) async fn run_server_services(
             },
             _ = run_human_control_service(http_state) => {},
             _ = protected_input_maintenance => {},
-            _ = transfer_engine => {},
         }
         return;
     }
@@ -185,7 +192,6 @@ pub(crate) async fn run_server_services(
         },
         _ = run_human_control_service(human_control_state) => {},
         _ = protected_input_maintenance => {},
-        _ = transfer_engine => {},
     }
 }
 

@@ -33,6 +33,26 @@ use std::time::Duration;
 /// work arrives in the meantime.
 const IDLE_POLL: Duration = Duration::from_secs(30);
 
+/// Runs synchronous git, archive and filesystem work off the runtime workers.
+///
+/// The engine's slowest steps are `git clone`, `git bundle` and gzipping a
+/// session archive, and every one of them is a fully blocking call that can run
+/// for minutes on a large repository. The same Tokio runtime carries every KSP
+/// terminal stream, the LAN listener and the relay socket; occupying a worker
+/// with a clone freezes all of them. This is the engine's form of the
+/// `run_handler_blocking` boundary the HTTP handlers use, for the same reason.
+pub(crate) async fn run_blocking<T>(
+    label: &'static str,
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("{label} worker failed: {error}"))?
+}
+
 /// Runs the engine for the life of the server.
 ///
 /// Startup does the recovery the in-memory queue could never do: work whose
@@ -131,6 +151,24 @@ fn recover_interrupted_work(queue: &Arc<TransferWorkQueue>) -> Result<(), String
             &serde_json::json!({ "transferId": transfer.id }),
         )?;
     }
+    // The renderer swept these at every window mount too, and that sweep is the
+    // only thing that ever released a *settled* transfer's sidecar reservation:
+    // a committed one is exempt from TTL pruning, so each leftover permanently
+    // consumes one of the destination's bounded reservation slots. The backlog
+    // an upgrade inherits is swept the same way, because the query asks for
+    // every terminal row whose cleanup never completed rather than only this
+    // run's.
+    for transfer_id in db
+        .list_terminal_incoming_transfer_ids()
+        .map_err(|error| format!("db error: {error}"))?
+    {
+        queue.enqueue(
+            &format!("cleanup:{transfer_id}"),
+            queue::KIND_SIDECAR_CLEANUP,
+            Some(&transfer_id),
+            &serde_json::json!({ "transferId": transfer_id }),
+        )?;
+    }
     Ok(())
 }
 
@@ -141,6 +179,7 @@ async fn execute(state: &Arc<AppState>, item: &crate::db::TransferWorkItem) -> R
         queue::KIND_INCOMING_REQUEST => import::record_incoming(state, &payload).await,
         queue::KIND_IMPORT => import::import_transfer(state, item, &payload).await,
         queue::KIND_REJECT => import::reject_transfer(state, &payload).await,
+        queue::KIND_SIDECAR_CLEANUP => import::release_settled_reservation(state, &payload).await,
         queue::KIND_PUSH => push::push_task(state, item, &payload).await,
         queue::KIND_FINALIZE => push::finalize(state, item, &payload).await,
         queue::KIND_OUTGOING_COMMITTED => push::outgoing_committed(state, item, &payload).await,
@@ -159,13 +198,28 @@ async fn report_exhausted_work(
     item: &crate::db::TransferWorkItem,
     reason: &str,
 ) {
+    let reason = format!("transfer work {} gave up: {reason}", item.kind);
     let Some(transfer_id) = item.transfer_id.as_deref() else {
+        // A push gives up before anything reserved a transfer id — the whole
+        // point of running the eligibility read and the artifact plan first —
+        // so there is no row to fail and nothing would reach the operator. Give
+        // it the same `failed` row a refused push gets, or an exhausted push is
+        // invisible on both machines.
+        if item.kind == queue::KIND_PUSH {
+            if let Ok(request) = serde_json::from_str::<serde_json::Value>(&item.payload_json) {
+                if let Err(error) = push::report_terminal_push(state, item, &request, &reason) {
+                    log::error!(
+                        "failed to record an exhausted push for {}: {error}",
+                        item.id
+                    );
+                }
+            }
+        }
         return;
     };
     let Ok(db) = state.transfer_work().open_db() else {
         return;
     };
-    let reason = format!("transfer work {} gave up: {reason}", item.kind);
     let transfer = db.get_task_transfer(transfer_id).ok().flatten();
     let failed = match transfer
         .as_ref()

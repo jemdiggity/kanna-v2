@@ -97,6 +97,22 @@ pub async fn reject_transfer(state: &Arc<AppState>, work: &Value) -> Result<(), 
     release_incoming_reservation(state, &transfer_id).await
 }
 
+/// Releases the sidecar state a transfer that settled earlier still owns.
+///
+/// Queued by the engine's startup sweep for every terminal incoming row whose
+/// cleanup never completed. The renderer used to do this at window mount, and
+/// it is the only thing that frees a *committed* reservation: those are exempt
+/// from TTL pruning, so each one left behind permanently consumes one of the
+/// destination's bounded reservation slots.
+pub async fn release_settled_reservation(
+    state: &Arc<AppState>,
+    work: &Value,
+) -> Result<(), String> {
+    let transfer_id = string_field(work, "transferId")
+        .ok_or_else(|| "sidecar cleanup work is missing a transfer id".to_string())?;
+    release_incoming_reservation(state, &transfer_id).await
+}
+
 /// Releases the sidecar state a settled incoming transfer still owns.
 async fn release_incoming_reservation(
     state: &Arc<AppState>,
@@ -292,17 +308,29 @@ async fn run_import(
 
     // Acknowledging is what closes the source task, so it happens at most once
     // for this work item even across a restart that resumes it.
+    //
+    // A *failed* acknowledgment gives the claim back. Keeping it would make the
+    // retry skip the ack and fall straight through to marking this transfer
+    // completed — the destination would report success while the source was
+    // never told, leaving its task open and the same task live on two machines.
     if db
         .claim_transfer_work_phase(&work.id, "acknowledge-import")
         .map_err(|error| format!("db error: {error}"))?
     {
-        control::acknowledge_import_committed(
+        if let Err(error) = control::acknowledge_import_committed(
             state,
             transfer_id,
             &payload.task.source_task_id,
             &local_task_id,
         )
-        .await?;
+        .await
+        {
+            db.release_transfer_work_phase(&work.id, "acknowledge-import")
+                .map_err(|release| {
+                    format!("db error releasing the acknowledge-import claim: {release}")
+                })?;
+            return Err(error.into());
+        }
     }
     if !db
         .mark_task_transfer_completed(transfer_id, &local_task_id, Some(ENGINE_CLAIM_TOKEN))
@@ -342,7 +370,6 @@ async fn acquire_repo(
     transfer_id: &str,
     payload: &OutgoingTransferPayload,
 ) -> Result<(String, PathBuf), ImportFailure> {
-    let db = state.transfer_work().open_db()?;
     let repo_name = payload.repo.name.clone().unwrap_or_else(|| "repo".into());
     let default_branch = payload
         .repo
@@ -350,8 +377,23 @@ async fn acquire_repo(
         .clone()
         .unwrap_or_else(|| "main".into());
 
-    if let Some(existing) = find_matching_repo(&db, payload)? {
-        return Ok((existing.0, PathBuf::from(existing.1)));
+    // Runs `git remote get-url` once per registered repo, so it is blocking
+    // work proportional to how many repos this machine has.
+    let matched = {
+        let queue = state.transfer_work();
+        let remote_url = payload.repo.remote_url.clone();
+        let payload_path = payload.repo.path.clone();
+        super::run_blocking("transfer repo match", move || {
+            find_matching_repo(
+                &queue.open_db()?,
+                remote_url.as_deref(),
+                payload_path.as_deref(),
+            )
+        })
+        .await?
+    };
+    if let Some((repo_id, repo_path)) = matched {
+        return Ok((repo_id, PathBuf::from(repo_path)));
     }
 
     let repo_path = match payload.repo.mode {
@@ -376,9 +418,13 @@ async fn acquire_repo(
                 .clone()
                 .ok_or_else(|| "incoming transfer payload is missing a remote URL".to_string())
                 .map_err(ImportFailure::Terminal)?;
-            let repo_path = super::git::allocate_repo_path(&repos_home()?, &repo_name)?;
-            super::git::clone_remote(&remote_url, &repo_path)?;
-            repo_path
+            let repo_name = repo_name.clone();
+            super::run_blocking("transfer repo clone", move || {
+                let repo_path = super::git::allocate_repo_path(&repos_home()?, &repo_name)?;
+                super::git::clone_remote(&remote_url, &repo_path)?;
+                Ok(repo_path)
+            })
+            .await?
         }
         RepoAcquisitionMode::BundleRepo => {
             let bundle = payload
@@ -388,18 +434,35 @@ async fn acquire_repo(
                 .ok_or_else(|| "incoming transfer payload is missing bundle metadata".to_string())
                 .map_err(ImportFailure::Terminal)?;
             let fetched = control::fetch_artifact(state, transfer_id, &bundle.artifact_id).await?;
-            let repo_path = super::git::allocate_repo_path(&repos_home()?, &repo_name)?;
             let checkout_ref = bundle
                 .ref_name
                 .clone()
                 .or_else(|| payload.task.branch.clone())
                 .or_else(|| payload.task.base_ref.clone());
-            super::git::init_from_bundle(&repo_path, &fetched, checkout_ref.as_deref())?;
-            repo_path
+            let repo_name = repo_name.clone();
+            super::run_blocking("transfer repo restore", move || {
+                let repo_path = super::git::allocate_repo_path(&repos_home()?, &repo_name)?;
+                super::git::init_from_bundle(&repo_path, &fetched, checkout_ref.as_deref())?;
+                Ok(repo_path)
+            })
+            .await?
         }
     };
 
-    let repo_id = register_repo(state, &repo_path, &repo_name, &default_branch)?;
+    // `add_repo` canonicalizes the path and reads the repo's default branch
+    // with git before it writes the row.
+    let repo_id = {
+        let (state, path, name, branch) = (
+            Arc::clone(state),
+            repo_path.clone(),
+            repo_name.clone(),
+            default_branch.clone(),
+        );
+        super::run_blocking("transfer repo register", move || {
+            register_repo(&state, &path, &name, &branch)
+        })
+        .await?
+    };
     Ok((repo_id, repo_path))
 }
 
@@ -408,14 +471,10 @@ async fn acquire_repo(
 /// check the repo out to the same place.
 fn find_matching_repo(
     db: &crate::db::Db,
-    payload: &OutgoingTransferPayload,
+    remote_url: Option<&str>,
+    payload_path: Option<&str>,
 ) -> Result<Option<(String, String)>, String> {
-    let normalized_remote = payload
-        .repo
-        .remote_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|url| !url.is_empty());
+    let normalized_remote = remote_url.map(str::trim).filter(|url| !url.is_empty());
     let repos = db
         .list_repos_for_maintenance()
         .map_err(|error| format!("db error: {error}"))?;
@@ -426,7 +485,7 @@ fn find_matching_repo(
             }
         }
     }
-    if let Some(path) = payload.repo.path.as_deref() {
+    if let Some(path) = payload_path {
         if let Some(repo) = repos.iter().find(|repo| repo.path == path) {
             return Ok(Some((repo.id.clone(), repo.path.clone())));
         }
@@ -495,23 +554,43 @@ async fn materialize_resume_state(
     for artifact in &artifacts {
         let source_path =
             control::fetch_artifact(state, transfer_id, &artifact.artifact_id).await?;
-        let wrote = crate::transfer_artifact::materialize_transfer_artifact_at_home(
-            &home,
-            &source_path,
-            crate::transfer_artifact::TransferArtifactContract {
-                provider,
-                resume_session_id: &resume_session_id,
-                filename: &artifact.filename,
-                kind: artifact.kind.as_str(),
-                materialization: artifact.materialization.as_str(),
-                // A Claude transcript is cwd-keyed, so only the receiver can
-                // name where it lands. The sender never supplies a destination.
-                destination_worktree_path: (artifact.kind
-                    == payload::TransferArtifactKind::SessionTranscript)
-                    .then_some(destination_worktree),
-            },
-        )
-        .map_err(ImportFailure::Terminal)?;
+        // Extracting a gzipped session archive is unbounded blocking work, and
+        // it runs against the operator's home directory — the one place the
+        // engine must never stall the runtime that is also serving terminals.
+        let wrote = {
+            let (home, provider, resume_session_id, filename, kind, materialization, worktree) = (
+                home.clone(),
+                provider.to_string(),
+                resume_session_id.clone(),
+                artifact.filename.clone(),
+                artifact.kind.as_str().to_string(),
+                artifact.materialization.as_str().to_string(),
+                (artifact.kind == payload::TransferArtifactKind::SessionTranscript)
+                    .then(|| destination_worktree.to_path_buf()),
+            );
+            super::run_blocking("transfer artifact materialization", move || {
+                crate::transfer_artifact::materialize_transfer_artifact_at_home(
+                    &home,
+                    &source_path,
+                    crate::transfer_artifact::TransferArtifactContract {
+                        provider: &provider,
+                        resume_session_id: &resume_session_id,
+                        filename: &filename,
+                        kind: &kind,
+                        materialization: &materialization,
+                        // A Claude transcript is cwd-keyed, so only the receiver
+                        // can name where it lands. The sender never supplies a
+                        // destination.
+                        destination_worktree_path: worktree.as_deref(),
+                    },
+                )
+            })
+            .await
+            // A contract violation, or a worker that panicked doing this — a
+            // payload this machine cannot safely materialize is not something a
+            // retry fixes.
+            .map_err(ImportFailure::Terminal)?
+        };
         materialized.push((artifact.artifact_id.clone(), wrote));
     }
 
