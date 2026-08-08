@@ -187,6 +187,10 @@ describe("CreateTaskComposer", () => {
     expect(findNodeByText(tree, "Repo One")).not.toBeNull();
     expect(findNodeByText(tree, "Studio Mac (online) · Claude")).not.toBeNull();
     expect(findNodeByText(tree, "Copilot")).toBeNull();
+    expect(optionsToggle?.props).toMatchObject({
+      accessibilityRole: "button",
+      accessibilityState: { expanded: false }
+    });
 
     (optionsToggle?.props?.onPress as (() => void) | undefined)?.();
 
@@ -213,6 +217,14 @@ describe("CreateTaskComposer", () => {
     expect(findNodeByText(tree, "Laptop")).not.toBeNull();
     expect(findNodeByText(tree, "Offline")).not.toBeNull();
     expect(copilotOption).not.toBeNull();
+    expect(laptopOption?.props).toMatchObject({
+      accessibilityRole: "button",
+      accessibilityState: { selected: false }
+    });
+    expect(copilotOption?.props).toMatchObject({
+      accessibilityRole: "button",
+      accessibilityState: { selected: false }
+    });
 
     (laptopOption?.props?.onPress as (() => void) | undefined)?.();
     (copilotOption?.props?.onPress as (() => void) | undefined)?.();
@@ -231,6 +243,10 @@ describe("CreateTaskComposer", () => {
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
     expect(createButton?.props?.disabled).toBe(false);
+    expect(createButton?.props).toMatchObject({
+      accessibilityRole: "button",
+      accessibilityState: { disabled: false }
+    });
   });
 
   it("restores a failed valid submission so it can be retried", () => {
@@ -287,6 +303,7 @@ describe("CreateTaskComposer", () => {
 
     expect(findNodeByText(tree, "Choose a repo and enter a task prompt first.")).not.toBeNull();
     expect(createButton?.props?.disabled).toBe(true);
+    expect(createButton?.props?.accessibilityState).toEqual({ disabled: true });
   });
 
   it("disables create until a machine is selected", () => {

@@ -24,8 +24,9 @@ export function FloatingToolbar({
     <View style={styles.wrap}>
       {searchAction ? (
         <Pressable
-          style={styles.utilityButton}
           accessibilityLabel={searchAction.label}
+          accessibilityRole="button"
+          style={styles.utilityButton}
           testID={MOBILE_E2E_IDS.toolbarSearch}
           onPress={() => onSelectUtilityAction(searchAction.name)}
         >
@@ -46,6 +47,8 @@ export function FloatingToolbar({
           const active = state.index === index;
           return (
             <Pressable
+              accessibilityRole="tab"
+              accessibilityState={{ selected: active }}
               key={tab.name}
               style={[styles.item, active ? styles.itemActive : null]}
               testID={MOBILE_E2E_IDS.toolbarTab(tab.name)}
@@ -75,11 +78,12 @@ export function FloatingToolbar({
 
       {createAction ? (
         <Pressable
+          accessibilityLabel={createAction.label}
+          accessibilityRole="button"
           style={({ pressed }) => [
             styles.utilityButtonPrimary,
             pressed ? styles.utilityButtonPrimaryPressed : null
           ]}
-          accessibilityLabel={createAction.label}
           testID={MOBILE_E2E_IDS.toolbarUtilityAction(createAction.name)}
           onPress={() => onSelectUtilityAction(createAction.name)}
         >

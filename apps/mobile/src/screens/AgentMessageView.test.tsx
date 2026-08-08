@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { FrameAgentEvent } from "@kanna/agent-protocol";
+import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { TaskTerminalStatus } from "../state/sessionStore";
 
 vi.mock("react-native", () => ({
@@ -101,6 +102,34 @@ function findByType(node: ElementNode, type: unknown): ElementNode | null {
   return null;
 }
 
+function findByAccessibilityLabel(
+  node: ElementNode | ElementNode[],
+  accessibilityLabel: string
+): ElementNode | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const match = findByAccessibilityLabel(child, accessibilityLabel);
+      if (match) return match;
+    }
+    return null;
+  }
+  if (node.props?.accessibilityLabel === accessibilityLabel) return node;
+
+  const children = node.props?.children;
+  const childList = Array.isArray(children) ? children : [children];
+  for (const child of childList) {
+    if (child && typeof child === "object") {
+      const match = findByAccessibilityLabel(
+        child as ElementNode | ElementNode[],
+        accessibilityLabel
+      );
+      if (match) return match;
+    }
+  }
+
+  return null;
+}
+
 describe("AgentMessageView", () => {
   it("renders neutral agent events as native chat, tools, permissions, stats, and debug", () => {
     const tree = renderAgentView([
@@ -125,6 +154,18 @@ describe("AgentMessageView", () => {
     expect(text).toContain("1 turns");
     expect(text).toContain("Debug");
     expect(text).toContain("debug stderr");
+    expect(findByAccessibilityLabel(tree, "Allow Edit once")?.props).toMatchObject({
+      accessibilityRole: "button"
+    });
+    expect(
+      findByAccessibilityLabel(tree, "Allow Edit for this session")?.props
+    ).toMatchObject({ accessibilityRole: "button" });
+    expect(findByAccessibilityLabel(tree, "Deny Edit")?.props).toMatchObject({
+      accessibilityRole: "button"
+    });
+    expect(findByTestId(tree, MOBILE_E2E_IDS.taskStopButton)?.props).toMatchObject({
+      accessibilityRole: "button"
+    });
   });
 
   it.each(["live", "idle"] as const)(

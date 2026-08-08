@@ -102,6 +102,8 @@ export function CreateTaskComposer({
             </Text>
 
             <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ expanded: isOptionsExpanded }}
               style={styles.optionsSummary}
               testID={MOBILE_E2E_IDS.createTaskOptionsToggle}
               onPress={onToggleOptions}
@@ -127,6 +129,7 @@ export function CreateTaskComposer({
                       return (
                         <Pressable
                           key={desktop.id}
+                          accessibilityRole="button"
                           accessibilityState={{ selected }}
                           style={[
                             styles.choiceOption,
@@ -166,6 +169,7 @@ export function CreateTaskComposer({
                       return (
                         <Pressable
                           key={option.provider}
+                          accessibilityRole="button"
                           accessibilityState={{ selected }}
                           style={[
                             styles.choiceOption,
@@ -212,6 +216,7 @@ export function CreateTaskComposer({
 
             <View style={styles.actions}>
               <Pressable
+                accessibilityRole="button"
                 style={styles.secondaryButton}
                 testID={MOBILE_E2E_IDS.createTaskCancelButton}
                 onPress={onClose}
@@ -219,6 +224,8 @@ export function CreateTaskComposer({
                 <Text style={styles.secondaryLabel}>Cancel</Text>
               </Pressable>
               <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ disabled: !canSubmit }}
                 disabled={!canSubmit}
                 style={[styles.primaryButton, !canSubmit ? styles.primaryButtonDisabled : null]}
                 testID={MOBILE_E2E_IDS.createTaskSubmitButton}

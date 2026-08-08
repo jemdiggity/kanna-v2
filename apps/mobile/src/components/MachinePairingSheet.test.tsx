@@ -163,9 +163,23 @@ describe("MachinePairingSheet", () => {
     expect(findByTestId(tree, "mobile.machine-pairing.code")?.props?.value).toBe("");
     expect(findByType(tree, "CameraView")).not.toBeNull();
     expect(findByType(tree, "ActivityIndicator")).toBeNull();
+    expect(findByType(tree, "KeyboardAvoidingView")?.props?.children?.[0]?.props).toMatchObject({
+      accessibilityElementsHidden: true,
+      accessible: false,
+      importantForAccessibility: "no-hide-descendants"
+    });
     expect(findPressableByText(tree, "Scan QR")?.props).toMatchObject({
+      accessibilityRole: "tab",
       accessibilityState: { selected: true },
       testID: "mobile.machine-pairing.mode.scan"
+    });
+    expect(findByTestId(tree, "mobile.machine-pairing.code")?.props).toMatchObject({
+      accessibilityLabel: "Pairing code"
+    });
+    expect(findByTestId(tree, "mobile.machine-pairing.submit")?.props).toMatchObject({
+      accessibilityLabel: "Add machine",
+      accessibilityRole: "button",
+      accessibilityState: { busy: false, disabled: true }
     });
     expect(findByTestId(tree, "mobile.machine-pairing.submit")?.props?.disabled).toBe(true);
     expect(findByTestId(tree, "mobile.machine-pairing.error")).toBeNull();
