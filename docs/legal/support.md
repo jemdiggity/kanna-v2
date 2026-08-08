@@ -17,21 +17,19 @@ Source: [desktop Mobile Access panel](https://github.com/tampopogk/kanna/blob/ma
 
 Cloud access lets a signed-in Kanna Mobile app reach an authenticated desktop when the phone is away from the Mac's local network. It uses a Kanna account and Kanna's Firebase and relay services. There is no cloud purchase or account-creation flow in the current mobile app.
 
-To request a Kanna account or cloud access, contact [BUSINESS DECISION: insert the monitored cloud-access email address or request-form URL, plus any information the requester should provide].
+To request a Kanna account or cloud access, email **support@tampopomyoko.com** with the subject "Cloud access". Tell us the email address you want the account created for and roughly what you plan to use Kanna for. Cloud access is granted manually, so please allow some time for a reply.
 
 Source: [mobile environment configuration](https://github.com/tampopogk/kanna/blob/main/apps/mobile/src/mobileEnvironments.json), [Firebase authentication](https://github.com/tampopogk/kanna/blob/main/apps/mobile/src/lib/firebase/sdk.ts), and [current App Store review audit](https://github.com/tampopogk/kanna/blob/main/docs/mobile-app-store-review-audit.md).
 
 ## Get help
 
-For pairing, sign-in, connectivity, notification, or task-control help, contact [BUSINESS DECISION: insert the monitored support email address or support-form URL]. Include the Kanna Mobile version, iOS version, Mac model and macOS version, and a short description of what happened. Do not send passwords, Firebase tokens, pairing secrets, source code, terminal output, or repository credentials unless support explicitly provides an approved secure method.
-
-[BUSINESS DECISION: insert supported languages, support hours, and expected response time, or remove this placeholder if none will be promised.]
+For pairing, sign-in, connectivity, notification, or task-control help, email **support@tampopomyoko.com**. Include the Kanna Mobile version, iOS version, Mac model and macOS version, and a short description of what happened. Do not send passwords, Firebase tokens, pairing secrets, source code, terminal output, or repository credentials unless support explicitly provides an approved secure method.
 
 ## Account and data deletion
 
-Kanna Mobile does not currently include an in-app account-deletion workflow. To request deletion of your Kanna account or Kanna-hosted data, contact [BUSINESS DECISION: insert the monitored privacy email address or deletion-request form URL]. Send the request from, or identify, the email address associated with the account. Never include your password or other credentials.
+Kanna Mobile does not currently include an in-app account-deletion workflow. To request deletion of your Kanna account or Kanna-hosted data, email **support@tampopomyoko.com** with the subject "Delete my account". Send the request from the email address associated with the account, or identify that address in the message. Never include your password or other credentials.
 
-[BUSINESS DECISION: insert the identity-verification steps, deletion scope, completion timeframe, lawful retention exceptions, and confirmation process.]
+We verify a deletion request by confirming it comes from the account's own email address; if it does not, we will write to that address before acting. A verified request removes your Firebase Authentication account and the Kanna-hosted records tied to it: your account document, your desktop and cloud task index, stored desktop credential hashes, and any push-notification registrations. We complete verified deletions within 30 days and email you when it is done. Copies may persist briefly in routine backups until those backups age out on their normal cycle, and we may retain the minimum needed to meet a legal obligation or to resolve a dispute.
 
 You can remove a manual LAN pairing from the **Machines** screen and clear locally retained crash diagnostics under **About this build**. Account deletion does not automatically erase data stored separately on your Mac, in local app storage, in a source-control provider, or by an agent provider.
 
