@@ -392,7 +392,7 @@ are in the conversation the destination resumes.
 | T2 | `6d1be758` | Loud failure on missing session state; `finalizedCleanly` load-bearing | 1.2 | T1 |
 | T3 | `9de722fc` | Idempotent duplicate push | 1.3 | T2 |
 | T4 | `31b7ba29` | Live CLI contract tests (transcripts, injection, quit, rollout timing) | 0 | — |
-| T5 | `000f4de5` | Sidecar re-parents under kanna-server (transport plumbing) | 2 | — |
+| T5 | `dbf60e69` | Sidecar re-parents under kanna-server (transport plumbing) | 2 | — |
 | T6 | `fc2fc1c2` | Transfer orchestration moves server-side; delete window-election machinery | 3 | T3, T5 |
 | T7 | `6d43a77d` | Injected-input finalization state machine | 4 | T6, T4 |
 | T8 | `8458932e` | Transfer progress UI + receiver-side import step output | 0 | — |
@@ -400,3 +400,7 @@ are in the conversation the destination resumes.
 T1→T2→T3 are chained on real file contention: all three edit
 `apps/desktop/src/stores/transfer.ts` (staging, finalize, and push paths
 respectively call into each other). T4, T5, T8 run in parallel from day one.
+
+T5 was originally created as `000f4de5`; that session was killed and the task
+recreated as `dbf60e69` (2026-08-06), continuing from checkpoint commit
+`49ccd7e5`. T6's blocker was rewired to the recreated task.
