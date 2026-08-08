@@ -112,6 +112,12 @@ Sources:
 
 ## App Privacy Label Guidance
 
+> **Stale:** Do not use this section for submission. It predates push
+> notifications, QR camera pairing, local crash diagnostics, and runtime
+> version `2.1.4`. Use
+> [`docs/2026-08-08-mobile-app-privacy-label.md`](2026-08-08-mobile-app-privacy-label.md)
+> instead.
+
 Recommended working assumption:
 
 - Data is linked to the user's identity when it is stored or routed under the
