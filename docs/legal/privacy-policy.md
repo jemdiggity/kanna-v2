@@ -1,10 +1,10 @@
 # Kanna Mobile Privacy Policy
 
-Effective date: [BUSINESS DECISION: insert the date on which this policy takes effect]
+Effective date: August 9, 2026
 
-Technical implementation reviewed: August 8, 2026
+Technical implementation reviewed: August 9, 2026
 
-Kanna Mobile is operated by [BUSINESS DECISION: insert the full legal entity name] ("Kanna," "we," "us," or "our"). This policy explains how Kanna Mobile handles information when you use the mobile app with the Kanna desktop app for macOS.
+Kanna Mobile is operated by Tampopo LLC ("Kanna," "we," "us," or "our"). This policy explains how Kanna Mobile handles information when you use the mobile app with the Kanna desktop app for macOS.
 
 ## The most important point for developers
 
@@ -105,11 +105,11 @@ Kanna's implementation uses the following service providers and platforms:
 - **Google Firebase Cloud Messaging** and **Apple Push Notification service** for optional push delivery; and
 - **Google Cloud infrastructure**, including a Google Cloud-hosted relay and Cloud Storage for over-the-air app updates.
 
-These providers process information to provide their services to Kanna. Kanna may also disclose information when [BUSINESS DECISION: state the approved legal-disclosure circumstances, if any, without creating an unsupported commitment].
+These providers process information to provide their services to Kanna. Kanna may also disclose information where required by applicable law, regulation, legal process, or an enforceable governmental request, or where we reasonably believe disclosure is necessary to investigate or prevent fraud, to enforce our terms, or to protect the rights, safety, or property of Kanna, our users, or the public. If Kanna is involved in a merger, acquisition, or sale of assets, information may transfer as part of that transaction, and we will make reasonable efforts to notify affected users.
 
 The mobile source contains no advertising SDK, imports no Firebase Analytics module, and the production Firebase configuration sets `IS_ANALYTICS_ENABLED` to false. The source contains no mechanism for cross-app advertising tracking.
 
-[BUSINESS DECISION: confirm the organization's practices outside this source tree. If accurate, replace this placeholder with: "We do not sell personal information or share it with third parties for cross-context behavioral advertising. We disclose information only to service providers that operate Kanna and as described in this policy."]
+We do not sell personal information, and we do not share it with third parties for cross-context behavioral advertising. We disclose information only to the service providers that operate Kanna and in the circumstances described in this policy.
 
 Source: [production Firebase configuration](https://github.com/tampopogk/kanna/blob/main/apps/mobile/firebase/GoogleService-Info.production.plist), [mobile package manifest](https://github.com/tampopogk/kanna/blob/main/apps/mobile/package.json), [Firebase service initialization](https://github.com/tampopogk/kanna/blob/main/services/relay/src/firebase.ts), and [relay operations](https://github.com/tampopogk/kanna/blob/main/docs/relay-vm-operations.md).
 
@@ -123,7 +123,14 @@ The code establishes the following product behavior but does not establish organ
 - the desktop's Firestore task collection is reconciled to its current published open-task snapshot, and task documents absent from a later snapshot are deleted; and
 - relay connection routing state is held in memory for active connections, while operational logs are handled separately.
 
-[BUSINESS DECISION: specify retention periods or criteria for Firebase Authentication accounts, Firestore desktop/task/credential/push records, relay and infrastructure logs, backups, support correspondence, and deletion-request records. State any different backup-deletion schedule.]
+Beyond that product behavior, we retain information as follows:
+
+- **Firebase Authentication accounts and Firestore records** (account documents, desktop and cloud task index, desktop credential hashes, push registrations) are kept while your account is active, and are deleted within 30 days of a verified deletion request.
+- **Relay and infrastructure logs**, which can include IP addresses, are kept for a short operational period for security and troubleshooting and are then discarded on the provider's normal cycle.
+- **Support and deletion-request correspondence** is kept only as long as needed to handle the request and to keep a record that we handled it.
+- **Backups** are rotated on their own schedule. Deleted records may persist in a backup until that backup ages out, after which they are not restored.
+
+Where a longer period is required to meet a legal obligation, resolve a dispute, or enforce our agreements, we retain the minimum necessary for that purpose.
 
 Source: [crash-diagnostic retention](https://github.com/tampopogk/kanna/blob/main/apps/mobile/src/lib/diagnostics/mobileCrashDiagnostics.ts), [push unregistration](https://github.com/tampopogk/kanna/blob/main/services/relay/src/auth.ts), [stale push-token removal](https://github.com/tampopogk/kanna/blob/main/services/relay/src/mobileNotifications.ts), and [cloud task reconciliation](https://github.com/tampopogk/kanna/blob/main/services/relay/src/cloudTaskPublication.ts).
 
@@ -131,9 +138,9 @@ Source: [crash-diagnostic retention](https://github.com/tampopogk/kanna/blob/mai
 
 Kanna Mobile currently provides sign-out, removal of a manual LAN pairing, and clearing of local crash diagnostics. It does not currently provide an in-app workflow that deletes the Firebase Authentication account and all associated cloud records.
 
-To request deletion of your Kanna account or Kanna-hosted data, contact [BUSINESS DECISION: insert a monitored privacy email address or deletion-request form URL]. Include the email address associated with the account and identify any desktops whose data you want deleted. Do not send your password, Firebase token, pairing secret, source code, or other credentials.
+To request deletion of your Kanna account or Kanna-hosted data, email **support@tampopomyoko.com** with the subject "Delete my account". Include the email address associated with the account and identify any desktops whose data you want deleted. Do not send your password, Firebase token, pairing secret, source code, or other credentials.
 
-[BUSINESS DECISION: document the identity-verification process, the data systems covered by deletion, the response and completion timeframes, any lawful retention exceptions, and whether the requester receives confirmation.]
+We verify a request by confirming it comes from the account's own email address; if it arrives from another address, we will write to the account address before acting. A verified deletion covers your Firebase Authentication account, your Firestore account document, your desktop and cloud task index, stored desktop credential hashes, and push-notification registrations. We acknowledge requests promptly, complete verified deletions within 30 days, and email you confirmation when the deletion is done. The backup and legal-retention exceptions described under Retention apply.
 
 Deleting Kanna-hosted data does not by itself delete data stored on your Mac, in local mobile AsyncStorage, in your source-control provider, or by an agent provider you use with Kanna. Remove local pairings and app data on the relevant devices, and contact those other providers as needed.
 
@@ -143,18 +150,26 @@ Source: [current account controls](https://github.com/tampopogk/kanna/blob/main/
 
 Cloud relay and OTA endpoints use `wss://` and `https://`, and Firebase ID tokens authenticate mobile relay sessions. Desktop cloud publication uses desktop credentials. Direct LAN access uses a per-device ID and secret issued during pairing. No system can guarantee absolute security, and Kanna's direct LAN transport is not represented by the source as end-to-end encrypted; use trusted networks and protect your Kanna account, devices, repositories, and agent-provider credentials.
 
+## Children
+
+Kanna Mobile is a developer tool intended for adults. It is not directed to children, and we do not knowingly collect personal information from children. If you believe a child has provided us with personal information, contact us and we will delete it.
+
 ## Policy changes
 
-[BUSINESS DECISION: state how material policy changes will be announced and when an updated policy becomes effective.]
+When this policy changes, we post the updated version at `https://kanna.build/privacy` with a new effective date. For changes that materially affect how we handle your information, we will give notice before the change takes effect, through the app or to the email address associated with your account. Continuing to use Kanna Mobile after a change takes effect means the updated policy applies to you.
 
 ## Governing law and privacy rights
 
-[BUSINESS DECISION: insert the governing law and identify any jurisdiction-specific privacy rights and request or appeal process that apply to the operating legal entity and its users.]
+Tampopo LLC operates Kanna from Japan, and this policy is governed by the laws of Japan.
+
+Under Japan's Act on the Protection of Personal Information (APPI), you may ask us to disclose the personal information we hold about you, to correct or add to it if it is inaccurate, or to stop using or delete it where the Act provides that right. Email **support@tampopomyoko.com** to make a request. We verify requests as described under Deletion requests and choices, and we respond without undue delay. If you are not satisfied with our response, you may raise the matter with Japan's Personal Information Protection Commission.
+
+Kanna is available to users outside Japan. If the law where you live gives you additional privacy rights, contact us and we will consider your request under that law. Information you send through Kanna is processed on Google Cloud and Firebase infrastructure, which may be located outside your country.
 
 ## Contact
 
-Privacy contact: [BUSINESS DECISION: insert a monitored privacy email address]
+Privacy contact: **support@tampopomyoko.com**
 
-Postal address: [BUSINESS DECISION: insert the legal entity's contact address]
+Postal address: Tampopo LLC, 1257 Ryozenji, Myoko-shi, Niigata-ken 944-0062, Japan
 
 Support: `https://kanna.build/support`
