@@ -587,6 +587,25 @@ pub(crate) fn prepare_revision_task_for_api(
     Ok(prepared)
 }
 
+/// Why a stage is being restarted in place, and whether the previous run's
+/// provider transcript may be used at all.
+enum StageRestartIntent {
+    /// Operator or API recovery of an interrupted run: prefer the previous
+    /// provider session, fall back to a fresh conversation when any resume
+    /// precondition fails.
+    ResumeProviderSession,
+    /// The provider CLI accepted the launch and then rejected the transcript
+    /// itself. Asking for it again would fail the same way, so the
+    /// replacement must not carry `--resume`.
+    FreshAfterRejectedResume {
+        /// The still-running resume attempt this replaces. Checked against the
+        /// task's latest run so a stale classification cannot restart a stage
+        /// that has already moved on.
+        rejected_run_id: String,
+        reason: String,
+    },
+}
+
 /// Prepare recovery of the latest interrupted run in the task's existing
 /// stage and worktree. The provider transcript is preferred; when any shared
 /// resume precondition fails, the same preparation produces a fresh session
@@ -595,6 +614,42 @@ pub(crate) fn prepare_resume_task_for_api(
     db: &Db,
     config: &Config,
     task_id: &str,
+) -> Result<PreparedStageRunSpawn, String> {
+    prepare_stage_restart(
+        db,
+        config,
+        task_id,
+        StageRestartIntent::ResumeProviderSession,
+    )
+}
+
+/// Prepare the one fresh relaunch a rejected Claude resume is allowed: same
+/// task, same stage, same worktree, no `--resume`. The replacement is a plain
+/// fresh run, so if the provider rejects it too there is nothing left to
+/// classify as a resume failure and the retry cannot repeat.
+pub(crate) fn prepare_fresh_restart_after_rejected_resume(
+    db: &Db,
+    config: &Config,
+    task_id: &str,
+    rejected_run_id: &str,
+    reason: &str,
+) -> Result<PreparedStageRunSpawn, String> {
+    prepare_stage_restart(
+        db,
+        config,
+        task_id,
+        StageRestartIntent::FreshAfterRejectedResume {
+            rejected_run_id: rejected_run_id.to_string(),
+            reason: reason.to_string(),
+        },
+    )
+}
+
+fn prepare_stage_restart(
+    db: &Db,
+    config: &Config,
+    task_id: &str,
+    intent: StageRestartIntent,
 ) -> Result<PreparedStageRunSpawn, String> {
     let identity = load_stage_identity(db, task_id)?;
     if identity.source_task.closed_at.is_some() {
@@ -606,11 +661,27 @@ pub(crate) fn prepare_resume_task_for_api(
         .latest_stage_run(task_id)
         .map_err(|error| format!("db error: {error}"))?
         .ok_or_else(|| format!("task has no stage run to resume: {task_id}"))?;
-    if !matches!(run.status.as_str(), "cancelled" | "failed") {
-        return Err(format!(
-            "latest run is {}, not cancelled or failed: {}",
-            run.status, task_id
-        ));
+    match &intent {
+        StageRestartIntent::ResumeProviderSession => {
+            if !matches!(run.status.as_str(), "cancelled" | "failed") {
+                return Err(format!(
+                    "latest run is {}, not cancelled or failed: {}",
+                    run.status, task_id
+                ));
+            }
+        }
+        // The rejected attempt is deliberately still `running` here: the
+        // replacement is prepared before anything is written, so a failed
+        // preparation leaves the exit to the caller's normal reporting.
+        StageRestartIntent::FreshAfterRejectedResume {
+            rejected_run_id, ..
+        } => {
+            if &run.id != rejected_run_id {
+                return Err(format!(
+                    "rejected resume attempt {rejected_run_id} is no longer the latest run: {task_id}"
+                ));
+            }
+        }
     }
     let item_stage = source_task
         .stage
@@ -645,22 +716,35 @@ pub(crate) fn prepare_resume_task_for_api(
         .as_deref()
         .ok_or_else(|| format!("task has no branch: {task_id}"))?;
     let current_worktree = format!("{}/.kanna-worktrees/{branch}", loaded.repo.path);
-    let resume = match run.cwd.as_deref() {
-        Some(run_cwd)
-            if std::path::Path::new(run_cwd).is_dir()
-                && std::path::Path::new(&current_worktree).is_dir()
-                && !same_cwd(run_cwd, &current_worktree) =>
-        {
-            Err("previous run was recorded in a different worktree than the current stage".into())
-        }
-        _ => prepare_resume_workspace(
-            run.agent_provider.as_deref(),
-            source_task.agent_type.as_deref(),
-            run.cwd.as_deref(),
-            run.provider_session_id.as_deref(),
-            &run.id,
-            &current_worktree,
-        ),
+    // Reviewer feedback is only readable from a run that is still running: an
+    // interrupted run's `feedback` has already been overwritten with the
+    // session-interruption marker, which is bookkeeping, not an instruction.
+    let requested_changes = match &intent {
+        StageRestartIntent::FreshAfterRejectedResume { .. } => run.feedback.clone(),
+        StageRestartIntent::ResumeProviderSession => None,
+    };
+    let resume = match &intent {
+        StageRestartIntent::FreshAfterRejectedResume { reason, .. } => Err(reason.clone()),
+        StageRestartIntent::ResumeProviderSession => match run.cwd.as_deref() {
+            Some(run_cwd)
+                if std::path::Path::new(run_cwd).is_dir()
+                    && std::path::Path::new(&current_worktree).is_dir()
+                    && !same_cwd(run_cwd, &current_worktree) =>
+            {
+                Err(
+                    "previous run was recorded in a different worktree than the current stage"
+                        .into(),
+                )
+            }
+            _ => prepare_resume_workspace(
+                run.agent_provider.as_deref(),
+                source_task.agent_type.as_deref(),
+                run.cwd.as_deref(),
+                run.provider_session_id.as_deref(),
+                &run.id,
+                &current_worktree,
+            ),
+        },
     };
     let (workspace_spec, final_prompt, resume_fallback_reason) = match resume {
         Ok((_provider, workspace)) => (
@@ -679,11 +763,23 @@ pub(crate) fn prepare_resume_task_for_api(
             log::info!("task resume unavailable for {task_id}: {reason}; spawning fresh");
             let prev_result = previous_stage_result(db, task_id, source_task)?;
             let prev_main_result = previous_main_stage_result(db, task_id)?;
+            // A fresh conversation knows only what the prompt tells it. When
+            // the interrupted run was a revision, its reviewer feedback is
+            // part of what the task is, so it is composed back into the task
+            // prompt rather than lost with the transcript.
+            let task_prompt = match requested_changes.as_deref() {
+                Some(feedback) => build_revision_task_prompt(
+                    source_task.prompt.as_deref().unwrap_or(""),
+                    feedback,
+                    None,
+                ),
+                None => source_task.prompt.as_deref().unwrap_or("").to_string(),
+            };
             let prompt = build_target_stage_prompt(
                 &loaded.definitions,
                 &loaded.repo.path,
                 &target_stage,
-                source_task.prompt.as_deref().unwrap_or(""),
+                &task_prompt,
                 prev_result.as_deref(),
                 prev_main_result.as_deref(),
                 Some(branch),
@@ -708,7 +804,9 @@ pub(crate) fn prepare_resume_task_for_api(
         workspace_spec,
         final_prompt,
         branch,
-        None,
+        // A restarted revision keeps the requested changes on its record, so
+        // the run history does not read as an unexplained re-run of the stage.
+        requested_changes.clone(),
         source_task.agent_type.as_deref(),
         // Recovery continues the interrupted run: it must respawn with what
         // that run was actually using, not with what the stage would resolve

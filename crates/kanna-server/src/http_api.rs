@@ -14,6 +14,7 @@ mod operator_events;
 mod pairing;
 mod repo_commands;
 mod repos;
+mod resume_recovery;
 #[path = "http_api/router.rs"]
 mod routes;
 pub(crate) mod settings;
