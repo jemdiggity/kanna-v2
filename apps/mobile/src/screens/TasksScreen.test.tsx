@@ -64,6 +64,16 @@ function findElement(node: ElementNode, type: unknown): ElementNode | null {
   return null;
 }
 
+function findPressableByText(node: ElementNode, text: string): ElementNode | null {
+  if (node.type === "Pressable" && textContent(node) === text) return node;
+  for (const child of flattenChildren(node.props?.children)) {
+    if (typeof child === "string") continue;
+    const match = findPressableByText(child, text);
+    if (match) return match;
+  }
+  return null;
+}
+
 function findFunctionElement(
   node: ElementNode,
   name: string
@@ -220,6 +230,10 @@ describe("TasksScreen", () => {
     }) as ElementNode;
 
     expect(textContent(tree)).toContain("Repo One");
+    expect(findPressableByText(tree, "Repo One")?.props).toMatchObject({
+      accessibilityRole: "button",
+      accessibilityState: { selected: true }
+    });
   });
 
   it("keeps Recent pan-repo even when the Tasks view has a selected repo", () => {

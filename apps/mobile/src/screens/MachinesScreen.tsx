@@ -46,6 +46,7 @@ export function MachinesScreen(props: MachinesScreenProps) {
       <View style={styles.header}>
         <Pressable
           accessibilityLabel="Back"
+          accessibilityRole="button"
           style={styles.headerAction}
           testID={MOBILE_E2E_IDS.machinesBackButton}
           onPress={props.onBack}
@@ -55,6 +56,7 @@ export function MachinesScreen(props: MachinesScreenProps) {
         <Text style={styles.title}>Machines</Text>
         <Pressable
           accessibilityLabel="Add machine"
+          accessibilityRole="button"
           style={styles.headerAction}
           testID={MOBILE_E2E_IDS.machinesAddButton}
           onPress={props.onOpenPairing}
@@ -141,6 +143,7 @@ function MachineSection({
             {machine.origins.manual ? (
               <Pressable
                 accessibilityLabel={`Remove pairing for ${machine.displayName}`}
+                accessibilityRole="button"
                 testID={MOBILE_E2E_IDS.machineRemoveButton(machine.desktopId)}
                 onPress={() => onRemove(machine)}
               >

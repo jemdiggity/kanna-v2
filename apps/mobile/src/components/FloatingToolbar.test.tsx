@@ -95,6 +95,14 @@ describe("FloatingToolbar", () => {
     );
 
     expect(flattenStyle(activity.props.style).backgroundColor).toBe("#E8F1FF");
+    expect(activity.props).toMatchObject({
+      accessibilityRole: "tab",
+      accessibilityState: { selected: true }
+    });
+    expect(tasks.props).toMatchObject({
+      accessibilityRole: "tab",
+      accessibilityState: { selected: false }
+    });
     await act(async () => tasks.props.onPress());
     expect(navigatorProps.navigation.emit).toHaveBeenCalledWith({
       type: "tabPress",
@@ -156,6 +164,7 @@ describe("FloatingToolbar", () => {
     expect(flattenStyle(searchButton.props.style).backgroundColor).toBe(
       "#080F1B"
     );
+    expect(searchButton.props.accessibilityRole).toBe("button");
     expect(flattenStyle(navigationBar?.props.style).backgroundColor).toBe(
       "#080F1B"
     );
@@ -180,6 +189,7 @@ describe("FloatingToolbar", () => {
     );
     const resolveStyle = addTaskButton.props.style;
 
+    expect(addTaskButton.props.accessibilityRole).toBe("button");
     expect(resolveStyle).toBeTypeOf("function");
     expect(resolveStyle({ pressed: true })).toEqual(
       expect.arrayContaining([

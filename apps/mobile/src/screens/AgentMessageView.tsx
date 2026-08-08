@@ -63,7 +63,12 @@ export function AgentMessageViewComponent({
           <LoadingText label="Connecting" style={styles.mutedText} />
         ) : null}
       </ScrollView>
-      <Pressable style={styles.stopButton} testID={MOBILE_E2E_IDS.taskStopButton} onPress={onInterrupt}>
+      <Pressable
+        accessibilityRole="button"
+        style={styles.stopButton}
+        testID={MOBILE_E2E_IDS.taskStopButton}
+        onPress={onInterrupt}
+      >
         <Text style={styles.stopButtonLabel}>Stop</Text>
       </Pressable>
     </View>
@@ -119,13 +124,28 @@ function renderEvent(
           <Text style={styles.cardTitle}>Permission: {event.tool_name}</Text>
           <Text style={styles.cardText}>{formatValue(event.input)}</Text>
           <View style={styles.permissionActions}>
-            <Pressable style={styles.permissionButton} onPress={() => onResolvePermission(event.request_id, { kind: "allow" })}>
+            <Pressable
+              accessibilityLabel={`Allow ${event.tool_name} once`}
+              accessibilityRole="button"
+              style={styles.permissionButton}
+              onPress={() => onResolvePermission(event.request_id, { kind: "allow" })}
+            >
               <Text style={styles.permissionButtonText}>Allow</Text>
             </Pressable>
-            <Pressable style={styles.permissionButton} onPress={() => onResolvePermission(event.request_id, { kind: "allow_session" })}>
+            <Pressable
+              accessibilityLabel={`Allow ${event.tool_name} for this session`}
+              accessibilityRole="button"
+              style={styles.permissionButton}
+              onPress={() => onResolvePermission(event.request_id, { kind: "allow_session" })}
+            >
               <Text style={styles.permissionButtonText}>Allow for session</Text>
             </Pressable>
-            <Pressable style={styles.permissionButton} onPress={() => onResolvePermission(event.request_id, { kind: "deny", reason: null })}>
+            <Pressable
+              accessibilityLabel={`Deny ${event.tool_name}`}
+              accessibilityRole="button"
+              style={styles.permissionButton}
+              onPress={() => onResolvePermission(event.request_id, { kind: "deny", reason: null })}
+            >
               <Text style={styles.permissionButtonText}>Deny</Text>
             </Pressable>
           </View>

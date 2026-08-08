@@ -87,7 +87,13 @@ export function MachinePairingSheet({
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         style={styles.backdrop}
       >
-        <Pressable style={styles.scrim} onPress={resetAndClose} />
+        <Pressable
+          accessibilityElementsHidden
+          accessible={false}
+          importantForAccessibility="no-hide-descendants"
+          style={styles.scrim}
+          onPress={resetAndClose}
+        />
         <View style={styles.sheet} testID={MOBILE_E2E_IDS.machinePairingSheet}>
           <View style={styles.header}>
             <View>
@@ -96,6 +102,7 @@ export function MachinePairingSheet({
             </View>
             <Pressable
               accessibilityLabel="Close add machine"
+              accessibilityRole="button"
               testID={MOBILE_E2E_IDS.machinePairingCloseButton}
               onPress={resetAndClose}
             >
@@ -135,6 +142,7 @@ export function MachinePairingSheet({
               <View style={styles.permissionCard}>
                 <Text style={styles.permissionText}>Camera access is off. You can still enter the code below.</Text>
                 <Pressable
+                  accessibilityRole="button"
                   style={styles.secondaryButton}
                   testID={MOBILE_E2E_IDS.machinePairingOpenSettingsButton}
                   onPress={() => void Linking.openSettings()}
@@ -144,6 +152,7 @@ export function MachinePairingSheet({
               </View>
             ) : (
               <Pressable
+                accessibilityRole="button"
                 style={styles.secondaryButton}
                 onPress={() => void requestPermission()}
               >
@@ -156,6 +165,7 @@ export function MachinePairingSheet({
             <Text style={styles.label}>Pairing code</Text>
             <View style={styles.codeRow}>
               <TextInput
+                accessibilityLabel="Pairing code"
                 autoCapitalize="characters"
                 autoCorrect={false}
                 maxLength={8}
@@ -167,6 +177,12 @@ export function MachinePairingSheet({
                 onChangeText={setCode}
               />
               <Pressable
+                accessibilityLabel="Add machine"
+                accessibilityRole="button"
+                accessibilityState={{
+                  busy: submitting,
+                  disabled: normalizedCode.length !== 6 || submitting
+                }}
                 disabled={normalizedCode.length !== 6 || submitting}
                 style={[
                   styles.primaryButton,

@@ -121,6 +121,18 @@ describe("MachinesScreen", () => {
     expect(findByTestId(tree, "mobile.machine.desktop-account.remove")).toBeNull();
     expect(findByTestId(tree, "mobile.machines-back")).not.toBeNull();
     expect(findByTestId(tree, "mobile.machines-add")).not.toBeNull();
+    expect(findByTestId(tree, "mobile.machines-back")?.props).toMatchObject({
+      accessibilityLabel: "Back",
+      accessibilityRole: "button"
+    });
+    expect(findByTestId(tree, "mobile.machines-add")?.props).toMatchObject({
+      accessibilityLabel: "Add machine",
+      accessibilityRole: "button"
+    });
+    expect(findByTestId(tree, "mobile.machine.desktop-dual.remove")?.props).toMatchObject({
+      accessibilityLabel: "Remove pairing for Jerome’s MacBook Pro",
+      accessibilityRole: "button"
+    });
   });
 
   it("shows source warnings without hiding cached machine rows", () => {

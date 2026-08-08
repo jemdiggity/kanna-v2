@@ -94,6 +94,8 @@ export function TasksScreen({
               const selected = repo.id === selectedRepoId;
               return (
                 <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ selected }}
                   key={repo.id}
                   style={[styles.repoChip, selected ? styles.repoChipSelected : null]}
                   onPress={() => onSelectRepo(repo.id)}
