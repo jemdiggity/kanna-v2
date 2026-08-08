@@ -220,8 +220,10 @@ describe("createSessionsApi", () => {
       model: "opencode/gpt-5.1-codex",
     });
 
-    expect(prepared.agentCmd).toBe("'/usr/bin/opencode' run --interactive --dangerously-skip-permissions -m opencode/gpt-5.1-codex 'Ship it'");
-    expect(prepared.agentCmdPreamble).toContain("'/usr/bin/opencode' run --interactive --dangerously-skip-permissions -m opencode/gpt-5.1-codex");
+    // The CLI's default command, not `run`: `opencode run` draws no TUI and
+    // exits at the end of its first turn, leaving no composer behind.
+    expect(prepared.agentCmd).toBe("'/usr/bin/opencode' --auto -m opencode/gpt-5.1-codex --prompt 'Ship it'");
+    expect(prepared.agentCmdPreamble).toContain("'/usr/bin/opencode' --auto -m opencode/gpt-5.1-codex --prompt");
     expect(prepared.agentCmdPreamble).toContain("Ship it");
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
     expect(prepared.agentProvider).toBe("opencode");
@@ -236,8 +238,16 @@ describe("createSessionsApi", () => {
       resumeSessionId: "ses_123",
     });
 
-    expect(prepared.agentCmd).toBe("'/usr/bin/opencode' run --interactive --dangerously-skip-permissions --session 'ses_123' 'Continue'");
-    expect(prepared.agentCmdPreamble).toContain("'/usr/bin/opencode' run --interactive --dangerously-skip-permissions --session 'ses_123'");
+    // Two phases: the TUI drops `--prompt` when it is also resuming a session,
+    // so the turn is seeded headlessly against that same id and the TUI then
+    // attaches to the conversation it extended.
+    expect(prepared.agentCmd).toBe(
+      "'/usr/bin/opencode' run --auto --session 'ses_123' 'Continue'; "
+      + "'/usr/bin/opencode' --auto --session 'ses_123'",
+    );
+    expect(prepared.agentCmdPreamble).toContain("'/usr/bin/opencode' run --auto --session 'ses_123'");
+    expect(prepared.agentCmdPreamble).toContain("; '/usr/bin/opencode' --auto --session 'ses_123'");
+    expect(prepared.agentCmd).not.toContain("--prompt");
     expect(prepared.agentCmdPreamble).toContain("Continue");
     expect(prepared.agentCmdPreamble).toContain("This session was launched by Kanna");
   });

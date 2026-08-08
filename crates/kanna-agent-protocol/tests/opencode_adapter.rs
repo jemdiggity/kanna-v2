@@ -164,7 +164,7 @@ fn spawn_args_pin_the_run_json_contract() {
             "json",
             "--dir",
             "/tmp/kanna-task",
-            "--dangerously-skip-permissions",
+            "--auto",
             "-m",
             "opencode/big-pickle",
             "--variant",
@@ -184,7 +184,7 @@ fn spawn_args_pin_the_run_json_contract() {
             "ses_123",
             "--dir",
             "/tmp/kanna-task",
-            "--dangerously-skip-permissions",
+            "--auto",
             "-m",
             "opencode/big-pickle",
             "--variant",
@@ -264,7 +264,7 @@ fn default_and_dont_ask_modes_skip_permissions() {
 
         let args = adapter.initial_spawn(&ctx).args.join(" ");
         assert!(
-            args.contains("--dangerously-skip-permissions"),
+            args.contains("--auto"),
             "args should skip permissions, got: {args}"
         );
     }
@@ -274,9 +274,7 @@ fn default_and_dont_ask_modes_skip_permissions() {
         permission_mode: Some("acceptEdits".to_string()),
         ..Default::default()
     });
-    assert!(!sandboxed
-        .args
-        .contains(&"--dangerously-skip-permissions".to_string()));
+    assert!(!sandboxed.args.contains(&"--auto".to_string()));
 }
 
 #[test]

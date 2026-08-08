@@ -47,7 +47,10 @@ impl OpencodeAdapter {
             args.push(ctx.cwd.clone());
         }
         if Self::should_skip_permissions(ctx) {
-            args.push("--dangerously-skip-permissions".to_string());
+            // The documented spelling on 1.18.15; `--dangerously-skip-permissions`
+            // is tolerated but has dropped out of `opencode run --help`. Pinned
+            // by `tests/cli-contract/tests/live/opencode-flags.test.ts`.
+            args.push("--auto".to_string());
         }
         if let Some(model) = &ctx.model {
             args.push("-m".to_string());

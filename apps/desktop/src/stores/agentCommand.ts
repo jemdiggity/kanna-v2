@@ -152,6 +152,23 @@ function codexConfigFlag(key: string, value: string): string {
   return `-c ${shellSingleQuote(`${key}=${value}`)}`;
 }
 
+/**
+ * Reasoning effort cannot ride on the argv of OpenCode's TUI entrypoint: the
+ * CLI's default command rejects `--variant` and exits with usage before drawing
+ * anything. It goes through the config env var instead, where
+ * `AgentConfig.variant` applies "only when using the agent's configured model"
+ * — hence the model is written beside it. Mirrors
+ * `opencode_config_content` in `crates/kanna-agent-protocol/src/mcp.rs`.
+ */
+function opencodeConfigEnvPrefix(model?: string, effort?: string): string | null {
+  if (!effort) return null;
+  const content = JSON.stringify({
+    $schema: "https://opencode.ai/config.json",
+    agent: { build: { ...(model ? { model } : {}), variant: effort } },
+  });
+  return `OPENCODE_CONFIG_CONTENT=${shellSingleQuote(content)}`;
+}
+
 async function buildOpenCodeCommand(params: BuildAgentCommandParams): Promise<AgentCommandResult> {
   const opencodePath = params.resolveBinaryPath
     ? await params.resolveBinaryPath("opencode").catch(() => "opencode")
@@ -159,27 +176,34 @@ async function buildOpenCodeCommand(params: BuildAgentCommandParams): Promise<Ag
   const opencodeExecutable = shellSingleQuote(opencodePath);
   const opencodeFlags: string[] = [...params.permissionFlags];
   if (params.model) opencodeFlags.push(`-m ${params.model}`);
-  if (params.effort) opencodeFlags.push(`--variant ${shellSingleQuote(params.effort)}`);
-  if (params.resumeSessionId) {
-    opencodeFlags.push(`--session ${shellSingleQuote(params.resumeSessionId)}`);
-  }
-  const opencodeParts = [opencodeExecutable, "run", "--interactive", ...opencodeFlags];
-  if (params.prompt) {
-    opencodeParts.push(shellSingleQuote(params.prompt));
-  }
+  const sessionFlag = params.resumeSessionId
+    ? `--session ${shellSingleQuote(params.resumeSessionId)}`
+    : null;
+  const envPrefix = opencodeConfigEnvPrefix(params.model, params.effort);
+  const command = (argv: string[]): string =>
+    [...(envPrefix ? [envPrefix] : []), ...argv].join(" ");
+  const tui = [opencodeExecutable, ...opencodeFlags, ...(sessionFlag ? [sessionFlag] : [])];
+
+  // `opencode run` draws no TUI and exits at the end of its first turn, leaving
+  // nothing for send-input, stage posts or the transfer wrap-up to type into.
+  // The default command opens the interactive TUI; `--prompt` delivers the
+  // opening prompt as a real turn on it — except when the TUI is also resuming
+  // a session, where it discards `--prompt` silently. There the turn is seeded
+  // by a headless `run` against the same session id first, and the TUI attaches
+  // to the conversation it just extended. Mirrors the Rust composition in
+  // `crates/kanna-server/src/task_creator/commands.rs`.
+  const buildCommand = (prompt: string | undefined): string => {
+    if (!prompt) return command(tui);
+    if (!sessionFlag) return command([...tui, `--prompt ${shellSingleQuote(prompt)}`]);
+    const seed = [opencodeExecutable, "run", ...opencodeFlags, sessionFlag, shellSingleQuote(prompt)];
+    return `${command(seed)}; ${command(tui)}`;
+  };
 
   const result: AgentCommandResult = {
-    agentCmd: opencodeParts.join(" "),
+    agentCmd: buildCommand(params.prompt),
   };
   if (params.prompt) {
-    const opencodePreambleParts = [
-      opencodeExecutable,
-      "run",
-      "--interactive",
-      ...opencodeFlags,
-      shellSingleQuote(params.runtimeUserPrompt),
-    ];
-    result.agentCmdPreamble = opencodePreambleParts.join(" ");
+    result.agentCmdPreamble = buildCommand(params.runtimeUserPrompt);
   }
   return result;
 }

@@ -2,7 +2,7 @@ use super::local_config::LocalConfigOverride;
 use super::provider::AgentProvider;
 use crate::mobile_api::TransferImportSummary;
 use kanna_agent_protocol::mcp::{
-    codex_mcp_config_overrides, opencode_mcp_config_content, read_kanna_mcp_server,
+    codex_mcp_config_overrides, opencode_config_content, read_kanna_mcp_server,
 };
 use kanna_agent_protocol::{prompt_with_system_prompt, EffortOverride};
 use std::path::Path;
@@ -141,28 +141,62 @@ pub(super) fn build_agent_command(
             }
         }
         AgentProvider::Opencode => {
+            // `opencode run` is a one-shot: it streams plain text, draws no TUI,
+            // and the process exits at the end of its first turn. A PTY task
+            // spawned that way has no composer, so `send-input`, stage posts,
+            // revision resume and the transfer wrap-up have nothing to type
+            // into — injected bytes are echoed by the tty and never become a
+            // turn. The CLI's *default* command is what opens the interactive
+            // TUI, and `--prompt` delivers the opening prompt as a real turn on
+            // it. No `[project]` positional is passed: the bootstrap shell
+            // already runs in the worktree, and a stray positional is how an
+            // unrecognised flag's value silently becomes the project path.
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
             if let Some(model) = model {
                 flags.push(format!("-m '{}'", shell_single_quote(model)));
             }
-            extend_effort_flags(*provider, &mut flags, effort);
-            let mut parts = vec![
-                executable.clone(),
-                "run".to_string(),
-                "--interactive".to_string(),
-            ];
-            if let Some(ProviderSessionBinding::Resume(session_id)) = provider_session {
-                parts.push("--session".to_string());
-                parts.push(format!("'{}'", shell_single_quote(session_id)));
+            let session_flag = match provider_session {
+                Some(ProviderSessionBinding::Resume(session_id)) => {
+                    Some(format!("--session '{}'", shell_single_quote(session_id)))
+                }
+                _ => None,
+            };
+            // Effort rides in the config rather than on the argv: the TUI
+            // entrypoint rejects `--variant` and exits before drawing anything.
+            let env_prefix = opencode_config_env_prefix(mcp_config_path, model, effort);
+            let command = |argv: Vec<String>| match &env_prefix {
+                Some(prefix) => format!("{prefix} {}", argv.join(" ")),
+                None => argv.join(" "),
+            };
+
+            let mut tui = vec![executable.clone()];
+            tui.extend(flags.iter().cloned());
+            tui.extend(session_flag.iter().cloned());
+
+            match (&session_flag, prompt.is_empty()) {
+                // A fresh conversation: the TUI's own `--prompt` opens it as a
+                // real turn, in one process.
+                (None, false) => {
+                    tui.push(format!("--prompt '{}'", escaped_prompt));
+                    command(tui)
+                }
+                // A resumed conversation: the TUI accepts `--prompt` and then
+                // silently discards it whenever it is also resuming a session
+                // (measured on 1.18.15, both flag orders, and with `--continue`
+                // and `--fork` in place of `--session`). So the turn is
+                // delivered first by a headless `run` against that same session
+                // id, and the TUI then attaches to the conversation it just
+                // extended. `;` rather than `&&`: if the seeding turn fails, the
+                // operator should still get a live composer to recover in.
+                (Some(session), false) => {
+                    let mut seed = vec![executable.clone(), "run".to_string()];
+                    seed.extend(flags);
+                    seed.push(session.clone());
+                    seed.push(format!("'{}'", escaped_prompt));
+                    format!("{}; {}", command(seed), command(tui))
+                }
+                (_, true) => command(tui),
             }
-            if let Some(env_prefix) = opencode_mcp_env_prefix(mcp_config_path) {
-                parts.insert(0, env_prefix);
-            }
-            parts.extend(flags);
-            if !prompt.is_empty() {
-                parts.push(format!("'{}'", escaped_prompt));
-            }
-            parts.join(" ")
         }
         AgentProvider::Antigravity => {
             let mut flags = get_agent_permission_flags(*provider, permission_mode);
@@ -228,9 +262,16 @@ fn extend_codex_mcp_flags(flags: &mut Vec<String>, mcp_config_path: Option<&str>
     }
 }
 
-fn opencode_mcp_env_prefix(mcp_config_path: Option<&str>) -> Option<String> {
-    let server = mcp_config_path.and_then(read_kanna_mcp_server)?;
-    let content = opencode_mcp_config_content(&server)?;
+/// Everything Kanna configures on an OpenCode spawn — MCP registration and the
+/// reasoning-effort variant — travels in this one env var, so it is composed
+/// once here rather than by two writers overwriting each other.
+fn opencode_config_env_prefix(
+    mcp_config_path: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Option<String> {
+    let server = mcp_config_path.and_then(read_kanna_mcp_server);
+    let content = opencode_config_content(server.as_ref(), model, effort)?;
     Some(format!(
         "OPENCODE_CONFIG_CONTENT='{}'",
         shell_single_quote(&content)
@@ -262,8 +303,15 @@ fn get_agent_permission_flags(
             // `tests/cli-contract/tests/live/codex-flags.test.ts`.
             Some(_) => vec!["--sandbox workspace-write".to_string()],
         },
+        // `--auto` is what `opencode --help` and `opencode run --help` document
+        // on 1.18.15. `--dangerously-skip-permissions` still works — it is
+        // tolerated rather than removed — but it is undocumented on both
+        // entrypoints, and an undocumented flag is the one that disappears
+        // without notice. Verified equivalent on a live TUI: with either flag
+        // the permission dialog is suppressed and the tool call runs; with
+        // neither, the dialog blocks.
         AgentProvider::Opencode => match normalized {
-            None | Some("dontAsk") => vec!["--dangerously-skip-permissions".to_string()],
+            None | Some("dontAsk") => vec!["--auto".to_string()],
             Some(_) => Vec::new(),
         },
         AgentProvider::Antigravity => match normalized {

@@ -3270,18 +3270,147 @@ fn build_agent_command_registers_opencode_kanna_mcp_with_inline_config() {
     );
 
     assert!(command.contains("OPENCODE_CONFIG_CONTENT='"));
-    assert!(command.contains("'opencode' run --interactive"));
     assert!(command.contains("\"$schema\":\"https://opencode.ai/config.json\""));
     assert!(command
         .contains("\"mcp\":{\"kanna-mcp\":{\"command\":[\"/tmp/kanna mcp/kanna-mcp\",\"serve\"]"));
     assert!(command.contains("\"type\":\"local\""));
     assert!(command.contains("\"enabled\":true"));
     assert!(command.contains("\"KANNA_SERVER_BASE_URL\":\"http://127.0.0.1:48120\""));
-    assert!(command.contains("run --interactive"));
     assert!(command.contains("'Kanna preamble."));
     assert!(command.contains("Do work."));
 
     let _ = std::fs::remove_file(mcp_config);
+}
+
+/// `opencode run` streams plain text and exits when its first turn ends; only
+/// the CLI's default command draws the TUI that `send-input`, stage posts,
+/// revision resume and the transfer wrap-up all need a composer from.
+#[test]
+fn opencode_pty_command_launches_the_interactive_tui_not_a_one_shot_run() {
+    let command = super::build_agent_command(
+        &AgentProvider::Opencode,
+        AgentProvider::Opencode.executable(),
+        "Do work.",
+        Some("opencode/big-pickle"),
+        None,
+        Some("dontAsk"),
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    assert_eq!(
+        command,
+        "'opencode' --auto -m 'opencode/big-pickle' --prompt 'Do work.'"
+    );
+    assert!(!command.contains(" run "));
+    assert!(!command.contains("--interactive"));
+}
+
+/// The TUI entrypoint takes one `[project]` positional and no `--variant`, so a
+/// variant on the argv makes the CLI print usage and exit before drawing
+/// anything. Effort has to travel in the config env var instead.
+#[test]
+fn opencode_pty_command_carries_effort_in_the_config_not_on_the_argv() {
+    let command = super::build_agent_command(
+        &AgentProvider::Opencode,
+        AgentProvider::Opencode.executable(),
+        "Do work.",
+        Some("opencode/big-pickle"),
+        Some("high"),
+        Some("dontAsk"),
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    assert!(!command.contains("--variant"));
+    assert!(command.contains(
+        "\"agent\":{\"build\":{\"model\":\"opencode/big-pickle\",\"variant\":\"high\"}}"
+    ));
+    assert!(command.ends_with("--prompt 'Do work.'"));
+}
+
+/// A resumed OpenCode PTY session still has to come up as a TUI, or the
+/// revision round it was reopened for has nothing to type into either — but the
+/// TUI discards `--prompt` whenever it is also resuming a session, so the turn
+/// is seeded by a headless `run` against the same session id first.
+#[test]
+fn opencode_pty_resume_seeds_the_turn_then_attaches_the_tui_to_the_same_session() {
+    let session = ProviderSessionBinding::Resume("ses_123".to_string());
+    let command = super::build_agent_command(
+        &AgentProvider::Opencode,
+        AgentProvider::Opencode.executable(),
+        "Continue.",
+        None,
+        None,
+        Some("dontAsk"),
+        &[],
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&session),
+    );
+
+    assert_eq!(
+        command,
+        "'opencode' run --auto --session 'ses_123' 'Continue.'; \
+         'opencode' --auto --session 'ses_123'"
+    );
+    // The session id is the same on both halves: the seeding turn extends the
+    // conversation the TUI then attaches to, rather than forking a new one.
+    assert_eq!(command.matches("--session 'ses_123'").count(), 2);
+    // `--prompt` never appears on a resume: the TUI would drop it silently.
+    assert!(!command.contains("--prompt"));
+}
+
+/// `--dangerously-skip-permissions` has dropped out of both `opencode --help`
+/// and `opencode run --help` on 1.18.15; `--auto` is what they document. Every
+/// permission mode has to produce a command that comes up, so all three are
+/// walked rather than just the default.
+#[test]
+fn opencode_permission_modes_use_the_documented_bypass_spelling() {
+    let build = |permission_mode: Option<&str>| {
+        super::build_agent_command(
+            &AgentProvider::Opencode,
+            AgentProvider::Opencode.executable(),
+            "Do work.",
+            None,
+            None,
+            permission_mode,
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    };
+
+    for mode in [None, Some("default"), Some("dontAsk")] {
+        let command = build(mode);
+        assert_eq!(
+            command, "'opencode' --auto --prompt 'Do work.'",
+            "permission mode {mode:?}"
+        );
+    }
+    assert_eq!(build(Some("acceptEdits")), "'opencode' --prompt 'Do work.'");
+    assert!(!build(None).contains("--dangerously-skip-permissions"));
 }
 
 #[test]
