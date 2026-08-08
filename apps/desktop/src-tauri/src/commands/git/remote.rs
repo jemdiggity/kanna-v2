@@ -114,13 +114,46 @@ pub fn git_branch_upstream(repo_path: String) -> Result<Option<String>, String> 
         None => return Ok(None),
     };
 
-    // After `git push -u origin <task-branch>`, the upstream is the task branch's
-    // remote copy. That is not a useful diff base, so keep the persisted base_ref.
-    if upstream_name == branch_name || upstream_name.rsplit('/').next() == Some(branch_name) {
+    // After `git push -u <remote> <branch>`, the upstream is this branch's own
+    // remote copy. It carries the same commits, so a diff against it is empty —
+    // keep the persisted base_ref instead.
+    if upstream_is_own_remote_copy(&repo, head.name(), branch_name, &upstream_name) {
         return Ok(None);
     }
 
     Ok(Some(upstream_name))
+}
+
+/// Whether `upstream_name` is only `branch_name` published on a remote. The
+/// comparison strips the remote name rather than the last path segment: the PR
+/// stage renames task branches to names like `fix/diff-base`, whose remote copy
+/// `origin/fix/diff-base` shares no single-segment suffix with the branch.
+fn upstream_is_own_remote_copy(
+    repo: &Repository,
+    branch_ref: Option<&str>,
+    branch_name: &str,
+    upstream_name: &str,
+) -> bool {
+    if upstream_name == branch_name {
+        return true;
+    }
+    upstream_remote_names(repo, branch_ref)
+        .iter()
+        .any(|remote| upstream_name == format!("{}/{}", remote, branch_name))
+}
+
+/// The branch's configured upstream remote, falling back to every configured
+/// remote when the branch has no readable `branch.<name>.remote` entry.
+fn upstream_remote_names(repo: &Repository, branch_ref: Option<&str>) -> Vec<String> {
+    if let Some(remote) = branch_ref
+        .and_then(|refname| repo.branch_upstream_remote(refname).ok())
+        .and_then(|buf| buf.as_str().map(str::to_string))
+    {
+        return vec![remote];
+    }
+    repo.remotes()
+        .map(|remotes| remotes.iter().flatten().map(str::to_string).collect())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -310,32 +343,40 @@ mod tests {
         assert!(refs.contains(&"origin/main".to_string()));
     }
 
-    #[test]
-    fn git_branch_upstream_returns_non_task_tracking_branch() {
-        let temp_repo = TempRepo::new("upstream-base");
+    /// Checks out `branch` tracking `<remote>/<remote_branch>`, so each
+    /// upstream case differs only in those names.
+    fn upstream_fixture(prefix: &str, branch: &str, remote: &str, remote_branch: &str) -> TempRepo {
+        let temp_repo = TempRepo::new(prefix);
         let repo = Repository::init(&temp_repo.path).expect("repo should initialize");
         let commit_id = create_commit(&repo, &temp_repo.path);
         let commit = repo
             .find_commit(commit_id)
             .expect("commit should be readable");
 
-        repo.branch("task-123", &commit, false)
+        repo.branch(branch, &commit, false)
             .expect("task branch should exist");
+        repo.remote(remote, "https://example.com/repo.git")
+            .expect("remote should exist");
         repo.reference(
-            "refs/remotes/origin/release",
+            &format!("refs/remotes/{}/{}", remote, remote_branch),
             commit_id,
             true,
-            "create origin release tracking ref",
+            "create remote tracking ref",
         )
-        .expect("origin/release should exist");
-        repo.remote("origin", "https://example.com/repo.git")
-            .expect("origin remote should exist");
-        repo.find_branch("task-123", git2::BranchType::Local)
+        .expect("remote tracking ref should exist");
+        repo.find_branch(branch, git2::BranchType::Local)
             .expect("task branch should be readable")
-            .set_upstream(Some("origin/release"))
+            .set_upstream(Some(&format!("{}/{}", remote, remote_branch)))
             .expect("task branch upstream should be set");
-        repo.set_head("refs/heads/task-123")
+        repo.set_head(&format!("refs/heads/{}", branch))
             .expect("HEAD should point at task branch");
+
+        temp_repo
+    }
+
+    #[test]
+    fn git_branch_upstream_returns_non_task_tracking_branch() {
+        let temp_repo = upstream_fixture("upstream-base", "task-123", "origin", "release");
 
         let upstream = git_branch_upstream(temp_repo.path.to_string_lossy().into_owned())
             .expect("upstream lookup should succeed");
@@ -345,34 +386,58 @@ mod tests {
 
     #[test]
     fn git_branch_upstream_ignores_task_branch_remote_copy() {
-        let temp_repo = TempRepo::new("upstream-task-copy");
-        let repo = Repository::init(&temp_repo.path).expect("repo should initialize");
-        let commit_id = create_commit(&repo, &temp_repo.path);
-        let commit = repo
-            .find_commit(commit_id)
-            .expect("commit should be readable");
-
-        repo.branch("task-123", &commit, false)
-            .expect("task branch should exist");
-        repo.reference(
-            "refs/remotes/origin/task-123",
-            commit_id,
-            true,
-            "create origin task tracking ref",
-        )
-        .expect("origin/task-123 should exist");
-        repo.remote("origin", "https://example.com/repo.git")
-            .expect("origin remote should exist");
-        repo.find_branch("task-123", git2::BranchType::Local)
-            .expect("task branch should be readable")
-            .set_upstream(Some("origin/task-123"))
-            .expect("task branch upstream should be set");
-        repo.set_head("refs/heads/task-123")
-            .expect("HEAD should point at task branch");
+        let temp_repo = upstream_fixture("upstream-task-copy", "task-123", "origin", "task-123");
 
         let upstream = git_branch_upstream(temp_repo.path.to_string_lossy().into_owned())
             .expect("upstream lookup should succeed");
 
         assert_eq!(upstream, None);
+    }
+
+    #[test]
+    fn git_branch_upstream_ignores_renamed_branch_remote_copy() {
+        // The PR stage renames the task branch before pushing it, so the
+        // remote copy is `origin/fix/diff-base`, not `origin/task-123`.
+        let temp_repo = upstream_fixture(
+            "upstream-renamed-copy",
+            "fix/diff-base",
+            "origin",
+            "fix/diff-base",
+        );
+
+        let upstream = git_branch_upstream(temp_repo.path.to_string_lossy().into_owned())
+            .expect("upstream lookup should succeed");
+
+        assert_eq!(upstream, None);
+    }
+
+    #[test]
+    fn git_branch_upstream_ignores_remote_copy_on_a_non_origin_remote() {
+        let temp_repo = upstream_fixture(
+            "upstream-fork-copy",
+            "fix/diff-base",
+            "fork",
+            "fix/diff-base",
+        );
+
+        let upstream = git_branch_upstream(temp_repo.path.to_string_lossy().into_owned())
+            .expect("upstream lookup should succeed");
+
+        assert_eq!(upstream, None);
+    }
+
+    #[test]
+    fn git_branch_upstream_keeps_base_branch_sharing_the_branch_name_suffix() {
+        let temp_repo = upstream_fixture(
+            "upstream-suffix-base",
+            "task-123",
+            "origin",
+            "release/task-123",
+        );
+
+        let upstream = git_branch_upstream(temp_repo.path.to_string_lossy().into_owned())
+            .expect("upstream lookup should succeed");
+
+        assert_eq!(upstream, Some("origin/release/task-123".to_string()));
     }
 }

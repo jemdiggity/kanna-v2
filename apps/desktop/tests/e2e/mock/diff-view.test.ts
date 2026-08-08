@@ -1459,6 +1459,53 @@ describe("diff view", () => {
     }
   });
 
+  it("keeps the Branch diff on the task's own base after the PR stage renames and pushes the branch", async () => {
+    const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
+    const taskBranch = await getSelectedTaskBranch();
+    const prBranch = "fix/e2e-pr-stage-rename";
+
+    // The PR stage renames the task branch to a meaningful name and pushes it,
+    // which points the branch upstream at its own remote copy. That copy holds
+    // the same commits, so it must not become the diff base.
+    await tauriInvoke(client, "run_script", {
+      script: [
+        "cat > e2e-pr-rename-committed.txt <<'EOF'",
+        "pr rename committed marker",
+        "EOF",
+        "git add e2e-pr-rename-committed.txt",
+        "git commit -m 'e2e pr rename committed content'",
+        `git branch -m ${prBranch}`,
+        "git push -u origin HEAD",
+      ].join("\n"),
+      cwd: worktreePath,
+      env: {},
+    });
+
+    try {
+      await openDiffModal(client);
+      await setDiffScope(client, "Branch");
+
+      const branchText = await waitForDiffText(
+        client,
+        `return text.includes("pr rename committed marker");`,
+      );
+      expect(branchText).toContain("pr rename committed marker");
+    } finally {
+      await tauriInvoke(client, "run_script", {
+        script: [
+          `git push origin --delete ${prBranch} || true`,
+          `git branch -m ${taskBranch}`,
+          "git branch --unset-upstream || true",
+          "git reset --hard HEAD",
+          "if [ \"$(git log -1 --pretty=%s)\" = 'e2e pr rename committed content' ]; then git reset --hard HEAD~1; fi",
+          "git clean -fd -- e2e-pr-rename-committed.txt",
+        ].join("\n"),
+        cwd: worktreePath,
+        env: {},
+      });
+    }
+  });
+
   it("sends pending review comments as a request-revision prompt and approves via advance-stage", async () => {
     const taskId = await client.executeSync<string>(
       `const ctx = window.__KANNA_E2E__.setupState;
