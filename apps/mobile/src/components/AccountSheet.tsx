@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import {
   KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -12,6 +13,8 @@ import {
 import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import type { AuthState } from "../state/sessionStore";
 import { getAccountBadgePresentation } from "./accountBadgePresentation";
+
+export const CLOUD_ACCESS_REQUEST_URL = "https://kanna.build/support";
 
 interface AccountSheetProps {
   auth: AuthState;
@@ -131,6 +134,19 @@ export function AccountSheet({
             </Pressable>
           ) : (
             <View style={styles.form}>
+              <Text style={styles.accessNotice}>
+                Cloud access is invite-only.{" "}
+                <Text
+                  accessibilityLabel="Request cloud access"
+                  accessibilityRole="link"
+                  onPress={() => {
+                    void Linking.openURL(CLOUD_ACCESS_REQUEST_URL);
+                  }}
+                  style={styles.accessNoticeLink}
+                >
+                  Request access.
+                </Text>
+              </Text>
               <TextInput
                 autoCapitalize="none"
                 keyboardType="email-address"
@@ -265,6 +281,15 @@ const styles = StyleSheet.create({
   },
   form: {
     gap: 12
+  },
+  accessNotice: {
+    color: "#9EB0CA",
+    fontSize: 13,
+    lineHeight: 18
+  },
+  accessNoticeLink: {
+    color: "#8EADD8",
+    fontWeight: "800"
   },
   machinesRow: {
     alignItems: "center",

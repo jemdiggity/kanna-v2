@@ -4,6 +4,7 @@ const reactState = vi.hoisted(() => ({
   index: 0,
   values: [] as unknown[]
 }));
+const openUrl = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 
 vi.mock("react", async (importActual) => {
   const actual = await importActual<typeof import("react")>();
@@ -33,6 +34,9 @@ vi.mock("react", async (importActual) => {
 
 vi.mock("react-native", () => ({
   KeyboardAvoidingView: "KeyboardAvoidingView",
+  Linking: {
+    openURL: openUrl
+  },
   Modal: "Modal",
   Platform: {
     OS: "ios"
@@ -47,15 +51,18 @@ vi.mock("react-native", () => ({
 }));
 
 let AccountSheet: typeof import("./AccountSheet").AccountSheet | null = null;
+let cloudAccessRequestUrl = "";
 
 beforeAll(async () => {
   const module = await import("./AccountSheet");
   AccountSheet = module.AccountSheet;
+  cloudAccessRequestUrl = module.CLOUD_ACCESS_REQUEST_URL;
 });
 
 beforeEach(() => {
   reactState.index = 0;
   reactState.values = [];
+  openUrl.mockClear();
 });
 
 interface ElementNode {
@@ -158,6 +165,21 @@ function textContent(
 }
 
 describe("AccountSheet", () => {
+  it("explains invite-only cloud access and links to request access", () => {
+    const tree = renderSignedOutSheet();
+    const requestAccessLink = findNodeByAccessibilityLabel(
+      tree,
+      "Request cloud access"
+    );
+
+    expect(textContent(tree)).toContain("Cloud access is invite-only. Request access.");
+    expect(requestAccessLink?.props?.accessibilityRole).toBe("link");
+
+    requestAccessLink?.props?.onPress?.();
+
+    expect(openUrl).toHaveBeenCalledWith(cloudAccessRequestUrl);
+  });
+
   it("lifts the sign-in drawer above the iOS keyboard", () => {
     const tree = renderSignedOutSheet();
     const keyboardAvoider = findNodeByType(tree, "KeyboardAvoidingView");
