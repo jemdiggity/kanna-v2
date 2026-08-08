@@ -77,7 +77,11 @@ export function MachinesScreen(props: MachinesScreenProps) {
         {props.machines.length === 0 ? (
           <View style={styles.empty}>
             <Text style={styles.emptyTitle}>No machines added</Text>
-            <Text style={styles.emptyDetail}>Sign in to discover account machines, or add one with a pairing code.</Text>
+            <Text style={styles.emptyDetail}>
+              Install Kanna for macOS from kanna.build, then tap Add and scan
+              its pairing QR code to connect over your local network. Cloud
+              sign-in for remote access is separate and optional.
+            </Text>
           </View>
         ) : null}
       </ScrollView>
