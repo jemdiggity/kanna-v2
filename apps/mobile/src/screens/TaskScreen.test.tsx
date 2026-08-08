@@ -774,10 +774,15 @@ describe("TaskScreen", () => {
 
     expect(findByTestId(tree, "mobile.visual-companion.button")?.props)
       .toMatchObject({
-        accessibilityLabel: "Visual companion ready",
-        accessibilityRole: "button"
+        accessibilityLabel: "Visual companion ready, new update",
+        accessibilityRole: "button",
+        accessibilityValue: { text: "unread" }
       });
-    expect(findByTestId(tree, "mobile.visual-companion.unread")).not.toBeNull();
+    expect(findByTestId(tree, "mobile.visual-companion.unread")?.props)
+      .toMatchObject({
+        accessible: false,
+        importantForAccessibility: "no-hide-descendants"
+      });
     expect(findByType(tree, "VisualCompanionModal")).toBeNull();
 
     pressByTestId(tree, "mobile.visual-companion.button");
@@ -789,6 +794,16 @@ describe("TaskScreen", () => {
     });
 
     expect(onCompanionOpenChange).toHaveBeenCalledWith(true);
+    expect(findByTestId(tree, "mobile.visual-companion.button")?.props)
+      .toMatchObject({
+        accessibilityLabel: "Visual companion ready",
+        accessibilityRole: "button"
+      });
+    expect(
+      findByTestId(tree, "mobile.visual-companion.button")?.props
+        ?.accessibilityValue
+    ).toBeUndefined();
+    expect(findByTestId(tree, "mobile.visual-companion.unread")).toBeNull();
     expect(findByType(tree, "VisualCompanionModal")?.props).toMatchObject({
       status: "available",
       snapshot: companionSnapshot

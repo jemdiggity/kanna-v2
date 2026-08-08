@@ -14,9 +14,12 @@
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{oneshot, Mutex, Notify};
@@ -32,6 +35,14 @@ const MAX_SIDECAR_STDOUT_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TRANSFER_EVENT_ENTRIES: usize = 256;
 const MAX_TRANSFER_EVENT_BYTES: usize = 8 * 1024 * 1024;
 
+/// Companion frames travel a lane of their own: a snapshot can approach the
+/// sidecar's 40 MiB IPC frame bound, which would evict the entire advisory log
+/// above, and a stale snapshot is worthless the moment a newer one exists.
+const COMPANION_IPC_FD_ENV: &str = "KANNA_TRANSFER_COMPANION_FD";
+const MAX_COMPANION_IPC_FRAME_BYTES: usize = 40 * 1024 * 1024;
+const MAX_COMPANION_EVENT_ENTRIES: usize = 1024;
+const MAX_COMPANION_EVENT_BYTES: usize = 64 * 1024 * 1024;
+
 type PendingRequests = Arc<StdMutex<HashMap<String, oneshot::Sender<Value>>>>;
 
 fn transfer_event_type(value: &Value) -> Option<&str> {
@@ -46,6 +57,7 @@ fn transfer_event_type(value: &Value) -> Option<&str> {
             | "outgoing_transfer_committed"
             | "outgoing_transfer_finalization_requested"
             | "terminal_event"
+            | "sidecar_exited"
     )
     .then_some(event_type)
 }
@@ -262,6 +274,188 @@ const EVENT_WAIT_RECHECK: std::time::Duration = std::time::Duration::from_secs(5
 /// inbound tunnel bridge dials, so the two can never disagree. Peer identity
 /// and the transfer root are resolved by the desktop (it owns the Tauri app
 /// data dir and the machine name) and handed to the server at spawn.
+
+/// Frame classes whose older instances are superseded by a newer one for the
+/// same `(peer_id, task_id)`. Reliable classes (event results, errors) are
+/// never coalesced.
+fn companion_event_latest_key(value: &Value) -> Option<(String, String)> {
+    if value.get("type").and_then(Value::as_str) != Some("companion_event") {
+        return None;
+    }
+    let frame_type = value
+        .get("frame")
+        .and_then(|frame| frame.get("type"))
+        .and_then(Value::as_str)?;
+    if !matches!(frame_type, "companion_snapshot" | "companion_unavailable") {
+        return None;
+    }
+    let peer_id = value.get("peer_id").and_then(Value::as_str)?;
+    let task_id = value.get("task_id").and_then(Value::as_str)?;
+    Some((peer_id.to_string(), task_id.to_string()))
+}
+
+struct CompanionEventEntry {
+    seq: u64,
+    bytes: usize,
+    latest_key: Option<(String, String)>,
+    event: Value,
+}
+
+#[derive(Default)]
+struct CompanionEventLogInner {
+    entries: VecDeque<CompanionEventEntry>,
+    bytes: usize,
+    next_seq: u64,
+    evicted_through_seq: u64,
+}
+
+/// Single-consumer log of companion frames read by the desktop over
+/// `GET /v1/transfers/sidecar/companion-events`. Snapshot-class frames are
+/// latest-wins per `(peer_id, task_id)`; reliable frames queue in order under
+/// the byte budget, evicting oldest with `missedEvents` reporting like the
+/// advisory log.
+pub struct CompanionEventLog {
+    stream_id: String,
+    inner: StdMutex<CompanionEventLogInner>,
+    appended: Notify,
+}
+
+impl Default for CompanionEventLog {
+    fn default() -> Self {
+        Self {
+            stream_id: new_transfer_event_stream_id(),
+            inner: StdMutex::new(CompanionEventLogInner::default()),
+            appended: Notify::new(),
+        }
+    }
+}
+
+impl CompanionEventLog {
+    fn lock(&self) -> std::sync::MutexGuard<'_, CompanionEventLogInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn append(&self, event: Value) {
+        let bytes = serde_json::to_vec(&event).map(|raw| raw.len()).unwrap_or(0);
+        let latest_key = companion_event_latest_key(&event);
+        let mut inner = self.lock();
+        if let Some(key) = &latest_key {
+            // A newer snapshot-class frame supersedes any queued one for the
+            // same attachment; superseding is not a missed event.
+            let mut removed = 0usize;
+            inner.entries.retain(|entry| {
+                if entry.latest_key.as_ref() == Some(key) {
+                    removed += entry.bytes;
+                    false
+                } else {
+                    true
+                }
+            });
+            inner.bytes = inner.bytes.saturating_sub(removed);
+        }
+        while inner.entries.len() >= MAX_COMPANION_EVENT_ENTRIES
+            || inner.bytes.saturating_add(bytes) > MAX_COMPANION_EVENT_BYTES
+        {
+            let Some(evicted) = inner.entries.pop_front() else {
+                break;
+            };
+            inner.bytes = inner.bytes.saturating_sub(evicted.bytes);
+            inner.evicted_through_seq = inner.evicted_through_seq.max(evicted.seq);
+        }
+        inner.next_seq += 1;
+        let seq = inner.next_seq;
+        inner.bytes = inner.bytes.saturating_add(bytes);
+        inner.entries.push_back(CompanionEventEntry {
+            seq,
+            bytes,
+            latest_key,
+            event,
+        });
+        drop(inner);
+        self.appended.notify_waiters();
+    }
+
+    pub fn read(
+        &self,
+        cursor: Option<u64>,
+        stream_id: Option<&str>,
+        limit: usize,
+    ) -> TransferEventBatch {
+        let mut inner = self.lock();
+        let stale_cursor = cursor.is_some() && stream_id.is_some_and(|id| id != self.stream_id);
+        let after_seq = if stale_cursor { 0 } else { cursor.unwrap_or(0) };
+        let missed_events =
+            stale_cursor || cursor.is_some_and(|seq| seq < inner.evicted_through_seq);
+        while inner
+            .entries
+            .front()
+            .is_some_and(|entry| entry.seq <= after_seq)
+        {
+            if let Some(entry) = inner.entries.pop_front() {
+                inner.bytes = inner.bytes.saturating_sub(entry.bytes);
+            }
+        }
+        let mut events = Vec::new();
+        let mut batch_cursor = after_seq.max(
+            inner
+                .entries
+                .front()
+                .map(|entry| entry.seq.saturating_sub(1))
+                .unwrap_or(inner.next_seq),
+        );
+        for entry in inner.entries.iter().take(limit) {
+            events.push(json!({
+                "seq": entry.seq,
+                "event": entry.event,
+            }));
+            batch_cursor = entry.seq;
+        }
+        let has_more = inner.entries.len() > events.len();
+        drop(inner);
+        TransferEventBatch {
+            events,
+            cursor: batch_cursor,
+            stream_id: self.stream_id.clone(),
+            has_more,
+            missed_events,
+        }
+    }
+
+    /// Same armed-wake-up contract as [`TransferEventLog::wait_for_events`]:
+    /// an append landing between the read and the await must wake this call.
+    pub async fn wait_for_events(
+        &self,
+        cursor: Option<u64>,
+        stream_id: Option<&str>,
+        limit: usize,
+        timeout: Duration,
+    ) -> TransferEventBatch {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut cursor = cursor;
+        let mut stream_id = stream_id.map(str::to_string);
+        let mut missed_events = false;
+        loop {
+            let mut appended = Box::pin(self.appended.notified());
+            appended.as_mut().enable();
+            let mut batch = self.read(cursor, stream_id.as_deref(), limit);
+            missed_events |= batch.missed_events;
+            if !batch.events.is_empty() {
+                batch.missed_events = missed_events;
+                return batch;
+            }
+            cursor = Some(batch.cursor);
+            stream_id = Some(batch.stream_id.clone());
+            if tokio::time::timeout_at(deadline, appended).await.is_err() {
+                let mut batch = self.read(cursor, stream_id.as_deref(), limit);
+                batch.missed_events |= missed_events;
+                return batch;
+            }
+        }
+    }
+}
+
 pub fn build_transfer_sidecar_env(
     config: &crate::config::Config,
 ) -> Result<Vec<(String, String)>, String> {
@@ -332,6 +526,10 @@ pub struct TransferSidecarClient {
     pending: PendingRequests,
     dead: Arc<AtomicBool>,
     request_counter: AtomicU64,
+    /// Monotonic spawn counter from the supervisor. Companion frames and the
+    /// `sidecar_exited` advisory event carry it so the desktop can fence
+    /// frames from a sidecar that has since been replaced.
+    incarnation: u64,
 }
 
 impl TransferSidecarClient {
@@ -339,10 +537,29 @@ impl TransferSidecarClient {
         sidecar_path: &std::path::Path,
         env: Vec<(String, String)>,
         events: Arc<TransferEventLog>,
+        companion_events: Arc<CompanionEventLog>,
         work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
+        incarnation: u64,
     ) -> Result<Self, String> {
+        let (companion_parent, companion_child) = StdUnixStream::pair()
+            .map_err(|error| format!("failed to create transfer companion IPC: {error}"))?;
+        companion_parent
+            .set_nonblocking(true)
+            .map_err(|error| format!("failed to configure transfer companion IPC: {error}"))?;
+        let companion_child_fd = companion_child.as_raw_fd();
+        // The child inherits the socket only if close-on-exec is cleared on
+        // its end before the exec.
+        unsafe {
+            let flags = libc::fcntl(companion_child_fd, libc::F_GETFD);
+            if flags < 0
+                || libc::fcntl(companion_child_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+            {
+                return Err("failed to share transfer companion IPC with the sidecar".to_string());
+            }
+        }
         let mut child = Command::new(sidecar_path)
             .envs(env)
+            .env(COMPANION_IPC_FD_ENV, companion_child_fd.to_string())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
@@ -351,7 +568,11 @@ impl TransferSidecarClient {
             // bind the port it was spawned to own.
             .kill_on_drop(true)
             .spawn()
-            .map_err(|error| format!("failed to spawn transfer sidecar: {error}"))?;
+            .map_err(|error| {
+                // Safety net: the fd flag change below never ran, so only the
+                // spawn error itself needs reporting.
+                format!("failed to spawn transfer sidecar: {error}")
+            })?;
 
         let stdin = child
             .stdin
@@ -361,6 +582,9 @@ impl TransferSidecarClient {
             .stdout
             .take()
             .ok_or_else(|| "transfer sidecar stdout unavailable".to_string())?;
+        drop(companion_child);
+        let companion_stream = tokio::net::UnixStream::from_std(companion_parent)
+            .map_err(|error| format!("failed to adopt transfer companion IPC: {error}"))?;
         let pending: PendingRequests = Arc::new(StdMutex::new(HashMap::new()));
         let dead = Arc::new(AtomicBool::new(false));
         // Identifies this sidecar process. The pull request ids it mints count
@@ -371,9 +595,17 @@ impl TransferSidecarClient {
             stdout,
             Arc::clone(&pending),
             Arc::clone(&dead),
-            events,
+            Arc::clone(&events),
             work,
             crate::transfer_engine::queue::unique_work_nonce(),
+            incarnation,
+        );
+        spawn_companion_reader(
+            companion_stream,
+            companion_events,
+            Arc::clone(&dead),
+            events,
+            incarnation,
         );
 
         Ok(Self {
@@ -382,7 +614,12 @@ impl TransferSidecarClient {
             pending,
             dead,
             request_counter: AtomicU64::new(1),
+            incarnation,
         })
+    }
+
+    pub fn incarnation(&self) -> u64 {
+        self.incarnation
     }
 
     pub fn is_dead(&self) -> bool {
@@ -493,6 +730,7 @@ fn spawn_reader(
     events: Arc<TransferEventLog>,
     work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
     incarnation: String,
+    process_incarnation: u64,
 ) {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
@@ -568,6 +806,66 @@ fn spawn_reader(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
+        // Tell the desktop this incarnation is gone so companion observers
+        // re-observe against the replacement instead of waiting on frames
+        // that will never arrive.
+        events.append(json!({
+            "type": "sidecar_exited",
+            "incarnation": process_incarnation,
+        }));
+    });
+}
+
+/// Reads length-prefixed companion frames from the sidecar's dedicated IPC
+/// socket into the companion log. Deserialization of a frame that can reach
+/// 40 MiB happens off the async worker.
+fn spawn_companion_reader(
+    mut stream: tokio::net::UnixStream,
+    companion_events: Arc<CompanionEventLog>,
+    dead: Arc<AtomicBool>,
+    _events: Arc<TransferEventLog>,
+    incarnation: u64,
+) {
+    use tokio::io::AsyncReadExt;
+    tokio::spawn(async move {
+        loop {
+            let length = match stream.read_u32().await {
+                Ok(length) => length as usize,
+                Err(_) => break,
+            };
+            if length == 0 || length > MAX_COMPANION_IPC_FRAME_BYTES {
+                log::error!(
+                    "transfer sidecar companion IPC frame length {length} is outside the                      1..={MAX_COMPANION_IPC_FRAME_BYTES} bound"
+                );
+                break;
+            }
+            let mut encoded = vec![0; length];
+            if stream.read_exact(&mut encoded).await.is_err() {
+                break;
+            }
+            let parsed =
+                tokio::task::spawn_blocking(move || serde_json::from_slice::<Value>(&encoded))
+                    .await;
+            let mut value = match parsed {
+                Ok(Ok(value)) => value,
+                Ok(Err(error)) => {
+                    log::error!("invalid transfer sidecar companion IPC frame: {error}");
+                    break;
+                }
+                Err(_) => break,
+            };
+            if value.get("type").and_then(Value::as_str) != Some("companion_event") {
+                log::error!("transfer sidecar companion IPC delivered a non-companion event");
+                break;
+            }
+            if dead.load(Ordering::Relaxed) {
+                break;
+            }
+            if let Some(object) = value.as_object_mut() {
+                object.insert("incarnation".to_string(), Value::from(incarnation));
+            }
+            companion_events.append(value);
+        }
     });
 }
 
@@ -577,6 +875,8 @@ pub struct TransferSidecarSupervisor {
     config: crate::config::Config,
     client: Mutex<Option<Arc<TransferSidecarClient>>>,
     events: Arc<TransferEventLog>,
+    companion_events: Arc<CompanionEventLog>,
+    incarnations: AtomicU64,
     work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
     /// Lets a router-level test stand a listener on the transfer port in place
     /// of a real sidecar without this supervisor trying to spawn one.
@@ -598,6 +898,8 @@ impl TransferSidecarSupervisor {
             config,
             client: Mutex::new(None),
             events: Arc::new(TransferEventLog::default()),
+            companion_events: Arc::new(CompanionEventLog::default()),
+            incarnations: AtomicU64::new(0),
             work,
             #[cfg(test)]
             externally_owned: AtomicBool::new(false),
@@ -646,6 +948,10 @@ impl TransferSidecarSupervisor {
         Arc::clone(&self.events)
     }
 
+    pub fn companion_events(&self) -> Arc<CompanionEventLog> {
+        Arc::clone(&self.companion_events)
+    }
+
     pub async fn ensure_running(&self) -> Result<Arc<TransferSidecarClient>, String> {
         let mut guard = self.client.lock().await;
         if guard.as_ref().is_some_and(|client| client.is_dead()) {
@@ -656,7 +962,9 @@ impl TransferSidecarSupervisor {
                 &self.sidecar_binary()?,
                 build_transfer_sidecar_env(&self.config)?,
                 Arc::clone(&self.events),
+                Arc::clone(&self.companion_events),
                 Arc::clone(&self.work),
+                self.incarnations.fetch_add(1, Ordering::Relaxed) + 1,
             )?));
         }
         guard
@@ -1060,9 +1368,29 @@ done
         assert_ne!(after[0], after[1], "the respawn must be a new process");
 
         // Both incarnations wrote into the one event log the desktop polls, so
-        // a respawn does not silently reset the stream the cursor tracks.
+        // a respawn does not silently reset the stream the cursor tracks — and
+        // the crash itself is announced so companion observers re-observe.
         let batch = supervisor.events().read(None, None, 10);
-        assert_eq!(batch.events.len(), 2);
+        let kinds: Vec<_> = batch
+            .events
+            .iter()
+            .map(|entry| {
+                entry["event"]["type"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            kinds.iter().filter(|kind| *kind == "sidecar_exited").count(),
+            1,
+            "the crashed incarnation must be announced exactly once: {kinds:?}"
+        );
+        assert_eq!(
+            kinds.iter().filter(|kind| *kind != "sidecar_exited").count(),
+            2,
+            "both incarnations' advisory events must survive the respawn: {kinds:?}"
+        );
 
         clear_identity_env();
         let _ = std::fs::remove_dir_all(&root);

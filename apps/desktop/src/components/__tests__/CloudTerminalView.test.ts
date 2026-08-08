@@ -1,44 +1,92 @@
 // @vitest-environment happy-dom
 
-import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mount } from "@vue/test-utils";
+import { nextTick } from "vue";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import CloudTerminalView from "../CloudTerminalView.vue";
 
-const harness = vi.hoisted(() => ({
-  clientFactory: vi.fn(),
-  dataListener: null as ((data: string) => void) | null,
-  sendInput: vi.fn(),
-  subscriptionListener: null as ((event: Record<string, unknown>) => void) | null,
-}));
+type LinkHandler = (event: MouseEvent, uri: string) => void;
 
-vi.mock("@xterm/xterm", () => ({
-  Terminal: class {
+const testState = vi.hoisted(() => {
+  class FakeTerminal {
     cols = 80;
     rows = 24;
-    options = {};
-    onData(listener: (data: string) => void) {
-      harness.dataListener = listener;
-      return { dispose() {} };
+    options: Record<string, unknown>;
+    dataHandler: ((data: string) => void) | null = null;
+    loadedAddons: unknown[] = [];
+    dispose = vi.fn();
+    loadAddon = vi.fn((addon: unknown) => {
+      this.loadedAddons.push(addon);
+    });
+    onData = vi.fn((handler: (data: string) => void) => {
+      this.dataHandler = handler;
+    });
+    open = vi.fn();
+    reset = vi.fn();
+    write = vi.fn();
+
+    constructor(options: Record<string, unknown>) {
+      this.options = { ...options };
     }
-    loadAddon() {}
-    open() {}
-    reset() {}
-    write() {}
-    dispose() {}
-  },
+  }
+
+  class FakeFitAddon {
+    fit = vi.fn();
+  }
+
+  class FakeWebLinksAddon {
+    constructor(readonly handler: LinkHandler) {}
+  }
+
+  return {
+    relayFactory: vi.fn(),
+    lanFactory: vi.fn(),
+    adoptRemote: vi.fn(),
+    openForClickedLink: vi.fn(),
+    openCurrent: vi.fn(),
+    openUrl: vi.fn(),
+    toastInfo: vi.fn(),
+    toastError: vi.fn(),
+    terminalBufferUnregister: vi.fn(),
+    ownershipRelease: vi.fn(),
+    terminals: [] as FakeTerminal[],
+    webLinksAddons: [] as FakeWebLinksAddon[],
+    resizeCallbacks: [] as ResizeObserverCallback[],
+    effectiveCodeTheme: null as import("vue").Ref<string> | null,
+    FakeTerminal,
+    FakeFitAddon,
+    FakeWebLinksAddon,
+  };
+});
+
+const mocks = testState;
+
+vi.mock("@xterm/xterm", () => ({
+  Terminal: vi.fn(function TerminalMock(options: Record<string, unknown>) {
+    const terminal = new testState.FakeTerminal(options);
+    testState.terminals.push(terminal);
+    return terminal;
+  }),
 }));
 
 vi.mock("@xterm/addon-fit", () => ({
-  FitAddon: class {
-    fit() {}
-  },
+  FitAddon: testState.FakeFitAddon,
+}));
+
+vi.mock("@xterm/addon-web-links", () => ({
+  WebLinksAddon: vi.fn(function WebLinksAddonMock(handler: LinkHandler) {
+    const addon = new testState.FakeWebLinksAddon(handler);
+    testState.webLinksAddons.push(addon);
+    return addon;
+  }),
+}));
+
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  openUrl: testState.openUrl,
 }));
 
 vi.mock("../../services/desktopRelayTerminal", () => ({
-  createConfiguredDesktopRelayTerminalClient: harness.clientFactory,
-}));
-
-vi.mock("../../services/desktopLanTerminal", () => ({
-  createConfiguredDesktopLanTerminalClient: vi.fn(),
+  createConfiguredDesktopRelayTerminalClient: testState.relayFactory,
 }));
 
 vi.mock("../../composables/remoteTerminalFileLinks", () => ({
@@ -48,211 +96,478 @@ vi.mock("../../composables/remoteTerminalFileLinks", () => ({
   }),
 }));
 
-vi.mock("../../theme/runtime", () => ({
-  useThemeRuntime: () => ({ effectiveCodeTheme: { __v_isRef: true, value: "dark" } }),
+vi.mock("../../services/desktopLanTerminal", () => ({
+  createConfiguredDesktopLanTerminalClient: testState.lanFactory,
 }));
 
+vi.mock("../../services/desktopCompanionBridge", () => ({
+  desktopCompanionRemoteKey: (desktopId: string, taskId: string) =>
+    JSON.stringify([desktopId, taskId]),
+  getDesktopCompanionBridgeManager: () => ({
+    adoptRemote: testState.adoptRemote,
+    openForClickedLink: testState.openForClickedLink,
+    openCurrent: testState.openCurrent,
+  }),
+}));
+
+vi.mock("../../composables/useToast", () => ({
+  useToast: () => ({
+    info: testState.toastInfo,
+    error: testState.toastError,
+  }),
+}));
+
+vi.mock("vue-i18n", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("vue-i18n")>();
+  return {
+    ...actual,
+    useI18n: () => ({
+      t: (key: string) =>
+        ({
+          "toasts.remoteCompanionStarting": "Starting visual companion…",
+          "toasts.remoteCompanionOpenFailed": "Could not open visual companion.",
+          "visualCompanion.open": "Open visual companion",
+        })[key] ?? key,
+    }),
+  };
+});
+
+vi.mock("../../theme/runtime", async () => {
+  const { ref } = await vi.importActual<typeof import("vue")>("vue");
+  testState.effectiveCodeTheme = ref("dark");
+  return {
+    useThemeRuntime: () => ({
+      effectiveCodeTheme: testState.effectiveCodeTheme,
+    }),
+  };
+});
+
 vi.mock("../../theme/theme", () => ({
-  getTerminalTheme: () => ({}),
+  getTerminalTheme: (theme: string) => ({ theme }),
 }));
 
 vi.mock("../../e2eTerminalBuffers", () => ({
-  registerE2ETerminalBuffer: () => () => {},
+  registerE2ETerminalBuffer: vi.fn(() => testState.terminalBufferUnregister),
 }));
 
-function deferred<T = void>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
+interface FakeClient {
+  close: ReturnType<typeof vi.fn>;
+  observeCompanion: ReturnType<typeof vi.fn>;
+  observeTerminal: ReturnType<typeof vi.fn>;
+  sendInput: ReturnType<typeof vi.fn>;
+  resize: ReturnType<typeof vi.fn>;
+  closeTask: ReturnType<typeof vi.fn>;
+  advanceStage: ReturnType<typeof vi.fn>;
+  terminalClose: ReturnType<typeof vi.fn>;
 }
 
-function terminalClient(sendInput = harness.sendInput) {
+function createClient(): FakeClient {
+  const terminalClose = vi.fn();
   return {
     close: vi.fn(),
-    observeTerminal: vi.fn((options: {
-      taskId: string;
-      listener: (event: Record<string, unknown>) => void;
-    }) => {
-      harness.subscriptionListener = options.listener;
-      queueMicrotask(() => options.listener({ type: "ready", taskId: options.taskId }));
-      return { close: vi.fn() };
-    }),
-    sendInput,
+    observeCompanion: vi.fn(),
+    observeTerminal: vi.fn(() => ({ close: terminalClose })),
+    sendInput: vi.fn(async () => {}),
     resize: vi.fn(async () => {}),
-    readTaskFile: vi.fn(async () => ({ path: "", content: "" })),
+    closeTask: vi.fn(async () => {}),
+    advanceStage: vi.fn(async () => {}),
+    terminalClose,
   };
 }
 
-describe("CloudTerminalView", () => {
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushAsync() {
+  await Promise.resolve();
+  await nextTick();
+  await Promise.resolve();
+  await nextTick();
+}
+
+function clickTerminalLink(uri: string) {
+  const event = new MouseEvent("click", { cancelable: true });
+  testState.webLinksAddons.at(-1)?.handler(event, uri);
+  return event;
+}
+
+describe("CloudTerminalView remote visual companion links", () => {
+  const originalResizeObserver = globalThis.ResizeObserver;
+
   beforeEach(() => {
-    harness.clientFactory.mockReset();
-    harness.dataListener = null;
-    harness.subscriptionListener = null;
-    harness.sendInput.mockReset();
-    harness.clientFactory.mockImplementation(async () => terminalClient());
-    globalThis.ResizeObserver = class ResizeObserver {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    } as typeof ResizeObserver;
-  });
-
-  it("keeps one terminal input request in flight and preserves FIFO bytes", async () => {
-    const first = deferred();
-    const second = deferred();
-    harness.sendInput
-      .mockImplementationOnce(() => first.promise)
-      .mockImplementation(() => second.promise);
-    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
-    const wrapper = mount(CloudTerminalView, {
-      props: {
-        ownerDesktopId: "desktop-1",
-        ownerTaskId: "task-1",
-        transport: "cloud",
-      },
-    });
-    await flushPromises();
-
-    harness.dataListener?.("a");
-    harness.dataListener?.("b");
-    harness.dataListener?.("c");
-    await flushPromises();
-
-    expect(harness.sendInput).toHaveBeenCalledTimes(1);
-    expect(harness.sendInput.mock.calls[0]?.[0]).toMatchObject({ data: "a" });
-
-    first.resolve();
-    await flushPromises();
-
-    expect(harness.sendInput).toHaveBeenCalledTimes(2);
-    expect(
-      harness.sendInput.mock.calls.map(([request]) => request.data).join(""),
-    ).toBe("abc");
-
-    second.resolve();
-    wrapper.unmount();
-  });
-
-  it("chunks the largest accepted paste into wire-safe UTF-8 input frames", async () => {
-    harness.sendInput.mockResolvedValue(undefined);
-    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
-    const wrapper = mount(CloudTerminalView, {
-      props: {
-        ownerDesktopId: "desktop-1",
-        ownerTaskId: "task-1",
-        transport: "cloud",
-      },
-    });
-    await flushPromises();
-    const paste = "界".repeat(64 * 1024);
-
-    harness.dataListener?.(paste);
-    await vi.waitFor(() => {
-      const sent = harness.sendInput.mock.calls
-        .map(([request]) => request.data)
-        .join("");
-      expect(sent).toBe(paste);
-    });
-
-    expect(harness.sendInput.mock.calls.length).toBeGreaterThan(1);
-    for (const [request] of harness.sendInput.mock.calls) {
-      expect(new TextEncoder().encode(request.data).byteLength).toBeLessThanOrEqual(4 * 1024);
+    testState.terminals.length = 0;
+    testState.webLinksAddons.length = 0;
+    testState.resizeCallbacks.length = 0;
+    if (testState.effectiveCodeTheme) {
+      testState.effectiveCodeTheme.value = "dark";
     }
-    wrapper.unmount();
+    vi.clearAllMocks();
+    mocks.adoptRemote.mockReturnValue({ release: mocks.ownershipRelease });
+    mocks.openForClickedLink.mockResolvedValue({
+      kind: "companion",
+      bridgeId: "bridge-1",
+    });
+    mocks.openCurrent.mockResolvedValue({
+      kind: "companion",
+      bridgeId: "bridge-1",
+    });
+    mocks.openUrl.mockResolvedValue(undefined);
+    globalThis.ResizeObserver = class ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        testState.resizeCallbacks.push(callback);
+      }
+      observe = vi.fn();
+      disconnect = vi.fn();
+    } as unknown as typeof ResizeObserver;
   });
 
-  it("keeps a failed input queue in error through later output and rebuilds it on retry", async () => {
-    harness.sendInput
-      .mockRejectedValueOnce(new Error("peer frame rejected"))
-      .mockResolvedValue(undefined);
-    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+  afterEach(() => {
+    globalThis.ResizeObserver = originalResizeObserver;
+  });
+
+  it("adopts the relay transport and routes terminal web links through the companion manager", async () => {
+    const client = createClient();
+    mocks.relayFactory.mockResolvedValue(client);
+
     const wrapper = mount(CloudTerminalView, {
       props: {
         ownerDesktopId: "desktop-1",
         ownerTaskId: "task-1",
-        transport: "cloud",
       },
     });
-    await flushPromises();
+    await flushAsync();
 
-    harness.dataListener?.("first");
-    await flushPromises();
-    expect(wrapper.attributes("data-status")).toBe("error");
-
-    harness.subscriptionListener?.({
-      type: "output",
-      taskId: "task-1",
-      text: "late output",
+    expect(testState.webLinksAddons).toHaveLength(1);
+    expect(mocks.adoptRemote).toHaveBeenCalledWith({
+      remoteKey: '["desktop-1","task-1"]',
+      ownerDesktopId: "desktop-1",
+      ownerTaskId: "task-1",
+      transport: client,
     });
-    await flushPromises();
-    expect(wrapper.attributes("data-status")).toBe("error");
-
-    await wrapper.setProps({ ownerTaskId: "task-2" });
-    await flushPromises();
-    expect(wrapper.attributes("data-status")).toBe("live");
-    harness.dataListener?.("retry");
-    await flushPromises();
-
-    expect(harness.sendInput).toHaveBeenCalledTimes(2);
-    expect(harness.sendInput).toHaveBeenLastCalledWith({
+    expect(client.observeTerminal).toHaveBeenCalledWith(expect.objectContaining({
       desktopId: "desktop-1",
-      taskId: "task-2",
-      data: "retry",
-    });
+      taskId: "task-1",
+    }));
+    expect(client.observeCompanion).not.toHaveBeenCalled();
+
+    const event = clickTerminalLink("http://localhost:4173/preview");
+    await flushAsync();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(mocks.openForClickedLink).toHaveBeenCalledWith(
+      '["desktop-1","task-1"]',
+      "http://localhost:4173/preview",
+    );
+    expect(mocks.openUrl).not.toHaveBeenCalled();
+
     wrapper.unmount();
   });
 
-  it("closes a delayed client instead of installing it after route replacement", async () => {
-    const firstFactory = deferred<ReturnType<typeof terminalClient>>();
-    const staleClient = terminalClient();
-    const replacementClient = terminalClient();
-    harness.clientFactory
-      .mockImplementationOnce(() => firstFactory.promise)
-      .mockResolvedValueOnce(replacementClient);
-    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
+  it("opens an ordinary URL returned by the manager with the Tauri opener", async () => {
+    const client = createClient();
+    mocks.relayFactory.mockResolvedValue(client);
+    mocks.openForClickedLink.mockResolvedValue({
+      kind: "ordinary",
+      url: "https://example.com/docs",
+    });
     const wrapper = mount(CloudTerminalView, {
       props: {
         ownerDesktopId: "desktop-1",
         ownerTaskId: "task-1",
-        transport: "cloud",
       },
     });
-    await flushPromises();
+    await flushAsync();
 
-    await wrapper.setProps({ ownerTaskId: "task-2" });
-    await flushPromises();
-    firstFactory.resolve(staleClient);
-    await flushPromises();
+    clickTerminalLink("https://example.com/docs");
+    await flushAsync();
 
-    expect(staleClient.close).toHaveBeenCalledOnce();
+    expect(mocks.openUrl).toHaveBeenCalledWith("https://example.com/docs");
+    expect(mocks.toastInfo).not.toHaveBeenCalled();
+    expect(mocks.toastError).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("provides a labeled keyboard control that opens the current companion", async () => {
+    const client = createClient();
+    mocks.relayFactory.mockResolvedValue(client);
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+      },
+    });
+    await flushAsync();
+
+    const control = wrapper.get(
+      'button[aria-label="Open visual companion"]',
+    );
+    expect(control.element).toBeInstanceOf(HTMLButtonElement);
+    expect(control.attributes("type")).toBe("button");
+    await control.trigger("click");
+    await flushAsync();
+
+    expect(mocks.openCurrent).toHaveBeenCalledExactlyOnceWith(
+      '["desktop-1","task-1"]',
+    );
+    expect(mocks.openForClickedLink).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("shows a localized starting toast for an unavailable companion without opening its original URL", async () => {
+    const client = createClient();
+    mocks.relayFactory.mockResolvedValue(client);
+    mocks.openForClickedLink.mockResolvedValue({ kind: "unavailable" });
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+      },
+    });
+    await flushAsync();
+
+    clickTerminalLink("http://127.0.0.1:4173/");
+    await flushAsync();
+
+    expect(mocks.toastInfo).toHaveBeenCalledWith("Starting visual companion…");
+    expect(mocks.openUrl).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("ignores invalid URLs and sanitizes companion manager failures", async () => {
+    const client = createClient();
+    mocks.relayFactory.mockResolvedValue(client);
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+      },
+    });
+    await flushAsync();
+
+    mocks.openForClickedLink.mockResolvedValueOnce({ kind: "invalid" });
+    clickTerminalLink("javascript:alert(1)");
+    await flushAsync();
+    expect(mocks.openUrl).not.toHaveBeenCalled();
+    expect(mocks.toastError).not.toHaveBeenCalled();
+
+    mocks.openForClickedLink.mockRejectedValueOnce(
+      new Error("http://secret.localhost:49152/capability"),
+    );
+    clickTerminalLink("http://localhost:4173/");
+    await flushAsync();
+    expect(mocks.toastError).toHaveBeenCalledWith(
+      "Could not open visual companion.",
+    );
+
+    expect(mocks.toastError).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("keeps ordinary opener failures out of companion UI and logs no raw error detail", async () => {
+    const client = createClient();
+    mocks.relayFactory.mockResolvedValue(client);
+    mocks.openForClickedLink.mockResolvedValue({
+      kind: "ordinary",
+      url: "https://example.com/",
+    });
+    mocks.openUrl.mockRejectedValue(new Error("sensitive opener detail"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+      },
+    });
+    await flushAsync();
+
+    clickTerminalLink("https://example.com/");
+    await flushAsync();
+
+    expect(mocks.toastError).not.toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledWith(
+      "[cloud-terminal] Failed to open URL.",
+    );
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain(
+      "sensitive opener detail",
+    );
+    consoleError.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("releases manager ownership and closes only the terminal subscription on unmount", async () => {
+    const client = createClient();
+    mocks.relayFactory.mockResolvedValue(client);
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+      },
+    });
+    await flushAsync();
+
+    wrapper.unmount();
+
+    expect(client.terminalClose).toHaveBeenCalledTimes(1);
+    expect(mocks.ownershipRelease).toHaveBeenCalledTimes(1);
+    expect(client.close).not.toHaveBeenCalled();
+  });
+
+  it("closes a client when adoption fails before ownership transfers", async () => {
+    const client = createClient();
+    mocks.relayFactory.mockResolvedValue(client);
+    mocks.adoptRemote.mockImplementationOnce(() => {
+      throw new Error("adoption failed");
+    });
+
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-1",
+        ownerTaskId: "task-1",
+      },
+    });
+    await flushAsync();
+
+    expect(client.close).toHaveBeenCalledTimes(1);
+    expect(client.observeTerminal).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("uses the LAN client factory and preserves terminal input and resize behavior", async () => {
+    const client = createClient();
+    let terminalListener:
+      | ((event: { type: "ready"; taskId: string }) => void)
+      | undefined;
+    client.observeTerminal.mockImplementation((options) => {
+      terminalListener = options.listener;
+      return { close: client.terminalClose };
+    });
+    mocks.lanFactory.mockResolvedValue(client);
+
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "peer-1",
+        ownerTaskId: "task-2",
+        transport: "lan",
+      },
+    });
+    await flushAsync();
+    terminalListener?.({ type: "ready", taskId: "task-2" });
+    client.resize.mockClear();
+    testState.resizeCallbacks[0]?.([], {} as ResizeObserver);
+    testState.terminals[0]?.dataHandler?.("hello");
+    await flushAsync();
+
+    expect(mocks.lanFactory).toHaveBeenCalledTimes(1);
+    expect(mocks.relayFactory).not.toHaveBeenCalled();
+    expect(mocks.adoptRemote).toHaveBeenCalledWith({
+      remoteKey: '["peer-1","task-2"]',
+      ownerDesktopId: "peer-1",
+      ownerTaskId: "task-2",
+      transport: client,
+    });
+    expect(client.sendInput).toHaveBeenCalledWith({
+      desktopId: "peer-1",
+      taskId: "task-2",
+      data: "hello",
+    });
+    expect(client.resize).toHaveBeenCalledWith({
+      desktopId: "peer-1",
+      taskId: "task-2",
+      cols: 80,
+      rows: 24,
+    });
+    testState.effectiveCodeTheme!.value = "light";
+    await nextTick();
+    expect(testState.terminals[0]?.options.theme).toEqual({ theme: "light" });
+    wrapper.unmount();
+  });
+
+  it("closes a stale pre-adoption client without replacing the current prop generation", async () => {
+    const staleClient = createClient();
+    const currentClient = createClient();
+    const staleFactory = deferred<FakeClient>();
+    mocks.relayFactory
+      .mockImplementationOnce(() => staleFactory.promise)
+      .mockResolvedValueOnce(currentClient);
+
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-old",
+        ownerTaskId: "task-old",
+      },
+    });
+    await flushAsync();
+    await wrapper.setProps({
+      ownerDesktopId: "desktop-new",
+      ownerTaskId: "task-new",
+    });
+    await flushAsync();
+    staleFactory.resolve(staleClient);
+    await flushAsync();
+
+    expect(mocks.adoptRemote).toHaveBeenCalledTimes(1);
+    expect(mocks.adoptRemote).toHaveBeenCalledWith({
+      remoteKey: '["desktop-new","task-new"]',
+      ownerDesktopId: "desktop-new",
+      ownerTaskId: "task-new",
+      transport: currentClient,
+    });
+    expect(staleClient.close).toHaveBeenCalledTimes(1);
     expect(staleClient.observeTerminal).not.toHaveBeenCalled();
-    expect(replacementClient.observeTerminal).toHaveBeenCalledWith(
-      expect.objectContaining({ desktopId: "desktop-1", taskId: "task-2" }),
+    expect(testState.webLinksAddons).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("does not surface a stale input failure after switching remote tasks", async () => {
+    const oldClient = createClient();
+    const newClient = createClient();
+    const oldSend = deferred<void>();
+    let oldTerminalListener:
+      | ((event: { type: "ready"; taskId: string }) => void)
+      | undefined;
+    oldClient.observeTerminal.mockImplementation((options) => {
+      oldTerminalListener = options.listener;
+      return { close: oldClient.terminalClose };
+    });
+    oldClient.sendInput.mockReturnValue(oldSend.promise);
+    mocks.relayFactory
+      .mockResolvedValueOnce(oldClient)
+      .mockResolvedValueOnce(newClient);
+
+    const wrapper = mount(CloudTerminalView, {
+      props: {
+        ownerDesktopId: "desktop-old",
+        ownerTaskId: "task-old",
+      },
+    });
+    await flushAsync();
+    oldTerminalListener?.({ type: "ready", taskId: "task-old" });
+    testState.terminals[0]?.dataHandler?.("old input");
+    await wrapper.setProps({
+      ownerDesktopId: "desktop-new",
+      ownerTaskId: "task-new",
+    });
+    await flushAsync();
+
+    oldSend.reject(new Error("old transport failed"));
+    await flushAsync();
+
+    expect(oldClient.sendInput).toHaveBeenCalledWith({
+      desktopId: "desktop-old",
+      taskId: "task-old",
+      data: "old input",
+    });
+    expect(wrapper.attributes("data-status")).toBe("connecting");
+    expect(testState.terminals[0]?.write).not.toHaveBeenCalledWith(
+      expect.stringContaining("old transport failed"),
     );
     wrapper.unmount();
-  });
-
-  it("closes a delayed client instead of installing it after unmount", async () => {
-    const factory = deferred<ReturnType<typeof terminalClient>>();
-    const staleClient = terminalClient();
-    harness.clientFactory.mockImplementationOnce(() => factory.promise);
-    const { default: CloudTerminalView } = await import("../CloudTerminalView.vue");
-    const wrapper = mount(CloudTerminalView, {
-      props: {
-        ownerDesktopId: "desktop-1",
-        ownerTaskId: "task-1",
-        transport: "cloud",
-      },
-    });
-    await flushPromises();
-
-    wrapper.unmount();
-    factory.resolve(staleClient);
-    await flushPromises();
-
-    expect(staleClient.close).toHaveBeenCalledOnce();
-    expect(staleClient.observeTerminal).not.toHaveBeenCalled();
   });
 });

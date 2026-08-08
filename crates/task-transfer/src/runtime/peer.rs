@@ -606,6 +606,24 @@ impl TransferRuntime {
         .await
     }
 
+    pub(super) async fn send_peer_request_with_line_limit(
+        &self,
+        peer: &PeerRegistryEntry,
+        request: PeerRequest,
+        max_line_bytes: Option<usize>,
+    ) -> Result<PeerResponse, RuntimeError> {
+        let max_response_bytes = max_line_bytes.unwrap_or(self.config.max_peer_response_bytes);
+        self.send_peer_request_with_permits(
+            peer,
+            request,
+            self.config.peer_request_timeout,
+            &self.peer_request_permits,
+            "peer request capacity",
+            max_response_bytes,
+        )
+        .await
+    }
+
     async fn send_peer_request_with_permits(
         &self,
         peer: &PeerRegistryEntry,

@@ -25,6 +25,15 @@ pub enum StreamKind {
     Companion,
 }
 
+/// Optional KSP behaviors that require both peers to agree on wire semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript", derive(TS), ts(export))]
+pub enum KspCapability {
+    CompanionAttachmentEpoch,
+    CompanionEventEpoch,
+}
+
 /// Whether the companion content is an HTML fragment that Kanna must frame
 /// or a complete HTML document that Kanna can render as-is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,10 +44,23 @@ pub enum CompanionDocumentKind {
     FullDocument,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript", derive(TS), ts(export))]
+pub struct CompanionAsset {
+    pub name: String,
+    pub content_type: String,
+    pub digest: String,
+    pub data_b64: String,
+}
+
 /// A structured selection made in a visual companion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
 pub struct CompanionEvent {
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub revision: String,
     pub event_id: String,
     #[serde(rename = "type")]
     pub event_type: String,
@@ -83,6 +105,8 @@ pub enum ClientFrame {
     Auth {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credential: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<KspCapability>,
     },
     /// Attach to a task's stream; agent streams replay journal events with
     /// `seq >= from_seq` before going live.
@@ -92,10 +116,23 @@ pub enum ClientFrame {
         #[serde(default)]
         #[cfg_attr(feature = "typescript", ts(type = "number"))]
         from_seq: u64,
+        // Omitted by older clients, preserving complete companion bundles.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_assets: Option<bool>,
+        // Omitted by older clients. Servers must emit legacy, unchunked
+        // snapshots unless the client explicitly opts into bounded chunks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        accept_snapshot_chunks: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        attachment_epoch: Option<u64>,
     },
     Detach {
         task_id: String,
         kind: StreamKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        attachment_epoch: Option<u64>,
     },
     /// Send a user message to a themed task (works mid-run — steering).
     AgentInput {
@@ -132,6 +169,9 @@ pub enum ClientFrame {
         task_id: String,
         session_id: String,
         revision: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        attachment_epoch: Option<u64>,
         event: CompanionEvent,
     },
     /// Request/response escape hatch for the task API (list/create/actions).
@@ -155,6 +195,8 @@ pub enum ServerFrame {
     AuthOk {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         stream_kinds: Vec<StreamKind>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<KspCapability>,
     },
     /// Agent attach reply: the replayed journal tail plus the seq the live
     /// stream continues from. A reconnecting client passes `next_seq` back
@@ -189,20 +231,50 @@ pub enum ServerFrame {
         revision: String,
         document_kind: CompanionDocumentKind,
         html: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_origin: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        assets: Vec<CompanionAsset>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        attachment_epoch: Option<u64>,
+    },
+    /// One bounded segment of a serialized `CompanionSnapshot`. KSP emits
+    /// these instead of a single maximum-size WebSocket data message so
+    /// terminal and control frames can run between segments.
+    CompanionSnapshotChunk {
+        task_id: String,
+        transfer_id: String,
+        index: u32,
+        count: u32,
+        data: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        attachment_epoch: Option<u64>,
     },
     /// The task currently has no active visual companion.
     CompanionUnavailable {
         task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        attachment_epoch: Option<u64>,
     },
     /// Acknowledgement for one structured companion event.
     CompanionEventResult {
         task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<String>,
         event_id: String,
         accepted: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        attachment_epoch: Option<u64>,
     },
     /// A task-scoped companion source failure, kept separate from generic KSP
     /// errors so other task stream handlers are unaffected.
@@ -210,6 +282,9 @@ pub enum ServerFrame {
         task_id: String,
         code: String,
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "typescript", ts(type = "number"))]
+        attachment_epoch: Option<u64>,
     },
     StatusChanged {
         task_id: String,
@@ -246,11 +321,17 @@ mod tests {
     #[test]
     fn client_frame_round_trip() {
         let frames = vec![
-            ClientFrame::Auth { credential: None },
+            ClientFrame::Auth {
+                credential: None,
+                capabilities: vec![KspCapability::CompanionEventEpoch],
+            },
             ClientFrame::Attach {
                 task_id: "t1".into(),
                 kind: StreamKind::Agent,
                 from_seq: 7,
+                include_assets: None,
+                accept_snapshot_chunks: None,
+                attachment_epoch: None,
             },
             ClientFrame::AgentInput {
                 task_id: "t1".into(),
@@ -310,6 +391,7 @@ mod tests {
             old,
             ServerFrame::AuthOk {
                 stream_kinds: Vec::new(),
+                capabilities: Vec::new(),
             }
         );
 
@@ -319,12 +401,20 @@ mod tests {
                 StreamKind::Terminal,
                 StreamKind::Companion,
             ],
+            capabilities: vec![
+                KspCapability::CompanionAttachmentEpoch,
+                KspCapability::CompanionEventEpoch,
+            ],
         };
         assert_eq!(
             serde_json::to_value(current).unwrap(),
             serde_json::json!({
                 "type": "auth_ok",
-                "stream_kinds": ["agent", "terminal", "companion"]
+                "stream_kinds": ["agent", "terminal", "companion"],
+                "capabilities": [
+                    "companion_attachment_epoch",
+                    "companion_event_epoch"
+                ]
             })
         );
     }
@@ -352,13 +442,136 @@ mod tests {
                 task_id: "t".into(),
                 kind: StreamKind::Agent,
                 from_seq: 0,
+                include_assets: None,
+                accept_snapshot_chunks: None,
+                attachment_epoch: None,
             }
         );
+
+        let asset_free: ClientFrame = serde_json::from_str(
+            r#"{"type":"attach","task_id":"t","kind":"companion","include_assets":false}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            asset_free,
+            ClientFrame::Attach {
+                task_id: "t".into(),
+                kind: StreamKind::Companion,
+                from_seq: 0,
+                include_assets: Some(false),
+                accept_snapshot_chunks: None,
+                attachment_epoch: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(asset_free).unwrap()["include_assets"],
+            false
+        );
+    }
+
+    #[test]
+    fn companion_attach_chunk_capability_is_optional_and_round_trips() {
+        let legacy: ClientFrame = serde_json::from_value(serde_json::json!({
+            "type": "attach",
+            "task_id": "task-1",
+            "kind": "companion"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(legacy).unwrap(),
+            serde_json::json!({
+                "type": "attach",
+                "task_id": "task-1",
+                "kind": "companion",
+                "from_seq": 0
+            })
+        );
+
+        let capable = serde_json::json!({
+            "type": "attach",
+            "task_id": "task-1",
+            "kind": "companion",
+            "from_seq": 0,
+            "accept_snapshot_chunks": true
+        });
+        let parsed: ClientFrame = serde_json::from_value(capable.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), capable);
+    }
+
+    #[test]
+    fn companion_attachment_epochs_are_optional_and_round_trip() {
+        for value in [
+            serde_json::json!({
+                "type": "attach",
+                "task_id": "task-1",
+                "kind": "companion",
+                "from_seq": 0,
+                "attachment_epoch": 7
+            }),
+            serde_json::json!({
+                "type": "detach",
+                "task_id": "task-1",
+                "kind": "companion",
+                "attachment_epoch": 7
+            }),
+        ] {
+            let parsed: ClientFrame = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+        }
+
+        for value in [
+            serde_json::json!({
+                "type": "companion_snapshot",
+                "task_id": "task-1",
+                "session_id": "session-1",
+                "revision": "revision-1",
+                "document_kind": "fragment",
+                "html": "<h2>Hello</h2>",
+                "attachment_epoch": 7
+            }),
+            serde_json::json!({
+                "type": "companion_snapshot_chunk",
+                "task_id": "task-1",
+                "transfer_id": "transfer-1",
+                "index": 0,
+                "count": 1,
+                "data": "{}",
+                "attachment_epoch": 7
+            }),
+            serde_json::json!({
+                "type": "companion_unavailable",
+                "task_id": "task-1",
+                "attachment_epoch": 7
+            }),
+            serde_json::json!({
+                "type": "companion_error",
+                "task_id": "task-1",
+                "code": "companion_source_failed",
+                "message": "failed",
+                "attachment_epoch": 7
+            }),
+        ] {
+            let parsed: ServerFrame = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+        }
+
+        let legacy_attach: ClientFrame = serde_json::from_value(serde_json::json!({
+            "type": "attach",
+            "task_id": "task-1",
+            "kind": "companion"
+        }))
+        .unwrap();
+        assert!(serde_json::to_value(legacy_attach)
+            .unwrap()
+            .get("attachment_epoch")
+            .is_none());
     }
 
     #[test]
     fn companion_frames_round_trip_and_preserve_wire_names() {
         let event = CompanionEvent {
+            session_id: "123-456".into(),
+            revision: "sha256:abc".into(),
             event_id: "event-1".into(),
             event_type: "click".into(),
             choice: "a".into(),
@@ -370,10 +583,12 @@ mod tests {
             task_id: "task-1".into(),
             session_id: "123-456".into(),
             revision: "sha256:abc".into(),
+            attachment_epoch: Some(7),
             event: event.clone(),
         };
         let client_json = serde_json::to_value(&client).unwrap();
         assert_eq!(client_json["type"], "companion_event");
+        assert_eq!(client_json["attachment_epoch"], 7);
         assert_eq!(client_json["event"]["type"], "click");
         assert_eq!(client_json["event"]["id"], serde_json::Value::Null);
         assert_eq!(
@@ -381,18 +596,54 @@ mod tests {
             client
         );
 
+        let asset = CompanionAsset {
+            name: "layout.png".into(),
+            content_type: "image/png".into(),
+            digest: "asset-digest".into(),
+            data_b64: "aGVsbG8=".into(),
+        };
         let snapshot = ServerFrame::CompanionSnapshot {
             task_id: "task-1".into(),
-            session_id: "123-456".into(),
-            revision: "sha256:abc".into(),
+            session_id: "session-1".into(),
+            revision: "revision-1".into(),
             document_kind: CompanionDocumentKind::Fragment,
-            html: "<h2>Choose</h2>".into(),
+            html: "<h2>Hello</h2>".into(),
+            source_origin: Some("http://localhost:52341".into()),
+            assets: vec![asset.clone()],
+            attachment_epoch: None,
         };
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(json["source_origin"], "http://localhost:52341");
+        assert_eq!(json["assets"][0]["name"], "layout.png");
         assert_eq!(
-            serde_json::from_value::<ServerFrame>(serde_json::to_value(&snapshot).unwrap())
-                .unwrap(),
+            serde_json::from_value::<ServerFrame>(json).unwrap(),
             snapshot
         );
+        let defaulted_snapshot = serde_json::from_value::<ServerFrame>(serde_json::json!({
+            "type": "companion_snapshot",
+            "task_id": "task-1",
+            "session_id": "session-1",
+            "revision": "revision-1",
+            "document_kind": "fragment",
+            "html": "<h2>Hello</h2>"
+        }))
+        .unwrap();
+        assert_eq!(
+            defaulted_snapshot,
+            ServerFrame::CompanionSnapshot {
+                task_id: "task-1".into(),
+                session_id: "session-1".into(),
+                revision: "revision-1".into(),
+                document_kind: CompanionDocumentKind::Fragment,
+                html: "<h2>Hello</h2>".into(),
+                source_origin: None,
+                assets: Vec::new(),
+                attachment_epoch: None,
+            }
+        );
+        let defaulted_json = serde_json::to_value(defaulted_snapshot).unwrap();
+        assert!(defaulted_json.get("source_origin").is_none());
+        assert!(defaulted_json.get("assets").is_none());
         assert_eq!(
             serde_json::to_value(StreamKind::Companion).unwrap(),
             "companion"
@@ -400,30 +651,62 @@ mod tests {
 
         let unavailable = serde_json::to_value(ServerFrame::CompanionUnavailable {
             task_id: "task-1".into(),
+            attachment_epoch: None,
         })
         .unwrap();
         assert_eq!(unavailable["type"], "companion_unavailable");
 
         let result = ServerFrame::CompanionEventResult {
             task_id: "task-1".into(),
+            session_id: Some("session-1".into()),
+            revision: Some("revision-1".into()),
             event_id: "event-1".into(),
             accepted: false,
             code: Some("companion_stale_revision".into()),
             message: Some("The companion changed before the selection arrived.".into()),
+            attachment_epoch: Some(7),
         };
         let result_json = serde_json::to_value(&result).unwrap();
         assert_eq!(result_json["type"], "companion_event_result");
+        assert_eq!(result_json["session_id"], "session-1");
+        assert_eq!(result_json["revision"], "revision-1");
         assert_eq!(result_json["event_id"], "event-1");
         assert_eq!(result_json["accepted"], false);
+        assert_eq!(result_json["attachment_epoch"], 7);
+        #[derive(Deserialize)]
+        struct LegacyCompanionEventResult {
+            event_id: String,
+            accepted: bool,
+        }
+        let legacy_view =
+            serde_json::from_value::<LegacyCompanionEventResult>(result_json.clone()).unwrap();
+        assert_eq!(legacy_view.event_id, "event-1");
+        assert!(!legacy_view.accepted);
         assert_eq!(
             serde_json::from_value::<ServerFrame>(result_json).unwrap(),
             result
         );
+        let legacy_result = serde_json::json!({
+            "type": "companion_event_result",
+            "task_id": "task-1",
+            "event_id": "legacy-event",
+            "accepted": true
+        });
+        assert!(matches!(
+            serde_json::from_value::<ServerFrame>(legacy_result).unwrap(),
+            ServerFrame::CompanionEventResult {
+                session_id: None,
+                revision: None,
+                attachment_epoch: None,
+                ..
+            }
+        ));
 
         let error = ServerFrame::CompanionError {
             task_id: "task-1".into(),
             code: "companion_source_failed".into(),
             message: "The visual companion could not be read.".into(),
+            attachment_epoch: None,
         };
         let error_json = serde_json::to_value(&error).unwrap();
         assert_eq!(error_json["type"], "companion_error");
@@ -432,5 +715,35 @@ mod tests {
             serde_json::from_value::<ServerFrame>(error_json).unwrap(),
             error
         );
+    }
+
+    #[test]
+    fn legacy_unbound_companion_events_remain_deserializable() {
+        let frame: ClientFrame = serde_json::from_value(serde_json::json!({
+            "type": "companion_event",
+            "task_id": "task-1",
+            "session_id": "session-1",
+            "revision": "revision-1",
+            "event": {
+                "event_id": "event-1",
+                "type": "click",
+                "choice": "a",
+                "text": "A",
+                "id": null,
+                "timestamp": 1
+            }
+        }))
+        .unwrap();
+        let ClientFrame::CompanionEvent {
+            event,
+            attachment_epoch,
+            ..
+        } = frame
+        else {
+            panic!("expected companion event");
+        };
+        assert!(event.session_id.is_empty());
+        assert!(event.revision.is_empty());
+        assert_eq!(attachment_epoch, None);
     }
 }

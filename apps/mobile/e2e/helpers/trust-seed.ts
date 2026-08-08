@@ -41,3 +41,20 @@ export async function seedTrustedDesktopThroughDeepLink(input: {
     url
   });
 }
+
+export async function seedPairedTrustedDesktopThroughDeepLink(input: {
+  bundleId: string;
+  createPairingSession(): Promise<{ pairingPayload: string }>;
+  driver: Browser;
+  desktop: TrustedDesktopSeed;
+  selectedRepoId?: string;
+  selectedTaskId?: string;
+}): Promise<void> {
+  await seedTrustedDesktopThroughDeepLink(input);
+  const pairing = await input.createPairingSession();
+  await claimPairingPayloadThroughDeepLink({
+    bundleId: input.bundleId,
+    driver: input.driver,
+    payload: pairing.pairingPayload
+  });
+}

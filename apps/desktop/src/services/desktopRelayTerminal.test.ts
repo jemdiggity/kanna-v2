@@ -22,6 +22,7 @@ import {
   resolveDesktopCloudTransportUrlFromEnv,
   type DesktopRelayTerminalEvent,
 } from "./desktopRelayTerminal";
+import type { DesktopRemoteCompanionEvent } from "./desktopRemoteTaskClient";
 
 class FakeSocket {
   readyState = 1;
@@ -38,6 +39,10 @@ class FakeSocket {
 
   send(data: string) {
     this.sent.push(data);
+  }
+
+  drop(code?: number) {
+    this.onclose?.(code === undefined ? {} : { code });
   }
 }
 
@@ -106,7 +111,11 @@ describe("configured desktop relay helpers", () => {
       type: "tunnel_request",
       desktopId: "desktop-owner",
     }));
-    expect(sent).toContainEqual({ type: "auth", credential: "id-token" });
+    expect(sent).toContainEqual({
+      type: "auth",
+      capabilities: ["companion_event_epoch"],
+      credential: "id-token",
+    });
     expect(sent).toContainEqual({
       type: "term_input",
       task_id: "task-1",
@@ -153,6 +162,241 @@ describe("configured desktop relay helpers", () => {
 });
 
 describe("createDesktopRelayTerminalClient", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("force-refreshes both relay and stream credentials after an auth rejection", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const getIdToken = vi.fn(async (forceRefresh?: boolean) =>
+      forceRefresh ? "refreshed-token" : "cached-token"
+    );
+    const client = createDesktopRelayTerminalClient({
+      createSocket: () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      getIdToken,
+      relayUrl: "ws://relay.test",
+    });
+    const events: DesktopRemoteCompanionEvent[] = [];
+    client.observeCompanion({
+      desktopId: "desktop-owner",
+      taskId: "task-1",
+      listener: (event) => events.push(event),
+    });
+
+    const firstSocket = sockets[0];
+    await openRelayTunnel(firstSocket);
+    firstSocket.drop(4005);
+    await vi.advanceTimersByTimeAsync(250);
+
+    const refreshedSocket = sockets[1];
+    await openRelayTunnel(refreshedSocket);
+    refreshedSocket.onmessage?.({
+      data: JSON.stringify({
+        type: "auth_ok",
+        stream_kinds: ["agent", "terminal", "companion"],
+      }),
+    });
+    await Promise.resolve();
+
+    expect(getIdToken.mock.calls.map(([forceRefresh]) => forceRefresh ?? false))
+      .toEqual([false, false, true, true]);
+    expect(refreshedSocket.sent.map((entry) => JSON.parse(entry))).toContainEqual({
+      type: "auth",
+      id_token: "refreshed-token",
+    });
+    expect(refreshedSocket.sent.map((entry) => JSON.parse(entry))).toContainEqual({
+      type: "auth",
+      capabilities: ["companion_event_epoch"],
+      credential: "refreshed-token",
+    });
+    expect(refreshedSocket.sent.map((entry) => JSON.parse(entry))).toContainEqual({
+      type: "attach",
+      task_id: "task-1",
+      kind: "companion",
+      from_seq: 0,
+      accept_snapshot_chunks: true,
+      attachment_epoch: 1,
+    });
+    expect(events).toContainEqual({
+      type: "connection",
+      taskId: "task-1",
+      connected: true,
+    });
+
+    client.close();
+  });
+
+  it("observes and interacts with a remote visual companion over the relay", async () => {
+    const socket = new FakeSocket();
+    const createSocket = vi.fn(() => socket);
+    const events: DesktopRemoteCompanionEvent[] = [];
+    const client = createDesktopRelayTerminalClient({
+      createSocket,
+      getIdToken: vi.fn(async () => "id-token"),
+      relayUrl: "ws://relay.test",
+    });
+    client.observeTerminal({
+      desktopId: "desktop-owner",
+      taskId: "task-1",
+      listener: vi.fn(),
+    });
+
+    const subscription = client.observeCompanion({
+      desktopId: "desktop-owner",
+      taskId: "task-1",
+      listener: (event) => events.push(event),
+    });
+    expect(createSocket).toHaveBeenCalledOnce();
+
+    await openRelayTunnel(socket);
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "auth_ok",
+        stream_kinds: ["agent", "terminal", "companion"],
+        capabilities: ["companion_attachment_epoch"],
+      }),
+    });
+    await Promise.resolve();
+    expect(socket.sent.map((entry) => JSON.parse(entry))).toContainEqual({
+      type: "attach",
+      task_id: "task-1",
+      kind: "companion",
+      from_seq: 0,
+      accept_snapshot_chunks: true,
+      attachment_epoch: 1,
+    });
+    expect(events).toContainEqual({
+      type: "connection",
+      taskId: "task-1",
+      connected: true,
+    });
+
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "companion_snapshot",
+        task_id: "task-1",
+        session_id: "session-1",
+        revision: "revision-1",
+        document_kind: "fragment",
+        html: "<h2>Hello</h2>",
+        source_origin: "http://localhost:52341",
+        attachment_epoch: 1,
+        assets: [{
+          name: "layout.png",
+          content_type: "image/png",
+          digest: "asset-digest",
+          data_b64: "UE5H",
+        }],
+      }),
+    });
+
+    expect(events.at(-1)).toMatchObject({
+      type: "snapshot",
+      taskId: "task-1",
+      snapshot: {
+        sourceOrigin: "http://localhost:52341",
+        assets: [{ name: "layout.png", contentType: "image/png" }],
+      },
+    });
+
+    const choice = {
+      session_id: "session-1",
+      revision: "revision-1",
+      event_id: "event-1",
+      type: "select",
+      choice: "grid",
+      text: "Grid",
+      id: null,
+      timestamp: 1,
+    };
+    expect(subscription.sendEvent("session-1", "revision-1", choice)).toBe(true);
+    expect(JSON.parse(socket.sent.at(-1)!)).toMatchObject({
+      type: "companion_event",
+      task_id: "task-1",
+      session_id: "session-1",
+      revision: "revision-1",
+      event: choice,
+    });
+
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "companion_event_result",
+        task_id: "task-1",
+        session_id: "session-1",
+        revision: "revision-1",
+        event_id: "event-1",
+        accepted: false,
+        code: "stale_revision",
+        message: "Refresh the companion.",
+      }),
+    });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "companion_unavailable",
+        task_id: "task-1",
+        attachment_epoch: 1,
+      }),
+    });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "companion_event_result",
+        task_id: "task-1",
+        event_id: "legacy-event",
+        accepted: true,
+      }),
+    });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "companion_error",
+        task_id: "task-1",
+        code: "read_failed",
+        message: "Could not read the companion.",
+        attachment_epoch: 1,
+      }),
+    });
+    expect(events.slice(-3)).toEqual([
+      {
+        type: "event_result",
+        taskId: "task-1",
+        result: {
+          sessionId: "session-1",
+          revision: "revision-1",
+          eventId: "event-1",
+          accepted: false,
+          code: "stale_revision",
+          message: "Refresh the companion.",
+        },
+      },
+      { type: "unavailable", taskId: "task-1" },
+      {
+        type: "error",
+        taskId: "task-1",
+        code: "read_failed",
+        message: "Could not read the companion.",
+      },
+    ]);
+
+    subscription.close();
+    subscription.close();
+    expect(subscription.sendEvent("session-1", "revision-1", choice)).toBe(false);
+    const detachFrames = socket.sent
+      .map((entry) => JSON.parse(entry))
+      .filter((frame) => frame.type === "detach");
+    expect(detachFrames).toEqual([
+      {
+        type: "detach",
+        task_id: "task-1",
+        kind: "companion",
+        attachment_epoch: 1,
+      },
+    ]);
+  });
+
   it("observes remote terminal output over the relay only after auth", async () => {
     const socket = new FakeSocket();
     const events: DesktopRelayTerminalEvent[] = [];
@@ -175,7 +419,11 @@ describe("createDesktopRelayTerminalClient", () => {
       desktopId: "desktop-owner",
     });
 
-    expect(JSON.parse(socket.sent[2])).toEqual({ type: "auth", credential: "id-token" });
+    expect(JSON.parse(socket.sent[2])).toEqual({
+      type: "auth",
+      capabilities: ["companion_event_epoch"],
+      credential: "id-token",
+    });
     socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
     await Promise.resolve();
     expect(JSON.parse(socket.sent[3])).toEqual({
@@ -487,6 +735,78 @@ describe("createDesktopRelayTerminalClient", () => {
 
     await expect(markReadPromise).rejects.toThrow(expected);
   });
+
+  it.each([409, 503])(
+    "rejects a remote close when the owner returns status %s",
+    async (status) => {
+      const socket = new FakeSocket();
+      const client = createDesktopRelayTerminalClient({
+        createSocket: () => socket,
+        getIdToken: vi.fn(async () => "id-token"),
+        relayUrl: "ws://relay.test",
+      });
+
+      const closePromise = client.closeTask({
+        desktopId: "desktop-owner",
+        taskId: "task-1",
+      });
+
+      await openRelayTunnel(socket);
+      socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+      await Promise.resolve();
+
+      const request = socket.sent
+        .map((entry) => JSON.parse(entry))
+        .find((entry) => entry.path === "/v1/tasks/task-1/actions/close");
+      expect(request).toMatchObject({ type: "request", method: "POST" });
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: "response",
+          id: request.id,
+          status,
+          body: { error: "Task is already closed." },
+        }),
+      });
+
+      await expect(closePromise).rejects.toThrow("Task is already closed.");
+    },
+  );
+
+  it.each([409, 503])(
+    "rejects a remote stage advance when the owner returns status %s",
+    async (status) => {
+      const socket = new FakeSocket();
+      const client = createDesktopRelayTerminalClient({
+        createSocket: () => socket,
+        getIdToken: vi.fn(async () => "id-token"),
+        relayUrl: "ws://relay.test",
+      });
+
+      const advancePromise = client.advanceStage({
+        desktopId: "desktop-owner",
+        taskId: "task-1",
+      });
+
+      await openRelayTunnel(socket);
+      socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+      await Promise.resolve();
+
+      const request = socket.sent
+        .map((entry) => JSON.parse(entry))
+        .find((entry) => entry.path === "/v1/tasks/task-1/actions/advance-stage");
+      expect(request).toMatchObject({ type: "request", method: "POST" });
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: "response",
+          id: request.id,
+          status,
+          body: { error: "Owner is unavailable." },
+        }),
+      });
+
+      await expect(advancePromise).rejects.toThrow("Owner is unavailable.");
+    },
+  );
 });
 
 describe("resolveDesktopCloudTransportUrlFromEnv", () => {

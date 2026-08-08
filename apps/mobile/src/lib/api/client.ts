@@ -5,6 +5,7 @@ import type {
   FrameAgentEvent,
   PermissionDecision,
 } from "@kanna/agent-protocol";
+import type { CompanionAssetSnapshot } from "@kanna/stream-client";
 import type {
   AbortTaskCreationRequest,
   CreateTaskRequest,
@@ -68,11 +69,15 @@ export type TaskCompanionStreamEvent =
       revision: string;
       documentKind: CompanionDocumentKind;
       html: string;
+      sourceOrigin?: string;
+      assets: CompanionAssetSnapshot[];
     }
   | { type: "unavailable"; taskId: string }
   | {
       type: "event_result";
       taskId: string;
+      sessionId: string;
+      revision: string;
       eventId: string;
       accepted: boolean;
       code?: string;

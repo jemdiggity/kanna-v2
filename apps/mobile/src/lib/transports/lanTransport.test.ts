@@ -563,7 +563,11 @@ describe("createLanTransport", () => {
     subscription.close();
 
     expect(socketFactory).toHaveBeenCalledWith(
-      "ws://127.0.0.1:48120/v2/stream"
+      "ws://127.0.0.1:48120/v2/stream",
+      {
+        "X-Kanna-Device-Id": "phone-1",
+        "X-Kanna-Device-Secret": "lan-secret"
+      }
     );
     expect(sent).toEqual([
       {
@@ -571,7 +575,8 @@ describe("createLanTransport", () => {
         credential: JSON.stringify({
           deviceId: "phone-1",
           deviceSecret: "lan-secret"
-        })
+        }),
+        capabilities: ["companion_event_epoch"]
       },
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 }
     ]);
@@ -634,7 +639,11 @@ describe("createLanTransport", () => {
     const subscription = transport.observeTaskTerminal("task-1", () => {});
 
     expect(socketFactory).toHaveBeenCalledWith(
-      "ws://127.0.0.1:48120/v1/stream"
+      "ws://127.0.0.1:48120/v1/stream",
+      {
+        "X-Kanna-Device-Id": "phone-1",
+        "X-Kanna-Device-Secret": "lan-secret"
+      }
     );
     subscription.close();
   });
@@ -664,7 +673,7 @@ describe("createLanTransport", () => {
     subscription.sendInput?.("G1s8NjU7MTsxTQ==");
 
     expect(sent).toEqual([
-      { type: "auth" },
+      { type: "auth", capabilities: ["companion_event_epoch"] },
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 },
       { type: "term_input", task_id: "task-1", data_b64: "G1s8NjU7MTsxTQ==" }
     ]);
@@ -728,7 +737,7 @@ describe("createLanTransport", () => {
 
     expect(socketFactory).toHaveBeenCalledWith("ws://127.0.0.1:48120/v1/stream");
     expect(sent).toEqual([
-      { type: "auth" },
+      { type: "auth", capabilities: ["companion_event_epoch"] },
       { type: "attach", task_id: "task-1", kind: "agent", from_seq: 0 },
       { type: "agent_input", task_id: "task-1", text: "continue" },
       {
@@ -767,20 +776,38 @@ describe("createLanTransport", () => {
       onerror: null,
       onmessage: null
     };
+    const socketFactory = vi.fn(() => socket);
     const transport = createLanTransport(
       "http://127.0.0.1:48120",
       vi.fn<FetchLike>(),
-      () => socket
+      socketFactory,
+      {
+        deviceCredentials: {
+          deviceId: "phone-1",
+          deviceSecret: "lan-secret"
+        }
+      }
     );
     const events: unknown[] = [];
     const subscription = transport.observeTaskCompanion("task-1", (event) =>
       events.push(event)
     );
+    expect(socketFactory).toHaveBeenCalledWith(
+      "ws://127.0.0.1:48120/v1/stream",
+      {
+        "X-Kanna-Device-Id": "phone-1",
+        "X-Kanna-Device-Secret": "lan-secret"
+      }
+    );
     socket.onopen?.();
     socket.onmessage?.({
       data: JSON.stringify({
         type: "auth_ok",
-        stream_kinds: ["agent", "terminal", "companion"]
+        stream_kinds: ["agent", "terminal", "companion"],
+        capabilities: [
+          "companion_attachment_epoch",
+          "companion_event_epoch"
+        ]
       } satisfies ServerFrame)
     });
     socket.onmessage?.({
@@ -790,18 +817,22 @@ describe("createLanTransport", () => {
         session_id: "123-456",
         revision: "rev-1",
         document_kind: "fragment",
-        html: "<button data-choice='a'>A</button>"
-      } satisfies ServerFrame)
-    });
-    socket.onmessage?.({
-      data: JSON.stringify({
-        type: "companion_event_result",
-        task_id: "task-1",
-        event_id: "event-1",
-        accepted: true
+        html: "<button data-choice='a'>A</button>",
+        source_origin: "http://localhost:52341",
+        attachment_epoch: 1,
+        assets: [
+          {
+            name: "layout.png",
+            content_type: "image/png",
+            digest: "asset-1",
+            data_b64: "UE5H"
+          }
+        ]
       } satisfies ServerFrame)
     });
     const event = {
+      session_id: "123-456",
+      revision: "rev-1",
       event_id: "event-1",
       type: "click",
       choice: "a",
@@ -810,6 +841,25 @@ describe("createLanTransport", () => {
       timestamp: 1
     } as const;
     expect(subscription.sendEvent("123-456", "rev-1", event)).toBe(true);
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "companion_event_result",
+        task_id: "task-1",
+        session_id: "123-456",
+        revision: "rev-1",
+        event_id: "event-1",
+        accepted: true,
+        attachment_epoch: 1
+      } satisfies ServerFrame)
+    });
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "companion_event_result",
+        task_id: "task-1",
+        event_id: "legacy-event",
+        accepted: true
+      } satisfies ServerFrame)
+    });
     socket.onclose?.({});
     expect(subscription.sendEvent("123-456", "rev-1", event)).toBe(false);
     subscription.close();
@@ -822,20 +872,74 @@ describe("createLanTransport", () => {
         sessionId: "123-456",
         revision: "rev-1",
         documentKind: "fragment",
-        html: "<button data-choice='a'>A</button>"
+        html: "<button data-choice='a'>A</button>",
+        sourceOrigin: "http://localhost:52341",
+        assets: []
       },
-      { type: "event_result", taskId: "task-1", eventId: "event-1", accepted: true },
+      {
+        type: "event_result",
+        taskId: "task-1",
+        sessionId: "123-456",
+        revision: "rev-1",
+        eventId: "event-1",
+        accepted: true,
+      },
       { type: "connection", taskId: "task-1", connected: false }
     ]);
     expect(sent).toContainEqual({
       type: "attach",
       task_id: "task-1",
       kind: "companion",
-      from_seq: 0
+      from_seq: 0,
+      accept_snapshot_chunks: true,
+      include_assets: false,
+      attachment_epoch: 1
     });
     expect(sent).toContainEqual(
       expect.objectContaining({ type: "companion_event", task_id: "task-1" })
     );
     expect(sent.filter((frame) => frame.type === "companion_event")).toHaveLength(1);
+  });
+
+  it("degrades a headerless LAN companion observer through unavailable capability negotiation", () => {
+    const sent: ClientFrame[] = [];
+    const socket: WebSocketLike = {
+      send: vi.fn((payload: string) => sent.push(JSON.parse(payload) as ClientFrame)),
+      close: vi.fn(),
+      onopen: null,
+      onclose: null,
+      onerror: null,
+      onmessage: null
+    };
+    const socketFactory = vi.fn(() => socket);
+    const transport = createLanTransport(
+      "http://127.0.0.1:48120",
+      vi.fn<FetchLike>(),
+      socketFactory
+    );
+    const events: unknown[] = [];
+    transport.observeTaskCompanion("task-legacy", (event) => events.push(event));
+
+    expect(socketFactory).toHaveBeenCalledWith(
+      "ws://127.0.0.1:48120/v1/stream"
+    );
+    socket.onopen?.();
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "auth_ok",
+        stream_kinds: ["agent", "terminal"]
+      } satisfies ServerFrame)
+    });
+
+    expect(sent).toEqual([
+      { type: "auth", capabilities: ["companion_event_epoch"] }
+    ]);
+    expect(events).toContainEqual({
+      type: "unavailable",
+      taskId: "task-legacy"
+    });
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ type: "error" })
+    );
   });
 });

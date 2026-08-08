@@ -1,6 +1,7 @@
 import { StreamClient } from "@kanna/stream-client";
 import { invoke } from "../invoke";
 import { resolveCurrentKannaServerBaseUrl, streamUrlFromServerBaseUrl } from "../services/kannaServerBaseUrl";
+import { createDesktopStreamFrameDecoder } from "../services/desktopStreamFrameDecoder";
 
 type ConnectionListener = (connected: boolean) => void;
 
@@ -24,6 +25,7 @@ export async function getSharedStreamClient(): Promise<StreamClient> {
     const client = new StreamClient({
       url: streamUrlFromServerBaseUrl(serverBaseUrl),
       onConnectionChange: notifyConnectionListeners,
+      frameDecoder: createDesktopStreamFrameDecoder(),
     });
     sharedClient = client;
     return client;

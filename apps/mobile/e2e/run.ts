@@ -25,7 +25,10 @@ import {
 import { resolveRequiredMobileE2eEnv } from "./helpers/env";
 import { createMobileSession } from "./helpers/session";
 import { selectors } from "./helpers/selectors";
-import { seedTrustedDesktopThroughDeepLink } from "./helpers/trust-seed";
+import {
+  seedPairedTrustedDesktopThroughDeepLink,
+  seedTrustedDesktopThroughDeepLink
+} from "./helpers/trust-seed";
 import {
   assertSimulatorAppInstalled,
   bootSimulator,
@@ -344,8 +347,9 @@ async function main(): Promise<void> {
         }
       });
     } else if (mode === "hybrid" && relayHarness) {
-      await seedTrustedDesktopThroughDeepLink({
+      await seedPairedTrustedDesktopThroughDeepLink({
         bundleId: env.bundleId,
+        createPairingSession: relayHarness.createPairingSession,
         driver,
         desktop: {
           desktopId: relayHarness.hybridFixture.desktop.desktopId,
@@ -356,6 +360,7 @@ async function main(): Promise<void> {
       });
       await runHybridTaskFlow(driver, {
         bundleId: env.bundleId,
+        companion: relayHarness.companion,
         credentials: relayHarness.credentials,
         fixture: relayHarness.hybridFixture,
         publishCloudRefresh: () => relayHarness!.publishHybridCloudRefresh(),

@@ -16,6 +16,7 @@ const STREAM_ENCRYPTION_CONTEXT: &[u8] = b"kanna-task-transfer:artifact-stream:v
 const ARTIFACT_RESPONSE_CONTEXT: &[u8] = b"kanna-task-transfer:artifact-response-metadata:v1";
 const KEY_DERIVATION_SALT: &[u8] = b"kanna-task-transfer:key-derivation:v1";
 
+#[derive(Clone)]
 pub struct TransferIdentity {
     secret: StaticSecret,
     pub public_key: PublicKey,
@@ -276,6 +277,15 @@ where
     STANDARD.encode_string(&ciphertext, &mut envelope);
     envelope.push_str("\"}");
     Ok(envelope)
+}
+
+pub fn seal_typed<T: Serialize>(
+    sender: &TransferIdentity,
+    receiver_public: &PublicKey,
+    payload: &T,
+) -> Result<String, CryptoError> {
+    let value = serde_json::to_value(payload)?;
+    seal_json(sender, receiver_public, &value)
 }
 
 pub fn open_json(
@@ -592,6 +602,15 @@ impl StreamOpener {
             .ok_or(CryptoError::StreamSequenceExhausted)?;
         Ok(plaintext)
     }
+}
+
+pub fn open_typed<T: for<'de> Deserialize<'de>>(
+    receiver: &TransferIdentity,
+    sender_public: &PublicKey,
+    sealed: &str,
+) -> Result<T, CryptoError> {
+    let value = open_json(receiver, sender_public, sealed)?;
+    serde_json::from_value(value).map_err(CryptoError::from)
 }
 
 fn build_cipher(

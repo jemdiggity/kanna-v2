@@ -23,6 +23,10 @@ interface KannaTerminalBuffersE2EApi {
   sessionIds: () => string[];
   write: (sessionId: string, data: string, callback?: () => void) => void;
   input: (sessionId: string, data: string) => void;
+  findTextCell: (
+    sessionId: string,
+    text: string,
+  ) => { column: number; row: number; columns: number; rows: number } | null;
 }
 
 interface KannaAppMetricsSnapshot {
@@ -81,6 +85,9 @@ interface KannaTerminalStreamsE2EApi {
   detach: (taskId: string) => Promise<void>;
 }
 
+type KannaRemoteCompanionE2EApi = import("./e2eRemoteCompanion")
+  .E2ERemoteCompanionApi;
+
 interface KannaE2EHook {
   ready: boolean;
   /** Set once App.vue has decided whether to show the startup shortcuts modal. */
@@ -104,6 +111,7 @@ interface KannaE2EHook {
     getAll(): Array<{ event: string; payload?: unknown }>;
   };
   terminalBuffers?: KannaTerminalBuffersE2EApi;
+  remoteCompanion?: KannaRemoteCompanionE2EApi;
 }
 
 interface Window {

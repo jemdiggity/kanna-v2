@@ -105,6 +105,42 @@ pub(super) async fn wait_transfer_events(
     })))
 }
 
+/// Long-poll the companion frame lane. Same cursor/streamId contract as
+/// `wait_transfer_events`, on a log of its own so a 40 MiB snapshot can never
+/// evict a pairing prompt.
+pub(super) async fn wait_transfer_companion_events(
+    _access: DesktopLocalAccess,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TransferEventsQuery>,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_EVENT_LIMIT)
+        .clamp(1, MAX_EVENT_LIMIT);
+    let timeout_secs = query
+        .timeout_secs
+        .unwrap_or(DEFAULT_WAIT_TIMEOUT_SECS)
+        .clamp(1, MAX_WAIT_TIMEOUT_SECS);
+    let batch = state
+        .transfer_sidecar()
+        .companion_events()
+        .wait_for_events(
+            query.cursor,
+            query.stream_id.as_deref(),
+            limit,
+            Duration::from_secs(timeout_secs),
+        )
+        .await;
+    Ok(Json(json!({
+        "waitOutcome": if batch.events.is_empty() { "timeout" } else { "events" },
+        "cursor": batch.cursor,
+        "streamId": batch.stream_id,
+        "events": batch.events,
+        "hasMore": batch.has_more,
+        "missedEvents": batch.missed_events,
+    })))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct CloudTransferProxyRequest {

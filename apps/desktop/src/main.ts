@@ -16,6 +16,7 @@ import { createWindowWorkspace, parseWindowBootstrap, resolveWindowBootstrap } f
 import { e2eAppMetrics, e2eTerminalOutputPerf } from "./e2eAppMetrics";
 import { e2eInvokeHistory } from "./e2eInvokeHistory";
 import { e2eEventHistory } from "./e2eEventHistory";
+import { createE2ERemoteCompanionApi } from "./e2eRemoteCompanion";
 import {
   getSharedStreamClient,
   resetSharedStreamClientForTests,
@@ -272,6 +273,7 @@ try {
       terminalOutputPerf: e2eTerminalOutputPerf,
       invokes: e2eInvokeHistory,
       events: e2eEventHistory,
+      remoteCompanion: createE2ERemoteCompanionApi(),
       resetStreamClient: resetSharedStreamClientForTests,
       serverWork: e2eServerWork,
       terminalStreams: e2eTerminalStreams,

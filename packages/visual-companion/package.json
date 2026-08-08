@@ -1,0 +1,19 @@
+{
+  "name": "@kanna/visual-companion",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "vitest run --maxWorkers=2",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@kanna/agent-protocol": "workspace:*",
+    "@kanna/stream-client": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "vitest": "^4.1.4"
+  }
+}

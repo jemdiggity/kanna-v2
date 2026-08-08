@@ -12,6 +12,7 @@ import type {
   CompanionDocumentKind,
   CompanionEvent,
   FrameAgentEvent,
+  KspCapability,
   PermissionDecision,
   ServerFrame,
   StateChangeScope,
@@ -72,14 +73,25 @@ export interface TerminalOutputMetadata {
   receivedAtMs: number;
 }
 
+export interface CompanionAssetSnapshot {
+  name: string;
+  contentType: string;
+  digest: string;
+  dataB64: string;
+}
+
 export interface CompanionSnapshot {
   sessionId: string;
   revision: string;
   documentKind: CompanionDocumentKind;
   html: string;
+  sourceOrigin?: string;
+  assets: CompanionAssetSnapshot[];
 }
 
 export interface CompanionEventResult {
+  sessionId: string;
+  revision: string;
   eventId: string;
   accepted: boolean;
   code?: string;
@@ -93,6 +105,29 @@ export interface CompanionStreamHandlers {
   onConnectionChange?(connected: boolean): void;
   onError?(code: string, message: string): void;
 }
+
+export interface CompanionAttachmentOptions {
+  /** Request embedded asset bytes. Defaults to true for desktop and older peers. */
+  includeAssets?: boolean;
+}
+
+export interface StreamFrameDecoder {
+  decode(
+    data: string,
+    lane?: StreamFrameDecodeLane,
+  ): Promise<ServerFrame | null>;
+  /** Joins and parses a completed bounded frame assembly in the decoder's
+   * worker rather than on the browser UI thread. */
+  decodeChunks?(
+    chunks: readonly string[],
+    lane?: StreamFrameDecodeLane,
+  ): Promise<ServerFrame | null>;
+  /** Cancels every decode owned by this client. The decoder remains reusable
+   * for a later reconnect. */
+  cancel(): void;
+}
+
+export type StreamFrameDecodeLane = "terminal" | "companion" | "control";
 
 export interface StreamClientOptions {
   /** e.g. ws://127.0.0.1:48120/v1/stream */
@@ -109,6 +144,8 @@ export interface StreamClientOptions {
   onAuthError?(): void;
   /** Injectable local monotonic clock for terminal dispatch diagnostics. */
   now?: () => number;
+  /** Decode large inbound frames away from the UI thread. */
+  frameDecoder?: StreamFrameDecoder;
 }
 
 interface AgentAttachment {
@@ -126,6 +163,8 @@ interface TerminalAttachment {
 interface CompanionAttachment {
   kind: "companion";
   handlers: CompanionStreamHandlers;
+  includeAssets: boolean;
+  generation: number;
 }
 
 type Attachment = AgentAttachment | TerminalAttachment | CompanionAttachment;
@@ -136,7 +175,47 @@ interface PendingRequest {
   reject(reason: Error): void;
 }
 
+interface PendingCompanionEvent {
+  taskId: string;
+  sessionId: string;
+  revision: string;
+  attachmentGeneration: number;
+}
+
+interface DecodeIngress {
+  socket: WebSocketLike;
+  retainedBytes: number;
+  data?: string;
+  chunks?: readonly string[];
+  frame?: ServerFrame;
+  companionChunkTaskId?: string;
+  companionAttachmentGeneration?: number;
+  companionChunkAttachmentEpoch?: { value: number | undefined };
+  companionGenerationFence: number;
+}
+
+interface CompanionChunkAssembly {
+  transferId: string;
+  nextIndex: number;
+  count: number;
+  retainedCharacters: number;
+  retainedBytes: number;
+  chunks: string[];
+  attachmentGeneration: number;
+  attachmentEpoch: number | undefined;
+}
+
 const DEFAULT_BACKOFF_MS = [250, 500, 1000, 2000, 5000];
+const MAX_PENDING_COMPANION_EVENTS = 1024;
+const MAX_COMPANION_CHUNK_COUNT = 512;
+const MAX_COMPANION_CHUNK_CHARACTERS = 256 * 1024;
+const MAX_COMPANION_ASSEMBLY_CHARACTERS = 64 * 1024 * 1024;
+const MAX_LEGAL_COMPANION_BUNDLE_CHARACTERS = 32 * 1024 * 1024;
+// A connection may carry two protocol-legal maximum companion bundles at the
+// same time. Account the conservative two-byte JS string representation for
+// both while keeping one shared, finite admission domain.
+const MAX_PENDING_DECODE_BYTES =
+  MAX_LEGAL_COMPANION_BUNDLE_CHARACTERS * 2 * 2;
 
 /** Delay before the single force-refresh retry after an auth-failure close. */
 const AUTH_RETRY_DELAY_MS = 250;
@@ -149,6 +228,7 @@ export class StreamClient {
   private readonly options: StreamClientOptions;
   private readonly factory: WebSocketFactory;
   private readonly now: () => number;
+  private readonly frameDecoder: StreamFrameDecoder | undefined;
   private socket: WebSocketLike | null = null;
   private authed = false;
   private closed = false;
@@ -163,16 +243,47 @@ export class StreamClient {
   private authFailurePending = false;
   private nextRequestId = 1;
   private readonly pendingRequests = new Map<number, PendingRequest>();
+  private readonly pendingCompanionEvents = new Map<string, PendingCompanionEvent>();
   private readonly attachments = new Map<string, Attachment>();
+  private readonly companionChunkAssemblies = new Map<
+    string,
+    CompanionChunkAssembly
+  >();
   private readonly stateChangedListeners = new Set<StateChangedListener>();
   private supportedStreamKinds = new Set<StreamKind>();
+  private supportedCapabilities = new Set<KspCapability>();
+  /** Companion task ids already attached on this socket. A replacement on a
+   * peer missing either attachment- or event-epoch support must move to a
+   * fresh socket before entering another lifecycle. */
+  private readonly companionTasksOnSocket = new Set<string>();
+  /** The sole attachment generation on this socket that may consume
+   * epoch-less legacy event results. Once the task is replaced, omitted
+   * epochs stay bound to the retired generation until a fresh socket makes
+   * delayed results impossible. */
+  private readonly legacyCompanionResultGenerations = new Map<string, number>();
   /** Frames queued until the auth handshake completes. */
   private sendQueue: ClientFrame[] = [];
+  private readonly decodeIngress: Record<
+    StreamFrameDecodeLane,
+    DecodeIngress[]
+  > = {
+    terminal: [],
+    companion: [],
+    control: [],
+  };
+  private decodeIngressBytes = 0;
+  private companionAttachmentGeneration = 0;
+  private decodeGeneration = 0;
+  private readonly activeDecodeGenerations = new Map<
+    StreamFrameDecodeLane,
+    number
+  >();
 
   constructor(options: StreamClientOptions) {
     this.options = options;
     this.factory = options.webSocketFactory ?? defaultFactory;
     this.now = options.now ?? (() => performance.now());
+    this.frameDecoder = options.frameDecoder;
     this.connect();
   }
 
@@ -183,6 +294,9 @@ export class StreamClient {
       this.reconnectTimer = null;
     }
     this.failPendingRequests(new Error("stream client closed"));
+    this.pendingCompanionEvents.clear();
+    this.companionChunkAssemblies.clear();
+    this.resetDecodeIngress();
     this.socket?.close();
     this.socket = null;
   }
@@ -204,22 +318,65 @@ export class StreamClient {
     this.sendFrame({ type: "attach", task_id: taskId, kind: "terminal", from_seq: 0 });
   }
 
-  attachCompanion(taskId: string, handlers: CompanionStreamHandlers): void {
+  attachCompanion(
+    taskId: string,
+    handlers: CompanionStreamHandlers,
+    options: CompanionAttachmentOptions = {},
+  ): void {
+    const includeAssets = options.includeAssets !== false;
+    if (this.companionAttachment(taskId)) {
+      this.clearPendingCompanionEvents(taskId);
+    }
+    this.dropCompanionChunkAssembly(taskId);
+    this.companionAttachmentGeneration += 1;
+    const generation = this.companionAttachmentGeneration;
     this.attachments.set(attachmentKey(taskId, "companion"), {
       kind: "companion",
       handlers,
+      includeAssets,
+      generation,
     });
     if (this.authed && !this.supports("companion")) {
       handlers.onUnavailable();
       return;
     }
-    this.sendFrame({ type: "attach", task_id: taskId, kind: "companion", from_seq: 0 });
+    if (
+      this.authed &&
+      (!this.supportsCapability("companion_attachment_epoch") ||
+        !this.supportsCapability("companion_event_epoch")) &&
+      this.companionTasksOnSocket.has(taskId)
+    ) {
+      this.retireLegacyCompanionSocket();
+      return;
+    }
+    const sent = this.sendFrame({
+      type: "attach",
+      task_id: taskId,
+      kind: "companion",
+      from_seq: 0,
+      accept_snapshot_chunks: true,
+      attachment_epoch: generation,
+      ...(includeAssets ? {} : { include_assets: false }),
+    });
+    if (sent) this.recordCompanionAttachmentOnSocket(taskId, generation);
   }
 
   detach(taskId: string, kind: StreamKind): void {
+    const attachment = this.attachments.get(attachmentKey(taskId, kind));
     this.attachments.delete(attachmentKey(taskId, kind));
+    if (kind === "companion") {
+      this.clearPendingCompanionEvents(taskId);
+      this.dropCompanionChunkAssembly(taskId);
+    }
     if (kind === "companion" && !this.supports("companion")) return;
-    this.sendFrame({ type: "detach", task_id: taskId, kind });
+    this.sendFrame({
+      type: "detach",
+      task_id: taskId,
+      kind,
+      ...(attachment?.kind === "companion"
+        ? { attachment_epoch: attachment.generation }
+        : {}),
+    });
   }
 
   sendAgentInput(taskId: string, text: string): void {
@@ -257,14 +414,40 @@ export class StreamClient {
     revision: string,
     event: CompanionEvent,
   ): boolean {
-    if (!this.authed || !this.socket || !this.supports("companion")) return false;
-    return this.rawSend({
+    const attachment = this.companionAttachment(taskId);
+    if (
+      !this.authed ||
+      !this.socket ||
+      !this.supports("companion") ||
+      !attachment
+    ) {
+      return false;
+    }
+    if (event.session_id !== sessionId || event.revision !== revision) return false;
+    const key = companionEventKey(taskId, event.event_id);
+    if (
+      this.pendingCompanionEvents.size >= MAX_PENDING_COMPANION_EVENTS &&
+      !this.pendingCompanionEvents.has(key)
+    ) {
+      return false;
+    }
+    const sent = this.rawSend({
       type: "companion_event",
       task_id: taskId,
       session_id: sessionId,
       revision,
       event,
+      attachment_epoch: attachment.generation,
     });
+    if (sent) {
+      this.pendingCompanionEvents.set(key, {
+        taskId,
+        sessionId,
+        revision,
+        attachmentGeneration: attachment.generation,
+      });
+    }
+    return sent;
   }
 
   onStateChanged(listener: StateChangedListener): () => void {
@@ -296,6 +479,9 @@ export class StreamClient {
     if (this.closed) return;
     this.authed = false;
     this.supportedStreamKinds.clear();
+    this.supportedCapabilities.clear();
+    this.companionTasksOnSocket.clear();
+    this.legacyCompanionResultGenerations.clear();
     const socket = this.factory(this.options.url, {
       forceRefreshCredential: this.forceRefreshNextAuth,
     });
@@ -307,13 +493,29 @@ export class StreamClient {
     socket.onmessage = (event) => {
       if (socket !== this.socket) return;
       if (typeof event.data !== "string") return;
-      let frame: ServerFrame;
-      try {
-        frame = JSON.parse(event.data) as ServerFrame;
-      } catch {
+      const data = event.data;
+      if (!this.frameDecoder) {
+        try {
+          this.handleFrame(JSON.parse(data) as ServerFrame);
+        } catch {
+          // Ignore malformed frames.
+        }
         return;
       }
-      this.handleFrame(frame);
+      if (data.startsWith('{"type":"term_output",')) {
+        try {
+          this.enqueueDecodedFrame(
+            socket,
+            JSON.parse(data) as ServerFrame,
+            data.length * 2,
+            "terminal",
+          );
+        } catch {
+          // Ignore malformed terminal frames.
+        }
+        return;
+      }
+      this.enqueueDecode(socket, data, decodeLaneForWireFrame(data));
     };
     socket.onclose = (event) => this.handleDisconnect(socket, event);
     socket.onerror = () => {
@@ -324,10 +526,16 @@ export class StreamClient {
   private handleDisconnect(socket: WebSocketLike, closeEvent?: unknown): void {
     if (this.closed || socket !== this.socket) return;
     this.socket = null;
+    this.resetDecodeIngress();
     const wasAuthed = this.authed;
     this.authed = false;
     this.supportedStreamKinds.clear();
+    this.supportedCapabilities.clear();
+    this.companionTasksOnSocket.clear();
+    this.legacyCompanionResultGenerations.clear();
     this.options.onConnectionChange?.(false);
+    this.pendingCompanionEvents.clear();
+    this.companionChunkAssemblies.clear();
     for (const attachment of this.attachments.values()) {
       if (attachment.kind === "companion") {
         attachment.handlers.onConnectionChange?.(false);
@@ -400,7 +608,11 @@ export class StreamClient {
     }
     if (this.closed || socket !== this.socket) return;
     const credential = provided && provided.trim().length > 0 ? provided : undefined;
-    this.rawSend({ type: "auth", ...(credential ? { credential } : {}) }, socket);
+    this.rawSend({
+      type: "auth",
+      ...(credential ? { credential } : {}),
+      capabilities: ["companion_event_epoch"],
+    }, socket);
   }
 
   private handleFrame(frame: ServerFrame): void {
@@ -410,6 +622,7 @@ export class StreamClient {
         this.supportedStreamKinds = new Set(
           frame.stream_kinds ?? ["agent", "terminal"],
         );
+        this.supportedCapabilities = new Set(frame.capabilities ?? []);
         this.reconnectAttempt = 0;
         this.forceRefreshNextAuth = false;
         this.authRetryConsumed = false;
@@ -427,12 +640,27 @@ export class StreamClient {
             attachment.handlers.onUnavailable();
             continue;
           }
-          this.rawSend({
+          const sent = this.rawSend({
             type: "attach",
             task_id: taskId,
             kind,
             from_seq: attachment.kind === "agent" ? attachment.fromSeq : 0,
+            ...(attachment.kind === "companion"
+              ? {
+                  accept_snapshot_chunks: true,
+                  attachment_epoch: attachment.generation,
+                }
+              : {}),
+            ...(attachment.kind === "companion" && !attachment.includeAssets
+              ? { include_assets: false }
+              : {}),
           });
+          if (sent && attachment.kind === "companion") {
+            this.recordCompanionAttachmentOnSocket(
+              taskId,
+              attachment.generation,
+            );
+          }
         }
         const queued = this.sendQueue;
         this.sendQueue = [];
@@ -486,20 +714,94 @@ export class StreamClient {
         return;
       }
       case "companion_snapshot": {
-        this.companionAttachment(frame.task_id)?.handlers.onSnapshot({
+        const attachment = this.companionAttachment(frame.task_id);
+        if (
+          !this.companionFrameMatchesAttachment(
+            frame.attachment_epoch,
+            attachment,
+          )
+        ) {
+          return;
+        }
+        this.dropCompanionChunkAssembly(frame.task_id);
+        attachment?.handlers.onSnapshot({
           sessionId: frame.session_id,
           revision: frame.revision,
           documentKind: frame.document_kind,
           html: frame.html,
+          sourceOrigin:
+            typeof frame.source_origin === "string"
+              ? frame.source_origin
+              : undefined,
+          assets: attachment.includeAssets && Array.isArray(frame.assets)
+            ? frame.assets
+                .filter(isCompanionAssetFrame)
+                .map((asset) => ({
+                  name: asset.name,
+                  contentType: asset.content_type,
+                  digest: asset.digest,
+                  dataB64: asset.data_b64,
+                }))
+            : [],
         });
         return;
       }
+      case "companion_snapshot_chunk": {
+        this.acceptCompanionSnapshotChunk(frame);
+        return;
+      }
       case "companion_unavailable": {
-        this.companionAttachment(frame.task_id)?.handlers.onUnavailable();
+        const attachment = this.companionAttachment(frame.task_id);
+        if (
+          this.companionFrameMatchesAttachment(
+            frame.attachment_epoch,
+            attachment,
+          )
+        ) {
+          attachment?.handlers.onUnavailable();
+        }
         return;
       }
       case "companion_event_result": {
-        this.companionAttachment(frame.task_id)?.handlers.onEventResult({
+        const attachment = this.companionAttachment(frame.task_id);
+        const key = companionEventKey(frame.task_id, frame.event_id);
+        const pending = this.pendingCompanionEvents.get(key);
+        if (!pending || !attachment) return;
+        if (pending.attachmentGeneration !== attachment.generation) return;
+        if (
+          frame.attachment_epoch === undefined
+            ? this.supportsCapability("companion_event_epoch") ||
+              this.legacyCompanionResultGenerations.get(frame.task_id) !==
+                pending.attachmentGeneration
+            : !this.companionFrameMatchesAttachment(
+                frame.attachment_epoch,
+                attachment,
+              )
+        ) {
+          return;
+        }
+        if (
+          frame.session_id != null &&
+          frame.session_id !== pending.sessionId
+        ) {
+          return;
+        }
+        if (frame.revision != null && frame.revision !== pending.revision) {
+          return;
+        }
+        this.pendingCompanionEvents.delete(key);
+        const sessionId = frame.session_id ?? pending.sessionId;
+        const revision = frame.revision ?? pending.revision;
+        if (!sessionId || !revision) {
+          attachment.handlers.onError?.(
+            "incompatible_companion_result",
+            "The remote companion result is from an incompatible version.",
+          );
+          return;
+        }
+        attachment.handlers.onEventResult({
+          sessionId,
+          revision,
           eventId: frame.event_id,
           accepted: frame.accepted,
           ...(frame.code == null ? {} : { code: frame.code }),
@@ -508,7 +810,15 @@ export class StreamClient {
         return;
       }
       case "companion_error": {
-        this.companionAttachment(frame.task_id)?.handlers.onError?.(frame.code, frame.message);
+        const attachment = this.companionAttachment(frame.task_id);
+        if (
+          this.companionFrameMatchesAttachment(
+            frame.attachment_epoch,
+            attachment,
+          )
+        ) {
+          attachment?.handlers.onError?.(frame.code, frame.message);
+        }
         return;
       }
       case "response": {
@@ -549,20 +859,384 @@ export class StreamClient {
     return attachment?.kind === "companion" ? attachment : undefined;
   }
 
+  private companionFrameMatchesAttachment(
+    attachmentEpoch: number | undefined,
+    attachment: CompanionAttachment | undefined,
+  ): boolean {
+    if (
+      attachmentEpoch === undefined &&
+      !this.supportsCapability("companion_attachment_epoch")
+    ) {
+      return true;
+    }
+    return (
+      attachment !== undefined &&
+      Number.isSafeInteger(attachmentEpoch) &&
+      attachmentEpoch === attachment.generation
+    );
+  }
+
+  private acceptCompanionSnapshotChunk(
+    frame: Extract<ServerFrame, { type: "companion_snapshot_chunk" }>,
+  ): void {
+    const attachment = this.companionAttachment(frame.task_id);
+    if (
+      !this.companionFrameMatchesAttachment(
+        frame.attachment_epoch,
+        attachment,
+      )
+    ) {
+      return;
+    }
+    if (!attachment) {
+      this.dropCompanionChunkAssembly(frame.task_id);
+      return;
+    }
+    if (
+      !Number.isSafeInteger(frame.index) ||
+      !Number.isSafeInteger(frame.count) ||
+      frame.index < 0 ||
+      frame.count < 1 ||
+      frame.count > MAX_COMPANION_CHUNK_COUNT ||
+      frame.index >= frame.count ||
+      frame.data.length > MAX_COMPANION_CHUNK_CHARACTERS ||
+      frame.transfer_id.length === 0
+    ) {
+      this.dropCompanionChunkAssembly(frame.task_id);
+      attachment.handlers.onError?.(
+        "invalid_companion_chunks",
+        "The remote visual companion was incomplete.",
+      );
+      return;
+    }
+    let assembly = this.companionChunkAssemblies.get(frame.task_id);
+    if (frame.index === 0) {
+      this.dropCompanionChunkAssembly(frame.task_id);
+      assembly = {
+        transferId: frame.transfer_id,
+        nextIndex: 0,
+        count: frame.count,
+        retainedCharacters: 0,
+        retainedBytes: 0,
+        chunks: [],
+        attachmentGeneration: attachment.generation,
+        attachmentEpoch: frame.attachment_epoch,
+      };
+      this.companionChunkAssemblies.set(frame.task_id, assembly);
+    }
+    if (
+      !assembly ||
+      assembly.transferId !== frame.transfer_id ||
+      assembly.count !== frame.count ||
+      assembly.nextIndex !== frame.index ||
+      assembly.retainedCharacters + frame.data.length >
+        MAX_COMPANION_ASSEMBLY_CHARACTERS ||
+      assembly.attachmentGeneration !== attachment.generation ||
+      assembly.attachmentEpoch !== frame.attachment_epoch
+    ) {
+      this.dropCompanionChunkAssembly(frame.task_id);
+      attachment.handlers.onError?.(
+        "invalid_companion_chunks",
+        "The remote visual companion was incomplete.",
+      );
+      return;
+    }
+    const retainedBytes = frame.data.length * 2;
+    if (!this.reserveDecodeBytes(retainedBytes)) {
+      this.dropCompanionChunkAssembly(frame.task_id);
+      attachment.handlers.onError?.(
+        "companion_decode_capacity",
+        "The remote visual companion exceeded local decode capacity.",
+      );
+      return;
+    }
+    assembly.chunks.push(frame.data);
+    assembly.retainedCharacters += frame.data.length;
+    assembly.retainedBytes += retainedBytes;
+    assembly.nextIndex += 1;
+    if (assembly.nextIndex !== assembly.count) return;
+
+    this.companionChunkAssemblies.delete(frame.task_id);
+    const socket = this.socket;
+    if (socket && this.frameDecoder?.decodeChunks) {
+      this.enqueueDecodeIngress("companion", {
+        socket,
+        chunks: assembly.chunks,
+        retainedBytes: assembly.retainedBytes,
+        companionChunkTaskId: frame.task_id,
+        companionAttachmentGeneration: assembly.attachmentGeneration,
+        companionChunkAttachmentEpoch: { value: assembly.attachmentEpoch },
+        companionGenerationFence: this.companionAttachmentGeneration,
+      }, true);
+      return;
+    }
+    try {
+      const snapshot = JSON.parse(assembly.chunks.join("")) as ServerFrame;
+      if (
+        snapshot.type !== "companion_snapshot" ||
+        snapshot.task_id !== frame.task_id ||
+        snapshot.attachment_epoch !== assembly.attachmentEpoch
+      ) {
+        throw new Error("chunk payload identity mismatch");
+      }
+      this.handleFrame(snapshot);
+    } catch {
+      attachment.handlers.onError?.(
+        "invalid_companion_chunks",
+        "The remote visual companion was incomplete.",
+      );
+    } finally {
+      this.releaseDecodeBytes(assembly.retainedBytes);
+    }
+  }
+
+  private clearPendingCompanionEvents(taskId: string): void {
+    for (const [key, pending] of this.pendingCompanionEvents) {
+      if (pending.taskId === taskId) this.pendingCompanionEvents.delete(key);
+    }
+  }
+
+  private enqueueDecode(
+    socket: WebSocketLike,
+    data: string,
+    lane: StreamFrameDecodeLane,
+  ): void {
+    // JS strings may retain two bytes per code unit. Account conservatively
+    // before putting the full wire string into a bounded lane.
+    const retainedBytes = data.length * 2;
+    this.enqueueDecodeIngress(lane, {
+      socket,
+      data,
+      retainedBytes,
+      companionGenerationFence: this.companionAttachmentGeneration,
+    });
+  }
+
+  private enqueueDecodedFrame(
+    socket: WebSocketLike,
+    frame: ServerFrame,
+    retainedBytes: number,
+    lane: StreamFrameDecodeLane,
+  ): void {
+    this.enqueueDecodeIngress(lane, {
+      socket,
+      frame,
+      retainedBytes,
+      companionGenerationFence: this.companionAttachmentGeneration,
+    });
+  }
+
+  private enqueueDecodeIngress(
+    lane: StreamFrameDecodeLane,
+    ingress: DecodeIngress,
+    retainedBytesAlreadyReserved = false,
+  ): void {
+    if (
+      !retainedBytesAlreadyReserved
+      && !this.reserveDecodeBytes(ingress.retainedBytes)
+    ) {
+      this.handleDecodeOverflow(ingress);
+      return;
+    }
+    this.decodeIngress[lane].push(ingress);
+    if (!this.activeDecodeGenerations.has(lane)) {
+      const generation = this.decodeGeneration;
+      this.activeDecodeGenerations.set(lane, generation);
+      void this.pumpDecodeIngress(lane, generation);
+    }
+  }
+
+  private async pumpDecodeIngress(
+    lane: StreamFrameDecodeLane,
+    generation: number,
+  ): Promise<void> {
+    try {
+      while (generation === this.decodeGeneration) {
+        const ingress = this.decodeIngress[lane].shift();
+        if (!ingress) return;
+        let frame: ServerFrame | null;
+        if (ingress.frame) {
+          frame = ingress.frame;
+        } else if (ingress.chunks) {
+          try {
+            frame = await this.frameDecoder!.decodeChunks!(
+              ingress.chunks,
+              lane,
+            );
+          } catch {
+            if (generation === this.decodeGeneration) {
+              this.releaseDecodeBytes(ingress.retainedBytes);
+              this.handleDecodeOverflow(ingress);
+            }
+            return;
+          }
+        } else {
+          try {
+            frame = await this.frameDecoder!.decode(ingress.data!, lane);
+          } catch {
+            if (generation === this.decodeGeneration) {
+              this.releaseDecodeBytes(ingress.retainedBytes);
+              this.handleDecodeOverflow(ingress);
+            }
+            return;
+          }
+        }
+        if (generation === this.decodeGeneration) {
+          this.releaseDecodeBytes(ingress.retainedBytes);
+        }
+        if (
+          generation === this.decodeGeneration &&
+          frame &&
+          ingress.socket === this.socket
+        ) {
+          if (
+            ingress.companionChunkTaskId &&
+            !this.companionIngressIsCurrent(
+              ingress.companionChunkTaskId,
+              ingress,
+            )
+          ) {
+            continue;
+          }
+          if (
+            ingress.companionChunkTaskId &&
+            (
+              frame.type !== "companion_snapshot" ||
+              frame.task_id !== ingress.companionChunkTaskId ||
+              (
+                ingress.companionChunkAttachmentEpoch !== undefined &&
+                frame.attachment_epoch !==
+                  ingress.companionChunkAttachmentEpoch.value
+              )
+            )
+          ) {
+            this.companionAttachment(
+              ingress.companionChunkTaskId,
+            )?.handlers.onError?.(
+              "invalid_companion_chunks",
+              "The remote visual companion was incomplete.",
+            );
+            continue;
+          }
+          const companionTaskId = companionFrameTaskId(frame);
+          if (
+            companionTaskId !== null &&
+            !this.companionIngressIsCurrent(companionTaskId, ingress)
+          ) {
+            continue;
+          }
+          this.handleFrame(frame);
+        }
+      }
+    } finally {
+      if (this.activeDecodeGenerations.get(lane) === generation) {
+        this.activeDecodeGenerations.delete(lane);
+        if (this.decodeIngress[lane].length > 0) {
+          const nextGeneration = this.decodeGeneration;
+          this.activeDecodeGenerations.set(lane, nextGeneration);
+          void this.pumpDecodeIngress(lane, nextGeneration);
+        }
+      }
+    }
+  }
+
+  private companionIngressIsCurrent(
+    taskId: string,
+    ingress: DecodeIngress,
+  ): boolean {
+    const attachment = this.companionAttachment(taskId);
+    if (!attachment) return false;
+    return ingress.companionAttachmentGeneration === undefined
+      ? attachment.generation <= ingress.companionGenerationFence
+      : attachment.generation === ingress.companionAttachmentGeneration;
+  }
+
+  private handleDecodeOverflow(ingress: DecodeIngress): void {
+    if (ingress.socket !== this.socket) return;
+    if (ingress.companionChunkTaskId) {
+      this.companionAttachment(
+        ingress.companionChunkTaskId,
+      )?.handlers.onError?.(
+        "companion_decode_capacity",
+        "The remote visual companion exceeded local decode capacity.",
+      );
+      return;
+    }
+    for (const attachment of this.attachments.values()) {
+      attachment.handlers.onError?.(
+        "stream_decode_capacity",
+        "The desktop could not decode an incoming update within its local capacity.",
+      );
+    }
+  }
+
+  private reserveDecodeBytes(bytes: number): boolean {
+    if (bytes < 0 || this.decodeIngressBytes + bytes > MAX_PENDING_DECODE_BYTES) {
+      return false;
+    }
+    this.decodeIngressBytes += bytes;
+    return true;
+  }
+
+  private releaseDecodeBytes(bytes: number): void {
+    this.decodeIngressBytes = Math.max(0, this.decodeIngressBytes - bytes);
+  }
+
+  private dropCompanionChunkAssembly(taskId: string): void {
+    const assembly = this.companionChunkAssemblies.get(taskId);
+    if (!assembly) return;
+    this.companionChunkAssemblies.delete(taskId);
+    this.releaseDecodeBytes(assembly.retainedBytes);
+  }
+
+  private resetDecodeIngress(): void {
+    this.decodeGeneration += 1;
+    this.decodeIngress.terminal = [];
+    this.decodeIngress.companion = [];
+    this.decodeIngress.control = [];
+    this.decodeIngressBytes = 0;
+    this.activeDecodeGenerations.clear();
+    this.frameDecoder?.cancel();
+  }
+
   private supports(kind: StreamKind): boolean {
     return this.supportedStreamKinds.has(kind);
   }
 
-  private sendFrame(frame: ClientFrame): void {
+  private supportsCapability(capability: KspCapability): boolean {
+    return this.supportedCapabilities.has(capability);
+  }
+
+  private retireLegacyCompanionSocket(): void {
+    const socket = this.socket;
+    if (!socket) return;
+    socket.close();
+    this.handleDisconnect(socket);
+  }
+
+  private recordCompanionAttachmentOnSocket(
+    taskId: string,
+    generation: number,
+  ): void {
+    if (
+      !this.supportsCapability("companion_event_epoch") &&
+      !this.companionTasksOnSocket.has(taskId)
+    ) {
+      this.legacyCompanionResultGenerations.set(taskId, generation);
+    }
+    this.companionTasksOnSocket.add(taskId);
+  }
+
+  private sendFrame(frame: ClientFrame): boolean {
     if (!this.authed || !this.socket) {
-      // Attaches are re-sent from the attachment registry on auth; queue
-      // everything else.
-      if (frame.type !== "attach") {
+      // Attachment state is re-sent from the registry on auth. Neither edge
+      // of that state transition belongs in the reconnect replay queue.
+      if (frame.type !== "attach" && frame.type !== "detach") {
         this.sendQueue.push(frame);
       }
-      return;
+      return false;
     }
-    this.rawSend(frame);
+    return this.rawSend(frame);
   }
 
   private rawSend(frame: ClientFrame, socket = this.socket): boolean {
@@ -593,12 +1267,60 @@ function attachmentKey(taskId: string, kind: StreamKind): string {
   return `${kind}:${taskId}`;
 }
 
+function companionFrameTaskId(frame: ServerFrame): string | null {
+  switch (frame.type) {
+    case "companion_snapshot":
+    case "companion_snapshot_chunk":
+    case "companion_unavailable":
+    case "companion_error":
+    case "companion_event_result":
+      return frame.task_id;
+    default:
+      return null;
+  }
+}
+
+function companionEventKey(taskId: string, eventId: string): string {
+  return JSON.stringify([taskId, eventId]);
+}
+
+function decodeLaneForWireFrame(data: string): StreamFrameDecodeLane {
+  if (
+    data.startsWith('{"type":"term_snapshot",') ||
+    data.startsWith('{"type":"term_output",')
+  ) {
+    return "terminal";
+  }
+  if (data.startsWith('{"type":"companion_')) {
+    return "companion";
+  }
+  return "control";
+}
+
 function parseAttachmentKey(key: string): { taskId: string; kind: StreamKind } {
   const separator = key.indexOf(":");
   return {
     kind: key.slice(0, separator) as StreamKind,
     taskId: key.slice(separator + 1),
   };
+}
+
+function isCompanionAssetFrame(
+  value: unknown,
+): value is {
+  name: string;
+  content_type: string;
+  digest: string;
+  data_b64: string;
+} {
+  if (typeof value !== "object" || value === null) return false;
+  const asset = value as Record<string, unknown>;
+  return (
+    typeof asset.name === "string" &&
+    typeof asset.content_type === "string" &&
+    typeof asset.digest === "string" &&
+    typeof asset.data_b64 === "string"
+  );
 }
 
 export interface RelayTunnelOptions {

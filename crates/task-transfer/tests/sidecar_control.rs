@@ -435,6 +435,9 @@ fn control_response_id(response: &ControlResponse) -> &str {
         | ControlResponse::ListPeerTaskSnapshots { request_id, .. }
         | ControlResponse::ObservePeerSession { request_id }
         | ControlResponse::UnobservePeerSession { request_id }
+        | ControlResponse::ObservePeerCompanion { request_id }
+        | ControlResponse::SendPeerCompanionEvent { request_id }
+        | ControlResponse::UnobservePeerCompanion { request_id }
         | ControlResponse::SendPeerSessionInput { request_id }
         | ControlResponse::ResizePeerSession { request_id }
         | ControlResponse::ClosePeerTask { request_id }

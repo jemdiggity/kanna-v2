@@ -450,4 +450,53 @@ describe("desktop LAN task index reader", () => {
       message: expect.stringContaining("upgrade and re-pair"),
     });
   });
+
+  it("keeps peer tasks distinct when legacy LAN snapshots omit cloud task ids", async () => {
+    const task = (id: string) => ({
+      ownerDesktopId: "desktop-owner",
+      ownerLocalTaskId: id,
+      title: id,
+      promptSnippet: id,
+      displayName: null,
+      stage: "in progress",
+      status: "active",
+      repo: {
+        cloudRepoId: "repo-1",
+        name: "Repo One",
+        remoteUrlHash: repo().remote_url_hash,
+        defaultBranch: "main",
+      },
+      branch: id,
+      baseRef: "main",
+      prNumber: null,
+      prUrl: null,
+      createdAt: "2026-06-13T00:00:00.000Z",
+      updatedAt: "2026-06-13T00:00:01.000Z",
+      closedAt: null,
+    });
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_transfer_task_snapshots") {
+        return [{
+          peer_id: "peer-primary",
+          snapshot: { tasks: [task("task-a"), task("task-b")] },
+        }];
+      }
+      if (command === "read_env_var") return "peer-secondary";
+      return null;
+    });
+
+    const snapshot = await listDesktopLanTasks({
+      localRepos: [{
+        repo: repo() as never,
+        remoteUrlHash: repo().remote_url_hash,
+      }],
+    });
+
+    expect(snapshot.items.map((item) => item.id)).toEqual([
+      `cloud:lan:${JSON.stringify(["peer-primary", "repo-1", "task-a"])}`,
+      `cloud:lan:${JSON.stringify(["peer-primary", "repo-1", "task-b"])}`,
+    ]);
+    expect(Object.values(snapshot.terminalRefs).map((ref) => ref.ownerLocalTaskId))
+      .toEqual(["task-a", "task-b"]);
+  });
 });

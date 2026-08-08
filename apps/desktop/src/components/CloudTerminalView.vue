@@ -2,20 +2,31 @@
 import { onMounted, onUnmounted, ref, watch } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { useI18n } from "vue-i18n";
 import "@xterm/xterm/css/xterm.css";
 import {
   createConfiguredDesktopRelayTerminalClient,
-  type DesktopRelayTerminalClient,
-  type DesktopRelayTerminalSubscription,
 } from "../services/desktopRelayTerminal";
 import { createConfiguredDesktopLanTerminalClient } from "../services/desktopLanTerminal";
 import {
   createRemoteTerminalFileLinkProvider,
   type RemoteTerminalFileLinkProvider,
 } from "../composables/remoteTerminalFileLinks";
+import {
+  desktopCompanionRemoteKey,
+  getDesktopCompanionBridgeManager,
+  type DesktopCompanionRemoteOwnership,
+} from "../services/desktopCompanionBridge";
+import type {
+  DesktopRemoteTaskClient,
+  DesktopRemoteTerminalSubscription,
+} from "../services/desktopRemoteTaskClient";
 import { getTerminalTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
 import { registerE2ETerminalBuffer } from "../e2eTerminalBuffers";
+import { useToast } from "../composables/useToast";
 
 const props = defineProps<{
   ownerDesktopId: string;
@@ -27,21 +38,29 @@ const containerRef = ref<HTMLElement | null>(null);
 const status = ref<"connecting" | "live" | "closed" | "error">("connecting");
 const errorMessage = ref<string | null>(null);
 const { effectiveCodeTheme } = useThemeRuntime();
+const { t } = useI18n();
+const toast = useToast();
+const companionBridge = getDesktopCompanionBridgeManager();
 let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let resizeObserver: ResizeObserver | null = null;
-let relayClient: DesktopRelayTerminalClient | null = null;
-let subscription: DesktopRelayTerminalSubscription | null = null;
+let relayClient: DesktopRemoteTaskClient | null = null;
+let subscription: DesktopRemoteTerminalSubscription | null = null;
+let companionOwnership: DesktopCompanionRemoteOwnership | null = null;
+let currentRemoteKey: string | null = null;
+let currentOwnerDesktopId: string | null = null;
+let currentOwnerTaskId: string | null = null;
 let unregisterE2ETerminalBuffer: (() => void) | null = null;
 let fileLinkProvider: RemoteTerminalFileLinkProvider | null = null;
 const MAX_PENDING_REMOTE_INPUT_CHARS = 64 * 1024;
 // LAN input is repeated in the authenticated peer envelope. A 4 KiB UTF-8
 // chunk stays below the task-transfer runtime's 64 KiB request-frame limit.
 const MAX_REMOTE_INPUT_FRAME_BYTES = 4 * 1024;
-let startGeneration = 0;
+let lifecycleGeneration = 0;
+let unmounted = false;
 
 interface RemoteInputQueue {
-  client: DesktopRelayTerminalClient;
+  client: DesktopRemoteTaskClient;
   desktopId: string;
   taskId: string;
   pending: string;
@@ -132,10 +151,18 @@ function enqueueRemoteInput(data: string) {
 
 function fitAndResizeRemote() {
   fitAddon?.fit();
-  if (!terminal || !relayClient || status.value !== "live") return;
+  if (
+    !terminal ||
+    !relayClient ||
+    !currentOwnerDesktopId ||
+    !currentOwnerTaskId ||
+    status.value !== "live"
+  ) {
+    return;
+  }
   void relayClient.resize({
-    desktopId: props.ownerDesktopId,
-    taskId: props.ownerTaskId,
+    desktopId: currentOwnerDesktopId,
+    taskId: currentOwnerTaskId,
     cols: terminal.cols,
     rows: terminal.rows,
   }).catch((error) => {
@@ -145,22 +172,24 @@ function fitAndResizeRemote() {
 
 async function start() {
   stopSubscription();
-  const generation = startGeneration;
+  const generation = lifecycleGeneration;
   const desktopId = props.ownerDesktopId;
   const taskId = props.ownerTaskId;
   const transport = props.transport;
+  const remoteKey = desktopCompanionRemoteKey(desktopId, taskId);
   fileLinkProvider?.clearFileCache();
   status.value = "connecting";
   errorMessage.value = null;
   terminal?.reset();
   terminal?.write("Connecting to remote terminal...\r\n");
 
-  let acquiredClient: DesktopRelayTerminalClient | null = null;
+  let acquiredClient: DesktopRemoteTaskClient | null = null;
+  let adopted = false;
   try {
     acquiredClient = transport === "lan"
       ? await createConfiguredDesktopLanTerminalClient()
       : await createConfiguredDesktopRelayTerminalClient();
-    if (generation !== startGeneration) {
+    if (unmounted || generation !== lifecycleGeneration) {
       acquiredClient?.close();
       return;
     }
@@ -168,7 +197,24 @@ async function start() {
       throw new Error(transport === "lan" ? "LAN terminal is unavailable." : "Cloud transport is not configured for this desktop.");
     }
     const client = acquiredClient;
+
+    const ownership = companionBridge.adoptRemote({
+      remoteKey,
+      ownerDesktopId: desktopId,
+      ownerTaskId: taskId,
+      transport: client,
+    });
+    adopted = true;
+    if (unmounted || generation !== lifecycleGeneration) {
+      ownership.release();
+      return;
+    }
+
     relayClient = client;
+    companionOwnership = ownership;
+    currentRemoteKey = remoteKey;
+    currentOwnerDesktopId = desktopId;
+    currentOwnerTaskId = taskId;
     const queue: RemoteInputQueue = {
       client,
       desktopId,
@@ -183,7 +229,8 @@ async function start() {
       taskId,
       listener(event) {
         if (
-          generation !== startGeneration
+          unmounted
+          || generation !== lifecycleGeneration
           || relayClient !== client
           || event.taskId !== taskId
         ) return;
@@ -210,29 +257,85 @@ async function start() {
       },
     });
   } catch (error) {
-    if (generation !== startGeneration) {
-      acquiredClient?.close();
+    if (unmounted || generation !== lifecycleGeneration) {
+      if (acquiredClient && !adopted) acquiredClient.close();
       return;
     }
-    closeInputQueue();
-    subscription?.close();
-    subscription = null;
-    if (relayClient === acquiredClient) {
-      relayClient = null;
+    if (acquiredClient && !adopted) {
+      closeInputQueue();
+      subscription?.close();
+      subscription = null;
+      if (relayClient === acquiredClient) {
+        relayClient = null;
+      }
+      acquiredClient.close();
+    } else {
+      stopSubscription();
     }
-    acquiredClient?.close();
     const message = error instanceof Error ? error.message : "Remote terminal failed.";
     writeRemoteTerminalError(message);
   }
 }
 
 function stopSubscription() {
-  startGeneration += 1;
+  lifecycleGeneration += 1;
   closeInputQueue();
-  subscription?.close();
+  try {
+    subscription?.close();
+  } catch {
+    // The manager still owns the parent transport.
+  }
   subscription = null;
-  relayClient?.close();
+  companionOwnership?.release();
+  companionOwnership = null;
   relayClient = null;
+  currentRemoteKey = null;
+  currentOwnerDesktopId = null;
+  currentOwnerTaskId = null;
+}
+
+async function activateLink(uri: string): Promise<void> {
+  if (unmounted) return;
+  const generation = lifecycleGeneration;
+  const remoteKey = currentRemoteKey ??
+    desktopCompanionRemoteKey(props.ownerDesktopId, props.ownerTaskId);
+
+  await companionBridge.openForClickedLink(remoteKey, uri).then((result) => {
+    if (unmounted || generation !== lifecycleGeneration) return;
+    if (result.kind === "ordinary") {
+      void openUrl(result.url).catch(() => {
+        console.error("[cloud-terminal] Failed to open URL.");
+      });
+      return;
+    }
+    if (result.kind === "unavailable") {
+      toast.info(t("toasts.remoteCompanionStarting"));
+    }
+  }).catch(() => {
+    if (unmounted || generation !== lifecycleGeneration) return;
+    toast.error(t("toasts.remoteCompanionOpenFailed"));
+  });
+}
+
+function handleLinkActivate(event: MouseEvent, uri: string) {
+  event.preventDefault();
+  void activateLink(uri);
+}
+
+async function openCurrentCompanion(): Promise<void> {
+  if (unmounted) return;
+  const generation = lifecycleGeneration;
+  const remoteKey = currentRemoteKey ??
+    desktopCompanionRemoteKey(props.ownerDesktopId, props.ownerTaskId);
+  await companionBridge.openCurrent(remoteKey).then((result) => {
+    if (unmounted || generation !== lifecycleGeneration) return;
+    if (result.kind === "unavailable") {
+      toast.info(t("toasts.remoteCompanionStarting"));
+    }
+  }).catch(() => {
+    if (unmounted || generation !== lifecycleGeneration) return;
+    toast.error(t("toasts.remoteCompanionOpenFailed"));
+  });
 }
 
 function registerTerminalBufferForE2E() {
@@ -253,11 +356,12 @@ onMounted(() => {
     theme: getTerminalTheme(effectiveCodeTheme.value),
   });
   terminal.onData((data) => {
-    if (!relayClient || status.value !== "live") return;
+    if (unmounted || !relayClient || status.value !== "live") return;
     enqueueRemoteInput(data);
   });
   fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
+  terminal.loadAddon(new WebLinksAddon(handleLinkActivate));
   if (containerRef.value) {
     terminal.open(containerRef.value);
     registerTerminalBufferForE2E();
@@ -289,6 +393,8 @@ watch(effectiveCodeTheme, (theme) => {
 });
 
 onUnmounted(() => {
+  unmounted = true;
+  lifecycleGeneration += 1;
   stopSubscription();
   unregisterE2ETerminalBuffer?.();
   unregisterE2ETerminalBuffer = null;
@@ -302,6 +408,17 @@ onUnmounted(() => {
 
 <template>
   <div class="cloud-terminal-shell" :data-status="status">
+    <button
+      type="button"
+      class="open-companion-control"
+      :aria-label="t('visualCompanion.open')"
+      :title="t('visualCompanion.open')"
+      @click="openCurrentCompanion"
+      @keydown.enter.prevent="openCurrentCompanion"
+      @keydown.space.prevent="openCurrentCompanion"
+    >
+      {{ t("visualCompanion.open") }}
+    </button>
     <div ref="containerRef" class="terminal-container"></div>
     <div v-if="status === 'error' && errorMessage" class="cloud-terminal-status">
       {{ errorMessage }}
@@ -320,6 +437,28 @@ onUnmounted(() => {
 .terminal-container {
   width: 100%;
   height: 100%;
+}
+
+.open-companion-control {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  right: 12px;
+  padding: 5px 8px;
+  border: 1px solid var(--kn-border-default);
+  border-radius: 5px;
+  background: var(--kn-bg-panel-raised);
+  color: var(--kn-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.78;
+}
+
+.open-companion-control:hover,
+.open-companion-control:focus-visible {
+  color: var(--kn-text-primary);
+  opacity: 1;
 }
 
 .cloud-terminal-status {

@@ -139,6 +139,30 @@ export class WebDriverClient {
     await pauseForSlowMode("webdriver pointer double press");
   }
 
+  async pointerPressAt(x: number, y: number): Promise<void> {
+    await this.post(`/session/${this.sid}/actions`, {
+      actions: [
+        {
+          type: "pointer",
+          id: "mouse",
+          parameters: { pointerType: "mouse" },
+          actions: [
+            {
+              type: "pointerMove",
+              duration: 0,
+              origin: "viewport",
+              x: Math.round(x),
+              y: Math.round(y),
+            },
+            { type: "pointerDown", button: 0 },
+            { type: "pointerUp", button: 0 },
+          ],
+        },
+      ],
+    });
+    await pauseForSlowMode("webdriver pointer press");
+  }
+
   async getText(elementId: string): Promise<string> {
     const res = await this.get(`/session/${this.sid}/element/${elementId}/text`);
     return res.value;

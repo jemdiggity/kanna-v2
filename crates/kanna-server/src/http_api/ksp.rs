@@ -1,3 +1,4 @@
+use super::lan_trust::TrustedLanDeviceAccess;
 use super::state::AppState;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, State};
@@ -9,18 +10,26 @@ pub(super) async fn legacy_ksp_stream(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    trusted_lan_device: Option<Extension<TrustedLanDeviceAccess>>,
 ) -> axum::response::Response {
     let auth_mode = direct_stream_auth_mode(peer, true);
-    ws.on_upgrade(move |socket| crate::ksp::handle_stream(socket, state, auth_mode))
+    let companion_access = direct_stream_companion_access(trusted_lan_device, auth_mode);
+    ws.on_upgrade(move |socket| {
+        crate::ksp::handle_stream(socket, state, auth_mode, companion_access)
+    })
 }
 
 pub(super) async fn ksp_stream(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    trusted_lan_device: Option<Extension<TrustedLanDeviceAccess>>,
 ) -> axum::response::Response {
     let auth_mode = direct_stream_auth_mode(peer, false);
-    ws.on_upgrade(move |socket| crate::ksp::handle_stream(socket, state, auth_mode))
+    let companion_access = direct_stream_companion_access(trusted_lan_device, auth_mode);
+    ws.on_upgrade(move |socket| {
+        crate::ksp::handle_stream(socket, state, auth_mode, companion_access)
+    })
 }
 
 fn direct_stream_auth_mode(
@@ -34,4 +43,15 @@ fn direct_stream_auth_mode(
     } else {
         crate::ksp::AuthMode::RequirePairedDevice
     }
+}
+
+/// Companion streams need a verified paired device: upgrade-time device
+/// headers or the stream cookie. An in-band paired credential can still earn
+/// companion access during `Auth`; a bare loopback stream cannot — the local
+/// desktop uses the companion bridge, not KSP, for its own server.
+fn direct_stream_companion_access(
+    trusted_lan_device: Option<Extension<TrustedLanDeviceAccess>>,
+    _auth_mode: crate::ksp::AuthMode,
+) -> bool {
+    trusted_lan_device.is_some()
 }

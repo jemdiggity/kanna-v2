@@ -9,6 +9,7 @@ members = [
     "crates/kanna-tool-catalog",
     "crates/runtime-defaults",
     "crates/kanna-server",
+    "crates/visual-companion",
     "crates/task-transfer",
     "crates/tauri-plugin-delta-updater",
     "packages/terminal-recovery",

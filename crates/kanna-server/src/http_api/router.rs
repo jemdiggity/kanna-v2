@@ -43,7 +43,7 @@ use super::tasks::{
 };
 use super::transfer_sidecar::{
     clear_cloud_transfer_proxies, ensure_cloud_transfer_proxy, remove_cloud_transfer_proxy,
-    run_transfer_control, wait_transfer_events,
+    run_transfer_control, wait_transfer_companion_events, wait_transfer_events,
 };
 use super::transfers::{
     approve_incoming_transfer, claim_pending_incoming_transfer, complete_task_transfer,
@@ -295,6 +295,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(mark_incoming_transfer_sidecar_cleanup_completed),
         )
         .route("/v1/transfers/sidecar/events", get(wait_transfer_events))
+        .route(
+            "/v1/transfers/sidecar/companion-events",
+            get(wait_transfer_companion_events),
+        )
         .route(
             "/v1/transfers/sidecar/control/{operation}",
             post(run_transfer_control),

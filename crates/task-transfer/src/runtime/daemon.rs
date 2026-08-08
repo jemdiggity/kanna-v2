@@ -1,15 +1,15 @@
 use super::events::{RuntimeError, RuntimeEvent};
 use super::state::ListenerContext;
+use super::state::RuntimeEventSender;
 use super::utils::{
-    parse_peer_response_line, parse_peer_terminal_event_line, peer_terminal_event_session_id,
-    unexpected_peer_response, write_json_line,
+    ensure_peer_is_trusted_for, parse_peer_response_line, parse_peer_terminal_event_line,
+    peer_terminal_event_session_id, unexpected_peer_response, write_json_line,
 };
 use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminalEvent};
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
 use std::path::Path;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, UnixStream};
-use tokio::sync::mpsc;
 
 pub(super) struct DaemonConnection {
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
@@ -23,7 +23,7 @@ pub(super) async fn stream_peer_session(
     session_id: String,
     sealed_payload: String,
     observer_lease_id: String,
-    incoming_sender: mpsc::Sender<RuntimeEvent>,
+    incoming_sender: RuntimeEventSender,
 ) -> Result<(), RuntimeError> {
     let mut stream = TcpStream::connect(&peer.endpoint).await?;
     write_json_line(
@@ -114,6 +114,31 @@ async fn observe_session_snapshot(
             other
         ))),
     }
+}
+
+pub(super) async fn requester_peer_public_key(
+    context: &ListenerContext,
+    requester_peer_id: &str,
+) -> Result<x25519_dalek::PublicKey, RuntimeError> {
+    let requester_peer = context
+        .discovery
+        .list_peers(&context.self_peer_id)
+        .await?
+        .into_iter()
+        .find(|peer| peer.peer_id == requester_peer_id)
+        .ok_or_else(|| {
+            RuntimeError::Protocol(format!(
+                "requester peer {} is not currently discovered",
+                requester_peer_id
+            ))
+        })?;
+    ensure_peer_is_trusted_for(
+        &context.registry_root,
+        &context.self_peer_id,
+        requester_peer_id,
+        &requester_peer.public_key,
+    )?;
+    Ok(crate::crypto::parse_public_key(&requester_peer.public_key)?)
 }
 
 pub(super) async fn send_daemon_input(

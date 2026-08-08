@@ -1,3 +1,9 @@
+use super::companion::{
+    append_owner_companion_event_rate_limited, ensure_owner_companion_generation,
+    fresh_observation_challenge, register_owner_companion_observer,
+    remove_owner_companion_observer, seal_owner_control_payload, stream_owner_companion,
+    verify_observe_companion_proof, verify_send_companion_event_proof,
+};
 use super::daemon::{
     advance_owner_task_stage, close_owner_task, mark_owner_task_read, prepare_session_observer,
     read_owner_task_file, resize_daemon_session, send_daemon_input, stream_daemon_session,
@@ -21,15 +27,19 @@ use super::state::{
 use super::utils::{
     extract_request_id, load_or_create_identity, local_capabilities_json,
     pairing_verification_code, peer_store, prune_outgoing_transfers, prune_transfer_artifacts,
-    remove_owned_artifact_paths, supports_authenticated_task_requests, take_transfer_artifacts,
-    write_bounded_legacy_json_line, write_json_line, ArtifactFraming,
+    read_bounded_json_line_with_type_limits, remove_owned_artifact_paths,
+    supports_authenticated_task_requests, take_transfer_artifacts, write_bounded_legacy_json_line,
+    write_json_line, ArtifactFraming,
 };
 use crate::crypto::{
     artifact_stream_context, open_json, parse_public_key, seal_json, seal_json_bounded,
     StreamSealer,
 };
 use crate::peer_store::PeerRecord;
-use crate::protocol::{PairingPeer, PeerRequest, PeerResponse};
+use crate::protocol::{
+    PairingPeer, PeerRequest, PeerResponse, MAX_COMPANION_REQUEST_LINE_BYTES,
+    MAX_LEGACY_SUBMIT_TRANSFER_LINE_BYTES, MAX_PEER_REQUEST_LINE_BYTES,
+};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
@@ -40,7 +50,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(test)]
+use std::sync::{Mutex as StdMutex, OnceLock};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex, OwnedSemaphorePermit, Semaphore};
 
@@ -98,6 +110,84 @@ where
     Ok(LegacyArtifactMaterialization { payload, _permit })
 }
 
+pub(super) const MAX_CONCURRENT_PREAUTH_REQUESTS: usize = 16;
+
+#[cfg(test)]
+struct CompanionResponseTestGate {
+    request_id: String,
+    blocked: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+pub(super) struct CompanionResponseTestGateGuard(Arc<CompanionResponseTestGate>);
+
+#[cfg(test)]
+static COMPANION_RESPONSE_TEST_GATE: OnceLock<StdMutex<Option<Arc<CompanionResponseTestGate>>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+pub(super) fn install_companion_response_test_gate(
+    request_id: &str,
+) -> CompanionResponseTestGateGuard {
+    let gate = Arc::new(CompanionResponseTestGate {
+        request_id: request_id.to_owned(),
+        blocked: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    *COMPANION_RESPONSE_TEST_GATE
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
+    CompanionResponseTestGateGuard(gate)
+}
+
+#[cfg(test)]
+impl CompanionResponseTestGateGuard {
+    pub(super) async fn wait_until_blocked(&self) {
+        self.0.blocked.notified().await;
+    }
+
+    pub(super) fn release(&self) {
+        self.0.release.notify_one();
+    }
+}
+
+#[cfg(test)]
+impl Drop for CompanionResponseTestGateGuard {
+    fn drop(&mut self) {
+        self.0.release.notify_one();
+        let mut installed = COMPANION_RESPONSE_TEST_GATE
+            .get_or_init(|| StdMutex::new(None))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if installed
+            .as_ref()
+            .is_some_and(|gate| Arc::ptr_eq(gate, &self.0))
+        {
+            *installed = None;
+        }
+    }
+}
+
+#[cfg(test)]
+async fn wait_for_companion_response_test_gate(response: &PeerResponse) {
+    let PeerResponse::SendCompanionEvent { request_id, .. } = response else {
+        return;
+    };
+    let gate = COMPANION_RESPONSE_TEST_GATE
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .filter(|gate| gate.request_id == *request_id)
+        .cloned();
+    if let Some(gate) = gate {
+        gate.blocked.notify_one();
+        gate.release.notified().await;
+    }
+}
+
 pub(super) async fn run_listener(listener: TcpListener, context: ListenerContext) {
     loop {
         let accepted = listener.accept().await;
@@ -111,10 +201,19 @@ pub(super) async fn run_listener(listener: TcpListener, context: ListenerContext
         };
 
         let connection_context = context.clone();
+        let connection_preauth_requests = Arc::clone(&context.preauth_requests);
 
         tokio::spawn(async move {
             let _permit = permit;
-            let _ = handle_connection(stream, connection_context).await;
+            let Ok(Ok(preauth_permit)) = tokio::time::timeout(
+                connection_context.peer_request_timeout,
+                connection_preauth_requests.acquire_owned(),
+            )
+            .await
+            else {
+                return;
+            };
+            let _ = handle_connection(stream, connection_context, preauth_permit).await;
         });
     }
 }
@@ -189,33 +288,36 @@ async fn trusted_receipt_target(
 async fn handle_connection(
     mut stream: TcpStream,
     context: ListenerContext,
+    preauth_permit: OwnedSemaphorePermit,
 ) -> Result<(), RuntimeError> {
-    let mut line = String::new();
-    let read = tokio::time::timeout(context.peer_request_timeout, async {
-        let reader = BufReader::new(&mut stream);
-        let mut bounded = reader.take(context.max_peer_request_bytes as u64 + 1);
-        bounded.read_line(&mut line).await
-    })
+    let mut preauth_permit = Some(preauth_permit);
+    let line = tokio::time::timeout(
+        context.peer_request_timeout,
+        read_bounded_json_line_with_type_limits(
+            &mut BufReader::new(&mut stream),
+            MAX_COMPANION_REQUEST_LINE_BYTES,
+            MAX_PEER_REQUEST_LINE_BYTES,
+            &[
+                (
+                    "submit_transfer_payload",
+                    MAX_LEGACY_SUBMIT_TRANSFER_LINE_BYTES,
+                ),
+                ("observe_companion", MAX_COMPANION_REQUEST_LINE_BYTES),
+                ("send_companion_event", MAX_COMPANION_REQUEST_LINE_BYTES),
+            ],
+            "peer request",
+        ),
+    )
     .await
-    .map_err(|_| {
-        RuntimeError::Protocol(format!(
-            "peer request read timed out after {}ms",
-            context.peer_request_timeout.as_millis(),
-        ))
-    })??;
-
-    if read == 0 {
+    .map_err(|_| RuntimeError::Protocol("peer request timed out".into()))??;
+    let Some(line) = line else {
         return Ok(());
-    }
-    if read > context.max_peer_request_bytes || !line.ends_with('\n') {
-        return Err(RuntimeError::Protocol(format!(
-            "peer request exceeds maximum frame size of {} bytes",
-            context.max_peer_request_bytes,
-        )));
-    }
+    };
 
     let request_id = extract_request_id(&line);
-    let response = match serde_json::from_str::<PeerRequest>(line.trim()) {
+    let request = serde_json::from_str::<PeerRequest>(line.trim());
+    drop(line);
+    let response = match request {
         Ok(PeerRequest::GetAuthenticatedRequestEpoch { request_id }) => {
             PeerResponse::AuthenticatedRequestEpoch {
                 request_id,
@@ -1226,6 +1328,7 @@ async fn handle_connection(
             .await
             {
                 Ok((daemon, initial_snapshot)) => {
+                    drop(preauth_permit.take());
                     write_json_line(
                         &mut stream,
                         &PeerResponse::ObserveSession {
@@ -1243,6 +1346,150 @@ async fn handle_connection(
                 },
             };
             response
+        }
+        Ok(PeerRequest::ObserveCompanion {
+            request_id,
+            requester_peer_id,
+            sealed_payload: sealed_proof,
+        }) => {
+            match verify_observe_companion_proof(
+                &context,
+                &request_id,
+                &requester_peer_id,
+                &sealed_proof,
+            )
+            .await
+            {
+                Ok((task_id, generation, stream_nonce)) => {
+                    let observation_challenge = fresh_observation_challenge();
+                    let sealed_payload = seal_owner_control_payload(
+                        &context,
+                        &requester_peer_id,
+                        "observe_companion_ack",
+                        &request_id,
+                        &task_id,
+                        &generation,
+                        &stream_nonce,
+                        &observation_challenge,
+                        0,
+                        None,
+                    )
+                    .await?;
+                    let cancel = register_owner_companion_observer(
+                        &context,
+                        &requester_peer_id,
+                        &task_id,
+                        &generation,
+                        &stream_nonce,
+                        &observation_challenge,
+                    )
+                    .await?;
+                    drop(preauth_permit.take());
+                    let result = async {
+                        write_json_line(
+                            &mut stream,
+                            &PeerResponse::ObserveCompanion {
+                                request_id: request_id.clone(),
+                                sealed_payload,
+                            },
+                        )
+                        .await?;
+                        stream_owner_companion(
+                            &context,
+                            stream,
+                            &requester_peer_id,
+                            task_id.clone(),
+                            request_id.clone(),
+                            generation.clone(),
+                            stream_nonce.clone(),
+                            observation_challenge.clone(),
+                            cancel,
+                        )
+                        .await
+                    }
+                    .await;
+                    remove_owner_companion_observer(
+                        &context,
+                        &requester_peer_id,
+                        &task_id,
+                        &generation,
+                    )
+                    .await;
+                    result?;
+                    return Ok(());
+                }
+                Err(error) => PeerResponse::Error {
+                    request_id,
+                    message: error.to_string(),
+                },
+            }
+        }
+        Ok(PeerRequest::SendCompanionEvent {
+            request_id,
+            requester_peer_id,
+            sealed_payload,
+        }) => {
+            let result = async {
+                let (
+                    task_id,
+                    session_id,
+                    revision,
+                    generation,
+                    stream_nonce,
+                    observation_challenge,
+                    sequence,
+                    event,
+                ) = verify_send_companion_event_proof(
+                    &context,
+                    &request_id,
+                    &requester_peer_id,
+                    &sealed_payload,
+                )
+                .await?;
+                let limiter = ensure_owner_companion_generation(
+                    &context,
+                    &requester_peer_id,
+                    &task_id,
+                    &generation,
+                    &stream_nonce,
+                    &observation_challenge,
+                    sequence,
+                )
+                .await?;
+                let frame = append_owner_companion_event_rate_limited(
+                    &context,
+                    limiter,
+                    &task_id,
+                    &session_id,
+                    &revision,
+                    &event,
+                )
+                .await?;
+                seal_owner_control_payload(
+                    &context,
+                    &requester_peer_id,
+                    "companion_event_result",
+                    &request_id,
+                    &task_id,
+                    &generation,
+                    &stream_nonce,
+                    &observation_challenge,
+                    sequence,
+                    Some(frame),
+                )
+                .await
+            }
+            .await;
+            match result {
+                Ok(sealed_payload) => PeerResponse::SendCompanionEvent {
+                    request_id,
+                    sealed_payload,
+                },
+                Err(error) => PeerResponse::Error {
+                    request_id,
+                    message: error.to_string(),
+                },
+            }
         }
         Ok(PeerRequest::SendSessionInput {
             request_id,
@@ -1431,6 +1678,8 @@ async fn handle_connection(
         },
     };
 
+    #[cfg(test)]
+    wait_for_companion_response_test_gate(&response).await;
     write_json_line(&mut stream, &response).await?;
     Ok(())
 }
