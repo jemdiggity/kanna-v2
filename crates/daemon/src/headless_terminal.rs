@@ -858,6 +858,11 @@ fn opencode_line_is_permission_action(line: &str) -> bool {
 /// model, inside the input box. 1.16.2 appended the variant as a third field;
 /// one separator is all this needs.
 ///
+/// Matching on the separator rather than the mode word is load-bearing: what
+/// sits left of the dot varies with the spawn's flags. Kanna's own PTY spawn
+/// passes a permission-bypass flag, which badges the mode — it draws
+/// "┃ Build auto · Big Pickle OpenCode Zen".
+///
 /// This is the idle marker because it is the only composer chrome that survived
 /// every width measured (80, 100, 120 and 160 columns) *and* both CLI versions
 /// seen: the hint bar below it is not drawn on a narrow terminal, and the

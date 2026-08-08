@@ -19,13 +19,22 @@ Two geometries are pinned because OpenCode's chrome is width-dependent: the
 wraps across two rows on 1.18.15 — so a marker picked from a wide terminal alone
 fails silently on a narrow one. The composer's status line
 (`┃ Build · Big Pickle OpenCode Zen`) and the working footer survive every width
-measured (80, 100, 120, 160), which is why the matcher keys on those.
+measured (80, 100, 120, 160), which is why the matcher keys on those. The
+matcher keys on the spaced middle dot rather than the mode word for the same
+reason the badge above exists: what sits left of the dot varies with the flags.
 
 The TUI is drawn by `opencode [project]`, the CLI's default command — which is
-what the capture script launches. `opencode run`, which is what Kanna currently
-spawns, streams plain text and exits at the end of its turn without drawing any
-TUI at all — its own defect, recorded as "defect 2" in
-`docs/2026-08-08-opencode-live-idle-detection-e2e-gap.md`.
+both what Kanna's PTY spawn runs and what the capture script launches.
+`opencode run` streams plain text and exits at the end of its turn without
+drawing any TUI at all, which is why it is not what a PTY task uses (recorded as
+"defect 2" in `docs/2026-08-08-opencode-live-idle-detection-e2e-gap.md`).
+
+The capture script passes **the flags Kanna spawns with**, not a bare
+invocation. That matters to what is rendered: with a permission-bypass flag the
+composer's mode carries a badge, so `busy-*` and `idle-*` show
+`┃ Build auto · Big Pickle OpenCode Zen`. `permission-*` is captured *without*
+one — it is Kanna's spawn for permission modes other than `dontAsk`/default, and
+`--auto` is precisely the flag that stops the dialog opening.
 
 ## Re-capturing
 

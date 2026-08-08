@@ -37,7 +37,18 @@ GEOMETRIES = ((120, 40), (80, 24))
 # The TUI is what the daemon's matcher reads, and `opencode [project]` — the
 # CLI's default command — is what draws it. `opencode run` streams plain text
 # and exits at the end of its turn, so it renders no chrome to pin.
-TUI_ARGS = ["--model", MODEL]
+#
+# These are the flags Kanna's PTY spawn puts on the argv
+# (crates/kanna-server/src/task_creator/commands.rs), so these frames are the
+# ones the daemon is actually handed. `--auto` changes what is *rendered*, not
+# only what is permitted: it adds a badge to the composer's mode
+# ("Build auto · Big Pickle" rather than "Build · Big Pickle"), so a fixture
+# captured without it pins a composer line no Kanna task ever draws.
+TUI_ARGS = ["--auto", "--model", MODEL]
+# Kanna's spawn for permission modes other than dontAsk/default, which passes no
+# bypass flag — and the only shape that can reach the permission dialog, since
+# `--auto` is exactly the flag that stops it opening.
+PERMISSION_TUI_ARGS = ["--model", MODEL]
 
 # Long enough to hold the TUI in its working state for a few frames, short
 # enough that the fixture stays a few kilobytes.
@@ -61,7 +72,9 @@ PERMISSION_CONFIG = json.dumps(
 ANSI = re.compile(
     rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][A-Z0-9]|\x1b[=>]"
 )
-COMPOSER_READY = re.compile(r"Askanything|Build·")
+# "Build·" alone would miss the spawn shape below: with a permission-bypass flag
+# the mode carries a badge, so the compacted line reads "Buildauto·".
+COMPOSER_READY = re.compile(r"Askanything|Build\w*·")
 WORKING_FOOTER = re.compile(r"esc(ape)?interrupt|esc(ape)?tointerrupt")
 
 
@@ -181,7 +194,7 @@ def capture_permission(binary: str, outdir: str, cols: int, rows: int) -> None:
     subprocess.run(["git", "init", "-q"], cwd=cwd, check=True)
     with open(os.path.join(cwd, "opencode.json"), "w") as handle:
         handle.write(PERMISSION_CONFIG)
-    session = Session([binary, *TUI_ARGS, cwd], cwd, cols, rows)
+    session = Session([binary, *PERMISSION_TUI_ARGS, cwd], cwd, cols, rows)
     try:
         if not session.wait_for(COMPOSER_READY, 60):
             sys.exit(f"{cols}x{rows}: opencode never drew its composer")
