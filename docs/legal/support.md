@@ -5,7 +5,7 @@ Kanna Mobile is a companion for the Kanna desktop app for macOS. It lets you vie
 ## Pair over your local network
 
 1. Put the iPhone and Mac on the same trusted local network and open Kanna on both devices.
-2. In the desktop app, open **Preferences → Developer → Mobile Access** and select **Start pairing**.
+2. In the desktop app, open **Preferences → Mobile** and select **Start pairing**.
 3. In Kanna Mobile, open **Machines**, select **Add**, and scan the QR code shown on the Mac. You can instead enter the six-character pairing code.
 4. If pairing fails, confirm that local-network and camera permissions are allowed as needed, both apps remain open, and the pairing code has not expired. Camera access is optional when you enter the code manually.
 
