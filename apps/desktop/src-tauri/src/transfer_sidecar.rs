@@ -23,6 +23,8 @@ fn forwarded_event_name(value: &Value) -> Option<&'static str> {
         Some("pairing_requested") => Some("pairing-requested"),
         Some("pairing_completed") => Some("pairing-completed"),
         Some("terminal_event") => Some("transfer-terminal-event"),
+        Some("sidecar_exited") => Some("transfer-sidecar-exited"),
+        Some("companion_event") => Some("transfer-companion-event"),
         _ => None,
     }
 }
@@ -80,6 +82,56 @@ pub fn spawn_transfer_event_poller(app: AppHandle) {
     });
 }
 
+/// Long-poll the server's companion frame lane and emit each frame to every
+/// window as `transfer-companion-event`. Companion frames travel apart from
+/// the advisory stream so a large snapshot can never delay a pairing prompt;
+/// this poller mirrors the advisory one against the companion route.
+pub fn spawn_transfer_companion_event_poller(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        crate::commands::mobile::wait_for_server_started(&app).await;
+        let client = reqwest::Client::new();
+        let mut position: Option<TransferEventPosition> = None;
+        loop {
+            match poll_transfer_event_route(
+                &app,
+                &client,
+                "/v1/transfers/sidecar/companion-events",
+                position.as_ref(),
+            )
+            .await
+            {
+                Ok(batch) => {
+                    if batch.missed_events {
+                        eprintln!(
+                            "[transfer-companion-events] resumed at cursor {:?}; the server \
+                             reports companion frames were missed (its stream is {})",
+                            position.as_ref().map(|position| position.cursor),
+                            batch.stream_id
+                        );
+                    }
+                    for event in batch.events {
+                        if forwarded_event_name(&event) == Some("transfer-companion-event") {
+                            let _ = app.emit("transfer-companion-event", &event);
+                        } else {
+                            eprintln!(
+                                "[transfer-companion-events] unhandled companion event: {event}"
+                            );
+                        }
+                    }
+                    position = Some(TransferEventPosition {
+                        cursor: batch.cursor,
+                        stream_id: batch.stream_id,
+                    });
+                }
+                Err(error) => {
+                    eprintln!("[transfer-companion-events] poll failed: {error}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    });
+}
+
 /// A cursor is only meaningful within the server incarnation that issued it,
 /// so the two are never carried apart.
 #[derive(Debug)]
@@ -101,8 +153,17 @@ async fn poll_transfer_events(
     client: &reqwest::Client,
     position: Option<&TransferEventPosition>,
 ) -> Result<TransferEventBatch, String> {
+    poll_transfer_event_route(app, client, "/v1/transfers/sidecar/events", position).await
+}
+
+async fn poll_transfer_event_route(
+    app: &AppHandle,
+    client: &reqwest::Client,
+    route: &str,
+    position: Option<&TransferEventPosition>,
+) -> Result<TransferEventBatch, String> {
     let base_url = crate::commands::mobile::ensure_server_base_url(app).await?;
-    let mut url = format!("{base_url}/v1/transfers/sidecar/events?timeoutSecs=25");
+    let mut url = format!("{base_url}{route}?timeoutSecs=25");
     if let Some(position) = position {
         url.push_str(&format!(
             "&cursor={}&streamId={}",

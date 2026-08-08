@@ -7,11 +7,13 @@ Expo `version` when `KANNA_APP_VERSION` was present (production archives), so
 Expo fell back to the private-workspace placeholder version `0.0.0` in
 `apps/mobile/package.json`, and "About this build" reported `0.0.0 (1)`.
 
-`app.config.ts` now uses an explicit `KANNA_APP_VERSION` when supplied and
-otherwise defaults from the repository `VERSION` file — the same release
-source `tools/kd/src/runtime/mobile-archive.ts` reads. Production archives keep
-their existing explicit-override/default behavior, and dev builds therefore
-have a deterministic non-placeholder fallback.
+`app.config.ts` now resolves an explicit `KANNA_APP_VERSION` first, then the
+mobile-owned `apps/mobile/VERSION`, and finally the root desktop `VERSION` as a
+compatibility fallback. `tools/kd/src/runtime/mobile-archive.ts` uses the same
+precedence for its explicit `--version` and checked-in defaults. An empty or
+malformed mobile file fails loudly rather than invisibly coupling the build
+back to the desktop version. Dev builds therefore have a deterministic
+non-placeholder fallback without inheriting every desktop release bump.
 
 Staging is different: its active release series may be ahead of production
 `VERSION`. Before any physical staging build, kd downloads the authoritative
@@ -25,11 +27,11 @@ lookup. The native runtime remains `2.1.4` in every environment.
 
 Automated coverage added:
 
-- `apps/mobile/src/mobileAppConfig.test.ts` — deterministic VERSION fallback,
-  explicit staging `KANNA_APP_VERSION` precedence, blank-override fallback,
-  walk-up file resolution, and loud failure on an empty `VERSION`.
-- `tools/kd/src/runtime/mobile-archive.test.ts` — production archive default
-  version comes from `VERSION`, and explicit `--version` still wins.
+- `apps/mobile/src/mobileAppConfig.test.ts` — explicit environment override,
+  mobile VERSION, and root fallback precedence; walk-up file resolution; and
+  loud path-specific failures for empty or malformed mobile versions.
+- `tools/kd/src/runtime/mobile-archive.test.ts` — the same three-level archive
+  precedence and path-specific empty/malformed mobile VERSION failures.
 - `tools/kd/tests/release.test.ts` — active staging channel resolution,
   prerelease-suffix removal, invalid-manifest rejection, and network failure.
 - `tools/kd/tests/tasks.test.ts` — resolved staging versions reach dev-client

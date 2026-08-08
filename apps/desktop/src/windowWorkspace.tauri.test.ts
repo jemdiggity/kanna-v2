@@ -17,6 +17,7 @@ const ensuredWindowWasLive = vi.hoisted(() => [] as boolean[]);
 const webviewCreatedHarness = vi.hoisted(() => ({
   handler: null as null | ((label: string) => Promise<void>),
 }));
+const disposeCompanionBridgesMock = vi.hoisted(() => vi.fn(async () => {}));
 
 vi.mock("./tauri-mock", () => ({
   isTauri: true,
@@ -27,6 +28,10 @@ vi.mock("@tauri-apps/api/window", () => ({
     close: closeMock,
     destroy: destroyMock,
   }),
+}));
+
+vi.mock("./services/desktopCompanionBridge", () => ({
+  disposeDesktopCompanionBridgeManager: disposeCompanionBridgesMock,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -93,6 +98,8 @@ describe("windowWorkspace in Tauri", () => {
     openWebviewLabels.splice(0, openWebviewLabels.length, "main");
     closeMock.mockClear();
     destroyMock.mockClear();
+    disposeCompanionBridgesMock.mockReset();
+    disposeCompanionBridgesMock.mockResolvedValue(undefined);
     emitMock.mockReset();
     emitMock.mockResolvedValue(undefined);
     ensuredWindowWasLive.splice(0);
@@ -146,9 +153,35 @@ describe("windowWorkspace in Tauri", () => {
 
     await workspace.destroyNativeWindow();
 
+    expect(disposeCompanionBridgesMock).toHaveBeenCalledTimes(1);
     expect(closeMock).not.toHaveBeenCalled();
     expect(destroyMock).toHaveBeenCalledTimes(1);
     expect(emitMock).not.toHaveBeenCalled();
+  });
+
+  it("waits for companion lease cleanup before destroying the native window", async () => {
+    let finishCleanup!: () => void;
+    disposeCompanionBridgesMock.mockImplementationOnce(
+      () => new Promise<void>((resolve) => {
+        finishCleanup = resolve;
+      }),
+    );
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: {
+        windowId: "main",
+        selectedRepoId: null,
+        selectedItemId: null,
+      },
+    });
+
+    const destroying = workspace.destroyNativeWindow();
+    await Promise.resolve();
+    expect(destroyMock).not.toHaveBeenCalled();
+
+    finishCleanup();
+    await destroying;
+    expect(destroyMock).toHaveBeenCalledTimes(1);
   });
 
   it("keeps a committed removal result distinct from notification failure", async () => {

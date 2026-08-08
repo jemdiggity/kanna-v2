@@ -57,6 +57,30 @@ beforeEach(() => {
 });
 
 describe("MachinesScreen", () => {
+  it("explains local QR pairing and keeps cloud access optional when empty", () => {
+    const tree = MachinesScreen({
+      machines: [],
+      sourceWarnings: { account: null, local: null },
+      pairingVisible: false,
+      onBack: vi.fn(),
+      onOpenPairing: vi.fn(),
+      onClosePairing: vi.fn(),
+      onPairCode: vi.fn(async () => undefined),
+      onPairPayload: vi.fn(async () => undefined),
+      onRemoveManual: vi.fn(async () => undefined)
+    }) as Node;
+
+    expect(textContent(tree)).toContain("Install Kanna for macOS from kanna.build");
+    expect(textContent(tree)).toContain("tap Add and scan its pairing QR code");
+    expect(textContent(tree)).toContain("connect over your local network");
+    expect(textContent(tree)).toContain(
+      "Cloud sign-in for remote access is separate and optional."
+    );
+    expect(findByTestId(tree, "mobile.machines-add")?.props).toMatchObject({
+      accessibilityLabel: "Add machine"
+    });
+  });
+
   it("groups deduplicated machines and only offers removal for manual origins", () => {
     const tree = MachinesScreen({
       machines: [

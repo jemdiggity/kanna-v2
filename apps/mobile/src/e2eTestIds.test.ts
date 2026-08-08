@@ -6,6 +6,7 @@ describe("MOBILE_E2E_IDS", () => {
     expect(MOBILE_E2E_IDS.appShell).toBe("mobile.app-shell");
     expect(MOBILE_E2E_IDS.appStartupLoading).toBe("mobile.app-startup-loading");
     expect(MOBILE_E2E_IDS.tasksScreen).toBe("mobile.tasks-screen");
+    expect(MOBILE_E2E_IDS.tasksPairMacButton).toBe("mobile.tasks-pair-mac");
     expect(MOBILE_E2E_IDS.recentScreen).toBe("mobile.recent-screen");
     expect(MOBILE_E2E_IDS.searchScreen).toBe("mobile.search-screen");
     expect(MOBILE_E2E_IDS.searchInput).toBe("mobile.search-input");

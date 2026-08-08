@@ -11,6 +11,13 @@ export interface TerminalBufferStats {
   hasEndMarker: boolean;
 }
 
+export interface VisibleTerminalTextCell {
+  column: number;
+  row: number;
+  columns: number;
+  rows: number;
+}
+
 const terminals = new Map<string, Terminal>();
 
 export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal): () => void {
@@ -23,6 +30,7 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
     sessionIds: () => Array.from(terminals.keys()),
     write: writeTerminalBuffer,
     input: inputTerminalBuffer,
+    findTextCell: findTerminalTextCell,
   };
 
   return () => {
@@ -31,6 +39,43 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
       terminals.delete(sessionId);
     }
   };
+}
+
+function findTerminalTextCell(
+  sessionId: string,
+  text: string,
+): VisibleTerminalTextCell | null {
+  const terminal = terminals.get(sessionId);
+  if (!terminal) {
+    throw new Error(`terminal buffer not registered for session ${sessionId}`);
+  }
+  return findVisibleTerminalTextCell(terminal, text);
+}
+
+export function findVisibleTerminalTextCell(
+  terminal: Terminal,
+  text: string,
+): VisibleTerminalTextCell | null {
+  if (!text) return null;
+
+  const activeBuffer = terminal.buffer.active;
+  const firstLine = activeBuffer.viewportY;
+  const lastLine = Math.min(activeBuffer.length, firstLine + terminal.rows);
+  let match: VisibleTerminalTextCell | null = null;
+
+  for (let lineIndex = firstLine; lineIndex < lastLine; lineIndex += 1) {
+    const line = activeBuffer.getLine(lineIndex)?.translateToString(true) ?? "";
+    const textColumn = line.indexOf(text);
+    if (textColumn < 0) continue;
+    match = {
+      column: textColumn + Math.floor(text.length / 2),
+      row: lineIndex - firstLine,
+      columns: terminal.cols,
+      rows: terminal.rows,
+    };
+  }
+
+  return match;
 }
 
 function inputTerminalBuffer(sessionId: string, data: string): void {

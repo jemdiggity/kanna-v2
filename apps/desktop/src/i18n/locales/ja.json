@@ -180,7 +180,9 @@
     "transferFinalizationFailed": "タスク転送に失敗しました",
     "transferFinalizationDegraded": "転送元を正常に終了できないまま引き継ぎました",
     "transferFinalizationUnclean": "転送元のエージェントセッションが正常に終了しませんでした",
-    "transferReservationOrphaned": "重複した転送予約を解放できず、ディスクに残っている可能性があります"
+    "transferReservationOrphaned": "重複した転送予約を解放できず、ディスクに残っている可能性があります",
+    "remoteCompanionStarting": "ビジュアルコンパニオンを起動しています。しばらくしてからもう一度リンクを開いてください。",
+    "remoteCompanionOpenFailed": "ビジュアルコンパニオンを開けませんでした。"
   },
   "tags": {
     "inProgress": "進行中",
@@ -405,6 +407,20 @@
     "incomingTitle": "受信中のタスク転送",
     "approve": "承認",
     "reject": "拒否"
+  },
+  "visualCompanion": {
+    "open": "ビジュアルコンパニオンを開く",
+    "connecting": "接続しています…",
+    "retry": "再試行",
+    "available": "接続済みです。",
+    "reconnecting": "再接続しています…",
+    "unavailable": "ビジュアルコンパニオンは終了しました。",
+    "error": "ビジュアルコンパニオンを利用できません",
+    "sending": "選択内容を送信しています…",
+    "sent": "選択内容を送信しました。",
+    "selectionFailed": "選択内容を送信できませんでした。もう一度お試しください。",
+    "unavailableDetail": "このコンパニオンは利用できなくなりました。",
+    "errorDetail": "コンパニオンを表示できませんでした。"
   },
   "common": {
     "loading": "読み込み中..."

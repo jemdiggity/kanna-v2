@@ -23,6 +23,7 @@ const TEST_DEVICE_TOKEN = "e2e-token";
 const TEST_USER_ID = "Bax9TJvOWm5bbl0Aq4nXg3XmkTCu";
 const SECRET_DESKTOP_ID = "desktop-secret-auth";
 const SECRET_DESKTOP_SECRET = "desktop-secret-for-relay";
+const E2E_SHUTDOWN_TOKEN = "relay-integration-shutdown-capability";
 let relayPort = 0;
 
 function relayUrl(): string {
@@ -35,6 +36,24 @@ function healthUrl(): string {
 
 function relayHttpUrl(path: string): string {
   return `http://localhost:${relayPort}${path}`;
+}
+
+interface RelayTunnelFlowHealth {
+  pauseCount: number;
+  resumeCount: number;
+  capRejectCount: number;
+  maxBufferedBytes: number;
+}
+
+async function relayTunnelFlowHealth(): Promise<RelayTunnelFlowHealth> {
+  const response = await fetch(healthUrl());
+  const body = await response.json() as {
+    tunnelFlow?: RelayTunnelFlowHealth;
+  };
+  if (!response.ok || !body.tunnelFlow) {
+    throw new Error(`relay health omitted tunnel flow metrics: ${JSON.stringify(body)}`);
+  }
+  return body.tunnelFlow;
 }
 
 /**
@@ -161,6 +180,21 @@ function publishedSnapshot(activity: string, tasks = [publishedTask(activity)]):
     desktop: { displayName: "Studio Mac" },
     tasks,
   };
+}
+
+function maximumLegalCompanionChunkFrames(bundleCount = 3): string[] {
+  const chunkData = "x".repeat(96 * 1024);
+  const chunksPerBundle = Math.ceil((23 * 1024 * 1024) / chunkData.length);
+  return Array.from({ length: bundleCount }, (_, bundleIndex) =>
+    Array.from({ length: chunksPerBundle }, (_, index) => JSON.stringify({
+      type: "companion_snapshot_chunk",
+      task_id: "task-maximum-companion",
+      transfer_id: `session-maximum-companion:revision-${bundleIndex}`,
+      index,
+      count: chunksPerBundle,
+      data: chunkData,
+    }))
+  ).flat();
 }
 
 async function seedRelayDesktopCredentials(firestorePort: number): Promise<void> {
@@ -520,6 +554,7 @@ describe("Relay integration", () => {
         FIREBASE_AUTH_EMULATOR_HOST: `127.0.0.1:${authPort}`,
         FIRESTORE_EMULATOR_HOST: `127.0.0.1:${firestorePort}`,
         PORT: String(relayPort),
+        KANNA_E2E_RELAY_SHUTDOWN_TOKEN: E2E_SHUTDOWN_TOKEN,
       },
       detached: true,
       stdio: "pipe",
@@ -1312,6 +1347,113 @@ describe("Relay integration", () => {
     await closeAndWait(desktopControl);
   });
 
+  it("pauses and resumes legal bounded companion chunks without exceeding the absolute cap", async () => {
+    const { ws: desktopControl } = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: "desktop-slow-tunnel",
+    });
+    const { ws: clientTunnel } = await connectAndAuth({
+      id_token: idToken,
+    });
+    const establishSignal = waitForMessage(
+      desktopControl,
+      (msg) =>
+        msg.type === "tunnel_establish" &&
+        msg.desktopId === "desktop-slow-tunnel",
+    );
+    clientTunnel.send(
+      JSON.stringify({
+        type: "tunnel_request",
+        id: "open-slow-tunnel",
+        desktopId: "desktop-slow-tunnel",
+      }),
+    );
+    const signal = await establishSignal;
+    const desktopTunnel = new WebSocket(relayUrl());
+    const desktopReady = waitForMessage(
+      desktopTunnel,
+      (msg) =>
+        msg.type === "tunnel_ready" &&
+        msg.tunnelId === signal.tunnelId,
+    );
+    const clientReady = waitForMessage(
+      clientTunnel,
+      (msg) =>
+        msg.type === "tunnel_ready" &&
+        msg.tunnelId === signal.tunnelId,
+    );
+    await new Promise<void>((resolve) => desktopTunnel.on("open", resolve));
+    desktopTunnel.send(
+      JSON.stringify({
+        type: "auth",
+        device_token: TEST_DEVICE_TOKEN,
+        desktop_id: "desktop-slow-tunnel",
+        tunnel_id: signal.tunnelId,
+      }),
+    );
+    await desktopReady;
+    await clientReady;
+
+    const chunks = maximumLegalCompanionChunkFrames();
+    expect(chunks.length).toBeGreaterThan(700);
+    expect(chunks.every((chunk) => Buffer.byteLength(chunk) <= 256 * 1024)).toBe(true);
+    const before = await relayTunnelFlowHealth();
+    const expectedFrames = chunks.length;
+    let sendCallbacks = 0;
+    let receivedFrames = 0;
+    const allReceived = new Promise<void>((resolve) => {
+      desktopTunnel.on("message", (_raw: Buffer, isBinary: boolean) => {
+        if (!isBinary) {
+          receivedFrames += 1;
+          if (receivedFrames === expectedFrames) resolve();
+        }
+      });
+    });
+
+    desktopTunnel.pause();
+    for (const chunk of chunks) {
+      clientTunnel.send(chunk, (error) => {
+        expect(error).toBeFalsy();
+        sendCallbacks += 1;
+      });
+    }
+    await vi.waitFor(
+      async () => expect((await relayTunnelFlowHealth()).pauseCount)
+        .toBeGreaterThan(before.pauseCount),
+      { timeout: 10_000, interval: 100 },
+    );
+    expect(sendCallbacks).toBeLessThan(expectedFrames);
+
+    desktopTunnel.resume();
+    await Promise.race([
+      allReceived,
+      new Promise<never>((_, reject) => {
+        setTimeout(
+          () => reject(new Error(`received ${receivedFrames}/${expectedFrames} snapshots`)),
+          15_000,
+        );
+      }),
+    ]);
+    await vi.waitFor(
+      () => expect(sendCallbacks).toBe(expectedFrames),
+      { timeout: 5_000 },
+    );
+    await vi.waitFor(
+      async () => expect((await relayTunnelFlowHealth()).resumeCount)
+        .toBeGreaterThan(before.resumeCount),
+      { timeout: 5_000, interval: 100 },
+    );
+    const after = await relayTunnelFlowHealth();
+    expect(after.maxBufferedBytes).toBeLessThanOrEqual(64 * 1024 * 1024);
+    expect(after.capRejectCount).toBe(before.capRejectCount);
+    expect(clientTunnel.readyState).toBe(WebSocket.OPEN);
+    expect(desktopTunnel.readyState).toBe(WebSocket.OPEN);
+
+    await closeAndWait(clientTunnel);
+    await closeAndWait(desktopTunnel);
+    await closeAndWait(desktopControl);
+  }, 30_000);
+
   it("rejects tunnel requests for an offline desktop", async () => {
     const { ws: client } = await connectAndAuth({
       id_token: idToken,
@@ -2094,5 +2236,41 @@ describe("Relay integration", () => {
 
     // The relay closes with 4004 for "Missing id_token or device_token"
     expect(closeCode).toBe(4004);
+  });
+
+  it("gracefully closes clients before an authorized E2E shutdown", async () => {
+    const unauthorized = await fetch(
+      `http://127.0.0.1:${relayPort}/__kanna_e2e_shutdown`,
+      {
+        method: "POST",
+        headers: { "x-kanna-e2e-shutdown-token": "wrong-token" },
+      },
+    );
+    expect(unauthorized.status).toBe(404);
+
+    const { ws } = await connectAndAuth({ device_token: TEST_DEVICE_TOKEN });
+    const closed = new Promise<{ code: number; reason: string }>((resolveClose) => {
+      ws.once("close", (code: number, reason: Buffer) => {
+        resolveClose({ code, reason: reason.toString() });
+      });
+    });
+    const exited = new Promise<void>((resolveExit) => {
+      relayProcess?.once("exit", () => resolveExit());
+    });
+
+    const response = await fetch(
+      `http://127.0.0.1:${relayPort}/__kanna_e2e_shutdown`,
+      {
+        method: "POST",
+        headers: { "x-kanna-e2e-shutdown-token": E2E_SHUTDOWN_TOKEN },
+      },
+    );
+
+    expect(response.status).toBe(204);
+    await expect(closed).resolves.toEqual({
+      code: 1012,
+      reason: "Relay restarting",
+    });
+    await expect(exited).resolves.toBeUndefined();
   });
 });

@@ -10,10 +10,10 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-pub(super) const CURRENT_PROTOCOL_VERSION: u32 = 3;
+pub(super) use crate::protocol::CURRENT_PROTOCOL_VERSION;
 pub(super) const AUTHENTICATED_TASK_REQUEST_PROTOCOL_VERSION: u32 = 2;
 pub(super) const AUTHENTICATED_TASK_REQUEST_VERSION: u32 = 1;
 pub(super) const STREAMED_ARTIFACT_PROTOCOL_VERSION: u32 = 3;
@@ -163,6 +163,234 @@ where
     stream.write_all(b"\n").await?;
     stream.flush().await?;
     Ok(())
+}
+
+pub(super) async fn read_bounded_line<R>(
+    reader: &mut R,
+    max_bytes: usize,
+    description: &str,
+) -> Result<Option<String>, RuntimeError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    read_bounded_line_with_prefix_extension(reader, max_bytes, None, description).await
+}
+
+pub(super) async fn read_bounded_line_with_prefix_extension<R>(
+    reader: &mut R,
+    max_bytes: usize,
+    prefix_extension: Option<(&[u8], usize)>,
+    description: &str,
+) -> Result<Option<String>, RuntimeError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let prefix_limits = prefix_extension.into_iter().collect::<Vec<_>>();
+    read_bounded_line_with_prefix_limits(reader, max_bytes, &prefix_limits, description).await
+}
+
+pub(super) async fn read_bounded_line_with_prefix_limits<R>(
+    reader: &mut R,
+    max_bytes: usize,
+    prefix_limits: &[(&[u8], usize)],
+    description: &str,
+) -> Result<Option<String>, RuntimeError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut line = Vec::with_capacity(max_bytes.min(8 * 1024));
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            return Err(RuntimeError::Protocol(format!(
+                "{description} is missing newline"
+            )));
+        }
+        let active_max_bytes = prefix_limits
+            .iter()
+            .find(|(prefix, _)| {
+                line.starts_with(prefix) || (line.is_empty() && available.starts_with(prefix))
+            })
+            .map_or(max_bytes, |(_, limit)| *limit);
+        let max_wire_bytes = active_max_bytes.saturating_add(1);
+        if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
+            if line.len().saturating_add(newline) > max_wire_bytes {
+                return Err(RuntimeError::Protocol(format!(
+                    "{description} exceeds {active_max_bytes} bytes"
+                )));
+            }
+            line.reserve_exact(newline);
+            line.extend_from_slice(&available[..newline]);
+            reader.consume(newline + 1);
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            if line.len() > active_max_bytes {
+                return Err(RuntimeError::Protocol(format!(
+                    "{description} exceeds {active_max_bytes} bytes"
+                )));
+            }
+            return String::from_utf8(line)
+                .map(Some)
+                .map_err(|_| RuntimeError::Protocol(format!("{description} is not valid UTF-8")));
+        }
+        if line.len().saturating_add(available.len()) > max_wire_bytes {
+            return Err(RuntimeError::Protocol(format!(
+                "{description} exceeds {active_max_bytes} bytes"
+            )));
+        }
+        line.reserve_exact(available.len());
+        line.extend_from_slice(available);
+        let consumed = available.len();
+        reader.consume(consumed);
+    }
+}
+
+pub(super) async fn read_bounded_json_line_with_type_limits<R>(
+    reader: &mut R,
+    unclassified_max_bytes: usize,
+    classified_max_bytes: usize,
+    type_limits: &[(&str, usize)],
+    description: &str,
+) -> Result<Option<String>, RuntimeError>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let absolute_max_bytes = type_limits
+        .iter()
+        .map(|(_, limit)| *limit)
+        .chain(std::iter::once(classified_max_bytes))
+        .max()
+        .unwrap_or(classified_max_bytes);
+    let mut line = Vec::with_capacity(unclassified_max_bytes.min(8 * 1024));
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            return Err(RuntimeError::Protocol(format!(
+                "{description} is missing newline"
+            )));
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.unwrap_or(available.len());
+        if line.len().saturating_add(consumed) > absolute_max_bytes.saturating_add(1) {
+            return Err(RuntimeError::Protocol(format!(
+                "{description} exceeds {absolute_max_bytes} bytes"
+            )));
+        }
+        line.reserve_exact(consumed);
+        line.extend_from_slice(&available[..consumed]);
+        reader.consume(consumed + usize::from(newline.is_some()));
+        let active_max_bytes =
+            top_level_json_type(&line).map_or(unclassified_max_bytes, |request_type| {
+                type_limits
+                    .iter()
+                    .find(|(name, _)| *name == request_type)
+                    .map_or(classified_max_bytes, |(_, limit)| *limit)
+            });
+        if line.len() > active_max_bytes.saturating_add(1) {
+            return Err(RuntimeError::Protocol(format!(
+                "{description} exceeds {active_max_bytes} bytes"
+            )));
+        }
+        if newline.is_none() {
+            continue;
+        }
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        if line.len() > active_max_bytes {
+            return Err(RuntimeError::Protocol(format!(
+                "{description} exceeds {active_max_bytes} bytes"
+            )));
+        }
+        return String::from_utf8(line)
+            .map(Some)
+            .map_err(|_| RuntimeError::Protocol(format!("{description} is not valid UTF-8")));
+    }
+}
+
+fn top_level_json_type(input: &[u8]) -> Option<String> {
+    let mut index = input.iter().position(|byte| !byte.is_ascii_whitespace())?;
+    if input.get(index) != Some(&b'{') {
+        return None;
+    }
+    index += 1;
+    let mut depth = 1_u32;
+    let mut expecting_key = true;
+    while index < input.len() {
+        match input[index] {
+            b'"' => {
+                let end = json_string_end(input, index)?;
+                if depth == 1 && expecting_key {
+                    let key = serde_json::from_slice::<String>(&input[index..end]).ok()?;
+                    let mut value_index = end;
+                    while input
+                        .get(value_index)
+                        .is_some_and(|byte| byte.is_ascii_whitespace())
+                    {
+                        value_index += 1;
+                    }
+                    if input.get(value_index) != Some(&b':') {
+                        return None;
+                    }
+                    value_index += 1;
+                    while input
+                        .get(value_index)
+                        .is_some_and(|byte| byte.is_ascii_whitespace())
+                    {
+                        value_index += 1;
+                    }
+                    if key == "type" {
+                        if input.get(value_index) != Some(&b'"') {
+                            return None;
+                        }
+                        let value_end = json_string_end(input, value_index)?;
+                        return serde_json::from_slice::<String>(&input[value_index..value_end])
+                            .ok();
+                    }
+                    expecting_key = false;
+                }
+                index = end;
+            }
+            b'{' | b'[' => {
+                depth = depth.saturating_add(1);
+                index += 1;
+            }
+            b'}' | b']' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            b',' if depth == 1 => {
+                expecting_key = true;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn json_string_end(input: &[u8], start: usize) -> Option<usize> {
+    let mut index = start.checked_add(1)?;
+    let mut escaped = false;
+    while index < input.len() {
+        let byte = input[index];
+        index += 1;
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            return Some(index);
+        }
+    }
+    None
 }
 
 pub(super) fn registry_entry_path(root: &Path, peer_id: &str) -> PathBuf {
@@ -549,6 +777,7 @@ pub(super) fn local_capabilities_json() -> String {
         "transferCapabilityVersion": 1,
         "authenticatedTaskRequests": true,
         "authenticatedTaskRequestVersion": AUTHENTICATED_TASK_REQUEST_VERSION,
+        "companionCapabilityVersion": 1,
     })
     .to_string()
 }
@@ -778,4 +1007,147 @@ fn truncate_on_char_boundary(value: &str, budget: usize) -> &str {
         end -= 1;
     }
     &value[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncWriteExt, BufReader};
+
+    #[tokio::test]
+    async fn bounded_line_accepts_exact_limit_and_rejects_one_byte_over() {
+        let (mut writer, reader) = tokio::io::duplex(32);
+        writer.write_all(b"1234\n").await.unwrap();
+        let mut reader = BufReader::new(reader);
+        assert_eq!(
+            read_bounded_line(&mut reader, 4, "test line")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("1234")
+        );
+
+        let (mut writer, reader) = tokio::io::duplex(32);
+        writer.write_all(b"12345\n").await.unwrap();
+        let mut reader = BufReader::new(reader);
+        let error = read_bounded_line(&mut reader, 4, "test line")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds 4 bytes"));
+    }
+
+    #[tokio::test]
+    async fn bounded_line_rejects_newline_free_input_at_the_limit() {
+        let (mut writer, reader) = tokio::io::duplex(32);
+        writer.write_all(b"1234").await.unwrap();
+        writer.shutdown().await.unwrap();
+        let mut reader = BufReader::new(reader);
+        let error = read_bounded_line(&mut reader, 4, "test line")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("missing newline"));
+    }
+
+    #[tokio::test]
+    async fn bounded_line_accepts_exact_limit_with_crlf_and_never_echoes_rejected_payload() {
+        let (mut writer, reader) = tokio::io::duplex(32);
+        writer.write_all(b"1234\r\n").await.unwrap();
+        let mut reader = BufReader::new(reader);
+        assert_eq!(
+            read_bounded_line(&mut reader, 4, "test line")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("1234")
+        );
+
+        let (mut writer, reader) = tokio::io::duplex(64);
+        writer
+            .write_all(b"secret-attacker-payload\n")
+            .await
+            .unwrap();
+        let mut reader = BufReader::new(reader);
+        let error = read_bounded_line(&mut reader, 4, "test line")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("secret-attacker-payload"));
+    }
+
+    #[tokio::test]
+    async fn bounded_line_distinguishes_clean_eof_from_partial_line_eof() {
+        let (mut writer, reader) = tokio::io::duplex(8);
+        writer.shutdown().await.unwrap();
+        let mut reader = BufReader::new(reader);
+        assert_eq!(
+            read_bounded_line(&mut reader, 4, "test line")
+                .await
+                .unwrap(),
+            None
+        );
+
+        let (mut writer, reader) = tokio::io::duplex(8);
+        writer.write_all(b"12").await.unwrap();
+        writer.shutdown().await.unwrap();
+        let mut reader = BufReader::new(reader);
+        assert!(read_bounded_line(&mut reader, 4, "test line")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("missing newline"));
+    }
+
+    #[tokio::test]
+    async fn companion_prefix_keeps_oversized_sealed_requests_on_the_narrow_limit() {
+        let prefix = br#"{"type":"observe_companion","#;
+        let mut request = prefix.to_vec();
+        request.extend(std::iter::repeat_n(b'x', 64));
+        request.push(b'\n');
+        let (mut writer, reader) = tokio::io::duplex(256);
+        writer.write_all(&request).await.unwrap();
+        let mut reader = BufReader::new(reader);
+        let error = read_bounded_line_with_prefix_limits(
+            &mut reader,
+            128,
+            &[(prefix.as_slice(), 32)],
+            "peer request",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeds 32 bytes"));
+    }
+
+    #[tokio::test]
+    async fn companion_type_after_request_id_keeps_the_narrow_limit() {
+        let mut request =
+            br#"{"request_id":"reordered","type":"observe_companion","sealed_payload":""#.to_vec();
+        request.resize(65, b'x');
+        request.push(b'\n');
+        let (mut writer, reader) = tokio::io::duplex(256);
+        writer.write_all(&request).await.unwrap();
+        let mut reader = BufReader::new(reader);
+        let error = read_bounded_json_line_with_type_limits(
+            &mut reader,
+            32,
+            128,
+            &[("observe_companion", 32)],
+            "peer request",
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeds 32 bytes"));
+    }
+
+    #[test]
+    fn top_level_type_ignores_nested_and_string_decoys() {
+        let request = br#"{
+            "request_id":"contains \"type\":\"submit_transfer_payload\"",
+            "metadata":{"type":"submit_transfer_payload"},
+            "type":"observe_companion"
+        }"#;
+        assert_eq!(
+            top_level_json_type(request).as_deref(),
+            Some("observe_companion")
+        );
+    }
 }

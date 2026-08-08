@@ -615,7 +615,7 @@ function NavigatorHarness({
 }
 
 describe("RootNavigator task collection integration", () => {
-  it("renders loading before the initial snapshot, then a genuine empty state", async () => {
+  it("renders loading before the initial snapshot, then guides a fresh install into Machines", async () => {
     const initialTasks = createDeferred<TaskSummary[]>();
     const client = createClientMock();
     vi.mocked(client.listRecentTasks).mockReturnValue(initialTasks.promise);
@@ -640,7 +640,18 @@ describe("RootNavigator task collection integration", () => {
     });
 
     expect(hasLoadingTasks()).toBe(false);
-    expect(visibleText()).toContain("No tasks yet.");
+    expect(visibleText()).toContain("Connect Kanna on your Mac");
+    expect(visibleText()).toContain("Cloud sign-in for remote access is separate and optional.");
+    expect(visibleText()).not.toContain("No tasks yet.");
+
+    await act(async () => {
+      rendered!.root.find(
+        (node) => node.props.testID === MOBILE_E2E_IDS.tasksPairMacButton
+      ).props.onPress();
+      await flushMicrotasks();
+    });
+
+    expect(rendered.root.findAllByType("MachinesScreen")).toHaveLength(1);
   });
 
   it("renders task content after the initial authoritative collection read", async () => {

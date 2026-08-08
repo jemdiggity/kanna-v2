@@ -1,4 +1,5 @@
 mod commands;
+mod companion_bridge;
 mod daemon_client;
 mod daemon_lifecycle;
 #[cfg(debug_assertions)]
@@ -23,7 +24,7 @@ use pipeline_listener::spawn_pipeline_listener;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 
 /// Managed state holding the pipeline socket path so the frontend can read it.
@@ -113,7 +114,39 @@ pub fn run() {
             std::collections::HashMap<String, (u16, u16)>,
         >::new())) as WindowSessionSizes)
         .manage(Arc::new(Mutex::new(None)) as PipelineSocketState)
+        .on_window_event(|window, event| {
+            if !matches!(event, tauri::WindowEvent::Destroyed) {
+                return;
+            }
+            let Some(manager) = window
+                .app_handle()
+                .try_state::<Arc<companion_bridge::CompanionBridgeManager>>()
+            else {
+                return;
+            };
+            let manager = Arc::clone(manager.inner());
+            let window_label = window.label().to_owned();
+            tauri::async_runtime::spawn(async move {
+                manager.close_owned_by_window(&window_label).await;
+            });
+        })
         .setup(|app| {
+            let (companion_events, mut companion_event_receiver) = tokio::sync::mpsc::channel(64);
+            let companion_manager = Arc::new(companion_bridge::CompanionBridgeManager::new(
+                companion_events,
+            ));
+            app.manage(companion_manager);
+            let companion_event_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(event) = companion_event_receiver.recv().await {
+                    if let Some(window) =
+                        companion_event_app.get_webview_window(&event.owner_window_label)
+                    {
+                        let _ = window.emit("remote-companion-browser-event", event);
+                    }
+                }
+            });
+
             #[cfg(target_os = "macos")]
             {
                 macos::fix_path_from_shell();
@@ -208,6 +241,7 @@ pub fn run() {
             // rather than a stdout pipe this process owns, so the reader runs
             // for the app's lifetime instead of per sidecar spawn.
             transfer_sidecar::spawn_transfer_event_poller(app.handle().clone());
+            transfer_sidecar::spawn_transfer_companion_event_poller(app.handle().clone());
 
             // Restore webview focus when the window gains focus.
             // This catches fullscreen exit (green button, View menu) and app
@@ -303,6 +337,12 @@ pub fn run() {
             commands::fs::list_builtin_resources,
             commands::fs::read_clipboard_image_png,
             commands::cloud::post_cloud_task_snapshot,
+            // Remote visual companion bridge commands
+            commands::companion::upsert_remote_companion_bridge,
+            commands::companion::set_remote_companion_bridge_state,
+            commands::companion::set_remote_companion_event_result,
+            commands::companion::close_remote_companion_bridge,
+            commands::companion::close_remote_companion_bridges_for_lease,
             // Mobile commands
             commands::mobile::ensure_mobile_server,
             commands::mobile::mobile_server_status,
@@ -321,6 +361,9 @@ pub fn run() {
             commands::transfer::list_transfer_task_snapshots,
             commands::transfer::observe_transfer_peer_session,
             commands::transfer::unobserve_transfer_peer_session,
+            commands::transfer::observe_transfer_peer_companion,
+            commands::transfer::unobserve_transfer_peer_companion,
+            commands::transfer::send_transfer_peer_companion_event,
             commands::transfer::send_transfer_peer_session_input,
             commands::transfer::resize_transfer_peer_session,
             commands::transfer::close_transfer_peer_task,

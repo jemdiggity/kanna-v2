@@ -245,6 +245,69 @@ pub async fn unobserve_transfer_peer_session(
 }
 
 #[tauri::command]
+pub async fn observe_transfer_peer_companion(
+    app: tauri::AppHandle,
+    peer_id: String,
+    task_id: String,
+    generation: String,
+) -> Result<Value, String> {
+    transfer_control(
+        &app,
+        "observe-peer-companion",
+        json!({
+            "peerId": peer_id,
+            "taskId": task_id,
+            "generation": generation,
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn unobserve_transfer_peer_companion(
+    app: tauri::AppHandle,
+    peer_id: String,
+    task_id: String,
+    generation: String,
+) -> Result<Value, String> {
+    transfer_control(
+        &app,
+        "unobserve-peer-companion",
+        json!({
+            "peerId": peer_id,
+            "taskId": task_id,
+            "generation": generation,
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn send_transfer_peer_companion_event(
+    app: tauri::AppHandle,
+    peer_id: String,
+    task_id: String,
+    session_id: String,
+    revision: String,
+    generation: String,
+    event: Value,
+) -> Result<Value, String> {
+    transfer_control(
+        &app,
+        "send-peer-companion-event",
+        json!({
+            "peerId": peer_id,
+            "taskId": task_id,
+            "sessionId": session_id,
+            "revision": revision,
+            "generation": generation,
+            "event": event,
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn send_transfer_peer_session_input(
     app: tauri::AppHandle,
     peer_id: String,

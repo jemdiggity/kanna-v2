@@ -8,9 +8,17 @@ import type {
 } from "../lib/api/types";
 import type {
   AgentProvider,
-  CompanionDocumentKind,
   FrameAgentEvent
 } from "@kanna/agent-protocol";
+import {
+  initialCompanionState,
+  reduceCompanionState,
+  type CompanionAction,
+  type CompanionEventStatus,
+  type CompanionSnapshot,
+  type CompanionState,
+  type CompanionStatus
+} from "@kanna/visual-companion";
 import type { TaskCompanionStreamEvent } from "../lib/api/client";
 import type { MobileAuthState } from "../lib/firebase/auth";
 import type {
@@ -44,18 +52,8 @@ import {
 export type ConnectionState = "idle" | "connecting" | "connected" | "error";
 export type MobileView = "tasks" | "recent" | "search" | "desktops" | "more";
 export type TaskTerminalStatus = "idle" | "connecting" | "live" | "closed" | "error";
-export type TaskCompanionStatus =
-  | "idle"
-  | "connecting"
-  | "reconnecting"
-  | "available"
-  | "unavailable"
-  | "error";
-export type TaskCompanionEventStatus =
-  | "idle"
-  | "sending"
-  | "sent"
-  | "error";
+export type TaskCompanionStatus = CompanionStatus;
+export type TaskCompanionEventStatus = CompanionEventStatus;
 export type RefreshStatus = "idle" | "refreshing" | "updated" | "error";
 export type TaskCollectionStatus = "loading" | "ready" | "error";
 export type AuthState = MobileAuthState;
@@ -167,12 +165,7 @@ export interface SessionState {
   taskAgentErrorMessage: string | null;
   taskCompanionTaskId: string | null;
   taskCompanionStatus: TaskCompanionStatus;
-  taskCompanionSnapshot: {
-    sessionId: string;
-    revision: string;
-    documentKind: CompanionDocumentKind;
-    html: string;
-  } | null;
+  taskCompanionSnapshot: CompanionSnapshot | null;
   taskCompanionUnread: boolean;
   taskCompanionErrorMessage: string | null;
   taskCompanionEventId: string | null;
@@ -396,6 +389,29 @@ export function createSessionStore(): SessionStore {
     for (const listener of terminalOutputListeners) {
       listener();
     }
+  };
+  const currentCompanionState = (): CompanionState => ({
+    status: state.taskCompanionStatus,
+    snapshot: state.taskCompanionSnapshot,
+    unread: state.taskCompanionUnread,
+    errorMessage: state.taskCompanionErrorMessage,
+    eventId: state.taskCompanionEventId,
+    eventStatus: state.taskCompanionEventStatus
+  });
+  const applyCompanionAction = (action: CompanionAction): boolean => {
+    const current = currentCompanionState();
+    const next = reduceCompanionState(current, action);
+    if (next === current) return false;
+    state = {
+      ...state,
+      taskCompanionStatus: next.status,
+      taskCompanionSnapshot: next.snapshot,
+      taskCompanionUnread: next.unread,
+      taskCompanionErrorMessage: next.errorMessage,
+      taskCompanionEventId: next.eventId,
+      taskCompanionEventStatus: next.eventStatus
+    };
+    return true;
   };
   const areTaskIdListsEqual = (
     left: readonly string[] | undefined,
@@ -1367,104 +1383,67 @@ export function createSessionStore(): SessionStore {
     beginTaskCompanion(taskId) {
       state = {
         ...state,
-        taskCompanionTaskId: taskId,
-        taskCompanionStatus: "connecting",
-        taskCompanionSnapshot: null,
-        taskCompanionUnread: false,
-        taskCompanionErrorMessage: null,
-        taskCompanionEventId: null,
-        taskCompanionEventStatus: "idle"
+        taskCompanionTaskId: taskId
       };
+      applyCompanionAction({ type: "begin" });
       publish();
     },
     applyTaskCompanionStreamEvent(taskId, event, isOpen) {
       if (state.taskCompanionTaskId !== taskId) return;
 
       if (event.type === "connection") {
-        if (event.connected) return;
-        const selectionWasSending =
-          state.taskCompanionEventStatus === "sending";
-        state = {
-          ...state,
-          taskCompanionStatus: "reconnecting",
-          taskCompanionSnapshot: null,
-          taskCompanionUnread: false,
-          taskCompanionErrorMessage: selectionWasSending
-            ? "Connection lost before the selection was confirmed. Retry after reconnecting."
-            : null,
-          taskCompanionEventId: null,
-          taskCompanionEventStatus: selectionWasSending ? "error" : "idle"
-        };
-        publish();
+        if (
+          applyCompanionAction({
+            type: "connection",
+            connected: event.connected,
+            // Mobile intentionally removes stale WebView controls while its
+            // stream is reattaching.
+            retainSnapshot: false
+          })
+        ) {
+          publish();
+        }
         return;
       }
 
       if (event.type === "snapshot") {
-        const revisionChanged =
-          state.taskCompanionSnapshot?.revision !== event.revision;
-        state = {
-          ...state,
-          taskCompanionStatus: "available",
-          taskCompanionSnapshot: {
+        applyCompanionAction({
+          type: "snapshot",
+          snapshot: {
             sessionId: event.sessionId,
             revision: event.revision,
             documentKind: event.documentKind,
-            html: event.html
+            html: event.html,
+            sourceOrigin: event.sourceOrigin,
+            assets: []
           },
-          taskCompanionUnread: isOpen
-            ? false
-            : revisionChanged
-              ? true
-              : state.taskCompanionUnread,
-          taskCompanionErrorMessage: null,
-          taskCompanionEventId: null,
-          taskCompanionEventStatus: "idle"
-        };
+          viewed: isOpen
+        });
         publish();
         return;
       }
 
       if (event.type === "unavailable") {
-        state = {
-          ...state,
-          taskCompanionStatus: "unavailable",
-          taskCompanionSnapshot: null,
-          taskCompanionUnread: false,
-          taskCompanionErrorMessage: null,
-          taskCompanionEventId: null,
-          taskCompanionEventStatus: "idle"
-        };
+        applyCompanionAction({ type: "unavailable" });
         publish();
         return;
       }
 
       if (event.type === "error") {
-        state = {
-          ...state,
-          taskCompanionStatus: "error",
-          taskCompanionSnapshot: null,
-          taskCompanionUnread: false,
-          taskCompanionErrorMessage: event.message,
-          taskCompanionEventId: null,
-          taskCompanionEventStatus: "idle"
-        };
+        applyCompanionAction({ type: "error", message: event.message });
         publish();
         return;
       }
 
       if (event.type === "event_result") {
-        if (state.taskCompanionEventId !== event.eventId) return;
-        state = {
-          ...state,
-          taskCompanionErrorMessage: event.accepted
-            ? null
-            : event.message ??
-              (event.code
-                ? `Selection rejected: ${event.code}`
-                : "The visual companion rejected this selection."),
-          taskCompanionEventStatus: event.accepted ? "sent" : "error"
-        };
-        publish();
+        if (
+          applyCompanionAction({
+            type: "event_result",
+            result: event
+          })
+        ) {
+          publish();
+        }
       }
     },
     markTaskCompanionViewed(taskId) {
@@ -1474,17 +1453,11 @@ export function createSessionStore(): SessionStore {
       ) {
         return;
       }
-      state = { ...state, taskCompanionUnread: false };
-      publish();
+      if (applyCompanionAction({ type: "viewed" })) publish();
     },
     beginTaskCompanionEvent(taskId, eventId) {
       if (state.taskCompanionTaskId !== taskId) return;
-      state = {
-        ...state,
-        taskCompanionErrorMessage: null,
-        taskCompanionEventId: eventId,
-        taskCompanionEventStatus: "sending"
-      };
+      applyCompanionAction({ type: "begin_event", eventId });
       publish();
     },
     reconcileSelectedTask() {
@@ -1551,14 +1524,9 @@ export function createSessionStore(): SessionStore {
     clearTaskCompanion() {
       state = {
         ...state,
-        taskCompanionTaskId: null,
-        taskCompanionStatus: "idle",
-        taskCompanionSnapshot: null,
-        taskCompanionUnread: false,
-        taskCompanionErrorMessage: null,
-        taskCompanionEventId: null,
-        taskCompanionEventStatus: "idle"
+        taskCompanionTaskId: null
       };
+      applyCompanionAction({ type: "reset" });
       publish();
     }
   };

@@ -1,11 +1,14 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use kanna_agent_protocol::{CompanionEvent, ServerFrame};
 use kanna_task_transfer::crypto::{
-    artifact_stream_context, parse_public_key, public_key_to_string, seal_json, StreamSealer,
-    TransferIdentity,
+    artifact_stream_context, open_json, parse_public_key, public_key_to_string, seal_json,
+    StreamSealer, TransferIdentity,
 };
 use kanna_task_transfer::peer_store::{PeerRecord, PeerStore};
-use kanna_task_transfer::protocol::{PeerRequest, PeerResponse};
+use kanna_task_transfer::protocol::{
+    PeerRequest, PeerResponse, MAX_COMPANION_REQUEST_LINE_BYTES, MAX_PEER_REQUEST_LINE_BYTES,
+};
 use kanna_task_transfer::registry::{PeerRegistry, PeerRegistryEntry};
 use kanna_task_transfer::runtime::{
     DiscoveryMode, ExternalPeer, PairingResult, RuntimeConfig, RuntimeError, RuntimeEvent,
@@ -2304,6 +2307,927 @@ async fn send_raw_peer_request(endpoint: &str, request: &PeerRequest) -> PeerRes
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paired_peer_observes_and_interacts_with_visual_companion() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("owner.sqlite");
+    let workspace = temp.path().join("owner-worktree");
+    create_companion_fixture(&db_path, &workspace);
+
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0).with_db_path(&db_path),
+    )
+    .await
+    .unwrap();
+    let viewer = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-viewer",
+        "Viewer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&viewer, &owner, "peer-owner").await;
+
+    viewer
+        .observe_peer_companion("peer-owner", "task-1", "generation-1")
+        .await
+        .unwrap();
+    let initial = next_companion_frame(&viewer).await;
+    let ServerFrame::CompanionSnapshot {
+        task_id,
+        session_id,
+        revision,
+        source_origin,
+        assets,
+        ..
+    } = initial
+    else {
+        panic!("expected companion snapshot, got {initial:?}");
+    };
+    assert_eq!(task_id, "task-1");
+    assert_eq!(source_origin.as_deref(), Some("http://localhost:52341"));
+    assert_eq!(assets[0].name, "layout.png");
+
+    let event = CompanionEvent {
+        session_id: session_id.clone(),
+        revision: revision.clone(),
+        event_id: "event-1".into(),
+        event_type: "click".into(),
+        choice: "grid".into(),
+        text: "Grid".into(),
+        element_id: Some("layout-grid".into()),
+        timestamp: 1_784_268_000_000,
+    };
+    viewer
+        .send_peer_companion_event(
+            "peer-owner",
+            "task-1",
+            &session_id,
+            &revision,
+            "generation-1",
+            event.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        next_companion_frame(&viewer).await,
+        ServerFrame::CompanionEventResult {
+            task_id: "task-1".into(),
+            session_id: Some("session-1".into()),
+            revision: Some(revision.clone()),
+            event_id: "event-1".into(),
+            accepted: true,
+            code: None,
+            message: None,
+            attachment_epoch: None,
+        },
+    );
+    let written =
+        std::fs::read_to_string(workspace.join(".superpowers/brainstorm/session-1/state/events"))
+            .unwrap();
+    assert_eq!(
+        serde_json::from_str::<CompanionEvent>(written.trim()).unwrap(),
+        event,
+    );
+
+    viewer
+        .send_peer_companion_event(
+            "peer-owner",
+            "task-1",
+            &session_id,
+            "stale-revision",
+            "generation-1",
+            CompanionEvent {
+                event_id: "event-stale".into(),
+                ..event.clone()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        next_companion_frame(&viewer).await,
+        ServerFrame::CompanionEventResult {
+            task_id: "task-1".into(),
+            session_id: Some("session-1".into()),
+            revision: Some("stale-revision".into()),
+            event_id: "event-stale".into(),
+            accepted: false,
+            code: Some("stale_revision".into()),
+            message: Some("Refresh the visual companion and try again.".into()),
+            attachment_epoch: None,
+        },
+    );
+
+    std::fs::write(
+        workspace.join(".superpowers/brainstorm/session-1/content/screen.html"),
+        "<h2>Updated layout</h2>",
+    )
+    .unwrap();
+    let updated = next_companion_frame(&viewer).await;
+    let ServerFrame::CompanionSnapshot {
+        revision: updated_revision,
+        html,
+        ..
+    } = updated
+    else {
+        panic!("expected updated companion snapshot");
+    };
+    assert_ne!(updated_revision, revision);
+    assert_eq!(html, "<h2>Updated layout</h2>");
+
+    std::fs::remove_dir_all(workspace.join(".superpowers")).unwrap();
+    assert_eq!(
+        next_companion_frame(&viewer).await,
+        ServerFrame::CompanionUnavailable {
+            task_id: "task-1".into(),
+            attachment_epoch: None,
+        },
+    );
+
+    viewer
+        .observe_peer_companion("peer-owner", "task-1", "generation-2")
+        .await
+        .unwrap();
+    assert_eq!(
+        next_companion_frame(&viewer).await,
+        ServerFrame::CompanionUnavailable {
+            task_id: "task-1".into(),
+            attachment_epoch: None,
+        },
+    );
+    wait_for_companion_counts(&viewer, &owner, 1, 1).await;
+    assert_eq!(owner.owner_companion_observer_count().await, 1);
+    let stale_generation_error = viewer
+        .send_peer_companion_event(
+            "peer-owner",
+            "task-1",
+            &session_id,
+            &revision,
+            "generation-1",
+            CompanionEvent {
+                event_id: "event-stale-generation".into(),
+                ..event.clone()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(stale_generation_error
+        .to_string()
+        .contains("observation is not active"));
+    viewer
+        .unobserve_peer_companion("peer-owner", "task-1", "generation-2")
+        .await
+        .unwrap();
+    wait_for_companion_counts(&viewer, &owner, 0, 0).await;
+    assert_eq!(owner.owner_companion_observer_count().await, 0);
+    let no_observation_error = viewer
+        .send_peer_companion_event(
+            "peer-owner",
+            "task-1",
+            &session_id,
+            &revision,
+            "generation-2",
+            CompanionEvent {
+                event_id: "event-after-close".into(),
+                ..event
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(no_observation_error
+        .to_string()
+        .contains("observation is not active"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multiple_viewers_share_and_release_one_owner_companion_scan_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("owner.sqlite");
+    let workspace = temp.path().join("owner-worktree");
+    create_companion_fixture(&db_path, &workspace);
+
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0).with_db_path(&db_path),
+    )
+    .await
+    .unwrap();
+    let first_viewer = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-viewer-a",
+        "Viewer A",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let second_viewer = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-viewer-b",
+        "Viewer B",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&first_viewer, &owner, "peer-owner").await;
+    pair_peers(&second_viewer, &owner, "peer-owner").await;
+
+    first_viewer
+        .observe_peer_companion("peer-owner", "task-1", "generation-a")
+        .await
+        .unwrap();
+    second_viewer
+        .observe_peer_companion("peer-owner", "task-1", "generation-b")
+        .await
+        .unwrap();
+    let first = next_companion_frame(&first_viewer).await;
+    let second = next_companion_frame(&second_viewer).await;
+    let (
+        ServerFrame::CompanionSnapshot {
+            revision: first_revision,
+            ..
+        },
+        ServerFrame::CompanionSnapshot {
+            revision: second_revision,
+            ..
+        },
+    ) = (first, second)
+    else {
+        panic!("both viewers must receive the shared snapshot");
+    };
+    assert_eq!(first_revision, second_revision);
+    assert_eq!(owner.owner_companion_source_count().await, 1);
+
+    first_viewer
+        .unobserve_peer_companion("peer-owner", "task-1", "generation-a")
+        .await
+        .unwrap();
+    assert_eq!(owner.owner_companion_source_count().await, 1);
+    second_viewer
+        .unobserve_peer_companion("peer-owner", "task-1", "generation-b")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        // Removing the source signals its poller; the poller releases retained
+        // frame bytes asynchronously when it observes that cancellation.
+        while owner.owner_companion_source_count().await != 0
+            || owner.owner_companion_retained_bytes() != 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the final observer must release the shared source");
+    assert_eq!(owner.owner_companion_retained_bytes(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paired_owner_limits_companion_events_at_ksp_boundary_and_resets_on_new_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("owner.sqlite");
+    let workspace = temp.path().join("owner-worktree");
+    create_companion_fixture(&db_path, &workspace);
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0).with_db_path(&db_path),
+    )
+    .await
+    .unwrap();
+    let viewer = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-viewer",
+        "Viewer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&viewer, &owner, "peer-owner").await;
+    viewer
+        .observe_peer_companion("peer-owner", "task-1", "generation-rate-1")
+        .await
+        .unwrap();
+    let ServerFrame::CompanionSnapshot {
+        session_id,
+        revision,
+        ..
+    } = next_companion_frame(&viewer).await
+    else {
+        panic!("expected companion snapshot");
+    };
+
+    for index in 0..30 {
+        viewer
+            .send_peer_companion_event(
+                "peer-owner",
+                "task-1",
+                &session_id,
+                &revision,
+                "generation-rate-1",
+                companion_event(&format!("rate-{index}")),
+            )
+            .await
+            .unwrap();
+        let ServerFrame::CompanionEventResult { accepted, .. } =
+            next_companion_frame(&viewer).await
+        else {
+            panic!("expected companion event result");
+        };
+        assert!(
+            accepted,
+            "event {index} should be inside the 30-event window"
+        );
+    }
+
+    viewer
+        .send_peer_companion_event(
+            "peer-owner",
+            "task-1",
+            &session_id,
+            &revision,
+            "generation-rate-1",
+            companion_event("rate-30"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        next_companion_frame(&viewer).await,
+        ServerFrame::CompanionEventResult {
+            task_id: "task-1".into(),
+            session_id: Some("session-1".into()),
+            revision: Some(revision.clone()),
+            event_id: "rate-30".into(),
+            accepted: false,
+            code: Some("companion_rate_limited".into()),
+            message: Some("Too many visual companion selections were sent.".into()),
+            attachment_epoch: None,
+        },
+    );
+
+    viewer
+        .observe_peer_companion("peer-owner", "task-1", "generation-rate-2")
+        .await
+        .unwrap();
+    let _ = next_companion_frame(&viewer).await;
+    viewer
+        .send_peer_companion_event(
+            "peer-owner",
+            "task-1",
+            &session_id,
+            &revision,
+            "generation-rate-2",
+            companion_event("new-generation"),
+        )
+        .await
+        .unwrap();
+    let ServerFrame::CompanionEventResult { accepted, .. } = next_companion_frame(&viewer).await
+    else {
+        panic!("expected companion event result");
+    };
+    assert!(accepted);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claimed_trusted_peer_without_key_proof_cannot_observe_or_send_companion_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-owner",
+        "Owner",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let viewer = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-viewer",
+        "Viewer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&viewer, &owner, "peer-owner").await;
+    let endpoint = viewer
+        .list_peers()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap()
+        .endpoint;
+
+    let observe = PeerRequest::ObserveCompanion {
+        request_id: "forged-observe".into(),
+        requester_peer_id: "peer-viewer".into(),
+        sealed_payload: "not-a-sealed-proof".into(),
+    };
+    let observe_response = send_raw_peer_request(&endpoint, &observe).await;
+    assert!(matches!(
+        observe_response,
+        PeerResponse::Error { message, .. } if message.contains("json error")
+    ));
+
+    let send = PeerRequest::SendCompanionEvent {
+        request_id: "forged-send".into(),
+        requester_peer_id: "peer-viewer".into(),
+        sealed_payload: "not-a-sealed-payload".into(),
+    };
+    let send_response = send_raw_peer_request(&endpoint, &send).await;
+    assert!(matches!(
+        send_response,
+        PeerResponse::Error { message, .. } if message.contains("json error")
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_accepts_max_transfer_request_and_rejects_oversized_or_incomplete_ingress() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-owner",
+        "Owner",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let endpoint = PeerRegistry::new(temp.path().to_path_buf())
+        .list_peers("attacker")
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap()
+        .endpoint;
+
+    let empty_transfer = PeerRequest::SubmitTransferPayload {
+        request_id: "max-transfer".into(),
+        transfer_id: "transfer-1".into(),
+        sealed_payload: String::new(),
+    };
+    let empty_transfer_len = serde_json::to_vec(&empty_transfer).unwrap().len();
+    let max_transfer = PeerRequest::SubmitTransferPayload {
+        request_id: "max-transfer".into(),
+        transfer_id: "transfer-1".into(),
+        sealed_payload: "A".repeat(MAX_PEER_REQUEST_LINE_BYTES - empty_transfer_len),
+    };
+    assert_eq!(
+        serde_json::to_vec(&max_transfer).unwrap().len(),
+        MAX_PEER_REQUEST_LINE_BYTES
+    );
+    assert!(
+        matches!(
+            send_raw_peer_request(&endpoint, &max_transfer).await,
+            PeerResponse::Error { request_id, .. } if request_id == "max-transfer"
+        ),
+        "a maximum-size transfer payload request should reach protocol handling"
+    );
+
+    let mut oversized =
+        br#"{"type":"observe_companion","request_id":"oversized","requester_peer_id":"attacker","sealed_payload":""#
+            .to_vec();
+    oversized.resize(MAX_COMPANION_REQUEST_LINE_BYTES + 1, b'x');
+    oversized.push(b'\n');
+    assert!(
+        send_inbound_bytes(&endpoint, &oversized).await.is_empty(),
+        "oversized unauthenticated request should be closed without a response"
+    );
+
+    let mut reordered =
+        br#"{"request_id":"reordered-oversized","requester_peer_id":"attacker","type":"observe_companion","sealed_payload":""#
+            .to_vec();
+    reordered.resize(MAX_COMPANION_REQUEST_LINE_BYTES + 1, b'x');
+    reordered.push(b'\n');
+    assert!(
+        send_inbound_bytes(&endpoint, &reordered).await.is_empty(),
+        "reordering a companion request must not bypass the companion ingress limit"
+    );
+
+    let mut newline_free =
+        br#"{"type":"send_companion_event","request_id":"newline-free","requester_peer_id":"attacker","sealed_payload":""#
+            .to_vec();
+    newline_free.resize(MAX_COMPANION_REQUEST_LINE_BYTES, b'x');
+    assert!(
+        send_inbound_bytes(&endpoint, &newline_free)
+            .await
+            .is_empty(),
+        "partial unauthenticated request should be closed without a response"
+    );
+
+    assert!(matches!(
+        send_raw_peer_request(
+            &endpoint,
+            &PeerRequest::SendCompanionEvent {
+                request_id: "listener-still-responsive".into(),
+                requester_peer_id: "attacker".into(),
+                sealed_payload: "invalid".into(),
+            },
+        )
+        .await,
+        PeerResponse::Error { .. }
+    ));
+    drop(owner);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_preauth_connections_time_out_and_do_not_starve_next_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let request_timeout = Duration::from_millis(100);
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_peer_request_timeout(request_timeout),
+    )
+    .await
+    .unwrap();
+    let endpoint = PeerRegistry::new(temp.path().to_path_buf())
+        .list_peers("attacker")
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap()
+        .endpoint;
+
+    let mut stalled = Vec::new();
+    for index in 0..16 {
+        let mut stream = TcpStream::connect(&endpoint).await.unwrap();
+        if index % 2 == 1 {
+            stream
+                .write_all(br#"{"type":"send_companion_event""#)
+                .await
+                .unwrap();
+        }
+        stalled.push(stream);
+    }
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let healthy = tokio::time::timeout(
+        Duration::from_secs(1),
+        send_raw_peer_request(
+            &endpoint,
+            &PeerRequest::SendCompanionEvent {
+                request_id: "healthy-after-stalls".into(),
+                requester_peer_id: "attacker".into(),
+                sealed_payload: "invalid".into(),
+            },
+        ),
+    )
+    .await
+    .expect("a queued healthy request should proceed after stalled reads time out");
+    assert!(matches!(healthy, PeerResponse::Error { .. }));
+
+    for mut stream in stalled {
+        let mut byte = [0_u8; 1];
+        let read = tokio::time::timeout(Duration::from_millis(200), stream.read(&mut byte))
+            .await
+            .expect("stalled connection should be closed after the pre-auth deadline")
+            .unwrap();
+        assert_eq!(read, 0);
+    }
+    drop(owner);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn complete_max_size_unauthenticated_requests_remain_limited_until_protocol_decision() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_secs(10)),
+    )
+    .await
+    .unwrap();
+    let endpoint = PeerRegistry::new(temp.path().to_path_buf())
+        .list_peers("attacker")
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap()
+        .endpoint;
+
+    let max_pairing_request = |index: usize| {
+        let request_id = format!("max-pair-{index:02}");
+        let empty = PeerRequest::StartPairing {
+            request_id: request_id.clone(),
+            source_peer_id: format!("attacker-{index:02}"),
+            source_display_name: "Attacker".into(),
+            source_public_key: "not-a-public-key".into(),
+            capabilities_json: String::new(),
+        };
+        let empty_len = serde_json::to_vec(&empty).unwrap().len();
+        let request = PeerRequest::StartPairing {
+            request_id,
+            source_peer_id: format!("attacker-{index:02}"),
+            source_display_name: "Attacker".into(),
+            source_public_key: "not-a-public-key".into(),
+            capabilities_json: "A".repeat(MAX_PEER_REQUEST_LINE_BYTES - empty_len),
+        };
+        assert_eq!(
+            serde_json::to_vec(&request).unwrap().len(),
+            MAX_PEER_REQUEST_LINE_BYTES
+        );
+        request
+    };
+
+    let mut clients = Vec::new();
+    for index in 0..16 {
+        let endpoint = endpoint.clone();
+        let request = max_pairing_request(index);
+        clients.push(tokio::spawn(async move {
+            send_raw_peer_request(&endpoint, &request).await
+        }));
+    }
+
+    let mut pairing_request_ids = Vec::new();
+    for _ in 0..16 {
+        let event = tokio::time::timeout(Duration::from_secs(5), owner.next_event())
+            .await
+            .expect("all sixteen permitted requests should reach pairing policy")
+            .unwrap();
+        let RuntimeEvent::PairingRequested(event) = event else {
+            panic!("expected pairing request");
+        };
+        pairing_request_ids.push(event.request_id);
+    }
+    assert_eq!(
+        owner.active_preauth_request_count(),
+        16,
+        "complete parsed requests must retain all sixteen pre-auth permits while awaiting policy"
+    );
+
+    let endpoint_for_queued = endpoint.clone();
+    let queued_request = max_pairing_request(16);
+    clients.push(tokio::spawn(async move {
+        send_raw_peer_request(&endpoint_for_queued, &queued_request).await
+    }));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), owner.next_event())
+            .await
+            .is_err(),
+        "the seventeenth complete request must wait for a pre-auth permit"
+    );
+
+    owner.reject_pairing(&pairing_request_ids[0]).await.unwrap();
+    let released_event = tokio::time::timeout(Duration::from_secs(2), owner.next_event())
+        .await
+        .expect("releasing any protocol decision should admit the queued request")
+        .unwrap();
+    assert!(matches!(
+        released_event,
+        RuntimeEvent::PairingRequested(event) if event.peer_id == "attacker-16"
+    ));
+    assert_eq!(owner.active_preauth_request_count(), 16);
+
+    for client in clients {
+        client.abort();
+    }
+    drop(owner);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authenticated_long_lived_companion_streams_release_preauth_capacity() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("owner.sqlite");
+    let workspace = temp.path().join("owner-worktree");
+    create_companion_fixture(&db_path, &workspace);
+    let db = rusqlite::Connection::open(&db_path).unwrap();
+    for index in 2..=16 {
+        db.execute(
+            "INSERT INTO pipeline_item (id, branch) VALUES (?, ?)",
+            [format!("task-{index}"), format!("task-task-{index}")],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO worktree (id, pipeline_item_id, path, branch)
+             VALUES (?, ?, ?, ?)",
+            [
+                format!("wt-{index}"),
+                format!("task-{index}"),
+                workspace.to_string_lossy().into_owned(),
+                format!("task-task-{index}"),
+            ],
+        )
+        .unwrap();
+    }
+    drop(db);
+
+    let owner = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), 0).with_db_path(&db_path),
+    )
+    .await
+    .unwrap();
+    let viewer = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-viewer",
+        "Viewer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&viewer, &owner, "peer-owner").await;
+
+    for index in 1..=16 {
+        viewer
+            .observe_peer_companion(
+                "peer-owner",
+                &format!("task-{index}"),
+                &format!("generation-{index}"),
+            )
+            .await
+            .unwrap();
+    }
+    wait_for_companion_counts(&viewer, &owner, 16, 16).await;
+    assert_eq!(
+        owner.active_preauth_request_count(),
+        0,
+        "verified and registered long-lived streams must release pre-auth permits"
+    );
+
+    let endpoint = PeerRegistry::new(temp.path().to_path_buf())
+        .list_peers("control-client")
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap()
+        .endpoint;
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        send_raw_peer_request(
+            &endpoint,
+            &PeerRequest::GetTaskSnapshot {
+                request_id: "control-after-streams".into(),
+                requester_peer_id: "peer-viewer".into(),
+                sealed_payload: None,
+            },
+        ),
+    )
+    .await
+    .expect("authenticated companion streams must not retain pre-auth permits");
+    // A prompt reply of any kind proves the listener still had pre-auth
+    // capacity; under the authenticated-request contract an unsealed snapshot
+    // request is answered with an error rather than a snapshot.
+    match response {
+        PeerResponse::TaskSnapshot { request_id, .. } | PeerResponse::Error { request_id, .. } => {
+            assert_eq!(request_id, "control-after-streams")
+        }
+        other => panic!("expected a prompt response, got {other:?}"),
+    }
+    drop(viewer);
+    drop(owner);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn captured_observe_and_send_fail_across_owner_restart_with_fresh_challenge() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("owner.sqlite");
+    let workspace = temp.path().join("owner-worktree");
+    create_companion_fixture(&db_path, &workspace);
+
+    let port_probe = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let owner_port = port_probe.local_addr().unwrap().port();
+    drop(port_probe);
+    let owner_config = RuntimeConfig::for_tests("peer-owner", "Owner", temp.path(), owner_port)
+        .with_db_path(&db_path);
+    let viewer_identity = TransferIdentity::generate();
+    let viewer_public_key = public_key_to_string(&viewer_identity.public_key);
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-viewer".into(),
+            display_name: "Viewer".into(),
+            endpoint: "127.0.0.1:9".into(),
+            pid: std::process::id(),
+            public_key: viewer_public_key.clone(),
+            protocol_version: 2,
+            accepting_transfers: true,
+        })
+        .unwrap();
+
+    let owner = TransferRuntime::spawn(owner_config.clone()).await.unwrap();
+    PeerStore::new(trusted_peer_store_path(temp.path(), "peer-owner"))
+        .upsert(PeerRecord {
+            peer_id: "peer-viewer".into(),
+            display_name: "Viewer".into(),
+            public_key: viewer_public_key,
+            capabilities_json: "{\"protocolVersion\":2,\"companionCapabilityVersion\":1}".into(),
+            paired_at: "2026-07-26T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+    let owner_entry = PeerRegistry::new(temp.path().to_path_buf())
+        .list_peers("peer-viewer")
+        .unwrap()
+        .into_iter()
+        .find(|peer| peer.peer_id == "peer-owner")
+        .unwrap();
+    let owner_public = parse_public_key(&owner_entry.public_key).unwrap();
+    let stream_nonce = URL_SAFE_NO_PAD.encode([3_u8; 24]);
+    let observe_request_id = "captured-observe";
+    let sealed_observe = seal_json(
+        &viewer_identity,
+        &owner_public,
+        &json!({
+            "operation": "observe_companion",
+            "request_id": observe_request_id,
+            "requester_peer_id": "peer-viewer",
+            "task_id": "task-1",
+            "generation": "captured-generation",
+            "session_id": null,
+            "revision": null,
+            "event": null,
+            "stream_nonce": stream_nonce,
+            "observation_challenge": null,
+            "sequence": 0,
+            "nonce": URL_SAFE_NO_PAD.encode([4_u8; 24]),
+            "issued_at_ms": SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        }),
+    )
+    .unwrap();
+    let captured_observe = PeerRequest::ObserveCompanion {
+        request_id: observe_request_id.into(),
+        requester_peer_id: "peer-viewer".into(),
+        sealed_payload: sealed_observe,
+    };
+    let captured_observe_wire = serde_json::to_string(&captured_observe).unwrap();
+    assert!(!captured_observe_wire.contains("task-1"));
+    assert!(!captured_observe_wire.contains("captured-generation"));
+
+    let (mut first_observation, first_ack) =
+        send_raw_observe(&owner_entry.endpoint, &captured_observe).await;
+    let PeerResponse::ObserveCompanion {
+        sealed_payload: first_ack,
+        ..
+    } = first_ack
+    else {
+        panic!("expected first sealed companion ACK");
+    };
+    let first_ack_wire = serde_json::to_string(&first_ack).unwrap();
+    let first_ack = open_json(&viewer_identity, &owner_public, &first_ack).unwrap();
+    let first_challenge = first_ack["observation_challenge"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!first_ack_wire.contains(&first_challenge));
+
+    let send_request_id = "captured-send";
+    let captured_send = PeerRequest::SendCompanionEvent {
+        request_id: send_request_id.into(),
+        requester_peer_id: "peer-viewer".into(),
+        sealed_payload: seal_json(
+            &viewer_identity,
+            &owner_public,
+            &json!({
+                "operation": "send_companion_event",
+                "request_id": send_request_id,
+                "requester_peer_id": "peer-viewer",
+                "task_id": "task-1",
+                "generation": "captured-generation",
+                "session_id": "session-1",
+                "revision": "captured-revision",
+                "event": companion_event("captured-event"),
+                "stream_nonce": stream_nonce,
+                "observation_challenge": first_challenge,
+                "sequence": 1,
+                "nonce": URL_SAFE_NO_PAD.encode([5_u8; 24]),
+                "issued_at_ms": SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+            }),
+        )
+        .unwrap(),
+    };
+    assert!(matches!(
+        send_raw_peer_request(&owner_entry.endpoint, &captured_send).await,
+        PeerResponse::SendCompanionEvent { .. }
+    ));
+
+    first_observation.shutdown().await.unwrap();
+    drop(first_observation);
+    drop(owner);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let restarted_owner = TransferRuntime::spawn(owner_config).await.unwrap();
+    let (second_observation, second_ack) =
+        send_raw_observe(&owner_entry.endpoint, &captured_observe).await;
+    let PeerResponse::ObserveCompanion {
+        sealed_payload: second_ack,
+        ..
+    } = second_ack
+    else {
+        panic!("expected restarted sealed companion ACK");
+    };
+    let attacker = TransferIdentity::generate();
+    assert!(open_json(&attacker, &owner_public, &second_ack).is_err());
+    let second_ack = open_json(&viewer_identity, &owner_public, &second_ack).unwrap();
+    let second_challenge = second_ack["observation_challenge"].as_str().unwrap();
+    assert_ne!(second_challenge, first_challenge);
+
+    assert!(matches!(
+        send_raw_peer_request(&owner_entry.endpoint, &captured_send).await,
+        PeerResponse::Error { message, .. }
+            if message.contains("observation is not active")
+    ));
+    assert_eq!(restarted_owner.active_owner_companion_count(), 1);
+    drop(second_observation);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn peers_become_trusted_after_explicit_pairing() {
     let temp = tempfile::tempdir().unwrap();
 
@@ -2808,6 +3732,160 @@ async fn observe_peer_session_reports_empty_peer_response_with_peer_context() {
     );
 
     server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn companion_observer_removes_itself_when_owner_disconnects() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let target_identity = TransferIdentity::generate();
+    let public_key = public_key_to_string(&target_identity.public_key);
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            endpoint: format!("127.0.0.1:{port}"),
+            pid: std::process::id(),
+            public_key: public_key.clone(),
+            protocol_version: 2,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    PeerStore::new(trusted_peer_store_path(temp.path(), "peer-primary"))
+        .upsert(PeerRecord {
+            peer_id: "peer-target".into(),
+            display_name: "Target".into(),
+            public_key,
+            capabilities_json: "{\"protocolVersion\":2,\"companionCapabilityVersion\":1}".into(),
+            paired_at: "2026-04-17T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+
+    let registry_dir = temp.path().to_path_buf();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(request["type"], "observe_companion");
+        let primary_entry = PeerRegistry::new(registry_dir)
+            .list_peers("peer-target")
+            .unwrap()
+            .into_iter()
+            .find(|peer| peer.peer_id == "peer-primary")
+            .unwrap();
+        let primary_public = parse_public_key(&primary_entry.public_key).unwrap();
+        let proof = open_json(
+            &target_identity,
+            &primary_public,
+            request["sealed_payload"].as_str().unwrap(),
+        )
+        .unwrap();
+        let observation_challenge = URL_SAFE_NO_PAD.encode([7_u8; 24]);
+        let sealed_payload = seal_json(
+            &target_identity,
+            &primary_public,
+            &json!({
+                "operation": "observe_companion_ack",
+                "request_id": request["request_id"],
+                "task_id": proof["task_id"],
+                "generation": proof["generation"],
+                "stream_nonce": proof["stream_nonce"],
+                "observation_challenge": observation_challenge,
+                "sequence": 0,
+                "frame": null,
+            }),
+        )
+        .unwrap();
+        writer
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({
+                        "type": "observe_companion",
+                        "request_id": request["request_id"],
+                        "sealed_payload": sealed_payload,
+                    })
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    primary
+        .observe_peer_companion("peer-target", "task-1", "generation-1")
+        .await
+        .unwrap();
+    let frame = next_companion_frame(&primary).await;
+    assert!(matches!(
+        frame,
+        ServerFrame::CompanionError {
+            code,
+            ..
+        } if code == "connection_failed"
+    ));
+    server.await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while primary.companion_observer_count().await != 0 {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_removes_authorization_after_post_registration_stream_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-owner",
+        "Owner",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let viewer = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-viewer",
+        "Viewer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&viewer, &owner, "peer-owner").await;
+
+    viewer
+        .observe_peer_companion("peer-owner", "task-1", "generation-fails")
+        .await
+        .unwrap();
+    let frame = next_companion_frame(&viewer).await;
+    assert!(matches!(
+        frame,
+        ServerFrame::CompanionError { code, .. } if code == "connection_failed"
+    ));
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while owner.owner_companion_observer_count().await != 0
+        || viewer.companion_observer_count().await != 0
+    {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(owner.active_owner_companion_count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -8712,6 +9790,51 @@ async fn prepare_transfer_preflight_does_not_leak_source_task_id_on_the_wire() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn already_paired_v1_peer_is_reported_unsupported_without_opening_a_companion_stream() {
+    let temp = tempfile::tempdir().unwrap();
+    let target_identity = TransferIdentity::generate();
+    PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&PeerRegistryEntry {
+            peer_id: "peer-v1".into(),
+            display_name: "Legacy".into(),
+            endpoint: "127.0.0.1:9".into(),
+            pid: std::process::id(),
+            public_key: public_key_to_string(&target_identity.public_key),
+            protocol_version: 1,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    PeerStore::new(trusted_peer_store_path(temp.path(), "peer-current"))
+        .upsert(PeerRecord {
+            peer_id: "peer-v1".into(),
+            display_name: "Legacy".into(),
+            public_key: public_key_to_string(&target_identity.public_key),
+            capabilities_json: "{\"protocolVersion\":1}".into(),
+            paired_at: "2026-07-26T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+    let current = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-current",
+        "Current",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+
+    let error = current
+        .observe_peer_companion("peer-v1", "task-1", "generation-1")
+        .await
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("does not support visual companions"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prepare_transfer_commit_does_not_leak_payload_on_the_wire() {
     let temp = tempfile::tempdir().unwrap();
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -9164,6 +10287,104 @@ async fn acknowledge_import_committed_does_not_leak_task_ids_on_the_wire() {
     proxy.await.unwrap();
 }
 
+fn create_companion_fixture(db_path: &Path, workspace: &Path) {
+    std::fs::create_dir_all(workspace.join(".superpowers/brainstorm/session-1/state")).unwrap();
+    std::fs::create_dir_all(workspace.join(".superpowers/brainstorm/session-1/content")).unwrap();
+    std::fs::write(
+        workspace.join(".superpowers/brainstorm/session-1/state/server-info"),
+        r#"{"url":"http://localhost:52341"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.join(".superpowers/brainstorm/session-1/content/screen.html"),
+        "<h2>Choose a layout</h2>",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.join(".superpowers/brainstorm/session-1/content/layout.png"),
+        b"PNG",
+    )
+    .unwrap();
+
+    let db = rusqlite::Connection::open(db_path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE pipeline_item (id TEXT PRIMARY KEY, branch TEXT);
+         CREATE TABLE worktree (
+             id TEXT PRIMARY KEY,
+             pipeline_item_id TEXT NOT NULL,
+             path TEXT NOT NULL,
+             branch TEXT NOT NULL,
+             created_at TEXT NOT NULL DEFAULT (datetime('now'))
+         );",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO pipeline_item (id, branch) VALUES ('task-1', 'task-task-1')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO worktree (id, pipeline_item_id, path, branch)
+         VALUES ('wt-1', 'task-1', ?, 'task-task-1')",
+        [workspace.to_str().unwrap()],
+    )
+    .unwrap();
+}
+
+async fn next_companion_frame(runtime: &TransferRuntime) -> ServerFrame {
+    loop {
+        match runtime.next_event().await.unwrap() {
+            RuntimeEvent::CompanionEvent { frame, .. } => return frame,
+            RuntimeEvent::PairingStarted(_)
+            | RuntimeEvent::PairingRequested(_)
+            | RuntimeEvent::PairingCompleted(_) => {}
+            RuntimeEvent::IncomingTransferRequest(_)
+            | RuntimeEvent::OutgoingTransferCommitted(_)
+            | RuntimeEvent::OutgoingTransferFinalizationRequested(_)
+            | RuntimeEvent::TaskPullRequested(_)
+            | RuntimeEvent::TerminalEvent { .. } => {
+                panic!("expected visual companion event")
+            }
+        }
+    }
+}
+
+fn companion_event(event_id: &str) -> CompanionEvent {
+    CompanionEvent {
+        session_id: "session-1".into(),
+        revision: "revision-1".into(),
+        event_id: event_id.into(),
+        event_type: "click".into(),
+        choice: "grid".into(),
+        text: "Grid".into(),
+        element_id: Some("layout-grid".into()),
+        timestamp: 1_784_268_000_000,
+    }
+}
+
+async fn wait_for_companion_counts(
+    viewer: &TransferRuntime,
+    owner: &TransferRuntime,
+    viewer_count: usize,
+    owner_count: usize,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if viewer.companion_observer_count().await == viewer_count
+            && owner.active_owner_companion_count() == owner_count
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "companion observer counts did not settle: viewer={}, owner={}",
+            viewer.companion_observer_count().await,
+            owner.active_owner_companion_count(),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 fn trusted_peer_store_path(root: &Path, self_peer_id: &str) -> std::path::PathBuf {
     root.join("trusted-peers")
         .join(format!("{}.json", URL_SAFE_NO_PAD.encode(self_peer_id)))
@@ -9243,6 +10464,7 @@ async fn next_incoming_transfer_request(
                 panic!("expected incoming transfer event");
             }
             RuntimeEvent::TerminalEvent { .. } => {}
+            RuntimeEvent::CompanionEvent { .. } => {}
         }
     }
 }
@@ -9266,6 +10488,7 @@ async fn next_outgoing_transfer_committed(
                 panic!("expected outgoing transfer committed event");
             }
             RuntimeEvent::TerminalEvent { .. } => {}
+            RuntimeEvent::CompanionEvent { .. } => {}
         }
     }
 }
@@ -9434,6 +10657,7 @@ async fn consume_pairing_completed(runtime: &TransferRuntime) {
             panic!("expected pairing completed event");
         }
         RuntimeEvent::TerminalEvent { .. } => panic!("expected pairing completed event"),
+        RuntimeEvent::CompanionEvent { .. } => panic!("expected pairing completed event"),
     }
 }
 
@@ -9477,6 +10701,9 @@ async fn pair_peers(
                     RuntimeEvent::TerminalEvent { .. } => {
                         panic!("expected pairing started event");
                     }
+                    RuntimeEvent::CompanionEvent { .. } => {
+                        panic!("expected pairing started event");
+                    }
                 }
             }
             event = target.next_event() => {
@@ -9501,6 +10728,9 @@ async fn pair_peers(
                     RuntimeEvent::TerminalEvent { .. } => {
                         panic!("expected pairing request event");
                     }
+                    RuntimeEvent::CompanionEvent { .. } => {
+                        panic!("expected pairing request event");
+                    }
                 }
             }
         }
@@ -9516,4 +10746,38 @@ async fn pair_peers(
         .await
         .unwrap();
     pairing.await.unwrap()
+}
+
+async fn send_raw_observe(endpoint: &str, request: &PeerRequest) -> (TcpStream, PeerResponse) {
+    let mut stream = TcpStream::connect(endpoint).await.unwrap();
+    stream
+        .write_all(format!("{}\n", serde_json::to_string(request).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    let mut line = String::new();
+    {
+        let mut reader = BufReader::new(&mut stream);
+        reader.read_line(&mut line).await.unwrap();
+    }
+    (stream, serde_json::from_str(line.trim()).unwrap())
+}
+
+async fn send_inbound_bytes(endpoint: &str, bytes: &[u8]) -> Vec<u8> {
+    let mut stream = TcpStream::connect(endpoint).await.unwrap();
+    let _ = stream.write_all(bytes).await;
+    let _ = stream.shutdown().await;
+    let mut response = Vec::new();
+    match tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut response))
+        .await
+        .expect("bounded peer request should close promptly")
+    {
+        Ok(_) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+            ) => {}
+        Err(error) => panic!("failed reading bounded peer response: {error}"),
+    }
+    response
 }

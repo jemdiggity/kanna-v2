@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   claimPairingPayloadThroughDeepLink,
+  seedPairedTrustedDesktopThroughDeepLink,
   seedTrustedDesktopThroughDeepLink
 } from "./trust-seed";
 
@@ -49,6 +50,36 @@ describe("mobile E2E trust seed helper", () => {
     expect(execute).toHaveBeenCalledWith("mobile: deepLink", {
       bundleId: "build.kanna.app.dev",
       url: `kanna://e2e-pair?payload=${encodeURIComponent(payload)}`
+    });
+  });
+
+  it("preserves the seeded selection before claiming real paired-LAN credentials", async () => {
+    const order: string[] = [];
+    const execute = vi.fn(async (_command: string, input: { url: string }) => {
+      order.push(input.url.startsWith("kanna://e2e-trust") ? "trust" : "claim");
+    });
+    const createPairingSession = vi.fn(async () => {
+      order.push("session");
+      return { pairingPayload: "signed-pairing-payload" };
+    });
+
+    await seedPairedTrustedDesktopThroughDeepLink({
+      bundleId: "build.kanna.app.dev",
+      createPairingSession,
+      driver: { execute } as never,
+      desktop: {
+        desktopId: "desktop-hybrid",
+        displayName: "Hybrid LAN Desktop",
+        lanBaseUrl: "http://127.0.0.1:48120"
+      },
+      selectedTaskId: "task-unresolved"
+    });
+
+    expect(order).toEqual(["trust", "session", "claim"]);
+    expect(createPairingSession).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenLastCalledWith("mobile: deepLink", {
+      bundleId: "build.kanna.app.dev",
+      url: "kanna://e2e-pair?payload=signed-pairing-payload"
     });
   });
 });

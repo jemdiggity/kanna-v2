@@ -7,6 +7,7 @@ import {
   mutateDesktopWindowWorkspace,
   type DesktopWindowWorkspaceMutation,
 } from "./services/desktopServerClient";
+import { disposeDesktopCompanionBridgeManager } from "./services/desktopCompanionBridge";
 import { isTauri } from "./tauri-mock";
 
 export interface WindowBootstrap {
@@ -393,6 +394,7 @@ export function createWindowWorkspace(input: {
   }
 
   async function destroyNativeWindow(): Promise<void> {
+    await disposeDesktopCompanionBridgeManager();
     if (isTauri) {
       const { getCurrentWindow } = await import("@tauri-apps/api/window");
       // `close()` emits another CloseRequested event. This path runs only

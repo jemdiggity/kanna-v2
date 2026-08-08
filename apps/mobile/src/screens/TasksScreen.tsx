@@ -11,11 +11,13 @@ import type { TaskCollectionStatus } from "../state/sessionStore";
 
 interface TasksScreenProps {
   heading?: string | null;
+  needsDesktopSetup?: boolean;
   repos: RepoSummary[];
   selectedRepoId: string | null;
   taskCollectionStatus: TaskCollectionStatus;
   taskSlots: TaskUiSlot[];
   scrollViewRef?: React.RefObject<ScrollView | null>;
+  onOpenMachines?(): void;
   onSelectRepo(repoId: string): void;
   onOpenTask(taskId: string): void;
 }
@@ -32,11 +34,13 @@ function sortTaskSlotsNewestFirst(taskSlots: readonly TaskUiSlot[]): TaskUiSlot[
 
 export function TasksScreen({
   heading,
+  needsDesktopSetup = false,
   repos,
   selectedRepoId,
   taskCollectionStatus,
   taskSlots,
   scrollViewRef,
+  onOpenMachines,
   onSelectRepo,
   onOpenTask
 }: TasksScreenProps) {
@@ -58,6 +62,12 @@ export function TasksScreen({
         )!
       )
     : sortTaskSlotsNewestFirst(scopedTaskSlots);
+  const showDesktopSetup =
+    !isRecentView &&
+    needsDesktopSetup &&
+    taskCollectionStatus === "ready" &&
+    displayedTaskSlots.length === 0 &&
+    onOpenMachines !== undefined;
 
   return (
     <ScrollView
@@ -104,21 +114,55 @@ export function TasksScreen({
           </ScrollView>
         ) : null}
 
-        <TaskList
-          emptyLabel="No tasks yet."
-          errorLabel={
-            taskCollectionStatus === "error" ? "Could not load tasks." : null
-          }
-          loading={
-            taskCollectionStatus === "loading" && displayedTaskSlots.length === 0
-          }
-          nestSubtasks
-          repoLabelForTask={isRecentView ? recentTaskRepoLabel : undefined}
-          taskSlots={displayedTaskSlots}
-          onOpenTask={onOpenTask}
-        />
+        {showDesktopSetup && onOpenMachines ? (
+          <DesktopSetupEmptyState onOpenMachines={onOpenMachines} />
+        ) : (
+          <TaskList
+            emptyLabel="No tasks yet."
+            errorLabel={
+              taskCollectionStatus === "error" ? "Could not load tasks." : null
+            }
+            loading={
+              taskCollectionStatus === "loading" && displayedTaskSlots.length === 0
+            }
+            nestSubtasks
+            repoLabelForTask={isRecentView ? recentTaskRepoLabel : undefined}
+            taskSlots={displayedTaskSlots}
+            onOpenTask={onOpenTask}
+          />
+        )}
       </View>
     </ScrollView>
+  );
+}
+
+function DesktopSetupEmptyState({
+  onOpenMachines
+}: {
+  onOpenMachines(): void;
+}) {
+  return (
+    <View style={styles.setupCard}>
+      <Text style={styles.setupTitle}>Connect Kanna on your Mac</Text>
+      <Text style={styles.setupDetail}>
+        Kanna Mobile is a companion to Kanna for macOS. Install the desktop app
+        from kanna.build first, then scan its pairing QR code to connect over
+        your local network. Cloud sign-in for remote access is separate and
+        optional.
+      </Text>
+      <Pressable
+        accessibilityLabel="Pair a Mac"
+        accessibilityRole="button"
+        style={({ pressed }) => [
+          styles.setupButton,
+          pressed ? styles.setupButtonPressed : null
+        ]}
+        testID={MOBILE_E2E_IDS.tasksPairMacButton}
+        onPress={onOpenMachines}
+      >
+        <Text style={styles.setupButtonLabel}>Pair a Mac</Text>
+      </Pressable>
+    </View>
   );
 }
 
@@ -156,5 +200,41 @@ const styles = StyleSheet.create({
   },
   repoLabelSelected: {
     color: "#0B1220"
+  },
+  setupCard: {
+    alignItems: "center",
+    backgroundColor: "#10192A",
+    borderColor: "#20304C",
+    borderRadius: 18,
+    borderWidth: 1,
+    gap: 12,
+    padding: 24
+  },
+  setupTitle: {
+    color: "#F5F7FB",
+    fontSize: 18,
+    fontWeight: "800",
+    textAlign: "center"
+  },
+  setupDetail: {
+    color: "#93A7C8",
+    fontSize: 15,
+    lineHeight: 22,
+    textAlign: "center"
+  },
+  setupButton: {
+    backgroundColor: "#E8F1FF",
+    borderRadius: 999,
+    marginTop: 4,
+    paddingHorizontal: 18,
+    paddingVertical: 11
+  },
+  setupButtonPressed: {
+    opacity: 0.82
+  },
+  setupButtonLabel: {
+    color: "#0B1220",
+    fontSize: 14,
+    fontWeight: "800"
   }
 });

@@ -166,13 +166,48 @@ async function flushPromises(): Promise<void> {
   await Promise.resolve();
 }
 
+function renderWebViewDocument(
+  webView: ElementNode | null,
+  onMessage?: (message: unknown) => void
+): Window {
+  const window = new Window();
+  if (onMessage) {
+    (window as unknown as {
+      ReactNativeWebView: { postMessage(message: string): void };
+    }).ReactNativeWebView = {
+      postMessage(data) {
+        onMessage(bridgeMessage(data));
+      }
+    };
+  }
+  window.document.write((webView?.props?.source as { html: string }).html);
+  const render = window.document.querySelector<HTMLScriptElement>(
+    "#kanna-companion-render"
+  );
+  expect(render).not.toBeNull();
+  window.eval(render?.textContent ?? "");
+  return window;
+}
+
+function installWebViewBridge(window: Window): void {
+  const bridge = window.document.querySelector<HTMLScriptElement>(
+    "#kanna-companion-bridge"
+  );
+  expect(bridge).not.toBeNull();
+  window.eval(bridge?.textContent ?? "");
+}
+
 describe("VisualCompanionModal", () => {
   it("renders the current revision in a tightly constrained WebView", () => {
     let tree = renderModal();
     let webView = findByType(tree, "WebView");
     const firstDocument = (webView?.props?.source as { html: string }).html;
+    const firstWindow = renderWebViewDocument(webView);
 
-    expect(firstDocument).toContain('data-choice="ship"');
+    expect(firstDocument).not.toContain('<button data-choice="ship">');
+    expect(
+      firstWindow.document.querySelector("button")?.dataset.choice
+    ).toBe("ship");
     expect(firstDocument).toContain("window.toggleSelect");
     expect(webView?.props).toMatchObject({
       allowFileAccess: false,
@@ -192,7 +227,8 @@ describe("VisualCompanionModal", () => {
       snapshot: { ...snapshot, revision: "rev-2", html: "<h1>Second</h1>" }
     });
     webView = findByType(tree, "WebView");
-    expect((webView?.props?.source as { html: string }).html).toContain("Second");
+    expect(renderWebViewDocument(webView).document.querySelector("h1")?.textContent)
+      .toBe("Second");
     expect((webView?.props?.source as { html: string }).html).not.toBe(firstDocument);
   });
 
@@ -233,7 +269,11 @@ describe("VisualCompanionModal", () => {
       bridgeMessage(JSON.stringify({ type: "companion-event", event }))
     );
 
-    expect(onSendEvent).toHaveBeenCalledWith("123-456", "rev-1", event);
+    expect(onSendEvent).toHaveBeenCalledWith("123-456", "rev-1", {
+      ...event,
+      session_id: "123-456",
+      revision: "rev-1"
+    });
   });
 
   it("accepts the largest timestamp represented exactly on the Rust u64 wire", () => {
@@ -252,7 +292,11 @@ describe("VisualCompanionModal", () => {
       bridgeMessage(JSON.stringify({ type: "companion-event", event }))
     );
 
-    expect(onSendEvent).toHaveBeenCalledWith("123-456", "rev-1", event);
+    expect(onSendEvent).toHaveBeenCalledWith("123-456", "rev-1", {
+      ...event,
+      session_id: "123-456",
+      revision: "rev-1"
+    });
   });
 
   it.each([
@@ -392,18 +436,8 @@ describe("VisualCompanionModal", () => {
       "WebView"
     );
     const onMessage = webView?.props?.onMessage as (message: unknown) => void;
-    const window = new Window();
-    (window as unknown as {
-      ReactNativeWebView: { postMessage(message: string): void };
-    }).ReactNativeWebView = {
-      postMessage(data) {
-        onMessage(bridgeMessage(data));
-      }
-    };
-    window.document.write((webView?.props?.source as { html: string }).html);
-    window.eval(
-      window.document.querySelector("#kanna-companion-bridge")?.textContent ?? ""
-    );
+    const window = renderWebViewDocument(webView, onMessage);
+    installWebViewBridge(window);
     window.document.querySelector<HTMLButtonElement>("button")?.click();
 
     const frames = vi.mocked(socket.send).mock.calls.map(([payload]) =>
@@ -411,6 +445,14 @@ describe("VisualCompanionModal", () => {
     );
     const sent = frames.find((frame) => frame.type === "companion_event");
     expect(sent).toBeDefined();
+    expect(sent).toMatchObject({
+      session_id: "123-456",
+      revision: "rev-1",
+      event: {
+        session_id: "123-456",
+        revision: "rev-1"
+      }
+    });
     expect(new TextEncoder().encode(sent!.event.choice)).toHaveLength(255);
     expect(new TextEncoder().encode(sent!.event.text)).toHaveLength(4096);
     expect(new TextEncoder().encode(sent!.event.id)).toHaveLength(256);

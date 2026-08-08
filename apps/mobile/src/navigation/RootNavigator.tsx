@@ -334,16 +334,23 @@ function NavigatorTabBar(props: BottomTabBarProps) {
 }
 
 function TasksTabRoute() {
-  const { controller, pushTask, state } = useNavigationContent();
+  const { controller, pushDesktops, pushTask, state } = useNavigationContent();
   const scrollViewRef = useTabReselectionScrollToTop();
+  const needsDesktopSetup =
+    state.auth.status === "signedOut" &&
+    state.accountDesktops.length === 0 &&
+    state.liveLanDesktops.length === 0 &&
+    state.trustedDesktops.length === 0;
   return (
     <StandardScreen title="Tasks">
       <TasksScreen
+        needsDesktopSetup={needsDesktopSetup}
         repos={state.repos}
         selectedRepoId={state.selectedRepoId}
         taskCollectionStatus={state.taskCollectionStatus}
         taskSlots={projectTaskUiSlots(state.repoTasks, state.taskUiSlots)}
         scrollViewRef={scrollViewRef}
+        onOpenMachines={pushDesktops}
         onSelectRepo={(repoId) => {
           void controller.selectRepo(repoId);
         }}

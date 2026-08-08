@@ -3,4 +3,4 @@
 /**
  * A structured selection made in a visual companion.
  */
-export type CompanionEvent = { event_id: string, type: string, choice: string, text: string, id: string | null, timestamp: number, };
+export type CompanionEvent = { session_id: string, revision: string, event_id: string, type: string, choice: string, text: string, id: string | null, timestamp: number, };

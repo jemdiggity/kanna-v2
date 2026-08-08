@@ -5360,6 +5360,8 @@ describe("createMobileController", () => {
     client.__companionStream.emit({
       type: "event_result",
       taskId: "task-1",
+      sessionId: "123-456",
+      revision: "rev-1",
       eventId: "event-1",
       accepted: true
     });

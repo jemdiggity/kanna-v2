@@ -180,7 +180,6 @@ impl PairingStore {
         )
     }
 
-    #[cfg(test)]
     pub fn is_trusted(&self, desktop_id: &str, device_id: &str) -> bool {
         self.trusted_devices
             .get(desktop_id)

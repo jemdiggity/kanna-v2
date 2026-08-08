@@ -1,19 +1,27 @@
 import { getConfiguredDesktopAuthSession } from "./desktopAuthSdk";
 import { invoke } from "../invoke";
 import { createRelayTunnelWebSocketFactory, StreamClient } from "@kanna/stream-client";
+import { createDesktopStreamFrameDecoder } from "./desktopStreamFrameDecoder";
+import type {
+  DesktopRemoteTaskClient,
+} from "./desktopRemoteTaskClient";
+
+export type {
+  AdvanceRemoteTaskStageOptions,
+  DesktopRemoteTerminalClient as DesktopRelayTerminalClient,
+  DesktopRemoteTerminalEvent as DesktopRelayTerminalEvent,
+  DesktopRemoteTerminalSubscription as DesktopRelayTerminalSubscription,
+  MarkRemoteTaskReadOptions,
+  ObserveDesktopRemoteTerminalOptions as ObserveDesktopRelayTerminalOptions,
+  ReadRemoteTaskFileOptions,
+  RemoteTaskActionOptions as RemoteTerminalActionOptions,
+  RemoteTaskFileContent,
+  ResizeRemoteTerminalOptions,
+  SendRemoteTerminalInputOptions,
+} from "./desktopRemoteTaskClient";
 
 export const PRODUCTION_CLOUD_TRANSPORT_URL = "wss://relay.kanna.build";
 export const STAGING_CLOUD_TRANSPORT_URL = "wss://relay-staging.kanna.build";
-
-export type DesktopRelayTerminalEvent =
-  | { type: "ready"; taskId: string }
-  | { type: "output"; taskId: string; text: string }
-  | { type: "exit"; taskId: string; code: number }
-  | { type: "error"; taskId: string; message: string };
-
-export interface DesktopRelayTerminalSubscription {
-  close(): void;
-}
 
 interface RelaySocketLike {
   readyState: number;
@@ -37,54 +45,6 @@ interface PendingInvoke {
   resolve(value: unknown): void;
 }
 
-export interface ObserveDesktopRelayTerminalOptions {
-  desktopId: string;
-  taskId: string;
-  listener(event: DesktopRelayTerminalEvent): void;
-}
-
-export interface RemoteTerminalActionOptions {
-  desktopId: string;
-  taskId: string;
-}
-
-export interface MarkRemoteTaskReadOptions extends RemoteTerminalActionOptions {
-  expectedActivityRevision: number;
-}
-
-export interface AdvanceRemoteTaskStageOptions extends RemoteTerminalActionOptions {
-  expectedTransitionRevision?: string;
-}
-
-export interface SendRemoteTerminalInputOptions extends RemoteTerminalActionOptions {
-  data: string;
-}
-
-export interface ResizeRemoteTerminalOptions extends RemoteTerminalActionOptions {
-  cols: number;
-  rows: number;
-}
-
-export interface ReadRemoteTaskFileOptions extends RemoteTerminalActionOptions {
-  path: string;
-}
-
-export interface RemoteTaskFileContent {
-  path: string;
-  content: string;
-}
-
-export interface DesktopRelayTerminalClient {
-  close(): void;
-  observeTerminal(options: ObserveDesktopRelayTerminalOptions): DesktopRelayTerminalSubscription;
-  sendInput(options: SendRemoteTerminalInputOptions): Promise<void>;
-  resize(options: ResizeRemoteTerminalOptions): Promise<void>;
-  closeTask(options: RemoteTerminalActionOptions): Promise<void>;
-  advanceStage(options: AdvanceRemoteTaskStageOptions): Promise<void>;
-  readTaskFile(options: ReadRemoteTaskFileOptions): Promise<RemoteTaskFileContent>;
-  markTaskRead(options: MarkRemoteTaskReadOptions): Promise<void>;
-}
-
 function assertSuccessfulTaskAction(
   response: { status: number; body: unknown },
   action: string,
@@ -105,7 +65,7 @@ function assertSuccessfulTaskAction(
   throw new Error(message ?? `Remote ${action} failed with HTTP ${response.status}`);
 }
 
-export async function createConfiguredDesktopRelayTerminalClient(): Promise<DesktopRelayTerminalClient | null> {
+export async function createConfiguredDesktopRelayTerminalClient(): Promise<DesktopRemoteTaskClient | null> {
   const relayUrl = await resolveDesktopRelayUrl();
   if (!relayUrl) return null;
   const authSession = await getConfiguredDesktopAuthSession();
@@ -141,7 +101,7 @@ export function createDesktopRelayTerminalClient({
   createSocket = (url) => new WebSocket(url) as unknown as RelaySocketLike,
   getIdToken,
   relayUrl,
-}: DesktopRelayTerminalClientOptions): DesktopRelayTerminalClient {
+}: DesktopRelayTerminalClientOptions): DesktopRemoteTaskClient {
   const clients = new Map<string, StreamClient>();
 
   const clientForDesktop = (desktopId: string): StreamClient => {
@@ -149,14 +109,15 @@ export function createDesktopRelayTerminalClient({
     if (existing) return existing;
     const client = new StreamClient({
       url: relayUrl,
-      credentialProvider: () => getIdToken(),
+      credentialProvider: (forceRefresh) => getIdToken(forceRefresh),
       webSocketFactory: createRelayTunnelWebSocketFactory({
         relayUrl,
         desktopId,
-        getIdentityToken: () => getIdToken(),
+        getIdentityToken: (forceRefresh) => getIdToken(forceRefresh),
         webSocketFactory: createSocket,
       }),
       reconnectDelaysMs: [250, 500, 1000, 2000],
+      frameDecoder: createDesktopStreamFrameDecoder(),
     });
     clients.set(desktopId, client);
     return client;
@@ -189,6 +150,60 @@ export function createDesktopRelayTerminalClient({
       return {
         close() {
           client.detach(options.taskId, "terminal");
+        },
+      };
+    },
+    observeCompanion(options) {
+      const client = clientForDesktop(options.desktopId);
+      client.attachCompanion(options.taskId, {
+        onSnapshot(snapshot) {
+          options.listener({
+            type: "snapshot",
+            taskId: options.taskId,
+            snapshot,
+          });
+        },
+        onUnavailable() {
+          options.listener({ type: "unavailable", taskId: options.taskId });
+        },
+        onEventResult(result) {
+          options.listener({
+            type: "event_result",
+            taskId: options.taskId,
+            result,
+          });
+        },
+        onConnectionChange(connected) {
+          options.listener({
+            type: "connection",
+            taskId: options.taskId,
+            connected,
+          });
+        },
+        onError(code, message) {
+          options.listener({
+            type: "error",
+            taskId: options.taskId,
+            code,
+            message,
+          });
+        },
+      });
+      let closed = false;
+      return {
+        close() {
+          if (closed) return;
+          closed = true;
+          client.detach(options.taskId, "companion");
+        },
+        sendEvent(sessionId, revision, event) {
+          if (closed) return false;
+          return client.sendCompanionEvent(
+            options.taskId,
+            sessionId,
+            revision,
+            event,
+          );
         },
       };
     },

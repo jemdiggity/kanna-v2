@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { WebSocketServer, type RawData, type WebSocket } from "ws";
+import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
   verifyPhoneToken,
   verifyDeviceToken,
@@ -17,6 +17,7 @@ import {
   setServerConnection,
   routeMessage,
   getConnectionCount,
+  getTunnelFlowStats,
   isTunnelSocket,
 } from "./router.js";
 import { handleOtaRequest } from "./ota.js";
@@ -33,6 +34,8 @@ import {
 
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const AUTH_TIMEOUT_MS = 10_000;
+const E2E_SHUTDOWN_TOKEN =
+  process.env.KANNA_E2E_RELAY_SHUTDOWN_TOKEN?.trim() || null;
 
 /**
  * Read the full request body as a string.
@@ -66,6 +69,17 @@ function jsonResponse(
 
 const server = createServer(async (req, res) => {
   try {
+    if (
+      E2E_SHUTDOWN_TOKEN &&
+      req.method === "POST" &&
+      req.url === "/__kanna_e2e_shutdown" &&
+      req.headers["x-kanna-e2e-shutdown-token"] === E2E_SHUTDOWN_TOKEN
+    ) {
+      res.writeHead(204).end();
+      setImmediate(() => shutdown("E2E shutdown"));
+      return;
+    }
+
     if (await handleOtaRequest(req, res)) {
       return;
     }
@@ -74,6 +88,7 @@ const server = createServer(async (req, res) => {
       jsonResponse(res, 200, {
         status: "ok",
         connections: getConnectionCount(),
+        tunnelFlow: getTunnelFlowStats(),
       });
       return;
     }
@@ -224,10 +239,9 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   }, AUTH_TIMEOUT_MS);
 
   ws.on("message", async (raw: RawData, isBinary: boolean) => {
-    const data = raw.toString();
-
     // --- Auth handshake (first message) ---
     if (!authenticated) {
+      const data = raw.toString();
       let msg: {
         type?: string;
         id_token?: string;
@@ -361,6 +375,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       forwardTunnelData(ws, raw, isBinary);
       return;
     }
+    const data = raw.toString();
     if (role === "server") {
       let publication: {
         type?: unknown;
@@ -501,3 +516,24 @@ server.listen(PORT, () => {
     `[relay] Firebase project=${process.env.FIREBASE_PROJECT_ID?.trim() || "(default)"}`
   );
 });
+
+let shuttingDown = false;
+function shutdown(signal: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[relay] ${signal} received; closing connections`);
+  server.close();
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.close(1012, "Relay restarting");
+    }
+  }
+  wss.close(() => process.exit(0));
+  setTimeout(() => {
+    for (const client of wss.clients) client.terminate();
+    process.exit(0);
+  }, 4_000).unref();
+}
+
+process.once("SIGTERM", () => shutdown("SIGTERM"));
+process.once("SIGINT", () => shutdown("SIGINT"));

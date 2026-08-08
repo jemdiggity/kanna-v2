@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod cloud;
+pub mod companion;
 pub mod daemon;
 pub mod fs;
 pub mod git;

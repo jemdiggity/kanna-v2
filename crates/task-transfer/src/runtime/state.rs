@@ -1,3 +1,4 @@
+use super::companion::{CompanionInboundByteBudget, OwnerCompanionSource};
 use super::config::RuntimeConfig;
 use super::discovery::PeerDiscovery;
 use super::events::{
@@ -7,13 +8,16 @@ use super::events::{
 use super::external_peers::ExternalPeerRegistry;
 use super::replay_store::TransferReplayStore;
 use crate::crypto::TransferIdentity;
+use kanna_visual_companion::CompanionMaterializationBudget;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
 use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use tokio::task::JoinHandle;
 
@@ -113,6 +117,358 @@ pub(super) type PendingOutgoingTransferFinalizations =
     Arc<Mutex<HashMap<String, OutgoingTransferFinalizationState>>>;
 
 pub(super) type PendingPairingRequests = Arc<Mutex<HashMap<String, PendingPairingRequest>>>;
+pub(super) const MAX_COMPANION_OBSERVERS: usize = 64;
+const MAX_RELIABLE_EVENTS_BEFORE_COMPANION: usize = 32;
+#[cfg(test)]
+pub(super) const MAX_PENDING_ORDINARY_EVENTS: usize = 4096;
+
+#[derive(Default)]
+struct CompanionEventState {
+    pending: HashMap<(String, String), RuntimeEvent>,
+    ready: VecDeque<(String, String)>,
+    current_generations: HashMap<(String, String), (u64, String)>,
+}
+
+#[derive(Clone)]
+pub(super) struct RuntimeEventSender {
+    ordinary: mpsc::Sender<RuntimeEvent>,
+    companion_state: Arc<StdMutex<CompanionEventState>>,
+    companion_notify: mpsc::Sender<()>,
+}
+
+impl RuntimeEventSender {
+    pub(super) fn register_companion_generation(
+        &self,
+        peer_id: &str,
+        task_id: &str,
+        generation: &str,
+        generation_order: u64,
+    ) -> bool {
+        let key = (peer_id.to_owned(), task_id.to_owned());
+        let mut state = self
+            .companion_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state
+            .current_generations
+            .get(&key)
+            .is_some_and(|(current_order, current_generation)| {
+                *current_order > generation_order
+                    || (*current_order == generation_order && current_generation != generation)
+            })
+        {
+            return false;
+        }
+        state
+            .current_generations
+            .insert(key.clone(), (generation_order, generation.to_owned()));
+        if state.pending.get(&key).is_some_and(|pending| {
+            matches!(
+                pending,
+                RuntimeEvent::CompanionEvent {
+                    generation: pending_generation,
+                    generation_order: pending_order,
+                    ..
+                } if *pending_order < generation_order
+                    || (*pending_order == generation_order
+                        && pending_generation != generation)
+            )
+        }) {
+            state.pending.remove(&key);
+            state.ready.retain(|pending_key| pending_key != &key);
+        }
+        true
+    }
+
+    pub(super) fn unregister_companion_generation(
+        &self,
+        peer_id: &str,
+        task_id: &str,
+        generation: &str,
+        generation_order: u64,
+    ) {
+        let key = (peer_id.to_owned(), task_id.to_owned());
+        let mut state = self
+            .companion_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state
+            .current_generations
+            .get(&key)
+            .is_some_and(|(current_order, current_generation)| {
+                *current_order == generation_order && current_generation == generation
+            })
+        {
+            state.current_generations.remove(&key);
+            state.pending.remove(&key);
+            state.ready.retain(|pending_key| pending_key != &key);
+        }
+    }
+
+    pub(super) async fn send(
+        &self,
+        event: RuntimeEvent,
+    ) -> Result<(), mpsc::error::SendError<RuntimeEvent>> {
+        let companion_identity = match &event {
+            RuntimeEvent::CompanionEvent {
+                peer_id,
+                task_id,
+                generation,
+                generation_order,
+                frame:
+                    kanna_agent_protocol::ServerFrame::CompanionSnapshot { .. }
+                    | kanna_agent_protocol::ServerFrame::CompanionUnavailable { .. },
+                ..
+            } => Some((
+                (peer_id.clone(), task_id.clone()),
+                generation.clone(),
+                *generation_order,
+            )),
+            _ => None,
+        };
+        let Some((key, generation, generation_order)) = companion_identity else {
+            if let RuntimeEvent::CompanionEvent {
+                peer_id,
+                task_id,
+                generation,
+                generation_order,
+                ..
+            } = &event
+            {
+                let state = self
+                    .companion_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if state
+                    .current_generations
+                    .get(&(peer_id.clone(), task_id.clone()))
+                    .is_some_and(|(current_order, current_generation)| {
+                        *current_order > *generation_order
+                            || (*current_order == *generation_order
+                                && current_generation != generation)
+                    })
+                {
+                    return Ok(());
+                }
+                drop(state);
+                if matches!(
+                    &event,
+                    RuntimeEvent::CompanionEvent {
+                        frame: kanna_agent_protocol::ServerFrame::CompanionError { .. },
+                        ..
+                    }
+                ) {
+                    self.invalidate_companion(peer_id, task_id, generation, *generation_order);
+                }
+            }
+            return self.ordinary.send(event).await;
+        };
+        if self.companion_notify.is_closed() {
+            return Err(mpsc::error::SendError(event));
+        }
+        let mut state = self
+            .companion_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match state.current_generations.get(&key) {
+            Some((current_order, current_generation))
+                if *current_order > generation_order
+                    || (*current_order == generation_order
+                        && current_generation != &generation) =>
+            {
+                return Ok(());
+            }
+            Some(_) => {}
+            None => {
+                state
+                    .current_generations
+                    .insert(key.clone(), (generation_order, generation));
+            }
+        }
+        if !state.pending.contains_key(&key) && state.pending.len() >= MAX_COMPANION_OBSERVERS {
+            return Err(mpsc::error::SendError(event));
+        }
+        if !state.pending.contains_key(&key) {
+            state.ready.push_back(key.clone());
+        }
+        state.pending.insert(key.clone(), event);
+        drop(state);
+        match self.companion_notify.try_send(()) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(())) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                let event = self
+                    .companion_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .pending
+                    .remove(&key)
+                    .expect("just-inserted companion event should remain pending");
+                Err(mpsc::error::SendError(event))
+            }
+        }
+    }
+
+    /// Non-blocking delivery for ordinary (non-companion) events whose lane
+    /// must never wait on channel capacity, such as observed terminal output.
+    pub(super) fn try_send(
+        &self,
+        event: RuntimeEvent,
+    ) -> Result<(), mpsc::error::TrySendError<RuntimeEvent>> {
+        self.ordinary.try_send(event)
+    }
+
+    pub(super) fn invalidate_companion(
+        &self,
+        peer_id: &str,
+        task_id: &str,
+        generation: &str,
+        generation_order: u64,
+    ) {
+        let key = (peer_id.to_owned(), task_id.to_owned());
+        let mut state = self
+            .companion_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.pending.get(&key).is_some_and(|pending| {
+            matches!(
+                pending,
+                RuntimeEvent::CompanionEvent {
+                    generation: pending_generation,
+                    generation_order: pending_order,
+                    ..
+                } if pending_generation == generation && *pending_order == generation_order
+            )
+        }) {
+            state.pending.remove(&key);
+            state.ready.retain(|pending_key| pending_key != &key);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_companion_count(&self) -> usize {
+        self.companion_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pending
+            .len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn companion_generation_count(&self) -> usize {
+        self.companion_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .current_generations
+            .len()
+    }
+}
+
+pub(super) struct RuntimeEventReceiver {
+    ordinary: mpsc::Receiver<RuntimeEvent>,
+    companion_state: Arc<StdMutex<CompanionEventState>>,
+    companion_notify: mpsc::Receiver<()>,
+    ordinary_closed: bool,
+    companion_closed: bool,
+    reliable_burst: usize,
+}
+
+impl RuntimeEventReceiver {
+    #[cfg(test)]
+    pub(super) fn close(&mut self) {
+        self.ordinary.close();
+        self.companion_notify.close();
+    }
+
+    fn take_companion(&self) -> Option<RuntimeEvent> {
+        let mut state = self
+            .companion_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while let Some(key) = state.ready.pop_front() {
+            if let Some(event) = state.pending.remove(&key) {
+                return Some(event);
+            }
+        }
+        None
+    }
+
+    pub(super) async fn recv(&mut self) -> Option<RuntimeEvent> {
+        loop {
+            if !self.ordinary_closed && self.reliable_burst < MAX_RELIABLE_EVENTS_BEFORE_COMPANION {
+                match self.ordinary.try_recv() {
+                    Ok(event) => {
+                        self.reliable_burst += 1;
+                        return Some(event);
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => self.ordinary_closed = true,
+                    Err(mpsc::error::TryRecvError::Empty) => {}
+                }
+            }
+            if let Some(event) = self.take_companion() {
+                self.reliable_burst = 0;
+                return Some(event);
+            }
+            if !self.ordinary_closed {
+                match self.ordinary.try_recv() {
+                    Ok(event) => {
+                        self.reliable_burst = self.reliable_burst.saturating_add(1);
+                        return Some(event);
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => self.ordinary_closed = true,
+                    Err(mpsc::error::TryRecvError::Empty) => {}
+                }
+            }
+            if self.ordinary_closed && self.companion_closed {
+                return None;
+            }
+            tokio::select! {
+                biased;
+                event = self.ordinary.recv(), if !self.ordinary_closed => {
+                    match event {
+                        Some(event) => {
+                            self.reliable_burst = self.reliable_burst.saturating_add(1);
+                            return Some(event);
+                        }
+                        None => self.ordinary_closed = true,
+                    }
+                }
+                notification = self.companion_notify.recv(), if !self.companion_closed => {
+                    if notification.is_none() {
+                        self.companion_closed = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn runtime_event_channel() -> (RuntimeEventSender, RuntimeEventReceiver) {
+    runtime_event_channel_with_capacity(MAX_PENDING_ORDINARY_EVENTS)
+}
+
+pub(super) fn runtime_event_channel_with_capacity(
+    ordinary_capacity: usize,
+) -> (RuntimeEventSender, RuntimeEventReceiver) {
+    let (ordinary, ordinary_rx) = mpsc::channel(ordinary_capacity.max(1));
+    let (companion_notify, companion_notify_rx) = mpsc::channel(1);
+    let companion_state = Arc::new(StdMutex::new(CompanionEventState::default()));
+    (
+        RuntimeEventSender {
+            ordinary,
+            companion_state: Arc::clone(&companion_state),
+            companion_notify,
+        },
+        RuntimeEventReceiver {
+            ordinary: ordinary_rx,
+            companion_state,
+            companion_notify: companion_notify_rx,
+            ordinary_closed: false,
+            companion_closed: false,
+            reliable_burst: 0,
+        },
+    )
+}
 
 pub(super) struct PendingPairingRequest {
     pub(super) verification_code: String,
@@ -133,6 +489,77 @@ pub(super) enum PairingDecision {
     Rejected,
 }
 
+pub(super) struct CompanionObserver {
+    pub(super) generation: String,
+    pub(super) generation_order: u64,
+    pub(super) handle: JoinHandle<()>,
+    pub(super) stream_nonce: String,
+    pub(super) observation_challenge: String,
+    pub(super) next_event_sequence: Arc<AtomicU64>,
+    pub(super) send_lock: Arc<Mutex<()>>,
+}
+
+pub(super) struct OwnerCompanionObserver {
+    pub(super) generation: String,
+    pub(super) stream_nonce: String,
+    pub(super) observation_challenge: String,
+    pub(super) next_event_sequence: u64,
+    pub(super) event_rate_limiter: Arc<Mutex<super::companion::CompanionEventRateLimiter>>,
+    pub(super) cancel: watch::Sender<bool>,
+}
+
+pub(super) fn remove_companion_observer_generation(
+    observers: &mut HashMap<(String, String), CompanionObserver>,
+    key: &(String, String),
+    generation: &str,
+    generation_order: u64,
+) -> bool {
+    if observers.get(key).is_some_and(|observer| {
+        observer.generation == generation && observer.generation_order == generation_order
+    }) {
+        observers.remove(key);
+        true
+    } else {
+        false
+    }
+}
+
+pub(super) fn remove_companion_observer_registration(
+    latest_generations: &mut HashMap<(String, String), (u64, String)>,
+    key: &(String, String),
+    generation: &str,
+    generation_order: u64,
+) -> bool {
+    if latest_generations
+        .get(key)
+        .is_some_and(|(current_order, current_generation)| {
+            *current_order == generation_order && current_generation == generation
+        })
+    {
+        latest_generations.remove(key);
+        true
+    } else {
+        false
+    }
+}
+
+pub(super) fn install_companion_observer_if_latest(
+    latest_generations: &HashMap<(String, String), (u64, String)>,
+    observers: &mut HashMap<(String, String), CompanionObserver>,
+    observer_key: (String, String),
+    observer: CompanionObserver,
+) -> Result<Option<CompanionObserver>, CompanionObserver> {
+    if latest_generations
+        .get(&observer_key)
+        .is_none_or(|(generation_order, generation)| {
+            *generation_order != observer.generation_order || generation != &observer.generation
+        })
+    {
+        return Err(observer);
+    }
+    Ok(observers.insert(observer_key, observer))
+}
+
 #[derive(Clone)]
 pub(super) struct ListenerContext {
     pub(super) self_peer_id: String,
@@ -148,7 +575,6 @@ pub(super) struct ListenerContext {
     pub(super) finalization_request_timeout: Duration,
     pub(super) incoming_connection_permits: Arc<Semaphore>,
     pub(super) legacy_artifact_memory_permits: Arc<Semaphore>,
-    pub(super) max_peer_request_bytes: usize,
     pub(super) max_pending_pairing_requests: usize,
     pub(super) max_task_pull_requests: usize,
     pub(super) max_finalization_waiters: usize,
@@ -165,11 +591,21 @@ pub(super) struct ListenerContext {
         Arc<Mutex<HashMap<String, AuthenticatedPeerRequestReplay>>>,
     pub(super) max_authenticated_request_replays: usize,
     pub(super) task_snapshot: Arc<Mutex<Value>>,
+    pub(super) db_path: Option<PathBuf>,
     pub(super) daemon_dir: Option<PathBuf>,
     pub(super) kanna_server_port: Option<u16>,
     pub(super) request_counter: Arc<AtomicU64>,
-    pub(super) incoming_sender: mpsc::Sender<RuntimeEvent>,
+    pub(super) incoming_sender: RuntimeEventSender,
     pub(super) receipt_sender: mpsc::Sender<OutgoingTransferCommittedEvent>,
+    pub(super) active_owner_companions: Arc<AtomicUsize>,
+    pub(super) owner_companion_retained_bytes: Arc<AtomicUsize>,
+    pub(super) owner_companion_sources: Arc<Mutex<HashMap<String, Arc<OwnerCompanionSource>>>>,
+    pub(super) companion_materialization_budget: Arc<CompanionMaterializationBudget>,
+    pub(super) owner_companion_encoding_slots: Arc<Semaphore>,
+    pub(super) owner_companion_observers:
+        Arc<Mutex<HashMap<(String, String), OwnerCompanionObserver>>>,
+    pub(super) companion_proof_nonces: Arc<Mutex<HashMap<(String, String), Instant>>>,
+    pub(super) preauth_requests: Arc<Semaphore>,
 }
 
 pub struct TransferRuntime {
@@ -191,9 +627,20 @@ pub struct TransferRuntime {
     pub(super) peer_request_permits: Arc<Semaphore>,
     pub(super) artifact_peer_request_permits: Arc<Semaphore>,
     pub(super) mark_read_peer_request_permits: Arc<Semaphore>,
-    pub(super) incoming_sender: mpsc::Sender<RuntimeEvent>,
-    pub(super) incoming_events: Mutex<mpsc::Receiver<RuntimeEvent>>,
     pub(super) receipt_events: Mutex<mpsc::Receiver<OutgoingTransferCommittedEvent>>,
+    pub(super) companion_observers: Arc<Mutex<HashMap<(String, String), CompanionObserver>>>,
+    pub(super) companion_observer_generations: Arc<Mutex<HashMap<(String, String), (u64, String)>>>,
+    pub(super) owner_companion_observers:
+        Arc<Mutex<HashMap<(String, String), OwnerCompanionObserver>>>,
+    pub(super) active_owner_companions: Arc<AtomicUsize>,
+    pub(super) owner_companion_retained_bytes: Arc<AtomicUsize>,
+    pub(super) owner_companion_sources: Arc<Mutex<HashMap<String, Arc<OwnerCompanionSource>>>>,
+    pub(super) companion_materialization_budget: Arc<CompanionMaterializationBudget>,
+    pub(super) companion_inbound_decode_budget: Arc<CompanionInboundByteBudget>,
+    pub(super) companion_inbound_decode_slots: Arc<Semaphore>,
+    pub(super) preauth_requests: Arc<Semaphore>,
+    pub(super) incoming_sender: RuntimeEventSender,
+    pub(super) incoming_events: Mutex<RuntimeEventReceiver>,
     pub(super) request_counter: Arc<AtomicU64>,
     pub(super) request_namespace: String,
     pub(super) listener_task: JoinHandle<()>,

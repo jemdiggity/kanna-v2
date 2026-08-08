@@ -74,20 +74,51 @@ function findPressableByText(node: ElementNode, text: string): ElementNode | nul
   return null;
 }
 
+function findFunctionElement(
+  node: ElementNode,
+  name: string
+): ElementNode | null {
+  if (typeof node.type === "function" && node.type.name === name) return node;
+  for (const child of flattenChildren(node.props?.children)) {
+    if (typeof child === "string") continue;
+    const match = findFunctionElement(child, name);
+    if (match) return match;
+  }
+  return null;
+}
+
+function renderFunctionElement(node: ElementNode): ElementNode {
+  if (typeof node.type !== "function") {
+    throw new Error("Expected a function component");
+  }
+  const render = node.type as (
+    props: ElementNode["props"]
+  ) => ElementNode;
+  return render(node.props);
+}
+
 function renderTasksScreen({
+  needsDesktopSetup = false,
+  repos = [{ id: "repo-1", name: "Repo One" }],
   taskCollectionStatus = "ready",
-  taskSlots = []
+  taskSlots = [],
+  onOpenMachines = vi.fn()
 }: {
+  needsDesktopSetup?: boolean;
+  repos?: Array<{ id: string; name: string }>;
   taskCollectionStatus?: TaskCollectionStatus;
   taskSlots?: TaskUiSlot[];
+  onOpenMachines?: () => void;
 } = {}): ElementNode {
   if (!TasksScreen) throw new Error("TasksScreen was not loaded");
   return TasksScreen({
     heading: "Tasks",
-    repos: [{ id: "repo-1", name: "Repo One" }],
-    selectedRepoId: "repo-1",
+    needsDesktopSetup,
+    repos,
+    selectedRepoId: repos[0]?.id ?? null,
     taskCollectionStatus,
     taskSlots,
+    onOpenMachines,
     onOpenTask: vi.fn(),
     onSelectRepo: vi.fn()
   } as never) as ElementNode;
@@ -123,6 +154,40 @@ describe("TasksScreen", () => {
     expect(textContent(TaskList(taskList?.props as never) as ElementNode)).toContain(
       "No tasks yet."
     );
+  });
+
+  it("guides a fresh install to pair the macOS companion over the local network", () => {
+    const onOpenMachines = vi.fn();
+    const tree = renderTasksScreen({
+      needsDesktopSetup: true,
+      repos: [],
+      onOpenMachines
+    });
+    const setupElement = findFunctionElement(tree, "DesktopSetupEmptyState");
+    if (!setupElement) throw new Error("Desktop setup empty state was not rendered");
+    const setupTree = renderFunctionElement(setupElement);
+
+    expect(textContent(setupTree)).toContain(
+      "Kanna Mobile is a companion to Kanna for macOS."
+    );
+    expect(textContent(setupTree)).toContain(
+      "Install the desktop app from kanna.build first"
+    );
+    expect(textContent(setupTree)).toContain("scan its pairing QR code");
+    expect(textContent(setupTree)).toContain("connect over your local network");
+    expect(textContent(setupTree)).toContain(
+      "Cloud sign-in for remote access is separate and optional."
+    );
+    expect(TaskList ? findElement(tree, TaskList) : null).toBeNull();
+
+    const pairButton = findElement(setupTree, "Pressable");
+    expect(pairButton?.props).toMatchObject({
+      accessibilityLabel: "Pair a Mac",
+      accessibilityRole: "button",
+      testID: MOBILE_E2E_IDS.tasksPairMacButton
+    });
+    pairButton?.props?.onPress?.();
+    expect(onOpenMachines).toHaveBeenCalledOnce();
   });
 
   it("shows a static task load failure", () => {

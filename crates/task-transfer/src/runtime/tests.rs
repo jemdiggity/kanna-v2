@@ -1,11 +1,291 @@
+use super::state::{
+    install_companion_observer_if_latest, remove_companion_observer_generation,
+    remove_companion_observer_registration, runtime_event_channel, CompanionObserver,
+    MAX_PENDING_ORDINARY_EVENTS,
+};
 use super::*;
+use crate::peer_store::PeerRecord;
+use crate::protocol::{PeerRequest, PeerResponse, PeerTerminalEvent};
+use kanna_agent_protocol::{CompanionDocumentKind, CompanionEvent, ServerFrame};
+use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::net::TcpStream;
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .expect("env lock should not be poisoned")
+}
+
+#[tokio::test]
+async fn generation_2_install_wins_when_generation_1_completes_later() {
+    struct ReleaseOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    let observer_key = ("peer-owner".to_owned(), "task-1".to_owned());
+    let latest_generations =
+        HashMap::from([(observer_key.clone(), (2, "generation-2".to_owned()))]);
+    let mut observers = HashMap::new();
+    let winning_handle = tokio::spawn(std::future::pending::<()>());
+    let winning = CompanionObserver {
+        generation: "generation-2".into(),
+        generation_order: 2,
+        handle: winning_handle,
+        stream_nonce: "nonce-2".into(),
+        observation_challenge: "challenge-2".into(),
+        next_event_sequence: Arc::new(AtomicU64::new(1)),
+        send_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+    let winning_install = install_companion_observer_if_latest(
+        &latest_generations,
+        &mut observers,
+        observer_key.clone(),
+        winning,
+    );
+    assert!(matches!(winning_install, Ok(None)));
+
+    let (released_tx, released_rx) = tokio::sync::oneshot::channel();
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let losing_handle = tokio::spawn(async move {
+        let _stream_resource = ReleaseOnDrop(Some(released_tx));
+        let _ = entered_tx.send(());
+        std::future::pending::<()>().await;
+    });
+    entered_rx
+        .await
+        .expect("losing stream task did not retain its resources");
+    let losing = CompanionObserver {
+        generation: "generation-1".into(),
+        generation_order: 1,
+        handle: losing_handle,
+        stream_nonce: "nonce-1".into(),
+        observation_challenge: "challenge-1".into(),
+        next_event_sequence: Arc::new(AtomicU64::new(1)),
+        send_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+    let stale = match install_companion_observer_if_latest(
+        &latest_generations,
+        &mut observers,
+        observer_key.clone(),
+        losing,
+    ) {
+        Err(stale) => stale,
+        Ok(_) => panic!("generation 1 replaced generation 2"),
+    };
+    stale.handle.abort();
+    tokio::time::timeout(Duration::from_secs(1), released_rx)
+        .await
+        .expect("losing stream resources were not released")
+        .expect("losing stream release signal was dropped");
+    assert_eq!(
+        observers
+            .get(&observer_key)
+            .map(|observer| observer.generation.as_str()),
+        Some("generation-2"),
+    );
+
+    observers.remove(&observer_key).unwrap().handle.abort();
+}
+
+#[tokio::test]
+async fn lower_order_registration_cannot_remove_higher_order_installed_observer() {
+    let temp = tempfile::tempdir().unwrap();
+    let registry = temp.path().join("registry");
+    let worktree = temp.path().join("owner-worktree");
+    let db_path = temp.path().join("owner.sqlite");
+    std::fs::create_dir_all(worktree.join(".superpowers/brainstorm/session-1/state")).unwrap();
+    std::fs::create_dir_all(worktree.join(".superpowers/brainstorm/session-1/content")).unwrap();
+    std::fs::write(
+        worktree.join(".superpowers/brainstorm/session-1/state/server-info"),
+        b"{}",
+    )
+    .unwrap();
+    std::fs::write(
+        worktree.join(".superpowers/brainstorm/session-1/content/layout.html"),
+        b"<button data-choice='a'>A</button>",
+    )
+    .unwrap();
+    let db = rusqlite::Connection::open(&db_path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE pipeline_item (id TEXT PRIMARY KEY, branch TEXT);
+         CREATE TABLE worktree (
+           id TEXT PRIMARY KEY,
+           pipeline_item_id TEXT,
+           path TEXT,
+           created_at TEXT
+         );",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO pipeline_item (id, branch) VALUES ('task-1', 'task-1')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO worktree (id, pipeline_item_id, path, created_at)
+         VALUES ('wt-1', 'task-1', ?1, '2026-07-27T00:00:00Z')",
+        [worktree.to_string_lossy().as_ref()],
+    )
+    .unwrap();
+    drop(db);
+
+    let owner = Arc::new(
+        TransferRuntime::spawn(
+            RuntimeConfig::for_tests("peer-owner", "Owner", &registry, 0).with_db_path(&db_path),
+        )
+        .await
+        .unwrap(),
+    );
+    let viewer = Arc::new(
+        TransferRuntime::spawn(RuntimeConfig::for_tests(
+            "peer-viewer",
+            "Viewer",
+            &registry,
+            0,
+        ))
+        .await
+        .unwrap(),
+    );
+    let owner_public = crate::crypto::public_key_to_string(&owner.identity.public_key);
+    let viewer_public = crate::crypto::public_key_to_string(&viewer.identity.public_key);
+    owner
+        .upsert_trusted_peer(PeerRecord {
+            peer_id: "peer-viewer".into(),
+            display_name: "Viewer".into(),
+            public_key: viewer_public,
+            capabilities_json: "{}".into(),
+            paired_at: "2026-07-27T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+    viewer
+        .upsert_trusted_peer(PeerRecord {
+            peer_id: "peer-owner".into(),
+            display_name: "Owner".into(),
+            public_key: owner_public,
+            capabilities_json: "{}".into(),
+            paired_at: "2026-07-27T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+
+    let gate =
+        super::lifecycle::install_companion_registration_test_gate("generation-a", "generation-b");
+    let viewer_for_old = Arc::clone(&viewer);
+    let old = tokio::spawn(async move {
+        viewer_for_old
+            .observe_peer_companion("peer-owner", "task-1", "generation-a")
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_blocked())
+        .await
+        .expect("lower-order registration did not reach the interleaving gate");
+
+    let viewer_for_new = Arc::clone(&viewer);
+    let newer = tokio::spawn(async move {
+        viewer_for_new
+            .observe_peer_companion("peer-owner", "task-1", "generation-b")
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_contender_entered())
+        .await
+        .expect("higher-order registration did not reach the critical section");
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            gate.wait_until_contender_passed()
+        )
+        .await
+        .is_err(),
+        "higher-order registration crossed the lower-order critical section"
+    );
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(1), gate.wait_until_contender_passed())
+        .await
+        .expect("higher-order registration did not proceed after the gate released");
+    newer.await.unwrap().unwrap();
+    let observer_key = ("peer-owner".to_owned(), "task-1".to_owned());
+    let higher_order = viewer
+        .companion_observers
+        .lock()
+        .await
+        .get(&observer_key)
+        .map(|observer| observer.generation_order)
+        .expect("higher-order observer should install after the old critical section");
+    old.await.unwrap().unwrap();
+
+    let observers = viewer.companion_observers.lock().await;
+    let observer = observers
+        .get(&observer_key)
+        .expect("lower-order registration removed the installed higher-order observer");
+    assert_eq!(observer.generation, "generation-b");
+    assert_eq!(observer.generation_order, higher_order);
+    drop(observers);
+    viewer
+        .unobserve_peer_companion("peer-owner", "task-1", "generation-b")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn ordinary_event_queue_is_bounded_and_resumes_after_drain() {
+    let (sender, mut receiver) = runtime_event_channel();
+    let terminal = |index: usize| RuntimeEvent::TerminalEvent {
+        peer_id: "peer-owner".into(),
+        session_id: "terminal-session".into(),
+        observer_lease_id: "lease-test".into(),
+        event: PeerTerminalEvent::Output {
+            session_id: "terminal-session".into(),
+            data: index.to_le_bytes().to_vec(),
+        },
+    };
+    for index in 0..MAX_PENDING_ORDINARY_EVENTS {
+        sender
+            .send(terminal(index))
+            .await
+            .expect("ordinary queue should accept events up to its bound");
+    }
+    let blocked_sender = sender.clone();
+    let blocked = tokio::spawn(async move {
+        blocked_sender
+            .send(terminal(MAX_PENDING_ORDINARY_EVENTS))
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !blocked.is_finished(),
+        "ordinary events must apply bounded backpressure instead of accumulating"
+    );
+
+    assert!(matches!(
+        receiver.recv().await,
+        Some(RuntimeEvent::TerminalEvent { .. })
+    ));
+    blocked
+        .await
+        .expect("bounded send task should finish")
+        .expect("ordinary delivery should resume as the pump drains");
+    assert!(matches!(
+        receiver.recv().await,
+        Some(RuntimeEvent::TerminalEvent { .. })
+    ));
+    sender
+        .send(terminal(MAX_PENDING_ORDINARY_EVENTS + 1))
+        .await
+        .expect("ordinary delivery should recover as the pump drains");
 }
 
 struct EnvGuard {
@@ -53,6 +333,56 @@ impl Drop for EnvGuard {
             std::env::remove_var(self.key);
         }
     }
+}
+
+async fn send_raw_companion_event(
+    runtime: &TransferRuntime,
+    owner: &TransferRuntime,
+    generation: &str,
+    request_id: &str,
+    event: &CompanionEvent,
+) -> TcpStream {
+    let observer = runtime
+        .companion_observers
+        .lock()
+        .await
+        .get(&("peer-owner".to_string(), "task-1".to_string()))
+        .map(|observer| {
+            (
+                observer.stream_nonce.clone(),
+                observer.observation_challenge.clone(),
+            )
+        })
+        .unwrap();
+    let sealed_payload = super::companion::seal_send_companion_event_proof(
+        &runtime.identity,
+        &owner.identity.public_key,
+        request_id,
+        "peer-viewer",
+        "task-1",
+        &event.session_id,
+        &event.revision,
+        generation,
+        &observer.0,
+        &observer.1,
+        1,
+        event,
+    )
+    .unwrap();
+    let mut stream = TcpStream::connect(("127.0.0.1", owner.config.listen_port))
+        .await
+        .unwrap();
+    super::utils::write_json_line(
+        &mut stream,
+        &PeerRequest::SendCompanionEvent {
+            request_id: request_id.into(),
+            requester_peer_id: "peer-viewer".into(),
+            sealed_payload,
+        },
+    )
+    .await
+    .unwrap();
+    stream
 }
 
 #[test]
@@ -875,4 +1205,972 @@ fn the_pre_fix_claude_session_archive_name_overflowed_name_max() {
         utils::managed_artifact_filename(&artifact_id).len() <= utils::NAME_MAX_BYTES,
         "the replacement scheme still overflows NAME_MAX",
     );
+}
+
+#[tokio::test]
+async fn completed_old_companion_observer_cannot_remove_reattached_generation() {
+    let mut observers = HashMap::new();
+    let key = ("peer-owner".to_string(), "task-1".to_string());
+    let replacement = tokio::spawn(std::future::pending::<()>());
+    observers.insert(
+        key.clone(),
+        CompanionObserver {
+            generation: "generation-new".into(),
+            generation_order: 2,
+            handle: replacement,
+            stream_nonce: "stream-new".into(),
+            observation_challenge: "challenge-new".into(),
+            next_event_sequence: Arc::new(AtomicU64::new(1)),
+            send_lock: Arc::new(tokio::sync::Mutex::new(())),
+        },
+    );
+
+    assert!(!remove_companion_observer_generation(
+        &mut observers,
+        &key,
+        "generation-old",
+        1,
+    ));
+    assert_eq!(
+        observers
+            .get(&key)
+            .map(|observer| observer.generation.as_str()),
+        Some("generation-new"),
+    );
+    observers
+        .remove(&key)
+        .expect("replacement observer remains")
+        .handle
+        .abort();
+}
+
+#[tokio::test]
+async fn completed_old_companion_observer_cannot_remove_newer_order_of_same_generation() {
+    let key = ("peer-owner".to_string(), "task-1".to_string());
+    let replacement = tokio::spawn(std::future::pending::<()>());
+    let mut observers = HashMap::from([(
+        key.clone(),
+        CompanionObserver {
+            generation: "generation-same".into(),
+            generation_order: 2,
+            handle: replacement,
+            stream_nonce: "stream-new".into(),
+            observation_challenge: "challenge-new".into(),
+            next_event_sequence: Arc::new(AtomicU64::new(1)),
+            send_lock: Arc::new(tokio::sync::Mutex::new(())),
+        },
+    )]);
+
+    assert!(!remove_companion_observer_generation(
+        &mut observers,
+        &key,
+        "generation-same",
+        1,
+    ));
+    assert_eq!(
+        observers
+            .get(&key)
+            .map(|observer| observer.generation_order),
+        Some(2)
+    );
+    observers.remove(&key).unwrap().handle.abort();
+}
+
+#[test]
+fn old_companion_registration_cleanup_cannot_remove_a_newer_order() {
+    let observer_key = ("peer-owner".to_owned(), "task-1".to_owned());
+    let mut latest_generations =
+        HashMap::from([(observer_key.clone(), (2, "generation-same".to_owned()))]);
+
+    assert!(!remove_companion_observer_registration(
+        &mut latest_generations,
+        &observer_key,
+        "generation-same",
+        1,
+    ));
+    assert_eq!(
+        latest_generations.get(&observer_key),
+        Some(&(2, "generation-same".to_owned()))
+    );
+
+    let (sender, _receiver) = runtime_event_channel();
+    sender.register_companion_generation("peer-owner", "task-1", "generation-same", 2);
+    sender.unregister_companion_generation("peer-owner", "task-1", "generation-same", 1);
+    assert_eq!(sender.companion_generation_count(), 1);
+}
+
+#[tokio::test]
+async fn unobserve_cleans_matching_preinstall_state_without_removing_newer_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let viewer = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-viewer",
+        "Viewer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let observer_key = ("peer-owner".to_owned(), "task-1".to_owned());
+    viewer
+        .companion_observer_generations
+        .lock()
+        .await
+        .insert(observer_key.clone(), (2, "generation-new".to_owned()));
+    viewer.incoming_sender.register_companion_generation(
+        "peer-owner",
+        "task-1",
+        "generation-new",
+        2,
+    );
+
+    viewer
+        .unobserve_peer_companion("peer-owner", "task-1", "generation-old")
+        .await
+        .unwrap();
+    assert_eq!(
+        viewer
+            .companion_observer_generations
+            .lock()
+            .await
+            .get(&observer_key)
+            .cloned(),
+        Some((2, "generation-new".to_owned()))
+    );
+    assert_eq!(viewer.incoming_sender.companion_generation_count(), 1);
+
+    viewer
+        .unobserve_peer_companion("peer-owner", "task-1", "generation-new")
+        .await
+        .unwrap();
+    assert!(viewer
+        .companion_observer_generations
+        .lock()
+        .await
+        .is_empty());
+    assert_eq!(viewer.incoming_sender.companion_generation_count(), 0);
+}
+
+#[tokio::test]
+async fn failed_companion_stream_open_and_unobserve_release_generation_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let stalled_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let target_identity = crate::crypto::TransferIdentity::generate();
+    let target_public_key = crate::crypto::public_key_to_string(&target_identity.public_key);
+    crate::registry::PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&crate::registry::PeerRegistryEntry {
+            peer_id: "peer-owner".into(),
+            display_name: "Owner".into(),
+            endpoint: stalled_listener.local_addr().unwrap().to_string(),
+            pid: std::process::id(),
+            public_key: target_public_key.clone(),
+            protocol_version: 2,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    super::utils::peer_store(temp.path(), "peer-viewer")
+        .unwrap()
+        .upsert(PeerRecord {
+            peer_id: "peer-owner".into(),
+            display_name: "Owner".into(),
+            public_key: target_public_key,
+            capabilities_json: "{\"protocolVersion\":2,\"companionCapabilityVersion\":1}".into(),
+            paired_at: "2026-07-27T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+    let viewer = TransferRuntime::spawn(
+        RuntimeConfig::for_tests("peer-viewer", "Viewer", temp.path(), 0)
+            .with_peer_request_timeout(Duration::from_millis(25)),
+    )
+    .await
+    .unwrap();
+
+    let error = viewer
+        .observe_peer_companion("peer-owner", "task-1", "generation-fails")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, RuntimeError::PeerRequestTimeout { .. }));
+    viewer
+        .unobserve_peer_companion("peer-owner", "task-1", "generation-fails")
+        .await
+        .unwrap();
+
+    assert!(viewer
+        .companion_observer_generations
+        .lock()
+        .await
+        .is_empty());
+    assert_eq!(viewer.incoming_sender.companion_generation_count(), 0);
+}
+
+#[tokio::test]
+async fn cancelled_companion_stream_open_rolls_back_generation_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let stalled_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let target_identity = crate::crypto::TransferIdentity::generate();
+    let target_public_key = crate::crypto::public_key_to_string(&target_identity.public_key);
+    crate::registry::PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&crate::registry::PeerRegistryEntry {
+            peer_id: "peer-owner".into(),
+            display_name: "Owner".into(),
+            endpoint: stalled_listener.local_addr().unwrap().to_string(),
+            pid: std::process::id(),
+            public_key: target_public_key.clone(),
+            protocol_version: 2,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    super::utils::peer_store(temp.path(), "peer-viewer")
+        .unwrap()
+        .upsert(PeerRecord {
+            peer_id: "peer-owner".into(),
+            display_name: "Owner".into(),
+            public_key: target_public_key,
+            capabilities_json: "{\"protocolVersion\":2,\"companionCapabilityVersion\":1}".into(),
+            paired_at: "2026-07-27T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+    let viewer = Arc::new(
+        TransferRuntime::spawn(
+            RuntimeConfig::for_tests("peer-viewer", "Viewer", temp.path(), 0)
+                .with_peer_request_timeout(Duration::from_secs(5)),
+        )
+        .await
+        .unwrap(),
+    );
+    let viewer_for_observe = Arc::clone(&viewer);
+    let observe = tokio::spawn(async move {
+        viewer_for_observe
+            .observe_peer_companion("peer-owner", "task-1", "generation-cancelled")
+            .await
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while viewer.incoming_sender.companion_generation_count() == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "observe did not register before opening the stalled stream"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(viewer.incoming_sender.companion_generation_count(), 1);
+
+    observe.abort();
+    assert!(observe.await.unwrap_err().is_cancelled());
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        let local_empty = viewer
+            .companion_observer_generations
+            .lock()
+            .await
+            .is_empty();
+        let sender_empty = viewer.incoming_sender.companion_generation_count() == 0;
+        if local_empty && sender_empty {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "cancelled observe retained local or event-sender generation state"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn stale_same_generation_send_failure_cannot_remove_replacement_observer() {
+    let temp = tempfile::tempdir().unwrap();
+    let stalled_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let target_identity = crate::crypto::TransferIdentity::generate();
+    let target_public_key = crate::crypto::public_key_to_string(&target_identity.public_key);
+    crate::registry::PeerRegistry::new(temp.path().to_path_buf())
+        .write_entry(&crate::registry::PeerRegistryEntry {
+            peer_id: "peer-owner".into(),
+            display_name: "Owner".into(),
+            endpoint: stalled_listener.local_addr().unwrap().to_string(),
+            pid: std::process::id(),
+            public_key: target_public_key.clone(),
+            protocol_version: 2,
+            accepting_transfers: true,
+        })
+        .unwrap();
+    super::utils::peer_store(temp.path(), "peer-viewer")
+        .unwrap()
+        .upsert(PeerRecord {
+            peer_id: "peer-owner".into(),
+            display_name: "Owner".into(),
+            public_key: target_public_key,
+            capabilities_json: "{\"protocolVersion\":2,\"companionCapabilityVersion\":1}".into(),
+            paired_at: "2026-07-27T00:00:00Z".into(),
+            last_seen_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+    let viewer = Arc::new(
+        TransferRuntime::spawn(
+            RuntimeConfig::for_tests("peer-viewer", "Viewer", temp.path(), 0)
+                .with_peer_request_timeout(Duration::from_millis(50)),
+        )
+        .await
+        .unwrap(),
+    );
+    let observer_key = ("peer-owner".to_owned(), "task-1".to_owned());
+    let old_send_lock = Arc::new(tokio::sync::Mutex::new(()));
+    let old_send_guard = old_send_lock.lock().await;
+    viewer
+        .companion_observer_generations
+        .lock()
+        .await
+        .insert(observer_key.clone(), (1, "generation-same".to_owned()));
+    viewer.incoming_sender.register_companion_generation(
+        "peer-owner",
+        "task-1",
+        "generation-same",
+        1,
+    );
+    viewer.companion_observers.lock().await.insert(
+        observer_key.clone(),
+        CompanionObserver {
+            generation: "generation-same".into(),
+            generation_order: 1,
+            handle: tokio::spawn(std::future::pending::<()>()),
+            stream_nonce: super::companion::fresh_observation_challenge(),
+            observation_challenge: super::companion::fresh_observation_challenge(),
+            next_event_sequence: Arc::new(AtomicU64::new(1)),
+            send_lock: Arc::clone(&old_send_lock),
+        },
+    );
+    let viewer_for_send = Arc::clone(&viewer);
+    let send = tokio::spawn(async move {
+        viewer_for_send
+            .send_peer_companion_event(
+                "peer-owner",
+                "task-1",
+                "session-1",
+                "revision-1",
+                "generation-same",
+                CompanionEvent {
+                    session_id: String::new(),
+                    revision: String::new(),
+                    event_id: "event-old".into(),
+                    event_type: "click".into(),
+                    choice: "a".into(),
+                    text: "A".into(),
+                    element_id: None,
+                    timestamp: 1_784_268_000_000,
+                },
+            )
+            .await
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while Arc::strong_count(&old_send_lock) < 3 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "send did not capture the old observer before replacement"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    viewer
+        .companion_observer_generations
+        .lock()
+        .await
+        .insert(observer_key.clone(), (2, "generation-same".to_owned()));
+    viewer.incoming_sender.register_companion_generation(
+        "peer-owner",
+        "task-1",
+        "generation-same",
+        2,
+    );
+    let replacement = CompanionObserver {
+        generation: "generation-same".into(),
+        generation_order: 2,
+        handle: tokio::spawn(std::future::pending::<()>()),
+        stream_nonce: super::companion::fresh_observation_challenge(),
+        observation_challenge: super::companion::fresh_observation_challenge(),
+        next_event_sequence: Arc::new(AtomicU64::new(1)),
+        send_lock: Arc::new(tokio::sync::Mutex::new(())),
+    };
+    viewer
+        .companion_observers
+        .lock()
+        .await
+        .insert(observer_key.clone(), replacement)
+        .unwrap()
+        .handle
+        .abort();
+    drop(old_send_guard);
+
+    assert!(send.await.unwrap().is_err());
+    assert_eq!(
+        viewer
+            .companion_observers
+            .lock()
+            .await
+            .get(&observer_key)
+            .map(|observer| observer.generation_order),
+        Some(2)
+    );
+    assert_eq!(
+        viewer
+            .companion_observer_generations
+            .lock()
+            .await
+            .get(&observer_key)
+            .cloned(),
+        Some((2, "generation-same".to_owned()))
+    );
+    assert_eq!(viewer.incoming_sender.companion_generation_count(), 1);
+    viewer
+        .companion_observers
+        .lock()
+        .await
+        .remove(&observer_key)
+        .unwrap()
+        .handle
+        .abort();
+}
+
+#[tokio::test]
+async fn lan_companion_event_retry_after_owner_restart_is_durably_idempotent() {
+    let temp = tempfile::tempdir().unwrap();
+    let registry = temp.path().join("registry");
+    let worktree = temp.path().join("worktree");
+    let db_path = temp.path().join("kanna.sqlite");
+    std::fs::create_dir_all(worktree.join(".superpowers/brainstorm/session-1/state")).unwrap();
+    std::fs::create_dir_all(worktree.join(".superpowers/brainstorm/session-1/content")).unwrap();
+    std::fs::write(
+        worktree.join(".superpowers/brainstorm/session-1/state/server-info"),
+        b"{}",
+    )
+    .unwrap();
+    std::fs::write(
+        worktree.join(".superpowers/brainstorm/session-1/content/layout.html"),
+        b"<button data-choice='a'>A</button>",
+    )
+    .unwrap();
+    let document = kanna_visual_companion::current_bundle(&worktree)
+        .unwrap()
+        .unwrap();
+    let db = rusqlite::Connection::open(&db_path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE pipeline_item (id TEXT PRIMARY KEY, branch TEXT);
+         CREATE TABLE worktree (
+           id TEXT PRIMARY KEY,
+           pipeline_item_id TEXT,
+           path TEXT,
+           created_at TEXT
+         );",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO pipeline_item (id, branch) VALUES ('task-1', 'task-1')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO worktree (id, pipeline_item_id, path, created_at)
+         VALUES ('wt-1', 'task-1', ?1, '2026-07-26T00:00:00Z')",
+        [worktree.to_string_lossy().as_ref()],
+    )
+    .unwrap();
+    drop(db);
+
+    let owner_config =
+        RuntimeConfig::for_tests("peer-owner", "Owner", &registry, 0).with_db_path(&db_path);
+    let viewer_config = RuntimeConfig::for_tests("peer-viewer", "Viewer", &registry, 0);
+    let owner = TransferRuntime::spawn(owner_config.clone()).await.unwrap();
+    let viewer = TransferRuntime::spawn(viewer_config).await.unwrap();
+    let owner_public = crate::crypto::public_key_to_string(&owner.identity.public_key);
+    let viewer_public = crate::crypto::public_key_to_string(&viewer.identity.public_key);
+    let trusted = |peer_id: &str, display_name: &str, public_key: String| PeerRecord {
+        peer_id: peer_id.into(),
+        display_name: display_name.into(),
+        public_key,
+        capabilities_json: "{}".into(),
+        paired_at: "2026-07-26T00:00:00Z".into(),
+        last_seen_at: None,
+        revoked_at: None,
+    };
+    owner
+        .upsert_trusted_peer(trusted("peer-viewer", "Viewer", viewer_public))
+        .unwrap();
+    viewer
+        .upsert_trusted_peer(trusted("peer-owner", "Owner", owner_public.clone()))
+        .unwrap();
+    viewer
+        .observe_peer_companion("peer-owner", "task-1", "generation-1")
+        .await
+        .unwrap();
+
+    let event = CompanionEvent {
+        session_id: document.session_id.clone(),
+        revision: document.revision.clone(),
+        event_id: "lan-lost-ack".into(),
+        event_type: "click".into(),
+        choice: "a".into(),
+        text: "Option A".into(),
+        element_id: None,
+        timestamp: 1_784_268_000_000,
+    };
+    let response_gate = super::listener::install_companion_response_test_gate("send-1");
+    let first = send_raw_companion_event(&viewer, &owner, "generation-1", "send-1", &event).await;
+    let events_path = worktree
+        .join(".superpowers/brainstorm")
+        .join(&document.session_id)
+        .join("state/events");
+    tokio::time::timeout(Duration::from_secs(1), response_gate.wait_until_blocked())
+        .await
+        .expect("owner must block after append and before response write");
+    assert_eq!(
+        std::fs::read_to_string(&events_path)
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    drop(first);
+    response_gate.release();
+    drop(response_gate);
+    drop(owner);
+
+    let replacement = TransferRuntime::spawn(owner_config).await.unwrap();
+    replacement
+        .upsert_trusted_peer(trusted(
+            "peer-viewer",
+            "Viewer",
+            crate::crypto::public_key_to_string(&viewer.identity.public_key),
+        ))
+        .unwrap();
+    viewer
+        .observe_peer_companion("peer-owner", "task-1", "generation-2")
+        .await
+        .unwrap();
+    let retry =
+        send_raw_companion_event(&viewer, &replacement, "generation-2", "send-2", &event).await;
+    let mut response_line = String::new();
+    BufReader::new(retry)
+        .read_line(&mut response_line)
+        .await
+        .unwrap();
+    let response: PeerResponse = serde_json::from_str(response_line.trim()).unwrap();
+    let PeerResponse::SendCompanionEvent { sealed_payload, .. } = response else {
+        panic!("expected accepted companion event response");
+    };
+    let (_, _, _, _, _, _, _, frame) = super::companion::open_owner_control_payload(
+        &viewer.identity,
+        &replacement.identity.public_key,
+        &sealed_payload,
+    )
+    .unwrap();
+    assert!(matches!(
+        frame,
+        Some(ServerFrame::CompanionEventResult { accepted: true, .. })
+    ));
+    assert_eq!(
+        std::fs::read_to_string(events_path)
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn slow_consumer_keeps_only_latest_large_companion_bundle_without_starving_reliable_events() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-viewer",
+        "Viewer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    runtime
+        .incoming_sender
+        .send(RuntimeEvent::TerminalEvent {
+            peer_id: "peer-owner".into(),
+            session_id: "task-1".into(),
+            observer_lease_id: "lease-test".into(),
+            event: PeerTerminalEvent::Output {
+                session_id: "task-1".into(),
+                data: b"terminal-remains-responsive".to_vec(),
+            },
+        })
+        .await
+        .unwrap();
+    runtime
+        .incoming_sender
+        .send(RuntimeEvent::CompanionEvent {
+            peer_id: "peer-owner".into(),
+            task_id: "task-1".into(),
+            generation: "generation-1".into(),
+            generation_order: 1,
+            frame: ServerFrame::CompanionError {
+                task_id: "task-1".into(),
+                code: "connection_failed".into(),
+                message: "stream closed".into(),
+                attachment_epoch: None,
+            },
+        })
+        .await
+        .unwrap();
+    runtime
+        .incoming_sender
+        .send(RuntimeEvent::CompanionEvent {
+            peer_id: "peer-owner".into(),
+            task_id: "task-1".into(),
+            generation: "generation-1".into(),
+            generation_order: 1,
+            frame: ServerFrame::CompanionEventResult {
+                task_id: "task-1".into(),
+                session_id: Some("session-1".into()),
+                revision: Some("revision-1".into()),
+                event_id: "event-1".into(),
+                accepted: true,
+                code: None,
+                message: None,
+                attachment_epoch: None,
+            },
+        })
+        .await
+        .unwrap();
+    for index in 0..8 {
+        runtime
+            .incoming_sender
+            .send(RuntimeEvent::CompanionEvent {
+                peer_id: "peer-owner".into(),
+                task_id: "task-1".into(),
+                generation: "generation-1".into(),
+                generation_order: 1,
+                frame: ServerFrame::CompanionSnapshot {
+                    task_id: "task-1".into(),
+                    session_id: "session-1".into(),
+                    revision: format!("revision-{index}"),
+                    document_kind: CompanionDocumentKind::Fragment,
+                    html: "x".repeat(2 * 1024 * 1024),
+                    source_origin: None,
+                    assets: vec![],
+                    attachment_epoch: None,
+                },
+            })
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(runtime.incoming_sender.pending_companion_count(), 1);
+    assert!(matches!(
+        runtime.next_event().await.unwrap(),
+        RuntimeEvent::TerminalEvent { .. }
+    ));
+    assert!(matches!(
+        runtime.next_event().await.unwrap(),
+        RuntimeEvent::CompanionEvent {
+            frame: ServerFrame::CompanionError { .. },
+            ..
+        }
+    ));
+    assert!(matches!(
+        runtime.next_event().await.unwrap(),
+        RuntimeEvent::CompanionEvent {
+            frame: ServerFrame::CompanionEventResult { .. },
+            ..
+        }
+    ));
+    let RuntimeEvent::CompanionEvent {
+        frame: ServerFrame::CompanionSnapshot { revision, .. },
+        ..
+    } = runtime.next_event().await.unwrap()
+    else {
+        panic!("expected latest coalesced companion snapshot");
+    };
+    assert_eq!(revision, "revision-7");
+
+    runtime
+        .incoming_sender
+        .send(RuntimeEvent::CompanionEvent {
+            peer_id: "peer-owner".into(),
+            task_id: "task-1".into(),
+            generation: "generation-1".into(),
+            generation_order: 1,
+            frame: ServerFrame::CompanionSnapshot {
+                task_id: "task-1".into(),
+                session_id: "session-1".into(),
+                revision: "must-not-follow-failure".into(),
+                document_kind: CompanionDocumentKind::Fragment,
+                html: "x".repeat(2 * 1024 * 1024),
+                source_origin: None,
+                assets: vec![],
+                attachment_epoch: None,
+            },
+        })
+        .await
+        .unwrap();
+    runtime
+        .incoming_sender
+        .send(RuntimeEvent::CompanionEvent {
+            peer_id: "peer-owner".into(),
+            task_id: "task-1".into(),
+            generation: "generation-1".into(),
+            generation_order: 1,
+            frame: ServerFrame::CompanionError {
+                task_id: "task-1".into(),
+                code: "connection_failed".into(),
+                message: "stream closed".into(),
+                attachment_epoch: None,
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(runtime.incoming_sender.pending_companion_count(), 0);
+    assert!(matches!(
+        runtime.next_event().await.unwrap(),
+        RuntimeEvent::CompanionEvent {
+            frame: ServerFrame::CompanionError { .. },
+            ..
+        }
+    ));
+
+    runtime
+        .incoming_sender
+        .send(RuntimeEvent::CompanionEvent {
+            peer_id: "peer-owner".into(),
+            task_id: "task-1".into(),
+            generation: "generation-new".into(),
+            generation_order: 2,
+            frame: ServerFrame::CompanionUnavailable {
+                task_id: "task-1".into(),
+                attachment_epoch: None,
+            },
+        })
+        .await
+        .unwrap();
+    runtime
+        .incoming_sender
+        .invalidate_companion("peer-owner", "task-1", "generation-old", 1);
+    assert_eq!(runtime.incoming_sender.pending_companion_count(), 1);
+    runtime
+        .incoming_sender
+        .invalidate_companion("peer-owner", "task-1", "generation-new", 2);
+    assert_eq!(runtime.incoming_sender.pending_companion_count(), 0);
+}
+
+#[tokio::test]
+async fn late_old_generation_cannot_replace_the_queued_recovery_snapshot() {
+    let (sender, mut receiver) = runtime_event_channel();
+    sender.register_companion_generation("peer-owner", "task-1", "generation-new", 2);
+    sender
+        .send(RuntimeEvent::CompanionEvent {
+            peer_id: "peer-owner".into(),
+            task_id: "task-1".into(),
+            generation: "generation-new".into(),
+            generation_order: 2,
+            frame: ServerFrame::CompanionSnapshot {
+                task_id: "task-1".into(),
+                session_id: "session-new".into(),
+                revision: "revision-recovery".into(),
+                document_kind: CompanionDocumentKind::Fragment,
+                html: "<p>fresh recovery</p>".into(),
+                source_origin: None,
+                assets: vec![],
+                attachment_epoch: None,
+            },
+        })
+        .await
+        .unwrap();
+    sender
+        .send(RuntimeEvent::CompanionEvent {
+            peer_id: "peer-owner".into(),
+            task_id: "task-1".into(),
+            generation: "generation-old".into(),
+            generation_order: 1,
+            frame: ServerFrame::CompanionUnavailable {
+                task_id: "task-1".into(),
+                attachment_epoch: None,
+            },
+        })
+        .await
+        .unwrap();
+
+    let RuntimeEvent::CompanionEvent {
+        generation,
+        generation_order,
+        frame: ServerFrame::CompanionSnapshot { revision, .. },
+        ..
+    } = receiver.recv().await.unwrap()
+    else {
+        panic!("expected the fresh recovery snapshot");
+    };
+    assert_eq!(generation, "generation-new");
+    assert_eq!(generation_order, 2);
+    assert_eq!(revision, "revision-recovery");
+}
+
+#[tokio::test]
+async fn stale_same_generation_error_cannot_invalidate_newer_queued_snapshot() {
+    let (sender, mut receiver) = runtime_event_channel();
+    sender.register_companion_generation("peer-owner", "task-1", "generation-same", 2);
+    sender
+        .send(RuntimeEvent::CompanionEvent {
+            peer_id: "peer-owner".into(),
+            task_id: "task-1".into(),
+            generation: "generation-same".into(),
+            generation_order: 2,
+            frame: ServerFrame::CompanionSnapshot {
+                task_id: "task-1".into(),
+                session_id: "session-new".into(),
+                revision: "revision-new".into(),
+                document_kind: CompanionDocumentKind::Fragment,
+                html: "<p>new</p>".into(),
+                source_origin: None,
+                assets: vec![],
+                attachment_epoch: None,
+            },
+        })
+        .await
+        .unwrap();
+    sender
+        .send(RuntimeEvent::CompanionEvent {
+            peer_id: "peer-owner".into(),
+            task_id: "task-1".into(),
+            generation: "generation-same".into(),
+            generation_order: 1,
+            frame: ServerFrame::CompanionError {
+                task_id: "task-1".into(),
+                code: "connection_failed".into(),
+                message: "old stream failed".into(),
+                attachment_epoch: None,
+            },
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(sender.pending_companion_count(), 1);
+    let RuntimeEvent::CompanionEvent {
+        generation_order,
+        frame: ServerFrame::CompanionSnapshot { revision, .. },
+        ..
+    } = receiver.recv().await.unwrap()
+    else {
+        panic!("expected the newer queued snapshot");
+    };
+    assert_eq!(generation_order, 2);
+    assert_eq!(revision, "revision-new");
+}
+
+#[tokio::test]
+async fn latest_companion_lane_is_capped_by_active_observer_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-viewer",
+        "Viewer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    for index in 0..super::state::MAX_COMPANION_OBSERVERS {
+        runtime
+            .incoming_sender
+            .send(RuntimeEvent::CompanionEvent {
+                peer_id: "peer-owner".into(),
+                task_id: format!("task-{index}"),
+                generation: "generation-1".into(),
+                generation_order: 1,
+                frame: ServerFrame::CompanionUnavailable {
+                    task_id: format!("task-{index}"),
+                    attachment_epoch: None,
+                },
+            })
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        runtime.incoming_sender.pending_companion_count(),
+        super::state::MAX_COMPANION_OBSERVERS,
+    );
+    assert!(runtime
+        .incoming_sender
+        .send(RuntimeEvent::CompanionEvent {
+            peer_id: "peer-owner".into(),
+            task_id: "one-too-many".into(),
+            generation: "generation-1".into(),
+            generation_order: 1,
+            frame: ServerFrame::CompanionUnavailable {
+                task_id: "one-too-many".into(),
+                attachment_epoch: None,
+            },
+        })
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn latest_companion_lane_gets_bounded_fairness_during_continuous_reliable_traffic() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-viewer",
+        "Viewer",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    runtime
+        .incoming_sender
+        .send(RuntimeEvent::CompanionEvent {
+            peer_id: "peer-owner".into(),
+            task_id: "task-1".into(),
+            generation: "generation-1".into(),
+            generation_order: 1,
+            frame: ServerFrame::CompanionUnavailable {
+                task_id: "task-1".into(),
+                attachment_epoch: None,
+            },
+        })
+        .await
+        .unwrap();
+    for index in 0..40 {
+        runtime
+            .incoming_sender
+            .send(RuntimeEvent::TerminalEvent {
+                peer_id: "peer-owner".into(),
+                session_id: "task-1".into(),
+                observer_lease_id: "lease-test".into(),
+                event: PeerTerminalEvent::Output {
+                    session_id: "task-1".into(),
+                    data: vec![index],
+                },
+            })
+            .await
+            .unwrap();
+    }
+
+    for _ in 0..32 {
+        assert!(matches!(
+            runtime.next_event().await.unwrap(),
+            RuntimeEvent::TerminalEvent { .. }
+        ));
+    }
+    assert!(matches!(
+        runtime.next_event().await.unwrap(),
+        RuntimeEvent::CompanionEvent {
+            frame: ServerFrame::CompanionUnavailable { .. },
+            ..
+        }
+    ));
+    assert!(matches!(
+        runtime.next_event().await.unwrap(),
+        RuntimeEvent::TerminalEvent { .. }
+    ));
 }
