@@ -5,6 +5,7 @@ export const MOBILE_E2E_IDS = {
   moreHeading: "mobile.more-heading",
   moreSearchInput: "mobile.more-search-input",
   tasksScreen: "mobile.tasks-screen",
+  tasksPairMacButton: "mobile.tasks-pair-mac",
   recentScreen: "mobile.recent-screen",
   searchScreen: "mobile.search-screen",
   searchInput: "mobile.search-input",
