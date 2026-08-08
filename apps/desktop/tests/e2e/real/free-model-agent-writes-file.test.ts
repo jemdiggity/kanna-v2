@@ -8,6 +8,7 @@ import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/rese
 import { waitForTaskCreated } from "../helpers/taskCreation";
 import { submitTaskFromUi } from "../helpers/newTaskFlow";
 import { nudgeTerminalTrustPrompt } from "../helpers/terminalInput";
+import { queryDb } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
 import { waitForFile, waitForNewTaskWorktree } from "../helpers/worktreeFs";
 
@@ -66,6 +67,35 @@ async function captureOpenCodeDiagnostics(client: WebDriverClient, taskId: strin
       })).catch((error) => cb({ error: String(error) }));`);
 }
 
+interface RuntimeStatusRow {
+  runtime_status: string | null;
+}
+
+/**
+ * Poll `pipeline_item.runtime_status` — the column `terminal_watcher` writes
+ * from the daemon's status broadcast — until it reaches `expected`.
+ */
+async function waitForRuntimeStatus(
+  client: WebDriverClient,
+  taskId: string,
+  expected: string,
+  timeoutMs: number,
+): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  let last: string | null = null;
+  while (Date.now() < deadline) {
+    const rows = (await queryDb(
+      client,
+      "SELECT runtime_status FROM pipeline_item WHERE id = ?",
+      [taskId],
+    ).catch(() => [])) as RuntimeStatusRow[];
+    last = rows[0]?.runtime_status ?? null;
+    if (last === expected) return last;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  return last;
+}
+
 describe("opencode agent writes file (real CLI)", () => {
   const client = new WebDriverClient();
   let testRepoPath = "";
@@ -118,5 +148,37 @@ describe("opencode agent writes file (real CLI)", () => {
       );
     }
     expect((await readFile(filePath, "utf8")).trimEnd()).toBe("OpenCode E2E content");
-  }, 240_000);
+
+    // The daemon's OpenCode status matcher, end to end.
+    //
+    // This assertion was written once before and withdrawn: while Kanna spawned
+    // `opencode run --interactive` the session drew no TUI at all, so nothing
+    // the matcher reads was ever rendered
+    // (docs/2026-08-08-opencode-live-idle-detection-e2e-gap.md). It is
+    // meaningful now because the spawn draws a real TUI and the process stays
+    // alive after its turn, so reaching `idle` requires the daemon to have
+    // positively recognised chrome OpenCode rendered — rather than, as before,
+    // reporting a one-shot process's exit.
+    //
+    // A/B'd against the pre-fix behaviour — `opencode_status_from_lines`
+    // returning `None` for every frame, which is what it did before this
+    // investigation. The assertion then never leaves `busy` and fails on the
+    // timeout ("expected 'busy' to be 'idle'"), exactly the state the gap doc
+    // records. With the matcher as shipped, it passes.
+    //
+    // The control has to be the *whole* matcher, not the composer rule alone.
+    // Two things would otherwise mask the difference:
+    //   - `detect_headless_terminal_status_if_due`
+    //     (crates/daemon/src/session.rs) falls back to Idle once any status has
+    //     been observed and the matcher stops matching, so disabling only the
+    //     composer rule still reaches `idle` off the working footer's
+    //     disappearance;
+    //   - the old `›` idle rule false-positives on OpenCode's echoed user
+    //     message, so it reports Idle for the wrong reason.
+    // What this therefore pins is that the daemon positively recognised
+    // OpenCode's chrome on a live TUI at all — which is what the pre-fix
+    // matcher could not do, and what the old one-shot spawn never rendered.
+    const status = await waitForRuntimeStatus(client, task.id, "idle", 120_000);
+    expect(status).toBe("idle");
+  }, 300_000);
 });

@@ -42,10 +42,13 @@ describe("getAgentPermissionFlags", () => {
     expect(getAgentPermissionFlags("codex", "acceptEdits")).toEqual(["--sandbox workspace-write"]);
   });
 
-  it("maps OpenCode default-like permissions to its skip-permissions flag", () => {
-    expect(getAgentPermissionFlags("opencode")).toEqual(["--dangerously-skip-permissions"]);
-    expect(getAgentPermissionFlags("opencode", "default")).toEqual(["--dangerously-skip-permissions"]);
-    expect(getAgentPermissionFlags("opencode", "dontAsk")).toEqual(["--dangerously-skip-permissions"]);
+  // `--auto` is what both `opencode --help` and `opencode run --help` document
+  // on 1.18.15; `--dangerously-skip-permissions` still works but is no longer
+  // documented on either entrypoint.
+  it("maps OpenCode default-like permissions to its documented auto-approve flag", () => {
+    expect(getAgentPermissionFlags("opencode")).toEqual(["--auto"]);
+    expect(getAgentPermissionFlags("opencode", "default")).toEqual(["--auto"]);
+    expect(getAgentPermissionFlags("opencode", "dontAsk")).toEqual(["--auto"]);
     expect(getAgentPermissionFlags("opencode", "acceptEdits")).toEqual([]);
   });
 

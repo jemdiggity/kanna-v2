@@ -32,6 +32,11 @@ import { sleep, startPtySession, type PtySession } from "../../helpers/pty";
 // fast enough that the working footer's own wording changed from "escape
 // interrupt" to "esc interrupt" between two runs of this investigation:
 // docs/2026-08-08-opencode-live-idle-detection-e2e-gap.md.
+//
+// The second describe block below pins the spawn *shape* these markers are read
+// off: that Kanna's argv still opens a TUI which outlives its first turn. The
+// markers and the shape fail independently, and while Kanna spawned
+// `opencode run --interactive` the shape was the one that was broken.
 
 /** OpenCode Zen's free model — see tests/live/opencode-flags.test.ts. */
 const LIVE_MODEL = "opencode/big-pickle";
@@ -44,8 +49,16 @@ const WORKING_FOOTER = /escapeinterrupt|escinterrupt|esctointerrupt/;
  * opencode_line_is_composer_status: "┃  Build · Big Pickle OpenCode Zen", or
  * "┃  Build · Model default" when no model is pinned. Matched against the
  * spaced output rather than the compact form, which has no line boundaries.
+ *
+ * The mode is more than one word whenever a permission-bypass flag is set —
+ * Kanna's own spawn renders "┃  Build auto · Big Pickle OpenCode Zen", with an
+ * "auto" badge after the mode. So this mirrors what the daemon actually keys
+ * on: the box border, then any text, then a spaced middle dot. An earlier
+ * version required a single word there and failed on Kanna's real argv while
+ * the daemon's matcher was perfectly happy — a test stricter than the code it
+ * guards is a false alarm waiting to happen.
  */
-const COMPOSER_STATUS = /┃ {1,4}\S+ · \S/;
+const COMPOSER_STATUS = /┃ {1,4}\S[^\n]* · \S/;
 /** OPENCODE_PERMISSION_ACTIONS, compacted the same way as READY. */
 const PERMISSION_ACTIONS = /Allowonce.*Allowalways/s;
 /**
@@ -72,17 +85,30 @@ async function requireEnvironment(ctx: { skip: (reason?: string) => void }): Pro
  * The TUI is what the daemon's matcher reads, and `opencode [project]` — the
  * CLI's default command — is what draws it.
  *
- * Kanna's own spawn is `opencode run --interactive '<prompt>'`, which on 1.18.15
- * streams plain text and exits at the end of its turn without drawing any TUI
- * at all. That is its own defect
- * (docs/2026-08-08-opencode-live-idle-detection-e2e-gap.md); what this file
- * pins is the chrome the matcher keys on, wherever a session has a TUI.
+ * These are the flags Kanna's PTY spawn puts on the argv
+ * (`crates/kanna-server/src/task_creator/commands.rs`), so the markers below are
+ * pinned against the shape a real task runs rather than a nearby one. Kanna
+ * passes no `[project]` positional — its bootstrap shell already runs in the
+ * worktree — but this harness starts the CLI directly, so the directory is
+ * given explicitly here.
  */
-async function startOpenCode(cwd: string): Promise<PtySession> {
+const KANNA_PTY_FLAGS = ["--auto", "--model", LIVE_MODEL];
+/**
+ * Kanna's spawn for any permission mode other than `dontAsk`/default, which
+ * passes no bypass flag at all. It is also the only shape that can reach the
+ * permission dialog — `--auto` is precisely the flag that stops it opening.
+ */
+const KANNA_PTY_FLAGS_ASKING = ["--model", LIVE_MODEL];
+
+async function startOpenCode(
+  cwd: string,
+  extraArgs: string[] = [],
+  flags: string[] = KANNA_PTY_FLAGS,
+): Promise<PtySession> {
   const binary = await findOpenCodeBinary();
   // OpenCode reads its project config from a repository root.
   execFileSync("git", ["init", "-q"], { cwd });
-  return startPtySession(binary, ["--model", LIVE_MODEL, cwd], { cwd });
+  return startPtySession(binary, [...flags, ...extraArgs, cwd], { cwd });
 }
 
 /** Pump until the TUI stops redrawing: the turn is over, or a dialog is up. */
@@ -182,7 +208,9 @@ describe("TUI status markers the daemon reads (opencode)", () => {
       }),
     );
 
-    const session = await startOpenCode(cwd);
+    // Kanna's asking spawn, not its default one: `--auto` suppresses the very
+    // dialog this test exists to find.
+    const session = await startOpenCode(cwd, [], KANNA_PTY_FLAGS_ASKING);
     try {
       if (!(await session.waitForOutput(READY, 60_000))) {
         ctx.skip("opencode TUI never reached its composer");
@@ -218,4 +246,75 @@ describe("TUI status markers the daemon reads (opencode)", () => {
       await removeDir(cwd);
     }
   }, 300_000);
+});
+
+// WHAT BREAKS IN KANNA IF THIS PIN FAILS: everything that reaches a running
+// OpenCode task by typing at it — `kanna_send_task_input`, stage posts
+// (commit/approve), revision resume, and transfer finalization's wrap-up and
+// quit. All of them write bytes to the PTY and expect a composer to be there.
+//
+// Kanna used to spawn `opencode run --interactive '<prompt>'`, which on 1.18.15
+// draws no TUI and exits at the end of its first turn: injected text was echoed
+// by the tty, never became a turn, and the process was gone a second later
+// (docs/2026-08-08-opencode-live-idle-detection-e2e-gap.md, "Defect 2"). The
+// spawn now uses the CLI's default command with `--prompt`. This is the pin
+// that the replacement actually keeps a composer alive past its opening turn —
+// the property the old shape lacked, and the one no marker assertion above can
+// detect on its own.
+describe("the spawn shape Kanna's OpenCode PTY tasks use", () => {
+  it("delivers --prompt as a real turn and still has a composer afterwards", async (ctx) => {
+    if (!(await requireEnvironment(ctx))) return;
+
+    const cwd = await makeRealTempDir("kanna-opencode-spawn-");
+    const session = await startOpenCode(cwd, [
+      "--prompt",
+      "Reply with exactly the word ALPHA and nothing else.",
+    ]);
+    try {
+      // `--prompt` has to become a turn on its own: nothing types it in.
+      const wentBusy = await session.waitForOutput(WORKING_FOOTER, 120_000);
+      expect(
+        wentBusy,
+        `opencode never started a turn from --prompt, so a Kanna task would come up with its ` +
+        `prompt undelivered. Check the PTY composition in ` +
+        `crates/kanna-server/src/task_creator/commands.rs. TUI tail:\n` +
+        session.output.slice(-1200),
+      ).toBe(true);
+
+      await waitUntilQuiet(session, 6_000, 240_000);
+
+      // The property the old `run --interactive` spawn did not have.
+      expect(
+        session.exited,
+        `opencode exited when its opening turn ended, so a Kanna task would have no session left ` +
+        `for send-input, stage posts, revision resume or the transfer wrap-up to reach. ` +
+        `exitCode=${session.exitCode}. TUI tail:\n${session.output.slice(-1200)}`,
+      ).toBe(false);
+      expect(
+        COMPOSER_STATUS.test(session.output),
+        `opencode drew no composer after its opening turn, so injected input has nothing to land ` +
+        `in. TUI tail:\n${session.output.slice(-1200)}`,
+      ).toBe(true);
+
+      // And injected input — written exactly the way `try_submit_task_input`
+      // writes it — becomes a second turn rather than tty echo.
+      await session.submit("Reply with exactly the word BETA and nothing else.");
+      const secondTurn = await session.waitForOutput(WORKING_FOOTER, 120_000);
+      expect(
+        secondTurn,
+        `injected input did not become a turn, which is the exact failure the old one-shot spawn ` +
+        `had: the bytes are echoed by the tty and the agent never sees them. TUI tail:\n` +
+        session.output.slice(-1200),
+      ).toBe(true);
+
+      await waitUntilQuiet(session, 6_000, 240_000);
+      expect(
+        session.compactOutput.includes("BETA"),
+        `the agent never answered the injected message. TUI tail:\n${session.output.slice(-1200)}`,
+      ).toBe(true);
+    } finally {
+      session.kill();
+      await removeDir(cwd);
+    }
+  }, 600_000);
 });

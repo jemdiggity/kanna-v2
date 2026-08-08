@@ -281,21 +281,24 @@ describe.skipIf(realE2eAgentProvider() !== "opencode")(
       const payload = JSON.parse(transfer.payload_json ?? "{}") as {
         finalization?: { cleanly_finalized?: boolean; degraded_reason?: string | null };
       };
-      expect(payload.finalization?.cleanly_finalized).toBeTypeOf("boolean");
-      if (payload.finalization?.cleanly_finalized === false) {
-        expect(
-          payload.finalization.degraded_reason ?? "",
-          "the finalization degraded for a reason other than the known OpenCode "
-          + "idle-detection gap",
-        ).toContain("did not finish its turn");
-      }
+      // Clean, not merely "degraded for the known reason". That tolerance
+      // existed because Kanna spawned `opencode run --interactive`, which drew
+      // no TUI and exited at the end of its first turn: the wrap-up was echoed
+      // by the tty, never became a turn, and the sequence could only ever
+      // degrade. The spawn now runs the real interactive TUI, so the whole
+      // sequence has to complete.
+      expect(
+        payload.finalization?.cleanly_finalized,
+        `the finalization degraded: ${payload.finalization?.degraded_reason ?? "(no reason)"}`,
+      ).toBe(true);
 
       // The wrap-up is minutes of user-visible latency, so the source task's
       // event feed has to make it legible as a transfer rather than as a hung
-      // task. The steps after `idle` are unreachable here for the same reason
-      // as above, and are pinned deterministically in `finalize.rs`'s tests.
+      // task. Every step is reachable now that the source session is a real
+      // TUI: the daemon can report it `Idle`, which is what unblocks the quit.
+      // While the spawn was a one-shot, the run ended at `wrap-up-sent`.
       const phases = await finalizationPhases(task.id);
-      expect(phases[0]).toBe("wrap-up-sent");
+      expect(phases).toEqual(["wrap-up-sent", "idle", "quit-sent", "exited"]);
 
       // And the shipped conversation carries it: the wrap-up Kanna typed, and
       // the agent's answer to it, both on the destination machine.

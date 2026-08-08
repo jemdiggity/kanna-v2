@@ -41,6 +41,11 @@ export function getAgentPermissionFlags(
         ? ["--yolo"]
         : ["--sandbox workspace-write"];
     case "opencode":
+      // `--auto` is the spelling `opencode --help` and `opencode run --help`
+      // document on 1.18.15; `--dangerously-skip-permissions` still works but
+      // is undocumented on both entrypoints. Mirrors the Rust composition in
+      // `crates/kanna-server/src/task_creator/commands.rs`.
+      return shouldUseYoloPermissionDefaults(permissionMode) ? ["--auto"] : [];
     case "antigravity":
       return shouldUseYoloPermissionDefaults(permissionMode)
         ? ["--dangerously-skip-permissions"]

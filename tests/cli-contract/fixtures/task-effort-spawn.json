@@ -17,7 +17,7 @@
   {
     "provider": "opencode",
     "effort": "xhigh",
-    "ptyFlag": "--variant 'xhigh'"
+    "ptyFlag": "\"variant\":\"xhigh\""
   },
   {
     "provider": "antigravity",

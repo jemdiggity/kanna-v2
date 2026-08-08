@@ -6,7 +6,9 @@ describe("buildAgentCommand", () => {
     ["claude", "--effort 'xhigh'"],
     ["codex", "-c 'model_reasoning_effort=\"xhigh\"'"],
     ["copilot", "--effort='xhigh'"],
-    ["opencode", "--variant 'xhigh'"],
+    // OpenCode's TUI entrypoint rejects `--variant` and exits with usage before
+    // drawing anything, so its effort control is the config env var instead.
+    ["opencode", "OPENCODE_CONFIG_CONTENT='{\"$schema\":\"https://opencode.ai/config.json\",\"agent\":{\"build\":{\"variant\":\"xhigh\"}}}'"],
     ["antigravity", "--effort 'xhigh'"],
   ] as const)("builds %s commands with its native effort control", async (provider, effortFlag) => {
     const command = await buildAgentCommand(provider, {
