@@ -47,6 +47,10 @@ export function pendingTunnelCountForTests(userId: string): number {
   return connections.get(userId)?.pendingTunnels.size ?? 0;
 }
 
+export function hasConnectionPairForTests(userId: string): boolean {
+  return connections.has(userId);
+}
+
 export function taskTransferTunnelFlowStateForTests(ws: WebSocket): {
   paused: boolean;
   peakBufferedBytes: number;
@@ -278,6 +282,21 @@ function newConnectionPair(): ConnectionPair {
 }
 
 /**
+ * Drop the user's pair only once *both* sides are gone.
+ *
+ * The pair is shared by every phone client and every desktop of one account,
+ * so deleting it while any socket is still registered strands those sockets:
+ * they stay open (their own close handlers then no-op against the replacement
+ * pair) but vanish from `list_active_desktops` and from routing, and they
+ * never reconnect because nothing told them anything was wrong.
+ */
+function deleteConnectionPairIfIdle(userId: string, pair: ConnectionPair): void {
+  if (pair.clients.size === 0 && pair.desktops.size === 0) {
+    connections.delete(userId);
+  }
+}
+
+/**
  * Store the phone-side WebSocket for a user.
  * Closes any existing phone connection for this user.
  * Cleans up the map entry when the socket closes.
@@ -302,9 +321,7 @@ export function setPhoneConnection(userId: string, ws: WebSocket): void {
           removePendingTunnel(current, tunnelId);
         }
       }
-      if (current.desktops.size === 0) {
-        connections.delete(userId);
-      }
+      deleteConnectionPairIfIdle(userId, current);
     }
   });
 }
@@ -347,10 +364,7 @@ export function setServerConnection(
           removePendingTunnel(current, tunnelId);
         }
       }
-      // Clean up map entry if both sides are gone
-      if (current.clients.size === 0) {
-        connections.delete(userId);
-      }
+      deleteConnectionPairIfIdle(userId, current);
     }
   });
 }
