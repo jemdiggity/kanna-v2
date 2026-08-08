@@ -2,6 +2,25 @@ import { describe, expect, it, vi } from "vitest";
 import { Window } from "happy-dom";
 import { buildVisualCompanionDocument } from "./buildVisualCompanionDocument";
 
+function renderCompanionDocument(document: string): Window {
+  const window = new Window();
+  window.document.write(document);
+  const render = window.document.querySelector<HTMLScriptElement>(
+    "#kanna-companion-render"
+  );
+  expect(render).not.toBeNull();
+  window.eval(render?.textContent ?? "");
+  return window;
+}
+
+function installCompanionBridge(window: Window): void {
+  const bridge = window.document.querySelector<HTMLScriptElement>(
+    "#kanna-companion-bridge"
+  );
+  expect(bridge).not.toBeNull();
+  window.eval(bridge?.textContent ?? "");
+}
+
 describe("buildVisualCompanionDocument", () => {
   it("wraps fragments in a responsive companion document", () => {
     const fragment = '<section data-note="raw"><button data-choice="a">A</button></section>';
@@ -13,10 +32,16 @@ describe("buildVisualCompanionDocument", () => {
     expect(document).toMatch(/^<!doctype html>/i);
     expect(document).toContain('<meta name="viewport"');
     expect(document).toContain('<main id="kanna-companion-content">');
-    expect(document).toContain(fragment);
+    expect(document).not.toContain(fragment);
+    expect(document).toContain('id="kanna-companion-render"');
     expect(document).toContain(".option.selected");
     expect(document).toContain(".cards {");
     expect(document).toContain(".split {");
+
+    const window = renderCompanionDocument(document);
+    const section = window.document.querySelector("main > section");
+    expect(section?.dataset.note).toBe("raw");
+    expect(section?.querySelector("button")?.textContent).toBe("A");
   });
 
   it("adds a restrictive CSP while allowing inline companion UI and remote images", () => {
@@ -34,7 +59,7 @@ describe("buildVisualCompanionDocument", () => {
     expect(document).toContain("frame-src 'none'");
     expect(document).toContain("object-src 'none'");
     expect(document).toContain("base-uri 'none'");
-    expect(document).toContain("navigate-to 'none'");
+    expect(document).not.toContain("navigate-to");
   });
 
   it("preserves a full document body and injects the policy and bridge", () => {
@@ -48,20 +73,18 @@ describe("buildVisualCompanionDocument", () => {
       html: source
     });
 
-    expect(document).toContain('<article id="kept">Keep me</article>');
-    expect(document).toContain("<title>Agent UI</title>");
     expect(document.indexOf("Content-Security-Policy")).toBeLessThan(
       document.indexOf("</head>")
     );
     expect(document).toContain("kanna-companion-bridge");
 
-    const window = new Window();
-    window.document.write(document);
+    const window = renderCompanionDocument(document);
     expect(
       window.document.head.querySelector(
         'meta[http-equiv="Content-Security-Policy"]'
       )
     ).not.toBeNull();
+    expect(window.document.title).toBe("Agent UI");
     expect(window.document.body.querySelector("#kept")?.textContent).toBe(
       "Keep me"
     );
@@ -117,16 +140,12 @@ describe("buildVisualCompanionDocument", () => {
       documentKind: "fragment",
       html: `<button id="${id}" data-choice="${choice}">${text}</button>`
     });
-    const window = new Window();
+    const window = renderCompanionDocument(document);
     const postMessage = vi.fn();
     (window as unknown as {
       ReactNativeWebView: { postMessage(message: string): void };
     }).ReactNativeWebView = { postMessage };
-    window.document.write(document);
-    const bridge = window.document.querySelector<HTMLScriptElement>(
-      "#kanna-companion-bridge"
-    );
-    window.eval(bridge?.textContent ?? "");
+    installCompanionBridge(window);
 
     window.document.querySelector<HTMLButtonElement>("button")?.click();
 
@@ -153,7 +172,30 @@ describe("buildVisualCompanionDocument", () => {
       html: hostile
     });
 
-    expect(document).toContain(hostile);
-    expect(document.replace(hostile, "")).toBe(baseline);
+    expect(document).not.toContain(hostile);
+    expect(
+      document
+        .replace(
+          windowSourcePayload(document),
+          windowSourcePayload(baseline)
+        )
+    ).toBe(baseline);
+
+    const window = renderCompanionDocument(document);
+    expect(
+      (window as unknown as { agentScript?: boolean }).agentScript
+    ).toBeUndefined();
+    expect(window.document.querySelector("script:not([id])")).toBeNull();
+    expect(window.document.querySelector("pre")?.textContent).toContain(
+      "` ${window.pwned}"
+    );
   });
 });
+
+function windowSourcePayload(document: string): string {
+  const window = new Window();
+  window.document.write(document);
+  return (
+    window.document.querySelector("#kanna-companion-source")?.textContent ?? ""
+  );
+}

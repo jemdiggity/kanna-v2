@@ -1,17 +1,27 @@
+use super::companion::{
+    open_owner_control_payload, open_peer_companion_stream, seal_observe_companion_proof,
+    seal_send_companion_event_proof, stream_peer_companion, CompanionInboundByteBudget,
+    MAX_COMPANION_INBOUND_DECODE_BYTES, MAX_CONCURRENT_COMPANION_INBOUND_DECODES,
+};
 use super::config::{DiscoveryMode, RuntimeConfig};
 use super::daemon::stream_peer_session;
 use super::discovery::{MdnsDiscovery, PeerDiscovery};
 use super::events::{RuntimeError, RuntimeEvent};
 use super::external_peers;
-use super::listener::run_listener;
+use super::listener::{run_listener, MAX_CONCURRENT_PREAUTH_REQUESTS};
 use super::replay_store::{unix_ms, TransferReplayStore};
-use super::state::{ListenerContext, TerminalObserverSlot, TransferRuntime};
+use super::state::{
+    install_companion_observer_if_latest, remove_companion_observer_generation,
+    remove_companion_observer_registration, runtime_event_channel_with_capacity, CompanionObserver,
+    ListenerContext, RuntimeEventSender, TerminalObserverSlot, TransferRuntime,
+};
 use super::utils::{
     load_or_create_identity, registry_entry_path, remove_managed_artifact_root,
     terminal_observer_key, unexpected_peer_response, CURRENT_PROTOCOL_VERSION,
 };
 use crate::crypto::{parse_public_key, public_key_to_string, seal_json};
 use crate::discovery::encode_txt_record;
+use crate::protocol::COMPANION_PROTOCOL_VERSION;
 use crate::protocol::{
     DiscoveredPeer, LocalTransferIdentity, PeerTaskSnapshot, PeerTaskSnapshotIssue,
     PeerTaskSnapshotListing,
@@ -20,14 +30,230 @@ use crate::protocol::{PeerRegistryEntry, PeerRequest, PeerResponse, PeerTerminal
 use crate::registry::PeerRegistry;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use kanna_agent_protocol::{CompanionEvent, ServerFrame};
 use rand_core::{OsRng, RngCore};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::process;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::{Mutex as StdMutex, OnceLock};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex, Semaphore};
+
+#[cfg(test)]
+struct CompanionRegistrationTestGate {
+    blocked_generation: String,
+    contender_generation: String,
+    blocked: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    contender_entered: tokio::sync::Notify,
+    contender_passed: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+pub(super) struct CompanionRegistrationTestGateGuard(Arc<CompanionRegistrationTestGate>);
+
+#[cfg(test)]
+static COMPANION_REGISTRATION_TEST_GATE: OnceLock<
+    StdMutex<Option<Arc<CompanionRegistrationTestGate>>>,
+> = OnceLock::new();
+
+#[cfg(test)]
+pub(super) fn install_companion_registration_test_gate(
+    blocked_generation: &str,
+    contender_generation: &str,
+) -> CompanionRegistrationTestGateGuard {
+    let gate = Arc::new(CompanionRegistrationTestGate {
+        blocked_generation: blocked_generation.to_owned(),
+        contender_generation: contender_generation.to_owned(),
+        blocked: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        contender_entered: tokio::sync::Notify::new(),
+        contender_passed: tokio::sync::Notify::new(),
+    });
+    *COMPANION_REGISTRATION_TEST_GATE
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&gate));
+    CompanionRegistrationTestGateGuard(gate)
+}
+
+#[cfg(test)]
+impl CompanionRegistrationTestGateGuard {
+    pub(super) async fn wait_until_blocked(&self) {
+        self.0.blocked.notified().await;
+    }
+
+    pub(super) fn release(&self) {
+        self.0.release.notify_one();
+    }
+
+    pub(super) async fn wait_until_contender_entered(&self) {
+        self.0.contender_entered.notified().await;
+    }
+
+    pub(super) async fn wait_until_contender_passed(&self) {
+        self.0.contender_passed.notified().await;
+    }
+}
+
+#[cfg(test)]
+impl Drop for CompanionRegistrationTestGateGuard {
+    fn drop(&mut self) {
+        self.0.release.notify_one();
+        let mut installed = COMPANION_REGISTRATION_TEST_GATE
+            .get_or_init(|| StdMutex::new(None))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if installed
+            .as_ref()
+            .is_some_and(|gate| Arc::ptr_eq(gate, &self.0))
+        {
+            *installed = None;
+        }
+    }
+}
+
+#[cfg(test)]
+fn notify_companion_registration_test_gate_entered(generation: &str) {
+    let gate = COMPANION_REGISTRATION_TEST_GATE
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .filter(|gate| gate.contender_generation == generation)
+        .cloned();
+    if let Some(gate) = gate {
+        gate.contender_entered.notify_one();
+    }
+}
+
+#[cfg(not(test))]
+fn notify_companion_registration_test_gate_entered(_generation: &str) {}
+
+#[cfg(test)]
+async fn wait_for_companion_registration_test_gate(generation: &str) {
+    let gate = COMPANION_REGISTRATION_TEST_GATE
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Some(gate) = gate {
+        if gate.contender_generation == generation {
+            gate.contender_passed.notify_one();
+            return;
+        }
+        if gate.blocked_generation == generation {
+            gate.blocked.notify_one();
+            gate.release.notified().await;
+        }
+    }
+}
+
+#[cfg(not(test))]
+async fn wait_for_companion_registration_test_gate(_generation: &str) {}
+
+struct CompanionObserverRegistrationRollback {
+    latest_generations: Arc<Mutex<HashMap<(String, String), (u64, String)>>>,
+    incoming_sender: RuntimeEventSender,
+    observer_key: (String, String),
+    generation: String,
+    generation_order: u64,
+    armed: bool,
+}
+
+impl CompanionObserverRegistrationRollback {
+    fn new(
+        latest_generations: Arc<Mutex<HashMap<(String, String), (u64, String)>>>,
+        incoming_sender: RuntimeEventSender,
+        observer_key: (String, String),
+        generation: String,
+        generation_order: u64,
+    ) -> Self {
+        Self {
+            latest_generations,
+            incoming_sender,
+            observer_key,
+            generation,
+            generation_order,
+            armed: true,
+        }
+    }
+
+    async fn rollback(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let removed = remove_companion_observer_registration(
+            &mut *self.latest_generations.lock().await,
+            &self.observer_key,
+            &self.generation,
+            self.generation_order,
+        );
+        if removed {
+            self.incoming_sender.unregister_companion_generation(
+                &self.observer_key.0,
+                &self.observer_key.1,
+                &self.generation,
+                self.generation_order,
+            );
+        }
+        self.armed = false;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CompanionObserverRegistrationRollback {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut latest_generations) = self.latest_generations.try_lock() {
+            let removed = remove_companion_observer_registration(
+                &mut latest_generations,
+                &self.observer_key,
+                &self.generation,
+                self.generation_order,
+            );
+            if removed {
+                self.incoming_sender.unregister_companion_generation(
+                    &self.observer_key.0,
+                    &self.observer_key.1,
+                    &self.generation,
+                    self.generation_order,
+                );
+            }
+            return;
+        }
+
+        let latest_generations = Arc::clone(&self.latest_generations);
+        let incoming_sender = self.incoming_sender.clone();
+        let observer_key = self.observer_key.clone();
+        let generation = self.generation.clone();
+        let generation_order = self.generation_order;
+        tokio::spawn(async move {
+            let removed = remove_companion_observer_registration(
+                &mut *latest_generations.lock().await,
+                &observer_key,
+                &generation,
+                generation_order,
+            );
+            if removed {
+                incoming_sender.unregister_companion_generation(
+                    &observer_key.0,
+                    &observer_key.1,
+                    &generation,
+                    generation_order,
+                );
+            }
+        });
+    }
+}
 
 impl TransferRuntime {
     pub fn local_identity(&self) -> LocalTransferIdentity {
@@ -100,7 +326,7 @@ impl TransferRuntime {
             ),
         };
         let (incoming_sender, incoming_receiver) =
-            mpsc::channel(config.max_lifecycle_events.max(1));
+            runtime_event_channel_with_capacity(config.max_lifecycle_events.max(1));
         let (receipt_sender, receipt_receiver) =
             mpsc::channel(config.max_unapplied_receipts.max(1));
         let pending_pairing_requests = Arc::new(Mutex::new(HashMap::new()));
@@ -161,6 +387,23 @@ impl TransferRuntime {
         let artifact_peer_request_permits = Arc::new(Semaphore::new(1));
         let mark_read_peer_request_permits =
             Arc::new(Semaphore::new(config.max_mark_read_peer_requests));
+        let companion_observers = Arc::new(Mutex::new(HashMap::new()));
+        let companion_observer_generations = Arc::new(Mutex::new(HashMap::new()));
+        let active_owner_companions = Arc::new(AtomicUsize::new(0));
+        let owner_companion_retained_bytes = Arc::new(AtomicUsize::new(0));
+        let owner_companion_sources = Arc::new(Mutex::new(HashMap::new()));
+        let companion_materialization_budget = Arc::new(
+            kanna_visual_companion::CompanionMaterializationBudget::new(2, 64 * 1024 * 1024),
+        );
+        let companion_inbound_decode_budget = Arc::new(CompanionInboundByteBudget::new(
+            MAX_COMPANION_INBOUND_DECODE_BYTES,
+        ));
+        let companion_inbound_decode_slots =
+            Arc::new(Semaphore::new(MAX_CONCURRENT_COMPANION_INBOUND_DECODES));
+        let owner_companion_encoding_slots = Arc::new(Semaphore::new(2));
+        let owner_companion_observers = Arc::new(Mutex::new(HashMap::new()));
+        let companion_proof_nonces = Arc::new(Mutex::new(HashMap::new()));
+        let preauth_requests = Arc::new(Semaphore::new(MAX_CONCURRENT_PREAUTH_REQUESTS));
         let request_counter = Arc::new(AtomicU64::new(1));
         let request_namespace = random_request_namespace();
         let listener_context = ListenerContext {
@@ -177,7 +420,6 @@ impl TransferRuntime {
             finalization_request_timeout: config.finalization_request_timeout,
             incoming_connection_permits,
             legacy_artifact_memory_permits: Arc::clone(&legacy_artifact_memory_permits),
-            max_peer_request_bytes: config.max_peer_request_bytes,
             max_pending_pairing_requests: config.max_lifecycle_events,
             max_task_pull_requests: config.max_task_pull_requests,
             max_finalization_waiters: config.max_finalization_waiters,
@@ -194,11 +436,20 @@ impl TransferRuntime {
             authenticated_peer_requests,
             max_authenticated_request_replays: config.max_authenticated_request_replays,
             task_snapshot: Arc::clone(&task_snapshot),
+            db_path: config.db_path.clone(),
             daemon_dir: config.daemon_dir.clone(),
             kanna_server_port: config.kanna_server_port,
             request_counter: Arc::clone(&request_counter),
             incoming_sender: incoming_sender.clone(),
             receipt_sender: receipt_sender.clone(),
+            active_owner_companions: Arc::clone(&active_owner_companions),
+            owner_companion_retained_bytes: Arc::clone(&owner_companion_retained_bytes),
+            owner_companion_sources: Arc::clone(&owner_companion_sources),
+            companion_materialization_budget: Arc::clone(&companion_materialization_budget),
+            owner_companion_encoding_slots,
+            owner_companion_observers: Arc::clone(&owner_companion_observers),
+            companion_proof_nonces,
+            preauth_requests: Arc::clone(&preauth_requests),
         };
         let listener_task = tokio::spawn(run_listener(listener, listener_context));
         let retry_receipts = Arc::clone(&import_commit_receipts);
@@ -238,6 +489,16 @@ impl TransferRuntime {
             peer_request_permits,
             artifact_peer_request_permits,
             mark_read_peer_request_permits,
+            companion_observers,
+            companion_observer_generations,
+            owner_companion_observers,
+            active_owner_companions,
+            owner_companion_retained_bytes,
+            owner_companion_sources,
+            companion_materialization_budget,
+            companion_inbound_decode_budget,
+            companion_inbound_decode_slots,
+            preauth_requests,
             incoming_sender,
             incoming_events: Mutex::new(incoming_receiver),
             receipt_events: Mutex::new(receipt_receiver),
@@ -484,7 +745,7 @@ impl TransferRuntime {
         let handle = tokio::spawn(async move {
             if let Err(error) = stream_peer_session(
                 peer_for_task,
-                request_id,
+                request_id.clone(),
                 self_peer_id,
                 session_id.clone(),
                 sealed_payload,
@@ -564,6 +825,489 @@ impl TransferRuntime {
                 }
             }
         }
+    }
+
+    pub async fn observe_peer_companion(
+        &self,
+        target_peer_id: &str,
+        task_id: &str,
+        generation: &str,
+    ) -> Result<(), RuntimeError> {
+        let observer_order = self.request_counter.fetch_add(1, Ordering::Relaxed);
+        let observer_key = (target_peer_id.to_owned(), task_id.to_owned());
+        let generation = generation.to_owned();
+        let target_peer = self.find_peer(target_peer_id).await?;
+        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        if target_peer.protocol_version < COMPANION_PROTOCOL_VERSION {
+            return Err(RuntimeError::Protocol(
+                "peer does not support visual companions".into(),
+            ));
+        }
+        notify_companion_registration_test_gate_entered(&generation);
+        let (replaced, mut registration_rollback) = {
+            let mut latest_generations = self.companion_observer_generations.lock().await;
+            if latest_generations
+                .get(&observer_key)
+                .is_some_and(|(latest_order, _)| *latest_order > observer_order)
+            {
+                return Ok(());
+            }
+            let previous_registration = latest_generations.get(&observer_key).cloned();
+            let mut observers = self.companion_observers.lock().await;
+            let replaced =
+                previous_registration.and_then(|(previous_order, previous_generation)| {
+                    if observers.get(&observer_key).is_some_and(|observer| {
+                        observer.generation_order == previous_order
+                            && observer.generation == previous_generation
+                    }) {
+                        observers.remove(&observer_key)
+                    } else {
+                        None
+                    }
+                });
+            latest_generations.insert(observer_key.clone(), (observer_order, generation.clone()));
+            self.incoming_sender.register_companion_generation(
+                target_peer_id,
+                task_id,
+                &generation,
+                observer_order,
+            );
+            let registration_rollback = CompanionObserverRegistrationRollback::new(
+                Arc::clone(&self.companion_observer_generations),
+                self.incoming_sender.clone(),
+                observer_key.clone(),
+                generation.clone(),
+                observer_order,
+            );
+            wait_for_companion_registration_test_gate(&generation).await;
+            (replaced, registration_rollback)
+        };
+        if let Some(observer) = replaced {
+            observer.handle.abort();
+            self.incoming_sender.invalidate_companion(
+                target_peer_id,
+                task_id,
+                &observer.generation,
+                observer.generation_order,
+            );
+        }
+
+        let opening = async {
+            let request_id = self.next_request_id("observe-companion");
+            let target_public = parse_public_key(&target_peer.public_key)?;
+            let (sealed_proof, stream_nonce) = seal_observe_companion_proof(
+                &self.identity,
+                &target_public,
+                &request_id,
+                &self.config.peer_id,
+                task_id,
+                &generation,
+            )?;
+            let (stream, observation_challenge) = tokio::time::timeout(
+                self.config.peer_request_timeout,
+                open_peer_companion_stream(
+                    target_peer.clone(),
+                    request_id.clone(),
+                    self.config.peer_id.clone(),
+                    task_id.to_owned(),
+                    generation.clone(),
+                    sealed_proof,
+                    stream_nonce.clone(),
+                    &self.identity,
+                ),
+            )
+            .await
+            .map_err(|_| RuntimeError::PeerRequestTimeout {
+                peer_id: target_peer.peer_id.clone(),
+                timeout_ms: self.config.peer_request_timeout.as_millis(),
+            })??;
+            Ok::<_, RuntimeError>((request_id, stream_nonce, stream, observation_challenge))
+        }
+        .await;
+        let (request_id, stream_nonce, stream, observation_challenge) = match opening {
+            Ok(opened) => opened,
+            Err(error) => {
+                registration_rollback.rollback().await;
+                return Err(error);
+            }
+        };
+        let task_id = task_id.to_owned();
+        let incoming_sender = self.incoming_sender.clone();
+        let peer_for_task = target_peer.clone();
+        let peer_id_for_error = target_peer.peer_id.clone();
+        let task_id_for_error = task_id.clone();
+        let task_id_for_install = task_id.clone();
+        let observers_for_cleanup = Arc::clone(&self.companion_observers);
+        let generations_for_cleanup = Arc::clone(&self.companion_observer_generations);
+        let observer_key_for_cleanup = observer_key.clone();
+        let generation_for_cleanup = generation.clone();
+        let request_id_for_stream = request_id;
+        let stream_nonce_for_stream = stream_nonce.clone();
+        let observation_challenge_for_stream = observation_challenge.clone();
+        let identity_for_stream = self.identity.clone();
+        let inbound_decode_slots = Arc::clone(&self.companion_inbound_decode_slots);
+        let inbound_decode_budget = Arc::clone(&self.companion_inbound_decode_budget);
+        let (start_sender, start_receiver) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            if start_receiver.await.is_err() {
+                return;
+            }
+            if let Err(error) = stream_peer_companion(
+                peer_for_task,
+                task_id.clone(),
+                generation_for_cleanup.clone(),
+                observer_order,
+                request_id_for_stream,
+                stream_nonce_for_stream,
+                observation_challenge_for_stream,
+                identity_for_stream,
+                incoming_sender.clone(),
+                stream,
+                inbound_decode_slots,
+                inbound_decode_budget,
+            )
+            .await
+            {
+                let _ = incoming_sender
+                    .send(RuntimeEvent::CompanionEvent {
+                        peer_id: peer_id_for_error.clone(),
+                        task_id: task_id_for_error.clone(),
+                        generation: generation_for_cleanup.clone(),
+                        generation_order: observer_order,
+                        frame: ServerFrame::CompanionError {
+                            task_id: task_id_for_error.clone(),
+                            code: "connection_failed".into(),
+                            message: error.to_string(),
+                            attachment_epoch: None,
+                        },
+                    })
+                    .await;
+            }
+            let removed = {
+                let mut latest_generations = generations_for_cleanup.lock().await;
+                let mut observers = observers_for_cleanup.lock().await;
+                let removed = remove_companion_observer_generation(
+                    &mut observers,
+                    &observer_key_for_cleanup,
+                    &generation_for_cleanup,
+                    observer_order,
+                );
+                if removed {
+                    remove_companion_observer_registration(
+                        &mut latest_generations,
+                        &observer_key_for_cleanup,
+                        &generation_for_cleanup,
+                        observer_order,
+                    );
+                }
+                removed
+            };
+            if removed {
+                incoming_sender.unregister_companion_generation(
+                    &peer_id_for_error,
+                    &task_id_for_error,
+                    &generation_for_cleanup,
+                    observer_order,
+                );
+            }
+        });
+        let candidate = CompanionObserver {
+            generation,
+            generation_order: observer_order,
+            handle,
+            stream_nonce,
+            observation_challenge,
+            next_event_sequence: Arc::new(AtomicU64::new(1)),
+            send_lock: Arc::new(Mutex::new(())),
+        };
+        let installation = {
+            let latest_generations = self.companion_observer_generations.lock().await;
+            let mut observers = self.companion_observers.lock().await;
+            install_companion_observer_if_latest(
+                &latest_generations,
+                &mut observers,
+                observer_key,
+                candidate,
+            )
+        };
+        match installation {
+            Ok(replaced) => {
+                registration_rollback.disarm();
+                if let Some(replaced) = replaced {
+                    replaced.handle.abort();
+                    self.incoming_sender.invalidate_companion(
+                        target_peer_id,
+                        &task_id_for_install,
+                        &replaced.generation,
+                        replaced.generation_order,
+                    );
+                }
+            }
+            Err(stale) => {
+                stale.handle.abort();
+                registration_rollback.rollback().await;
+                return Ok(());
+            }
+        }
+        let _ = start_sender.send(());
+        Ok(())
+    }
+
+    pub async fn unobserve_peer_companion(
+        &self,
+        target_peer_id: &str,
+        task_id: &str,
+        generation: &str,
+    ) -> Result<(), RuntimeError> {
+        let observer_key = (target_peer_id.to_owned(), task_id.to_owned());
+        let mut latest_generations = self.companion_observer_generations.lock().await;
+        let mut observers = self.companion_observers.lock().await;
+        let observer = if observers
+            .get(&observer_key)
+            .is_some_and(|observer| observer.generation == generation)
+        {
+            observers.remove(&observer_key)
+        } else {
+            None
+        };
+        let registration = latest_generations
+            .get(&observer_key)
+            .filter(|(_, current_generation)| current_generation == &generation)
+            .cloned();
+        if let Some((generation_order, current_generation)) = &registration {
+            remove_companion_observer_registration(
+                &mut latest_generations,
+                &observer_key,
+                current_generation,
+                *generation_order,
+            );
+        }
+        drop(observers);
+        drop(latest_generations);
+
+        let registration_matches_observer = observer
+            .as_ref()
+            .zip(registration.as_ref())
+            .is_some_and(|(observer, (generation_order, current_generation))| {
+                observer.generation_order == *generation_order
+                    && observer.generation == current_generation.as_str()
+            });
+        if let Some(observer) = observer {
+            observer.handle.abort();
+            if !registration_matches_observer {
+                self.incoming_sender.unregister_companion_generation(
+                    target_peer_id,
+                    task_id,
+                    &observer.generation,
+                    observer.generation_order,
+                );
+            }
+        }
+        if let Some((generation_order, current_generation)) = registration {
+            self.incoming_sender.unregister_companion_generation(
+                target_peer_id,
+                task_id,
+                &current_generation,
+                generation_order,
+            );
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub async fn companion_observer_count(&self) -> usize {
+        self.companion_observers.lock().await.len()
+    }
+
+    #[doc(hidden)]
+    pub fn active_owner_companion_count(&self) -> usize {
+        self.active_owner_companions.load(Ordering::Acquire)
+    }
+
+    #[doc(hidden)]
+    pub fn owner_companion_retained_bytes(&self) -> usize {
+        self.owner_companion_retained_bytes.load(Ordering::Acquire)
+    }
+
+    #[doc(hidden)]
+    pub async fn owner_companion_source_count(&self) -> usize {
+        // Reading both shared fields here keeps the diagnostics tied to the
+        // same runtime-owned admission domain.
+        let _ = self.companion_materialization_budget.retained_bytes();
+        self.owner_companion_sources.lock().await.len()
+    }
+
+    #[doc(hidden)]
+    pub async fn owner_companion_observer_count(&self) -> usize {
+        self.owner_companion_observers.lock().await.len()
+    }
+
+    #[doc(hidden)]
+    pub fn active_preauth_request_count(&self) -> usize {
+        MAX_CONCURRENT_PREAUTH_REQUESTS - self.preauth_requests.available_permits()
+    }
+
+    pub async fn send_peer_companion_event(
+        &self,
+        target_peer_id: &str,
+        task_id: &str,
+        session_id: &str,
+        revision: &str,
+        generation: &str,
+        mut event: CompanionEvent,
+    ) -> Result<(), RuntimeError> {
+        event.session_id = session_id.to_owned();
+        event.revision = revision.to_owned();
+        let target_peer = self.find_peer(target_peer_id).await?;
+        self.ensure_peer_is_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        if target_peer.protocol_version < COMPANION_PROTOCOL_VERSION {
+            return Err(RuntimeError::Protocol(
+                "peer does not support visual companions".into(),
+            ));
+        }
+        let target_public = parse_public_key(&target_peer.public_key)?;
+        let observer_key = (target_peer_id.to_owned(), task_id.to_owned());
+        let (send_lock, generation_order) = {
+            let observers = self.companion_observers.lock().await;
+            let observer = observers
+                .get(&observer_key)
+                .filter(|observer| observer.generation == generation)
+                .ok_or_else(|| {
+                    RuntimeError::Protocol("companion observation is not active".into())
+                })?;
+            (Arc::clone(&observer.send_lock), observer.generation_order)
+        };
+        let _send_guard = send_lock.lock().await;
+        let result = async {
+            let request_id = self.next_request_id("companion-event");
+            let (stream_nonce, observation_challenge, sequence) = {
+                let observers = self.companion_observers.lock().await;
+                let observer = observers
+                    .get(&observer_key)
+                    .filter(|observer| {
+                        observer.generation == generation
+                            && observer.generation_order == generation_order
+                    })
+                    .ok_or_else(|| {
+                        RuntimeError::Protocol("companion observation is not active".into())
+                    })?;
+                (
+                    observer.stream_nonce.clone(),
+                    observer.observation_challenge.clone(),
+                    observer.next_event_sequence.fetch_add(1, Ordering::AcqRel),
+                )
+            };
+            let sealed_proof = seal_send_companion_event_proof(
+                &self.identity,
+                &target_public,
+                &request_id,
+                &self.config.peer_id,
+                task_id,
+                session_id,
+                revision,
+                generation,
+                &stream_nonce,
+                &observation_challenge,
+                sequence,
+                &event,
+            )?;
+            let response = self
+                .send_peer_request_with_line_limit(
+                    &target_peer,
+                    PeerRequest::SendCompanionEvent {
+                        request_id: request_id.clone(),
+                        requester_peer_id: self.config.peer_id.clone(),
+                        sealed_payload: sealed_proof,
+                    },
+                    Some(super::companion::MAX_COMPANION_CONTROL_LINE_BYTES),
+                )
+                .await?;
+            match response {
+                PeerResponse::SendCompanionEvent {
+                    request_id: response_request_id,
+                    sealed_payload,
+                } if response_request_id == request_id => {
+                    let (
+                        operation,
+                        bound_request_id,
+                        bound_task_id,
+                        bound_generation,
+                        bound_stream_nonce,
+                        bound_observation_challenge,
+                        bound_sequence,
+                        frame,
+                    ) = open_owner_control_payload(
+                        &self.identity,
+                        &target_public,
+                        &sealed_payload,
+                    )?;
+                    if operation != "companion_event_result"
+                        || bound_request_id != request_id
+                        || bound_task_id != task_id
+                        || bound_generation != generation
+                        || bound_stream_nonce != stream_nonce
+                        || bound_observation_challenge != observation_challenge
+                        || bound_sequence != sequence
+                    {
+                        return Err(RuntimeError::Protocol(
+                            "companion event result binding is invalid".into(),
+                        ));
+                    }
+                    let frame = frame.ok_or_else(|| {
+                        RuntimeError::Protocol("companion event result frame is missing".into())
+                    })?;
+                    if super::companion::frame_task_id(&frame) != Some(task_id) {
+                        return Err(RuntimeError::Protocol(
+                            "companion event result task is invalid".into(),
+                        ));
+                    }
+                    self.incoming_sender
+                        .send(RuntimeEvent::CompanionEvent {
+                            peer_id: target_peer.peer_id,
+                            task_id: task_id.to_owned(),
+                            generation: generation.to_owned(),
+                            generation_order,
+                            frame,
+                        })
+                        .await
+                        .map_err(|_| RuntimeError::IncomingEventChannelClosed)
+                }
+                PeerResponse::Error { message, .. } => Err(RuntimeError::Protocol(message)),
+                other => Err(unexpected_peer_response("send-companion-event", &other)),
+            }
+        }
+        .await;
+        if result.is_err() {
+            let removed = {
+                let mut latest_generations = self.companion_observer_generations.lock().await;
+                let mut observers = self.companion_observers.lock().await;
+                if observers.get(&observer_key).is_some_and(|observer| {
+                    observer.generation == generation
+                        && observer.generation_order == generation_order
+                }) {
+                    let removed = observers.remove(&observer_key);
+                    remove_companion_observer_registration(
+                        &mut latest_generations,
+                        &observer_key,
+                        generation,
+                        generation_order,
+                    );
+                    removed
+                } else {
+                    None
+                }
+            };
+            if let Some(observer) = removed {
+                observer.handle.abort();
+                self.incoming_sender.unregister_companion_generation(
+                    target_peer_id,
+                    task_id,
+                    &observer.generation,
+                    observer.generation_order,
+                );
+            }
+        }
+        result
     }
 
     pub async fn send_peer_session_input(
@@ -924,6 +1668,11 @@ impl Drop for TransferRuntime {
                 if let Some(handle) = slot.handle {
                     handle.abort();
                 }
+            }
+        }
+        if let Ok(mut observers) = self.companion_observers.try_lock() {
+            for (_, observer) in observers.drain() {
+                observer.handle.abort();
             }
         }
     }

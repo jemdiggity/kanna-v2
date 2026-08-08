@@ -818,8 +818,10 @@ dependencies = [
  "chrono",
  "hkdf",
  "if-addrs",
+ "kanna-agent-protocol",
  "kanna-daemon",
  "kanna-runtime-defaults",
+ "kanna-visual-companion",
  "libc",
  "mdns-sd",
  "rand_core",
@@ -831,6 +833,18 @@ dependencies = [
  "thiserror",
  "tokio",
  "x25519-dalek",
+]
+
+[[package]]
+name = "kanna-visual-companion"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "kanna-agent-protocol",
+ "libc",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

@@ -57,7 +57,7 @@ interface RelayTaskFlowOptions {
   waitForQuickReplyInput(): Promise<void>;
 }
 
-interface RelayVisualCompanionActions {
+export interface RelayVisualCompanionActions {
   disconnect(): Promise<void>;
   expectNoEvent(choice: string): Promise<void>;
   invalidateSource(): Promise<void>;
@@ -68,7 +68,7 @@ interface RelayVisualCompanionActions {
   waitForEvent(choice: string): Promise<unknown>;
 }
 
-interface RelayVisualCompanionUi {
+export interface RelayVisualCompanionUi {
   clickChoice(choice: string): Promise<void>;
   close(): Promise<void>;
   open(): Promise<void>;
@@ -696,7 +696,7 @@ async function withVisualCompanionWebView<T>(
   );
 }
 
-function createVisualCompanionUi(driver: Browser): RelayVisualCompanionUi {
+export function createVisualCompanionUi(driver: Browser): RelayVisualCompanionUi {
   return {
     async open() {
       const button = await driver.$(selectors.visualCompanionButton);

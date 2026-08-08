@@ -1,5 +1,7 @@
+use kanna_agent_protocol::ServerFrame;
 use kanna_task_transfer::protocol::{
-    ControlRequest, ControlResponse, PeerRequest, PeerResponse, PeerTerminalEvent, SidecarEvent,
+    ControlRequest, ControlResponse, PeerCompanionEvent, PeerRequest, PeerResponse,
+    PeerTerminalEvent, SidecarEvent,
 };
 use kanna_task_transfer::runtime::{ExternalPeer, TransferTransport};
 use serde_json::json;
@@ -48,6 +50,33 @@ fn get_local_identity_control_messages_roundtrip() {
         }),
     );
     assert_roundtrip(response);
+}
+
+#[test]
+fn companion_messages_roundtrip_with_shared_protocol_frames() {
+    assert_roundtrip(PeerRequest::ObserveCompanion {
+        request_id: "req-observe".into(),
+        requester_peer_id: "peer-viewer".into(),
+        sealed_payload: "sealed-observe".into(),
+    });
+    assert_roundtrip(PeerRequest::SendCompanionEvent {
+        request_id: "req-event".into(),
+        requester_peer_id: "peer-viewer".into(),
+        sealed_payload: "sealed-event".into(),
+    });
+    assert_roundtrip(SidecarEvent::CompanionEvent {
+        peer_id: "peer-owner".into(),
+        task_id: "task-1".into(),
+        generation: "generation-1".into(),
+        generation_order: 1,
+        frame: ServerFrame::CompanionUnavailable {
+            task_id: "task-1".into(),
+            attachment_epoch: None,
+        },
+    });
+    assert_roundtrip(PeerCompanionEvent::Sealed {
+        sealed_payload: "sealed-frame".into(),
+    });
 }
 
 #[test]

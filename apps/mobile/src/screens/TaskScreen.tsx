@@ -34,7 +34,6 @@ import type {
 } from "../state/sessionStore";
 import type { TerminalOutputLike } from "../state/terminalOutputBuffer";
 import type {
-  CompanionDocumentKind,
   CompanionEvent,
   FrameAgentEvent,
   PermissionDecision
@@ -49,7 +48,10 @@ import {
   mentionedFilesActionLabel,
   type TerminalFileMentionHistory
 } from "./terminalFileMentions";
-import { VisualCompanionModal } from "./VisualCompanionModal";
+import {
+  VisualCompanionModal,
+  type VisualCompanionSnapshot
+} from "./VisualCompanionModal";
 import {
   clampTaskComposerHeight,
   TASK_COMPOSER_MAX_HEIGHT,
@@ -91,12 +93,7 @@ interface TaskScreenProps {
   taskCreationPhase?: TaskCreationPhase;
   taskCreationErrorMessage?: string | null;
   companionStatus?: TaskCompanionStatus;
-  companionSnapshot?: {
-    sessionId: string;
-    revision: string;
-    documentKind: CompanionDocumentKind;
-    html: string;
-  } | null;
+  companionSnapshot?: VisualCompanionSnapshot | null;
   companionUnread?: boolean;
   companionErrorMessage?: string | null;
   companionEventStatus?: TaskCompanionEventStatus;
@@ -736,16 +733,24 @@ export function TaskScreen({
               accessibilityLabel={
                 companionStatus === "error"
                   ? "Visual companion unavailable"
+                  : companionUnread
+                    ? "Visual companion ready, new update"
                   : "Visual companion ready"
               }
               accessibilityRole="button"
+              accessibilityValue={
+                companionStatus === "available" && companionUnread
+                  ? { text: "unread" }
+                  : undefined
+              }
               onPress={openCompanion}
               style={styles.companionButton}
               testID={MOBILE_E2E_IDS.visualCompanionButton}
             >
               {companionStatus === "available" && companionUnread ? (
                 <View
-                  accessibilityLabel="New visual companion update"
+                  accessible={false}
+                  importantForAccessibility="no-hide-descendants"
                   style={styles.companionUnread}
                   testID={MOBILE_E2E_IDS.visualCompanionUnread}
                 />

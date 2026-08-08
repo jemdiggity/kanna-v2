@@ -1,15 +1,33 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { access, copyFile, mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createConnection, createServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
 import { homedir } from "node:os";
-import { dirname, basename, delimiter, join, posix, resolve } from "node:path";
+import { dirname, basename, join, posix, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { AGENT_PROVIDER_SPECS } from "@kanna/agent-protocol";
 import { buildRealE2eAgentEnv } from "./runEnv";
 import { createInstanceConfig, type InstanceConfig } from "./runConfig";
+import {
+  buildAgentProviderIsolationEnv,
+  composeInstanceStartEnv,
+} from "./agentProviderIsolation";
 import { pauseBeforeTestTarget, pauseForAppReady } from "./helpers/runSlowMode";
-import { isRealTestTarget, shouldStartInitialInstances } from "./runPlan";
+import {
+  isRealTestTarget,
+  relayStartupReportedListening,
+  shouldStartInitialInstances,
+  targetNeedsEmulators,
+  targetNeedsIsolatedAgentProviders,
+  targetNeedsPlaywrightChromium,
+  targetNeedsRelay,
+  targetNeedsRelayControl,
+  targetNeedsSecondaryInstance,
+  resolveRelayControlOperation,
+} from "./runPlan";
+import { assertPlaywrightChromiumAvailable } from "./playwrightPreflight";
 import { createPortAllocator } from "./runPorts";
 import {
   classifyAppStartup,
@@ -39,59 +57,12 @@ function sanitizeSuffix(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, "-");
 }
 
-async function isExecutable(path: string): Promise<boolean> {
-  return await access(path, constants.X_OK).then(() => true).catch(() => false);
-}
-
 function agentCliVersionFixtureEnv(): Record<string, string> {
   return {
     KANNA_E2E_AGENT_CLI_VERSION_CLAUDE: "2.1.118 (Claude Code)\n",
     KANNA_E2E_AGENT_CLI_VERSION_COPILOT: "GitHub Copilot CLI 1.0.32.\nRun 'copilot update' to check for updates.\n",
     KANNA_E2E_AGENT_CLI_VERSION_CODEX: "codex-cli 0.125.0-beta.1+20260429\n",
     KANNA_E2E_AGENT_CLI_VERSION_OPENCODE: "1.4.3\n",
-  };
-}
-
-async function buildAgentProviderIsolationEnv(fixtureRoot: string): Promise<Record<string, string>> {
-  const providerExecutables = new Set(AGENT_PROVIDER_SPECS.map(({ executable }) => executable));
-  const sanitizedPathEntries: string[] = [];
-  const pathRoot = join(fixtureRoot, "path");
-  const zshStartupDir = join(fixtureRoot, "zsh");
-  await mkdir(pathRoot, { recursive: true });
-  await mkdir(zshStartupDir, { recursive: true });
-
-  for (const [index, entry] of (process.env.PATH ?? "").split(delimiter).entries()) {
-    if (!entry) continue;
-    const containsProvider = (await Promise.all(
-      [...providerExecutables].map((executable) => isExecutable(join(entry, executable))),
-    )).some(Boolean);
-    if (!containsProvider) {
-      sanitizedPathEntries.push(entry);
-      continue;
-    }
-
-    const mirror = join(pathRoot, String(index));
-    await mkdir(mirror, { recursive: true });
-    const entries = await readdir(entry, { withFileTypes: true }).catch(() => []);
-    for (const candidate of entries) {
-      if (providerExecutables.has(candidate.name)) continue;
-      const source = join(entry, candidate.name);
-      if (!await isExecutable(source)) continue;
-      await symlink(source, join(mirror, candidate.name));
-    }
-    sanitizedPathEntries.push(mirror);
-  }
-
-  const sanitizedPath = sanitizedPathEntries.join(delimiter);
-  const shellPath = sanitizedPath.replaceAll("'", "'\\''");
-  const zshPathExport = `export PATH='${shellPath}'\n`;
-  await writeFile(join(zshStartupDir, ".zprofile"), zshPathExport);
-  await writeFile(join(zshStartupDir, ".zshrc"), zshPathExport);
-
-  return {
-    PATH: sanitizedPath,
-    SHELL: "/bin/zsh",
-    ZDOTDIR: zshStartupDir,
   };
 }
 
@@ -312,27 +283,7 @@ async function waitForApp(instance: InstanceConfig, timeoutMs: number): Promise<
 }
 
 function needsSecondaryInstance(testTargets: string[]): boolean {
-  return testTargets.some((target) =>
-    /real\/local-transfer-.*\.test\.ts$/.test(target) ||
-    /real\/cloud-task-(?:sync|transfer)\.test\.ts$/.test(target)
-  );
-}
-
-function targetNeedsSecondaryInstance(testTarget: string): boolean {
-  return needsSecondaryInstance([testTarget]);
-}
-
-function targetNeedsEmulators(testTarget: string): boolean {
-  return /real\/cloud-task-(?:sync|mobile-index|transfer)\.test\.ts$/.test(testTarget) ||
-    /real\/mobile-relay-auth-recovery\.test\.ts$/.test(testTarget) ||
-    /real\/mobile-pairing-ui\.test\.ts$/.test(testTarget) ||
-    /real\/auth-indexeddb-fallback\.test\.ts$/.test(testTarget);
-}
-
-function targetNeedsRelay(testTarget: string): boolean {
-  return /real\/cloud-task-(?:sync|mobile-index|transfer)\.test\.ts$/.test(testTarget) ||
-    /real\/mobile-relay-auth-recovery\.test\.ts$/.test(testTarget) ||
-    /real\/mobile-pairing-ui\.test\.ts$/.test(testTarget);
+  return testTargets.some(targetNeedsSecondaryInstance);
 }
 
 function targetNeedsAuthIndexedDbOpenFailure(testTarget: string): boolean {
@@ -341,10 +292,6 @@ function targetNeedsAuthIndexedDbOpenFailure(testTarget: string): boolean {
 
 function targetNeedsStaleNativeWindowState(testTarget: string): boolean {
   return /real\/startup-window-size\.test\.ts$/.test(testTarget);
-}
-
-function targetNeedsIsolatedAgentProviders(testTarget: string): boolean {
-  return /mock\/new-task-modal\.test\.ts$/.test(testTarget);
 }
 
 async function seedStaleNativeWindowStateForStartup(repoRoot: string): Promise<() => Promise<void>> {
@@ -442,6 +389,9 @@ async function main(): Promise<void> {
   if (testTargets.length === 0) {
     throw new Error(`no E2E tests matched ${suite ?? "default suites"}`);
   }
+  if (testTargets.some(targetNeedsPlaywrightChromium)) {
+    await assertPlaywrightChromiumAvailable();
+  }
   const realE2eAgentEnv = buildRealE2eAgentEnv(testTargets, process.env);
 
   const enableSecondary = needsSecondaryInstance(testTargets);
@@ -457,6 +407,9 @@ async function main(): Promise<void> {
   const primaryTransferPort = await ports.allocate("primary transfer");
   const primaryMobileServerPort = await ports.allocate("primary mobile server");
   const relayPort = await ports.allocate("relay");
+  const relayControlPort = await ports.allocate("relay control");
+  const relayControlCapability = randomBytes(32).toString("hex");
+  const relayShutdownCapability = randomBytes(32).toString("hex");
   const firebaseAuthPort = await ports.allocate("firebase auth");
   const firebaseFirestorePort = await ports.allocate("firebase firestore");
   const firebaseFunctionsPort = await ports.allocate("firebase functions");
@@ -480,6 +433,8 @@ async function main(): Promise<void> {
     KANNA_RELAY_PORT: String(relayPort),
     KANNA_RELAY_URL: relayUrl,
   };
+  const relayControlUrl =
+    `http://127.0.0.1:${relayControlPort}/${relayControlCapability}`;
   const primaryDbName = `test-${worktreeName}-${runSuffix}-primary.db`;
   const primaryDaemonDir = join(repoRoot, ".kanna-daemon-e2e", runSuffix);
   const realE2eRuntimeEnv = realE2eAgentEnv.KANNA_E2E_REAL_AGENT_PROVIDER === "codex"
@@ -580,6 +535,7 @@ async function main(): Promise<void> {
   }
 
   function buildTestEnv(
+    testTarget: string,
     withSecondary: boolean,
     perfOutputPath: string,
     runtimeEnv: Record<string, string>,
@@ -590,6 +546,9 @@ async function main(): Promise<void> {
       KANNA_DEV_PORT: String(primaryDevPort),
       KANNA_E2E_PERF_OUTPUT_PATH: perfOutputPath,
       ...relayEnv,
+      ...(targetNeedsRelayControl(testTarget)
+        ? { KANNA_E2E_RELAY_CONTROL_URL: relayControlUrl }
+        : {}),
       KANNA_TRANSFER_REGISTRY_DIR: transferRegistryDir,
       KANNA_WEBDRIVER_PORT: String(primaryWebDriverPort),
       ...firebaseEnv,
@@ -607,15 +566,16 @@ async function main(): Promise<void> {
     isolateAgentProviders = false,
     secondaryRuntimeEnv: Record<string, string> = runtimeEnv,
   ): Promise<RunningInstances> {
-    const fixtureEnv = useAgentCliFixtures
-      ? {
-          ...agentCliVersionEnv,
-          ...(isolateAgentProviders ? agentProviderIsolationEnv : {}),
-        }
-      : {};
     await runCommand(primary.startCommand, {
       cwd: repoRoot,
-      env: { ...primary.env, ...runtimeEnv, ...fixtureEnv },
+      env: composeInstanceStartEnv({
+        baseEnv: primary.env,
+        runtimeEnv,
+        agentCliVersionEnv,
+        agentProviderIsolationEnv,
+        useAgentCliFixtures,
+        isolateAgentProviders,
+      }),
     });
     console.log(`[e2e] waiting for primary app at ${primary.baseUrl}`);
     await waitForApp(primary, 10 * 60_000);
@@ -626,7 +586,14 @@ async function main(): Promise<void> {
     if (secondaryInstance) {
       await runCommand(secondaryInstance.startCommand, {
         cwd: repoRoot,
-        env: { ...secondaryInstance.env, ...secondaryRuntimeEnv, ...fixtureEnv },
+        env: composeInstanceStartEnv({
+          baseEnv: secondaryInstance.env,
+          runtimeEnv: secondaryRuntimeEnv,
+          agentCliVersionEnv,
+          agentProviderIsolationEnv,
+          useAgentCliFixtures,
+          isolateAgentProviders,
+        }),
       });
       console.log(`[e2e] waiting for secondary app at ${secondaryInstance.baseUrl}`);
       await waitForApp(secondaryInstance, 10 * 60_000);
@@ -758,11 +725,68 @@ async function main(): Promise<void> {
 
   let relayProcess: ReturnType<typeof spawn> | null = null;
   let relayOutput = "";
+  const relayHealthUrl = `http://127.0.0.1:${relayPort}/health`;
+
+  async function relayHealthy(): Promise<boolean> {
+    const response = await fetch(relayHealthUrl, {
+      signal: AbortSignal.timeout(1_000),
+    }).catch(() => null);
+    return response?.ok === true;
+  }
+
+  async function relayPortOpen(): Promise<boolean> {
+    return await new Promise<boolean>((resolveOpen) => {
+      const socket = createConnection({
+        host: "127.0.0.1",
+        port: relayPort,
+      });
+      let settled = false;
+      const finish = (open: boolean) => {
+        if (settled) return;
+        settled = true;
+        socket.destroy();
+        resolveOpen(open);
+      };
+      socket.setTimeout(1_000, () => finish(false));
+      socket.once("connect", () => finish(true));
+      socket.once("error", () => finish(false));
+    });
+  }
+
+  async function waitForRelayPortClosed(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!await relayPortOpen()) return true;
+      await sleep(100);
+    }
+    return !await relayPortOpen();
+  }
+
+  async function waitForRelayChildExit(
+    proc: ReturnType<typeof spawn>,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    if (proc.exitCode !== null || proc.signalCode !== null) return true;
+    return await new Promise<boolean>((resolveExit) => {
+      const finish = (exited: boolean) => {
+        clearTimeout(timer);
+        proc.off("exit", onExit);
+        proc.off("error", onError);
+        resolveExit(exited);
+      };
+      const onExit = () => finish(true);
+      const onError = () => finish(true);
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      proc.once("exit", onExit);
+      proc.once("error", onError);
+    });
+  }
 
   async function startRelay(): Promise<void> {
     if (relayProcess) return;
 
     relayOutput = "";
+    let startupOutput = "";
     const proc = spawn("pnpm", ["--dir", "services/relay", "run", "dev"], {
       cwd: repoRoot,
       env: {
@@ -770,61 +794,149 @@ async function main(): Promise<void> {
         ...firebaseEnv,
         ...relayEnv,
         PORT: String(relayPort),
+        KANNA_E2E_RELAY_SHUTDOWN_TOKEN: relayShutdownCapability,
       },
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
     relayProcess = proc;
     proc.stdout?.on("data", (chunk: Buffer) => {
-      relayOutput += chunk.toString();
+      const text = chunk.toString();
+      startupOutput += text;
+      relayOutput += text;
     });
     proc.stderr?.on("data", (chunk: Buffer) => {
-      relayOutput += chunk.toString();
+      const text = chunk.toString();
+      startupOutput += text;
+      relayOutput += text;
     });
 
     let exited: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+    let spawnError: Error | null = null;
+    proc.once("error", (error) => {
+      spawnError = error;
+      if (relayProcess === proc) relayProcess = null;
+    });
     proc.once("exit", (code, signal) => {
       exited = { code, signal };
       if (relayProcess === proc) relayProcess = null;
     });
 
-    const healthUrl = `http://127.0.0.1:${relayPort}/health`;
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
-      if (exited) {
+      if (spawnError) {
         throw new Error(
-          `Relay exited before readiness: ${exited.code ?? exited.signal}\n${relayOutput.trim()}`,
+          `Relay failed to spawn: ${spawnError.message}\n${startupOutput.trim()}`,
         );
       }
-      const response = await fetch(healthUrl).catch(() => null);
-      if (response?.ok) return;
+      if (exited) {
+        throw new Error(
+          `Relay exited before readiness: ${exited.code ?? exited.signal}\n${startupOutput.trim()}`,
+        );
+      }
+      if (
+        relayStartupReportedListening(startupOutput, relayPort) &&
+        await relayHealthy()
+      ) {
+        await sleep(100);
+        if (exited) {
+          throw new Error(
+            `Relay exited after reporting readiness: ${exited.code ?? exited.signal}\n${startupOutput.trim()}`,
+          );
+        }
+        if (await relayHealthy()) return;
+      }
       await sleep(250);
     }
 
-    throw new Error(`timed out waiting for relay at ${healthUrl}\n${relayOutput.trim()}`);
+    throw new Error(
+      `timed out waiting for owned relay listener at ${relayHealthUrl}\n${startupOutput.trim()}`,
+    );
   }
 
   async function stopRelay(): Promise<void> {
     const proc = relayProcess;
     relayProcess = null;
-    if (!proc?.pid) return;
-
-    try {
-      process.kill(-proc.pid, "SIGINT");
-    } catch {
-      proc.kill("SIGINT");
+    if (!proc?.pid) {
+      if (await relayPortOpen()) {
+        throw new Error("relay listener is open without a managed process");
+      }
+      return;
     }
-    const exited = await Promise.race([
-      new Promise<boolean>((resolveExit) => proc.once("exit", () => resolveExit(true))),
-      sleep(5_000).then(() => false),
+
+    const gracefulResponse = await fetch(
+      `http://127.0.0.1:${relayPort}/__kanna_e2e_shutdown`,
+      {
+        method: "POST",
+        headers: {
+          "x-kanna-e2e-shutdown-token": relayShutdownCapability,
+        },
+        signal: AbortSignal.timeout(2_000),
+      },
+    ).catch(() => null);
+    if (gracefulResponse?.status !== 204) {
+      try {
+        process.kill(-proc.pid, "SIGINT");
+      } catch {
+        proc.kill("SIGINT");
+      }
+    }
+    let [childExited, portClosed] = await Promise.all([
+      waitForRelayChildExit(proc, 5_000),
+      waitForRelayPortClosed(5_000),
     ]);
-    if (!exited) {
+    if (!childExited || !portClosed) {
       try {
         process.kill(-proc.pid, "SIGKILL");
       } catch {
         proc.kill("SIGKILL");
       }
+      [childExited, portClosed] = await Promise.all([
+        waitForRelayChildExit(proc, 5_000),
+        waitForRelayPortClosed(5_000),
+      ]);
     }
+    if (!childExited || !portClosed) {
+      throw new Error(
+        `relay shutdown incomplete (childExited=${childExited}, portClosed=${portClosed})`,
+      );
+    }
+  }
+
+  let relayControl = Promise.resolve();
+  const relayControlServer = targetNeedsRelayControl(
+    testTargets.find(targetNeedsRelayControl) ?? "",
+  )
+    ? createHttpServer((request, response) => {
+      const requested = resolveRelayControlOperation(
+        request.method,
+        request.url,
+        relayControlCapability,
+      );
+      const operation = requested === "disconnect"
+        ? stopRelay
+        : requested === "reconnect"
+          ? startRelay
+          : null;
+      if (!operation) {
+        response.writeHead(404).end();
+        return;
+      }
+      relayControl = relayControl.catch(() => undefined).then(operation);
+      void relayControl.then(
+        () => response.writeHead(204).end(),
+        (error: unknown) => {
+          response.writeHead(500, { "Content-Type": "text/plain" });
+          response.end(error instanceof Error ? error.message : "relay control failed");
+        },
+      );
+    })
+    : null;
+  if (relayControlServer) {
+    await new Promise<void>((resolveListen, reject) => {
+      relayControlServer.once("error", reject);
+      relayControlServer.listen(relayControlPort, "127.0.0.1", resolveListen);
+    });
   }
 
   let runningInstances: RunningInstances | null = null;
@@ -865,7 +977,7 @@ async function main(): Promise<void> {
           needsSecondaryForTarget,
           false,
           realE2eRuntimeEnvForTarget(testTarget),
-          false,
+          isolateAgentProviders,
           secondaryRealE2eRuntimeEnvForTarget(testTarget),
         );
         runningMockAgentProviderIsolation = null;
@@ -892,6 +1004,7 @@ async function main(): Promise<void> {
           {
             cwd: desktopRoot,
             env: buildTestEnv(
+              testTarget,
               needsSecondaryForTarget,
               perfOutputPath,
               realE2eRuntimeEnvForTarget(testTarget),
@@ -936,6 +1049,11 @@ async function main(): Promise<void> {
       await cleanup?.().catch(() => undefined);
     }
     await stopRelay();
+    if (relayControlServer) {
+      await new Promise<void>((resolveClose) => {
+        relayControlServer.close(() => resolveClose());
+      });
+    }
     await stopFirebaseEmulators();
     if (secondary) {
       await rm(secondary.daemonDir, { recursive: true, force: true }).catch(() => undefined);

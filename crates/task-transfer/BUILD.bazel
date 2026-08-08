@@ -19,7 +19,9 @@ rust_library(
     edition = "2021",
     deps = all_crate_deps(normal = True) + [
         "//crates/daemon:kanna_daemon_lib_for_task_transfer",
+        "//crates/kanna-agent-protocol:kanna_agent_protocol_for_task_transfer",
         "//crates/runtime-defaults:kanna_runtime_defaults",
+        "//crates/visual-companion:kanna_visual_companion_for_task_transfer",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
 )
@@ -33,6 +35,7 @@ rust_binary(
     deps = all_crate_deps(normal = True) + [
         ":kanna_task_transfer_lib",
         "//crates/daemon:kanna_daemon_lib_for_task_transfer",
+        "//crates/kanna-agent-protocol:kanna_agent_protocol_for_task_transfer",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
 )
@@ -46,6 +49,7 @@ rust_binary(
     deps = all_crate_deps(normal = True) + [
         ":kanna_task_transfer_lib",
         "//crates/daemon:kanna_daemon_lib_for_task_transfer",
+        "//crates/kanna-agent-protocol:kanna_agent_protocol_for_task_transfer",
     ],
     proc_macro_deps = all_crate_deps(proc_macro = True),
     platform = "//tools/bazel:macos_x86_64",

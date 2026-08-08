@@ -21,7 +21,6 @@ const DEFAULT_MAX_INCOMING_CONNECTIONS: usize = 32;
 const DEFAULT_MAX_LIFECYCLE_EVENTS: usize = 256;
 const DEFAULT_MAX_TASK_PULL_REQUESTS: usize = 256;
 const DEFAULT_MAX_FINALIZATION_WAITERS: usize = 8;
-const DEFAULT_MAX_PEER_REQUEST_BYTES: usize = 64 * 1024;
 const DEFAULT_MAX_PEER_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_MAX_ARTIFACT_RESPONSE_BYTES: usize = super::MAX_LEGACY_ARTIFACT_RESPONSE_BYTES;
 // Finalizing an outgoing transfer is the one peer request whose answer waits on
@@ -104,7 +103,6 @@ pub struct RuntimeConfig {
     pub(super) max_lifecycle_events: usize,
     pub(super) max_task_pull_requests: usize,
     pub(super) max_finalization_waiters: usize,
-    pub(super) max_peer_request_bytes: usize,
     pub(super) max_peer_response_bytes: usize,
     pub(super) max_artifact_response_bytes: usize,
     pub(super) mark_read_timeout: Duration,
@@ -145,7 +143,6 @@ impl RuntimeConfig {
             max_lifecycle_events: DEFAULT_MAX_LIFECYCLE_EVENTS,
             max_task_pull_requests: DEFAULT_MAX_TASK_PULL_REQUESTS,
             max_finalization_waiters: DEFAULT_MAX_FINALIZATION_WAITERS,
-            max_peer_request_bytes: DEFAULT_MAX_PEER_REQUEST_BYTES,
             max_peer_response_bytes: DEFAULT_MAX_PEER_RESPONSE_BYTES,
             max_artifact_response_bytes: DEFAULT_MAX_ARTIFACT_RESPONSE_BYTES,
             mark_read_timeout: Duration::from_secs(2),
@@ -369,7 +366,6 @@ impl RuntimeConfig {
             max_lifecycle_events: DEFAULT_MAX_LIFECYCLE_EVENTS,
             max_task_pull_requests: DEFAULT_MAX_TASK_PULL_REQUESTS,
             max_finalization_waiters: DEFAULT_MAX_FINALIZATION_WAITERS,
-            max_peer_request_bytes: DEFAULT_MAX_PEER_REQUEST_BYTES,
             max_peer_response_bytes: DEFAULT_MAX_PEER_RESPONSE_BYTES,
             max_artifact_response_bytes: DEFAULT_MAX_ARTIFACT_RESPONSE_BYTES,
             mark_read_timeout: Duration::from_secs(2),

@@ -589,12 +589,25 @@ describe("createSessionStore", () => {
       sessionId: "123-456",
       revision: "rev-1",
       documentKind: "fragment",
-      html: "<h2>First</h2>"
+      html: "<h2>First</h2>",
+      sourceOrigin: "http://localhost:4312",
+      assets: [
+        {
+          name: "layout.png",
+          contentType: "image/png",
+          digest: "digest-1",
+          dataB64: "UE5H"
+        }
+      ]
     }, false);
     expect(store.getState()).toMatchObject({
       taskCompanionStatus: "available",
       taskCompanionUnread: true,
-      taskCompanionSnapshot: { revision: "rev-1" }
+      taskCompanionSnapshot: {
+        revision: "rev-1",
+        sourceOrigin: "http://localhost:4312",
+        assets: []
+      }
     });
     store.markTaskCompanionViewed("task-pending");
     expect(store.getState().taskCompanionUnread).toBe(false);
@@ -616,6 +629,8 @@ describe("createSessionStore", () => {
     store.applyTaskCompanionStreamEvent("task-pending", {
       type: "event_result",
       taskId: "task-pending",
+      sessionId: "123-456",
+      revision: "rev-2",
       eventId: "mobile-1",
       accepted: false,
       code: "stale_revision",
@@ -632,6 +647,8 @@ describe("createSessionStore", () => {
     store.applyTaskCompanionStreamEvent("task-pending", {
       type: "event_result",
       taskId: "task-pending",
+      sessionId: "123-456",
+      revision: "rev-2",
       eventId: "mobile-1",
       accepted: true
     }, true);
@@ -639,6 +656,8 @@ describe("createSessionStore", () => {
     store.applyTaskCompanionStreamEvent("task-pending", {
       type: "event_result",
       taskId: "task-pending",
+      sessionId: "123-456",
+      revision: "rev-2",
       eventId: "mobile-2",
       accepted: true
     }, true);
@@ -792,6 +811,8 @@ describe("createSessionStore", () => {
     store.applyTaskCompanionStreamEvent("task-1", {
       type: "event_result",
       taskId: "task-1",
+      sessionId: "session-1",
+      revision: "rev-1",
       eventId: "event-1",
       accepted: false,
       code: "companion_event_failed",
@@ -805,6 +826,50 @@ describe("createSessionStore", () => {
       taskCompanionEventId: "event-1",
       taskCompanionEventStatus: "error"
     });
+  });
+
+  it("only applies companion event results for the exact current snapshot", () => {
+    const store = createSessionStore();
+    store.beginTaskCompanion("task-1");
+    store.applyTaskCompanionStreamEvent("task-1", {
+      type: "snapshot",
+      taskId: "task-1",
+      sessionId: "session-current",
+      revision: "revision-current",
+      documentKind: "fragment",
+      html: '<button data-choice="a">A</button>'
+    }, true);
+    store.beginTaskCompanionEvent("task-1", "event-reused");
+
+    store.applyTaskCompanionStreamEvent("task-1", {
+      type: "event_result",
+      taskId: "task-1",
+      sessionId: "session-stale",
+      revision: "revision-current",
+      eventId: "event-reused",
+      accepted: true
+    }, true);
+    expect(store.getState().taskCompanionEventStatus).toBe("sending");
+
+    store.applyTaskCompanionStreamEvent("task-1", {
+      type: "event_result",
+      taskId: "task-1",
+      sessionId: "session-current",
+      revision: "revision-stale",
+      eventId: "event-reused",
+      accepted: true
+    }, true);
+    expect(store.getState().taskCompanionEventStatus).toBe("sending");
+
+    store.applyTaskCompanionStreamEvent("task-1", {
+      type: "event_result",
+      taskId: "task-1",
+      sessionId: "session-current",
+      revision: "revision-current",
+      eventId: "event-reused",
+      accepted: true
+    }, true);
+    expect(store.getState().taskCompanionEventStatus).toBe("sent");
   });
 
   it("clears the selected task when reconciliation finds no remaining collection match", () => {

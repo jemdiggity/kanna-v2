@@ -1,4 +1,20 @@
+use kanna_agent_protocol::{CompanionEvent, ServerFrame};
 use serde::{Deserialize, Serialize};
+
+pub const CURRENT_PROTOCOL_VERSION: u32 = 3;
+pub const COMPANION_PROTOCOL_VERSION: u32 = 2;
+
+/// Maximum peer request line. Large repository/session artifacts are staged
+/// out of band; inline requests carry bounded task metadata, prompts, and a
+/// serialized terminal recovery snapshot.
+pub const MAX_PEER_REQUEST_LINE_BYTES: usize = 8 * 1024 * 1024;
+/// Companion control requests contain only sealed proofs and must remain
+/// narrow before authentication to bound unauthenticated ingress memory.
+pub const MAX_COMPANION_REQUEST_LINE_BYTES: usize = 64 * 1024;
+/// Protocol-v1 transfer commits embedded terminal recovery directly in the
+/// sealed submit envelope. Keep that legacy wire shape readable while newer
+/// request kinds remain on the narrow unauthenticated ingress limit.
+pub const MAX_LEGACY_SUBMIT_TRANSFER_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -32,6 +48,21 @@ pub enum ControlRequest {
         target_peer_id: String,
         session_id: String,
         observer_lease_id: String,
+    },
+    ObservePeerCompanion {
+        request_id: String,
+        target_peer_id: String,
+        task_id: String,
+        generation: String,
+    },
+    SendPeerCompanionEvent {
+        request_id: String,
+        target_peer_id: String,
+        task_id: String,
+        session_id: String,
+        revision: String,
+        generation: String,
+        event: CompanionEvent,
     },
     SendPeerSessionInput {
         request_id: String,
@@ -75,6 +106,12 @@ pub enum ControlRequest {
         target_peer_id: String,
         session_id: String,
         observer_lease_id: String,
+    },
+    UnobservePeerCompanion {
+        request_id: String,
+        target_peer_id: String,
+        task_id: String,
+        generation: String,
     },
     StartPairing {
         request_id: String,
@@ -197,6 +234,12 @@ pub enum ControlResponse {
     ObservePeerSession {
         request_id: String,
     },
+    ObservePeerCompanion {
+        request_id: String,
+    },
+    SendPeerCompanionEvent {
+        request_id: String,
+    },
     SendPeerSessionInput {
         request_id: String,
     },
@@ -218,6 +261,9 @@ pub enum ControlResponse {
         request_id: String,
     },
     UnobservePeerSession {
+        request_id: String,
+    },
+    UnobservePeerCompanion {
         request_id: String,
     },
     StartPairing {
@@ -377,6 +423,16 @@ pub enum PeerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sealed_payload: Option<String>,
     },
+    ObserveCompanion {
+        request_id: String,
+        requester_peer_id: String,
+        sealed_payload: String,
+    },
+    SendCompanionEvent {
+        request_id: String,
+        requester_peer_id: String,
+        sealed_payload: String,
+    },
     SendSessionInput {
         request_id: String,
         requester_peer_id: String,
@@ -425,7 +481,7 @@ pub enum PeerRequest {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PeerResponse {
     AuthenticatedRequestEpoch {
@@ -480,6 +536,14 @@ pub enum PeerResponse {
         request_id: String,
         session_id: String,
     },
+    ObserveCompanion {
+        request_id: String,
+        sealed_payload: String,
+    },
+    SendCompanionEvent {
+        request_id: String,
+        sealed_payload: String,
+    },
     SendSessionInput {
         request_id: String,
     },
@@ -525,6 +589,12 @@ pub enum PeerTerminalEvent {
         session_id: String,
         message: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerCompanionEvent {
+    Sealed { sealed_payload: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -578,7 +648,7 @@ pub struct PairingPeer {
     pub capabilities_json: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SidecarEvent {
     PairingStarted {
@@ -622,6 +692,13 @@ pub enum SidecarEvent {
         session_id: String,
         observer_lease_id: String,
         event: PeerTerminalEvent,
+    },
+    CompanionEvent {
+        peer_id: String,
+        task_id: String,
+        generation: String,
+        generation_order: u64,
+        frame: ServerFrame,
     },
 }
 

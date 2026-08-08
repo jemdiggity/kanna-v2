@@ -34,6 +34,7 @@
     "@expo/vector-icons": "15.1.1",
     "@kanna/agent-protocol": "workspace:*",
     "@kanna/stream-client": "workspace:*",
+    "@kanna/visual-companion": "workspace:*",
     "@react-native-async-storage/async-storage": "^2.2.0",
     "@react-native-firebase/app": "^26.0.0",
     "@react-native-firebase/messaging": "^26.0.0",

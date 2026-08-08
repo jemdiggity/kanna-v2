@@ -2,6 +2,7 @@ use crate::crypto::CryptoError;
 use crate::peer_store::PeerStoreError;
 use crate::protocol::{DiscoveredPeer, PeerTerminalEvent};
 use crate::registry::RegistryError;
+use kanna_agent_protocol::ServerFrame;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -75,7 +76,7 @@ pub struct TaskPullRequestedEvent {
     pub source_task_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeEvent {
     PairingStarted(PairingStartedEvent),
     PairingRequested(PairingRequestedEvent),
@@ -89,6 +90,13 @@ pub enum RuntimeEvent {
         session_id: String,
         observer_lease_id: String,
         event: PeerTerminalEvent,
+    },
+    CompanionEvent {
+        peer_id: String,
+        task_id: String,
+        generation: String,
+        generation_order: u64,
+        frame: ServerFrame,
     },
 }
 

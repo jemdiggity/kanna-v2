@@ -180,7 +180,9 @@
     "transferFinalizationFailed": "Task transfer failed",
     "transferFinalizationDegraded": "Task transfer handed off without a clean shutdown",
     "transferFinalizationUnclean": "the source agent session did not end cleanly",
-    "transferReservationOrphaned": "A duplicate transfer reservation could not be released and may be left on disk"
+    "transferReservationOrphaned": "A duplicate transfer reservation could not be released and may be left on disk",
+    "remoteCompanionStarting": "The visual companion is still starting. Try the link again in a moment.",
+    "remoteCompanionOpenFailed": "Could not open the visual companion."
   },
   "tags": {
     "inProgress": "In Progress",
@@ -408,6 +410,20 @@
     "incomingTitle": "Incoming Task Transfer",
     "approve": "Approve",
     "reject": "Reject"
+  },
+  "visualCompanion": {
+    "open": "Open visual companion",
+    "connecting": "Connecting…",
+    "retry": "Retry",
+    "available": "Connected.",
+    "reconnecting": "Reconnecting…",
+    "unavailable": "This visual companion has ended.",
+    "error": "Visual companion unavailable",
+    "sending": "Sending selection…",
+    "sent": "Selection delivered.",
+    "selectionFailed": "Selection failed. Try again.",
+    "unavailableDetail": "The companion is no longer available.",
+    "errorDetail": "The companion could not be displayed."
   },
   "common": {
     "loading": "Loading..."

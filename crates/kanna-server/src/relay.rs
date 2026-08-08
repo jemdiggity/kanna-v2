@@ -47,6 +47,7 @@ impl RelayKeepalive {
             if now.duration_since(sent_at) >= RELAY_PONG_TIMEOUT {
                 return RelayKeepaliveAction::Reconnect;
             }
+            return RelayKeepaliveAction::SendPing;
         }
 
         self.pending_ping_sent_at = Some(now);
@@ -1543,6 +1544,10 @@ mod tests {
 
         assert_eq!(
             keepalive.on_ping_tick(start),
+            RelayKeepaliveAction::SendPing
+        );
+        assert_eq!(
+            keepalive.on_ping_tick(start + RELAY_PING_INTERVAL),
             RelayKeepaliveAction::SendPing
         );
         assert_eq!(

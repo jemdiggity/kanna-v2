@@ -1050,6 +1050,7 @@ export function useAppCloudWorkspace({ db, store, toast, windowWorkspace }: UseA
     refreshLanTasks,
     __e2eInjectRemoteSnapshot,
     __e2eFailNextRemoteAction,
+    associateDesktopCloudCredential,
     initializeDesktopCloudAuth,
     initializeDesktopLanTaskSync,
     markTransferSidecarReady,

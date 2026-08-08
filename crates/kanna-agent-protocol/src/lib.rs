@@ -30,8 +30,8 @@ pub use events::{
     TurnStatus, MAX_TEXT_BYTES,
 };
 pub use frames::{
-    ClientFrame, CompanionDocumentKind, CompanionEvent, FrameAgentEvent, ServerFrame,
-    StateChangeScope, StreamKind,
+    ClientFrame, CompanionAsset, CompanionDocumentKind, CompanionEvent, FrameAgentEvent,
+    KspCapability, ServerFrame, StateChangeScope, StreamKind,
 };
 pub use opencode::OpencodeAdapter;
 pub use providers::{

@@ -4,6 +4,7 @@ import {
   getTerminalOutputPerfSnapshot,
   resetTerminalOutputPerfSnapshot,
 } from "./perf/terminalOutputPerf";
+import { redactE2EInvokeArgs } from "./e2eInvokeRedaction";
 
 export interface E2EAppMetricsSnapshot {
   invokeCounts: Record<string, number>;
@@ -38,7 +39,10 @@ const activeListenCounts = new Map<string, number>();
 export const e2eAppMetrics: E2EAppMetricsApi = {
   recordInvoke(command: string, args?: unknown): void {
     increment(invokeCounts, command);
-    invokeCalls.push({ command, args: args ?? null });
+    invokeCalls.push({
+      command,
+      args: redactE2EInvokeArgs(command, args ?? null),
+    });
     while (invokeCalls.length > MAX_INVOKE_CALLS) {
       invokeCalls.shift();
     }

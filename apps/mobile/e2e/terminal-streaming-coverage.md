@@ -1,5 +1,46 @@
 # Terminal Streaming E2E Coverage
 
+## Desktop external-browser visual companion
+
+`pnpm --dir apps/desktop test:e2e -- real/remote-visual-companion.test.ts`
+creates two real desktop instances and exercises the ordinary
+`CloudTerminalView` link handler through both authenticated relay and paired LAN
+task transports. The test arms a one-time capture at the normal opener boundary
+before the first physical xterm activation, exchanges the
+captured capability URL for a cookie in headless Playwright, and then performs an
+independent second xterm pointer activation through the ordinary OS opener after
+the capability has been consumed. Playwright executes the shared browser
+adapter against the real Rust loopback HTTP/WebSocket bridge. Each transport
+loads the fixture HTML and `layout.png`, observes a revision reload, clicks a
+real `data-choice` element and observes delivery back to the owner worktree,
+then observes `server-stopped` become unavailable.
+
+The relay journey also stops and restarts the actual relay child process and
+publishes a new fixture revision while the route is down. Recovery requires a
+fresh authoritative revision in the renderer hook and an automatic Playwright
+reload to its unique marker, not merely a retained `connected` state. The
+paired-LAN journey applies the same outage-only revision proof, resolves the registered
+`kanna-task-transfer` process, validates its PID and command, terminates that real
+sidecar, requires the browser and renderer to become reconnecting, and proves a
+different validated sidecar PID is registered before recovery to `available`.
+LAN retry generations and stale-frame rejection remain covered more narrowly by
+`src/services/desktopLanTerminal.test.ts` and the task-transfer runtime tests.
+
+This target requires a locally provisioned Playwright Chromium. Before starting
+the desktop instances, emulators, or relay, the E2E runner verifies that
+`chromium.executablePath()` exists and is executable. It does not download a
+browser during the test. On a clean checkout where the browser is absent, run:
+
+```bash
+pnpm --dir apps/desktop exec playwright install chromium
+```
+
+The DEV-only capture surface is keyed by the canonical
+`(ownerDesktopId, ownerTaskId)` pair and exposes only sanitized identity,
+revision, lifecycle status, and the one-time capability URL. Desktop E2E invoke
+metrics/history deny remote-companion arguments by default so fixture HTML,
+assets, capabilities, and event-derived messages never enter diagnostics.
+
 ## Relay visual companion
 
 `pnpm --dir apps/mobile run test:e2e:relay` now seeds an active
@@ -18,6 +59,29 @@ define a companion-specific relay message, preview HTTP route, public URL, or
 cloud persistence path. The simulator run requires the existing Firebase
 emulators, relay, Appium, and iOS simulator environment managed by the mobile
 E2E runner; it never installs, launches, or automates a physical iPhone.
+
+## Paired-LAN mobile visual companion
+
+`pnpm --dir apps/mobile run test:e2e:hybrid` now creates a real pairing session
+against the harness desktop, seeds the persisted hybrid selection, and claims
+the signed QR payload through the app's native deep-link controller before the
+journey starts. After proving cloud/LAN task deduplication, it stops the relay,
+opens the duplicate through its paired LAN route, and runs the same native
+visual-companion action and real WebView journey used by the relay lane. The
+journey loads the source document, removes a bad-source WebView, observes a
+fresh revision, stops and restarts the LAN KSP owner to prove reconnect, sends a
+real `data-choice` event back to the worktree, observes `server-stopped` as
+unavailable, resumes, and closes the native modal. Because the relay remains
+stopped throughout, these assertions cannot pass through the cloud fallback.
+
+This lane is simulator-only and requires the kd-managed Firebase emulators and
+relay harness, Metro with the exact hybrid environment, an installed dev build,
+Appium with the XCUITest driver, and an iOS simulator that accepts Local Network
+access. The runner provisions those processes and pairing credentials; it does
+not depend on a pre-paired developer phone. Narrower deterministic coverage is
+provided by `lanTransport.test.ts` for credential headers and capability
+degradation, the KSP paired/unpaired authorization tests, the visual companion
+component tests, and the hybrid routing fixture tests.
 
 `pnpm --dir apps/mobile run test:e2e:smoke` exercises the PTY terminal path in
 `specs/smoke/list-detail-back.e2e.ts` only when the run provides a known live

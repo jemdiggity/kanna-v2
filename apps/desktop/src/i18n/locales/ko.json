@@ -180,7 +180,9 @@
     "transferFinalizationFailed": "작업 전송에 실패했습니다",
     "transferFinalizationDegraded": "소스를 정상 종료하지 못한 채 인계했습니다",
     "transferFinalizationUnclean": "소스 에이전트 세션이 정상적으로 종료되지 않았습니다",
-    "transferReservationOrphaned": "중복 전송 예약을 해제하지 못해 디스크에 남아 있을 수 있습니다"
+    "transferReservationOrphaned": "중복 전송 예약을 해제하지 못해 디스크에 남아 있을 수 있습니다",
+    "remoteCompanionStarting": "비주얼 컴패니언을 시작하고 있습니다. 잠시 후 링크를 다시 열어 주세요.",
+    "remoteCompanionOpenFailed": "비주얼 컴패니언을 열 수 없습니다."
   },
   "tags": {
     "inProgress": "진행 중",
@@ -406,6 +408,20 @@
     "incomingTitle": "수신 작업 전송",
     "approve": "승인",
     "reject": "거절"
+  },
+  "visualCompanion": {
+    "open": "비주얼 컴패니언 열기",
+    "connecting": "연결 중…",
+    "retry": "다시 시도",
+    "available": "연결되었습니다.",
+    "reconnecting": "다시 연결 중…",
+    "unavailable": "비주얼 컴패니언이 종료되었습니다.",
+    "error": "비주얼 컴패니언을 사용할 수 없습니다",
+    "sending": "선택 항목을 보내는 중…",
+    "sent": "선택 항목을 보냈습니다.",
+    "selectionFailed": "선택 항목을 보내지 못했습니다. 다시 시도해 주세요.",
+    "unavailableDetail": "이 컴패니언은 더 이상 사용할 수 없습니다.",
+    "errorDetail": "컴패니언을 표시할 수 없습니다."
   },
   "common": {
     "loading": "로딩 중..."

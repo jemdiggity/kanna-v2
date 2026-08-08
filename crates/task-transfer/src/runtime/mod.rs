@@ -1,3 +1,4 @@
+mod companion;
 mod config;
 mod daemon;
 mod discovery;

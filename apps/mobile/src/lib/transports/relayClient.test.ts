@@ -53,10 +53,18 @@ describe("createRelayDesktopClient", () => {
         session_id: "123-456",
         revision: "rev-1",
         document_kind: "fragment",
-        html: "<button data-choice='a'>A</button>"
+        html: "<button data-choice='a'>A</button>",
+        assets: [{
+          name: "unused.png",
+          content_type: "image/png",
+          digest: "asset-1",
+          data_b64: "UE5H"
+        }]
       })
     });
     expect(subscription.sendEvent("123-456", "rev-1", {
+      session_id: "123-456",
+      revision: "rev-1",
       event_id: "event-1",
       type: "click",
       choice: "a",
@@ -73,7 +81,10 @@ describe("createRelayDesktopClient", () => {
       type: "attach",
       task_id: "task-1",
       kind: "companion",
-      from_seq: 0
+      from_seq: 0,
+      accept_snapshot_chunks: true,
+      include_assets: false,
+      attachment_epoch: 1
     });
     expect(frames).toContainEqual(
       expect.objectContaining({ type: "companion_event", task_id: "task-1" })
@@ -81,7 +92,8 @@ describe("createRelayDesktopClient", () => {
     expect(frames).toContainEqual({
       type: "detach",
       task_id: "task-1",
-      kind: "companion"
+      kind: "companion",
+      attachment_epoch: 1
     });
     expect(events).toEqual([
       { type: "connection", taskId: "task-1", connected: true },
@@ -89,7 +101,8 @@ describe("createRelayDesktopClient", () => {
         type: "snapshot",
         taskId: "task-1",
         sessionId: "123-456",
-        revision: "rev-1"
+        revision: "rev-1",
+        assets: []
       })
     ]);
     client.close();
@@ -312,6 +325,7 @@ describe("createRelayDesktopClient", () => {
       3,
       JSON.stringify({
         type: "auth",
+        capabilities: ["companion_event_epoch"],
         credential: "id-token-1"
       })
     );

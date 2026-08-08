@@ -50,7 +50,10 @@ export interface WebSocketLike {
   onmessage: ((event: { data: string }) => void) | null;
 }
 
-export type WebSocketFactory = (url: string) => WebSocketLike;
+export type WebSocketFactory = (
+  url: string,
+  headers?: Record<string, string>
+) => WebSocketLike;
 
 export interface LanDeviceCredentials {
   deviceId: string;
@@ -60,7 +63,14 @@ export interface LanDeviceCredentials {
 export function createLanTransport(
   baseUrl: string,
   fetchImpl: FetchLike,
-  createSocket: WebSocketFactory = (url) => new WebSocket(url) as unknown as WebSocketLike,
+  createSocket: WebSocketFactory = (url, headers) => {
+    const ReactNativeWebSocket = WebSocket as unknown as new (
+      url: string,
+      protocols?: string | string[],
+      options?: { headers?: Record<string, string> }
+    ) => WebSocketLike;
+    return new ReactNativeWebSocket(url, undefined, { headers });
+  },
   options: { deviceCredentials?: LanDeviceCredentials | null } = {}
 ): KannaTransport {
   const deviceCredentials = options.deviceCredentials ?? null;
@@ -75,6 +85,10 @@ export function createLanTransport(
           "X-Kanna-Device-Secret": deviceCredentials.deviceSecret
         }
       : {};
+  const createKspSocket = (url: string): WebSocketLike =>
+    deviceCredentials
+      ? createSocket(url, credentialHeaders())
+      : createSocket(url);
   const request = async <T>(
     path: string,
     init?: {
@@ -211,7 +225,7 @@ export function createLanTransport(
       const client = new StreamClient({
         url: buildKspWebSocketUrl(baseUrl, kspStreamVersion),
         credential: streamCredential,
-        webSocketFactory: (url) => createSocket(url) as unknown as StreamWebSocketLike,
+        webSocketFactory: (url) => createKspSocket(url) as unknown as StreamWebSocketLike,
         reconnectDelaysMs: [250, 500, 1000, 2000]
       });
 
@@ -245,7 +259,7 @@ export function createLanTransport(
       const client = new StreamClient({
         url: buildKspWebSocketUrl(baseUrl, kspStreamVersion),
         credential: streamCredential,
-        webSocketFactory: (url) => createSocket(url) as unknown as StreamWebSocketLike,
+        webSocketFactory: (url) => createKspSocket(url) as unknown as StreamWebSocketLike,
         reconnectDelaysMs: [250, 500, 1000, 2000]
       });
 
@@ -286,27 +300,31 @@ export function createLanTransport(
       const client = new StreamClient({
         url: buildKspWebSocketUrl(baseUrl, kspStreamVersion),
         credential: streamCredential,
-        webSocketFactory: (url) => createSocket(url) as unknown as StreamWebSocketLike,
+        webSocketFactory: (url) => createKspSocket(url) as unknown as StreamWebSocketLike,
         reconnectDelaysMs: [250, 500, 1000, 2000]
       });
 
-      client.attachCompanion(taskId, {
-        onSnapshot(snapshot) {
-          listener({ type: "snapshot", taskId, ...snapshot });
+      client.attachCompanion(
+        taskId,
+        {
+          onSnapshot(snapshot) {
+            listener({ type: "snapshot", taskId, ...snapshot, assets: [] });
+          },
+          onUnavailable() {
+            listener({ type: "unavailable", taskId });
+          },
+          onEventResult(result) {
+            listener({ type: "event_result", taskId, ...result });
+          },
+          onConnectionChange(connected) {
+            listener({ type: "connection", taskId, connected });
+          },
+          onError(code, message) {
+            listener({ type: "error", taskId, code, message });
+          }
         },
-        onUnavailable() {
-          listener({ type: "unavailable", taskId });
-        },
-        onEventResult(result) {
-          listener({ type: "event_result", taskId, ...result });
-        },
-        onConnectionChange(connected) {
-          listener({ type: "connection", taskId, connected });
-        },
-        onError(code, message) {
-          listener({ type: "error", taskId, code, message });
-        }
-      });
+        { includeAssets: false }
+      );
 
       return {
         close() {

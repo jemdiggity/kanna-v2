@@ -129,6 +129,8 @@ impl TransferRuntime {
             )),
             PeerResponse::AuthenticatedRequestEpoch { .. }
             | PeerResponse::ObserveSession { .. }
+            | PeerResponse::ObserveCompanion { .. }
+            | PeerResponse::SendCompanionEvent { .. }
             | PeerResponse::SendSessionInput { .. }
             | PeerResponse::ResizeSession { .. }
             | PeerResponse::CloseTask { .. }
@@ -240,6 +242,8 @@ impl TransferRuntime {
             )),
             PeerResponse::AuthenticatedRequestEpoch { .. }
             | PeerResponse::ObserveSession { .. }
+            | PeerResponse::ObserveCompanion { .. }
+            | PeerResponse::SendCompanionEvent { .. }
             | PeerResponse::SendSessionInput { .. }
             | PeerResponse::ResizeSession { .. }
             | PeerResponse::CloseTask { .. }
@@ -353,6 +357,8 @@ impl TransferRuntime {
             | PeerResponse::ImportCommitted { .. }
             | PeerResponse::TaskSnapshot { .. }
             | PeerResponse::ObserveSession { .. }
+            | PeerResponse::ObserveCompanion { .. }
+            | PeerResponse::SendCompanionEvent { .. }
             | PeerResponse::SendSessionInput { .. }
             | PeerResponse::ResizeSession { .. }
             | PeerResponse::CloseTask { .. }
@@ -641,6 +647,8 @@ impl TransferRuntime {
             | PeerResponse::FinalizeTransfer { .. }
             | PeerResponse::TaskSnapshot { .. }
             | PeerResponse::ObserveSession { .. }
+            | PeerResponse::ObserveCompanion { .. }
+            | PeerResponse::SendCompanionEvent { .. }
             | PeerResponse::SendSessionInput { .. }
             | PeerResponse::ResizeSession { .. }
             | PeerResponse::CloseTask { .. }

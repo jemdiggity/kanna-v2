@@ -7,6 +7,12 @@ import {
   waitForTaskTerminalLive
 } from "../smoke/list-detail-back.e2e";
 import { openProfileSheet } from "../smoke/profile-connection.e2e";
+import {
+  createVisualCompanionUi,
+  verifyRelayVisualCompanionJourney,
+  type RelayVisualCompanionActions
+} from "../relay/relay-task-flow.e2e";
+import type { MobileRelayCompanionFixture } from "../../helpers/relay-harness";
 
 const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
@@ -20,6 +26,9 @@ interface HybridCredentials {
 
 interface HybridTaskFlowOptions {
   bundleId: string;
+  companion: RelayVisualCompanionActions & {
+    fixture: MobileRelayCompanionFixture;
+  };
   credentials: HybridCredentials;
   fixture: MobileHybridFixture;
   publishCloudRefresh(): Promise<void>;
@@ -491,4 +500,9 @@ export async function runHybridTaskFlow(
     waitUntil: (condition, waitOptions) =>
       driver.waitUntil(condition, waitOptions)
   });
+  await verifyRelayVisualCompanionJourney(
+    createVisualCompanionUi(driver),
+    options.companion.fixture,
+    options.companion
+  );
 }

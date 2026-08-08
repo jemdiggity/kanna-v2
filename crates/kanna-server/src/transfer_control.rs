@@ -22,6 +22,9 @@ const OPERATIONS: &[&str] = &[
     "list-task-snapshots",
     "observe-peer-session",
     "unobserve-peer-session",
+    "observe-peer-companion",
+    "unobserve-peer-companion",
+    "send-peer-companion-event",
     "send-peer-session-input",
     "resize-peer-session",
     "close-peer-task",
@@ -138,6 +141,44 @@ pub async fn dispatch(
                     }),
                 )
                 .await
+        }
+        "observe-peer-companion" | "unobserve-peer-companion" => {
+            let kind = if operation == "observe-peer-companion" {
+                "observe_peer_companion"
+            } else {
+                "unobserve_peer_companion"
+            };
+            let response = client
+                .request(
+                    kind,
+                    json!({
+                        "target_peer_id": required_string(&params, &["peerId"])?,
+                        "task_id": required_string(&params, &["taskId"])?,
+                        "generation": required_string(&params, &["generation"])?,
+                    }),
+                )
+                .await?;
+            Ok(with_incarnation(response, client))
+        }
+        "send-peer-companion-event" => {
+            let event = params
+                .get("event")
+                .cloned()
+                .ok_or("send-peer-companion-event requires an event")?;
+            let response = client
+                .request(
+                    "send_peer_companion_event",
+                    json!({
+                        "target_peer_id": required_string(&params, &["peerId"])?,
+                        "task_id": required_string(&params, &["taskId"])?,
+                        "session_id": required_string(&params, &["sessionId"])?,
+                        "revision": required_string(&params, &["revision"])?,
+                        "generation": required_string(&params, &["generation"])?,
+                        "event": event,
+                    }),
+                )
+                .await?;
+            Ok(with_incarnation(response, client))
         }
         "send-peer-session-input" => {
             let data = params
@@ -593,4 +634,13 @@ mod tests {
         );
         assert!(transfer_transport(&json!({ "transport": "carrier-pigeon" })).is_err());
     }
+}
+
+/// Companion callers fence frames by sidecar incarnation, so companion verbs
+/// answer with the incarnation that served them.
+fn with_incarnation(mut response: Value, client: &TransferSidecarClient) -> Value {
+    if let Some(object) = response.as_object_mut() {
+        object.insert("incarnation".into(), Value::from(client.incarnation()));
+    }
+    response
 }

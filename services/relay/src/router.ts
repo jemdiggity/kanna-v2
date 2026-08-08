@@ -61,6 +61,17 @@ export function taskTransferTunnelFlowStateForTests(ws: WebSocket): {
   };
 }
 
+const backpressuredTunnelSources = new WeakSet<WebSocket>();
+const MAX_TUNNEL_BUFFERED_BYTES = 64 * 1024 * 1024;
+const TUNNEL_BACKPRESSURE_HIGH_WATER_BYTES = 32 * 1024 * 1024;
+const TUNNEL_BACKPRESSURE_LOW_WATER_BYTES = 16 * 1024 * 1024;
+const tunnelFlowStats = {
+  pauseCount: 0,
+  resumeCount: 0,
+  capRejectCount: 0,
+  maxBufferedBytes: 0,
+};
+
 function parseRelayMessage(data: string): RelayMessage | null {
   try {
     const parsed: unknown = JSON.parse(data);
@@ -256,6 +267,8 @@ function closeTunnelPeer(ws: WebSocket): void {
   tunnelLabels.delete(ws);
   tunnelServices.delete(ws);
   tunnelPeakBufferedBytes.delete(ws);
+  tunnelSockets.delete(ws);
+  backpressuredTunnelSources.delete(ws);
   if (peer) {
     if (pausedTunnelSources.has(peer)) {
       pausedTunnelSources.delete(peer);
@@ -265,9 +278,31 @@ function closeTunnelPeer(ws: WebSocket): void {
     tunnelLabels.delete(peer);
     tunnelServices.delete(peer);
     tunnelPeakBufferedBytes.delete(peer);
+    tunnelSockets.delete(peer);
+    backpressuredTunnelSources.delete(peer);
     if (peer.readyState <= 1) {
       peer.close(1000, "Tunnel peer closed");
     }
+  }
+}
+
+function failTunnelPair(source: WebSocket, code: number, reason: string): void {
+  const peer = tunnelPeers.get(source);
+  tunnelPeers.delete(source);
+  tunnelLabels.delete(source);
+  tunnelSockets.delete(source);
+  backpressuredTunnelSources.delete(source);
+  if (peer) {
+    tunnelPeers.delete(peer);
+    tunnelLabels.delete(peer);
+    tunnelSockets.delete(peer);
+    backpressuredTunnelSources.delete(peer);
+  }
+  if (source.readyState <= 1) {
+    source.close(code, reason);
+  }
+  if (peer && peer.readyState <= 1) {
+    peer.close(code, reason);
   }
 }
 
@@ -378,7 +413,6 @@ export function forwardTunnelData(source: WebSocket, data: RawData, isBinary = f
   if (!peer || peer.readyState !== 1) {
     return;
   }
-  const payload = isBinary ? data : rawDataToString(data);
   const service = tunnelServices.get(source);
   if (service === "task-transfer" && isBinary) {
     const byteLength = rawDataByteLength(data);
@@ -387,7 +421,7 @@ export function forwardTunnelData(source: WebSocket, data: RawData, isBinary = f
       peer.close(1013, "Task-transfer backpressure limit exceeded");
       return;
     }
-    peer.send(payload, { binary: true }, (error) => {
+    peer.send(data, { binary: true }, (error) => {
       if (error && source.readyState <= 1) {
         source.close(1011, "Task-transfer forwarding failed");
         return;
@@ -413,9 +447,18 @@ export function forwardTunnelData(source: WebSocket, data: RawData, isBinary = f
     }
     return;
   }
+  const payloadBytes = rawDataByteLength(data);
+  if (
+    payloadBytes > MAX_TUNNEL_BUFFERED_BYTES ||
+    peer.bufferedAmount > MAX_TUNNEL_BUFFERED_BYTES - payloadBytes
+  ) {
+    tunnelFlowStats.capRejectCount += 1;
+    failTunnelPair(source, 1013, "Tunnel peer is not consuming data");
+    return;
+  }
   if (process.env.KANNA_RELAY_DEBUG_TUNNEL === "1") {
     const direction = tunnelLabels.get(source) === "client" ? "client->desktop" : "desktop->client";
-    let summary = `<${rawDataByteLength(data)} bytes>`;
+    let summary = `<${payloadBytes} bytes>`;
     try {
       const parsed = JSON.parse(rawDataToString(data)) as Record<string, unknown>;
       summary = typeof parsed.type === "string" ? parsed.type : "json";
@@ -426,7 +469,49 @@ export function forwardTunnelData(source: WebSocket, data: RawData, isBinary = f
     }
     console.log(`[router] Tunnel ${direction}: ${summary}`);
   }
-  peer.send(payload, { binary: isBinary });
+  try {
+    peer.send(data, { binary: isBinary }, (error) => {
+      if (error) {
+        console.warn(`[router] Tunnel send failed: ${error.message}`);
+        failTunnelPair(source, 1011, "Tunnel send failed");
+        return;
+      }
+      if (
+        backpressuredTunnelSources.has(source) &&
+        tunnelPeers.get(source) === peer &&
+        peer.bufferedAmount <= TUNNEL_BACKPRESSURE_LOW_WATER_BYTES
+      ) {
+        backpressuredTunnelSources.delete(source);
+        if (source.readyState === 1) {
+          tunnelFlowStats.resumeCount += 1;
+          source.resume();
+        }
+      }
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[router] Tunnel send failed: ${message}`);
+    failTunnelPair(source, 1011, "Tunnel send failed");
+    return;
+  }
+
+  tunnelFlowStats.maxBufferedBytes = Math.max(
+    tunnelFlowStats.maxBufferedBytes,
+    peer.bufferedAmount,
+  );
+  if (peer.bufferedAmount > MAX_TUNNEL_BUFFERED_BYTES) {
+    tunnelFlowStats.capRejectCount += 1;
+    failTunnelPair(source, 1013, "Tunnel peer is not consuming data");
+    return;
+  }
+  if (
+    peer.bufferedAmount >= TUNNEL_BACKPRESSURE_HIGH_WATER_BYTES &&
+    !backpressuredTunnelSources.has(source)
+  ) {
+    backpressuredTunnelSources.add(source);
+    tunnelFlowStats.pauseCount += 1;
+    source.pause();
+  }
 }
 
 export function attachDesktopTunnel(
@@ -632,4 +717,8 @@ export function routeMessage(
 /** Get current connection count (for health/debug). */
 export function getConnectionCount(): number {
   return connections.size;
+}
+
+export function getTunnelFlowStats(): Readonly<typeof tunnelFlowStats> {
+  return { ...tunnelFlowStats };
 }

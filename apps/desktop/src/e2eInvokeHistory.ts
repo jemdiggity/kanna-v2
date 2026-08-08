@@ -1,3 +1,5 @@
+import { redactE2EInvokeArgs } from "./e2eInvokeRedaction";
+
 export interface E2EInvokeRecord {
   cmd: string;
   args?: unknown;
@@ -13,7 +15,10 @@ function cloneJson(value: unknown): unknown {
 
 export const e2eInvokeHistory = {
   record(cmd: string, args?: unknown) {
-    invokeRecords.push({ cmd, args: cloneJson(args) });
+    invokeRecords.push({
+      cmd,
+      args: cloneJson(redactE2EInvokeArgs(cmd, args)),
+    });
   },
   clear() {
     invokeRecords.length = 0;
