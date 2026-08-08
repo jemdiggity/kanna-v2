@@ -1468,7 +1468,15 @@ pub async fn handle_stream(
             if let Some(fence) = delivery_fence {
                 match await_fenced_companion_send(send, fence).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(_)) | Err(()) => return,
+                    // A real transport failure ends the connection.
+                    Ok(Err(_)) => return,
+                    // The attachment epoch moved on while this companion frame
+                    // was blocked on backpressure: the frame is stale, not the
+                    // socket. Keep writing — clients fence by epoch, so a
+                    // half-buffered stale frame flushed later is harmless,
+                    // while returning here would leave the reader half of the
+                    // connection alive with no writer and no close frame.
+                    Err(()) => continue,
                 }
             } else if send.await.is_err() {
                 return;
@@ -1539,7 +1547,15 @@ pub async fn handle_tungstenite_stream(
             if let Some(fence) = delivery_fence {
                 match await_fenced_companion_send(send, fence).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(_)) | Err(()) => return,
+                    // A real transport failure ends the connection.
+                    Ok(Err(_)) => return,
+                    // The attachment epoch moved on while this companion frame
+                    // was blocked on backpressure: the frame is stale, not the
+                    // socket. Keep writing — clients fence by epoch, so a
+                    // half-buffered stale frame flushed later is harmless,
+                    // while returning here would leave the reader half of the
+                    // connection alive with no writer and no close frame.
+                    Err(()) => continue,
                 }
             } else if send.await.is_err() {
                 return;
@@ -2605,6 +2621,14 @@ impl StreamConn {
                         || self.legacy_companion_tasks_on_connection.len()
                             >= MAX_LEGACY_COMPANION_TASKS_PER_CONNECTION)
                 {
+                    self.error(
+                        Some(task_id),
+                        "companion_attach_rejected",
+                        "this connection has exhausted its companion attachments; \
+                         reconnect or update Kanna Mobile"
+                            .into(),
+                    )
+                    .await;
                     return false;
                 }
                 let legacy_companion_task_id = (kind == StreamKind::Companion
@@ -2614,7 +2638,11 @@ impl StreamConn {
                     task_id,
                     kind,
                     from_seq,
-                    include_assets.unwrap_or(true),
+                    // Assets are opt-in: a client that does not name the field
+                    // is a pre-asset client that can neither chunk nor read
+                    // them, and an unchunked assetful snapshot can be tens of
+                    // megabytes in one text frame.
+                    include_assets.unwrap_or(false),
                     accept_snapshot_chunks.unwrap_or(false),
                     attachment_epoch,
                 )
@@ -2624,10 +2652,19 @@ impl StreamConn {
                         .attachments
                         .contains_key(&(task_id.clone(), StreamKind::Companion))
                     {
-                        self.legacy_companion_tasks_on_connection.insert(task_id);
+                        self.legacy_companion_tasks_on_connection
+                            .insert(task_id.clone());
                         if self.legacy_companion_tasks_on_connection.len()
                             >= MAX_LEGACY_COMPANION_TASKS_PER_CONNECTION
                         {
+                            self.error(
+                                Some(task_id),
+                                "companion_attach_rejected",
+                                "this connection has exhausted its companion attachments; \
+                                 reconnect or update Kanna Mobile"
+                                    .into(),
+                            )
+                            .await;
                             return false;
                         }
                     }
@@ -2659,6 +2696,11 @@ impl StreamConn {
                 }
                 if kind == StreamKind::Companion {
                     self.companion_tx.invalidate(&task_id);
+                    // A detached legacy companion no longer holds one of this
+                    // connection's bounded legacy slots, so the client's next
+                    // modal-open re-attach must succeed instead of ending the
+                    // whole multiplexed socket.
+                    self.legacy_companion_tasks_on_connection.remove(&task_id);
                 }
             }
             ClientFrame::AgentInput { task_id, text } => {
@@ -4264,38 +4306,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_companion_lifecycle_history_retires_at_its_bound() {
-        let (mut conn, _outbound_rx) =
-            companion_lifecycle_test_conn("legacy-lifecycle-history-bound", false);
+    async fn legacy_companion_duplicate_attach_retires_with_an_error_frame() {
+        let (mut conn, mut outbound_rx) =
+            companion_lifecycle_test_conn("legacy-duplicate-attach", false);
 
-        for index in 0..MAX_LEGACY_COMPANION_TASKS_PER_CONNECTION {
-            let task_id = format!("legacy-task-{index}");
-            let keep_open = conn
-                .handle(companion_attach_frame(task_id.clone(), index as u64))
-                .await;
-            if index + 1 == MAX_LEGACY_COMPANION_TASKS_PER_CONNECTION {
-                assert!(
-                    !keep_open,
-                    "the connection must retire when legacy history reaches its bound"
-                );
-                break;
+        assert!(
+            conn.handle(companion_attach_frame("legacy-task".into(), 0))
+                .await
+        );
+        // Replacing a still-attached legacy companion on the same connection
+        // is connection-fatal — legacy events carry no epoch to fence a
+        // second concurrent lifecycle — but the retire must be announced
+        // rather than silently ending terminal and agent streams too.
+        assert!(
+            !conn
+                .handle(companion_attach_frame("legacy-task".into(), 1))
+                .await,
+            "duplicate legacy attach without detach must retire the connection"
+        );
+        let mut saw_rejection = false;
+        while let Ok(Some(frame)) =
+            tokio::time::timeout(Duration::from_millis(500), outbound_rx.recv()).await
+        {
+            if let ServerFrame::Error { code, .. } = &frame {
+                if code == "companion_attach_rejected" {
+                    saw_rejection = true;
+                    break;
+                }
             }
-            assert!(keep_open);
+        }
+        assert!(
+            saw_rejection,
+            "retiring the connection must be announced with an error frame"
+        );
+        conn.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn legacy_companion_reattach_after_detach_succeeds() {
+        let (mut conn, _outbound_rx) =
+            companion_lifecycle_test_conn("legacy-reattach-after-detach", false);
+
+        // A legacy client re-sends attach on every companion modal reopen;
+        // a detached task must not keep holding one of its bounded slots.
+        for epoch in 0..3_u64 {
+            assert!(
+                conn.handle(companion_attach_frame("legacy-task".into(), epoch))
+                    .await,
+                "re-attach after detach must keep the connection open (epoch {epoch})"
+            );
+            assert_eq!(conn.legacy_companion_tasks_on_connection.len(), 1);
             assert!(
                 conn.handle(ClientFrame::Detach {
-                    task_id,
+                    task_id: "legacy-task".into(),
                     kind: StreamKind::Companion,
-                    attachment_epoch: Some(index as u64),
+                    attachment_epoch: Some(epoch),
                 })
                 .await
             );
+            assert!(
+                conn.legacy_companion_tasks_on_connection.is_empty(),
+                "detach must release the task's legacy attachment slot"
+            );
         }
-
-        assert_eq!(
-            conn.legacy_companion_tasks_on_connection.len(),
-            MAX_LEGACY_COMPANION_TASKS_PER_CONNECTION,
-            "legacy lifecycle history must not grow past its bound"
-        );
         conn.shutdown().await;
     }
 
@@ -5782,7 +5855,7 @@ mod tests {
                 task_id: "task-1".into(),
                 kind: StreamKind::Companion,
                 from_seq: 0,
-                include_assets: None,
+                include_assets: Some(true),
                 accept_snapshot_chunks: None,
                 attachment_epoch: None,
             },
@@ -5875,6 +5948,181 @@ mod tests {
             None,
             "detached companions must stop sending updates"
         );
+    }
+
+    #[tokio::test]
+    async fn fenced_companion_send_cancelled_by_epoch_bump_keeps_the_connection_alive() {
+        let fixture = KspCompanionFixture::new("epoch-bump-blocked-send");
+        fixture.activate("123-456", "first.html", b"<h2>Blocked</h2>");
+        fixture.server_info("123-456", br#"{"url":"http://localhost:52341"}"#);
+        // One maximum-size asset makes the epoch-1 snapshot far larger than
+        // loopback socket buffering, so its send parks on TCP backpressure
+        // while the client is not reading.
+        fixture.content(
+            "123-456",
+            "large.png",
+            &vec![0_u8; kanna_visual_companion::MAX_COMPANION_ASSET_BYTES as usize],
+        );
+        let url = fixture.serve().await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame());
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Companion,
+                from_seq: 0,
+                include_assets: Some(true),
+                accept_snapshot_chunks: Some(false),
+                attachment_epoch: Some(1),
+            },
+        )
+        .await;
+        // Let the writer start (and block on) the oversized epoch-1 send.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Detach + re-attach bumps the attachment epoch, cancelling the
+        // parked fenced send. The connection must survive that cancellation.
+        send_frame(
+            &mut socket,
+            &ClientFrame::Detach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Companion,
+                attachment_epoch: Some(1),
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Companion,
+                from_seq: 0,
+                include_assets: Some(false),
+                accept_snapshot_chunks: Some(false),
+                attachment_epoch: Some(2),
+            },
+        )
+        .await;
+
+        // Resume reading. Any partially buffered epoch-1 frame is harmless —
+        // the client fences by epoch — but the epoch-2 snapshot has to arrive,
+        // proving the writer kept the socket alive.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "epoch-2 snapshot never arrived after the fenced send was cancelled"
+            );
+            match recv_frame_with_timeout(&mut socket, Duration::from_secs(20)).await {
+                Some(ServerFrame::CompanionSnapshot {
+                    attachment_epoch: Some(2),
+                    ..
+                }) => break,
+                Some(_) => continue,
+                None => panic!("connection went silent after the fenced send was cancelled"),
+            }
+        }
+
+        // Request traffic must also still flow on the same connection.
+        send_frame(
+            &mut socket,
+            &ClientFrame::Request {
+                id: 9,
+                method: "GET".into(),
+                path: "/v1/tasks".into(),
+                body: None,
+            },
+        )
+        .await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "request went unanswered after the fenced send was cancelled"
+            );
+            match recv_frame_with_timeout(&mut socket, Duration::from_secs(10)).await {
+                Some(ServerFrame::Response { id: 9, .. }) => break,
+                Some(_) => continue,
+                None => panic!("connection went silent before answering the request"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_attach_without_asset_opt_in_gets_an_assetless_snapshot() {
+        let fixture = KspCompanionFixture::new("legacy-assetless-default");
+        KspCompanionFixture::activate_maximum_bundle(&fixture.worktree, "123-456");
+        let url = fixture.serve().await;
+        let mut socket = ws_connect(&url).await;
+        send_frame(&mut socket, &legacy_client_auth_frame()).await;
+        assert!(matches!(
+            recv_frame(&mut socket).await,
+            ServerFrame::AuthOk { .. }
+        ));
+        // A pre-asset client names neither include_assets nor
+        // accept_snapshot_chunks; it must never be handed the maximum
+        // assetful bundle in one unchunked frame.
+        send_frame(
+            &mut socket,
+            &ClientFrame::Attach {
+                task_id: "task-1".into(),
+                kind: StreamKind::Companion,
+                from_seq: 0,
+                include_assets: None,
+                accept_snapshot_chunks: None,
+                attachment_epoch: None,
+            },
+        )
+        .await;
+        match recv_frame(&mut socket).await {
+            ServerFrame::CompanionSnapshot { html, assets, .. } => {
+                assert_eq!(
+                    html.len(),
+                    kanna_visual_companion::MAX_COMPANION_HTML_BYTES as usize
+                );
+                assert!(
+                    assets.is_empty(),
+                    "a client that did not opt into assets must not receive them"
+                );
+            }
+            other => panic!("expected an assetless companion snapshot, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_with_unknown_capability_still_authenticates() {
+        let state = Arc::new(crate::http_api::AppState::new(test_config(
+            "ksp-unknown-capability",
+            "KSP Unknown Capability",
+        )));
+        let (incoming_tx, incoming_rx) = mpsc::channel(8);
+        let (frame_tx, companion_tx, mut outbound_rx) = outbound_frame_channel(8);
+        let task = tokio::spawn(handle_stream_channels(
+            incoming_rx,
+            frame_tx,
+            companion_tx,
+            state,
+            AuthMode::AllowEmpty,
+            true,
+        ));
+
+        // A future client may advertise capabilities this build has never
+        // heard of; one unknown string must not fail the whole Auth frame.
+        incoming_tx
+            .send(
+                serde_json::json!({
+                    "type": "auth",
+                    "capabilities": ["companion_event_epoch", "capability_from_the_future"],
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outbound_rx.recv().await, Some(auth_ok_frame()));
+        drop(incoming_tx);
+        let _ = task.await;
     }
 
     #[tokio::test]
@@ -6502,6 +6750,8 @@ mod tests {
             },
         )
         .await;
+        // A legacy client re-sends attach on every companion modal reopen; a
+        // detach-then-attach lifecycle must continue on the same connection.
         send_frame(
             &mut socket,
             &ClientFrame::Attach {
@@ -6514,19 +6764,29 @@ mod tests {
             },
         )
         .await;
+        assert!(matches!(
+            recv_frame(&mut socket).await,
+            ServerFrame::CompanionSnapshot {
+                attachment_epoch: Some(2),
+                ..
+            }
+        ));
         send_frame(&mut socket, &event_frame("legacy-after-replacement", None)).await;
-        assert!(
-            recv_frame_with_timeout(&mut socket, Duration::from_secs(1))
-                .await
-                .is_none(),
-            "a legacy client must reconnect before its second attachment lifecycle"
-        );
+        assert!(matches!(
+            recv_frame(&mut socket).await,
+            ServerFrame::CompanionEventResult {
+                event_id,
+                accepted: true,
+                attachment_epoch: None,
+                ..
+            } if event_id == "legacy-after-replacement"
+        ));
         assert_eq!(
             std::fs::read_to_string(&events_path)
                 .map(|events| events.lines().count())
                 .unwrap_or(0),
-            1,
-            "the stale legacy event queued behind replacement must not append"
+            2,
+            "an un-epoched event on the re-attached lifecycle must append"
         );
     }
 
@@ -6584,6 +6844,18 @@ mod tests {
             },
         )
         .await;
+        match recv_frame_with_timeout(&mut first, Duration::from_secs(5)).await {
+            Some(ServerFrame::Error { code, .. }) => {
+                assert_eq!(
+                    code, "companion_attach_rejected",
+                    "direct replacement must be announced before the retire"
+                );
+            }
+            other => panic!(
+                "direct replacement from a legacy client must retire the connection \
+                 with an error frame, got {other:?}"
+            ),
+        }
         assert!(
             recv_frame_with_timeout(&mut first, Duration::from_secs(1))
                 .await

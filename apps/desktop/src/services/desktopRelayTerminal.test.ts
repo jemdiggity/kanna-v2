@@ -221,6 +221,7 @@ describe("createDesktopRelayTerminalClient", () => {
       from_seq: 0,
       accept_snapshot_chunks: true,
       attachment_epoch: 1,
+      include_assets: true,
     });
     expect(events).toContainEqual({
       type: "connection",
@@ -269,6 +270,7 @@ describe("createDesktopRelayTerminalClient", () => {
       from_seq: 0,
       accept_snapshot_chunks: true,
       attachment_epoch: 1,
+      include_assets: true,
     });
     expect(events).toContainEqual({
       type: "connection",

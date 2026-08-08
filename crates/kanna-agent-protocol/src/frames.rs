@@ -26,12 +26,19 @@ pub enum StreamKind {
 }
 
 /// Optional KSP behaviors that require both peers to agree on wire semantics.
+///
+/// The set is open on the wire: a peer from the future may advertise
+/// capabilities this build has never heard of, and rejecting the whole frame
+/// for one unknown string would make the negotiation unable to ever grow.
+/// Unknown strings deserialize to [`KspCapability::Unknown`] and are ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript", derive(TS), ts(export))]
 pub enum KspCapability {
     CompanionAttachmentEpoch,
     CompanionEventEpoch,
+    #[serde(other)]
+    Unknown,
 }
 
 /// Whether the companion content is an HTML fragment that Kanna must frame
@@ -317,6 +324,21 @@ pub enum ServerFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_with_unknown_capability_strings_still_parses() {
+        let frame: ClientFrame = serde_json::from_str(
+            r#"{"type":"auth","capabilities":["companion_event_epoch","capability_from_the_future"]}"#,
+        )
+        .expect("an unknown capability string must not fail the Auth frame");
+        let ClientFrame::Auth { capabilities, .. } = frame else {
+            panic!("expected an auth frame");
+        };
+        assert_eq!(
+            capabilities,
+            vec![KspCapability::CompanionEventEpoch, KspCapability::Unknown],
+        );
+    }
 
     #[test]
     fn client_frame_round_trip() {

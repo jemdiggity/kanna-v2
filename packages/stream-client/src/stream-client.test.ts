@@ -815,6 +815,7 @@ describe("StreamClient", () => {
         from_seq: 0,
         accept_snapshot_chunks: true,
         attachment_epoch: 2,
+        include_assets: true,
       },
     ]);
     expect(
@@ -908,6 +909,7 @@ describe("StreamClient", () => {
       from_seq: 0,
       accept_snapshot_chunks: true,
       attachment_epoch: 1,
+      include_assets: true,
     });
     client.close();
   });
@@ -943,6 +945,7 @@ describe("StreamClient", () => {
       from_seq: 0,
       accept_snapshot_chunks: true,
       attachment_epoch: 1,
+      include_assets: true,
     });
     const pendingEvent = (eventId: string): CompanionEvent => ({
       session_id: "123-456",
@@ -1060,6 +1063,7 @@ describe("StreamClient", () => {
       from_seq: 0,
       accept_snapshot_chunks: true,
       attachment_epoch: 1,
+      include_assets: true,
     });
 
     client.detach("task-1", "companion");
@@ -2063,6 +2067,7 @@ describe("StreamClient", () => {
       from_seq: 0,
       accept_snapshot_chunks: true,
       attachment_epoch: 1,
+      include_assets: true,
     });
 
     client.detach("task-race", "companion");
@@ -2085,6 +2090,7 @@ describe("StreamClient", () => {
       from_seq: 0,
       accept_snapshot_chunks: true,
       attachment_epoch: 2,
+      include_assets: true,
     });
 
     socket.receive({
@@ -2514,6 +2520,7 @@ describe("StreamClient", () => {
         from_seq: 0,
         accept_snapshot_chunks: true,
         attachment_epoch: 1,
+        include_assets: true,
       },
     ]);
     expect(

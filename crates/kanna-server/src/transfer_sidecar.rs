@@ -1382,12 +1382,18 @@ done
             })
             .collect();
         assert_eq!(
-            kinds.iter().filter(|kind| *kind == "sidecar_exited").count(),
+            kinds
+                .iter()
+                .filter(|kind| *kind == "sidecar_exited")
+                .count(),
             1,
             "the crashed incarnation must be announced exactly once: {kinds:?}"
         );
         assert_eq!(
-            kinds.iter().filter(|kind| *kind != "sidecar_exited").count(),
+            kinds
+                .iter()
+                .filter(|kind| *kind != "sidecar_exited")
+                .count(),
             2,
             "both incarnations' advisory events must survive the respawn: {kinds:?}"
         );

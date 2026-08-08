@@ -356,7 +356,7 @@ export class StreamClient {
       from_seq: 0,
       accept_snapshot_chunks: true,
       attachment_epoch: generation,
-      ...(includeAssets ? {} : { include_assets: false }),
+      include_assets: includeAssets,
     });
     if (sent) this.recordCompanionAttachmentOnSocket(taskId, generation);
   }
@@ -651,8 +651,8 @@ export class StreamClient {
                   attachment_epoch: attachment.generation,
                 }
               : {}),
-            ...(attachment.kind === "companion" && !attachment.includeAssets
-              ? { include_assets: false }
+            ...(attachment.kind === "companion"
+              ? { include_assets: attachment.includeAssets }
               : {}),
           });
           if (sent && attachment.kind === "companion") {

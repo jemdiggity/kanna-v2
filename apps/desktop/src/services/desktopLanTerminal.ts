@@ -232,6 +232,11 @@ export function createDesktopLanTerminalClient(): DesktopRemoteTaskClient {
       entry.connected = false;
       entry.sending = false;
       entry.failedGeneration = null;
+      // The retry may land on a respawned sidecar whose first frames can beat
+      // the observe response; a pinned dead incarnation would silently drop
+      // that initial snapshot. Bind to the next incarnation we actually see,
+      // exactly like the first attempt.
+      entry.sidecarIncarnation = null;
       void startCompanionAttempt(entry);
     }, delay);
   };

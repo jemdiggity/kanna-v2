@@ -748,6 +748,62 @@ describe("createDesktopLanTerminalClient", () => {
     }
   });
 
+  it("delivers a respawned sidecar's snapshot that beats the retry observe response", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: DesktopRemoteCompanionEvent[] = [];
+      const client = createDesktopLanTerminalClient();
+      client.observeCompanion({
+        desktopId: "peer-owner",
+        taskId: "task-1",
+        listener: (event) => events.push(event),
+      });
+      await waitForCompanionObservations(1);
+
+      // The first attempt bound the observer to sidecar incarnation 1.
+      listenerFor("transfer-sidecar-exited")({ payload: { incarnation: 1 } });
+
+      // The retry's observe response hangs, so the observer has not yet
+      // learned the respawned incarnation when its first frame arrives —
+      // the companion event lane is unordered relative to the response.
+      invokeMock.mockImplementation((command) =>
+        command === "observe_transfer_peer_companion"
+          ? new Promise(() => undefined)
+          : Promise.resolve(null),
+      );
+      await vi.advanceTimersByTimeAsync(250);
+      await waitForCompanionObservations(2);
+      const retryGeneration = companionGenerationAt(1);
+
+      listenerFor("transfer-companion-event")({
+        payload: {
+          type: "companion_event",
+          incarnation: 2,
+          peer_id: "peer-owner",
+          task_id: "task-1",
+          generation: retryGeneration,
+          frame: {
+            type: "companion_snapshot",
+            task_id: "task-1",
+            session_id: "session-1",
+            revision: "revision-2",
+            document_kind: "fragment",
+            html: "<h2>Respawned</h2>",
+            assets: [],
+          },
+        },
+      });
+
+      expect(events.at(-1)).toMatchObject({
+        type: "snapshot",
+        taskId: "task-1",
+        snapshot: { revision: "revision-2", html: "<h2>Respawned</h2>" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("restarts multiple companion observers once for one sidecar death", async () => {
     vi.useFakeTimers();
     try {
