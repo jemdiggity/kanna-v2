@@ -43,7 +43,11 @@ server-side infers it: `display_name` is the only title input the fan-out has.
   (`transition: auto`).
 - **`specialty-review` pipeline** — a single manual `review` stage with **no
   agent binding**; the dispatcher binds the specialty agent through the
-  create request's `agent` override. Manual is the uniform choice: the
+  create request's `agent` override. It is an *internal* built-in
+  (`selectable: false` in `BUILTIN_PIPELINES`): Kanna binds it itself, so the
+  name resolves on create but is never listed as a pipeline a human or an
+  agent chooses — one character from `specialized-reviewers` is too close to
+  offer both in the same picker. Manual is the uniform choice: the
   engine only auto-advances on `success`, so an auto stage would close PASS
   children while FAIL children parked — two lifecycles for one kind of
   child, and dispatcher logic that branches on outcome. With manual, both

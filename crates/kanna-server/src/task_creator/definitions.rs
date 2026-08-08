@@ -546,25 +546,33 @@ impl RepoDefinitions {
         Ok(Some(definition))
     }
 
+    /// Every pipeline name this repo offers as a *choice* — what the desktop's
+    /// new-task picker lists and what a caller may name on task creation.
+    ///
+    /// Internal built-ins are excluded even when the repo ships a file under
+    /// that name: such a file customizes the internal pipeline's definition
+    /// (and `pipeline_optional` honors it), it does not promote the name to a
+    /// choice. This repo is itself the source of the bundled definitions, so
+    /// without that rule every Kanna checkout would list its own internals.
     pub(super) fn pipeline_names(&self) -> Result<Vec<String>, String> {
         let path = ".kanna/pipelines";
         let entries = self
             .snapshot
             .list_direct_entries(path)
             .map_err(|error| definition_error(&self.snapshot, path, error))?;
-        let mut names = BTreeSet::from([
-            "no-review".to_string(),
-            "single-reviewer".to_string(),
-            "specialized-reviewers".to_string(),
-            "specialty-review".to_string(),
-        ]);
+        let mut names = BUILTIN_PIPELINES
+            .iter()
+            .filter(|pipeline| pipeline.selectable)
+            .map(|pipeline| pipeline.name.to_string())
+            .collect::<BTreeSet<String>>();
         for entry in entries {
             let Some(name) = entry.strip_suffix(".json") else {
                 continue;
             };
-            if !name.is_empty() && name != "schema" {
-                names.insert(name.to_string());
+            if name.is_empty() || name == "schema" || is_internal_builtin_pipeline(name) {
+                continue;
             }
+            names.insert(name.to_string());
         }
         Ok(names.into_iter().collect())
     }
@@ -1120,6 +1128,55 @@ pub(super) fn canonical_builtin_pipeline_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
+/// A pipeline Kanna ships, and whether its name is a choice.
+///
+/// `selectable: false` marks an *internal* built-in: Kanna binds it itself
+/// rather than offering it, so the name must still resolve, but listing it as
+/// an option only invites picking it by mistake. `specialty-review` is the
+/// only one today — the single-stage pipeline `qa-dispatcher` gives each child
+/// task it fans out, one character away from the `specialized-reviewers`
+/// pipeline an operator actually chooses.
+struct BuiltinPipeline {
+    name: &'static str,
+    definition: &'static str,
+    selectable: bool,
+}
+
+/// Single source of truth for the built-in pipelines: both `pipeline_names()`
+/// and the compiled-resource fallback read this table, so a built-in can never
+/// be offered without shipping a definition, or ship one whose visibility is
+/// declared in two places that can drift apart.
+const BUILTIN_PIPELINES: &[BuiltinPipeline] = &[
+    BuiltinPipeline {
+        name: "no-review",
+        definition: include_str!("../../../../.kanna/pipelines/no-review.json"),
+        selectable: true,
+    },
+    BuiltinPipeline {
+        name: "single-reviewer",
+        definition: include_str!("../../../../.kanna/pipelines/single-reviewer.json"),
+        selectable: true,
+    },
+    BuiltinPipeline {
+        name: "specialized-reviewers",
+        definition: include_str!("../../../../.kanna/pipelines/specialized-reviewers.json"),
+        selectable: true,
+    },
+    BuiltinPipeline {
+        name: "specialty-review",
+        definition: include_str!("../../../../.kanna/pipelines/specialty-review.json"),
+        selectable: false,
+    },
+];
+
+/// Whether `name` is a built-in Kanna binds itself rather than a choice a
+/// human or an agent makes. See `BuiltinPipeline`.
+pub(super) fn is_internal_builtin_pipeline(name: &str) -> bool {
+    BUILTIN_PIPELINES
+        .iter()
+        .any(|pipeline| pipeline.name == name && !pipeline.selectable)
+}
+
 fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
     // A retired built-in pipeline name serves its current definition.
     if let Some(name) = relative_path
@@ -1132,21 +1189,14 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
         }
     }
 
-    let pipeline = match relative_path {
-        ".kanna/pipelines/no-review.json" => {
-            Some(include_str!("../../../../.kanna/pipelines/no-review.json"))
-        }
-        ".kanna/pipelines/single-reviewer.json" => Some(include_str!(
-            "../../../../.kanna/pipelines/single-reviewer.json"
-        )),
-        ".kanna/pipelines/specialized-reviewers.json" => Some(include_str!(
-            "../../../../.kanna/pipelines/specialized-reviewers.json"
-        )),
-        ".kanna/pipelines/specialty-review.json" => Some(include_str!(
-            "../../../../.kanna/pipelines/specialty-review.json"
-        )),
-        _ => None,
-    };
+    let pipeline = relative_path
+        .strip_prefix(".kanna/pipelines/")
+        .and_then(|file| file.strip_suffix(".json"))
+        .and_then(|name| {
+            BUILTIN_PIPELINES
+                .iter()
+                .find_map(|pipeline| (pipeline.name == name).then_some(pipeline.definition))
+        });
     pipeline.or_else(|| {
         BUILTIN_AGENT_RESOURCES
             .iter()
