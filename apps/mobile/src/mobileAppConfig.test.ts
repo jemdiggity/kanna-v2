@@ -140,21 +140,21 @@ describe("mobile app config", () => {
     expect(resolveMobileAppEnvironment("qa").name).toBe("prod");
   });
 
-  it("defaults the dev native version from the repository VERSION source", () => {
+  it("defaults the dev native version from the injected fallback source", () => {
     const config = createExpoConfig({ KANNA_APP_ENV: "dev" }, () => "3.4.5");
 
     expect(config.version).toBe("3.4.5");
     expect(config.ios?.buildNumber).toBeUndefined();
   });
 
-  it("prefers an explicit staging KANNA_APP_VERSION over the repository VERSION", () => {
+  it("prefers an explicit staging KANNA_APP_VERSION over checked-in versions", () => {
     const config = createExpoConfig(
       {
         KANNA_APP_ENV: "staging",
         KANNA_APP_VERSION: "1.2.3"
       },
       () => {
-        throw new Error("must not read the repository VERSION when overridden");
+        throw new Error("must not read a checked-in VERSION when overridden");
       }
     );
 
@@ -167,25 +167,59 @@ describe("mobile app config", () => {
     expect(config.version).toBe("3.4.5");
   });
 
-  it("embeds the real repository VERSION for canonical builds", () => {
-    const repoVersion = readRepoVersion();
+  it("embeds the checked-in mobile VERSION for canonical builds", () => {
+    const mobileVersion = readRepoVersion();
 
-    expect(repoVersion).toMatch(/^\d+\.\d+\.\d+$/);
-    expect(repoVersion).not.toBe("0.0.0");
-    expect(createExpoConfig({}).version).toBe(repoVersion);
+    expect(mobileVersion).toBe("1.0.0");
+    expect(createExpoConfig({}).version).toBe(mobileVersion);
   });
 
-  it("finds the VERSION file by walking up from a nested directory", async () => {
+  it("prefers apps/mobile/VERSION while walking up from a nested directory", async () => {
     const root = await mkdtemp(join(tmpdir(), "kanna-version-"));
     await writeFile(join(root, "VERSION"), "7.8.9\n");
     const nested = join(root, "apps", "mobile");
+    await mkdir(nested, { recursive: true });
+    await writeFile(join(nested, "VERSION"), "1.2.3\n");
+
+    expect(readRepoVersion(nested)).toBe("1.2.3");
+    expect(readRepoVersion(root)).toBe("1.2.3");
+  });
+
+  it("falls back to the repository VERSION while walking up", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-version-fallback-"));
+    await writeFile(join(root, "VERSION"), "7.8.9\n");
+    const nested = join(root, "apps", "mobile", "src");
     await mkdir(nested, { recursive: true });
 
     expect(readRepoVersion(nested)).toBe("7.8.9");
   });
 
-  it("fails loudly when the VERSION file is empty", async () => {
+  it("fails loudly with the path when apps/mobile/VERSION is empty", async () => {
     const root = await mkdtemp(join(tmpdir(), "kanna-version-empty-"));
+    const mobileDir = join(root, "apps", "mobile");
+    const mobileVersionPath = join(mobileDir, "VERSION");
+    await mkdir(mobileDir, { recursive: true });
+    await writeFile(join(root, "VERSION"), "7.8.9\n");
+    await writeFile(mobileVersionPath, "  \n");
+
+    expect(() => readRepoVersion(root)).toThrow(mobileVersionPath);
+    expect(() => readRepoVersion(root)).toThrow(/is empty/);
+  });
+
+  it("fails loudly with the path when apps/mobile/VERSION is malformed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-version-malformed-"));
+    const mobileDir = join(root, "apps", "mobile");
+    const mobileVersionPath = join(mobileDir, "VERSION");
+    await mkdir(mobileDir, { recursive: true });
+    await writeFile(join(root, "VERSION"), "7.8.9\n");
+    await writeFile(mobileVersionPath, "not-a-version\n");
+
+    expect(() => readRepoVersion(root)).toThrow(mobileVersionPath);
+    expect(() => readRepoVersion(root)).toThrow(/is malformed/);
+  });
+
+  it("keeps the existing loud failure for an empty repository VERSION fallback", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kanna-repo-version-empty-"));
     await writeFile(join(root, "VERSION"), "  \n");
 
     expect(() => readRepoVersion(root)).toThrow(/is empty/);

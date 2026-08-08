@@ -6,13 +6,20 @@ Firebase cloud services. Everything goes through `kd`.
 
 ## Versioning
 
-The root `VERSION` file is the single source of truth for the packaged app
-version. `./kd release ship --release` updates `VERSION`, `tauri.conf.json`,
+The root `VERSION` file is the single source of truth for the packaged desktop
+app version. `./kd release ship --release` updates `VERSION`, `tauri.conf.json`,
 and Rust package metadata, commits, tags `vX.Y.Z`, and publishes a GitHub
 release. `VERSION` governs the packaged desktop app only — workspace
 `package.json` versions play no part in it (app-related packages sit at
 `0.0.0`; a few services version independently, e.g. `services/relay` at
 `0.1.0`). The desktop app reads `VERSION` at compile time via `build.rs`.
+
+The mobile App Store marketing version is independent and lives in
+`apps/mobile/VERSION`. Native mobile builds resolve it in this order: an
+explicit `KANNA_APP_VERSION`, `apps/mobile/VERSION`, then the root `VERSION` as
+a compatibility fallback. An empty or malformed mobile version fails the build
+instead of silently using the desktop version. This marketing version is
+separate from the OTA `runtimeVersion` and the iOS build number.
 
 ## Desktop: dev path vs. release path
 
@@ -120,6 +127,11 @@ relay endpoints `wss://relay.kanna.build` / `wss://relay-staging.kanna.build`.
 Runs Expo prebuild (CNG) with `KANNA_APP_ENV=prod`, archives the generated
 workspace, and exports an IPA under `.build/mobile/ios-production/`. Bundle
 ids: `build.kanna.app` (prod), `build.kanna.app.staging`, `build.kanna.app.dev`.
+The default `CFBundleShortVersionString` comes from `apps/mobile/VERSION`.
+`--version <version>` is an explicit one-build override; if the mobile file is
+absent, the root desktop `VERSION` remains a compatibility fallback. Always
+pass a monotonically increasing `--build-number`; it controls
+`CFBundleVersion` independently.
 Run the [mobile production QA gate](../testing/mobile-production-qa-gate.md)
 before TestFlight external testing or App Store submission.
 
