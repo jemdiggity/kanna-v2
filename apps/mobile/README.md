@@ -40,9 +40,11 @@ Physical staging builds started with `./kd mobile run --device --staging`
 resolve the active `desktop-staging/latest-staging.json` release pointer and
 embed its marketing version after removing the `-staging.N` suffix. The build
 fails before prebuild if that authoritative pointer is unavailable or invalid;
-it does not substitute the production `VERSION` or a possibly stale local tag.
-An explicit `KANNA_APP_VERSION` still takes precedence. Dev builds use the
-checked-in repository `VERSION` as their deterministic fallback.
+it does not substitute a checked-in version or a possibly stale local tag. An
+explicit `KANNA_APP_VERSION` still takes precedence. Dev builds use the
+checked-in `apps/mobile/VERSION` as their deterministic fallback, with the root
+desktop `VERSION` retained only for compatibility when the mobile file is
+absent.
 
 ## Production iOS Archive
 
@@ -60,10 +62,12 @@ bundle id `build.kanna.app`, display name `Kanna`, and Apple team
 generates the production workspace and scheme as `Kanna`; the dev and staging
 workspaces are `KannaDev` and `KannaStaging` respectively.
 
-By default, the App Store marketing version comes from the repo `VERSION` file.
-Pass `--version <version>` only if the mobile App Store version intentionally
-diverges from the desktop release version. Always pass a monotonically
-increasing `--build-number`; this becomes `CFBundleVersion`.
+By default, the App Store marketing version comes from `apps/mobile/VERSION`.
+Pass `--version <version>` for an explicit one-build override. If the mobile
+file is absent, the root desktop `VERSION` remains a compatibility fallback;
+an empty or malformed mobile file fails instead of silently falling back.
+Always pass a monotonically increasing `--build-number`; this becomes
+`CFBundleVersion`.
 
 To upload after export, configure Transporter API-key credentials locally and
 run:

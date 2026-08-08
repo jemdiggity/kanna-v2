@@ -5,7 +5,7 @@
 // source. Do NOT import ./src/mobileEnvironment here.
 import environments from "./src/mobileEnvironments.json";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 type KannaAppEnvironmentName = "dev" | "staging" | "prod";
 type OtaChannel = "staging" | "production";
@@ -96,23 +96,44 @@ const OTA_MANIFEST_PATH = "/ota/manifest";
 const OTA_CODE_SIGNING_CERTIFICATE = "./certs/ota-codesign.pem";
 const OTA_CODE_SIGNING_KEY_ID = "kanna-mobile-ota-v1";
 
+const NATIVE_MARKETING_VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
+
+function readVersionFile(candidate: string, mobile: boolean): string {
+  const version = readFileSync(candidate, "utf8").trim();
+  const source = mobile ? "Mobile" : "Repository";
+  if (!version) {
+    throw new Error(
+      `${source} VERSION file at ${candidate} is empty; fix it or set KANNA_APP_VERSION explicitly.`
+    );
+  }
+  if (mobile && !NATIVE_MARKETING_VERSION_PATTERN.test(version)) {
+    throw new Error(
+      `Mobile VERSION file at ${candidate} is malformed; expected X.Y.Z, got ${JSON.stringify(version)}. Fix it or set KANNA_APP_VERSION explicitly.`
+    );
+  }
+  return version;
+}
+
 // The native CFBundleShortVersionString source of truth. An explicit
 // KANNA_APP_VERSION (production archives and kd staging device builds) wins.
-// Other local builds fall back to the repository VERSION file — the release
-// version source mobile-archive also reads. Kd must supply the active staging
-// marketing version because that series may be ahead of VERSION.
+// Other local builds prefer apps/mobile/VERSION, with the repository VERSION
+// retained as a compatibility fallback. Kd must supply the active staging
+// marketing version because that series may be ahead of either checked-in
+// version. Keep walking upward so config loading works from the repo root or a
+// nested mobile directory.
 export function readRepoVersion(startDir: string = process.cwd()): string {
   let dir = resolve(startDir);
   for (;;) {
+    const mobileCandidate = join(dir, "apps", "mobile", "VERSION");
+    if (existsSync(mobileCandidate)) {
+      return readVersionFile(mobileCandidate, true);
+    }
+
     const candidate = join(dir, "VERSION");
     if (existsSync(candidate)) {
-      const version = readFileSync(candidate, "utf8").trim();
-      if (!version) {
-        throw new Error(
-          `Repository VERSION file at ${candidate} is empty; fix it or set KANNA_APP_VERSION explicitly.`
-        );
-      }
-      return version;
+      const isMobileVersion =
+        basename(dir) === "mobile" && basename(dirname(dir)) === "apps";
+      return readVersionFile(candidate, isMobileVersion);
     }
     const parent = dirname(dir);
     if (parent === dir) {

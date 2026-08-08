@@ -11,9 +11,15 @@ import {
 } from "./mobile-archive";
 import type { CommandRunner } from "./process";
 
-async function writeMinimalRepo(root: string): Promise<void> {
+async function writeMinimalRepo(
+  root: string,
+  mobileVersion: string | null = "1.0.0"
+): Promise<void> {
   await mkdir(join(root, "apps/mobile/src"), { recursive: true });
   await writeFile(join(root, "VERSION"), "0.0.67\n");
+  if (mobileVersion !== null) {
+    await writeFile(join(root, "apps/mobile/VERSION"), `${mobileVersion}\n`);
+  }
   await writeFile(
     join(root, "apps/mobile/src/mobileEnvironments.json"),
     JSON.stringify({
@@ -156,13 +162,54 @@ describe("kd mobile archive", () => {
     );
 
     expect(result.ok).toBe(true);
-    expect(result.message).toContain("Dry run: mobile production archive 0.0.67 (45)");
+    expect(result.message).toContain("Dry run: mobile production archive 1.0.0 (45)");
     const plan = result.data as MobileIosArchivePlan;
-    expect(plan.version).toBe("0.0.67");
+    expect(plan.version).toBe("1.0.0");
     expect(plan.commands[0]?.env).toMatchObject({
-      KANNA_APP_VERSION: "0.0.67",
+      KANNA_APP_VERSION: "1.0.0",
       KANNA_IOS_BUILD_NUMBER: "45"
     });
     expect(calls).toEqual(["xcodebuild -version"]);
+  });
+
+  it("falls back to the repository VERSION when apps/mobile/VERSION is absent", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-fallback-"));
+    await writeMinimalRepo(repoRoot, null);
+
+    const plan = await buildMobileIosArchivePlan({
+      repoRoot,
+      buildNumber: "45"
+    });
+
+    expect(plan.version).toBe("0.0.67");
+    expect(plan.commands[0]?.env).toMatchObject({
+      KANNA_APP_VERSION: "0.0.67"
+    });
+  });
+
+  it("fails loudly when apps/mobile/VERSION is empty", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-empty-"));
+    await writeMinimalRepo(repoRoot, "  ");
+    const mobileVersionPath = join(repoRoot, "apps/mobile/VERSION");
+
+    await expect(
+      buildMobileIosArchivePlan({ repoRoot, buildNumber: "45" })
+    ).rejects.toThrow(mobileVersionPath);
+    await expect(
+      buildMobileIosArchivePlan({ repoRoot, buildNumber: "45" })
+    ).rejects.toThrow(/is empty/);
+  });
+
+  it("fails loudly when apps/mobile/VERSION is malformed", async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-malformed-"));
+    await writeMinimalRepo(repoRoot, "not-a-version");
+    const mobileVersionPath = join(repoRoot, "apps/mobile/VERSION");
+
+    await expect(
+      buildMobileIosArchivePlan({ repoRoot, buildNumber: "45" })
+    ).rejects.toThrow(mobileVersionPath);
+    await expect(
+      buildMobileIosArchivePlan({ repoRoot, buildNumber: "45" })
+    ).rejects.toThrow(/is malformed/);
   });
 });

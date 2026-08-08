@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import type { CommandRunner } from "./process";
@@ -52,6 +53,7 @@ const APPLE_TEAM_ID = "GY3LFAA59P";
 const XCODE_SCHEME = "Kanna";
 const UPLOAD_API_KEY_PLACEHOLDER = "<APP_STORE_CONNECT_API_KEY_ID>";
 const UPLOAD_API_ISSUER_PLACEHOLDER = "<APP_STORE_CONNECT_API_ISSUER_ID>";
+const NATIVE_MARKETING_VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
 
 export function parseXcodeMajorVersion(stdout: string): number | null {
   const match = stdout.match(/^Xcode\s+(\d+)(?:\.|\s|$)/m);
@@ -72,9 +74,28 @@ async function readMobileProductionIdentity(repoRoot: string): Promise<{ bundleI
 }
 
 async function readCurrentVersion(repoRoot: string): Promise<string> {
-  const version = (await readFile(join(repoRoot, "VERSION"), "utf8")).trim();
+  const mobileVersionPath = join(repoRoot, "apps/mobile/VERSION");
+  if (existsSync(mobileVersionPath)) {
+    const mobileVersion = (await readFile(mobileVersionPath, "utf8")).trim();
+    if (!mobileVersion) {
+      throw new Error(
+        `Mobile VERSION file at ${mobileVersionPath} is empty; pass --version explicitly or fix the file.`
+      );
+    }
+    if (!NATIVE_MARKETING_VERSION_PATTERN.test(mobileVersion)) {
+      throw new Error(
+        `Mobile VERSION file at ${mobileVersionPath} is malformed; expected X.Y.Z, got ${JSON.stringify(mobileVersion)}. Pass --version explicitly or fix the file.`
+      );
+    }
+    return mobileVersion;
+  }
+
+  const repoVersionPath = join(repoRoot, "VERSION");
+  const version = (await readFile(repoVersionPath, "utf8")).trim();
   if (!version) {
-    throw new Error("VERSION is empty; pass --version explicitly or fix VERSION.");
+    throw new Error(
+      `Repository VERSION file at ${repoVersionPath} is empty; pass --version explicitly or fix the file.`
+    );
   }
   return version;
 }
