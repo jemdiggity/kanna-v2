@@ -205,6 +205,11 @@ try {
     parseWindowBootstrap(window.location.search),
   );
   const windowWorkspace = createWindowWorkspace({ db, bootstrap: windowBootstrap });
+  try {
+    await windowWorkspace.restoreCurrentWindowGeometry();
+  } catch (error: unknown) {
+    console.warn("[windowWorkspace] failed to restore current window geometry:", error);
+  }
 
   const RootComponent = await resolveRootComponent();
   const app = createApp(RootComponent);

@@ -1,4 +1,5 @@
 import type { DbHandle } from "./types/kanna";
+import type { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 
 import { emit } from "./emit";
 import { listen } from "./listen";
@@ -20,6 +21,21 @@ export interface WorkspaceWindowState extends WindowBootstrap {
   sidebarHidden: boolean;
   sidebarWidth: number;
   order: number;
+  geometry?: WorkspaceWindowGeometry | null;
+}
+
+export interface WorkspaceWindowGeometry {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface WorkspaceMonitorWorkArea {
+  workArea: {
+    position: { x: number; y: number };
+    size: { width: number; height: number };
+  };
 }
 
 export interface WorkspaceSnapshot {
@@ -61,6 +77,8 @@ export interface WindowWorkspaceController {
   }) => Promise<void>;
   persistSidebarHidden: (hidden: boolean) => Promise<void>;
   persistSidebarWidth: (width: number) => Promise<void>;
+  restoreCurrentWindowGeometry: () => Promise<void>;
+  startGeometryTracking: () => Promise<() => void>;
   invalidateSharedData: (reason: string) => Promise<void>;
   restoreAdditionalWindows: () => Promise<void>;
   onSharedInvalidation: (handler: (payload: { reason?: string; sourceWindowId?: string }) => void | Promise<void>) => Promise<() => void>;
@@ -78,11 +96,64 @@ export const WINDOW_WORKSPACE_NATIVE_NAVIGATE_REPO_DOWN_EVENT = "kanna://native-
 export const DEFAULT_SIDEBAR_WIDTH = 260;
 export const MIN_SIDEBAR_WIDTH = 220;
 export const MAX_SIDEBAR_WIDTH = 420;
+export const MIN_WINDOW_WIDTH = 800;
+export const MIN_WINDOW_HEIGHT = 600;
 
 export function normalizeSidebarWidth(width: unknown): number {
   return typeof width === "number" && Number.isFinite(width) && width >= MIN_SIDEBAR_WIDTH && width <= MAX_SIDEBAR_WIDTH
     ? Math.round(width)
     : DEFAULT_SIDEBAR_WIDTH;
+}
+
+export function normalizeWindowGeometry(value: unknown): WorkspaceWindowGeometry | null {
+  if (typeof value !== "object" || value === null) return null;
+  const candidate = value as Partial<WorkspaceWindowGeometry>;
+  if (
+    typeof candidate.x !== "number" || !Number.isFinite(candidate.x) ||
+    typeof candidate.y !== "number" || !Number.isFinite(candidate.y) ||
+    typeof candidate.width !== "number" || !Number.isFinite(candidate.width) ||
+    typeof candidate.height !== "number" || !Number.isFinite(candidate.height) ||
+    candidate.width < MIN_WINDOW_WIDTH || candidate.height < MIN_WINDOW_HEIGHT
+  ) {
+    return null;
+  }
+
+  return {
+    x: Math.round(candidate.x),
+    y: Math.round(candidate.y),
+    width: Math.round(candidate.width),
+    height: Math.round(candidate.height),
+  };
+}
+
+function rectanglesIntersect(
+  geometry: WorkspaceWindowGeometry,
+  monitor: WorkspaceMonitorWorkArea,
+): boolean {
+  const left = monitor.workArea.position.x;
+  const top = monitor.workArea.position.y;
+  const right = left + monitor.workArea.size.width;
+  const bottom = top + monitor.workArea.size.height;
+  return geometry.x < right && geometry.x + geometry.width > left &&
+    geometry.y < bottom && geometry.y + geometry.height > top;
+}
+
+export function resolveRestorableWindowGeometry(
+  value: unknown,
+  monitors: readonly WorkspaceMonitorWorkArea[],
+): WorkspaceWindowGeometry | null {
+  const geometry = normalizeWindowGeometry(value);
+  if (!geometry || monitors.length === 0) return geometry;
+  if (monitors.some((monitor) => rectanglesIntersect(geometry, monitor))) return geometry;
+
+  const fallback = monitors[0];
+  if (!fallback) return geometry;
+  return {
+    x: Math.round(fallback.workArea.position.x),
+    y: Math.round(fallback.workArea.position.y),
+    width: Math.round(Math.min(geometry.width, fallback.workArea.size.width)),
+    height: Math.round(Math.min(geometry.height, fallback.workArea.size.height)),
+  };
 }
 
 export function parseWindowBootstrap(search: string): WindowBootstrap {
@@ -133,14 +204,19 @@ function normalizeWorkspaceSnapshot(snapshot: WorkspaceSnapshot): WorkspaceSnaps
   const ordered = [...snapshot.windows].sort((left, right) => left.order - right.order);
 
   return {
-    windows: ordered.map((entry, index) => ({
-      windowId: entry.windowId,
-      selectedRepoId: entry.selectedRepoId,
-      selectedItemId: entry.selectedItemId,
-      sidebarHidden: entry.sidebarHidden,
-      sidebarWidth: normalizeSidebarWidth(entry.sidebarWidth),
-      order: index,
-    })),
+    windows: ordered.map((entry, index) => {
+      const normalized = {
+        windowId: entry.windowId,
+        selectedRepoId: entry.selectedRepoId,
+        selectedItemId: entry.selectedItemId,
+        sidebarHidden: entry.sidebarHidden,
+        sidebarWidth: normalizeSidebarWidth(entry.sidebarWidth),
+        order: index,
+      };
+      return entry.geometry === undefined
+        ? normalized
+        : { ...normalized, geometry: normalizeWindowGeometry(entry.geometry) };
+    }),
   };
 }
 
@@ -181,6 +257,11 @@ export function applyWindowWorkspaceMutation(
     case "updateSidebarWidth": {
       const entry = next.windows.find((candidate) => candidate.windowId === mutation.windowId);
       if (entry) entry.sidebarWidth = normalizeSidebarWidth(mutation.sidebarWidth);
+      break;
+    }
+    case "updateGeometry": {
+      const entry = next.windows.find((candidate) => candidate.windowId === mutation.windowId);
+      if (entry) entry.geometry = normalizeWindowGeometry(mutation.geometry);
       break;
     }
     case "remove": {
@@ -250,6 +331,7 @@ export async function readWorkspaceSnapshot(db: DbHandle): Promise<WorkspaceSnap
         sidebarHidden: entry?.sidebarHidden === true,
         sidebarWidth: normalizeSidebarWidth(entry?.sidebarWidth),
         order: typeof entry?.order === "number" ? entry.order : index,
+        geometry: normalizeWindowGeometry(entry?.geometry),
       })) : [],
     });
   } catch (error) {
@@ -286,6 +368,40 @@ export function createWindowWorkspace(input: {
 }): WindowWorkspaceController {
   const { db, bootstrap } = input;
   let currentWindowUpdateQueue = Promise.resolve();
+
+  async function resolveNativeGeometry(
+    geometry: unknown,
+  ): Promise<WorkspaceWindowGeometry | null> {
+    const normalized = normalizeWindowGeometry(geometry);
+    if (!normalized || !isTauri) return normalized;
+    try {
+      const { availableMonitors, primaryMonitor } = await import("@tauri-apps/api/window");
+      const [primary, available] = await Promise.all([primaryMonitor(), availableMonitors()]);
+      const monitors = primary
+        ? [primary, ...available.filter((monitor) =>
+            monitor.workArea.position.x !== primary.workArea.position.x ||
+            monitor.workArea.position.y !== primary.workArea.position.y ||
+            monitor.workArea.size.width !== primary.workArea.size.width ||
+            monitor.workArea.size.height !== primary.workArea.size.height)]
+        : available;
+      return resolveRestorableWindowGeometry(normalized, monitors);
+    } catch (error) {
+      console.warn("[windowWorkspace] failed to inspect monitors for geometry restore:", error);
+      return normalized;
+    }
+  }
+
+  async function applyNativeGeometry(
+    nativeWindow: {
+      setSize: (size: PhysicalSize) => Promise<void>;
+      setPosition: (position: PhysicalPosition) => Promise<void>;
+    },
+    geometry: WorkspaceWindowGeometry,
+  ): Promise<void> {
+    const { PhysicalPosition, PhysicalSize } = await import("@tauri-apps/api/window");
+    await nativeWindow.setSize(new PhysicalSize(geometry.width, geometry.height));
+    await nativeWindow.setPosition(new PhysicalPosition(geometry.x, geometry.y));
+  }
 
   async function mutateWorkspace(
     mutation: DesktopWindowWorkspaceMutation,
@@ -368,11 +484,12 @@ export function createWindowWorkspace(input: {
     });
   }
 
-  async function spawnWindow(state: WindowBootstrap): Promise<void> {
+  async function spawnWindow(state: WindowBootstrap & { geometry?: WorkspaceWindowGeometry | null }): Promise<void> {
     const url = buildWindowUrl(state);
 
     if (isTauri) {
       const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+      const geometry = await resolveNativeGeometry(state.geometry);
       await new Promise<void>((resolve, reject) => {
         const webview = new WebviewWindow(`window-${state.windowId}`, {
           url,
@@ -381,8 +498,22 @@ export function createWindowWorkspace(input: {
           height: 800,
           minWidth: 800,
           minHeight: 600,
+          ...(geometry ? { visible: false } : {}),
         });
-        void webview.once("tauri://created", () => resolve());
+        void webview.once("tauri://created", () => {
+          void (async () => {
+            try {
+              if (geometry) {
+                await applyNativeGeometry(webview, geometry);
+                await webview.show();
+                await webview.setFocus();
+              }
+              resolve();
+            } catch (error) {
+              reject(error);
+            }
+          })();
+        });
         void webview.once("tauri://error", (event) => {
           reject(new Error(`failed to create window: ${String(event.payload)}`));
         });
@@ -405,6 +536,67 @@ export function createWindowWorkspace(input: {
     }
 
     window.close();
+  }
+
+  async function restoreCurrentWindowGeometry(): Promise<void> {
+    if (!isTauri) return;
+    const snapshot = await loadSnapshot({ authoritative: true });
+    const saved = snapshot.windows.find((entry) => entry.windowId === bootstrap.windowId);
+    const geometry = await resolveNativeGeometry(saved?.geometry);
+    if (!geometry) return;
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await applyNativeGeometry(getCurrentWindow(), geometry);
+  }
+
+  async function startGeometryTracking(): Promise<() => void> {
+    if (!isTauri) return () => {};
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    const nativeWindow = getCurrentWindow();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let disposed = false;
+
+    const persistGeometry = async () => {
+      timer = null;
+      try {
+        const [position, size] = await Promise.all([
+          nativeWindow.outerPosition(),
+          nativeWindow.outerSize(),
+        ]);
+        if (disposed) return;
+        const geometry = normalizeWindowGeometry({
+          x: position.x,
+          y: position.y,
+          width: size.width,
+          height: size.height,
+        });
+        if (!geometry) return;
+        await queueCurrentWindowMutation({
+          operation: "updateGeometry",
+          windowId: bootstrap.windowId,
+          geometry,
+        });
+      } catch (error) {
+        console.warn("[windowWorkspace] failed to persist window geometry:", error);
+      }
+    };
+    const schedulePersistence = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        void persistGeometry();
+      }, 150);
+    };
+    const [unlistenMoved, unlistenResized] = await Promise.all([
+      nativeWindow.onMoved(schedulePersistence),
+      nativeWindow.onResized(schedulePersistence),
+    ]);
+
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+      unlistenMoved();
+      unlistenResized();
+    };
   }
 
   function queueCurrentWindowMutation(
@@ -488,6 +680,8 @@ export function createWindowWorkspace(input: {
         sidebarWidth: normalizeSidebarWidth(width),
       });
     },
+    restoreCurrentWindowGeometry,
+    startGeometryTracking,
     invalidateSharedData: async (reason) => {
       await emit(WINDOW_WORKSPACE_INVALIDATED_EVENT, {
         reason,

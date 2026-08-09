@@ -53,7 +53,7 @@ Add `updating_window_geometry_is_atomic_and_does_not_recreate_missing_windows`, 
 
 - [ ] **Step 4: Run the Rust test and verify RED**
 
-Run: `cargo test -p kanna-server http_api::window_workspace::tests --lib`
+Run: `cargo test -p kanna-server window_workspace::tests`
 
 Expected: FAIL because the Rust geometry field and mutation payload do not exist.
 
@@ -86,7 +86,7 @@ Mirror it in Rust with `x: i32`, `y: i32`, `width: u32`, `height: u32`, an optio
 
 Run: `pnpm --dir apps/desktop exec vitest run src/windowWorkspace.test.ts`
 
-Run: `cargo test -p kanna-server http_api::window_workspace::tests --lib`
+Run: `cargo test -p kanna-server window_workspace::tests`
 
 Expected: both commands exit 0.
 
@@ -193,13 +193,13 @@ Run: `cargo fmt --all`
 
 Run: `pnpm --dir apps/desktop exec vitest run src/windowWorkspace.test.ts src/windowWorkspace.tauri.test.ts src/App.test.ts`
 
-Run: `cargo test -p kanna-server http_api::window_workspace::tests --lib`
+Run: `cargo test -p kanna-server window_workspace::tests`
 
 - [ ] **Step 3: Run required static checks**
 
 Run: `pnpm exec tsc --noEmit`
 
-Run: `cargo clippy -p kanna-server --all-targets -- -D warnings`
+Run: `cargo clippy -p kanna-server --all-targets`
 
 - [ ] **Step 4: Inspect final diff**
 

@@ -212,6 +212,63 @@ async function readWorkspaceWindowIds(client: WebDriverClient): Promise<string[]
     .filter((windowId): windowId is string => typeof windowId === "string" && windowId.length > 0);
 }
 
+async function readWorkspaceWindowGeometry(
+  client: WebDriverClient,
+  windowId: string,
+): Promise<{ x: number; y: number; width: number; height: number } | null> {
+  const rows = await queryDb(
+    client,
+    "SELECT value FROM settings WHERE key = ?",
+    ["window_workspace_v1"],
+  ) as Array<{ value?: string | null }>;
+  const raw = rows[0]?.value;
+  if (!raw) return null;
+  const snapshot = JSON.parse(raw) as {
+    windows?: Array<{
+      windowId?: string | null;
+      geometry?: { x?: unknown; y?: unknown; width?: unknown; height?: unknown } | null;
+    }>;
+  };
+  const geometry = snapshot.windows?.find((entry) => entry.windowId === windowId)?.geometry;
+  return geometry &&
+    typeof geometry.x === "number" &&
+    typeof geometry.y === "number" &&
+    typeof geometry.width === "number" &&
+    typeof geometry.height === "number"
+    ? { x: geometry.x, y: geometry.y, width: geometry.width, height: geometry.height }
+    : null;
+}
+
+function expectWindowRectNear(
+  actual: { x: number; y: number; width: number; height: number },
+  expected: { x: number; y: number; width: number; height: number },
+  tolerance = 16,
+  detail = "",
+): void {
+  const context = `expected=${JSON.stringify(expected)} actual=${JSON.stringify(actual)} ${detail}`;
+  expect(Math.abs(actual.x - expected.x), context).toBeLessThanOrEqual(tolerance);
+  expect(Math.abs(actual.y - expected.y), context).toBeLessThanOrEqual(tolerance);
+  expect(Math.abs(actual.width - expected.width), context).toBeLessThanOrEqual(tolerance);
+  expect(Math.abs(actual.height - expected.height), context).toBeLessThanOrEqual(tolerance);
+}
+
+async function destroyFocusedWindowWithoutRemovingMembership(
+  client: WebDriverClient,
+): Promise<void> {
+  const result = await client.executeAsync(
+    `const cb = arguments[arguments.length - 1];
+     const ctx = window.__KANNA_E2E__.setupState;
+     setTimeout(() => {
+       void Promise.resolve(ctx.windowWorkspace.destroyNativeWindow())
+         .catch((error) => console.error("[e2e] native-only destroy failed", error));
+     }, 0);
+     cb("scheduled");`,
+  );
+  if (result !== "scheduled") {
+    throw new Error(`Failed to schedule native-only window destroy: ${JSON.stringify(result)}`);
+  }
+}
+
 async function forgetFocusedWindowWithoutDestroyingHarness(
   client: WebDriverClient,
 ): Promise<void> {
@@ -315,6 +372,83 @@ describe("new window", () => {
     await waitForWindowCount(client, initialHandles.length);
     await switchToWindow(client, sourceHandle);
     await client.waitForAppReady();
+  });
+
+  it("restores a secondary window at its persisted native bounds", async () => {
+    const repoId = await importWindowTestRepo(client, testRepoPath, "new-window-geometry-test");
+    const taskId = randomUUID();
+    await execDb(
+      client,
+      "INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type) VALUES (?, ?, ?, ?, ?)",
+      [taskId, repoId, "Window Geometry", "in progress", NEW_WINDOW_FIXTURE_AGENT_TYPE],
+    );
+    await callVueMethod(client, "loadItems", repoId);
+    await setSelectedItem(client, taskId);
+    await waitForCurrentItemId(client, taskId);
+
+    const initialHandles = await getWindowHandles(client);
+    const sourceHandle = await findWindowHandleForItem(client, initialHandles, taskId);
+    await switchToWindow(client, sourceHandle);
+    const sourceRect = await client.getWindowRect();
+    await client.executeAsync(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = window.__KANNA_E2E__.setupState;
+       Promise.resolve(ctx.windowWorkspace.openWindow({
+         selectedRepoId: ${JSON.stringify(repoId)},
+         selectedItemId: ${JSON.stringify(taskId)},
+       })).then(() => cb("ok")).catch((error) => cb({ __error: error?.message ?? String(error) }));`,
+    );
+
+    const openedHandles = await waitForWindowCount(client, initialHandles.length + 1);
+    const secondaryHandle = openedHandles.find((handle) => !initialHandles.includes(handle));
+    expect(secondaryHandle).toBeTruthy();
+    await switchToWindow(client, secondaryHandle ?? "");
+    await client.waitForAppReady();
+    const secondaryWindowId = await client.executeSync<string>(
+      "return window.__KANNA_E2E__.setupState.windowWorkspace.bootstrap.windowId;",
+    );
+    const expectedRect = {
+      x: sourceRect.x + 40,
+      y: sourceRect.y + 40,
+      width: 980,
+      height: 720,
+    };
+    await client.setWindowRect(expectedRect);
+    expectWindowRectNear(await client.getWindowRect(), expectedRect);
+    // Window creation itself can emit an initial resize. Wait past the
+    // geometry debounce so the deliberate WebDriver bounds are authoritative.
+    await sleep(750);
+    const persistedGeometry = await readWorkspaceWindowGeometry(client, secondaryWindowId);
+    expect(persistedGeometry).not.toBeNull();
+
+    await destroyFocusedWindowWithoutRemovingMembership(client);
+    await waitForWindowCount(client, initialHandles.length);
+    await switchToWindow(client, sourceHandle);
+    await client.waitForAppReady();
+    await client.executeAsync(
+      `const cb = arguments[arguments.length - 1];
+       Promise.resolve(window.__KANNA_E2E__.setupState.windowWorkspace.restoreAdditionalWindows())
+         .then(() => cb("ok"))
+         .catch((error) => cb({ __error: error?.message ?? String(error) }));`,
+    );
+
+    const restoredHandles = await waitForWindowCount(client, initialHandles.length + 1);
+    const restoredHandle = restoredHandles.find((handle) => !initialHandles.includes(handle));
+    expect(restoredHandle).toBeTruthy();
+    await switchToWindow(client, restoredHandle ?? "");
+    await client.waitForAppReady();
+    const restoredRect = await client.getWindowRect();
+
+    await closeFocusedWindowThroughAppAction(client);
+    await waitForWindowCount(client, initialHandles.length);
+    await switchToWindow(client, sourceHandle);
+    await client.waitForAppReady();
+    expectWindowRectNear(
+      restoredRect,
+      expectedRect,
+      16,
+      `persisted=${JSON.stringify(persistedGeometry)}`,
+    );
   });
 
   it("syncs unread-to-read changes across open windows", async () => {

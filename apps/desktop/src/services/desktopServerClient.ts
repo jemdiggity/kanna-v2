@@ -477,6 +477,14 @@ export interface DesktopWorkspaceWindowState {
   sidebarHidden: boolean;
   sidebarWidth: number;
   order: number;
+  geometry?: DesktopWorkspaceWindowGeometry | null;
+}
+
+export interface DesktopWorkspaceWindowGeometry {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface DesktopWindowWorkspaceSnapshot {
@@ -494,6 +502,11 @@ export type DesktopWindowWorkspaceMutation =
     }
   | { operation: "updateSidebarHidden"; windowId: string; sidebarHidden: boolean }
   | { operation: "updateSidebarWidth"; windowId: string; sidebarWidth: number }
+  | {
+      operation: "updateGeometry";
+      windowId: string;
+      geometry: DesktopWorkspaceWindowGeometry;
+    }
   | {
       operation: "remove";
       windowId: string;
