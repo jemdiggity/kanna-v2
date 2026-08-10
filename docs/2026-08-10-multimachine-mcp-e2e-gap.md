@@ -1,8 +1,11 @@
-# Multi-machine MCP: remaining full-E2E gap
+# Multi-machine agent routing: remaining full-E2E gap
 
 The shipped path crosses four independently running components:
 
 `kanna-mcp` → source `kanna-server` → relay → target `kanna-server`.
+
+The CLI follows the same catalog and server bridge, substituting `kanna-cli`
+for `kanna-mcp` at the first boundary.
 
 The current remote-E2E harness boots one desktop server and a mobile-shaped
 relay client. It cannot yet boot two desktop-authenticated `kanna-server`
@@ -27,6 +30,12 @@ Narrower coverage added meanwhile exercises every boundary and wire shape:
   requests. It also gives one `kanna_wait_events` call a local and remote task,
   verifies owner discovery and concurrent native waits, and checks the remote
   event's `machineId` plus aggregate cursor.
+- `crates/kanna-cli/tests/machine_routing.rs` drives the real CLI process and
+  verifies machine discovery, remote proxy routing, and the explicit-self
+  local path without relay discovery.
+- The MCP stdio coverage also verifies that explicit self-reference remains
+  local and that an aggregate cursor claiming a different local identity is
+  rejected before task probing or relay routing.
 - `kanna-server` HTTP tests verify the loopback-only bridge, request
   validation, and relay queue handoff.
 - `kanna-server`'s relay-loop test performs a real WebSocket request/response

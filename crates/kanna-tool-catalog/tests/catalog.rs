@@ -20,6 +20,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
         names,
         vec![
             "kanna_info",
+            "kanna_list_machines",
             "kanna_list_repos",
             "kanna_add_repo",
             "kanna_list_recent_tasks",
@@ -63,8 +64,8 @@ fn generated_schema_preserves_required_order_types_and_enums() {
         .find(|tool| tool["name"] == "kanna_info")
         .expect("info tool");
     assert_eq!(
-        info["inputSchema"],
-        json!({ "type": "object", "properties": {} })
+        info["inputSchema"]["properties"]["machine_id"]["type"],
+        json!("string")
     );
     assert_eq!(info["annotations"], json!({ "readOnlyHint": true }));
 
@@ -154,6 +155,14 @@ fn generated_schema_preserves_required_order_types_and_enums() {
     let until = &wait["inputSchema"]["properties"]["until"];
     assert_eq!(until["type"], json!("string"));
     assert_eq!(until["enum"], json!(["finished", "closed"]));
+
+    let complete_stage = tools
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|tool| tool["name"] == "kanna_complete_stage")
+        .expect("complete stage tool");
+    assert!(complete_stage["inputSchema"]["properties"]["machine_id"].is_null());
 }
 
 #[test]
@@ -286,8 +295,10 @@ fn removed_approval_override_is_not_an_agent_tool() {
         .iter()
         .find(|tool| tool.name == "kanna_advance_stage")
         .expect("advance tool");
-    assert_eq!(advance.params.len(), 1);
-    assert_eq!(advance.params[0].name, "task_id");
+    assert_eq!(advance.params.len(), 2);
+    assert_eq!(advance.params[0].name, "machine_id");
+    assert_eq!(advance.params[0].location, ParamLoc::Routing);
+    assert_eq!(advance.params[1].name, "task_id");
 }
 
 #[test]
@@ -300,6 +311,14 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             Method::Get,
             ResponseKind::RuntimeInfo,
             "/v1/status",
+            json!({}),
+        ),
+        (
+            "kanna_list_machines",
+            json!({}),
+            Method::Get,
+            ResponseKind::Json,
+            "/v1/cloud/desktops",
             json!({}),
         ),
         (
@@ -667,7 +686,18 @@ fn resolves_expected_requests_for_every_bundled_tool() {
         assert_eq!(request.kind, kind, "{name}");
         assert_eq!(request.path, path, "{name}");
         assert_eq!(request.body, body, "{name}");
+        assert_eq!(request.machine_id, None, "{name}");
     }
+
+    let routed = resolve_request(
+        &catalog,
+        "kanna_get_task",
+        &json!({ "machine_id": "desktop-studio", "task_id": "task-1" }),
+    )
+    .expect("routed task");
+    assert_eq!(routed.machine_id.as_deref(), Some("desktop-studio"));
+    assert_eq!(routed.path, "/v1/tasks/task-1");
+    assert_eq!(routed.body, json!({}));
 
     let wait = resolve_request(
         &catalog,
@@ -1006,7 +1036,8 @@ fn preserves_validation_error_strings() {
         .expect_err("unknown tool should fail");
     assert!(unknown_tool.starts_with("unknown tool: kanna_unknown"));
     assert!(
-        unknown_tool.contains("available tools: kanna_info, kanna_list_repos,"),
+        unknown_tool
+            .contains("available tools: kanna_info, kanna_list_machines, kanna_list_repos,"),
         "unknown tool error should list available tools: {unknown_tool}"
     );
 }
@@ -1028,7 +1059,7 @@ fn type_mismatch_and_unknown_argument_errors_are_actionable() {
     .expect_err("unknown argument should fail");
     assert_eq!(
         unknown_arg,
-        "unknown argument: force (kanna_close_task accepts: task_id)"
+        "unknown argument: force (kanna_close_task accepts: machine_id, task_id)"
     );
 }
 
@@ -1055,7 +1086,8 @@ fn load_catalog_uses_override_and_falls_back_with_warning() {
 
     let loaded = kanna_tool_catalog::load_catalog(&root);
     assert_eq!(loaded.catalog.tools[0].name, "kanna_info");
-    assert_eq!(loaded.catalog.tools[1].name, "kanna_test_tool");
+    assert_eq!(loaded.catalog.tools[1].name, "kanna_list_machines");
+    assert_eq!(loaded.catalog.tools[2].name, "kanna_test_tool");
     assert_eq!(
         loaded.watch_source.as_deref(),
         Some(override_path.as_path())
@@ -1107,7 +1139,9 @@ fn catalog_override_cannot_replace_safe_kanna_info_declaration() {
     assert_eq!(info.name, "kanna_info");
     assert_eq!(info.path, "/v1/status");
     assert_eq!(info.response_kind, ResponseKind::RuntimeInfo);
-    assert!(info.params.is_empty());
+    assert_eq!(info.params.len(), 1);
+    assert_eq!(info.params[0].name, "machine_id");
+    assert_eq!(info.params[0].location, ParamLoc::Routing);
     assert!(info.description.contains("authoritative server"));
 
     let _ = fs::remove_dir_all(&root);

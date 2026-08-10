@@ -17,7 +17,6 @@ use std::time::{Duration, SystemTime};
 
 const DEFAULT_SERVER_BASE_URL: &str = "http://127.0.0.1:48120";
 const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
-const MACHINE_ID_ARG: &str = "machine_id";
 const MULTI_MACHINE_CURSOR_PREFIX: &str = "km1.";
 const MAX_MULTI_MACHINE_CURSOR_LEN: usize = 64 * 1024;
 const MULTI_MACHINE_WAIT_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
@@ -121,45 +120,7 @@ fn mcp_tool_error_result(id: Value, message: String) -> Value {
 type SharedCatalog = Arc<RwLock<Catalog>>;
 
 fn mcp_tools_list_value(catalog: &Catalog) -> Value {
-    let mut tools = catalog.tools_list_value();
-    let Some(entries) = tools.as_array_mut() else {
-        return tools;
-    };
-    for entry in entries.iter_mut() {
-        if let Some(properties) = entry
-            .get_mut("inputSchema")
-            .and_then(|schema| schema.get_mut("properties"))
-            .and_then(Value::as_object_mut)
-        {
-            properties.insert(
-                MACHINE_ID_ARG.to_string(),
-                serde_json::json!({
-                    "type": "string",
-                    "description": "Machine id from kanna_list_machines. Omit to use the local machine connected to this MCP process."
-                }),
-            );
-        }
-        if entry.get("name").and_then(Value::as_str) == Some("kanna_wait_events") {
-            entry["inputSchema"]["properties"][MACHINE_ID_ARG]["description"] = Value::String(
-                "Pin the entire wait to one machine. Omit with task_ids to discover and wait across every owning machine; parent_task_id and repo_id use the local machine when omitted."
-                    .to_string(),
-            );
-            entry["description"] = Value::String(format!(
-                "{} When task_ids is supplied without machine_id, those tasks may live on different currently reachable machines: kanna-mcp discovers each owner, waits on all owners concurrently, tags every event with machineId, and returns one aggregate opaque cursor. Pass that cursor back unchanged. A machine_id pins the entire wait to one machine. parent_task_id and repo_id remain machine-scoped and use the local machine unless machine_id is supplied.",
-                entry.get("description").and_then(Value::as_str).unwrap_or_default()
-            ));
-        }
-    }
-    entries.insert(
-        1.min(entries.len()),
-        serde_json::json!({
-            "name": "kanna_list_machines",
-            "description": "List the current Kanna machine and every sibling machine currently reachable through the signed-in account's relay connection. Use the returned machine id as machine_id on another MCP tool to read or mutate that machine. The local machine is always returned; relayAvailable and error explain whether remote discovery is currently available.",
-            "inputSchema": { "type": "object", "properties": {} },
-            "annotations": { "readOnlyHint": true }
-        }),
-    );
-    tools
+    catalog.tools_list_value()
 }
 
 async fn handle_mcp_request(
@@ -441,6 +402,17 @@ struct LocalMachineIdentity {
     desktop_id: String,
 }
 
+async fn resolve_remote_machine_id(
+    base_url: &str,
+    machine_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(machine_id) = machine_id else {
+        return Ok(None);
+    };
+    let identity: LocalMachineIdentity = get_json(base_url, "/v1/status").await?;
+    Ok((machine_id != identity.desktop_id).then(|| machine_id.to_string()))
+}
+
 fn method_name(method: Method) -> &'static str {
     match method {
         Method::Get => "GET",
@@ -715,20 +687,19 @@ async fn probe_task_on_machine(
 async fn discover_task_owners(
     base_url: &str,
     task_ids: &[String],
+    local_machine_id: &str,
 ) -> Result<MultiMachineCursor, String> {
     // Resolve and probe the local server without touching the relay. An
     // all-local fan-out should stay just as cheap and reliable as it was before
     // cross-machine fan-in existed; sibling discovery is needed only for ids
     // that the local database does not own.
-    let identity: LocalMachineIdentity = get_json(base_url, "/v1/status").await?;
-    let local_machine_id = identity.desktop_id;
     let mut task_ids_by_machine: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut missing = Vec::new();
 
     let mut local_probes = tokio::task::JoinSet::new();
     for task_id in task_ids {
         let base_url = base_url.to_string();
-        let machine_id = local_machine_id.clone();
+        let machine_id = local_machine_id.to_string();
         let task_id = task_id.clone();
         local_probes.spawn(async move {
             let result = probe_task_on_machine(&base_url, &machine_id, &machine_id, &task_id).await;
@@ -739,7 +710,7 @@ async fn discover_task_owners(
         let (task_id, found) = probe.map_err(|error| format!("task probe failed: {error}"))?;
         if found? {
             task_ids_by_machine
-                .entry(local_machine_id.clone())
+                .entry(local_machine_id.to_string())
                 .or_default()
                 .push(task_id);
         } else {
@@ -759,7 +730,7 @@ async fn discover_task_owners(
             .machines
             .into_iter()
             .map(|machine| machine.id)
-            .filter(|machine_id| machine_id != &local_machine_id)
+            .filter(|machine_id| machine_id != local_machine_id)
             .collect::<Vec<_>>();
         if remote_machine_ids.is_empty() {
             let relay_detail = if machines.relay_available {
@@ -779,7 +750,7 @@ async fn discover_task_owners(
         let mut remote_probes = tokio::task::JoinSet::new();
         for machine_id in &remote_machine_ids {
             let base_url = base_url.to_string();
-            let local_machine_id = local_machine_id.clone();
+            let local_machine_id = local_machine_id.to_string();
             let machine_id = machine_id.clone();
             let task_ids = missing.clone();
             remote_probes.spawn(async move {
@@ -842,7 +813,7 @@ async fn discover_task_owners(
         grouped_ids.sort();
     }
     Ok(MultiMachineCursor {
-        local_machine_id,
+        local_machine_id: local_machine_id.to_string(),
         task_ids_by_machine,
         cursors_by_machine: BTreeMap::new(),
     })
@@ -854,6 +825,7 @@ fn spawn_machine_event_wait(
     catalog: &SharedCatalog,
     args: &Value,
     machine_id: &str,
+    local_machine_id: &str,
     timeout_secs: u64,
 ) -> Result<(), String> {
     let task_ids = session
@@ -885,8 +857,7 @@ fn spawn_machine_event_wait(
         resolve_request(&catalog, "kanna_wait_events", &Value::Object(machine_args))?
     };
     let base_url = base_url.to_string();
-    let routed_machine_id =
-        (machine_id != session.cursor.local_machine_id).then(|| machine_id.to_string());
+    let routed_machine_id = (machine_id != local_machine_id).then(|| machine_id.to_string());
     let completed_machine_id = machine_id.to_string();
     session.pending.spawn(async move {
         let result = get_routed_json(&base_url, &request.path, routed_machine_id.as_deref()).await;
@@ -981,14 +952,22 @@ async fn wait_events_across_machines(
         Some(cursor) => decode_multi_machine_cursor(cursor)?,
         None => None,
     };
+    let identity: LocalMachineIdentity = get_json(base_url, "/v1/status").await?;
+    let local_machine_id = identity.desktop_id;
     let mut cursor = match decoded_cursor {
         Some(cursor) => {
+            if cursor.local_machine_id != local_machine_id {
+                return Err(format!(
+                    "multi-machine event cursor belongs to local machine {}, but this client is connected to {}",
+                    cursor.local_machine_id, local_machine_id
+                ));
+            }
             if cursor_task_ids(&cursor) != task_ids {
                 return Err("cursor belongs to a different task_ids scope".to_string());
             }
             cursor
         }
-        None => discover_task_owners(base_url, &task_ids).await?,
+        None => discover_task_owners(base_url, &task_ids, &local_machine_id).await?,
     };
     if let Some(native_cursor) = supplied_cursor.filter(|_| {
         !args
@@ -1066,6 +1045,7 @@ async fn wait_events_across_machines(
                 catalog,
                 &args,
                 &machine_id,
+                &local_machine_id,
                 remaining_secs,
             )?;
         }
@@ -1143,19 +1123,19 @@ async fn handle_mcp_tool_call(
     name: &str,
     args: Value,
 ) -> Result<Value, String> {
-    let (args, machine_id) = extract_machine_id(args)?;
-    if name == "kanna_complete_stage" && machine_id.is_some() {
+    if name == "kanna_complete_stage" && args.get("machine_id").is_some() {
         return Err(
             "kanna_complete_stage cannot target another machine; an agent can only complete its own local stage"
                 .to_string(),
         );
     }
-    if name == "kanna_list_machines" {
-        if machine_id.is_some() || args.as_object().is_some_and(|args| !args.is_empty()) {
-            return Err("kanna_list_machines accepts no arguments".to_string());
-        }
-        return get_json(base_url, "/v1/cloud/desktops").await;
-    }
+    let declared_machine_id = {
+        let catalog = catalog
+            .read()
+            .map_err(|_| "catalog lock poisoned".to_string())?;
+        resolve_request(&catalog, name, &args)?.machine_id
+    };
+    let machine_id = resolve_remote_machine_id(base_url, declared_machine_id.as_deref()).await?;
     if name == "kanna_wait_events" && machine_id.is_none() && args.get("task_ids").is_some() {
         return wait_events_across_machines(base_url, catalog, multi_machine_waits, args).await;
     }
@@ -1247,19 +1227,6 @@ async fn maybe_augment_create_task_args(
         .await
         .map_err(|e| format!("failed to infer repo_id from KANNA_TASK_ID={task_id}: {e}"))?;
     augment_create_task_args(args, Some(&current_task))
-}
-
-fn extract_machine_id(args: Value) -> Result<(Value, Option<String>), String> {
-    let Some(mut object) = args.as_object().cloned() else {
-        return Ok((args, None));
-    };
-    let machine_id = match object.remove(MACHINE_ID_ARG) {
-        Some(Value::String(value)) if !value.trim().is_empty() => Some(value),
-        Some(Value::String(_)) => return Err("machine_id must not be empty".to_string()),
-        Some(_) => return Err("machine_id must be a string".to_string()),
-        None => None,
-    };
-    Ok((Value::Object(object), machine_id))
 }
 
 fn augment_create_task_args(args: Value, current_task: Option<&Value>) -> Result<Value, String> {
@@ -1789,7 +1756,8 @@ mod tests {
 
         let tools = catalog.read().unwrap().tools_list_value();
         assert_eq!(tools[0]["name"], json!("kanna_info"));
-        assert_eq!(tools[1]["name"], json!("kanna_custom_ping"));
+        assert_eq!(tools[1]["name"], json!("kanna_list_machines"));
+        assert_eq!(tools[2]["name"], json!("kanna_custom_ping"));
         let output = String::from_utf8(stdout.lock().unwrap().clone()).unwrap();
         assert_eq!(
             output,

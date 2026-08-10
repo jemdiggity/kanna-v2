@@ -37,14 +37,20 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - `POST /v1/tasks/{task_id}/actions/set-notify`
 - `POST /v1/pairing/sessions`
 
-## Multi-machine MCP Routing
+## Multi-machine Agent Routing
 
-`kanna-mcp` remains a client of the machine-local `kanna-server`; agent
-processes never receive Firebase credentials and do not connect to the cloud
-relay themselves. Its MCP-only `kanna_list_machines` tool calls
-`GET /v1/cloud/desktops` and every other MCP tool advertises an optional
-`machine_id`. Omitting it preserves the local behavior. Supplying an id wraps
-the catalog-resolved HTTP request through
+`kanna-mcp` and `kanna-cli` remain clients of the machine-local
+`kanna-server`; agent processes never receive Firebase credentials and do not
+connect to the cloud relay themselves. Their shared tool catalog declares
+`kanna_list_machines` (`GET /v1/cloud/desktops`) and an optional `machine_id`
+on every routable tool. Machine discovery itself and the local-run-bound
+`kanna_complete_stage` omit that property. In the CLI,
+the same surface is available as `kanna-cli machine list` and
+`kanna-cli tool call <tool> --machine-id <id>`. Omitting `machine_id` preserves
+local behavior. Both adapters compare an explicit id with the live desktop id
+from the local server first: naming the current machine takes the local path
+and never requires relay discovery or availability. A different id wraps the
+catalog-resolved HTTP request through
 `POST /v1/cloud/desktops/{desktop_id}/invoke`.
 
 Those two bridge routes require a real desktop-loopback request
@@ -78,6 +84,13 @@ work, or replacing the server event feed with client polling. If MCP restarts,
 the aggregate cursor contains enough state to recreate those waits without
 losing events. Machine failures are returned in `machineErrors` without
 advancing that machine's cursor or discarding events received elsewhere.
+
+On every aggregate-cursor resume, kanna-mcp compares the cursor's claimed
+`localMachineId` with the live local server identity before using its ownership
+map or native cursors. A cursor copied from another machine, made stale by an
+identity change, or tampered to relabel the local sequence space is rejected.
+Local-versus-remote event routing uses that same live identity, never the
+cursor's self-asserted value.
 
 This automatic fan-in applies only to `task_ids`, whose ownership can be
 resolved exactly. `parent_task_id` and `repo_id` remain scopes on one machine:

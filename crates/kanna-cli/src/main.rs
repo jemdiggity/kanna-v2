@@ -69,6 +69,11 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: ToolCommands,
     },
+    /// Discover Kanna machines reachable through the signed-in account
+    Machine {
+        #[command(subcommand)]
+        command: MachineCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -569,6 +574,21 @@ pub(crate) enum ToolCommands {
         #[arg(long)]
         arg: Vec<String>,
 
+        /// Machine id from `kanna-cli machine list`; omit it, or pass the
+        /// current machine id, to use the local machine
+        #[arg(long)]
+        machine_id: Option<String>,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum MachineCommands {
+    /// List the current machine and reachable sibling machines
+    List {
         /// Override the local Kanna server base URL
         #[arg(long)]
         server_url: Option<String>,
@@ -610,6 +630,9 @@ async fn main() {
         }
         Commands::Tool { command } => {
             commands::tool::run(command).await;
+        }
+        Commands::Machine { command } => {
+            commands::tool::run_machine(command).await;
         }
     }
 }

@@ -334,6 +334,8 @@ fn parses_generic_tool_subcommands() {
         r#"{"repo_id":"repo-1","prompt":"Ship"}"#,
         "--arg",
         "stage=pr",
+        "--machine-id",
+        "desktop-studio",
         "--server-url",
         "http://127.0.0.1:48120",
     ])
@@ -345,6 +347,7 @@ fn parses_generic_tool_subcommands() {
                     name,
                     json,
                     arg,
+                    machine_id,
                     server_url,
                 },
         } => {
@@ -354,10 +357,19 @@ fn parses_generic_tool_subcommands() {
                 Some(r#"{"repo_id":"repo-1","prompt":"Ship"}"#)
             );
             assert_eq!(arg, vec!["stage=pr".to_string()]);
+            assert_eq!(machine_id.as_deref(), Some("desktop-studio"));
             assert_eq!(server_url.as_deref(), Some("http://127.0.0.1:48120"));
         }
         _ => panic!("expected tool call command"),
     }
+
+    let cli = crate::Cli::try_parse_from(["kanna-cli", "machine", "list"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        crate::Commands::Machine {
+            command: crate::MachineCommands::List { .. }
+        }
+    ));
 }
 
 #[test]
@@ -541,6 +553,7 @@ fn typed_cli_surfaces_match_catalog_tools_and_params() {
         let catalog_params = tool
             .params
             .iter()
+            .filter(|param| param.location != ParamLoc::Routing)
             .map(|param| param.name.as_str())
             .collect::<BTreeSet<_>>();
         let mapped_params = surface

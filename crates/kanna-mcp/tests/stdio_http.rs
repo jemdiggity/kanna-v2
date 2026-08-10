@@ -1,3 +1,4 @@
+use base64::Engine;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -852,6 +853,13 @@ fn serve_routes_task_listing_and_creation_to_an_explicit_machine() {
     let proxy_path = "/v1/cloud/desktops/desktop-studio/invoke";
     let (base_url, server) = start_http_fixture(vec![
         ExpectedRequest {
+            method: "GET",
+            path: "/v1/status",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({ "desktopId": "desktop-local" }),
+        },
+        ExpectedRequest {
             method: "POST",
             path: proxy_path,
             body: Some(json!({
@@ -871,6 +879,13 @@ fn serve_routes_task_listing_and_creation_to_an_explicit_machine() {
                 }],
                 "error": null
             }),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/status",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({ "desktopId": "desktop-local" }),
         },
         ExpectedRequest {
             method: "POST",
@@ -933,6 +948,45 @@ fn serve_routes_task_listing_and_creation_to_an_explicit_machine() {
 }
 
 #[test]
+fn explicit_self_machine_id_uses_local_http_without_relay_discovery() {
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/status",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!({ "desktopId": "desktop-local" }),
+        },
+        ExpectedRequest {
+            method: "GET",
+            path: "/v1/tasks/recent",
+            body: None,
+            response_status: "200 OK",
+            response_body: json!([]),
+        },
+    ]);
+
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_list_recent_tasks",
+                "arguments": { "machine_id": "desktop-local" }
+            }
+        })],
+    );
+
+    let observed = server.join().expect("fixture server");
+    assert_eq!(tool_text(&responses[0]), json!([]));
+    assert!(observed
+        .iter()
+        .all(|request| request.path != "/v1/cloud/desktops" && !request.path.contains("/invoke")));
+}
+
+#[test]
 fn tools_list_advertises_machine_routing_on_operational_tools() {
     let responses = run_kanna_mcp(
         "http://127.0.0.1:9",
@@ -956,6 +1010,11 @@ fn tools_list_advertises_machine_routing_on_operational_tools() {
         list_tasks["inputSchema"]["properties"]["machine_id"]["type"],
         "string"
     );
+    let complete_stage = tools
+        .iter()
+        .find(|tool| tool["name"] == "kanna_complete_stage")
+        .expect("complete stage tool");
+    assert!(complete_stage["inputSchema"]["properties"]["machine_id"].is_null());
 }
 
 #[test]
@@ -1137,6 +1196,50 @@ fn all_local_event_wait_does_not_require_relay_discovery() {
     let result = tool_text(&responses[0]);
     assert_eq!(result["waitOutcome"], "events", "{result}");
     assert_eq!(result["events"][0]["machineId"], "desktop-local");
+}
+
+#[test]
+fn aggregate_cursor_rejects_a_stale_or_tampered_local_machine_identity() {
+    let cursor_body = serde_json::to_vec(&json!({
+        "localMachineId": "desktop-stale",
+        "taskIdsByMachine": { "desktop-stale": ["task-local"] },
+        "cursorsByMachine": {}
+    }))
+    .expect("encode cursor body");
+    let cursor = format!(
+        "km1.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(cursor_body)
+    );
+    let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
+        method: "GET",
+        path: "/v1/status",
+        body: None,
+        response_status: "200 OK",
+        response_body: json!({ "desktopId": "desktop-local" }),
+    }]);
+
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 36,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_wait_events",
+                "arguments": {
+                    "task_ids": ["task-local"],
+                    "cursor": cursor,
+                    "timeout_secs": 0
+                }
+            }
+        })],
+    );
+
+    server.join().expect("fixture server");
+    assert_eq!(
+        tool_error_text(&responses[0]),
+        "multi-machine event cursor belongs to local machine desktop-stale, but this client is connected to desktop-local"
+    );
 }
 
 /// Serves `GET /v1/tasks/{id}` from a mutable body for as many polls as a wait

@@ -6,6 +6,16 @@
       "method": "GET",
       "path": "/v1/status",
       "response": "runtime_info",
+      "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" }
+      ]
+    },
+    {
+      "name": "kanna_list_machines",
+      "description": "List the current Kanna machine and every sibling machine currently reachable through the signed-in account's relay connection. Use the returned machine id as machine_id on another tool to read or mutate that machine. The local machine is always returned; relayAvailable and error explain whether remote discovery is currently available.",
+      "method": "GET",
+      "path": "/v1/cloud/desktops",
+      "response": "json",
       "params": []
     },
     {
@@ -14,7 +24,9 @@
       "method": "GET",
       "path": "/v1/repos",
       "response": "json",
-      "params": []
+      "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" }
+      ]
     },
     {
       "name": "kanna_add_repo",
@@ -23,6 +35,7 @@
       "path": "/v1/repos",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "path", "description": "Absolute path to the local git repository to register.", "type": "string", "required": true, "location": "body" },
         { "name": "name", "description": "Display name for the repository. Defaults to the directory name.", "type": "string", "required": false, "location": "body" }
       ]
@@ -33,7 +46,9 @@
       "method": "GET",
       "path": "/v1/tasks/recent",
       "response": "json",
-      "params": []
+      "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" }
+      ]
     },
     {
       "name": "kanna_get_task",
@@ -42,6 +57,7 @@
       "path": "/v1/tasks/{task_id}",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" }
       ]
     },
@@ -52,6 +68,7 @@
       "path": "/v1/tasks/{task_id}/children",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" }
       ]
     },
@@ -62,6 +79,7 @@
       "path": "/v1/tasks/{task_id}",
       "response": "wait",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" },
         { "name": "timeout_secs", "description": "Seconds to wait before returning the latest detail with waitOutcome 'timeout' (clamped to at most 240, so the call returns inside the 300s tools/call timeout MCP clients enforce).", "type": "integer", "required": false, "location": "body", "default": 240, "max": 240 },
         { "name": "poll_secs", "description": "Seconds between polls (minimum 1).", "type": "integer", "required": false, "location": "body", "default": 3, "min": 1 },
@@ -70,11 +88,12 @@
     },
     {
       "name": "kanna_wait_events",
-      "description": "Watch several Kanna tasks at once: blocks until any of them emits an event, then returns every event since your cursor plus a new cursor. This is the tool for orchestrating child tasks — kanna_wait_task blocks on one id and resolves only on finish, so it cannot watch a fan-out. Scope it by task_ids, by parent_task_id (your own id, to watch everything you fanned out without naming it), or by repo_id. Event types: 'task.created', 'run.started', 'run.finished' (payload.status succeeded/failed/cancelled, payload.result), 'stage.changed', 'task.pipeline_changed', 'task.pr_created', 'task.revision_requested' (payload.exhausted true means the task is parked for its human — stop waiting), 'task.closed', 'task.awaiting_input' (the agent is parked on an interactive prompt and needs an answer, e.g. via kanna_send_task_input), 'task.merge_signaled' (the task's PR reached the repo's merge agent; payload.source is 'agent' or 'engine'), and 'task.merge_handoff_missing' (the pipeline finished a stage that promised the merge handoff with no PR to hand off, so the task was NOT closed — treat it as a failed approval), and 'task.transfer_finalizing' (a cross-machine transfer is shutting the task's agent down so its conversation can be shipped; payload.phase is one of 'wrap-up-sent', 'idle', 'quit-sent', 'exited', 'already-exited', 'degraded'). Call it in a loop, passing back the opaque cursor you were given unchanged: events that fire between two calls are delivered on the next one, each exactly once. Omit the cursor on the first call to receive the scope's retained history. An elapsed window returns waitOutcome 'timeout' with no events — a normal result, not an error. Fixed task/repo scopes use one sequence watermark. parent_task_id binds that same global watermark to the parent id in a constant-size cursor; membership is evaluated at each read checkpoint, so reparenting never rewinds acknowledged events and newly eligible events after the checkpoint are delivered without cursor growth. hasMore true means another batch is already waiting, so call again immediately.",
+      "description": "Watch several Kanna tasks at once: blocks until any of them emits an event, then returns every event since your cursor plus a new cursor. This is the tool for orchestrating child tasks — kanna_wait_task blocks on one id and resolves only on finish, so it cannot watch a fan-out. Scope it by task_ids, by parent_task_id (your own id, to watch everything you fanned out without naming it), or by repo_id. Event types: 'task.created', 'run.started', 'run.finished' (payload.status succeeded/failed/cancelled, payload.result), 'stage.changed', 'task.pipeline_changed', 'task.pr_created', 'task.revision_requested' (payload.exhausted true means the task is parked for its human — stop waiting), 'task.closed', 'task.awaiting_input' (the agent is parked on an interactive prompt and needs an answer, e.g. via kanna_send_task_input), 'task.merge_signaled' (the task's PR reached the repo's merge agent; payload.source is 'agent' or 'engine'), and 'task.merge_handoff_missing' (the pipeline finished a stage that promised the merge handoff with no PR to hand off, so the task was NOT closed — treat it as a failed approval), and 'task.transfer_finalizing' (a cross-machine transfer is shutting the task's agent down so its conversation can be shipped; payload.phase is one of 'wrap-up-sent', 'idle', 'quit-sent', 'exited', 'already-exited', 'degraded'). Call it in a loop, passing back the opaque cursor you were given unchanged: events that fire between two calls are delivered on the next one, each exactly once. Omit the cursor on the first call to receive the retained history. An elapsed window returns waitOutcome 'timeout' with no events — a normal result, not an error. Fixed task/repo scopes use one sequence watermark. parent_task_id binds that same global watermark to the parent id in a constant-size cursor; membership is evaluated at each read checkpoint, so reparenting never rewinds acknowledged events and newly eligible events after the checkpoint are delivered without cursor growth. hasMore true means another batch is already waiting, so call again immediately. In kanna-mcp, task_ids supplied without machine_id may belong to different currently reachable machines: the adapter discovers each owner, waits on all owners concurrently, tags every event with machineId, and returns one aggregate opaque cursor. Pass that cursor back unchanged. A machine_id pins the entire wait to one machine; parent_task_id and repo_id remain machine-scoped and use the local machine unless machine_id is supplied.",
       "method": "GET",
       "path": "/v1/task-events",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_ids", "description": "Task ids (or branch names) to watch, e.g. the child tasks you created. Required unless parent_task_id or repo_id is given.", "type": "string_array", "required": false, "location": "query", "key": "taskIds" },
         { "name": "parent_task_id", "description": "Watch every task fanned out under this parent instead of naming ids: pass your own task id and you get your children's events without remembering what you created. Re-resolved on every call, so a child created after you started watching is in scope on the next one. Direct children only, and the parent's own events are excluded — the same set kanna_get_task reports as childTaskIds. Ignored when task_ids is given; takes precedence over repo_id.", "type": "string", "required": false, "location": "query", "key": "parentTaskId" },
         { "name": "repo_id", "description": "Watch every task in this repository instead of naming ids. Ignored when task_ids or parent_task_id is given.", "type": "string", "required": false, "location": "query", "key": "repoId" },
@@ -90,6 +109,7 @@
       "path": "/v1/mobile/notifications",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "title", "description": "Short notification title shown to the operator.", "type": "string", "required": true, "location": "body" },
         { "name": "body", "description": "Concise notification message shown to the operator.", "type": "string", "required": true, "location": "body" },
         { "name": "task_id", "description": "Optional durable Kanna task id to open when the operator taps the notification.", "type": "string", "required": false, "location": "body", "key": "taskId" }
@@ -102,6 +122,7 @@
       "path": "/v1/tasks/{task_id}/actions/set-notify",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}) whose completion should be announced.", "type": "string", "required": true, "location": "path" },
         { "name": "notify_task_id", "description": "Task id that receives the completion message. Omit to clear the notification target.", "type": "string", "required": false, "location": "body", "key": "notifyTaskId" }
       ]
@@ -113,6 +134,7 @@
       "path": "/v1/tasks/{task_id}/actions/set-pipeline",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}) to re-pipeline.", "type": "string", "required": true, "location": "path" },
         { "name": "pipeline_name", "description": "Pipeline definition to pin. Retired built-in aliases still resolve (for example, 'default' resolves to 'no-review' unless the repo defines its own 'default' pipeline).", "type": "string", "required": true, "location": "body", "key": "pipelineName" }
       ]
@@ -124,6 +146,7 @@
       "path": "/v1/tasks/{task_id}/logs",
       "response": "text",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" },
         { "name": "tail", "description": "Maximum number of most-recent log lines to return. Defaults to 50.", "type": "integer", "required": false, "location": "query" }
       ]
@@ -135,6 +158,7 @@
       "path": "/v1/tasks/search",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "query", "description": "Text matched (case-insensitive) against task display names and prompts.", "type": "string", "required": true, "location": "query" }
       ]
     },
@@ -145,6 +169,7 @@
       "path": "/v1/repos/{repo_id}/tasks",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "repo_id", "description": "Repository id from kanna_list_repos.", "type": "string", "required": true, "location": "path" }
       ]
     },
@@ -155,6 +180,7 @@
       "path": "/v1/repos/{repo_id}/agents",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "repo_id", "description": "Repository id from kanna_list_repos.", "type": "string", "required": true, "location": "path" }
       ]
     },
@@ -165,6 +191,7 @@
       "path": "/v1/tasks",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "repo_id", "description": "Repository id from kanna_list_repos. Optional inside a Kanna task session, where it defaults to the current task's repo.", "type": "string", "required": false, "location": "body", "key": "repoId" },
         { "name": "prompt", "description": "Task prompt given to the first stage's agent.", "type": "string", "required": true, "location": "body" },
         { "name": "display_name", "description": "Short human-readable task title shown in the sidebar. Omitting it does not derive a title: the task falls back to the prompt text itself, clipped to fit, so tasks whose prompts share an opening line become indistinguishable. Always pass one when creating several tasks from a template.", "type": "string", "required": false, "location": "body", "key": "displayName" },
@@ -189,6 +216,7 @@
       "path": "/v1/repos/{repo_id}/agents/{agent}/signal",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "repo_id", "description": "Repository id from kanna_list_repos.", "type": "string", "required": true, "location": "path" },
         { "name": "agent", "description": "Agent definition name to signal (e.g. 'merge-master').", "type": "string", "required": true, "location": "path" },
         { "name": "message", "description": "Message delivered to the agent's terminal session as input.", "type": "string", "required": true, "location": "body" },
@@ -203,6 +231,7 @@
       "path": "/v1/tasks/{task_id}/actions/signal-merge-handoff",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Approved Kanna task id (stable across stages) or one of its branch names.", "type": "string", "required": true, "location": "path" },
         { "name": "branch", "description": "Resolved PR head branch.", "type": "string", "required": true, "location": "body" },
         { "name": "target", "description": "Resolved PR base branch.", "type": "string", "required": true, "location": "body" },
@@ -217,6 +246,7 @@
       "path": "/v1/tasks/{task_id}/input",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" },
         { "name": "input", "description": "Text to type into the task's agent terminal.", "type": "string", "required": true, "location": "body" }
       ]
@@ -228,6 +258,7 @@
       "path": "/v1/tasks/{task_id}/actions/close",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" }
       ]
     },
@@ -238,6 +269,7 @@
       "path": "/v1/tasks/{task_id}",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" },
         { "name": "display_name", "description": "New short human-readable task title shown in the sidebar.", "type": "string", "required": true, "location": "body", "key": "displayName" }
       ]
@@ -249,6 +281,7 @@
       "path": "/v1/tasks/{task_id}/actions/advance-stage",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" }
       ]
     },
@@ -259,6 +292,7 @@
       "path": "/v1/tasks/{task_id}/actions/rerun-stage",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" }
       ]
     },
@@ -269,6 +303,7 @@
       "path": "/v1/tasks/{task_id}/actions/resume",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" }
       ]
     },
@@ -279,6 +314,7 @@
       "path": "/v1/tasks/{task_id}/actions/block",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" },
         { "name": "blocker_task_ids", "description": "Task ids that must finish before the blocked task.", "type": "string_array", "required": true, "location": "body", "key": "blockerTaskIds" }
       ]
@@ -290,6 +326,7 @@
       "path": "/v1/tasks/{task_id}/actions/unblock",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" }
       ]
     },
@@ -300,6 +337,7 @@
       "path": "/v1/tasks/{task_id}/actions/set-parent",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" },
         { "name": "parent_task_id", "description": "Durable work-item id to nest this genuine semantic subtask under. Omit to detach the task from its current parent; use notify_task_id separately for completion routing.", "type": "string", "required": false, "location": "body", "key": "parentTaskId" }
       ]
@@ -311,6 +349,7 @@
       "path": "/v1/tasks/{task_id}/dependent-tasks-exist",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" }
       ]
     },
@@ -334,6 +373,7 @@
       "path": "/v1/tasks/{task_id}/actions/request-revision",
       "response": "json",
       "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
         { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" },
         { "name": "target_stage", "description": "Pipeline stage whose agent should make the changes.", "type": "string", "required": false, "location": "body", "key": "targetStage", "default": "in progress" },
         { "name": "summary", "description": "Short summary of why the revision is needed, shown to the user.", "type": "string", "required": true, "location": "body" },
