@@ -381,9 +381,10 @@ fn which_binary_with_path(
 /// The user's real PATH as an interactive login shell resolves it, captured
 /// ONCE per process. Loading zshrc costs seconds; it used to run per binary
 /// lookup on the stage-advance request path, which is where the multi-second
-/// ⌘S-to-prompt lag came from. The PATH cannot change for the lifetime of
-/// this process, so one capture serves every lookup. `warm_login_shell_path`
-/// pays the one-time cost at server startup, off the request path.
+/// ⌘S-to-prompt lag came from. `warm_login_shell_path` pays the one-time cost
+/// at server startup, off the request path. Binary resolution also checks live
+/// user install locations so an agent installed later does not require a server
+/// restart merely because the cached PATH predates it.
 fn login_shell_path() -> Option<&'static str> {
     static LOGIN_SHELL_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     LOGIN_SHELL_PATH
@@ -422,8 +423,9 @@ pub(crate) fn resolve_agent_executable(provider: AgentProvider) -> Result<String
     resolve_provider_executable(provider, None, "")
 }
 
-/// Cheap binary availability check against the process PATH plus the cached
-/// login-shell PATH — never a per-call login shell.
+/// Cheap binary availability check against the process PATH, the cached
+/// login-shell PATH, and live user install locations — never a per-call login
+/// shell.
 fn resolve_binary_from_candidates(
     name: &str,
     candidates: Vec<PathBuf>,
@@ -457,8 +459,14 @@ fn resolve_binary_from_candidates(
                 return Ok(binary);
             }
         }
+        if let Some(binary) = kanna_runtime_defaults::find_user_binary(name) {
+            return Ok(binary.to_string_lossy().to_string());
+        }
 
-        Err(format!("binary '{}' not found in PATH", name))
+        Err(format!(
+            "binary '{}' not found in PATH or user install locations",
+            name
+        ))
     })
 }
 

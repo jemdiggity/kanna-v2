@@ -454,6 +454,33 @@ pub fn which_binary_in_path_os(name: &str, path: &std::ffi::OsStr) -> Option<Pat
         .find(|candidate| is_executable_file(candidate))
 }
 
+/// Find a user-installed executable in locations commonly used by agent CLI
+/// installers. These are fallback locations for long-lived app processes whose
+/// PATH was captured before an installer updated the user's shell config.
+pub fn find_user_binary(name: &str) -> Option<PathBuf> {
+    find_user_binary_for_home(&home_dir(), name)
+}
+
+fn find_user_binary_for_home(home: &Path, name: &str) -> Option<PathBuf> {
+    user_binary_candidates_for_home(home, name)
+        .into_iter()
+        .find(|candidate| is_executable_file(candidate))
+}
+
+fn user_binary_candidates_for_home(home: &Path, name: &str) -> Vec<PathBuf> {
+    [
+        home.join(".opencode").join("bin"),
+        home.join(".local").join("bin"),
+        home.join(".bun").join("bin"),
+        home.join(".npm").join("bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+    ]
+    .into_iter()
+    .map(|directory| directory.join(name))
+    .collect()
+}
+
 #[cfg(unix)]
 pub fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -856,6 +883,30 @@ mod tests {
         assert_eq!(
             which_binary_in_path("kanna-cli", unique.to_string_lossy().as_ref()),
             None
+        );
+
+        let _ = std::fs::remove_dir_all(unique);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_user_binary_covers_opencode_installed_after_startup() {
+        let unique = std::env::temp_dir().join(format!(
+            "kanna-runtime-defaults-user-bin-{}",
+            std::process::id()
+        ));
+        let binary_name = format!("kanna-opencode-refresh-test-{}", std::process::id());
+        let binary = unique.join(".opencode/bin").join(&binary_name);
+        let _ = std::fs::remove_dir_all(&unique);
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
+
+        assert_eq!(find_user_binary_for_home(&unique, &binary_name), None);
+
+        make_executable(&binary);
+        assert_eq!(
+            find_user_binary_for_home(&unique, &binary_name),
+            Some(binary)
         );
 
         let _ = std::fs::remove_dir_all(unique);

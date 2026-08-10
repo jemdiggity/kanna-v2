@@ -290,6 +290,49 @@ describe("MainPanel", () => {
     }
   }, 15_000);
 
+  it("updates a newly installed CLI when setup requests a recheck", async () => {
+    let opencodeInstalled = false;
+    invokeMock.mockImplementation((command: string, args?: { name?: string; script?: string }) => {
+      if (command === "read_env_var") return Promise.reject(new Error("env var not set"));
+      if (command === "which_binary" && args?.name === "opencode" && opencodeInstalled) {
+        return Promise.resolve("/Users/tester/.opencode/bin/opencode");
+      }
+      if (command === "which_binary") return Promise.reject(new Error(`missing ${args?.name ?? "agent"}`));
+      if (command === "run_script") return Promise.resolve("opencode 1.2.3\n");
+      return Promise.resolve("");
+    });
+    const { default: MainPanel } = await import("../MainPanel.vue");
+    const wrapper = mount(MainPanel, {
+      props: { uiSlot: null, hasRepos: false },
+      global: {
+        mocks: {
+          $t: (key: string, values?: Record<string, string>) =>
+            key === "mainPanel.agentVersion"
+              ? `Version ${values?.version ?? "?"}`
+              : key === "mainPanel.agentOpenCodeName"
+                ? "OpenCode"
+                : key,
+        },
+        stubs: {
+          TaskHeader: { template: '<div data-testid="task-header" />' },
+          TerminalTabs: { template: '<div data-testid="terminal-tabs" />' },
+        },
+      },
+    });
+    await flushPromises();
+
+    const openCodeCard = () => wrapper.findAll(".agent-card")
+      .find(card => card.text().includes("OpenCode"));
+    expect(openCodeCard()?.find(".not-installed").exists()).toBe(true);
+
+    opencodeInstalled = true;
+    await (wrapper.vm as unknown as { recheckClis: () => Promise<void> }).recheckClis();
+    await flushPromises();
+
+    expect(openCodeCard()?.find(".installed").exists()).toBe(true);
+    expect(openCodeCard()?.text()).toContain("Version 1.2.3");
+  }, 15_000);
+
   it("shows the Antigravity install command when agy is missing", async () => {
     invokeMock.mockImplementation((command: string, args?: { name?: string }) => {
       if (command === "read_env_var") return Promise.reject(new Error("env var not set"));

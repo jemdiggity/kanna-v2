@@ -341,8 +341,14 @@ pub fn which_binary(name: String) -> Result<String, String> {
 fn resolve_binary_from_candidates(name: &str, candidates: Vec<PathBuf>) -> Result<String, String> {
     resolve_binary_from_candidates_with_path_lookup(name, candidates, |name| {
         kanna_runtime_defaults::which_binary(name)
+            .or_else(|| kanna_runtime_defaults::find_user_binary(name))
             .map(|path| path.to_string_lossy().to_string())
-            .ok_or_else(|| format!("binary '{}' not found in PATH", name))
+            .ok_or_else(|| {
+                format!(
+                    "binary '{}' not found in PATH or user install locations",
+                    name
+                )
+            })
     })
 }
 
