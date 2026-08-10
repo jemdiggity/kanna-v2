@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
 import {
   hasConnectionPairForTests,
+  pendingResponseCountForTests,
   routeMessage,
   setPhoneConnection,
   setServerConnection,
@@ -51,6 +52,18 @@ async function disconnect(peer: { client: WebSocket; server: WebSocket }): Promi
   await closed;
 }
 
+function desktopProof(desktopId: string): {
+  kind: "desktop";
+  desktopId: string;
+  desktopSecret: string;
+} {
+  return {
+    kind: "desktop",
+    desktopId,
+    desktopSecret: `${desktopId}-secret`,
+  };
+}
+
 function nextMessage(socket: WebSocket): Promise<Record<string, unknown>> {
   return new Promise((resolve) => {
     socket.once("message", (raw) => resolve(JSON.parse(raw.toString())));
@@ -84,8 +97,18 @@ describe("connection pair lifetime", () => {
     const userId = "desktop-controller-user";
     const requester = await connect(url);
     const target = await connect(url);
-    setServerConnection(userId, "desktop-requester", requester.server);
-    setServerConnection(userId, "desktop-target", target.server);
+    setServerConnection(
+      userId,
+      "desktop-requester",
+      requester.server,
+      desktopProof("desktop-requester"),
+    );
+    setServerConnection(
+      userId,
+      "desktop-target",
+      target.server,
+      desktopProof("desktop-target"),
+    );
 
     const listed = nextMessage(requester.client);
     routeMessage(
@@ -191,6 +214,146 @@ describe("connection pair lifetime", () => {
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(targetReceivedMessage).toBe(false);
+  });
+
+  it("returns an uncorrelated error for a rejected sibling invoke without an id", async () => {
+    const url = await startServer();
+    const userId = "missing-invoke-id-user";
+    const requester = await connect(url);
+    const target = await connect(url);
+    setServerConnection(userId, "unverified-requester", requester.server);
+    setServerConnection(
+      userId,
+      "desktop-target",
+      target.server,
+      desktopProof("desktop-target"),
+    );
+
+    const rejected = nextMessage(requester.client);
+    routeMessage(
+      userId,
+      "server",
+      JSON.stringify({
+        type: "invoke",
+        desktopId: "desktop-target",
+        method: "GET",
+        path: "/v1/tasks/recent",
+        body: null,
+      }),
+      requester.server,
+      "unverified-requester",
+      {
+        kind: "device",
+        desktopId: "unverified-requester",
+        deviceToken: "legacy-device-token",
+      },
+    );
+
+    expect(await rejected).toMatchObject({
+      type: "response",
+      id: null,
+      error: "desktop-secret authentication is required",
+    });
+  });
+
+  it("rejects sibling invokes to a target authenticated by a legacy device token", async () => {
+    const url = await startServer();
+    const userId = "legacy-target-user";
+    const requester = await connect(url);
+    const target = await connect(url);
+    setServerConnection(
+      userId,
+      "verified-requester",
+      requester.server,
+      desktopProof("verified-requester"),
+    );
+    setServerConnection(userId, "unverified-target", target.server, {
+      kind: "device",
+      desktopId: "unverified-target",
+      deviceToken: "legacy-device-token",
+    });
+
+    let targetReceivedMessage = false;
+    target.client.once("message", () => {
+      targetReceivedMessage = true;
+    });
+    const rejected = nextMessage(requester.client);
+    routeMessage(
+      userId,
+      "server",
+      JSON.stringify({
+        type: "invoke",
+        id: "legacy-target-invoke",
+        desktopId: "unverified-target",
+        method: "GET",
+        path: "/v1/tasks/recent",
+        body: null,
+      }),
+      requester.server,
+      "verified-requester",
+      desktopProof("verified-requester"),
+    );
+
+    expect(await rejected).toMatchObject({
+      type: "response",
+      id: "legacy-target-invoke",
+      error: "target desktop-secret authentication is required",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(targetReceivedMessage).toBe(false);
+  });
+
+  it("cleans pending responses owned by a replaced same-id desktop socket", async () => {
+    const url = await startServer();
+    const userId = "same-id-reconnect-user";
+    let requester = await connect(url);
+    const target = await connect(url);
+    setServerConnection(
+      userId,
+      "desktop-requester",
+      requester.server,
+      desktopProof("desktop-requester"),
+    );
+    setServerConnection(
+      userId,
+      "desktop-target",
+      target.server,
+      desktopProof("desktop-target"),
+    );
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      routeMessage(
+        userId,
+        "server",
+        JSON.stringify({
+          type: "invoke",
+          id: `in-flight-${attempt}`,
+          desktopId: "desktop-target",
+          method: "GET",
+          path: "/v1/tasks/recent",
+          body: null,
+        }),
+        requester.server,
+        "desktop-requester",
+        desktopProof("desktop-requester"),
+      );
+      expect(pendingResponseCountForTests(userId)).toBe(1);
+
+      const oldRequester = requester;
+      const oldClosed = new Promise<void>((resolve) => {
+        oldRequester.server.once("close", resolve);
+      });
+      requester = await connect(url);
+      setServerConnection(
+        userId,
+        "desktop-requester",
+        requester.server,
+        desktopProof("desktop-requester"),
+      );
+      await oldClosed;
+
+      expect(pendingResponseCountForTests(userId)).toBe(0);
+    }
   });
 
   it("keeps the other desktops online when one disconnects with no phone attached", async () => {
