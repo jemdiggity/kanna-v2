@@ -1144,6 +1144,12 @@ async fn handle_mcp_tool_call(
     args: Value,
 ) -> Result<Value, String> {
     let (args, machine_id) = extract_machine_id(args)?;
+    if name == "kanna_complete_stage" && machine_id.is_some() {
+        return Err(
+            "kanna_complete_stage cannot target another machine; an agent can only complete its own local stage"
+                .to_string(),
+        );
+    }
     if name == "kanna_list_machines" {
         if machine_id.is_some() || args.as_object().is_some_and(|args| !args.is_empty()) {
             return Err("kanna_list_machines accepts no arguments".to_string());
@@ -1160,7 +1166,7 @@ async fn handle_mcp_tool_call(
             .map_err(|_| "catalog lock poisoned".to_string())?;
         resolve_request(&catalog, name, &args)?
     };
-    if name == "kanna_complete_stage" && machine_id.is_none() {
+    if name == "kanna_complete_stage" {
         bind_request_to_spawned_run(base_url, &mut request).await?;
     }
     let task_id = env::var("KANNA_TASK_ID")

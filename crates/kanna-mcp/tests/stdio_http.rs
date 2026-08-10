@@ -959,6 +959,55 @@ fn tools_list_advertises_machine_routing_on_operational_tools() {
 }
 
 #[test]
+fn complete_stage_rejects_remote_machine_without_issuing_http() {
+    let (base_url_tx, base_url_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
+        base_url_tx
+            .send(format!(
+                "http://{}",
+                listener.local_addr().expect("local addr")
+            ))
+            .expect("send base url");
+        listener
+            .set_nonblocking(true)
+            .expect("set nonblocking listener");
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            listener.accept().is_err(),
+            "remote stage completion should not issue HTTP requests"
+        );
+    });
+    let base_url = base_url_rx.recv().expect("base url");
+
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 33,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_complete_stage",
+                "arguments": {
+                    "machine_id": "desktop-studio",
+                    "task_id": "task-remote",
+                    "status": "success",
+                    "summary": "should stay local"
+                }
+            }
+        })],
+    );
+
+    server.join().expect("fixture server");
+    assert_eq!(responses.len(), 1);
+    assert_eq!(responses[0]["id"], json!(33));
+    assert_eq!(
+        tool_error_text(&responses[0]),
+        "kanna_complete_stage cannot target another machine; an agent can only complete its own local stage"
+    );
+}
+
+#[test]
 fn serve_lists_machines_through_the_local_server() {
     let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
         method: "GET",

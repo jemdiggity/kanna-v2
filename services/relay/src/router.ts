@@ -1,5 +1,6 @@
 import type { RawData, WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
+import type { ServerAuthProof } from "./auth.js";
 
 interface ConnectionPair {
   clients: Set<WebSocket>;
@@ -570,7 +571,8 @@ export function routeMessage(
   from: "phone" | "server",
   data: string,
   source?: WebSocket,
-  sourceDesktopId?: string | null
+  sourceDesktopId?: string | null,
+  serverAuthProof?: ServerAuthProof | null,
 ): void {
   const pair = connections.get(userId);
   if (!pair) return;
@@ -699,11 +701,14 @@ export function routeMessage(
       if (hadPendingResponse) return;
     }
 
-    // The desktop credential already resolved this socket to `userId`, so a
-    // desktop can use the same account-scoped routing boundary as mobile. This
-    // is what lets a local MCP reach a sibling machine without copying Firebase
-    // credentials into the agent process or exposing that sibling's LAN API.
     if (parsed?.type === "invoke") {
+      // A legacy device token proves only account membership. Desktop-to-desktop
+      // routing requires the desktop-scoped credential that bound this socket
+      // to its claimed desktop ID.
+      if (serverAuthProof?.kind !== "desktop") {
+        sendErrorResponse(source, parsed.id, "desktop-secret authentication is required");
+        return;
+      }
       if (parsed.command === "list_active_desktops") {
         sendDataResponse(source, parsed.id, {
           desktopIds: Array.from(pair.desktops.entries())

@@ -496,7 +496,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         return;
       }
     }
-    routeMessage(userId!, role!, data, ws, desktopId);
+    routeMessage(userId!, role!, data, ws, desktopId, serverAuthProof);
   });
 
   ws.on("close", (code: number, reason: Buffer) => {

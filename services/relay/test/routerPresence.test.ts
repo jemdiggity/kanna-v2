@@ -99,6 +99,11 @@ describe("connection pair lifetime", () => {
       }),
       requester.server,
       "desktop-requester",
+      {
+        kind: "desktop",
+        desktopId: "desktop-requester",
+        desktopSecret: "requester-secret",
+      },
     );
     expect((await listed).data).toEqual({
       desktopIds: ["desktop-requester", "desktop-target"],
@@ -118,6 +123,11 @@ describe("connection pair lifetime", () => {
       }),
       requester.server,
       "desktop-requester",
+      {
+        kind: "desktop",
+        desktopId: "desktop-requester",
+        desktopSecret: "requester-secret",
+      },
     );
     expect(await delivered).toMatchObject({
       id: "desktop-invoke",
@@ -139,6 +149,48 @@ describe("connection pair lifetime", () => {
       "desktop-target",
     );
     expect((await response).body).toEqual([{ id: "task-on-target" }]);
+  });
+
+  it("rejects sibling desktop invokes authenticated by a legacy device token", async () => {
+    const url = await startServer();
+    const userId = "legacy-device-user";
+    const requester = await connect(url);
+    const target = await connect(url);
+    setServerConnection(userId, "unverified-requester", requester.server);
+    setServerConnection(userId, "desktop-target", target.server);
+
+    let targetReceivedMessage = false;
+    target.client.once("message", () => {
+      targetReceivedMessage = true;
+    });
+    const rejected = nextMessage(requester.client);
+    routeMessage(
+      userId,
+      "server",
+      JSON.stringify({
+        type: "invoke",
+        id: "legacy-device-invoke",
+        desktopId: "desktop-target",
+        method: "GET",
+        path: "/v1/tasks/recent",
+        body: null,
+      }),
+      requester.server,
+      "unverified-requester",
+      {
+        kind: "device",
+        desktopId: "unverified-requester",
+        deviceToken: "legacy-device-token",
+      },
+    );
+
+    expect(await rejected).toMatchObject({
+      type: "response",
+      id: "legacy-device-invoke",
+      error: "desktop-secret authentication is required",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(targetReceivedMessage).toBe(false);
   });
 
   it("keeps the other desktops online when one disconnects with no phone attached", async () => {

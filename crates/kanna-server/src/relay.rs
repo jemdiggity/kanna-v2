@@ -103,7 +103,7 @@ pub(crate) async fn run_relay_loop(
         // HTTP invokes dispatch off the read loop; this caps how many run at
         // once so a burst cannot exhaust the blocking pool. Mirrors the KSP
         // request worker's CPU-aware concurrency.
-        let invoke_permits = Arc::new(tokio::sync::Semaphore::new(
+        let invoke_permits = Arc::new(RelayHttpInvokePermits::new(
             crate::ksp::request_concurrency(),
         ));
         let mut keepalive = RelayKeepalive::new();
@@ -784,10 +784,34 @@ pub(crate) struct RelayHttpInvokeRequest {
     pub(crate) authenticated_user_id: Option<String>,
 }
 
+/// Separate budgets keep long-poll task event watches from consuming every
+/// permit needed by the mobile client's short REST requests.
+pub(crate) struct RelayHttpInvokePermits {
+    short: Arc<tokio::sync::Semaphore>,
+    long_poll: Arc<tokio::sync::Semaphore>,
+}
+
+impl RelayHttpInvokePermits {
+    pub(crate) fn new(concurrency: usize) -> Self {
+        Self {
+            short: Arc::new(tokio::sync::Semaphore::new(concurrency)),
+            long_poll: Arc::new(tokio::sync::Semaphore::new(concurrency)),
+        }
+    }
+
+    pub(crate) fn for_path(&self, path: &str) -> Arc<tokio::sync::Semaphore> {
+        if path.split('?').next() == Some("/v1/task-events") {
+            Arc::clone(&self.long_poll)
+        } else {
+            Arc::clone(&self.short)
+        }
+    }
+}
+
 pub(crate) async fn dispatch_relay_http_invoke(
     http_state: Arc<http_api::AppState>,
     sink: Arc<Mutex<relay_client::WsSink>>,
-    invoke_permits: Arc<tokio::sync::Semaphore>,
+    invoke_permits: Arc<RelayHttpInvokePermits>,
     request: RelayHttpInvokeRequest,
 ) -> Result<(), String> {
     let RelayHttpInvokeRequest {
@@ -797,7 +821,7 @@ pub(crate) async fn dispatch_relay_http_invoke(
         body,
         authenticated_user_id,
     } = request;
-    let permit = match Arc::clone(&invoke_permits).try_acquire_owned() {
+    let permit = match invoke_permits.for_path(&path).try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
             let response = RelayMessage::Response {
