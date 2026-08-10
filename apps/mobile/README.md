@@ -58,7 +58,7 @@ The command runs Expo CNG locally with `KANNA_APP_ENV=prod`, keeps the generated
 `apps/mobile/ios/` directory uncommitted, archives the generated Xcode workspace,
 and exports an IPA under `.build/mobile/ios-production/`. It uses the production
 bundle id `build.kanna.app`, display name `Kanna`, and Apple team
-`GY3LFAA59P` from `app.config.ts` and `mobileEnvironments.json`. Expo SDK 57
+`EA4J68749Z` from `app.config.ts` and `mobileEnvironments.json`. Expo SDK 57
 generates the production workspace and scheme as `Kanna`; the dev and staging
 workspaces are `KannaDev` and `KannaStaging` respectively.
 

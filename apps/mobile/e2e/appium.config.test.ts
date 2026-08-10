@@ -92,7 +92,7 @@ describe("mobile Appium config", () => {
         bundleId: "build.kanna.app",
         deviceName: "Jeremy's iPhone",
         deviceUdid: "00008110-001234560E10801E",
-        xcodeOrgId: "GY3LFAA59P",
+        xcodeOrgId: "EA4J68749Z",
         updatedWdaBundleId: "build.kanna.app.webdriveragentrunner"
       })
     ).toMatchObject({
@@ -104,7 +104,7 @@ describe("mobile Appium config", () => {
       "appium:wdaLocalPort": 4724,
       "appium:forceAppLaunch": true,
       "appium:shouldTerminateApp": true,
-      "appium:xcodeOrgId": "GY3LFAA59P",
+      "appium:xcodeOrgId": "EA4J68749Z",
       "appium:xcodeSigningId": "Apple Development",
       "appium:updatedWDABundleId": "build.kanna.app.webdriveragentrunner"
     });

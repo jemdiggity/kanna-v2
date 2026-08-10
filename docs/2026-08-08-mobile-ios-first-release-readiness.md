@@ -28,7 +28,7 @@ Verified in the repo, not assumed:
 
 | Area | State | Evidence |
 |---|---|---|
-| Production identity | `Kanna` / `build.kanna.app` / team `GY3LFAA59P` | `apps/mobile/src/mobileEnvironments.json`, `apps/mobile/app.config.ts` |
+| Production identity | `Kanna` / `build.kanna.app` / team `EA4J68749Z` | `apps/mobile/src/mobileEnvironments.json`, `apps/mobile/app.config.ts` |
 | Archive + upload pipeline | `./kd mobile archive --production --build-number <n> [--upload]` — prebuild → `xcodebuild archive` → `app-store-connect` export → Transporter | `tools/kd/src/runtime/mobile-archive.ts` |
 | Release QA gate | `./kd mobile qa --production [--ota]` | `docs/testing/mobile-production-qa-gate.md` |
 | Production backend | `https://relay.kanna.build/health` → 200 (checked 2026-08-10) | live |
@@ -186,7 +186,7 @@ Grouped by who does it.
   `APP_STORE_CONNECT_API_ISSUER_ID`, and `AuthKey_<id>.p8` in
   `~/.appstoreconnect/private_keys/`). `./kd mobile archive --upload` requires
   all three, plus Xcode 26+. The build Mac must also have an Apple Account for
-  team `GY3LFAA59P` in Xcode so automatic signing can create the Apple
+  team `EA4J68749Z` in Xcode so automatic signing can create the Apple
   Distribution certificate and provisioning profile.
 - **A4** — Apple Developer Program membership active and the latest Apple
   Developer Program License Agreement accepted. A free app is covered by that
