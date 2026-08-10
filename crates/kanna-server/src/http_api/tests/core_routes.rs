@@ -2565,6 +2565,14 @@ async fn list_task_children_route_returns_open_and_closed_direct_children_with_v
         db.update_pipeline_item_parent("task-grandchild", Some("task-child-security"))
             .unwrap();
         db.update_test_pipeline_item_stage_context(
+            "task-parent",
+            "task-parent-2",
+            "specialized-reviewers",
+            None,
+            "claude",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_stage_context(
             "task-child-no-run",
             "branch-task-child-no-run",
             "specialty-review",
@@ -2705,6 +2713,48 @@ async fn list_task_children_route_returns_open_and_closed_direct_children_with_v
                 "latestRun": null
             }
         ])
+    );
+
+    // A dispatcher resumes in a later stage's workspace, so it may only know
+    // the task by one of its branch names; the tool's contract promises that
+    // resolves to the same history.
+    let by_branch = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/tasks/task-parent-2/children")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_branch.status(), StatusCode::OK);
+    let by_branch_body = axum::body::to_bytes(by_branch.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        from_slice::<serde_json::Value>(&by_branch_body).unwrap(),
+        children
+    );
+
+    // An existing task that dispatched nothing is an empty list, never a 404.
+    // That is what lets the dispatcher tell "no children were ever created"
+    // from "I asked about the wrong task".
+    let childless = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/tasks/task-unrelated/children")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(childless.status(), StatusCode::OK);
+    let childless_body = axum::body::to_bytes(childless.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        from_slice::<serde_json::Value>(&childless_body).unwrap(),
+        serde_json::json!([])
     );
 
     let missing_parent = app
