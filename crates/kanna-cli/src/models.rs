@@ -143,6 +143,12 @@ pub(crate) struct TaskLatestRun {
 pub(crate) struct TaskChild {
     pub(crate) id: String,
     pub(crate) agent: Option<String>,
+    /// Absence is contract-bearing here, unlike the other fields: a server new
+    /// enough to serve this route always sends a `pipeline` (the column is NOT
+    /// NULL), so a missing `pipelineName` means the responding server predates
+    /// the discriminator. Skipping `None` keeps that signal intact through the
+    /// typed fallback instead of laundering an old server's omission into an
+    /// explicit `null` the dispatcher would have to classify differently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pipeline_name: Option<String>,
     pub(crate) created_at: Option<String>,

@@ -597,6 +597,7 @@ The CLI remains the shell/script interface; MCP is the structured agent-tool int
 - `kanna-cli task signal-merge --task-id <TASK_ID> --branch <HEAD> --target <BASE> --summary <SUMMARY> [--pr-url <URL>] [--server-url <URL>]` sends an ordinary request to the repository's merge agent.
 - `kanna-cli task resume --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/resume`. It resumes a dead latest run's provider conversation when its durable transcript and original worktree pass the shared revision-resume checks; otherwise the replacement run records `resumeFallbackReason`.
 - `kanna-cli task rerun-stage --task-id <TASK_ID> [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/rerun-stage`. This is always an explicit fresh provider conversation, not recovery.
+- `kanna-cli task children --task-id <TASK_ID> [--server-url <URL>]` calls `GET /v1/tasks/{task_id}/children` and prints the direct-child history as JSON. It is the typed no-MCP fallback for `kanna_list_task_children`, so it reproduces the route's field set rather than summarizing it.
 
 The provider support and daemon-loss trigger matrix is documented in
 [`2026-07-30-session-death-recovery.md`](2026-07-30-session-death-recovery.md).
