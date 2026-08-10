@@ -374,6 +374,46 @@ describe("new window", () => {
     await client.waitForAppReady();
   });
 
+  it("restores the current window at its persisted native bounds on reload", async () => {
+    const handles = await waitForWindowCount(client, 1);
+    await switchToWindow(client, handles[0] ?? "");
+    await client.waitForAppReady();
+    const windowId = await client.executeSync<string>(
+      "return window.__KANNA_E2E__.setupState.windowWorkspace.bootstrap.windowId;",
+    );
+    expect(windowId).toBe("main");
+
+    const sourceRect = await client.getWindowRect();
+    const expectedRect = {
+      x: sourceRect.x + 32,
+      y: sourceRect.y + 32,
+      width: Math.max(800, sourceRect.width - 120),
+      height: Math.max(600, sourceRect.height - 80),
+    };
+    await execDb(
+      client,
+      "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+      [
+        "window_workspace_v1",
+        JSON.stringify({
+          windows: [{
+            windowId,
+            selectedRepoId: null,
+            selectedItemId: null,
+            order: 0,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+            geometry: expectedRect,
+          }],
+        }),
+      ],
+    );
+
+    await client.reload();
+
+    expectWindowRectNear(await client.getWindowRect(), expectedRect);
+  });
+
   it("restores a secondary window at its persisted native bounds", async () => {
     const repoId = await importWindowTestRepo(client, testRepoPath, "new-window-geometry-test");
     const taskId = randomUUID();

@@ -250,6 +250,111 @@ describe("windowWorkspace in Tauri", () => {
     );
   });
 
+  it("reveals a secondary window when applying its saved geometry fails", async () => {
+    const geometryError = new Error("geometry restore failed");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [
+          {
+            windowId: "main",
+            selectedRepoId: null,
+            selectedItemId: null,
+            order: 0,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+          },
+          {
+            windowId: "win-2",
+            selectedRepoId: "repo-1",
+            selectedItemId: "task-1",
+            order: 1,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+            geometry: { x: 180, y: 110, width: 1024, height: 768 },
+          },
+        ],
+      } satisfies WorkspaceSnapshot),
+    );
+    webviewCreatedHarness.handler = async (label) => {
+      const restored = createdWindows.find((entry) => entry.label === label);
+      restored?.setSize.mockRejectedValueOnce(geometryError);
+    };
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+
+    await expect(workspace.restoreAdditionalWindows()).resolves.toBeUndefined();
+
+    const restored = createdWindows[0];
+    expect(restored?.show).toHaveBeenCalledTimes(1);
+    expect(restored?.setFocus).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[windowWorkspace] failed to apply saved window geometry:",
+      geometryError,
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("continues restoring saved windows after one spawn fails", async () => {
+    const focusError = new Error("focus failed");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    settingStore.set(
+      WINDOW_WORKSPACE_SETTINGS_KEY,
+      JSON.stringify({
+        windows: [
+          {
+            windowId: "main",
+            selectedRepoId: null,
+            selectedItemId: null,
+            order: 0,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+          },
+          ...["win-2", "win-3"].map((windowId, index) => ({
+            windowId,
+            selectedRepoId: "repo-1",
+            selectedItemId: `task-${index + 1}`,
+            order: index + 1,
+            sidebarHidden: false,
+            sidebarWidth: 260,
+            geometry: {
+              x: 180 + index * 40,
+              y: 110 + index * 40,
+              width: 1024,
+              height: 768,
+            },
+          })),
+        ],
+      } satisfies WorkspaceSnapshot),
+    );
+    webviewCreatedHarness.handler = async (label) => {
+      if (label === "window-win-2") {
+        createdWindows.find((entry) => entry.label === label)
+          ?.setFocus.mockRejectedValueOnce(focusError);
+      }
+    };
+    const workspace = createWindowWorkspace({
+      db: {} as never,
+      bootstrap: { windowId: "main", selectedRepoId: null, selectedItemId: null },
+    });
+
+    await expect(workspace.restoreAdditionalWindows()).resolves.toBeUndefined();
+
+    expect(createdWindows.map((entry) => entry.label)).toEqual([
+      "window-win-2",
+      "window-win-3",
+    ]);
+    expect(createdWindows[1]?.show).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[windowWorkspace] failed to restore window win-2:",
+      focusError,
+    );
+    errorSpy.mockRestore();
+  });
+
   it("coalesces native move and resize events into one geometry mutation", async () => {
     vi.useFakeTimers();
     settingStore.set(

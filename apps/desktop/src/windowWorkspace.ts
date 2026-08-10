@@ -504,7 +504,11 @@ export function createWindowWorkspace(input: {
           void (async () => {
             try {
               if (geometry) {
-                await applyNativeGeometry(webview, geometry);
+                try {
+                  await applyNativeGeometry(webview, geometry);
+                } catch (error) {
+                  console.warn("[windowWorkspace] failed to apply saved window geometry:", error);
+                }
                 await webview.show();
                 await webview.setFocus();
               }
@@ -696,7 +700,11 @@ export function createWindowWorkspace(input: {
         .sort((left, right) => left.order - right.order);
 
       for (const entry of extraWindows) {
-        await spawnWindow(entry);
+        try {
+          await spawnWindow(entry);
+        } catch (error) {
+          console.error(`[windowWorkspace] failed to restore window ${entry.windowId}:`, error);
+        }
       }
     },
     onSharedInvalidation: async (handler) =>
