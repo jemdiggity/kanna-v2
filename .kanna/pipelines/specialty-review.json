@@ -2,6 +2,7 @@
   "$schema": "./schema.json",
   "name": "specialty-review",
   "description": "Single-stage pipeline for specialty review child tasks; the dispatcher binds the specialty agent at creation",
+  "visibility": "internal",
   "stages": [
     {
       "name": "review",

@@ -302,7 +302,10 @@ default providers, and default models come from the fully resolved definition:
 a repo `AGENT.md` wins over a built-in of the same name, then the repo's
 `EXTEND.md` is layered on top. `source` is `built_in`, `repo_override`, or
 `repo_authored`; extending a built-in counts as a repo override because the
-definition that runs is repo-modified.
+definition that runs is repo-modified. Definitions whose resolved frontmatter
+declares `visibility: internal` — the `commit` and `approve` stage posts Kanna
+binds itself — are omitted from the listing, but still resolve when the
+`agent` field names them explicitly: visibility governs listing, not access.
 
 Task creation uses that same resolution path for any agent role, not only
 specialty reviewers. An explicit request provider wins, followed by the

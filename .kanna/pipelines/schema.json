@@ -37,6 +37,10 @@
     "description": {
       "type": "string"
     },
+    "visibility": {
+      "description": "Whether this pipeline is offered as a choice. \"internal\" keeps the name out of every listing (the repo manifest, the desktop's new-task picker, the tool catalog's advertised lineup) while it still resolves when named explicitly on task creation — visibility governs listing, not access. Defaults to \"public\" when absent.",
+      "enum": ["public", "internal"]
+    },
     "revision_limit": {
       "description": "Agent-requested revision rounds a task may spend before Kanna stops forking revisions and parks the task for its human. Defaults to 3 when omitted; 0 disables the cap. A human-requested revision is never refused and resets the count.",
       "type": "integer",
@@ -153,6 +157,19 @@
           "name": "pr",
           "agent": "pr",
           "prompt": "Create a PR for the work on branch $BRANCH. Previous result: $PREV_RESULT",
+          "policy": { "transition": "manual" }
+        }
+      ]
+    },
+    {
+      "$schema": "./schema.json",
+      "name": "orchestrated-child",
+      "description": "A pipeline an orchestrating agent binds for the child tasks it creates; internal keeps it out of the new-task picker while it still resolves by name",
+      "visibility": "internal",
+      "stages": [
+        {
+          "name": "review",
+          "prompt": "$TASK_PROMPT",
           "policy": { "transition": "manual" }
         }
       ]

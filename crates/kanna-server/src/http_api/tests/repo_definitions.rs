@@ -214,11 +214,13 @@ fn write_remote_definitions(repo: &Path) {
     )
     .unwrap();
     // A repo file named after an internal built-in customizes that pipeline's
-    // definition; it must not promote the name to a selectable choice.
+    // definition; re-declaring `"visibility": "internal"` keeps the name out
+    // of the manifest (a repo file omitting the field would promote it).
     std::fs::write(
         repo.join(".kanna/pipelines/specialty-review.json"),
         json!({
             "name": "specialty-review",
+            "visibility": "internal",
             "stages": [{
                 "name": "review",
                 "prompt": "REMOTE_SPECIALTY_REVIEW",
@@ -228,6 +230,25 @@ fn write_remote_definitions(repo: &Path) {
         .to_string(),
     )
     .unwrap();
+    // A repo-authored pipeline can keep itself out of the picker the same way.
+    std::fs::write(
+        repo.join(".kanna/pipelines/hidden-child.json"),
+        json!({
+            "name": "hidden-child",
+            "visibility": "internal",
+            "stages": [{
+                "name": "review",
+                "prompt": "REMOTE_HIDDEN_CHILD",
+                "policy": {"transition": "manual"}
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // Reading visibility means parsing every pipeline file; a malformed one
+    // must stay listed instead of erroring (or silently shrinking) the
+    // manifest.
+    std::fs::write(repo.join(".kanna/pipelines/broken.json"), "{ not json").unwrap();
     std::fs::write(repo.join(".kanna/pipelines/invalid\\name.json"), "{}").unwrap();
     std::fs::write(repo.join(".kanna/pipelines/schema.json"), "{}").unwrap();
     std::fs::write(
@@ -458,6 +479,9 @@ async fn list_agents_reports_the_resolved_repo_override_that_task_creation_uses(
     assert_eq!(status, StatusCode::OK);
     let agents = agents.as_array().expect("agent list response");
 
+    // The repo's commit override omits `visibility`, which deliberately makes
+    // the name a public choice — the bundled definition it replaces declares
+    // `visibility: internal` and is Kanna's to bind as a stage post.
     let commit = agents
         .iter()
         .find(|agent| agent["name"] == "commit")
@@ -467,6 +491,18 @@ async fn list_agents_reports_the_resolved_repo_override_that_task_creation_uses(
     assert_eq!(commit["defaultModel"], "repo-extended-model");
     assert_eq!(commit["defaultEffort"], "low");
     assert_eq!(commit["source"], "repo_override");
+
+    // `approve` keeps its bundled `visibility: internal`: unlisted here, but
+    // its definition still resolves when named explicitly.
+    assert!(
+        !agents.iter().any(|agent| agent["name"] == "approve"),
+        "internal built-in approve must not be listed"
+    );
+    let (status, approve) =
+        json_response(&app, "/v1/repos/repo-1/kanna-definitions/agents/approve").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(approve["definition"]["name"], "approve");
+    assert_eq!(approve["definition"]["visibility"], "internal");
 
     let ship = agents
         .iter()
@@ -583,12 +619,15 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
     );
     assert!(manifest["config"].get("stageOrder").is_none());
     assert_eq!(manifest["defaultPipeline"], "remote-qa");
-    // `specialty-review` is absent even though this repo ships a file of that
-    // name: an internal built-in is Kanna's to bind, and a repo file only
-    // customizes its definition (asserted below).
+    // `specialty-review` and `hidden-child` are absent because their files
+    // declare `"visibility": "internal"` (asserted resolvable below), while
+    // the malformed `broken` stays listed: an unparseable file cannot have
+    // declared itself internal, and dropping it would hide the repo's own
+    // pipeline behind a silent manifest shrink.
     assert_eq!(
         manifest["pipelines"],
         json!([
+            "broken",
             "no-review",
             "qa",
             "release.v2",
@@ -650,7 +689,7 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
     );
 
     // Unlisted, but still resolvable — and the repo's override still wins over
-    // the bundled definition, exactly as it does for a selectable pipeline.
+    // the bundled definition, exactly as it does for a listed pipeline.
     let (status, internal_pipeline) = json_response(
         &app,
         "/v1/repos/repo-1/kanna-definitions/pipelines/specialty-review",
@@ -661,6 +700,23 @@ async fn repo_definition_routes_return_one_remote_revision_and_normalized_snake_
         internal_pipeline["definition"]["stages"][0]["prompt"],
         "REMOTE_SPECIALTY_REVIEW"
     );
+    assert_eq!(internal_pipeline["definition"]["visibility"], "internal");
+
+    let (status, hidden_child) = json_response(
+        &app,
+        "/v1/repos/repo-1/kanna-definitions/pipelines/hidden-child",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        hidden_child["definition"]["stages"][0]["prompt"],
+        "REMOTE_HIDDEN_CHILD"
+    );
+
+    // The malformed pipeline's parse error belongs to its own endpoint, not
+    // to the manifest that listed it.
+    let broken = response(&app, "/v1/repos/repo-1/kanna-definitions/pipelines/broken").await;
+    assert_eq!(broken.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
     let (status, agent) = json_response(
         &app,
@@ -729,8 +785,9 @@ async fn repo_definition_routes_use_bundled_only_values_without_a_remote_ref() {
     assert_eq!(manifest["refName"], "origin/main");
     assert_eq!(manifest["config"], json!({}));
     assert_eq!(manifest["defaultPipeline"], "no-review");
-    // The bundled built-ins, minus `specialty-review`: the dispatcher binds
-    // that one for its child tasks, so it is never a choice the caller makes.
+    // The bundled built-ins, minus `specialty-review`: its definition declares
+    // `"visibility": "internal"` because the dispatcher binds it for its child
+    // tasks, so it is never a choice the caller makes.
     assert_eq!(
         manifest["pipelines"],
         json!(["no-review", "single-reviewer", "specialized-reviewers"])

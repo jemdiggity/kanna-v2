@@ -1,5 +1,6 @@
 use super::definitions::{
-    PipelineDefinition, PipelineStage, PipelineStagePolicy, PipelineStageTransition,
+    DefinitionVisibility, PipelineDefinition, PipelineStage, PipelineStagePolicy,
+    PipelineStageTransition,
 };
 use super::lifecycle::spawn_prepared_task_for_api_recording_stage_run;
 use super::types::{PreparedTaskSpawn, TaskCreationRequest};
@@ -67,6 +68,9 @@ fn build_merge_task_request() -> Result<TaskCreationRequest, String> {
         }],
         environments: None,
         revision_limit: None,
+        // Kanna binds this synthetic pipeline itself; it is never a listed
+        // choice, and visibility is never consulted on resolution anyway.
+        visibility: DefinitionVisibility::Internal,
     };
     let pipeline_def =
         serde_json::to_string(&pipeline).map_err(|e| format!("serialize error: {}", e))?;

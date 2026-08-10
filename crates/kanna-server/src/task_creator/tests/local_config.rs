@@ -2,7 +2,7 @@
 //! reach a spawn from the working tree, beat the committed config, lose to an
 //! explicit task override, and fail loudly rather than quietly when malformed.
 
-use super::super::definitions::{AgentDefinition, RepoDefinitions};
+use super::super::definitions::{AgentDefinition, DefinitionVisibility, RepoDefinitions};
 use super::super::provider::resolve_agent_provider_with;
 use super::*;
 use crate::db::Repo;
@@ -70,6 +70,7 @@ fn review_agent() -> AgentDefinition {
         effort: None,
         permission_mode: None,
         allowed_tools: Vec::new(),
+        visibility: DefinitionVisibility::Public,
     }
 }
 
