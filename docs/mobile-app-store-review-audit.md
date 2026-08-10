@@ -2,6 +2,15 @@
 
 Last reviewed: 2026-07-07
 
+> **Superseded by**
+> [`2026-08-08-mobile-ios-first-release-readiness.md`](2026-08-08-mobile-ios-first-release-readiness.md),
+> which re-verifies these findings and adds the ones this pass missed. The
+> findings below still hold, with one important qualification: no Kanna account
+> can be created anywhere in the product (the desktop app cannot create them
+> either), but this matters far less than it appears, because the mobile app is
+> not account-gated. It works over LAN with no account at all after a QR pairing
+> with the desktop app. Accounts are only needed for remote/WAN access.
+
 ## Implemented in this pass
 
 - Replaced the signed-out mobile auth copy that referred to "local alpha credentials" with production-safe account/local-network wording.

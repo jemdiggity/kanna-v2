@@ -2,6 +2,18 @@
 
 Last prepared: 2026-07-07
 
+> **Partly superseded.** See
+> [`2026-08-08-mobile-ios-first-release-readiness.md`](2026-08-08-mobile-ios-first-release-readiness.md)
+> for the current gap list. The **Source Inventory** and **App Privacy Label
+> Guidance** sections below are out of date: the app has since gained push
+> notifications (FCM device tokens registered with the relay), camera use for QR
+> pairing, and local-only crash diagnostics, and `runtimeVersion` is now `2.1.4`,
+> not `1.0.0`. Do not fill in the App Privacy form from this page. The metadata
+> draft is superseded by
+> [`2026-08-09-mobile-app-store-listing.md`](2026-08-09-mobile-app-store-listing.md).
+> The screenshot rules, review-notes template, and open
+> `Requires human confirmation` questions remain useful.
+
 This package is a working reference for the human App Store Connect submitter.
 It is not legal advice. Anything marked "Requires human confirmation" must be
 confirmed by the business/legal owner before submission.
