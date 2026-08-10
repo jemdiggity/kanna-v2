@@ -194,6 +194,11 @@ export function buildTerminalDocument({
       let pendingFileMentionScanTimer = null;
       let lastPostedFileMentionSnapshot = "";
       let latestContentRevision = null;
+      // A snapshot is replayed one xterm write callback at a time. Keep whole
+      // mutations ordered so a live append cannot land between old snapshot
+      // chunks and then be redrawn away by the rest of that snapshot.
+      const terminalMutationQueue = [];
+      let terminalMutationActive = false;
 
       term.loadAddon(fitAddon);
       term.open(root);
@@ -1466,28 +1471,51 @@ export function buildTerminalDocument({
         writeNext();
       }
 
+      function runNextTerminalMutation() {
+        if (terminalMutationActive) {
+          return;
+        }
+        const mutation = terminalMutationQueue.shift();
+        if (!mutation) {
+          return;
+        }
+        terminalMutationActive = true;
+        mutation(() => {
+          terminalMutationActive = false;
+          runNextTerminalMutation();
+        });
+      }
+
+      function enqueueTerminalMutation(mutation) {
+        terminalMutationQueue.push(mutation);
+        runNextTerminalMutation();
+      }
+
       window.__replaceTerminalState = function replaceTerminalState(state) {
         const contentRevision = Number.isSafeInteger(state.contentRevision)
           ? state.contentRevision
           : null;
         latestContentRevision = contentRevision;
-        clearTerminalSelection();
-        viewportPinnedToBottom = true;
-        const shouldStick = shouldFollowTerminalBottom();
-        term.reset();
-        ${enableE2EInspection ? "resetTerminalFrameDiagnostics();" : ""}
-        fitTerminal();
-        const complete = () => {
+        enqueueTerminalMutation((finishMutation) => {
+          clearTerminalSelection();
+          viewportPinnedToBottom = true;
+          const shouldStick = shouldFollowTerminalBottom();
+          term.reset();
+          ${enableE2EInspection ? "resetTerminalFrameDiagnostics();" : ""}
           fitTerminal();
-          finalizeRender(shouldStick);
-          rebuildTerminalFileMentions();
-          scheduleTerminalContentReady(contentRevision);
-        };
-        if (state.text) {
-          term.write(state.text, complete);
-          return;
-        }
-        writeTerminalChunks(state.chunksB64, complete);
+          const complete = () => {
+            fitTerminal();
+            finalizeRender(shouldStick);
+            rebuildTerminalFileMentions();
+            scheduleTerminalContentReady(contentRevision);
+            finishMutation();
+          };
+          if (state.text) {
+            term.write(state.text, complete);
+            return;
+          }
+          writeTerminalChunks(state.chunksB64, complete);
+        });
       };
 
       window.__appendTerminalChunk = function appendTerminalChunk(state) {
@@ -1495,27 +1523,30 @@ export function buildTerminalDocument({
           return;
         }
 
-        const shouldStick = shouldFollowTerminalBottom();
-        const previousNormalLength = normalBuffer().length;
-        writeTerminalChunks(state.chunksB64, () => {
-          fitTerminal();
-          finalizeRender(shouldStick);
-          const currentNormalLength = normalBuffer().length;
-          const scanNormalBuffer =
-            term.buffer.active.type !== "alternate" ||
-            currentNormalLength !== previousNormalLength;
-          const scanAlternateBuffer =
-            term.buffer.active.type === "alternate";
-          if (
-            scanNormalBuffer ||
-            scanAlternateBuffer
-          ) {
-            scheduleIncrementalFileMentionScan(
-              previousNormalLength,
-              scanNormalBuffer,
+        enqueueTerminalMutation((finishMutation) => {
+          const shouldStick = shouldFollowTerminalBottom();
+          const previousNormalLength = normalBuffer().length;
+          writeTerminalChunks(state.chunksB64, () => {
+            fitTerminal();
+            finalizeRender(shouldStick);
+            const currentNormalLength = normalBuffer().length;
+            const scanNormalBuffer =
+              term.buffer.active.type !== "alternate" ||
+              currentNormalLength !== previousNormalLength;
+            const scanAlternateBuffer =
+              term.buffer.active.type === "alternate";
+            if (
+              scanNormalBuffer ||
               scanAlternateBuffer
-            );
-          }
+            ) {
+              scheduleIncrementalFileMentionScan(
+                previousNormalLength,
+                scanNormalBuffer,
+                scanAlternateBuffer
+              );
+            }
+            finishMutation();
+          });
         });
       };
 
