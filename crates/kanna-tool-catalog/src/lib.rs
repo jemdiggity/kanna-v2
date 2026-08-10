@@ -322,6 +322,7 @@ pub enum ParamLoc {
     Path,
     Query,
     Body,
+    Routing,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -346,6 +347,9 @@ pub struct ResolvedRequest {
     pub path: String,
     pub body: Value,
     pub wait: Option<WaitSpec>,
+    /// Adapter-only routing metadata. It is declared alongside ordinary tool
+    /// parameters, but is never serialized into the target server request.
+    pub machine_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -364,18 +368,26 @@ fn parsed_bundled_catalog() -> Catalog {
         .unwrap_or_else(|error| panic!("bundled kanna tool catalog is invalid: {error}"))
 }
 
-/// Runtime identity is a security boundary, not a repo-customizable transport
-/// shortcut. Catalog overrides may add or replace ordinary tools, but the
-/// bundled parameterless status declaration always owns `kanna_info` so an
-/// override cannot turn it into a raw `/v1/status` passthrough.
+/// Runtime identity and account-scoped machine discovery are adapter
+/// boundaries, not repo-customizable transport shortcuts. Catalog overrides
+/// may add or replace ordinary tools, but the bundled declarations always own
+/// these two tools.
 fn ensure_required_runtime_tools(mut catalog: Catalog) -> Catalog {
-    let info = parsed_bundled_catalog()
+    let mut required = parsed_bundled_catalog()
         .tools
         .into_iter()
-        .find(|tool| tool.name == "kanna_info")
-        .unwrap_or_else(|| panic!("bundled catalog must declare kanna_info"));
-    catalog.tools.retain(|tool| tool.name != "kanna_info");
-    catalog.tools.insert(0, info);
+        .filter(|tool| matches!(tool.name.as_str(), "kanna_info" | "kanna_list_machines"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        required.len(),
+        2,
+        "bundled catalog must declare runtime tools"
+    );
+    catalog
+        .tools
+        .retain(|tool| !matches!(tool.name.as_str(), "kanna_info" | "kanna_list_machines"));
+    required.append(&mut catalog.tools);
+    catalog.tools = required;
     catalog
 }
 
@@ -654,6 +666,7 @@ pub fn resolve_request(
     let mut path = tool.path.clone();
     let mut body = Map::new();
     let mut query = Vec::new();
+    let mut machine_id = None;
 
     for param in &tool.params {
         let Some(value) = value_for_param(tool, param, args)? else {
@@ -680,6 +693,19 @@ pub fn resolve_request(
                 let key = param.key.as_deref().unwrap_or(&param.name);
                 body.insert(key.to_string(), value);
             }
+            ParamLoc::Routing => {
+                if param.name != "machine_id" {
+                    return Err(format!(
+                        "unsupported routing argument on {}: {}",
+                        tool.name, param.name
+                    ));
+                }
+                let value = string_value(&value, &param.name)?;
+                if value.trim().is_empty() {
+                    return Err("machine_id must not be empty".to_string());
+                }
+                machine_id = Some(value);
+            }
         }
     }
 
@@ -700,6 +726,7 @@ pub fn resolve_request(
         path,
         body: Value::Object(body),
         wait,
+        machine_id,
     })
 }
 

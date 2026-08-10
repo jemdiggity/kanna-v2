@@ -2,17 +2,20 @@ use std::env;
 use std::process;
 
 use kanna_tool_catalog::{
-    load_catalog, resolve_request, runtime_info_snapshot, Catalog, Method as CatalogMethod,
-    ResolvedRequest, ResponseKind, RuntimeAdapterIdentity,
+    clamp_wait_timeout_secs, load_catalog, resolve_request, runtime_info_snapshot,
+    wait_resolved_result, wait_timeout_result, Catalog, Method as CatalogMethod, ResolvedRequest,
+    ResponseKind, RuntimeAdapterIdentity,
 };
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::api::{
-    get_json, get_text, patch_catalog_json, post_catalog_json, wait_catalog_task_via_api,
+    catalog_task_matches_wait_until, get_json, get_text, patch_catalog_json, post_catalog_json,
+    wait_catalog_task_via_api,
 };
 use crate::commands::print_json;
 use crate::config::resolve_server_base_url_from_env;
-use crate::ToolCommands;
+use crate::{MachineCommands, ToolCommands};
 
 pub(crate) fn load_tool_catalog_from_current_dir() -> Result<Catalog, String> {
     let cwd = env::current_dir().map_err(|e| format!("failed to read current directory: {e}"))?;
@@ -61,36 +64,90 @@ pub(crate) async fn execute_catalog_request(
     base_url: &str,
     request: ResolvedRequest,
     adapter: RuntimeAdapterIdentity<'_>,
+    machine_id: Option<&str>,
 ) -> Result<Value, String> {
     match (request.method, request.kind) {
-        (CatalogMethod::Get, ResponseKind::Json) => get_json(base_url, &request.path).await,
-        (CatalogMethod::Get, ResponseKind::Text) => {
-            get_text(base_url, &request.path).await.map(Value::String)
+        (CatalogMethod::Get, ResponseKind::Json) => {
+            get_routed_json(base_url, &request.path, machine_id).await
         }
-        (CatalogMethod::Post, ResponseKind::Json) => {
-            post_catalog_json(base_url, &request.path, &request.body).await
-        }
-        (CatalogMethod::Patch, ResponseKind::Json) => {
-            patch_catalog_json(base_url, &request.path, &request.body).await
-        }
+        (CatalogMethod::Get, ResponseKind::Text) => match machine_id {
+            Some(machine_id) => {
+                invoke_machine(
+                    base_url,
+                    machine_id,
+                    CatalogMethod::Get,
+                    &request.path,
+                    &Value::Null,
+                )
+                .await
+            }
+            None => get_text(base_url, &request.path).await.map(Value::String),
+        },
+        (CatalogMethod::Post | CatalogMethod::Patch, ResponseKind::Json) => match machine_id {
+            Some(machine_id) => {
+                invoke_machine(
+                    base_url,
+                    machine_id,
+                    request.method,
+                    &request.path,
+                    &request.body,
+                )
+                .await
+            }
+            None if request.method == CatalogMethod::Post => {
+                post_catalog_json(base_url, &request.path, &request.body).await
+            }
+            None => patch_catalog_json(base_url, &request.path, &request.body).await,
+        },
         (_, ResponseKind::Wait) => {
             let wait = request
                 .wait
                 .ok_or_else(|| "wait request missing wait spec".to_string())?;
-            wait_catalog_task_via_api(
-                base_url,
-                &wait.task_id,
-                wait.timeout_secs,
-                wait.poll_secs,
-                wait.until,
-            )
-            .await
+            match machine_id {
+                Some(machine_id) => {
+                    wait_catalog_task_routed(
+                        base_url,
+                        &wait.task_id,
+                        wait.timeout_secs,
+                        wait.poll_secs,
+                        wait.until,
+                        Some(machine_id),
+                    )
+                    .await
+                }
+                None => {
+                    wait_catalog_task_via_api(
+                        base_url,
+                        &wait.task_id,
+                        wait.timeout_secs,
+                        wait.poll_secs,
+                        wait.until,
+                    )
+                    .await
+                }
+            }
         }
-        (CatalogMethod::Get, ResponseKind::RuntimeInfo) => Ok(runtime_info_snapshot(
-            base_url,
-            adapter,
-            get_runtime_status(base_url, &request.path).await,
-        )),
+        (CatalogMethod::Get, ResponseKind::RuntimeInfo) => {
+            let (effective_url, status) = match machine_id {
+                Some(machine_id) => (
+                    format!("kanna+relay://{machine_id}"),
+                    get_routed_json(base_url, &request.path, Some(machine_id)).await,
+                ),
+                None => (
+                    base_url.to_string(),
+                    get_runtime_status(base_url, &request.path).await,
+                ),
+            };
+            let mut snapshot = runtime_info_snapshot(&effective_url, adapter, status);
+            if let Some(machine_id) = machine_id {
+                snapshot["connection"]["routing"] = serde_json::json!({
+                    "kind": "accountRelay",
+                    "machineId": machine_id,
+                    "viaBaseUrl": base_url,
+                });
+            }
+            Ok(snapshot)
+        }
         _ => Err(format!(
             "unsupported catalog request: {:?} {:?}",
             request.method, request.kind
@@ -104,7 +161,21 @@ pub(crate) async fn call_catalog_tool(
     name: &str,
     args: &Value,
 ) -> Result<(ResponseKind, Value), String> {
+    if name == "kanna_complete_stage" && args.get("machine_id").is_some() {
+        return Err(
+            "kanna_complete_stage cannot target another machine; an agent can only complete its own local stage"
+                .to_string(),
+        );
+    }
     let mut request = resolve_request(catalog, name, args)?;
+    let requested_machine_id = request.machine_id.take();
+    let machine_id = resolve_remote_machine_id(base_url, requested_machine_id.as_deref()).await?;
+    if name == "kanna_create_task" && machine_id.is_some() && args.get("repo_id").is_none() {
+        return Err(format!(
+            "repo_id is required when creating a task on machine {}; call kanna_list_repos with the same machine_id first",
+            machine_id.as_deref().unwrap_or_default()
+        ));
+    }
     if name == "kanna_complete_stage" {
         bind_request_to_spawned_run(base_url, &mut request).await?;
     }
@@ -121,9 +192,120 @@ pub(crate) async fn call_catalog_tool(
             mcp_protocol_version: None,
             task_id: task_id.as_deref(),
         },
+        machine_id.as_deref(),
     )
     .await?;
     Ok((kind, value))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalMachineIdentity {
+    desktop_id: String,
+}
+
+#[derive(Deserialize)]
+struct MachineInvokeResponse {
+    status: u16,
+    body: Option<Value>,
+    error: Option<String>,
+}
+
+async fn resolve_remote_machine_id(
+    base_url: &str,
+    machine_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(machine_id) = machine_id else {
+        return Ok(None);
+    };
+    let identity: LocalMachineIdentity = get_json(base_url, "/v1/status").await?;
+    Ok((machine_id != identity.desktop_id).then(|| machine_id.to_string()))
+}
+
+fn method_name(method: CatalogMethod) -> &'static str {
+    match method {
+        CatalogMethod::Get => "GET",
+        CatalogMethod::Post => "POST",
+        CatalogMethod::Patch => "PATCH",
+    }
+}
+
+async fn invoke_machine(
+    base_url: &str,
+    machine_id: &str,
+    method: CatalogMethod,
+    path: &str,
+    body: &Value,
+) -> Result<Value, String> {
+    let proxy_path = format!(
+        "/v1/cloud/desktops/{}/invoke",
+        crate::api::encode_path_segment(machine_id)
+    );
+    let response = post_catalog_json(
+        base_url,
+        &proxy_path,
+        &serde_json::json!({
+            "method": method_name(method),
+            "path": path,
+            "body": body,
+        }),
+    )
+    .await?;
+    let response: MachineInvokeResponse = serde_json::from_value(response)
+        .map_err(|error| format!("invalid machine invoke response: {error}"))?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!(
+            "{} {} on machine {} failed with status {}: {}",
+            method_name(method),
+            path,
+            machine_id,
+            response.status,
+            response.error.unwrap_or_else(|| response
+                .body
+                .as_ref()
+                .map(Value::to_string)
+                .unwrap_or_default())
+        ));
+    }
+    Ok(response.body.unwrap_or(Value::Null))
+}
+
+async fn get_routed_json(
+    base_url: &str,
+    path: &str,
+    machine_id: Option<&str>,
+) -> Result<Value, String> {
+    match machine_id {
+        Some(machine_id) => {
+            invoke_machine(base_url, machine_id, CatalogMethod::Get, path, &Value::Null).await
+        }
+        None => get_json(base_url, path).await,
+    }
+}
+
+async fn wait_catalog_task_routed(
+    base_url: &str,
+    task_id: &str,
+    timeout_secs: u64,
+    poll_secs: u64,
+    until: kanna_tool_catalog::WaitUntil,
+    machine_id: Option<&str>,
+) -> Result<Value, String> {
+    let timeout_secs = clamp_wait_timeout_secs(timeout_secs);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let poll_interval = std::time::Duration::from_secs(poll_secs.max(1));
+    let path = crate::api::task_get_path(task_id);
+    loop {
+        let task = get_routed_json(base_url, &path, machine_id).await?;
+        if catalog_task_matches_wait_until(&task, until) {
+            return Ok(wait_resolved_result(task));
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Ok(wait_timeout_result(task, task_id, timeout_secs));
+        }
+        tokio::time::sleep(poll_interval.min(deadline - now)).await;
+    }
 }
 
 async fn bind_request_to_spawned_run(
@@ -200,6 +382,7 @@ pub(crate) async fn run(command: ToolCommands) {
             name,
             json,
             arg,
+            machine_id,
             server_url,
         } => {
             // The catalog is loaded first: it is what types `--arg` values.
@@ -207,10 +390,15 @@ pub(crate) async fn run(command: ToolCommands) {
                 eprintln!("Error: {e}");
                 process::exit(1);
             });
-            let args = build_tool_call_args(&catalog, &name, &json, &arg).unwrap_or_else(|e| {
+            let mut args = build_tool_call_args(&catalog, &name, &json, &arg).unwrap_or_else(|e| {
                 eprintln!("Error: {e}");
                 process::exit(1);
             });
+            if let Some(machine_id) = machine_id {
+                args.as_object_mut()
+                    .expect("tool arguments were validated as an object")
+                    .insert("machine_id".to_string(), Value::String(machine_id));
+            }
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
             let (kind, value) = call_catalog_tool(&base_url, &catalog, &name, &args)
                 .await
@@ -226,6 +414,33 @@ pub(crate) async fn run(command: ToolCommands) {
             }
             if let Err(e) = print_json(&value) {
                 eprintln!("Error: {e}");
+                process::exit(1);
+            }
+        }
+    }
+}
+
+pub(crate) async fn run_machine(command: MachineCommands) {
+    match command {
+        MachineCommands::List { server_url } => {
+            let catalog = load_tool_catalog_from_current_dir().unwrap_or_else(|error| {
+                eprintln!("Error: {error}");
+                process::exit(1);
+            });
+            let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let (_, machines) = call_catalog_tool(
+                &base_url,
+                &catalog,
+                "kanna_list_machines",
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                eprintln!("Error: {error}");
+                process::exit(1);
+            });
+            if let Err(error) = print_json(&machines) {
+                eprintln!("Error: {error}");
                 process::exit(1);
             }
         }

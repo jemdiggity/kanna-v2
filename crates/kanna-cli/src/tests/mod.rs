@@ -28,7 +28,7 @@ use crate::models::{
     TaskDetail, TaskInputResponse, TaskLatestRun, TaskRenameRequest, TaskSummary, WaitUntil,
 };
 use clap::{Command, CommandFactory, Parser};
-use kanna_tool_catalog::{CLIENT_TOOL_CALL_BUDGET_SECS, MAX_WAIT_TIMEOUT_SECS};
+use kanna_tool_catalog::{ParamLoc, CLIENT_TOOL_CALL_BUDGET_SECS, MAX_WAIT_TIMEOUT_SECS};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -47,6 +47,13 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             "kanna_info",
             TypedToolSurface {
                 command_path: &["info"],
+                param_args: &[],
+            },
+        ),
+        (
+            "kanna_list_machines",
+            TypedToolSurface {
+                command_path: &["machine", "list"],
                 param_args: &[],
             },
         ),
