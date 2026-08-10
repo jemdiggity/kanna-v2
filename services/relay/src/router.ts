@@ -32,6 +32,7 @@ interface RelayMessage {
 
 /** In-memory map of userId → client and desktop WebSocket connections. */
 const connections = new Map<string, ConnectionPair>();
+const verifiedDesktopIdentities = new WeakMap<WebSocket, string>();
 const tunnelPeers = new WeakMap<WebSocket, WebSocket>();
 const tunnelLabels = new WeakMap<WebSocket, "client" | "desktop">();
 const tunnelServices = new WeakMap<WebSocket, TunnelService>();
@@ -46,6 +47,10 @@ export const TASK_TRANSFER_PENDING_TUNNEL_TIMEOUT_MS = 10_000;
 
 export function pendingTunnelCountForTests(userId: string): number {
   return connections.get(userId)?.pendingTunnels.size ?? 0;
+}
+
+export function pendingResponseCountForTests(userId: string): number {
+  return connections.get(userId)?.pendingResponses.size ?? 0;
 }
 
 export function hasConnectionPairForTests(userId: string): boolean {
@@ -86,19 +91,19 @@ function parseRelayMessage(data: string): RelayMessage | null {
   return null;
 }
 
-function sendErrorResponse(
+export function sendErrorResponse(
   client: WebSocket | undefined,
   id: unknown,
   error: string
 ): void {
-  if (id == null || !client || client.readyState !== 1) {
+  if (!client || client.readyState !== 1) {
     return;
   }
 
   client.send(
     JSON.stringify({
       type: "response",
-      id,
+      id: id ?? null,
       error,
     })
   );
@@ -370,7 +375,8 @@ export function setPhoneConnection(userId: string, ws: WebSocket): void {
 export function setServerConnection(
   userId: string,
   desktopId: string,
-  ws: WebSocket
+  ws: WebSocket,
+  serverAuthProof?: ServerAuthProof | null,
 ): void {
   let pair = connections.get(userId);
   if (!pair) {
@@ -386,27 +392,37 @@ export function setServerConnection(
     existing.close(1000, "Replaced by new connection");
   }
 
+  if (
+    serverAuthProof?.kind === "desktop"
+    && serverAuthProof.desktopId === desktopId
+  ) {
+    verifiedDesktopIdentities.set(ws, desktopId);
+  }
+
   pair.desktops.set(desktopId, ws);
   console.log(`[router] Server connected for ${userId}/${desktopId}`);
 
   ws.on("close", () => {
     console.log(`[router] Server disconnected for ${userId}/${desktopId}`);
     const current = connections.get(userId);
-    if (current?.desktops.get(desktopId) === ws) {
-      current.desktops.delete(desktopId);
-      for (const [id, requester] of current.pendingResponses.entries()) {
-        if (requester === ws) {
-          current.pendingResponses.delete(id);
-        }
+    if (!current) return;
+
+    for (const [id, requester] of current.pendingResponses.entries()) {
+      if (requester === ws) {
+        current.pendingResponses.delete(id);
       }
+    }
+
+    if (current.desktops.get(desktopId) === ws) {
+      current.desktops.delete(desktopId);
       for (const [tunnelId, tunnel] of current.pendingTunnels.entries()) {
         if (tunnel.desktopId === desktopId) {
           tunnel.client.close(1011, "Desktop disconnected before tunnel opened");
           removePendingTunnel(current, tunnelId);
         }
       }
-      deleteConnectionPairIfIdle(userId, current);
     }
+    deleteConnectionPairIfIdle(userId, current);
   });
 }
 
@@ -705,7 +721,10 @@ export function routeMessage(
       // A legacy device token proves only account membership. Desktop-to-desktop
       // routing requires the desktop-scoped credential that bound this socket
       // to its claimed desktop ID.
-      if (serverAuthProof?.kind !== "desktop") {
+      if (
+        serverAuthProof?.kind !== "desktop"
+        || serverAuthProof.desktopId !== sourceDesktopId
+      ) {
         sendErrorResponse(source, parsed.id, "desktop-secret authentication is required");
         return;
       }
@@ -727,6 +746,14 @@ export function routeMessage(
       const target = pair.desktops.get(desktopId);
       if (!target || target.readyState !== 1) {
         sendErrorResponse(source, parsed.id, "Desktop offline");
+        return;
+      }
+      if (verifiedDesktopIdentities.get(target) !== desktopId) {
+        sendErrorResponse(
+          source,
+          parsed.id,
+          "target desktop-secret authentication is required",
+        );
         return;
       }
       if (idKey && source) {

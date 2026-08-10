@@ -16,6 +16,7 @@ import {
   setPhoneConnection,
   setServerConnection,
   routeMessage,
+  sendErrorResponse,
   getConnectionCount,
   getTunnelFlowStats,
   isTunnelSocket,
@@ -344,7 +345,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
       if (role === "phone") {
         setPhoneConnection(userId, ws);
       } else {
-        setServerConnection(userId, desktopId ?? "default", ws);
+        setServerConnection(userId, desktopId ?? "default", ws, serverAuthProof);
       }
 
       // Send auth success
@@ -395,6 +396,23 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         };
       } catch {
         // Non-publication messages retain the router's existing behavior.
+      }
+      if (
+        publication?.type === "invoke"
+        && serverAuthProof?.kind === "desktop"
+      ) {
+        if (
+          !desktopId
+          || !await revalidateServerAuth(serverAuthProof, userId!, desktopId)
+        ) {
+          sendErrorResponse(
+            ws,
+            publication.id,
+            "desktop credential is no longer authorized",
+          );
+          ws.close(4005, "Authentication revoked");
+          return;
+        }
       }
       if (publication?.type === "mobile_notification_publish") {
         const id = typeof publication.id === "string" ? publication.id : "";

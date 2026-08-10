@@ -23,6 +23,8 @@ const TEST_DEVICE_TOKEN = "e2e-token";
 const TEST_USER_ID = "Bax9TJvOWm5bbl0Aq4nXg3XmkTCu";
 const SECRET_DESKTOP_ID = "desktop-secret-auth";
 const SECRET_DESKTOP_SECRET = "desktop-secret-for-relay";
+const ROUTING_TARGET_DESKTOP_ID = "desktop-secret-routing-target";
+const ROUTING_TARGET_DESKTOP_SECRET = "desktop-secret-routing-target-secret";
 const E2E_SHUTDOWN_TOKEN = "relay-integration-shutdown-capability";
 let relayPort = 0;
 
@@ -687,6 +689,139 @@ describe("Relay integration", () => {
     expect((await desktopRef.collection("tasks").get()).docs.map((doc) => doc.id).sort())
       .toEqual(beforeTaskIds);
     await closeAndWait(ws);
+  });
+
+  it("rejects sibling invokes to a responder without verified desktop identity", async () => {
+    const { ws: requester } = await connectAndAuth({
+      desktop_id: SECRET_DESKTOP_ID,
+      desktop_secret: SECRET_DESKTOP_SECRET,
+    });
+    const { ws: unverifiedTarget } = await connectAndAuth({
+      device_token: TEST_DEVICE_TOKEN,
+      desktop_id: "legacy-sibling-target",
+    });
+
+    try {
+      const unexpectedInvoke = waitForMessage(
+        unverifiedTarget,
+        (message) => message.type === "invoke",
+        250,
+      ).then(
+        () => "invoke",
+        () => "timeout",
+      );
+      const rejected = waitForMessage(
+        requester,
+        (message) => message.type === "response" && message.id === "unverified-target",
+      );
+      requester.send(JSON.stringify({
+        type: "invoke",
+        id: "unverified-target",
+        desktopId: "legacy-sibling-target",
+        method: "GET",
+        path: "/v1/tasks/recent",
+        body: null,
+      }));
+
+      await expect(rejected).resolves.toMatchObject({
+        error: "target desktop-secret authentication is required",
+      });
+      await expect(unexpectedInvoke).resolves.toBe("timeout");
+    } finally {
+      await closeAndWait(requester);
+      await closeAndWait(unverifiedTarget);
+    }
+  });
+
+  it("stops routing sibling invokes after the requester desktop secret is revoked", async () => {
+    const requesterCredentialRef = testFirestore.doc(
+      `desktopCredentials/${SECRET_DESKTOP_ID}`,
+    );
+    const targetCredentialRef = testFirestore.doc(
+      `desktopCredentials/${ROUTING_TARGET_DESKTOP_ID}`,
+    );
+    const targetDesktopRef = testFirestore.doc(
+      `users/${TEST_USER_ID}/desktops/${ROUTING_TARGET_DESKTOP_ID}`,
+    );
+    await targetCredentialRef.set({
+      desktopId: ROUTING_TARGET_DESKTOP_ID,
+      desktopSecretHash: sha256Hex(ROUTING_TARGET_DESKTOP_SECRET),
+      displayName: "Routing Target",
+      revokedAt: null,
+      uid: TEST_USER_ID,
+      updatedAt: new Date().toISOString(),
+    });
+
+    const { ws: requester } = await connectAndAuth({
+      desktop_id: SECRET_DESKTOP_ID,
+      desktop_secret: SECRET_DESKTOP_SECRET,
+    });
+    const { ws: target } = await connectAndAuth({
+      desktop_id: ROUTING_TARGET_DESKTOP_ID,
+      desktop_secret: ROUTING_TARGET_DESKTOP_SECRET,
+    });
+
+    try {
+      const firstInvoke = waitForMessage(
+        target,
+        (message) => message.type === "invoke" && message.id === "before-revocation",
+      );
+      requester.send(JSON.stringify({
+        type: "invoke",
+        id: "before-revocation",
+        desktopId: ROUTING_TARGET_DESKTOP_ID,
+        method: "GET",
+        path: "/v1/tasks/recent",
+        body: null,
+      }));
+      await expect(firstInvoke).resolves.toMatchObject({
+        desktopId: ROUTING_TARGET_DESKTOP_ID,
+      });
+
+      await requesterCredentialRef.update({
+        revokedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      const unexpectedInvoke = waitForMessage(
+        target,
+        (message) => message.type === "invoke" && message.id === "after-revocation",
+        250,
+      ).then(
+        () => "invoke",
+        () => "timeout",
+      );
+      const rejected = waitForMessage(
+        requester,
+        (message) => message.type === "response" && message.id === "after-revocation",
+      );
+      const closed = new Promise<number>((resolveClose) => {
+        requester.once("close", (code) => resolveClose(code));
+      });
+      requester.send(JSON.stringify({
+        type: "invoke",
+        id: "after-revocation",
+        desktopId: ROUTING_TARGET_DESKTOP_ID,
+        method: "GET",
+        path: "/v1/tasks/recent",
+        body: null,
+      }));
+
+      await expect(rejected).resolves.toMatchObject({
+        error: "desktop credential is no longer authorized",
+      });
+      await expect(closed).resolves.toBe(4005);
+      await expect(unexpectedInvoke).resolves.toBe("timeout");
+    } finally {
+      if (requester.readyState < WebSocket.CLOSING) await closeAndWait(requester);
+      await closeAndWait(target);
+      await requesterCredentialRef.update({
+        revokedAt: null,
+        updatedAt: new Date().toISOString(),
+      });
+      await targetCredentialRef.delete();
+      await testFirestore.recursiveDelete(targetDesktopRef);
+    }
   });
 
   it("routes mobile notification publishes only from desktop-secret servers", async () => {
